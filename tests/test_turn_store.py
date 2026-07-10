@@ -242,6 +242,33 @@ def test_same_second_delivered_run_repairs_fractional_ledger_timestamp(tmp_path:
     assert loaded.timestamp > 10.9
 
 
+def test_repeated_delivered_run_recovery_keeps_ledger_version_stable(tmp_path: Path) -> None:
+    """Idempotent recovery should not rewrite the ledger with synthetic timestamp drift."""
+    store = _store(tmp_path)
+    ledger_record = TurnRecord.create(
+        ["$event"],
+        response_event_id="$response",
+        response_owner="agent",
+        timestamp=10,
+    )
+    store._ledger.record_handled_turn(ledger_record)
+    recovery_record = TurnRecord.create(
+        ["$event"],
+        response_event_id="$response",
+        response_owner="agent",
+        timestamp=20,
+    )
+
+    loaded = _load_with_recovery(
+        store,
+        original_event_id="$event",
+        recovery_record=recovery_record,
+    )
+
+    assert loaded == ledger_record
+    assert store.get_turn_record("$event") == ledger_record
+
+
 def test_newer_interrupted_run_keeps_delivered_ledger_outcome(tmp_path: Path) -> None:
     """A newer run without Matrix delivery must not replace a visible response."""
     store = _store(tmp_path)

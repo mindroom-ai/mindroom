@@ -408,7 +408,7 @@ def _reconcile_ledger_and_recovery(ledger_record: TurnRecord, recovery_record: T
             if backfilled_record != ledger_record
             else ledger_record
         )
-    return replace(
+    recovered_record = replace(
         ledger_record,
         discovery_event_ids=(*ledger_record.discovery_event_ids, *recovery_record.discovery_event_ids),
         response_event_id=recovery_record.response_event_id,
@@ -420,5 +420,12 @@ def _reconcile_ledger_and_recovery(ledger_record: TurnRecord, recovery_record: T
         correlation_id=recovery_record.correlation_id or ledger_record.correlation_id,
         history_scope=recovery_record.history_scope or ledger_record.history_scope,
         conversation_target=recovery_record.conversation_target or ledger_record.conversation_target,
-        timestamp=max(recovery_record.timestamp, math.nextafter(ledger_record.timestamp, math.inf)),
+    )
+    return (
+        replace(
+            recovered_record,
+            timestamp=max(recovery_record.timestamp, math.nextafter(ledger_record.timestamp, math.inf)),
+        )
+        if recovered_record != ledger_record
+        else ledger_record
     )
