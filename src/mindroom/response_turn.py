@@ -391,7 +391,12 @@ def _reset_turn_state_for_dynamic_continuation(
     return turn_state
 
 
-def _fallback_matrix_run_metadata(ctx: ResponseTurnContext, run: TurnRunState) -> dict[str, Any] | None:
+def _fallback_matrix_run_metadata(
+    ctx: ResponseTurnContext,
+    run: TurnRunState,
+    *,
+    extra_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Build run metadata for interruptions that fire before prepare finished."""
     return build_matrix_run_metadata(
         ctx.reply_to_event_id,
@@ -400,7 +405,7 @@ def _fallback_matrix_run_metadata(ctx: ResponseTurnContext, run: TurnRunState) -
         thread_id=ctx.thread_id,
         requester_id=ctx.requester_id,
         correlation_id=ctx.correlation_id,
-        extra_metadata=deepcopy(ctx.matrix_run_metadata),
+        extra_metadata=deepcopy(ctx.matrix_run_metadata if extra_metadata is None else extra_metadata),
     )
 
 
@@ -413,7 +418,11 @@ def _interrupted_run_metadata(
     if run.run_metadata is not None:
         return run.run_metadata
     if sinks.turn_recorder is not None and sinks.turn_recorder.run_metadata is not None:
-        return sinks.turn_recorder.run_metadata
+        return _fallback_matrix_run_metadata(
+            ctx,
+            run,
+            extra_metadata=sinks.turn_recorder.run_metadata,
+        )
     return _fallback_matrix_run_metadata(ctx, run)
 
 

@@ -327,7 +327,18 @@ def test_blocking_errored_attempt_preserves_seeded_recorder_metadata() -> None:
     )
 
     assert result == "friendly error"
-    assert recorder.interrupted_calls[-1]["run_metadata"] == seeded_metadata
+    assert recorder.interrupted_calls[-1]["run_metadata"] == {
+        "matrix_source_event_ids": ["$source"],
+        "matrix_seen_event_ids": ["$reply", "$source"],
+        "room_id": "!room",
+        "thread_id": "$thread",
+        "reply_to_event_id": "$reply",
+        "requester_id": "@user:hs",
+        "correlation_id": "corr-1",
+        "tools_schema": [],
+        "model_params": {},
+        "matrix_event_id": "$reply",
+    }
 
 
 def test_blocking_cancelled_attempt_records_persists_and_raises() -> None:
