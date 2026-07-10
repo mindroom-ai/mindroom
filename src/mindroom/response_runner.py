@@ -95,6 +95,7 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
 
     from mindroom.bot_runtime_view import BotRuntimeView
+    from mindroom.cancellation import CancelSource
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
@@ -141,6 +142,12 @@ def _split_delivery_tool_trace(
         else:
             interrupted.append(trace_entry)
     return completed, interrupted
+
+
+def _mark_restart_recovery_pending(recorder: TurnRecorder, cancel_source: CancelSource) -> None:
+    """Protect replay provenance only when sync restart queued recovery."""
+    if cancel_source == "sync_restart":
+        recorder.mark_restart_recovery_pending()
 
 
 def _materialize_matrix_run_metadata(
@@ -1571,7 +1578,8 @@ class ResponseRunner:
                         )
                         event_id = transport_outcome.last_physical_stream_event_id
                         progress.track_event(event_id)
-                    except asyncio.CancelledError:
+                    except asyncio.CancelledError as exc:
+                        _mark_restart_recovery_pending(team_turn_recorder, classify_cancel_source(exc))
                         await self._persist_interrupted_recorder_off_loop(
                             recorder=team_turn_recorder,
                             session_scope=session_scope,
@@ -1653,7 +1661,8 @@ class ResponseRunner:
                                     tool_dispatch=tool_dispatch,
                                     operation=build_response_text,
                                 )
-                            except asyncio.CancelledError:
+                            except asyncio.CancelledError as exc:
+                                _mark_restart_recovery_pending(team_turn_recorder, classify_cancel_source(exc))
                                 await self._persist_interrupted_recorder_off_loop(
                                     recorder=team_turn_recorder,
                                     session_scope=session_scope,
@@ -1718,7 +1727,8 @@ class ResponseRunner:
                             ),
                         ),
                     )
-                except asyncio.CancelledError:
+                except asyncio.CancelledError as exc:
+                    _mark_restart_recovery_pending(team_turn_recorder, classify_cancel_source(exc))
                     self._ensure_recorder_interrupted(team_turn_recorder)
                     raise
                 finally:
@@ -1762,6 +1772,10 @@ class ResponseRunner:
                 original_status=(
                     RunStatus.cancelled if transport_outcome.terminal_status == "cancelled" else RunStatus.error
                 ),
+            )
+            _mark_restart_recovery_pending(
+                team_turn_recorder,
+                cancel_source_from_failure_reason(transport_outcome.failure_reason),
             )
             await self._persist_interrupted_recorder_off_loop(
                 recorder=team_turn_recorder,
@@ -2035,7 +2049,8 @@ class ResponseRunner:
                     tool_trace=tool_trace,
                     run_metadata_content=run_metadata_content,
                 )
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            _mark_restart_recovery_pending(turn_recorder, classify_cancel_source(exc))
             await self._persist_interrupted_recorder_off_loop(
                 recorder=turn_recorder,
                 session_scope=self.deps.state_writer.history_scope(),
@@ -2152,7 +2167,8 @@ class ResponseRunner:
                         response_event_id=request.existing_event_id,
                     )
                 return transport_outcome
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            _mark_restart_recovery_pending(turn_recorder, classify_cancel_source(exc))
             await self._persist_interrupted_recorder_off_loop(
                 recorder=turn_recorder,
                 session_scope=self.deps.state_writer.history_scope(),
@@ -2279,7 +2295,8 @@ class ResponseRunner:
                     extra_content=response_extra_content or None,
                 ),
             )
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            _mark_restart_recovery_pending(turn_recorder, classify_cancel_source(exc))
             self._ensure_recorder_interrupted(turn_recorder)
             raise
         finally:
@@ -2391,6 +2408,10 @@ class ResponseRunner:
                 original_status=(
                     RunStatus.cancelled if stream_transport_outcome.terminal_status == "cancelled" else RunStatus.error
                 ),
+            )
+            _mark_restart_recovery_pending(
+                turn_recorder,
+                cancel_source_from_failure_reason(stream_transport_outcome.failure_reason),
             )
             await self._persist_interrupted_recorder_off_loop(
                 recorder=turn_recorder,

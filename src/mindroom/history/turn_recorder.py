@@ -29,6 +29,7 @@ class TurnRecorder:
     outcome: str = "pending"
     interrupted_persisted: bool = False
     interruption_status: RunStatus = RunStatus.cancelled
+    restart_recovery_pending: bool = False
 
     def set_run_metadata(self, metadata: dict[str, Any] | None) -> None:
         """Replace the current Matrix run metadata snapshot."""
@@ -107,6 +108,10 @@ class TurnRecorder:
         self.outcome = "interrupted"
         self.interruption_status = original_status
 
+    def mark_restart_recovery_pending(self) -> None:
+        """Record that sync-restart recovery still needs this replay provenance."""
+        self.restart_recovery_pending = True
+
     def interrupted_snapshot(self) -> InterruptedReplaySnapshot:
         """Build one canonical interrupted snapshot from the recorded facts."""
         return build_interrupted_replay_snapshot(
@@ -117,6 +122,7 @@ class TurnRecorder:
             run_metadata=self.run_metadata,
             response_event_id=self.response_event_id,
             original_status=self.interruption_status,
+            restart_recovery_pending=self.restart_recovery_pending,
         )
 
     def claim_interrupted_persistence(self) -> bool:

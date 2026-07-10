@@ -19,8 +19,10 @@ from mindroom.constants import (
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_REPLAY_STATE_INTERRUPTED,
     MINDROOM_REPLAY_STATE_METADATA_KEY,
+    MINDROOM_RESTART_RECOVERY_PENDING_METADATA_KEY,
 )
 from mindroom.history.storage import (
+    pending_restart_recovery_run_ids,
     read_scope_seen_event_ids,
     read_scope_state,
     record_compaction_chunk,
@@ -98,6 +100,22 @@ def test_scope_seen_event_ids_include_persisted_response_event_ids(tmp_path: Pat
     session = _session("session-1", runs=[run])
 
     assert read_scope_seen_event_ids(session, scope) == {"question-1", "answer-1"}
+
+
+def test_pending_restart_recovery_run_ids_only_keeps_latest_flagged_replay() -> None:
+    """Generic failures clear protection; repeated restart cancels replace it."""
+    first = _completed_run("first")
+    first.metadata = {
+        MINDROOM_REPLAY_STATE_METADATA_KEY: MINDROOM_REPLAY_STATE_INTERRUPTED,
+        MINDROOM_RESTART_RECOVERY_PENDING_METADATA_KEY: True,
+    }
+    second = _completed_run("second")
+    second.metadata = dict(first.metadata)
+    provider_error = _completed_run("provider-error")
+    provider_error.metadata = {MINDROOM_REPLAY_STATE_METADATA_KEY: MINDROOM_REPLAY_STATE_INTERRUPTED}
+
+    assert pending_restart_recovery_run_ids([first, second]) == {"second"}
+    assert pending_restart_recovery_run_ids([first, provider_error]) == set()
 
 
 @pytest.mark.parametrize("excluded_status", [RunStatus.cancelled, RunStatus.error, RunStatus.paused])
@@ -406,9 +424,17 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_p
     }
 
 
+@pytest.mark.parametrize(
+    ("restart_recovery_pending", "expected_run_ids"),
+    [(True, ["interrupted"]), (False, [])],
+)
 @pytest.mark.asyncio
-async def test_compaction_keeps_unrecovered_interrupted_replay_live(tmp_path: Path) -> None:
-    """Compaction cannot erase the provenance needed by a pending sync-restart retry."""
+async def test_compaction_only_keeps_pending_restart_recovery_replay(
+    tmp_path: Path,
+    restart_recovery_pending: bool,
+    expected_run_ids: list[str],
+) -> None:
+    """Compaction protects only provenance needed by a pending sync-restart retry."""
     config, runtime_paths = _make_config(
         tmp_path,
         compaction=CompactionOverrideConfig(enabled=True),
@@ -422,6 +448,8 @@ async def test_compaction_keeps_unrecovered_interrupted_replay_live(tmp_path: Pa
         "matrix_seen_event_ids": ["source-event"],
         MINDROOM_REPLAY_STATE_METADATA_KEY: MINDROOM_REPLAY_STATE_INTERRUPTED,
     }
+    if restart_recovery_pending:
+        interrupted.metadata[MINDROOM_RESTART_RECOVERY_PENDING_METADATA_KEY] = True
     session = _session("session-1", runs=[completed, interrupted])
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
@@ -453,5 +481,6 @@ async def test_compaction_keeps_unrecovered_interrupted_replay_live(tmp_path: Pa
 
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
-    assert [run.run_id for run in persisted.runs or []] == ["interrupted"]
-    assert scope_has_recovered_interrupted_event(persisted, scope, "source-event") is False
+    assert [run.run_id for run in persisted.runs or []] == expected_run_ids
+    if restart_recovery_pending:
+        assert scope_has_recovered_interrupted_event(persisted, scope, "source-event") is False
