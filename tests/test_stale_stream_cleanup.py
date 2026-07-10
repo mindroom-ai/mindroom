@@ -877,11 +877,13 @@ async def test_auto_resume_records_outbound_message_when_send_succeeds(tmp_path:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("human_timestamp", [100, 200])
+@pytest.mark.parametrize("relay_sender", [None, OTHER_BOT_USER_ID])
 async def test_auto_resume_skips_human_activity_after_original_event(
     tmp_path: Path,
     human_timestamp: int,
+    relay_sender: str | None,
 ) -> None:
-    """Human activity after the original response suppresses recovery despite later bot edits."""
+    """Direct or relayed human activity suppresses recovery despite later bot edits."""
     config = _make_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     client = AsyncMock(spec=nio.AsyncClient)
@@ -896,11 +898,20 @@ async def test_auto_resume_skips_human_activity_after_original_event(
                 thread_id="$threaded",
             ),
             ResolvedVisibleMessage.synthetic(
-                sender=USER_ID,
+                sender=relay_sender or USER_ID,
                 body="Please continue",
                 event_id="$new-user-message",
                 timestamp=human_timestamp,
                 thread_id="$threaded",
+                content=(
+                    {
+                        "body": "Please continue",
+                        ORIGINAL_SENDER_KEY: USER_ID,
+                        SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                    }
+                    if relay_sender is not None
+                    else None
+                ),
             ),
         ],
         is_full_history=True,
