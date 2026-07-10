@@ -551,8 +551,8 @@ async def test_trigger_support_only_reload_unbinds_and_raises_when_api_publish_f
 async def test_config_publish_failure_restores_pre_stopped_mcp_entities(tmp_path: Path) -> None:
     """A rejected API publication must restore bots stopped for the pending MCP update."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path), api_enabled=False)
-    current_config = _config(tmp_path)
-    new_config = _config(tmp_path, command="uvx")
+    current_config = _config_with_code_agent(tmp_path)
+    new_config = _config_with_code_agent(tmp_path, role="Updated role")
     orchestrator.config = current_config
     call_order: list[str] = []
 
@@ -598,7 +598,7 @@ async def test_config_publish_failure_restores_pre_stopped_mcp_entities(tmp_path
 async def test_restore_pre_stopped_mcp_entities_recreates_and_sets_up_bots(tmp_path: Path) -> None:
     """Old-config MCP bots should be recreated before failed publication recovery returns."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path), api_enabled=False)
-    config = _config(tmp_path)
+    config = _config_with_code_agent(tmp_path)
     started_bot = MagicMock(spec=AgentBot)
 
     with (
