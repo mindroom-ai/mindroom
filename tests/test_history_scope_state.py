@@ -11,17 +11,21 @@ import pytest
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
+from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
+from agno.session.team import TeamSession
 
 from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.constants import (
     MINDROOM_COMPACTION_METADATA_KEY,
 )
+from mindroom.history.compaction import scope_visible_runs
 from mindroom.history.storage import (
     read_scope_seen_event_ids,
     read_scope_state,
     record_compaction_chunk,
+    seen_event_ids_for_runs,
     set_force_compaction_state,
     update_scope_seen_event_ids,
     write_scope_state,
@@ -93,6 +97,48 @@ def test_scope_seen_event_ids_include_persisted_response_event_ids(tmp_path: Pat
     session = _session("session-1", runs=[run])
 
     assert read_scope_seen_event_ids(session, scope) == {"question-1", "answer-1"}
+
+
+@pytest.mark.parametrize("is_team", [False, True], ids=["agent", "team"])
+def test_seen_event_ids_match_model_history_visibility(is_team: bool) -> None:
+    entity_id = "team-123" if is_team else "test_agent"
+    scope = HistoryScope(kind="team" if is_team else "agent", scope_id=entity_id)
+
+    def make_run(run_id: str, status: RunStatus, *, parent_run_id: str | None = None) -> RunOutput | TeamRunOutput:
+        metadata = {"matrix_seen_event_ids": [f"{run_id}-event"]}
+        if is_team:
+            return TeamRunOutput(
+                run_id=run_id,
+                team_id=entity_id,
+                status=status,
+                parent_run_id=parent_run_id,
+                metadata=metadata,
+            )
+        return RunOutput(
+            run_id=run_id,
+            agent_id=entity_id,
+            status=status,
+            parent_run_id=parent_run_id,
+            metadata=metadata,
+        )
+
+    runs = [
+        make_run("completed", RunStatus.completed),
+        make_run("paused", RunStatus.paused),
+        make_run("cancelled", RunStatus.cancelled),
+        make_run("error", RunStatus.error),
+        make_run("child", RunStatus.completed, parent_run_id="completed"),
+    ]
+    session: AgentSession | TeamSession
+    if is_team:
+        session = TeamSession(session_id="session-1", team_id=entity_id, runs=runs, created_at=1, updated_at=1)
+    else:
+        session = AgentSession(session_id="session-1", agent_id=entity_id, runs=runs, created_at=1, updated_at=1)
+    update_scope_seen_event_ids(session, scope, ["preserved-event"])
+
+    assert read_scope_seen_event_ids(session, scope) == {"completed-event", "preserved-event"}
+    assert seen_event_ids_for_runs(runs) == {"completed-event"}
+    assert [run.run_id for run in scope_visible_runs(session, scope)] == ["completed"]
 
 
 def test_scope_states_do_not_bleed_between_scopes(tmp_path: Path) -> None:
