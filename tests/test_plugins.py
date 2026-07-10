@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
@@ -1378,6 +1379,32 @@ def test_load_plugins_preserves_metadata_only_built_in_tools(tmp_path: Path) -> 
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
         plugin_module._MODULE_IMPORT_CACHE.clear()
         plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+
+
+def test_load_plugins_preserves_non_plugin_dynamic_tools(tmp_path: Path) -> None:
+    """Syncing the plugin overlay must not claim another dynamic registry namespace."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config_without_plugins = _bind_runtime_paths(Config(plugins=[]), config_path)
+    dynamic_factory = MagicMock()
+    original_registry = TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    original_plugin_roots = _get_plugin_skill_roots()
+
+    try:
+        TOOL_REGISTRY["mcp_demo"] = dynamic_factory
+        dynamic_metadata = replace(TOOL_METADATA["shell"], name="mcp_demo", factory=dynamic_factory)
+        TOOL_METADATA["mcp_demo"] = dynamic_metadata
+
+        assert load_plugins(config_without_plugins, runtime_paths_for(config_without_plugins)) == []
+        assert TOOL_REGISTRY["mcp_demo"] is dynamic_factory
+        assert TOOL_METADATA["mcp_demo"] is dynamic_metadata
+    finally:
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
         set_plugin_skill_roots(original_plugin_roots)
 
 

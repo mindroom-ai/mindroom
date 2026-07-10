@@ -17,6 +17,7 @@ from mindroom.tool_system.registry_state import (
     capture_tool_registry_snapshot,
     clear_plugin_tool_registrations,
     locked_tool_registry_state,
+    registered_plugin_tool_names,
     restore_plugin_tool_registrations,
     restore_tool_registry_snapshot,
     scoped_plugin_registration_owner,
@@ -102,14 +103,20 @@ def _raise_if_host_control_exception(exc: BaseException) -> None:
         raise exc
 
 
-def _sync_loaded_plugin_tools(plugins: list[_Plugin]) -> None:
+def _sync_loaded_plugin_tools(
+    plugins: list[_Plugin],
+    previous_plugin_tool_names: set[str],
+) -> None:
     """Remove plugin tool registrations for plugins no longer present in config."""
     active_tool_modules = [
         (plugin.name, plugin_imports._module_name(plugin.name, plugin.root, plugin.tools_module_path))
         for plugin in plugins
         if plugin.tools_module_path is not None
     ]
-    synchronize_plugin_tools(active_tool_modules)
+    synchronize_plugin_tools(
+        active_tool_modules,
+        previous_plugin_tool_names=previous_plugin_tool_names,
+    )
 
 
 def load_plugins(
@@ -123,9 +130,10 @@ def load_plugins(
     import mindroom.tools  # noqa: F401, PLC0415
 
     with locked_tool_registry_state():
+        previous_plugin_tool_names = registered_plugin_tool_names()
         plugin_entries = config.plugins
         if not plugin_entries:
-            _sync_loaded_plugin_tools([])
+            _sync_loaded_plugin_tools([], previous_plugin_tool_names)
             if set_skill_roots:
                 set_plugin_skill_roots([])
             return []
@@ -159,7 +167,7 @@ def load_plugins(
             if plugins:
                 logger.info("Loaded plugins", plugins=[plugin.name for plugin in plugins])
 
-            _sync_loaded_plugin_tools(plugins)
+            _sync_loaded_plugin_tools(plugins, previous_plugin_tool_names)
 
             if set_skill_roots:
                 set_plugin_skill_roots(skill_roots)

@@ -547,6 +547,74 @@ async def test_trigger_support_only_reload_unbinds_and_raises_when_api_publish_f
     mock_bind_runtime.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_config_publish_failure_restores_pre_stopped_mcp_entities(tmp_path: Path) -> None:
+    """A rejected API publication must restore bots stopped for the pending MCP update."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path), api_enabled=False)
+    current_config = _config(tmp_path)
+    new_config = _config(tmp_path, command="uvx")
+    orchestrator.config = current_config
+    call_order: list[str] = []
+
+    async def prepare_api(_config: Config) -> object:
+        call_order.append("prepare")
+        return object()
+
+    async def stop_mcp_entities(*_args: object) -> set[str]:
+        call_order.append("stop")
+        return {"code"}
+
+    def reject_publish(_prepared: object) -> None:
+        call_order.append("publish")
+        msg = "stale API snapshot"
+        raise RuntimeError(msg)
+
+    async def restore_entities(_config: Config, _entity_names: set[str]) -> None:
+        call_order.append("restore")
+
+    with (
+        patch.object(orchestrator._external_trigger_runtime, "prepare_api_config_snapshot", side_effect=prepare_api),
+        patch.object(orchestrator, "_stop_entities_before_mcp_sync", side_effect=stop_mcp_entities),
+        patch.object(
+            orchestrator._external_trigger_runtime,
+            "publish_prepared_api_config_snapshot",
+            side_effect=reject_publish,
+        ),
+        patch.object(orchestrator, "_restore_pre_stopped_mcp_entities", side_effect=restore_entities) as restore,
+        pytest.raises(RuntimeError, match="stale API snapshot"),
+    ):
+        await orchestrator._apply_plugin_snapshot_for_config_update(
+            current_config=current_config,
+            new_config=new_config,
+            changed_server_ids={"demo"},
+        )
+
+    assert call_order == ["prepare", "stop", "publish", "restore"]
+    restore.assert_awaited_once_with(current_config, {"code"})
+    assert orchestrator.config is current_config
+
+
+@pytest.mark.asyncio
+async def test_restore_pre_stopped_mcp_entities_recreates_and_sets_up_bots(tmp_path: Path) -> None:
+    """Old-config MCP bots should be recreated before failed publication recovery returns."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path), api_enabled=False)
+    config = _config(tmp_path)
+    started_bot = MagicMock(spec=AgentBot)
+
+    with (
+        patch.object(
+            orchestrator,
+            "_create_and_start_entities",
+            new=AsyncMock(return_value=EntityStartResults(started_bots=[started_bot])),
+        ) as create,
+        patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as setup,
+    ):
+        await orchestrator._restore_pre_stopped_mcp_entities(config, {"code"})
+
+    create.assert_awaited_once_with({"code"}, config, start_sync_tasks=True)
+    setup.assert_awaited_once_with([started_bot])
+
+
 def test_log_mcp_degraded_entities_warns_per_failed_optional_server(tmp_path: Path) -> None:
     """Report only running entities as degraded by an unavailable optional MCP server."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))

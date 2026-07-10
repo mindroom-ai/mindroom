@@ -3468,6 +3468,7 @@ expose = [
     "capture_tool_registry_snapshot",
     "clear_plugin_tool_registrations",
     "locked_tool_registry_state",
+    "registered_plugin_tool_names",
     "reconcile_dynamic_tool_state",
     "register_plugin_tool_metadata",
     "resolved_tool_state",

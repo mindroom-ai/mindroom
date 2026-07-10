@@ -826,13 +826,17 @@ class _MultiAgentOrchestrator:
             new_config,
             prepared_plugin_reload.resolved_tool_state,
         )
+        prepared_api_snapshot = await self._external_trigger_runtime.prepare_api_config_snapshot(new_config)
         pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
             current_config,
             new_config,
             changed_server_ids,
         )
-        prepared_api_snapshot = await self._external_trigger_runtime.prepare_api_config_snapshot(new_config)
-        self._external_trigger_runtime.publish_prepared_api_config_snapshot(prepared_api_snapshot)
+        try:
+            self._external_trigger_runtime.publish_prepared_api_config_snapshot(prepared_api_snapshot)
+        except Exception:
+            await self._restore_pre_stopped_mcp_entities(current_config, pre_stopped_mcp_entities)
+            raise
         self.config = new_config
         new_hook_registry = apply_prepared_plugin_reload(
             prepared_plugin_reload,
@@ -1230,19 +1234,44 @@ class _MultiAgentOrchestrator:
         affected_entities = current_config.get_entities_referencing_tools(
             {mcp_tool_name(server_id) for server_id in changed_server_ids},
         ) | new_config.get_entities_referencing_tools({mcp_tool_name(server_id) for server_id in changed_server_ids})
-        if not affected_entities:
+        stopped_entities = affected_entities & self.agent_bots.keys()
+        if not stopped_entities:
             return set()
 
-        self._external_trigger_runtime.unbind_for_entity_changes(affected_entities)
-        for entity_name in affected_entities:
+        self._external_trigger_runtime.unbind_for_entity_changes(stopped_entities)
+        for entity_name in stopped_entities:
             await self._cancel_bot_start_task(entity_name)
         await stop_entities(
-            affected_entities,
+            stopped_entities,
             self.agent_bots,
             self._sync_tasks,
-            restart_entities=affected_entities & set(configured_entity_names(new_config)),
+            restart_entities=stopped_entities & set(configured_entity_names(new_config)),
         )
-        return affected_entities
+        return stopped_entities
+
+    async def _restore_pre_stopped_mcp_entities(
+        self,
+        config: RuntimeConfig,
+        entity_names: set[str],
+    ) -> None:
+        """Restore old-config bots after a staged publication fails."""
+        if not entity_names:
+            return
+        start_results = await self._create_and_start_entities(
+            entity_names,
+            config,
+            start_sync_tasks=True,
+        )
+        if start_results.started_bots:
+            await self._setup_rooms_and_memberships(start_results.started_bots)
+        for entity_name in start_results.retryable_entities:
+            await self._schedule_bot_start_retry(entity_name)
+        self._external_trigger_runtime.bind_if_ready(config, self.agent_bots)
+        if start_results.permanently_failed_entities:
+            logger.error(
+                "Failed to restore MCP-dependent entities after config publication failure",
+                entities=start_results.permanently_failed_entities,
+            )
 
     async def _restart_changed_entities(
         self,

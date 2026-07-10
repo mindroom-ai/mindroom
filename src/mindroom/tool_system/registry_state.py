@@ -54,6 +54,11 @@ def snapshot_plugin_tool_registrations(module_name: str) -> dict[str, ToolMetada
     return _PLUGIN_TOOL_METADATA_BY_MODULE.get(module_name, {}).copy()
 
 
+def registered_plugin_tool_names() -> set[str]:
+    """Return every tool name owned by cached plugin registrations."""
+    return {tool_name for registrations in _PLUGIN_TOOL_METADATA_BY_MODULE.values() for tool_name in registrations}
+
+
 def restore_plugin_tool_registrations(
     module_name: str,
     registrations: dict[str, ToolMetadata],
@@ -164,18 +169,28 @@ def reconcile_dynamic_tool_state(
     return desired_tool_names
 
 
-def synchronize_plugin_tools(active_plugins: list[tuple[str, str]]) -> None:
+def synchronize_plugin_tools(
+    active_plugins: list[tuple[str, str]],
+    *,
+    previous_plugin_tool_names: Iterable[str] = (),
+) -> None:
     """Rebuild the active plugin tool overlay from cached per-module registrations."""
     desired_registry, desired_metadata = resolved_tool_state(
         active_plugins,
         _PLUGIN_TOOL_METADATA_BY_MODULE,
     )
+    current_plugin_tool_names = registered_plugin_tool_names()
     reconcile_dynamic_tool_state(
         TOOL_REGISTRY,
         TOOL_METADATA,
         desired_registry,
         desired_metadata,
-        owned_tool_names={*TOOL_REGISTRY, *TOOL_METADATA},
+        owned_tool_names={
+            *BUILTIN_TOOL_REGISTRY,
+            *BUILTIN_TOOL_METADATA,
+            *previous_plugin_tool_names,
+            *current_plugin_tool_names,
+        },
         collision_error=ValueError,
     )
 
