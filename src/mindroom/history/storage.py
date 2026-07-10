@@ -307,6 +307,8 @@ def scope_has_recovered_interrupted_event(
             if event_id in _run_seen_event_ids(run):
                 interrupted_source_seen = True
                 recovered_after_interruption = False
+            elif interrupted_source_seen:
+                recovered_after_interruption = True
             continue
         if interrupted_source_seen:
             recovered_after_interruption = True

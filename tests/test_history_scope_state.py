@@ -196,6 +196,15 @@ def test_sync_restart_recovery_ignores_interrupted_replay_until_later_visible_ru
 
     assert scope_has_recovered_interrupted_event(session, scope, "source-event") is True
 
+    later_failed_turn = _completed_run("later-failed-turn")
+    later_failed_turn.metadata = {
+        "matrix_seen_event_ids": ["newer-event"],
+        MINDROOM_REPLAY_STATE_METADATA_KEY: MINDROOM_REPLAY_STATE_INTERRUPTED,
+    }
+    session.runs = [interrupted, later_failed_turn]
+
+    assert scope_has_recovered_interrupted_event(session, scope, "source-event") is True
+
 
 def test_sync_restart_recovery_includes_compaction_preserved_seen_events(tmp_path: Path) -> None:
     """A recovered run stays authoritative after compaction removes its run row."""
