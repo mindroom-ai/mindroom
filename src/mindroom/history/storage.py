@@ -246,7 +246,7 @@ def read_scope_seen_event_ids(session: AgentSession | TeamSession, scope: Histor
 
 
 def seen_event_ids_for_runs(runs: Iterable[RunOutput | TeamRunOutput]) -> set[str]:
-    """Return Matrix event ids already represented by run metadata."""
+    """Return Matrix event ids represented by model-history-visible runs."""
     seen_event_ids: set[str] = set()
     for run in runs:
         if not is_model_history_visible_run(run):

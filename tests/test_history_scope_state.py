@@ -124,6 +124,7 @@ def test_seen_event_ids_match_model_history_visibility(is_team: bool) -> None:
 
     runs = [
         make_run("completed", RunStatus.completed),
+        make_run("running", RunStatus.running),
         make_run("paused", RunStatus.paused),
         make_run("cancelled", RunStatus.cancelled),
         make_run("error", RunStatus.error),
@@ -136,9 +137,9 @@ def test_seen_event_ids_match_model_history_visibility(is_team: bool) -> None:
         session = AgentSession(session_id="session-1", agent_id=entity_id, runs=runs, created_at=1, updated_at=1)
     update_scope_seen_event_ids(session, scope, ["preserved-event"])
 
-    assert read_scope_seen_event_ids(session, scope) == {"completed-event", "preserved-event"}
-    assert seen_event_ids_for_runs(runs) == {"completed-event"}
-    assert [run.run_id for run in scope_visible_runs(session, scope)] == ["completed"]
+    assert read_scope_seen_event_ids(session, scope) == {"completed-event", "preserved-event", "running-event"}
+    assert seen_event_ids_for_runs(runs) == {"completed-event", "running-event"}
+    assert [run.run_id for run in scope_visible_runs(session, scope)] == ["completed", "running"]
 
 
 def test_scope_states_do_not_bleed_between_scopes(tmp_path: Path) -> None:
