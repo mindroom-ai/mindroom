@@ -110,6 +110,62 @@ def _write_pre_registration_broken_tool_plugin(plugin_root: Path, tool_name: str
     )
 
 
+def _write_constant_named_broken_tool_plugin(plugin_root: Path, tool_name: str = "constant_named_tool") -> None:
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "broken_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from definitely_missing_plugin_dependency import broken\n"
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "\n"
+        f"TOOL_NAME = {tool_name!r}\n"
+        "\n"
+        "class BrokenTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='broken', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name=TOOL_NAME,\n"
+        "    display_name='Constant Named Tool',\n"
+        "    description='Tool registered under a module-level constant name',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def broken_plugin_tools():\n"
+        "    return BrokenTool\n",
+        encoding="utf-8",
+    )
+
+
+def _write_dynamic_named_broken_tool_plugin(plugin_root: Path, tool_name: str = "dynamic_plugin_tool") -> None:
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "broken_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from definitely_missing_plugin_dependency import broken\n"
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "\n"
+        "class BrokenTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='broken', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        f"    name='_'.join({tool_name.split('_')!r}),\n"
+        "    display_name='Dynamic Named Tool',\n"
+        "    description='Tool whose registered name cannot be recovered statically',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def broken_plugin_tools():\n"
+        "    return BrokenTool\n",
+        encoding="utf-8",
+    )
+
+
 def _write_mid_registration_broken_tool_plugin(plugin_root: Path) -> None:
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -1854,6 +1910,112 @@ def test_load_config_tolerates_unavailable_ast_plugin_tool_with_authored_overrid
             call.args == ("Plugin tool unavailable because plugin failed to load",)
             and call.kwargs["tool_name"] == "broken_plugin_tool"
             and call.kwargs["config_path"] == "agents.assistant.tools[0]"
+            for call in mock_logger.warning.call_args_list
+        )
+
+
+def test_load_config_tolerates_broken_plugin_tool_named_by_module_constant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Broken-plugin tool names assigned via module-level constants should still be recovered."""
+    plugin_root = tmp_path / "plugins" / "broken"
+    _write_constant_named_broken_tool_plugin(plugin_root)
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        (
+            "models:\n"
+            "  default:\n"
+            "    provider: openai\n"
+            "    id: gpt-5.4\n"
+            "router:\n"
+            "  model: default\n"
+            "agents:\n"
+            "  assistant:\n"
+            "    display_name: Assistant\n"
+            "    role: test\n"
+            "    tools:\n"
+            "      - shell\n"
+            "      - constant_named_tool\n"
+            "plugins:\n"
+            "  - ./plugins/broken\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    mock_logger = MagicMock()
+    monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
+
+    with _preserved_plugin_loader_state():
+        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+
+        assert config.resolve_entity("assistant").available_tools == ["shell", "scheduler"]
+        assert any(
+            call.args == ("Plugin tool unavailable because plugin failed to load",)
+            and call.kwargs["tool_name"] == "constant_named_tool"
+            and call.kwargs["config_path"] == "agents.assistant.tools[1]"
+            for call in mock_logger.warning.call_args_list
+        )
+
+
+def test_load_config_disables_unknown_tool_when_any_plugin_failed_to_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown tools must not block tolerant startup while a failed plugin could explain them."""
+    plugin_root = tmp_path / "plugins" / "broken"
+    _write_dynamic_named_broken_tool_plugin(plugin_root)
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        (
+            "models:\n"
+            "  default:\n"
+            "    provider: openai\n"
+            "    id: gpt-5.4\n"
+            "router:\n"
+            "  model: default\n"
+            "agents:\n"
+            "  assistant:\n"
+            "    display_name: Assistant\n"
+            "    role: test\n"
+            "    tools:\n"
+            "      - shell\n"
+            "      - dynamic_plugin_tool:\n"
+            "          some_option: ignored\n"
+            "plugins:\n"
+            "  - ./plugins/broken\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    mock_logger = MagicMock()
+    monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
+
+    with _preserved_plugin_loader_state():
+        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+
+        assert config.resolve_entity("assistant").available_tools == ["shell", "scheduler"]
+        assert any(
+            call.args == ("Unknown tool may belong to a plugin that failed to load; disabling it for this run",)
+            and call.kwargs["tool_name"] == "dynamic_plugin_tool"
+            and call.kwargs["config_path"] == "agents.assistant.tools[1]"
+            and call.kwargs["failed_plugins"] == ["broken_plugin"]
             for call in mock_logger.warning.call_args_list
         )
 

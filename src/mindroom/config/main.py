@@ -351,6 +351,7 @@ class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
     _source_files: frozenset[Path] = PrivateAttr(default=frozenset())
     _unavailable_plugin_tool_names: set[str] = PrivateAttr(default_factory=set)
+    _plugin_load_failure_names: frozenset[str] = PrivateAttr(default=frozenset())
     _runtime_approved_egress_injected_default_tool: bool = PrivateAttr(default=False)
     _runtime_approved_egress_injected_approval_rule: bool = PrivateAttr(default=False)
 
@@ -1356,6 +1357,18 @@ class Config(BaseModel):
 
         validation_info = tool_validation_snapshot.get(entry.name)
         if entry.name not in tool_validation_snapshot and not self.is_tool_preset(entry.name):
+            if self._plugin_load_failure_names:
+                # A failed plugin's tool names cannot always be recovered from its
+                # broken source, so this unknown name may belong to one of them;
+                # disable the tool instead of refusing to start.
+                logger.warning(
+                    "Unknown tool may belong to a plugin that failed to load; disabling it for this run",
+                    config_path=config_path_prefix,
+                    tool_name=entry.name,
+                    failed_plugins=sorted(self._plugin_load_failure_names),
+                )
+                self._unavailable_plugin_tool_names.add(entry.name)
+                return
             msg = f"{config_path_prefix}.{entry.name}: Unknown tool '{entry.name}'."
             raise ToolConfigOverrideError(msg)
         if validation_info is not None and validation_info.unavailable_due_to_plugin_load_error:
@@ -1381,9 +1394,17 @@ class Config(BaseModel):
     ) -> None:
         """Validate authored tool references against one resolved validation snapshot."""
         # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
-        from mindroom.tool_system.catalog import resolved_tool_validation_snapshot_for_runtime  # noqa: PLC0415
+        from mindroom.tool_system.catalog import (  # noqa: PLC0415
+            resolved_failed_plugin_names_for_runtime,
+            resolved_tool_validation_snapshot_for_runtime,
+        )
 
         tool_validation_snapshot = resolved_tool_validation_snapshot_for_runtime(
+            runtime_paths,
+            self,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        )
+        self._plugin_load_failure_names = resolved_failed_plugin_names_for_runtime(
             runtime_paths,
             self,
             tolerate_plugin_load_errors=tolerate_plugin_load_errors,
