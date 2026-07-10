@@ -34,12 +34,14 @@ _INTERRUPTED_REPLAY_STATE = "interrupted"
 
 
 def _run_matches_scope(run: RunOutput | TeamRunOutput, scope: HistoryScope) -> bool:
+    """Return whether one stored run belongs to the requested history scope."""
     if scope.kind == "team":
         return isinstance(run, TeamRunOutput) and run.team_id == scope.scope_id
     return isinstance(run, RunOutput) and run.agent_id == scope.scope_id
 
 
 def _run_source_event_ids(run: RunOutput | TeamRunOutput) -> set[str] | None:
+    """Return valid source event IDs, or None when provenance is absent or malformed."""
     metadata = run.metadata
     if not isinstance(metadata, dict):
         return None
