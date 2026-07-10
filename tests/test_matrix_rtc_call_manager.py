@@ -1005,6 +1005,46 @@ async def test_manager_replays_a_key_received_while_starting(
 
 
 @pytest.mark.asyncio
+async def test_manager_reconciles_key_when_join_finishes_during_admission(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A join completing during key validation cannot strand the admitted key."""
+
+    async def send_key(_self: object, *, targets: list[CallMember], **_kwargs: object) -> list[CallMember]:
+        return targets
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
+    client = _client()
+    room = _room(encrypted=True)
+    client.rooms = {ROOM_ID: room}
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    key_fetch_started = asyncio.Event()
+    release_key_fetch = asyncio.Event()
+    fetch_count = 0
+
+    async def racing_fetch(_room_id: str) -> list[CallMember]:
+        nonlocal fetch_count
+        fetch_count += 1
+        if fetch_count == 1:
+            key_fetch_started.set()
+            await release_key_fetch.wait()
+        return [_member("@alice:example.org", "ALICEDEV")]
+
+    manager._fetch_remote_members = racing_fetch  # type: ignore[method-assign]
+    key_task = asyncio.create_task(manager.on_to_device_event(_frame_key_event()))
+    await key_fetch_started.wait()
+    await manager.on_room_event(room, _member_unknown_event())
+    release_key_fetch.set()
+    await key_task
+
+    assert ("@alice:example.org:ALICEDEV", b"A" * 16, 2) in bridge.frame_keys
+    assert manager._pending_keys == {}
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_manager_rejects_participant_selected_remote_focus(
     tmp_path: Path,
 ) -> None:

@@ -193,6 +193,7 @@ class CallManager:
             )
             return
         self._queue_pending_key(room_id, received)
+        session = self._sessions.get(room_id)
         if session is not None:
             room = self._observed_rooms.get(room_id) or self._client.rooms.get(room_id)
             if room is not None:
