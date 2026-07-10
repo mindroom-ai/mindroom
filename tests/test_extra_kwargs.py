@@ -185,6 +185,31 @@ def test_get_model_instance_with_extra_kwargs() -> None:
     assert model.temperature == 0.8
 
 
+def test_openrouter_provider_defaults_to_uncapped_max_tokens() -> None:
+    """Agno's OpenRouter class caps output at 1024 tokens; the loader must lift that default."""
+    config_data = {
+        "models": {
+            "uncapped": {
+                "provider": "openrouter",
+                "id": "deepseek/deepseek-v4-pro",
+                "extra_kwargs": {"api_key": "test-key"},
+            },
+            "capped": {
+                "provider": "openrouter",
+                "id": "deepseek/deepseek-v4-pro",
+                "extra_kwargs": {"api_key": "test-key", "max_tokens": 4096},
+            },
+        },
+        "router": {"model": "uncapped"},
+        "agents": {},
+    }
+
+    config, runtime_paths = _config_with_runtime_paths(config_data)
+
+    assert get_model_instance(config, runtime_paths, "uncapped").max_tokens is None
+    assert get_model_instance(config, runtime_paths, "capped").max_tokens == 4096
+
+
 def test_get_model_instance_supports_llama_cpp_provider() -> None:
     """llama.cpp should use Agno's OpenAI-compatible local provider class."""
     config_data = {

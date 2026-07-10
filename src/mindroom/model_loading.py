@@ -206,6 +206,10 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
             api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
         if not api_key:
             logger.warning("No OpenRouter API key found in environment or CredentialsManager")
+        # Agno's OpenRouter dataclass defaults max_tokens to 1024, which silently
+        # truncates long replies mid-sentence; None keeps the cap out of the
+        # request so the provider's own model limit applies.
+        extra_kwargs.setdefault("max_tokens", None)
         return OpenRouter(id=model_id, api_key=api_key, **extra_kwargs)
 
     if canonical_provider == "zai":
