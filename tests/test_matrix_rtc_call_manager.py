@@ -1108,6 +1108,41 @@ async def test_manager_recovers_inherited_focus_after_founder_leaves(tmp_path: P
     assert service == SERVICE_URL
 
 
+@pytest.mark.parametrize(
+    ("follower_focus", "session_stays"),
+    [(SERVICE_URL, True), ("https://rtc.remote.example", False)],
+)
+@pytest.mark.asyncio
+async def test_active_session_revalidates_focus_after_founder_leaves(
+    tmp_path: Path,
+    follower_focus: str,
+    session_stays: bool,
+) -> None:
+    """A remaining member must keep advertising the focus trusted at join."""
+    now_ms = int(time.time() * 1000)
+    founder = _remote_member_event(device="FOUNDER", created_ts=now_ms)
+    follower = _remote_member_event(device="FOLLOWER", created_ts=now_ms + 1)
+    client = _client()
+    client.room_get_state.return_value = _state_response(founder, follower)
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    room = _room()
+
+    await manager.on_room_event(room, _member_unknown_event())
+    client.room_get_state.return_value = _state_response(
+        _remote_member_event(
+            device="FOLLOWER",
+            created_ts=now_ms + 1,
+            livekit_service_url=follower_focus,
+        ),
+    )
+    await manager.on_room_event(room, _member_unknown_event())
+
+    assert (ROOM_ID in manager._sessions) is session_stays
+    assert bridge.closed is not session_stays
+    await manager.shutdown()
+
+
 @pytest.mark.asyncio
 async def test_manager_fetches_grant_with_local_network_trust(
     monkeypatch: pytest.MonkeyPatch,

@@ -265,6 +265,15 @@ class CallManager:
             self._sessions.pop(room_id, None)
             await self._stop_session(session)
             return
+        oldest_member = min(members, key=lambda member: member.created_ts)
+        current_focus = _normalized_service_url(oldest_member.livekit_service_url or "")
+        if current_focus != _normalized_service_url(session.livekit_service_url):
+            logger.warning("call_focus_changed", room_id=room_id, advertised_url=oldest_member.livekit_service_url)
+            self._clear_reconcile_retry(room_id)
+            self._pending_keys.pop(room_id, None)
+            self._sessions.pop(room_id, None)
+            await self._stop_session(session)
+            return
         await self._update_session_members(room, session, members)
 
     async def _join_if_populated(self, room: nio.MatrixRoom, members: list[CallMember]) -> None:
