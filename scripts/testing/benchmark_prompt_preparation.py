@@ -22,6 +22,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.history.types import PreparedHistoryState
 from mindroom.memory import MemoryPromptParts
+from mindroom.model_defaults import CONFIG_INIT_MODEL_PRESETS
 from mindroom.response_turn import ResponseTurnContext
 
 if TYPE_CHECKING:
@@ -109,9 +110,10 @@ async def _benchmark(args: argparse.Namespace) -> dict[str, object]:
             storage_path=root / "storage",
             process_env={"MATRIX_HOMESERVER": "http://localhost:8008", "MINDROOM_NAMESPACE": ""},
         )
+        default_model = CONFIG_INIT_MODEL_PRESETS["openai"]
         config = Config.model_validate(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.5"}},
+                "models": {"default": default_model.to_config_dict()},
                 "agents": {"benchmark": {"display_name": "Benchmark", "role": "Benchmark prompt preparation"}},
             },
         )
