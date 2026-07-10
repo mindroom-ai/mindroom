@@ -1598,7 +1598,7 @@ async def test_team_response_records_interrupted_snapshot_for_cancelled_runs() -
     assert _render_interrupted_replay_content(snapshot) == (
         "**GeneralAgent**: Half done\n\n\n"
         "*No team consensus - showing individual responses only*\n\n"
-        "(turn interrupted by the user before completion; "
+        "(turn stopped before completion; "
         "1 tool call(s) had completed: run_shell_command)"
     )
 
@@ -1666,7 +1666,7 @@ async def test_team_response_records_incomplete_cancelled_tools_as_interrupted()
     assert _render_interrupted_replay_content(snapshot) == (
         "**GeneralAgent**: Half done\n\n\n"
         "*No team consensus - showing individual responses only*\n\n"
-        "(turn interrupted by the user before completion; "
+        "(turn stopped before completion; "
         "1 tool call(s) were still running: run_shell_command)"
     )
 
@@ -2090,7 +2090,7 @@ async def test_team_response_stream_records_hidden_interrupted_tool_state() -> N
     assert _render_interrupted_replay_content(snapshot) == (
         "**GeneralAgent**: Half done\n\n\n"
         "*No team consensus - showing individual responses only*\n\n"
-        "(turn interrupted by the user before completion; "
+        "(turn stopped before completion; "
         "1 tool call(s) had completed: run_shell_command)"
     )
 
@@ -2326,7 +2326,7 @@ async def test_team_response_stream_records_interrupted_snapshot_after_external_
     assert snapshot.user_message == "Analyze this."
     assert _render_interrupted_replay_content(snapshot) == (
         "**GeneralAgent**: Half done\n\n\n*No team consensus - showing individual responses only*\n\n"
-        "(turn interrupted by the user before completion)"
+        "(turn stopped before completion)"
     )
 
 
@@ -2515,7 +2515,7 @@ async def test_team_response_stream_preserves_pending_tool_identity_within_membe
     assert _render_interrupted_replay_content(snapshot) == (
         "**GeneralAgent**: General started\n\n\n"
         "*No team consensus - showing individual responses only*\n\n"
-        "(turn interrupted by the user before completion; "
+        "(turn stopped before completion; "
         "1 tool call(s) had completed: run_shell_command; "
         "1 tool call(s) were still running: run_shell_command)"
     )

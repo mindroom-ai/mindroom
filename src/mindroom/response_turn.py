@@ -24,6 +24,8 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, NoReturn
 from uuid import uuid4
 
+from agno.run.base import RunStatus
+
 from mindroom import ai_runtime
 from mindroom.ai_turn_state import AITurnState
 from mindroom.cancellation import build_cancelled_error
@@ -54,11 +56,10 @@ __all__ = [
     "AttemptResolved",
     "BlockingAttemptResolution",
     "BlockingTurnAdapter",
-    "CancelledAttempt",
     "CompletedAttempt",
     "DynamicContinuationRunState",
     "EmptyRunDiscard",
-    "ErroredAttempt",
+    "ExcludedAttempt",
     "HandledAttempt",
     "ResponseTurnContext",
     "StandaloneReplaySnapshot",
@@ -268,9 +269,9 @@ class CompletedAttempt:
 
 
 @dataclass(frozen=True)
-class CancelledAttempt:
-    """One attempt whose provider run reported cancellation."""
-
+class ExcludedAttempt:  # noqa: D101
+    original_status: RunStatus = RunStatus.cancelled
+    response_text: str = ""
     reason: str | None = None
     partial_text: str = ""
     completed_tools: tuple[ToolTraceEntry, ...] = ()
@@ -281,20 +282,12 @@ class CancelledAttempt:
 
 
 @dataclass(frozen=True)
-class ErroredAttempt:
-    """One attempt that resolved to user-facing error text (blocking only)."""
-
-    user_message_text: str
-    metadata_content: dict[str, Any] | None = None
-
-
-@dataclass(frozen=True)
 class HandledAttempt:
-    """One streaming attempt that already emitted and recorded its own terminal output."""
+    """One streaming error whose user-facing text was already emitted."""
 
 
-BlockingAttemptResolution = CompletedAttempt | CancelledAttempt | ErroredAttempt
-StreamAttemptResolution = CompletedAttempt | CancelledAttempt | HandledAttempt
+BlockingAttemptResolution = CompletedAttempt | ExcludedAttempt
+StreamAttemptResolution = CompletedAttempt | ExcludedAttempt | HandledAttempt
 
 
 @dataclass(frozen=True)
@@ -323,6 +316,7 @@ class StandaloneReplaySnapshot:
     completed_tools: list[ToolTraceEntry]
     interrupted_tools: list[ToolTraceEntry]
     run_metadata: dict[str, Any] | None
+    original_status: RunStatus
 
 
 @dataclass(frozen=True)
@@ -408,13 +402,12 @@ def _fallback_matrix_run_metadata(ctx: ResponseTurnContext, run: TurnRunState) -
     )
 
 
-def _persist_attempt_cancelled_replay(
+def _persist_excluded_attempt_replay(
     ctx: ResponseTurnContext,
     persist: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None],
     run: TurnRunState,
-    resolution: CancelledAttempt,
+    resolution: ExcludedAttempt,
 ) -> None:
-    """Persist the standalone interrupted replay for one cancelled attempt."""
     persist(
         run.scope_context,
         StandaloneReplaySnapshot(
@@ -424,30 +417,37 @@ def _persist_attempt_cancelled_replay(
             completed_tools=run.turn_state.completed_tools_for(resolution.completed_tools),
             interrupted_tools=list(resolution.interrupted_tools),
             run_metadata=run.run_metadata,
+            original_status=resolution.original_status,
         ),
     )
     run.standalone_replay_persisted = True
 
 
-def _record_turn_cancelled_fallback(
+def _record_turn_excluded_fallback(
     ctx: ResponseTurnContext,
     persist: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None] | None,
     sinks: TurnSinks,
     run: TurnRunState,
     snapshot: TurnPartialSnapshot,
     *,
+    original_status: RunStatus,
     use_recorder_state: bool,
 ) -> None:
-    """Record an externally cancelled turn on the recorder or as a standalone replay."""
     recorder = sinks.turn_recorder
     if recorder is not None:
+        if recorder.outcome == "completed":
+            return
         run_metadata = (
             run.run_metadata
             if run.run_metadata is not None
             else recorder.run_metadata or _fallback_matrix_run_metadata(ctx, run)
         )
         if use_recorder_state:
-            run.turn_state.record_interrupted_from_recorder(recorder, run_metadata=run_metadata)
+            run.turn_state.record_interrupted_from_recorder(
+                recorder,
+                run_metadata=run_metadata,
+                original_status=original_status,
+            )
         else:
             run.turn_state.record_interrupted(
                 recorder,
@@ -455,6 +455,7 @@ def _record_turn_cancelled_fallback(
                 assistant_text=snapshot.assistant_text,
                 completed_tools=list(snapshot.completed_tools),
                 interrupted_tools=list(snapshot.interrupted_tools),
+                original_status=original_status,
             )
         return
     if run.standalone_replay_persisted or persist is None:
@@ -468,8 +469,10 @@ def _record_turn_cancelled_fallback(
             completed_tools=run.turn_state.completed_tools_for(snapshot.completed_tools),
             interrupted_tools=list(snapshot.interrupted_tools),
             run_metadata=run.run_metadata if run.run_metadata is not None else _fallback_matrix_run_metadata(ctx, run),
+            original_status=original_status,
         ),
     )
+    run.standalone_replay_persisted = True
 
 
 def _settle_empty_run(
@@ -563,16 +566,26 @@ async def run_blocking_response_turn(
         # The blocking envelope re-records from the recorder's canonical state so
         # an in-attempt cancellation (recorded above with attempt-local partials)
         # and an external task cancel converge on the same interrupted turn.
-        _record_turn_cancelled_fallback(
+        _record_turn_excluded_fallback(
             ctx,
             adapter.persist_standalone_replay,
             sinks,
             run,
             adapter.snapshot_partial(),
+            original_status=RunStatus.cancelled,
             use_recorder_state=True,
         )
         raise
     except Exception as e:
+        _record_turn_excluded_fallback(
+            ctx,
+            adapter.persist_standalone_replay,
+            sinks,
+            run,
+            adapter.snapshot_partial(),
+            original_status=RunStatus.error,
+            use_recorder_state=False,
+        )
         if adapter.unexpected_error_text is None:
             raise
         logger.exception("Response turn failed", entity=ctx.entity_label)
@@ -595,7 +608,7 @@ def _settle_blocking_attempt(
     # The blocking envelope publishes run metadata before recording, and only
     # for attempts that end the turn: a discarded empty run's or a superseded
     # continuation attempt's payload must not ride out on a later resolution.
-    if isinstance(resolution, CancelledAttempt):
+    if isinstance(resolution, ExcludedAttempt):
         _publish_run_metadata(sinks, resolution.metadata_content)
         run.turn_state.record_interrupted(
             sinks.turn_recorder,
@@ -603,13 +616,13 @@ def _settle_blocking_attempt(
             assistant_text=resolution.partial_text,
             completed_tools=list(resolution.completed_tools),
             interrupted_tools=list(resolution.interrupted_tools),
+            original_status=resolution.original_status,
         )
         if sinks.turn_recorder is None and adapter.persist_standalone_replay is not None:
-            _persist_attempt_cancelled_replay(ctx, adapter.persist_standalone_replay, run, resolution)
-        raise build_cancelled_error(resolution.reason)
-    if isinstance(resolution, ErroredAttempt):
-        _publish_run_metadata(sinks, resolution.metadata_content)
-        return resolution.user_message_text
+            _persist_excluded_attempt_replay(ctx, adapter.persist_standalone_replay, run, resolution)
+        if resolution.original_status is RunStatus.cancelled:
+            raise build_cancelled_error(resolution.reason)
+        return resolution.response_text
     settle = _settle_completed_attempt(
         ctx,
         sinks,
@@ -736,7 +749,7 @@ def _settle_completed_attempt(
     )
 
 
-async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912
+async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     ctx: ResponseTurnContext,
     adapter: StreamingTurnAdapter[ChunkT],
     sinks: TurnSinks,
@@ -765,26 +778,38 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912
                     if resolution is None:
                         _raise_missing_stream_resolution(ctx.entity_label)
                     if isinstance(resolution, HandledAttempt):
+                        _record_turn_excluded_fallback(
+                            ctx,
+                            adapter.persist_standalone_replay,
+                            sinks,
+                            run,
+                            adapter.snapshot_partial(),
+                            original_status=RunStatus.error,
+                            use_recorder_state=False,
+                        )
                         return
-                    if isinstance(resolution, CancelledAttempt):
-                        # The streaming envelope records the interruption before
-                        # publishing cancelled run metadata to the collector.
+                    if isinstance(resolution, ExcludedAttempt):
                         run.turn_state.record_interrupted(
                             sinks.turn_recorder,
                             run_metadata=run.run_metadata,
                             assistant_text=resolution.partial_text,
                             completed_tools=list(resolution.completed_tools),
                             interrupted_tools=list(resolution.interrupted_tools),
+                            original_status=resolution.original_status,
                         )
                         _publish_run_metadata(sinks, resolution.metadata_content)
                         if sinks.turn_recorder is None and adapter.persist_standalone_replay is not None:
-                            _persist_attempt_cancelled_replay(
+                            _persist_excluded_attempt_replay(
                                 ctx,
                                 adapter.persist_standalone_replay,
                                 run,
                                 resolution,
                             )
-                        raise build_cancelled_error(resolution.reason)
+                        if resolution.original_status is RunStatus.cancelled:
+                            raise build_cancelled_error(resolution.reason)
+                        if resolution.response_text:
+                            yield adapter.make_text_chunk(resolution.response_text)
+                        return
                     settle = _settle_completed_attempt(
                         ctx,
                         sinks,
@@ -814,16 +839,26 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912
                     return
             _raise_continuation_budget_exhausted()
     except asyncio.CancelledError:
-        _record_turn_cancelled_fallback(
+        _record_turn_excluded_fallback(
             ctx,
             adapter.persist_standalone_replay,
             sinks,
             run,
             adapter.snapshot_partial(),
+            original_status=RunStatus.cancelled,
             use_recorder_state=False,
         )
         raise
     except Exception as e:
+        _record_turn_excluded_fallback(
+            ctx,
+            adapter.persist_standalone_replay,
+            sinks,
+            run,
+            adapter.snapshot_partial(),
+            original_status=RunStatus.error,
+            use_recorder_state=False,
+        )
         if adapter.unexpected_error_text is None:
             raise
         logger.exception("Response turn failed", entity=ctx.entity_label)

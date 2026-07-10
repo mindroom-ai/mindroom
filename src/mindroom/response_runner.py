@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from uuid import uuid4
 
 from agno.db.base import SessionType
+from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
@@ -546,7 +547,7 @@ class ResponseRunner:
 
     def _ensure_recorder_interrupted(self, recorder: TurnRecorder) -> None:
         """Mark one recorder interrupted unless lower layers already captured richer state."""
-        if recorder.outcome != "interrupted":
+        if recorder.outcome == "pending":
             recorder.mark_interrupted()
 
     def _persist_interrupted_recorder(
@@ -615,6 +616,8 @@ class ResponseRunner:
         tool_trace: Sequence[ToolTraceEntry],
     ) -> bool:
         """Capture canonical interrupted replay state from one failed stream delivery."""
+        if recorder.outcome == "completed":
+            return False
         partial_text = clean_partial_reply_text(strip_visible_tool_markers(accumulated_text))
         completed_tools, interrupted_tools = _split_delivery_tool_trace(tool_trace)
         if not partial_text:
@@ -630,6 +633,7 @@ class ResponseRunner:
             assistant_text=partial_text,
             completed_tools=completed_tools,
             interrupted_tools=interrupted_tools,
+            original_status=RunStatus.error,
         )
         return True
 
@@ -2197,6 +2201,18 @@ class ResponseRunner:
                 )
             finally:
                 await lifecycle.emit_session_started(session_started_watch)
+                if turn_recorder.outcome != "completed" and turn_recorder.original_status is not RunStatus.cancelled:
+                    if turn_recorder.outcome == "pending":
+                        turn_recorder.mark_interrupted(RunStatus.error)
+                    await self._persist_interrupted_recorder_off_loop(
+                        recorder=turn_recorder,
+                        session_scope=session_scope,
+                        session_id=runtime.session_id,
+                        execution_identity=runtime.tool_dispatch.execution_identity,
+                        run_id=run_id,
+                        is_team=False,
+                        response_event_id=request.existing_event_id,
+                    )
         except asyncio.CancelledError as exc:
             cancel_source = classify_cancel_source(exc)
             log_cancelled_response(

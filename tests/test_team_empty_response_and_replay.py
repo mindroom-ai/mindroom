@@ -180,8 +180,7 @@ async def test_team_response_stream_empty_event_stream_retries_then_notices() ->
     assert mock_team.arun.call_count == 2
     rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
     assert ai_runtime.EMPTY_RESPONSE_NOTICE in rendered
-    # The notice-only turn records an empty completion, not the placeholder document.
-    assert recorder.outcome == "completed"
+    assert recorder.outcome == "interrupted"
     assert recorder.assistant_text == ""
 
 
@@ -393,8 +392,8 @@ async def test_team_response_stream_records_interrupted_turn_on_errored_run_outp
 
 
 @pytest.mark.asyncio
-async def test_team_response_stream_leaves_recorder_pending_when_error_has_no_partial() -> None:
-    """A team error with no partial work records nothing for replay."""
+async def test_team_response_stream_records_error_without_partial_output() -> None:
+    """A team error with no partial work still records one replay carrier."""
     orchestrator, config = _make_orchestrator()
 
     async def stream() -> AsyncIterator[object]:
@@ -419,7 +418,7 @@ async def test_team_response_stream_leaves_recorder_pending_when_error_has_no_pa
             )
         ]
 
-    assert recorder.outcome == "pending"
+    assert recorder.outcome == "interrupted"
 
 
 @pytest.mark.asyncio

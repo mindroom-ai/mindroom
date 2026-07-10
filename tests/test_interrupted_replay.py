@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
 from agno.models.message import Message
 from agno.models.response import ToolExecution
 from agno.run.agent import RunOutput
@@ -122,7 +123,7 @@ def test_build_interrupted_replay_run_creates_completed_agent_run_with_summary_a
         (
             "assistant",
             "Half done\n\n"
-            "(turn interrupted by the user before completion; "
+            "(turn stopped before completion; "
             "1 tool call(s) had completed: run_shell_command; "
             "1 tool call(s) were still running: save_file)",
         ),
@@ -160,11 +161,12 @@ def test_interrupted_replay_content_contains_no_raw_tool_trace() -> None:
     assert "[interrupted]" not in content
     assert '{"attachment"' not in content
     assert content.startswith("Half done")
-    assert "turn interrupted by the user before completion" in content
+    assert "turn stopped before completion" in content
     assert "get_attachment" in content
 
 
-def test_build_interrupted_replay_run_tracks_replay_and_seen_event_metadata() -> None:
+@pytest.mark.parametrize("original_status", [RunStatus.cancelled, RunStatus.error, RunStatus.paused])
+def test_build_interrupted_replay_run_tracks_replay_and_seen_event_metadata(original_status: RunStatus) -> None:
     """Interrupted replay runs should preserve the event-consumption metadata used by prompt prep."""
     snapshot = InterruptedReplaySnapshot(
         user_message="Please continue",
@@ -176,6 +178,7 @@ def test_build_interrupted_replay_run_tracks_replay_and_seen_event_metadata() ->
             "matrix_response_event_id": "$reply",
             "matrix_seen_event_ids": ["e1", "e2"],
         },
+        original_status=original_status,
     )
 
     run = _build_interrupted_replay_run(
@@ -190,9 +193,11 @@ def test_build_interrupted_replay_run_tracks_replay_and_seen_event_metadata() ->
         "matrix_event_id": "e1",
         "matrix_response_event_id": "$reply",
         "matrix_seen_event_ids": ["e1", "e2"],
-        "mindroom_original_status": "cancelled",
+        "mindroom_original_status": original_status.name,
         "mindroom_replay_state": "interrupted",
     }
+    summary = {RunStatus.cancelled: "stopped", RunStatus.error: "failed", RunStatus.paused: "paused"}[original_status]
+    assert summary in _assistant_text(run)
 
 
 def test_build_interrupted_replay_run_preserves_coalesced_source_metadata() -> None:
@@ -395,6 +400,6 @@ def test_persist_interrupted_replay_snapshot_keeps_minimal_interrupted_turn(tmp_
         assert persisted is not None
         assert persisted.runs is not None
         assert len(persisted.runs) == 1
-        assert _assistant_text(persisted.runs[0]) == "(turn interrupted by the user before completion)"
+        assert _assistant_text(persisted.runs[0]) == "(turn stopped before completion)"
     finally:
         storage.close()
