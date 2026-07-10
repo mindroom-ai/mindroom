@@ -41,14 +41,12 @@ def test_serialized_kubernetes_worker_validation_snapshot_uses_each_runtime_conf
         authored,
         {},
         {"first": replace(TOOL_METADATA["shell"], name="first")},
-        tolerate_plugin_load_errors=True,
     )
     second_state = resolved_tool_runtime_state_from_registry(
         runtime_paths,
         authored,
         {},
         {"second": replace(TOOL_METADATA["shell"], name="second")},
-        tolerate_plugin_load_errors=True,
     )
     first_config = RuntimeConfig.from_authored(
         authored,

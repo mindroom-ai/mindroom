@@ -29,7 +29,7 @@ from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.tool_approval import ToolCallWorkflowOrigin
-from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
+from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_execution_identity_from_runtime_context,
@@ -41,6 +41,7 @@ from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool
 if TYPE_CHECKING:
     from mindroom.config.main import RuntimeConfig
     from mindroom.dynamic_workflows.runner import AsyncParticipantExecutor, ParticipantExecutor
+    from mindroom.tool_system.declarations import ToolMetadata
 
 # Agent-infrastructure toolkits that are built outside the tool registry and presume
 # a durable agent runtime; they can never be granted to workflow participants.
@@ -692,8 +693,7 @@ def _resolve_participant_toolkits(context: ToolRuntimeContext, participant: dict
     tool_names = _participant_tool_names(participant)
     if not tool_names:
         return {}
-    ensure_tool_registry_loaded(context.runtime_paths, context.config)
-    _reject_unavailable_workflow_tools(tool_names)
+    _reject_unavailable_workflow_tools(tool_names, _runtime_tool_metadata(context))
     # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
     from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools  # noqa: PLC0415
 
@@ -703,7 +703,6 @@ def _resolve_participant_toolkits(context: ToolRuntimeContext, participant: dict
         context.config,
         context.runtime_paths,
         list(tool_names),
-        tool_registry_preloaded=True,
     )
     entity_view = context.config.resolve_entity(context.agent_name)
     authored_overrides = {entry.name: entry.tool_config_overrides for entry in entity_view.tool_configs}
@@ -742,12 +741,19 @@ def _participant_tool_names(participant: dict[str, object]) -> list[str]:
     return tool_names
 
 
-def _reject_unavailable_workflow_tools(tool_names: list[str]) -> None:
+def _runtime_tool_metadata(context: ToolRuntimeContext) -> Mapping[str, ToolMetadata]:
+    return resolved_tool_metadata_for_runtime(
+        context.runtime_paths,
+        context.config,
+    )
+
+
+def _reject_unavailable_workflow_tools(tool_names: list[str], tool_metadata: Mapping[str, ToolMetadata]) -> None:
     for tool_name in tool_names:
         if tool_name in _WORKFLOW_RESTRICTED_TOOLS:
             msg = f"Dynamic Workflow participants cannot use agent-infrastructure tool '{tool_name}'."
             raise DynamicWorkflowError(msg)
-        if tool_name not in TOOL_METADATA:
+        if tool_name not in tool_metadata:
             msg = f"Dynamic Workflow participant tool '{tool_name}' is not a registered tool."
             raise DynamicWorkflowError(msg)
 
@@ -903,8 +909,7 @@ def _validate_workflow_tool_policy_for_context(context: ToolRuntimeContext, spec
     tool_names = _spec_tool_names(spec)
     if not tool_names:
         return
-    ensure_tool_registry_loaded(context.runtime_paths, context.config)
-    _reject_unavailable_workflow_tools(tool_names)
+    _reject_unavailable_workflow_tools(tool_names, _runtime_tool_metadata(context))
 
 
 def _spec_tool_names(spec: dict[str, object]) -> list[str]:

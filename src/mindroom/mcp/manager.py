@@ -37,7 +37,7 @@ from mindroom.oauth.service import (
     oauth_credentials_usable,
     refresh_scoped_oauth_credentials_with_result,
 )
-from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded, get_tool_by_name
+from mindroom.tool_system.catalog import get_tool_by_name, resolved_tool_metadata_for_runtime
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 
 if TYPE_CHECKING:
@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
+    from mindroom.tool_system.declarations import ToolMetadata
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
@@ -1065,9 +1066,15 @@ class MCPServerManager:
         return local_tool_configs, {server_id: tuple(configs) for server_id, configs in mcp_tool_configs.items()}
 
     @staticmethod
-    def _metadata_only_tool_function_names(tool_name: str, *, config: RuntimeConfig, agent_name: str) -> set[str]:
+    def _metadata_only_tool_function_names(
+        tool_name: str,
+        *,
+        config: RuntimeConfig,
+        agent_name: str,
+        tool_metadata: Mapping[str, ToolMetadata],
+    ) -> set[str]:
         """Return provider-visible names for context-built tools declared in metadata."""
-        metadata = TOOL_METADATA.get(tool_name)
+        metadata = tool_metadata.get(tool_name)
         if metadata is None or metadata.factory is not None:
             return set()
         if tool_name == "memory" and config.resolve_entity(agent_name).memory_backend == "none":
@@ -1080,12 +1087,18 @@ class MCPServerManager:
         *,
         config: RuntimeConfig,
         agent_name: str,
+        tool_metadata: Mapping[str, ToolMetadata],
     ) -> set[str]:
         """Return provider-visible function names for metadata-only configured tools."""
         function_names: set[str] = set()
         for tool_name in sorted(tool_names):
             function_names.update(
-                self._metadata_only_tool_function_names(tool_name, config=config, agent_name=agent_name),
+                self._metadata_only_tool_function_names(
+                    tool_name,
+                    config=config,
+                    agent_name=agent_name,
+                    tool_metadata=tool_metadata,
+                ),
             )
         return function_names
 
@@ -1094,6 +1107,7 @@ class MCPServerManager:
         tool_configs: list[EffectiveToolConfig],
         *,
         get_tool_by_name: Callable[..., object],
+        config: RuntimeConfig,
     ) -> set[str]:
         """Return provider-visible function names exposed by one set of local tools."""
         function_names: set[str] = set()
@@ -1102,6 +1116,7 @@ class MCPServerManager:
                 toolkit = get_tool_by_name(
                     tool_config.name,
                     self.runtime_paths,
+                    runtime_config=config,
                     worker_target=None,
                     tool_config_overrides=dict(tool_config.tool_config_overrides),
                 )
@@ -1126,7 +1141,10 @@ class MCPServerManager:
         if config is None:
             return set(), {}
 
-        ensure_tool_registry_loaded(self.runtime_paths, config)
+        tool_metadata = resolved_tool_metadata_for_runtime(
+            self.runtime_paths,
+            config,
+        )
         local_tool_configs, mcp_tool_configs = self._partition_tool_configs(
             self._configured_tool_configs(agent_name, loaded_tools=loaded_tools),
         )
@@ -1135,6 +1153,7 @@ class MCPServerManager:
             local_tool_names,
             config=config,
             agent_name=agent_name,
+            tool_metadata=tool_metadata,
         )
         function_names.update(
             self._tool_function_names_for_local_tools(
@@ -1145,9 +1164,11 @@ class MCPServerManager:
                         entry.name,
                         config=config,
                         agent_name=agent_name,
+                        tool_metadata=tool_metadata,
                     )
                 ],
                 get_tool_by_name=get_tool_by_name,
+                config=config,
             ),
         )
         return function_names, mcp_tool_configs

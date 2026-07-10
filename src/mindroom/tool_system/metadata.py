@@ -51,9 +51,11 @@ if TYPE_CHECKING:
 
     from agno.tools import Toolkit
 
-    from mindroom.config.main import Config
+    from mindroom.config.main import Config, RuntimeConfig
+    from mindroom.config.plugin import PluginEntryConfig
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
+    from mindroom.hooks import HookCallback, HookRegistry
 
 logger = get_logger(__name__)
 
@@ -501,6 +503,8 @@ def _build_tool_instance(
     tool_name: str,
     runtime_paths: RuntimePaths,
     *,
+    tool_factory: Callable[[], type[Toolkit]],
+    tool_metadata: Mapping[str, ToolMetadata],
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
     credentials_manager: CredentialsManager | None = None,
@@ -533,8 +537,8 @@ def _build_tool_instance(
         wrap_toolkit_for_output_files,
     )
 
-    metadata = TOOL_METADATA[tool_name]
-    tool_class = TOOL_REGISTRY[tool_name]()
+    metadata = tool_metadata[tool_name]
+    tool_class = tool_factory()
     resolved_credentials_manager = _resolve_tool_credentials_manager(
         metadata,
         runtime_paths,
@@ -552,8 +556,16 @@ def _build_tool_instance(
     ) or {}
     if credential_overrides:
         credentials = {**credentials, **credential_overrides}
-    validated_tool_config_overrides = validate_authored_tool_entry_overrides(tool_name, tool_config_overrides)
-    safe_tool_init_overrides = sanitize_tool_init_overrides(tool_name, tool_init_overrides)
+    validated_tool_config_overrides = validate_authored_tool_entry_overrides(
+        tool_name,
+        tool_config_overrides,
+        tool_metadata=tool_metadata,
+    )
+    safe_tool_init_overrides = sanitize_tool_init_overrides(
+        tool_name,
+        tool_init_overrides,
+        tool_metadata=tool_metadata,
+    )
     init_kwargs = _build_tool_config_init_kwargs(
         tool_name,
         metadata,
@@ -609,6 +621,7 @@ def get_tool_by_name(
     tool_name: str,
     runtime_paths: RuntimePaths,
     *,
+    runtime_config: RuntimeConfig | None = None,
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
     credentials_manager: CredentialsManager | None = None,
@@ -623,8 +636,19 @@ def get_tool_by_name(
     worker_target: ResolvedWorkerTarget | None,
 ) -> Toolkit:
     """Get a tool instance by its registered name."""
-    if tool_name not in TOOL_REGISTRY:
-        available = ", ".join(sorted(TOOL_REGISTRY.keys()))
+    if runtime_config is None:
+        tool_registry = TOOL_REGISTRY
+        tool_metadata = TOOL_METADATA
+    else:
+        resolved_state = _resolved_tool_state_for_runtime(
+            runtime_paths,
+            runtime_config,
+        )
+        tool_registry = resolved_state.tool_registry
+        tool_metadata = resolved_state.tool_metadata
+    tool_factory = tool_registry.get(tool_name)
+    if tool_factory is None:
+        available = ", ".join(sorted(tool_registry))
         msg = f"Unknown tool: {tool_name}. Available tools: {available}"
         raise ToolMetadataValidationError(msg)
 
@@ -632,6 +656,8 @@ def get_tool_by_name(
         _build_tool_instance,
         tool_name,
         runtime_paths,
+        tool_factory=tool_factory,
+        tool_metadata=tool_metadata,
         disable_sandbox_proxy=disable_sandbox_proxy,
         credential_overrides=credential_overrides,
         credentials_manager=credentials_manager,
@@ -647,7 +673,7 @@ def get_tool_by_name(
     )
 
     # Pre-check dependencies using find_spec (no side effects) before importing
-    metadata = TOOL_METADATA.get(tool_name)
+    metadata = tool_metadata.get(tool_name)
     deps = metadata.dependencies if metadata and metadata.dependencies else []
     if deps:
         missing = ", ".join(deps)
@@ -688,6 +714,17 @@ class _ResolvedToolState:
     tool_registry: dict[str, Callable[[], type[Toolkit]]]
     tool_metadata: dict[str, ToolMetadata]
     unavailable_tool_metadata: dict[str, ToolMetadata]
+    hook_registry: HookRegistry
+
+
+@dataclass(frozen=True)
+class _ResolvedPluginHooks:
+    """Minimal plugin shape needed to compile validation-time hooks."""
+
+    name: str
+    entry_config: PluginEntryConfig
+    plugin_order: int
+    discovered_hooks: tuple[HookCallback, ...]
 
 
 @dataclass(frozen=True)
@@ -696,7 +733,6 @@ class ResolvedToolRuntimeState:
 
     runtime_paths: RuntimePaths
     validation_snapshot: Mapping[str, ToolValidationInfo]
-    tolerate_plugin_load_errors: bool
     _state: _ResolvedToolState = dataclass_field(repr=False)
 
 
@@ -723,7 +759,7 @@ def _execute_validation_plugin_module(
     plugin_root: Path,
     module_path: Path,
     registrations_by_module: dict[str, dict[str, ToolMetadata]],
-) -> str:
+) -> tuple[str, tuple[HookCallback, ...]]:
     """Execute one plugin module into a temporary validation import context."""
     runtime_module_name = plugin_module._module_name(plugin_name, plugin_root, module_path)
     validation_module_name = f"{runtime_module_name}{_VALIDATION_PLUGIN_MODULE_SUFFIX}{id(registrations_by_module)}"
@@ -743,12 +779,16 @@ def _execute_validation_plugin_module(
     tasks_before_import = plugin_module._running_tasks()
     execution_error: Exception | None = None
     created_task_count = 0
+    discovered_hooks: tuple[HookCallback, ...] = ()
     try:
         with (
             scoped_plugin_registration_store(registrations_by_module),
             scoped_plugin_registration_owner(validation_module_name),
         ):
             loader.exec_module(module)
+            from mindroom.hooks import iter_module_hooks  # noqa: PLC0415
+
+            discovered_hooks = tuple(iter_module_hooks(module))
     except Exception as exc:
         execution_error = exc
     finally:
@@ -773,17 +813,19 @@ def _execute_validation_plugin_module(
     if created_task_count:
         msg = f"Plugin validation module created async tasks during import: {module_path}"
         raise ToolMetadataValidationError(msg)
-    return validation_module_name
+    return validation_module_name, discovered_hooks
 
 
 _RESOLVED_TOOL_STATE_LOCK = threading.RLock()
 _RESOLVED_TOOL_STATE_CACHE: dict[tuple[int, bool], tuple[RuntimePaths, _ResolvedToolState]] = {}
+_BOUND_RUNTIME_TOOL_STATE_CACHE: dict[int, tuple[RuntimePaths, _ResolvedToolState]] = {}
 
 
 def clear_resolved_tool_state_cache() -> None:
     """Drop cached per-config resolved tool state after live plugin registry changes."""
     with _RESOLVED_TOOL_STATE_LOCK:
         _RESOLVED_TOOL_STATE_CACHE.clear()
+        _BOUND_RUNTIME_TOOL_STATE_CACHE.clear()
 
 
 def bind_resolved_tool_state_cache(
@@ -791,11 +833,16 @@ def bind_resolved_tool_state_cache(
     target_config: Config,
 ) -> None:
     """Bind carried tool state to the runtime config built from its validation snapshot."""
-    target_key = (id(target_config), resolved_state.tolerate_plugin_load_errors)
+    target_key = id(target_config)
     with _RESOLVED_TOOL_STATE_LOCK:
-        if target_key not in _RESOLVED_TOOL_STATE_CACHE:
-            weakref.finalize(target_config, _evict_resolved_tool_state, target_key)
-        _RESOLVED_TOOL_STATE_CACHE[target_key] = (resolved_state.runtime_paths, resolved_state._state)
+        if target_key not in _BOUND_RUNTIME_TOOL_STATE_CACHE:
+            weakref.finalize(target_config, _evict_bound_runtime_tool_state, target_key)
+        _BOUND_RUNTIME_TOOL_STATE_CACHE[target_key] = (resolved_state.runtime_paths, resolved_state._state)
+
+
+def _evict_bound_runtime_tool_state(cache_key: int) -> None:
+    with _RESOLVED_TOOL_STATE_LOCK:
+        _BOUND_RUNTIME_TOOL_STATE_CACHE.pop(cache_key, None)
 
 
 def _evict_resolved_tool_state(cache_key: tuple[int, bool]) -> None:
@@ -819,6 +866,9 @@ def _resolved_tool_state_for_runtime(
     """
     cache_key = (id(config), tolerate_plugin_load_errors)
     with _RESOLVED_TOOL_STATE_LOCK:
+        bound = _BOUND_RUNTIME_TOOL_STATE_CACHE.get(id(config))
+        if bound is not None and bound[0] == runtime_paths:
+            return bound[1]
         cached = _RESOLVED_TOOL_STATE_CACHE.get(cache_key)
         if cached is not None and cached[0] == runtime_paths:
             return cached[1]
@@ -841,6 +891,7 @@ def _compute_resolved_tool_state_for_runtime(
 ) -> _ResolvedToolState:
     """Resolve registry and metadata for one runtime config by executing its plugins."""
     import mindroom.tools  # noqa: F401, PLC0415
+    from mindroom.hooks import HookRegistry  # noqa: PLC0415
     from mindroom.mcp.registry import resolved_mcp_tool_state  # noqa: PLC0415
 
     plugin_entries = config.plugins
@@ -854,7 +905,7 @@ def _compute_resolved_tool_state_for_runtime(
             mcp_registry,
             mcp_metadata,
         )
-        return _ResolvedToolState(builtin_registry, builtin_metadata, {})
+        return _ResolvedToolState(builtin_registry, builtin_metadata, {}, HookRegistry.empty())
 
     plugin_bases = plugin_module._collect_plugin_bases(
         plugin_entries,
@@ -867,40 +918,45 @@ def _compute_resolved_tool_state_for_runtime(
     validation_registrations: dict[str, dict[str, ToolMetadata]] = {}
     unavailable_tool_metadata: dict[str, ToolMetadata] = {}
     active_plugins: list[tuple[str, str]] = []
-    for plugin_base, plugin_entry, _ in plugin_bases:
+    hook_plugins: list[_ResolvedPluginHooks] = []
+    for plugin_base, plugin_entry, plugin_order in plugin_bases:
         candidate_registrations: dict[str, dict[str, ToolMetadata]] = {}
         candidate_active_plugins: list[tuple[str, str]] = []
+        candidate_hooks: tuple[HookCallback, ...] = ()
         try:
             if plugin_base.tools_module_path is None:
                 if plugin_base.hooks_module_path is not None:
-                    _execute_validation_plugin_module(
+                    _, candidate_hooks = _execute_validation_plugin_module(
                         plugin_base.name,
                         plugin_base.root,
                         plugin_base.hooks_module_path,
                         candidate_registrations,
                     )
             else:
+                tool_module_name, tool_module_hooks = _execute_validation_plugin_module(
+                    plugin_base.name,
+                    plugin_base.root,
+                    plugin_base.tools_module_path,
+                    candidate_registrations,
+                )
                 candidate_active_plugins.append(
                     (
                         plugin_base.name,
-                        _execute_validation_plugin_module(
-                            plugin_base.name,
-                            plugin_base.root,
-                            plugin_base.tools_module_path,
-                            candidate_registrations,
-                        ),
+                        tool_module_name,
                     ),
                 )
                 if (
                     plugin_base.hooks_module_path is not None
                     and plugin_base.hooks_module_path != plugin_base.tools_module_path
                 ):
-                    _execute_validation_plugin_module(
+                    _, candidate_hooks = _execute_validation_plugin_module(
                         plugin_base.name,
                         plugin_base.root,
                         plugin_base.hooks_module_path,
                         candidate_registrations,
                     )
+                else:
+                    candidate_hooks = tool_module_hooks
         except Exception as exc:
             if not tolerate_plugin_load_errors:
                 raise
@@ -912,6 +968,14 @@ def _compute_resolved_tool_state_for_runtime(
 
         validation_registrations.update(candidate_registrations)
         active_plugins.extend(candidate_active_plugins)
+        hook_plugins.append(
+            _ResolvedPluginHooks(
+                name=plugin_base.name,
+                entry_config=plugin_entry,
+                plugin_order=plugin_order,
+                discovered_hooks=candidate_hooks,
+            ),
+        )
 
     desired_registry, desired_metadata = resolved_tool_state(active_plugins, validation_registrations)
     mcp_registry, mcp_metadata = resolved_mcp_tool_state(config)
@@ -926,7 +990,12 @@ def _compute_resolved_tool_state_for_runtime(
         desired_registry,
         desired_metadata,
     )
-    return _ResolvedToolState(desired_registry, desired_metadata, unavailable_tool_metadata)
+    return _ResolvedToolState(
+        desired_registry,
+        desired_metadata,
+        unavailable_tool_metadata,
+        HookRegistry.from_plugins(hook_plugins),
+    )
 
 
 def _unavailable_tool_metadata_without_resolved_tools(
@@ -971,6 +1040,49 @@ def resolved_tool_metadata_for_runtime(
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
     )
     return resolved_state.tool_metadata
+
+
+def resolved_hook_registry_for_runtime(
+    runtime_paths: RuntimePaths,
+    config: RuntimeConfig,
+) -> HookRegistry:
+    """Return the immutable hook registry carried by one runtime config."""
+    resolved_state = _resolved_tool_state_for_runtime(
+        runtime_paths,
+        config,
+    )
+    return resolved_state.hook_registry
+
+
+def refresh_mcp_tool_state_for_runtime(
+    runtime_paths: RuntimePaths,
+    config: RuntimeConfig,
+) -> None:
+    """Refresh MCP entries without rediscovering the config's committed plugins."""
+    from mindroom.mcp.registry import mcp_tool_name  # noqa: PLC0415
+
+    current_state = _resolved_tool_state_for_runtime(
+        runtime_paths,
+        config,
+    )
+    mcp_tool_names = {mcp_tool_name(server_id) for server_id in config.mcp_servers}
+    refreshed_state = resolved_tool_runtime_state_from_registry(
+        runtime_paths,
+        config,
+        {
+            tool_name: factory
+            for tool_name, factory in current_state.tool_registry.items()
+            if tool_name not in mcp_tool_names
+        },
+        {
+            tool_name: metadata
+            for tool_name, metadata in current_state.tool_metadata.items()
+            if tool_name not in mcp_tool_names
+        },
+        hook_registry=current_state.hook_registry,
+        unavailable_tool_names=config.unavailable_plugin_tool_names,
+    )
+    bind_resolved_tool_state_cache(refreshed_state, config)
 
 
 def _tool_validation_snapshot_from_state(
@@ -1070,7 +1182,6 @@ def resolved_tool_runtime_state_for_runtime(
     return _resolved_tool_runtime_state_snapshot(
         runtime_paths,
         resolved_state,
-        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
     )
 
 
@@ -1080,10 +1191,11 @@ def resolved_tool_runtime_state_from_registry(
     tool_registry: Mapping[str, Callable[[], type[Toolkit]]],
     tool_metadata: Mapping[str, ToolMetadata],
     *,
+    hook_registry: HookRegistry | None = None,
     unavailable_tool_names: Iterable[str] = (),
-    tolerate_plugin_load_errors: bool = False,
 ) -> ResolvedToolRuntimeState:
     """Build carried runtime state from one already-staged plugin registry."""
+    from mindroom.hooks import HookRegistry  # noqa: PLC0415
     from mindroom.mcp.registry import resolved_mcp_tool_state  # noqa: PLC0415
 
     registry = dict(tool_registry)
@@ -1102,16 +1214,18 @@ def resolved_tool_runtime_state_from_registry(
     }
     return _resolved_tool_runtime_state_snapshot(
         runtime_paths,
-        _ResolvedToolState(registry, metadata, unavailable_metadata),
-        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        _ResolvedToolState(
+            registry,
+            metadata,
+            unavailable_metadata,
+            hook_registry or HookRegistry.empty(),
+        ),
     )
 
 
 def _resolved_tool_runtime_state_snapshot(
     runtime_paths: RuntimePaths,
     resolved_state: _ResolvedToolState,
-    *,
-    tolerate_plugin_load_errors: bool,
 ) -> ResolvedToolRuntimeState:
     """Project one resolved catalog into its validation and cache-binding value."""
     validation_metadata = {
@@ -1125,7 +1239,6 @@ def _resolved_tool_runtime_state_snapshot(
             validation_metadata,
             unavailable_plugin_tool_names=frozenset(resolved_state.unavailable_tool_metadata),
         ),
-        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
         _state=resolved_state,
     )
 
@@ -1239,11 +1352,16 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
     return snapshot
 
 
-def default_worker_routed_tools(tool_names: list[str]) -> list[str]:
+def default_worker_routed_tools(
+    tool_names: list[str],
+    *,
+    tool_metadata: Mapping[str, ToolMetadata] | None = None,
+) -> list[str]:
     """Return the tool names that default to worker execution."""
+    metadata_by_name = TOOL_METADATA if tool_metadata is None else tool_metadata
     selected_tools: list[str] = []
     for tool_name in tool_names:
-        metadata = TOOL_METADATA.get(tool_name)
+        metadata = metadata_by_name.get(tool_name)
         if metadata is not None and metadata.default_execution_target == ToolExecutionTarget.WORKER:
             selected_tools.append(tool_name)
     return selected_tools

@@ -22,6 +22,7 @@ import mindroom.tools.custom_api as custom_api_module
 from mindroom.config import runtime as config_runtime_module
 from mindroom.config.main import Config, RuntimeConfig, load_config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.hooks import HookRegistry
 from mindroom.redaction import REDACTED
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
@@ -376,7 +377,7 @@ def test_plugin_validation_uses_sys_modules_snapshot(tmp_path: Path, monkeypatch
     snapshot = capture_tool_registry_snapshot()
     assert isinstance(snapshot.plugin_modules, dict)
 
-    module_name = _execute_validation_plugin_module("demo", plugin_root, module_path, {})
+    module_name, _ = _execute_validation_plugin_module("demo", plugin_root, module_path, {})
     assert module_name
     assert "demo" in module_name
     assert "__validation__" in module_name
@@ -929,7 +930,7 @@ def test_resolved_tool_state_cached_per_config_object(
 ) -> None:
     """One config object should resolve its tool state once across all consumers."""
     compute_calls = 0
-    dummy_state = metadata_module._ResolvedToolState({}, {}, {})
+    dummy_state = metadata_module._ResolvedToolState({}, {}, {}, HookRegistry.empty())
 
     def counted_compute(*_args: object, **_kwargs: object) -> metadata_module._ResolvedToolState:
         nonlocal compute_calls
@@ -977,7 +978,7 @@ def test_runtime_config_reuses_tool_state_resolved_during_validation(
 ) -> None:
     """The authored-to-runtime stage should preserve the catalog's per-config cache."""
     compute_calls = 0
-    dummy_state = metadata_module._ResolvedToolState({}, {}, {})
+    dummy_state = metadata_module._ResolvedToolState({}, {}, {}, HookRegistry.empty())
 
     def counted_compute(*_args: object, **_kwargs: object) -> metadata_module._ResolvedToolState:
         nonlocal compute_calls
@@ -1007,7 +1008,7 @@ def test_runtime_config_binds_carried_tool_state_after_concurrent_cache_clear(
 ) -> None:
     """Config construction must not re-read a cache that another lifecycle can clear."""
     compute_calls = 0
-    dummy_state = metadata_module._ResolvedToolState({}, {}, {})
+    dummy_state = metadata_module._ResolvedToolState({}, {}, {}, HookRegistry.empty())
 
     def counted_compute(*_args: object, **_kwargs: object) -> metadata_module._ResolvedToolState:
         nonlocal compute_calls
@@ -1046,7 +1047,7 @@ def test_resolved_tool_state_cache_evicts_on_config_gc(
     monkeypatch.setattr(
         metadata_module,
         "_compute_resolved_tool_state_for_runtime",
-        lambda *_args, **_kwargs: metadata_module._ResolvedToolState({}, {}, {}),
+        lambda *_args, **_kwargs: metadata_module._ResolvedToolState({}, {}, {}, HookRegistry.empty()),
     )
     metadata_module.clear_resolved_tool_state_cache()
     runtime_paths = resolve_runtime_paths(

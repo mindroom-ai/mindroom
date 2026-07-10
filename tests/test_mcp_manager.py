@@ -1938,6 +1938,31 @@ async def test_mcp_manager_marks_direct_builtin_function_name_collisions_as_fail
     assert "existing MindRoom tool function" in str(error)
 
 
+def test_mcp_function_surface_does_not_reload_plugin_files(tmp_path: Path) -> None:
+    """MCP collision validation should consume the config's committed runtime state."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = runtime_config_from_data(
+        {
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "tools": ["shell"],
+                },
+            },
+        },
+        runtime_paths,
+    )
+    manager = MCPServerManager(runtime_paths)
+    manager._config = config
+
+    with patch("mindroom.tool_system.plugins.load_plugins", side_effect=AssertionError("unexpected plugin reload")):
+        function_names, mcp_tools = manager._configured_function_surface("code", loaded_tools=[])
+
+    assert "run_shell_command" in function_names
+    assert mcp_tools == {}
+
+
 @pytest.mark.asyncio
 async def test_mcp_manager_allows_memory_mcp_function_when_memory_backend_none(
     monkeypatch: pytest.MonkeyPatch,

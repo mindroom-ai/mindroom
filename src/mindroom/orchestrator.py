@@ -72,7 +72,7 @@ from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_system.catalog import (
     ResolvedToolRuntimeState,
     bind_resolved_tool_state_cache,
-    clear_resolved_tool_state_cache,
+    refresh_mcp_tool_state_for_runtime,
 )
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
@@ -1329,7 +1329,7 @@ class _MultiAgentOrchestrator:
         async with self._mcp_catalog_change_lock:
             if not self.running or self.config is None:
                 return
-            clear_resolved_tool_state_cache()
+            refresh_mcp_tool_state_for_runtime(self.runtime_paths, self.config)
             changed_entities = self.config.get_entities_referencing_tools({mcp_tool_name(server_id)})
             if not changed_entities:
                 return

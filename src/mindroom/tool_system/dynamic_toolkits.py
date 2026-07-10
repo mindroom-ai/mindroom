@@ -8,12 +8,13 @@ from typing import TYPE_CHECKING
 
 from mindroom.config.models import EffectiveToolConfig
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.catalog import TOOL_METADATA, validate_authored_tool_entry_overrides
+from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime, validate_authored_tool_entry_overrides
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from mindroom.config.main import RuntimeConfig
+    from mindroom.tool_system.declarations import ToolMetadata
 
 
 logger = get_logger(__name__)
@@ -142,8 +143,20 @@ def _sanitize_loaded_tools_with_current_initials(
 def _normalize_effective_tool_config_overrides(
     tool_name: str,
     overrides: dict[str, object],
+    config: RuntimeConfig,
 ) -> dict[str, object]:
-    return validate_authored_tool_entry_overrides(tool_name, overrides)
+    return validate_authored_tool_entry_overrides(
+        tool_name,
+        overrides,
+        tool_metadata=_runtime_tool_metadata(config),
+    )
+
+
+def _runtime_tool_metadata(config: RuntimeConfig) -> Mapping[str, ToolMetadata]:
+    return resolved_tool_metadata_for_runtime(
+        config.runtime_paths,
+        config,
+    )
 
 
 def has_deferred_tools(config: RuntimeConfig, agent_name: str) -> bool:
@@ -299,6 +312,7 @@ def visible_tool_surface(
             tool_config_overrides=_normalize_effective_tool_config_overrides(
                 entry.name,
                 dict(entry.tool_config_overrides),
+                config,
             ),
             defer=entry.defer,
             initial=entry.initial,
@@ -512,9 +526,10 @@ def deferred_tool_catalog_entries(
 ) -> list[DeferredToolCatalogEntry]:
     """Return model-visible catalog metadata for one agent's authored deferred tools."""
     loaded = set(loaded_tools)
+    tool_metadata = _runtime_tool_metadata(config)
     entries: list[DeferredToolCatalogEntry] = []
     for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs:
-        metadata = TOOL_METADATA.get(entry.name)
+        metadata = tool_metadata.get(entry.name)
         entries.append(
             DeferredToolCatalogEntry(
                 name=entry.name,

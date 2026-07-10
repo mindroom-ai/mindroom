@@ -2094,6 +2094,19 @@ def test_resolve_participant_toolkits_builds_real_instances_with_caller_routing(
     assert "read_url" in toolkits["website"].functions
 
 
+def test_resolve_participant_toolkits_does_not_reload_plugin_files(tmp_path: Path) -> None:
+    """Participant tool resolution should consume the context's committed runtime state."""
+    context = _make_context(tmp_path)
+
+    with patch("mindroom.tool_system.plugins.load_plugins", side_effect=AssertionError("unexpected plugin reload")):
+        toolkits = dynamic_workflow_module._resolve_participant_toolkits(
+            context,
+            {"id": "writer", "tools": ["website"]},
+        )
+
+    assert list(toolkits) == ["website"]
+
+
 def test_participant_run_config_requires_approval_for_granted_tools(tmp_path: Path) -> None:
     """Without pre-approval config, granted tool calls must default to require_approval."""
     context = _make_context(tmp_path)

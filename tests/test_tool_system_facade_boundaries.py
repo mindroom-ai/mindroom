@@ -55,6 +55,8 @@ EXPECTED_PUBLIC_CATALOG_SYMBOLS = [
     "export_tools_metadata",
     "get_tool_by_name",
     "normalize_authored_tool_overrides",
+    "refresh_mcp_tool_state_for_runtime",
+    "resolved_hook_registry_for_runtime",
     "resolved_tool_metadata_for_runtime",
     "resolved_tool_runtime_state_for_runtime",
     "resolved_tool_runtime_state_from_registry",

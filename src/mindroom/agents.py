@@ -24,7 +24,6 @@ from mindroom.agent_knowledge_descriptions import knowledge_source_descriptions
 from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, native_tool_search_supported
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
 from mindroom.openai_tool_search import install_openai_deferred_tool_search, openai_native_tool_search_supported
 from mindroom.prompt_templates import build_agent_identity_context, render_prompt_template
@@ -36,10 +35,10 @@ from mindroom.runtime_resolution import (
 from mindroom.timing import timed, timed_block
 from mindroom.tool_approval import tool_requires_approval_for_openai_compat
 from mindroom.tool_system.catalog import (
-    TOOL_METADATA,
     default_worker_routed_tools,
-    ensure_tool_registry_loaded,
     get_tool_by_name,
+    resolved_hook_registry_for_runtime,
+    resolved_tool_metadata_for_runtime,
 )
 from mindroom.tool_system.dynamic_toolkits import (
     VisibleToolSurface,
@@ -61,7 +60,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from contextlib import AbstractContextManager
 
     from agno.knowledge.protocol import KnowledgeProtocol
@@ -75,7 +74,9 @@ if TYPE_CHECKING:
     from mindroom.config.main import RuntimeConfig
     from mindroom.config.models import DefaultsConfig
     from mindroom.credentials import CredentialsManager
+    from mindroom.hooks import HookRegistry
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.tool_system.declarations import ToolMetadata
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 logger = get_logger(__name__)
@@ -448,9 +449,9 @@ def _file_mode_knowledge_instruction_block(
     return "\n".join([*lines, *source_lines])
 
 
-def _tool_supports_base_dir(tool_name: str) -> bool:
+def _tool_supports_base_dir(tool_name: str, tool_metadata: Mapping[str, ToolMetadata]) -> bool:
     """Return whether a registered tool exposes a base_dir config field."""
-    metadata = TOOL_METADATA.get(tool_name)
+    metadata = tool_metadata.get(tool_name)
     if metadata is None or not metadata.config_fields:
         return False
     return any(field.name == "base_dir" for field in metadata.config_fields)
@@ -460,9 +461,10 @@ def _tool_base_dir_override(
     tool_name: str,
     *,
     workspace_path: Path | None,
+    tool_metadata: Mapping[str, ToolMetadata],
 ) -> dict[str, object] | None:
     """Build per-agent tool overrides for workspace-aware local tools."""
-    if workspace_path is None or not _tool_supports_base_dir(tool_name):
+    if workspace_path is None or not _tool_supports_base_dir(tool_name, tool_metadata):
         return None
     return {"base_dir": str(workspace_path)}
 
@@ -470,6 +472,7 @@ def _tool_base_dir_override(
 def _build_registered_agent_tool(
     tool_name: str,
     runtime_paths: constants.RuntimePaths,
+    config: RuntimeConfig,
     credentials_manager: CredentialsManager,
     shared_storage_path: Path,
     worker_tools: list[str],
@@ -484,6 +487,10 @@ def _build_registered_agent_tool(
     runtime_overrides: dict[str, object] | None,
 ) -> Toolkit:
     """Build one registered toolkit using the resolved routing inputs for this agent."""
+    tool_metadata = resolved_tool_metadata_for_runtime(
+        runtime_paths,
+        config,
+    )
     worker_target = build_agent_toolkit_worker_target(
         worker_scope,
         agent_name,
@@ -495,11 +502,13 @@ def _build_registered_agent_tool(
     return get_tool_by_name(
         tool_name,
         runtime_paths,
+        runtime_config=config,
         credentials_manager=credentials_manager,
         tool_config_overrides=tool_config_overrides,
         tool_init_overrides=_tool_base_dir_override(
             tool_name,
             workspace_path=workspace_path,
+            tool_metadata=tool_metadata,
         ),
         runtime_overrides=runtime_overrides,
         shared_storage_root_path=shared_storage_path,
@@ -718,7 +727,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 agent_name,
             )
             return None
-        hidden_tool_names = _context_hidden_toolkits(execution_identity)
+        hidden_tool_names = _context_hidden_toolkits(execution_identity, config, runtime_paths)
         if not _visible_deferred_tool_names(config, agent_name, hidden_tool_names=hidden_tool_names):
             logger.warning(
                 "Skipping 'dynamic_tools' tool for agent '%s': no compatible deferred tools are available",
@@ -747,6 +756,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     return _build_registered_agent_tool(
         tool_name,
         runtime_paths,
+        config,
         credentials_manager,
         shared_storage_path,
         worker_tools,
@@ -787,8 +797,6 @@ def resolve_runtime_worker_tools(
     config: RuntimeConfig,
     runtime_paths: constants.RuntimePaths,
     runtime_tool_names: list[str],
-    *,
-    tool_registry_preloaded: bool = False,
 ) -> list[str]:
     """Return worker-routed tools for one concrete runtime tool selection."""
     agent_config = config.get_agent(agent_name)
@@ -798,9 +806,13 @@ def resolve_runtime_worker_tools(
     if configured is not None:
         return config.expand_tool_names(list(configured))
 
-    if not tool_registry_preloaded:
-        ensure_tool_registry_loaded(runtime_paths, config)
-    return default_worker_routed_tools(runtime_tool_names)
+    return default_worker_routed_tools(
+        runtime_tool_names,
+        tool_metadata=resolved_tool_metadata_for_runtime(
+            runtime_paths,
+            config,
+        ),
+    )
 
 
 def _is_learning_enabled(agent_config: AgentConfig, defaults: DefaultsConfig) -> bool:
@@ -809,10 +821,18 @@ def _is_learning_enabled(agent_config: AgentConfig, defaults: DefaultsConfig) ->
     return learning is not False
 
 
-def _context_hidden_toolkits(execution_identity: ToolExecutionIdentity | None) -> frozenset[str]:
+def _context_hidden_toolkits(
+    execution_identity: ToolExecutionIdentity | None,
+    config: RuntimeConfig,
+    runtime_paths: constants.RuntimePaths,
+) -> frozenset[str]:
     if execution_identity is None or execution_identity.room_id is not None:
         return frozenset()
-    return frozenset(tool_name for tool_name, metadata in TOOL_METADATA.items() if metadata.requires_room_context)
+    tool_metadata = resolved_tool_metadata_for_runtime(
+        runtime_paths,
+        config,
+    )
+    return frozenset(tool_name for tool_name, metadata in tool_metadata.items() if metadata.requires_room_context)
 
 
 def _visible_deferred_tool_names(
@@ -1055,7 +1075,7 @@ def _build_agent_tool_hook_bridge(
         if hook_registry is not None
         else runtime_context.hook_registry
         if runtime_context is not None
-        else HookRegistry.empty()
+        else resolved_hook_registry_for_runtime(runtime_paths, config)
     )
     return build_tool_hook_bridge(
         active_hook_registry,
@@ -1238,7 +1258,7 @@ def _assemble_agent_toolkits(
         delegation_depth=delegation_depth,
         native_deferred_tools=native_deferred_tools,
     )
-    hidden_toolkits = _context_hidden_toolkits(execution_identity)
+    hidden_toolkits = _context_hidden_toolkits(execution_identity, config, runtime_paths)
     resolved_tool_configs = {entry.name: entry for entry in dynamic_tool_selection.runtime_tool_configs}
     if disable_runtime_capabilities:
         resolved_tool_configs = {}
@@ -1267,7 +1287,6 @@ def _assemble_agent_toolkits(
             config,
             runtime_paths,
             list(resolved_tool_configs),
-            tool_registry_preloaded=True,
         )
     entity_view = config.resolve_entity(agent_name)
     tools: list[Toolkit] = []

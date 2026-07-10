@@ -261,6 +261,7 @@ def prepare_plugin_reload(
                 candidate_tool_registry_snapshot.metadata,
                 config,
             )
+            candidate_hook_registry = HookRegistry.from_plugins(plugins)
             candidate_plugin_registry, candidate_plugin_metadata = resolved_tool_state(
                 _active_plugin_tool_modules(plugins),
                 candidate_tool_registry_snapshot.plugin_tool_metadata_by_module,
@@ -270,14 +271,14 @@ def prepare_plugin_reload(
                 config,
                 candidate_plugin_registry,
                 candidate_plugin_metadata,
+                hook_registry=candidate_hook_registry,
                 unavailable_tool_names=config.unavailable_plugin_tool_names,
-                tolerate_plugin_load_errors=True,
             )
             candidate_plugin_cache = plugin_imports._PLUGIN_CACHE.copy()
             candidate_module_import_cache = plugin_imports._MODULE_IMPORT_CACHE.copy()
             candidate_package_roots = _package_roots(candidate_module_import_cache)
             prepared_reload = _PreparedPluginReload(
-                hook_registry=HookRegistry.from_plugins(plugins),
+                hook_registry=candidate_hook_registry,
                 active_plugin_names=tuple(plugin.name for plugin in plugins),
                 tool_registry_snapshot=candidate_tool_registry_snapshot,
                 resolved_tool_state=resolved_runtime_tool_state,

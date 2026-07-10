@@ -61,6 +61,7 @@ from mindroom.teams import materialize_exact_team_members
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.registry_state import (
+    TOOL_METADATA,
     TOOL_REGISTRY,
     capture_tool_registry_snapshot,
     restore_tool_registry_snapshot,
@@ -640,11 +641,9 @@ def test_create_agent_uses_preloaded_tool_registry_for_multiple_tools(
     config.agents["general"].tools = ["shell", "coding", "duckduckgo", "website"]
     config.agents["general"].include_default_tools = False
 
-    with patch("mindroom.agents.ensure_tool_registry_loaded") as mock_ensure_registry:
-        _create_agent_for_test("general", config=config)
+    _create_agent_for_test("general", config=config)
 
     assert len(mock_get_tool_by_name.call_args_list) == 4
-    mock_ensure_registry.assert_not_called()
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -685,6 +684,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         name: str,
         _runtime_paths: object = None,
         *,
+        runtime_config: object | None = None,
         credentials_manager: object | None = None,
         tool_config_overrides: dict[str, object] | None = None,
         tool_init_overrides: dict[str, object] | None = None,
@@ -698,6 +698,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
     ) -> MagicMock:
         del (
             _runtime_paths,
+            runtime_config,
             credentials_manager,
             tool_config_overrides,
             tool_init_overrides,
@@ -743,6 +744,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
         name: str,
         _runtime_paths: object = None,
         *,
+        runtime_config: object | None = None,
         credentials_manager: object | None = None,
         tool_config_overrides: dict[str, object] | None = None,
         tool_init_overrides: dict[str, object] | None = None,
@@ -756,6 +758,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
     ) -> MagicMock:
         del (
             _runtime_paths,
+            runtime_config,
             credentials_manager,
             tool_config_overrides,
             tool_init_overrides,
@@ -1624,11 +1627,17 @@ def test_create_agent_preserves_committed_plugins_after_rejected_reload(tmp_path
     tools_path = plugin_root / "tools.py"
     tools_path.write_text(
         "from agno.tools import Toolkit\n"
+        "from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, ToolBeforeCallContext, hook\n"
         "from mindroom.tool_system.declarations import ToolCategory\n"
         "from mindroom.tool_system.registration import register_tool_with_metadata\n"
         "class ReloadTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
-        "        super().__init__(name='reload', tools=[])\n"
+        "        super().__init__(name='reload', tools=[self.echo])\n"
+        "    def echo(self, text: str) -> str:\n"
+        "        return text\n"
+        "@hook(EVENT_TOOL_BEFORE_CALL)\n"
+        "async def block_tool(ctx: ToolBeforeCallContext) -> None:\n"
+        "    ctx.decline('blocked by committed hook')\n"
         "@register_tool_with_metadata(\n"
         "    name='reload_plugin_tool',\n"
         "    display_name='Reload Plugin Tool',\n"
@@ -1647,7 +1656,13 @@ def test_create_agent_preserves_committed_plugins_after_rejected_reload(tmp_path
     try:
         config = _bind_runtime_paths(
             Config(
-                agents={"general": AgentConfig(display_name="General", tools=[])},
+                agents={
+                    "general": AgentConfig(
+                        display_name="General",
+                        tools=["reload_plugin_tool"],
+                        include_default_tools=False,
+                    ),
+                },
                 defaults={"tools": []},
                 models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
                 plugins=["./plugins/reload-tool"],
@@ -1656,16 +1671,18 @@ def test_create_agent_preserves_committed_plugins_after_rejected_reload(tmp_path
         )
         prepared = plugins_module.prepare_plugin_reload(config, runtime_paths)
         plugins_module.apply_prepared_plugin_reload(prepared)
-        committed_factory = TOOL_REGISTRY["reload_plugin_tool"]
-
         tools_path.write_text("raise ImportError('reload failure')\n", encoding="utf-8")
         with pytest.raises(plugin_imports.PluginValidationError, match="reload failure"):
             plugins_module.prepare_plugin_reload(config, runtime_paths)
 
+        TOOL_REGISTRY.pop("reload_plugin_tool")
+        TOOL_METADATA.pop("reload_plugin_tool")
         with patch("mindroom.agent_storage.SqliteDb"):
-            _create_agent_for_test("general", config=config)
+            agent = _create_agent_for_test("general", config=config)
 
-        assert TOOL_REGISTRY["reload_plugin_tool"] is committed_factory
+        toolkit = next(toolkit for toolkit in agent.tools if toolkit.name == "reload")
+        assert toolkit.functions["echo"].tool_hooks
+        assert "reload_plugin_tool" not in TOOL_REGISTRY
     finally:
         restore_tool_registry_snapshot(original_registry)
         plugin_imports._PLUGIN_CACHE.clear()
@@ -2011,6 +2028,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
         tool_name: str,
         _runtime_paths: object = None,
         *,
+        runtime_config: object | None = None,
         credentials_manager: object | None = None,
         tool_config_overrides: dict[str, object] | None = None,
         tool_init_overrides: dict[str, object] | None = None,
@@ -2024,6 +2042,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
     ) -> MagicMock:
         del (
             _runtime_paths,
+            runtime_config,
             tool_config_overrides,
             tool_init_overrides,
             runtime_overrides,
