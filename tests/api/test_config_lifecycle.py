@@ -506,12 +506,12 @@ class TestExternalWriterPublishing:
         )
         assert _snapshot(loaded_app) is before
 
-    def test_initial_runtime_publish_can_seed_app_without_disk_snapshot(self, loaded_app: FastAPI) -> None:
-        """A supplied runtime config can initialize an app that never loaded authored source."""
+    def test_initial_runtime_publish_reports_config_broken_during_preparation(self, loaded_app: FastAPI) -> None:
+        """A fresh API snapshot must not hide a failed source check during publication."""
         loaded = _snapshot(loaded_app)
         assert loaded.runtime_config is not None
         api_app = _make_api_app(loaded.runtime_paths)
-        loaded.runtime_paths.config_path.unlink()
+        loaded.runtime_paths.config_path.write_text("agents: [unclosed\n", encoding="utf-8")
 
         prepared = config_lifecycle.prepare_runtime_config_publish(
             loaded.runtime_config.model_copy(),
@@ -520,10 +520,10 @@ class TestExternalWriterPublishing:
         )
 
         assert prepared.source_load_result.success is False
-        assert config_lifecycle.publish_prepared_runtime_config_into_app(prepared, api_app) is True
-        seeded = _snapshot(api_app)
-        assert seeded.config_load_result == config_lifecycle.ConfigLoadResult(success=True)
-        assert seeded.runtime_config is prepared.runtime_config
+        assert config_lifecycle.publish_prepared_runtime_config_into_app(prepared, api_app) is False
+        failed = _snapshot(api_app)
+        assert failed.config_load_result is prepared.source_load_result
+        assert failed.runtime_config is None
 
     def test_stale_same_config_publish_cannot_replace_newer_tool_state(self, loaded_app: FastAPI) -> None:
         """Equal authored data cannot make a stale derived tool snapshot safe to publish."""

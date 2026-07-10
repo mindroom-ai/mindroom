@@ -784,6 +784,7 @@ class _MultiAgentOrchestrator:
                     config,
                     prepared_plugin_reload.resolved_tool_state,
                 )
+                await asyncio.to_thread(ensure_config_source_current, refreshed_config, self.runtime_paths)
                 prepared_api_snapshot = await self._external_trigger_runtime.prepare_api_config_snapshot(
                     refreshed_config,
                 )

@@ -1159,7 +1159,7 @@ async def test_handle_mcp_catalog_change_waits_for_config_publication(tmp_path: 
 @pytest.mark.asyncio
 async def test_update_config_stops_mcp_entities_before_syncing_manager(tmp_path: Path) -> None:
     """Stop bots that depend on changed MCP servers before manager sync removes those servers."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path), api_enabled=False)
     orchestrator.config = _config(tmp_path)
     orchestrator.agent_bots = {
         ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),

@@ -853,7 +853,7 @@ def publish_prepared_runtime_config_into_app(
                 active_config_path=str(current.runtime_paths.config_path),
             )
             return False
-        source_load_failed = not prepared.source_load_result.success and current.config_load_result is not None
+        source_load_failed = not prepared.source_load_result.success
         if current.generation != prepared.observed_generation:
             logger.info(
                 "Discarding stale API config publish after config changed",

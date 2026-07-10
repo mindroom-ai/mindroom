@@ -66,7 +66,10 @@ async def orchestrator_factory(
     orchestrators: list[_MultiAgentOrchestrator] = []
 
     def create() -> _MultiAgentOrchestrator:
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        orchestrator = _MultiAgentOrchestrator(
+            runtime_paths=orchestrator_runtime_paths(tmp_path),
+            api_enabled=False,
+        )
         orchestrators.append(orchestrator)
         return orchestrator
 

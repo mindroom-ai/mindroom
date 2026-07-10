@@ -184,6 +184,35 @@ async def test_no_api_reload_requeues_source_change_before_commit(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_no_api_manual_plugin_reload_rejects_source_change_before_commit(tmp_path: Path) -> None:
+    """Manual plugin reload must not publish a runtime built from stale authored source."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    runtime_paths.config_path.write_text("agents: {}\ntimezone: UTC\n", encoding="utf-8")
+    staged_config = load_config(runtime_paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths, api_enabled=False)
+    orchestrator.config = staged_config
+    orchestrator.running = True
+    original_rebuild = orchestrator._rebuild_config_with_tool_state
+
+    def rebuild_after_source_change(*args: object, **kwargs: object) -> Config:
+        rebuilt = original_rebuild(*args, **kwargs)
+        runtime_paths.config_path.write_text(
+            "agents: {}\ntimezone: America/New_York\n",
+            encoding="utf-8",
+        )
+        return rebuilt
+
+    with (
+        patch.object(orchestrator.plugin_watch, "refresh"),
+        patch.object(orchestrator, "_rebuild_config_with_tool_state", new=rebuild_after_source_change),
+        pytest.raises(ConfigSourceChangedError),
+    ):
+        await orchestrator.reload_plugins_now(source="test")
+
+    assert orchestrator.config is staged_config
+
+
+@pytest.mark.asyncio
 async def test_watch_skills_task_snapshots_off_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     """The skills watcher should not run recursive skill snapshots on the asyncio loop."""
 
