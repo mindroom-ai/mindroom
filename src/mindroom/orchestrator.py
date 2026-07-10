@@ -72,6 +72,7 @@ from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
     apply_prepared_plugin_reload,
+    cancel_discarded_plugin_reload_tasks,
     deactivate_plugins,
     load_plugins,
     prepare_plugin_reload,
@@ -137,6 +138,14 @@ class _PreparedPluginConfigUpdate:
     prepared_reload: PreparedPluginReload
     watch_roots: tuple[Path, ...]
     watch_root_snapshots: dict[Path, dict[Path, int]]
+
+
+@dataclass(frozen=True)
+class _PreStoppedMcpEntities:
+    """Entities stopped ahead of an MCP sync, split by pre-stop liveness."""
+
+    affected: frozenset[str] = frozenset()
+    running_before_stop: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -767,6 +776,9 @@ class _MultiAgentOrchestrator:
                 source=source,
                 changed_paths=[str(path) for path in changed_paths],
             )
+            # Capture watcher baselines before loading so an edit landing during
+            # the reload still diffs against pre-reload state on the next scan.
+            watch_roots, watch_root_snapshots = self.plugin_watch.capture(config)
             try:
                 result = reload_plugins(config, self.runtime_paths)
             except Exception:
@@ -776,12 +788,12 @@ class _MultiAgentOrchestrator:
                 )
                 self._activate_hook_registry(recovery_result.hook_registry)
                 clear_worker_validation_snapshot_cache()
-                self.plugin_watch.refresh(config)
+                self.plugin_watch.replace_snapshots(watch_roots, watch_root_snapshots)
                 logger.warning(warning_message, source=source, **warning_kwargs)
                 raise
             self._activate_hook_registry(result.hook_registry)
             clear_worker_validation_snapshot_cache()
-            self.plugin_watch.refresh(config)
+            self.plugin_watch.replace_snapshots(watch_roots, watch_root_snapshots)
             logger.info(
                 "Plugin reload complete",
                 source=source,
@@ -1126,14 +1138,22 @@ class _MultiAgentOrchestrator:
 
     async def _update_unchanged_bots(self, plan: ConfigUpdatePlan) -> None:
         """Apply the new config to bots that do not require restart."""
+        unchanged_bots: list[tuple[str, AgentBot | TeamBot]] = []
         for entity_name, bot in self.agent_bots.items():
             if entity_name in plan.entities_to_restart:
                 continue
             bot.config = plan.new_config
             bot.enable_streaming = plan.new_config.defaults.enable_streaming
             bot.hook_registry = self.hook_registry
-            await bot._set_presence_with_model_info()
+            unchanged_bots.append((entity_name, bot))
             logger.debug("bot_config_updated", agent=entity_name)
+        # Presence is cosmetic; one failure must not leave later bots on the old config
+        # or fail the update after the new config already committed.
+        for entity_name, bot in unchanged_bots:
+            try:
+                await bot._set_presence_with_model_info()
+            except Exception:
+                logger.exception("Updating presence after config change failed", agent=entity_name)
 
     async def _emit_config_reloaded(
         self,
@@ -1188,57 +1208,78 @@ class _MultiAgentOrchestrator:
         current_config: Config,
         new_config: Config,
         changed_server_ids: set[str],
-    ) -> set[str]:
+    ) -> _PreStoppedMcpEntities:
         """Stop MCP-dependent entities before removing or reconfiguring their servers."""
         if not changed_server_ids:
-            return set()
+            return _PreStoppedMcpEntities()
 
-        affected_entities = current_config.get_entities_referencing_tools(
-            {mcp_tool_name(server_id) for server_id in changed_server_ids},
-        ) | new_config.get_entities_referencing_tools({mcp_tool_name(server_id) for server_id in changed_server_ids})
+        affected_entities = frozenset(
+            current_config.get_entities_referencing_tools(
+                {mcp_tool_name(server_id) for server_id in changed_server_ids},
+            )
+            | new_config.get_entities_referencing_tools(
+                {mcp_tool_name(server_id) for server_id in changed_server_ids},
+            ),
+        )
         if not affected_entities:
-            return set()
+            return _PreStoppedMcpEntities()
 
+        running_before_stop = frozenset(
+            entity_name
+            for entity_name in affected_entities
+            if (bot := self.agent_bots.get(entity_name)) is not None and bot.running
+        )
         self._external_trigger_runtime.unbind_for_entity_changes(affected_entities)
         for entity_name in affected_entities:
             await self._cancel_bot_start_task(entity_name)
         await stop_entities(
-            affected_entities,
+            set(affected_entities),
             self.agent_bots,
             self._sync_tasks,
-            restart_entities=affected_entities & set(configured_entity_names(new_config)),
+            restart_entities=set(affected_entities & set(configured_entity_names(new_config))),
         )
-        return affected_entities
+        return _PreStoppedMcpEntities(affected=affected_entities, running_before_stop=running_before_stop)
 
     async def _rollback_failed_config_publication(
         self,
         current_config: Config,
-        pre_stopped_mcp_entities: set[str],
+        pre_stopped: _PreStoppedMcpEntities,
     ) -> None:
         """Restore last-good runtime services and entities after a failed publication."""
         logger.warning("Configuration update failed before publication; keeping last-good config")
         try:
             await self._sync_mcp_manager(current_config)
+        except Exception:
+            logger.exception("Resyncing the MCP manager to the last-good config failed during rollback")
+        try:
             await self._sync_event_cache_service(current_config)
         except Exception:
-            logger.exception("Resyncing runtime services to the last-good config failed during rollback")
-        await self._restore_pre_stopped_mcp_entities(pre_stopped_mcp_entities, current_config)
+            logger.exception("Resyncing the event-cache service to the last-good config failed during rollback")
+        await self._restore_pre_stopped_mcp_entities(pre_stopped, current_config)
 
     async def _restore_pre_stopped_mcp_entities(
         self,
-        entity_names: set[str],
+        pre_stopped: _PreStoppedMcpEntities,
         config: Config,
     ) -> None:
-        """Recreate entities that were stopped for an MCP sync that never published."""
-        restartable_entities = entity_names & set(configured_entity_names(config))
-        if not restartable_entities:
-            return
-        start_results = await self._create_and_start_entities(
-            restartable_entities,
-            config,
-            start_sync_tasks=True,
-        )
-        self._external_trigger_runtime.bind_if_ready(config, self.agent_bots)
+        """Recreate previously running entities stopped for a sync that never published."""
+        restartable_entities = {
+            entity_name
+            for entity_name in pre_stopped.running_before_stop & set(configured_entity_names(config))
+            if (bot := self.agent_bots.get(entity_name)) is None or not bot.running
+        }
+        start_results = EntityStartResults()
+        if restartable_entities:
+            start_results = await self._create_and_start_entities(
+                restartable_entities,
+                config,
+                start_sync_tasks=True,
+            )
+        if start_results.started_bots:
+            await self._setup_rooms_and_memberships(start_results.started_bots)
+        if pre_stopped.affected:
+            # Stopping unbound the trigger runtime even when nothing is restartable.
+            self._external_trigger_runtime.bind_if_ready(config, self.agent_bots)
         for entity_name in start_results.retryable_entities:
             await self._schedule_bot_start_retry(entity_name)
         if start_results.permanently_failed_entities:
@@ -1387,17 +1428,18 @@ class _MultiAgentOrchestrator:
         replay_startup_maintenance = await self._startup_maintenance.cancel()
 
         try:
-            # Stage plugins first: a broken plugin edit must fail the update before
-            # any entity is stopped or any runtime service is resynced.
+            # Stage plugins first: a rejected plugin snapshot must fail the update
+            # before any entity is stopped or any runtime service is resynced.
             prepared_plugin_update = (
                 self._prepare_plugin_update_for_config_update(new_config) if plugin_changes else None
             )
-            pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
-                current_config,
-                new_config,
-                plan.changed_mcp_servers,
-            )
+            pre_stopped_mcp_entities = _PreStoppedMcpEntities()
             try:
+                pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
+                    current_config,
+                    new_config,
+                    plan.changed_mcp_servers,
+                )
                 changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
                 await self._sync_event_cache_service(new_config)
                 logger.info(
@@ -1406,6 +1448,8 @@ class _MultiAgentOrchestrator:
                 )
                 await self._external_trigger_runtime.sync_api_config_snapshot(new_config)
             except Exception:
+                if prepared_plugin_update is not None:
+                    cancel_discarded_plugin_reload_tasks(prepared_plugin_update.prepared_reload)
                 await self._rollback_failed_config_publication(current_config, pre_stopped_mcp_entities)
                 raise
             # Publish the new config only after every fallible sync above succeeded, so a
@@ -1440,7 +1484,7 @@ class _MultiAgentOrchestrator:
 
             changed_entities, retryable_entities, permanently_failed_entities = await self._restart_changed_entities(
                 plan,
-                already_stopped_entities=pre_stopped_mcp_entities,
+                already_stopped_entities=set(pre_stopped_mcp_entities.affected),
             )
             await self._reconcile_post_update_rooms(plan, changed_entities)
 

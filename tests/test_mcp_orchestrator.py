@@ -18,7 +18,7 @@ from mindroom.external_triggers.store import ExternalTriggerTarget, TriggerDeliv
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
 from mindroom.orchestration.runtime import EntityStartResults
-from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator, _PreStoppedMcpEntities
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -385,7 +385,11 @@ async def test_trigger_support_only_reload_rebinds_external_trigger_runtime(tmp_
     with (
         patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
         patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
-        patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
+        patch.object(
+            orchestrator,
+            "_stop_entities_before_mcp_sync",
+            new=AsyncMock(return_value=_PreStoppedMcpEntities()),
+        ),
         patch.object(orchestrator.plugin_watch, "sync_roots"),
         patch.object(orchestrator, "_activate_hook_registry"),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
@@ -445,7 +449,11 @@ async def test_trigger_support_only_reload_publishes_api_config_before_binding_r
     with (
         patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
         patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
-        patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
+        patch.object(
+            orchestrator,
+            "_stop_entities_before_mcp_sync",
+            new=AsyncMock(return_value=_PreStoppedMcpEntities()),
+        ),
         patch.object(orchestrator.plugin_watch, "sync_roots"),
         patch.object(orchestrator, "_activate_hook_registry"),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
@@ -516,7 +524,11 @@ async def test_trigger_support_only_reload_unbinds_and_raises_when_api_publish_f
     with (
         patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
         patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
-        patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
+        patch.object(
+            orchestrator,
+            "_stop_entities_before_mcp_sync",
+            new=AsyncMock(return_value=_PreStoppedMcpEntities()),
+        ),
         patch.object(orchestrator.plugin_watch, "sync_roots"),
         patch.object(orchestrator, "_activate_hook_registry"),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
@@ -790,7 +802,11 @@ async def test_apply_config_update_plan_unbinds_runtime_before_restarted_entity_
     with (
         patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
         patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
-        patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
+        patch.object(
+            orchestrator,
+            "_stop_entities_before_mcp_sync",
+            new=AsyncMock(return_value=_PreStoppedMcpEntities()),
+        ),
         patch.object(orchestrator.plugin_watch, "sync_roots"),
         patch.object(orchestrator, "_activate_hook_registry"),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
@@ -888,7 +904,11 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
     with (
         patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
         patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
-        patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
+        patch.object(
+            orchestrator,
+            "_stop_entities_before_mcp_sync",
+            new=AsyncMock(return_value=_PreStoppedMcpEntities()),
+        ),
         patch.object(orchestrator.plugin_watch, "sync_roots"),
         patch.object(orchestrator, "_activate_hook_registry"),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
@@ -1009,8 +1029,8 @@ async def test_update_config_stops_mcp_entities_before_syncing_manager(tmp_path:
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
     orchestrator.config = _config(tmp_path)
     orchestrator.agent_bots = {
-        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
-        "code": MagicMock(spec=AgentBot),
+        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot, running=True),
+        "code": MagicMock(spec=AgentBot, running=True),
     }
     updated_config = Config.validate_with_runtime(
         {
@@ -1055,6 +1075,20 @@ async def test_update_config_stops_mcp_entities_before_syncing_manager(tmp_path:
     assert call_order[:2] == ["stop", "sync"]
 
 
+async def _stop_entities_flipping_running(
+    entity_names: set[str],
+    agent_bots: dict[str, AgentBot],
+    sync_tasks: dict[str, asyncio.Task],
+    *,
+    restart_entities: set[str] | frozenset[str] = frozenset(),
+) -> None:
+    del sync_tasks, restart_entities
+    for entity_name in entity_names:
+        bot = agent_bots.get(entity_name)
+        if bot is not None:
+            bot.running = False
+
+
 @pytest.mark.asyncio
 async def test_update_config_keeps_last_good_state_when_mcp_sync_fails(tmp_path: Path) -> None:
     """A failed MCP sync must keep the current config live and restart pre-stopped entities."""
@@ -1063,10 +1097,10 @@ async def test_update_config_keeps_last_good_state_when_mcp_sync_fails(tmp_path:
     updated_config = _config(tmp_path, command="uvx")
     orchestrator.config = current_config
     orchestrator.agent_bots = {
-        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
-        "code": MagicMock(spec=AgentBot),
-        "plain": MagicMock(spec=AgentBot),
-        "dev_team": MagicMock(spec=AgentBot),
+        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot, running=True),
+        "code": MagicMock(spec=AgentBot, running=True),
+        "plain": MagicMock(spec=AgentBot, running=True),
+        "dev_team": MagicMock(spec=AgentBot, running=True),
     }
     persist_entity_accounts(current_config, orchestrator.runtime_paths)
     persist_entity_accounts(updated_config, orchestrator.runtime_paths)
@@ -1081,7 +1115,7 @@ async def test_update_config_keeps_last_good_state_when_mcp_sync_fails(tmp_path:
 
     with (
         patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
-        patch("mindroom.orchestrator.stop_entities", new=AsyncMock()),
+        patch("mindroom.orchestrator.stop_entities", new=AsyncMock(side_effect=_stop_entities_flipping_running)),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(side_effect=fake_sync_mcp_manager)),
         patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
         patch.object(
@@ -1112,10 +1146,10 @@ async def test_update_config_keeps_last_good_state_when_api_snapshot_publish_fai
     updated_config = _config(tmp_path, command="uvx")
     orchestrator.config = current_config
     orchestrator.agent_bots = {
-        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
-        "code": MagicMock(spec=AgentBot),
-        "plain": MagicMock(spec=AgentBot),
-        "dev_team": MagicMock(spec=AgentBot),
+        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot, running=True),
+        "code": MagicMock(spec=AgentBot, running=True),
+        "plain": MagicMock(spec=AgentBot, running=True),
+        "dev_team": MagicMock(spec=AgentBot, running=True),
     }
     persist_entity_accounts(current_config, orchestrator.runtime_paths)
     persist_entity_accounts(updated_config, orchestrator.runtime_paths)
@@ -1129,7 +1163,7 @@ async def test_update_config_keeps_last_good_state_when_api_snapshot_publish_fai
 
     with (
         patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
-        patch("mindroom.orchestrator.stop_entities", new=AsyncMock()),
+        patch("mindroom.orchestrator.stop_entities", new=AsyncMock(side_effect=_stop_entities_flipping_running)),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(side_effect=record_sync_mcp_manager)),
         patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
         patch.object(
@@ -1153,6 +1187,157 @@ async def test_update_config_keeps_last_good_state_when_api_snapshot_publish_fai
     restored_entities, restored_config = restore.await_args.args
     assert restored_entities == {"code", "dev_team"}
     assert restored_config is current_config
+
+
+@pytest.mark.asyncio
+async def test_rollback_resyncs_event_cache_when_mcp_rollback_fails(tmp_path: Path) -> None:
+    """A failing MCP rollback must not skip restoring the event-cache service."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    current_config = _config(tmp_path)
+    updated_config = _config(tmp_path, command="uvx")
+    orchestrator.config = current_config
+    orchestrator.agent_bots = {
+        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot, running=True),
+        "code": MagicMock(spec=AgentBot, running=True),
+        "dev_team": MagicMock(spec=AgentBot, running=True),
+    }
+    persist_entity_accounts(current_config, orchestrator.runtime_paths)
+    persist_entity_accounts(updated_config, orchestrator.runtime_paths)
+    cache_synced_configs: list[Config] = []
+
+    async def record_cache_sync(config: Config) -> None:
+        cache_synced_configs.append(config)
+
+    with (
+        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
+        patch("mindroom.orchestrator.stop_entities", new=AsyncMock(side_effect=_stop_entities_flipping_running)),
+        patch.object(
+            orchestrator,
+            "_sync_mcp_manager",
+            new=AsyncMock(side_effect=[RuntimeError("mcp sync failed"), RuntimeError("mcp rollback failed")]),
+        ),
+        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock(side_effect=record_cache_sync)),
+        patch.object(
+            orchestrator,
+            "_create_and_start_entities",
+            new=AsyncMock(return_value=EntityStartResults()),
+        ) as restore,
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
+        pytest.raises(RuntimeError, match="mcp sync failed"),
+    ):
+        await orchestrator.config_reload.update_config()
+
+    assert orchestrator.config is current_config
+    assert cache_synced_configs == [current_config]
+    restore.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_rollback_restores_only_entities_running_before_stop(tmp_path: Path) -> None:
+    """Rollback must not resurrect entities that were not running before the update."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    current_config = _config(tmp_path)
+    updated_config = _config(tmp_path, command="uvx")
+    orchestrator.config = current_config
+    orchestrator.agent_bots = {
+        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot, running=True),
+        "code": MagicMock(spec=AgentBot, running=False),
+        "dev_team": MagicMock(spec=AgentBot, running=True),
+    }
+    persist_entity_accounts(current_config, orchestrator.runtime_paths)
+    persist_entity_accounts(updated_config, orchestrator.runtime_paths)
+
+    with (
+        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
+        patch("mindroom.orchestrator.stop_entities", new=AsyncMock(side_effect=_stop_entities_flipping_running)),
+        patch.object(
+            orchestrator,
+            "_sync_mcp_manager",
+            new=AsyncMock(side_effect=[RuntimeError("mcp sync failed"), set()]),
+        ),
+        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
+        patch.object(
+            orchestrator,
+            "_create_and_start_entities",
+            new=AsyncMock(return_value=EntityStartResults()),
+        ) as restore,
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready") as bind,
+        pytest.raises(RuntimeError, match="mcp sync failed"),
+    ):
+        await orchestrator.config_reload.update_config()
+
+    restore.assert_awaited_once()
+    restored_entities, restored_config = restore.await_args.args
+    assert restored_entities == {"dev_team"}
+    assert restored_config is current_config
+    bind.assert_called_once_with(current_config, orchestrator.agent_bots)
+
+
+@pytest.mark.asyncio
+async def test_rollback_rebinds_triggers_even_when_nothing_is_restartable(tmp_path: Path) -> None:
+    """Stopping unbinds the trigger runtime, so rollback must rebind it unconditionally."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    current_config = _config(tmp_path)
+    updated_config = _config(tmp_path, command="uvx")
+    orchestrator.config = current_config
+    orchestrator.agent_bots = {
+        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot, running=True),
+        "code": MagicMock(spec=AgentBot, running=False),
+        "dev_team": MagicMock(spec=AgentBot, running=False),
+    }
+    persist_entity_accounts(current_config, orchestrator.runtime_paths)
+    persist_entity_accounts(updated_config, orchestrator.runtime_paths)
+
+    with (
+        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
+        patch("mindroom.orchestrator.stop_entities", new=AsyncMock(side_effect=_stop_entities_flipping_running)),
+        patch.object(
+            orchestrator,
+            "_sync_mcp_manager",
+            new=AsyncMock(side_effect=[RuntimeError("mcp sync failed"), set()]),
+        ),
+        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
+        patch.object(orchestrator, "_create_and_start_entities", new=AsyncMock()) as restore,
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready") as bind,
+        pytest.raises(RuntimeError, match="mcp sync failed"),
+    ):
+        await orchestrator.config_reload.update_config()
+
+    restore.assert_not_awaited()
+    bind.assert_called_once_with(current_config, orchestrator.agent_bots)
+
+
+@pytest.mark.asyncio
+async def test_restore_runs_room_setup_before_trigger_rebind(tmp_path: Path) -> None:
+    """Restored bots need room and membership reconciliation before triggers rebind."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    config = _config(tmp_path)
+    restored_bot = MagicMock(spec=AgentBot)
+    call_order: list[str] = []
+
+    async def record_rooms(bots: list[AgentBot]) -> None:
+        assert bots == [restored_bot]
+        call_order.append("rooms")
+
+    with (
+        patch.object(
+            orchestrator,
+            "_create_and_start_entities",
+            new=AsyncMock(return_value=EntityStartResults(started_bots=[restored_bot])),
+        ),
+        patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock(side_effect=record_rooms)),
+        patch.object(
+            orchestrator._external_trigger_runtime,
+            "bind_if_ready",
+            side_effect=lambda *_args: call_order.append("bind"),
+        ),
+    ):
+        await orchestrator._restore_pre_stopped_mcp_entities(
+            _PreStoppedMcpEntities(affected=frozenset({"code"}), running_before_stop=frozenset({"code"})),
+            config,
+        )
+
+    assert call_order == ["rooms", "bind"]
 
 
 @pytest.mark.asyncio

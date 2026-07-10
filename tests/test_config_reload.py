@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import json
 import sys
 import tempfile
@@ -27,9 +28,13 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, _get_changed_agents, build_config_update_plan
-from mindroom.orchestration.plugin_watch import _drop_unconfigured_plugin_root_snapshots, watch_plugins_task
+from mindroom.orchestration.plugin_watch import (
+    _collect_plugin_root_changes,
+    _drop_unconfigured_plugin_root_snapshots,
+    watch_plugins_task,
+)
 from mindroom.orchestration.runtime import log_startup_phase_finished, log_startup_phase_started
-from mindroom.orchestrator import _MultiAgentOrchestrator, _watch_skills_task
+from mindroom.orchestrator import _MultiAgentOrchestrator, _PreStoppedMcpEntities, _watch_skills_task
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.tool_system.plugins import PluginReloadResult
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
@@ -1310,14 +1315,14 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
         await orchestrator.reload_plugins_now(source="initial")
         assert plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module.VALUE == 1
 
-        async def start_blocked_reload(*_args: object, **_kwargs: object) -> set[str]:
+        async def start_blocked_reload(*_args: object, **_kwargs: object) -> _PreStoppedMcpEntities:
             nonlocal reload_task
             hooks_path.write_text("VALUE = 2\n", encoding="utf-8")
             reload_task = asyncio.create_task(orchestrator.reload_plugins_now(source="interleaved"))
             await asyncio.sleep(0)
             assert reload_task is not None
             assert not reload_task.done()
-            return set()
+            return _PreStoppedMcpEntities()
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
@@ -1371,7 +1376,14 @@ async def test_update_config_keeps_live_plugins_when_api_snapshot_sync_fails(tmp
         '{"name":"other","hooks_module":"hooks.py","skills":[]}',
         encoding="utf-8",
     )
-    (other_root / "hooks.py").write_text("OTHER = 1\n", encoding="utf-8")
+    (other_root / "hooks.py").write_text(
+        "import asyncio\n"
+        "import builtins\n"
+        "\n"
+        "_LEAK_TASK = asyncio.get_running_loop().create_task(asyncio.sleep(3600))\n"
+        "builtins._MINDROOM_TEST_LEAK_TASK = _LEAK_TASK\n",
+        encoding="utf-8",
+    )
 
     current_config = _runtime_bound_config(
         Config(
@@ -1419,10 +1431,19 @@ async def test_update_config_keeps_live_plugins_when_api_snapshot_sync_fails(tmp
 
         assert orchestrator.config is current_config
         assert orchestrator.hook_registry is live_hook_registry
+        staged_task = builtins._MINDROOM_TEST_LEAK_TASK
+        await asyncio.sleep(0)
+        assert staged_task.cancelled()
 
         result = await orchestrator.reload_plugins_now(source="recovery")
         assert result.active_plugin_names == ("demo",)
     finally:
+        staged_task = getattr(builtins, "_MINDROOM_TEST_LEAK_TASK", None)
+        if staged_task is not None:
+            if not staged_task.done():
+                staged_task.cancel()
+                await asyncio.gather(staged_task, return_exceptions=True)
+            delattr(builtins, "_MINDROOM_TEST_LEAK_TASK")
         plugin_module._PLUGIN_CACHE.clear()
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
         plugin_module._MODULE_IMPORT_CACHE.clear()
@@ -1431,6 +1452,90 @@ async def test_update_config_keeps_live_plugins_when_api_snapshot_sync_fails(tmp
         for module_name in set(sys.modules) - original_modules:
             if module_name.startswith("mindroom_plugin_"):
                 sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_update_unchanged_bots_applies_config_to_all_bots_despite_presence_failure(tmp_path: Path) -> None:
+    """One failing presence update must not leave later bots on the old config."""
+    current_config = _runtime_bound_config(
+        Config(
+            agents={
+                "alpha": {"display_name": "AlphaAgent", "model": "default"},
+                "beta": {"display_name": "BetaAgent", "model": "default"},
+            },
+            models={"default": {"provider": "test", "id": "test-model"}},
+        ),
+        tmp_path,
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={
+                "alpha": {"display_name": "AlphaAgent", "model": "default"},
+                "beta": {"display_name": "BetaAgent", "model": "default"},
+            },
+            models={"default": {"provider": "test", "id": "test-model"}},
+            timezone="Europe/Amsterdam",
+        ),
+        tmp_path,
+    )
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config))
+    orchestrator.config = current_config
+    alpha = MagicMock(spec=AgentBot)
+    alpha._set_presence_with_model_info = AsyncMock(side_effect=RuntimeError("presence failed"))
+    beta = MagicMock(spec=AgentBot)
+    beta._set_presence_with_model_info = AsyncMock()
+    orchestrator.agent_bots = {"alpha": alpha, "beta": beta}
+    plan = ConfigUpdatePlan(
+        new_config=new_config,
+        changed_mcp_servers=set(),
+        configured_entities={"alpha", "beta"},
+        entities_to_restart=set(),
+        new_entities=set(),
+        removed_entities=set(),
+        mindroom_user_changed=False,
+        matrix_room_access_changed=False,
+        matrix_space_changed=False,
+        authorization_changed=False,
+    )
+
+    await orchestrator._update_unchanged_bots(plan)
+
+    assert alpha.config is new_config
+    assert beta.config is new_config
+    beta._set_presence_with_model_info.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_manual_reload_keeps_watcher_baseline_for_edits_during_reload(tmp_path: Path) -> None:
+    """An edit landing while a manual reload runs must stay visible to the watcher."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    hooks_path = plugin_root / "hooks.py"
+    (plugin_root / "mindroom.plugin.json").write_text(
+        '{"name":"demo","hooks_module":"hooks.py","skills":[]}',
+        encoding="utf-8",
+    )
+    hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
+
+    config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator.config = config
+    orchestrator.running = True
+
+    def editing_reload(config: Config, runtime_paths: object) -> PluginReloadResult:
+        del config, runtime_paths
+        hooks_path.write_text("VALUE = 2\n", encoding="utf-8")
+        return PluginReloadResult(HookRegistry.empty(), ("demo",), 0)
+
+    with patch("mindroom.orchestrator.reload_plugins", side_effect=editing_reload):
+        await orchestrator.reload_plugins_now(source="test")
+
+    watch_state = orchestrator.plugin_watch
+    changed_paths = await _collect_plugin_root_changes(
+        tuple(watch_state.last_snapshot_by_root),
+        watch_state.last_snapshot_by_root,
+    )
+    assert hooks_path.resolve() in {path.resolve() for path in changed_paths}
 
 
 @pytest.mark.asyncio

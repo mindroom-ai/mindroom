@@ -273,6 +273,19 @@ def apply_prepared_plugin_reload(
     )
 
 
+def cancel_discarded_plugin_reload_tasks(prepared_reload: PreparedPluginReload) -> int:
+    """Cancel module-global tasks spawned by one staged plugin snapshot that will not commit."""
+    cancelled_task_ids: set[int] = set()
+    for module in prepared_reload.tool_registry_snapshot.plugin_modules.values():
+        for value in vars(module).values():
+            for task in _iter_module_tasks(value):
+                if task.done() or id(task) in cancelled_task_ids:
+                    continue
+                task.cancel()
+                cancelled_task_ids.add(id(task))
+    return len(cancelled_task_ids)
+
+
 def reload_plugins(
     config: Config,
     runtime_paths: RuntimePaths,

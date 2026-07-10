@@ -37,7 +37,7 @@ from mindroom.orchestration.runtime import (
     stop_entities,
     sync_forever_with_restart,
 )
-from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator, _PreStoppedMcpEntities
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
     GENERIC_SHUTDOWN,
@@ -1293,7 +1293,11 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
             patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
-            patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
+            patch.object(
+                orchestrator,
+                "_stop_entities_before_mcp_sync",
+                new=AsyncMock(return_value=_PreStoppedMcpEntities()),
+            ),
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
             patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),

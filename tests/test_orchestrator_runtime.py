@@ -47,6 +47,7 @@ from mindroom.orchestration.runtime import (
 from mindroom.orchestrator import (
     _EmbeddedApiServerContext,
     _MultiAgentOrchestrator,
+    _PreStoppedMcpEntities,
     _run_api_server,
     _run_auxiliary_task_forever,
     _SignalAwareUvicornServer,
@@ -2958,9 +2959,9 @@ class TestMultiAgentOrchestrator:
         set_plugin_skill_roots([])
         try:
 
-            async def mutate_plugin_after_prepare(*_args: object, **_kwargs: object) -> set[str]:
+            async def mutate_plugin_after_prepare(*_args: object, **_kwargs: object) -> _PreStoppedMcpEntities:
                 hooks_path.write_text("VALUE = 2\n", encoding="utf-8")
-                return set()
+                return _PreStoppedMcpEntities()
 
             with (
                 patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
