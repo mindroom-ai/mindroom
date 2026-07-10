@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
-from collections import deque
 from dataclasses import dataclass, field, replace
 from inspect import isasyncgenfunction, iscoroutinefunction
 from typing import TYPE_CHECKING, Any
@@ -50,12 +49,10 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from agno.agent import Agent as AgnoAgent
-    from agno.knowledge.knowledge import Knowledge
     from livekit.agents.llm import RawFunctionTool
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.knowledge import KnowledgeRefreshScheduler
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -117,13 +114,13 @@ class _CallResponseTracker:
     runtime_paths: RuntimePaths
     execution_identity: ToolExecutionIdentity
     pending: dict[str, _CallAgentRunState] = field(default_factory=dict)
-    order: deque[str] = field(default_factory=deque)
+    settlements: set[asyncio.Task[None]] = field(default_factory=set)
+    settlement_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def register(self, state: _CallAgentRunState) -> str:
         """Remember a completed agent response until LiveKit settles playout."""
         correlation_id = uuid4().hex
         self.pending[correlation_id] = state
-        self.order.append(correlation_id)
         return correlation_id
 
     def finalize(self, token: str | None, spoken_text: str, interrupted: bool) -> Awaitable[None] | None:
@@ -136,21 +133,40 @@ class _CallResponseTracker:
             if state.outcome == "interrupted" and state.original_status is not None
             else RunStatus.cancelled
         )
-        return asyncio.to_thread(self._persist, state, spoken_text, original_status)
+        settlement = asyncio.create_task(
+            self._persist_serialized(state, spoken_text, original_status),
+            name=f"settle_call_response:{state.run_id}",
+        )
+        self.settlements.add(settlement)
+        settlement.add_done_callback(self.settlements.discard)
+        return settlement
+
+    async def wait_for_settlements(self) -> None:
+        """Do not start another persisted run while playout reconciliation is active."""
+        while self.settlements:
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in tuple(self.settlements)),
+                return_exceptions=True,
+            )
 
     async def persist_unspoken(self, state: _CallAgentRunState, *, default_status: RunStatus) -> None:
         """Persist a terminal generation before LiveKit received any text."""
         original_status = state.original_status or default_status
-        await asyncio.shield(asyncio.to_thread(self._persist, state, "", original_status))
+        await asyncio.shield(self._persist_serialized(state, "", original_status))
+
+    async def _persist_serialized(
+        self,
+        state: _CallAgentRunState,
+        spoken_text: str,
+        original_status: RunStatus,
+    ) -> None:
+        async with self.settlement_lock:
+            await asyncio.to_thread(self._persist, state, spoken_text, original_status)
 
     def _pop(self, token: str | None) -> _CallAgentRunState | None:
         if token is not None:
             return self.pending.pop(token, None)
-        while self.order:
-            candidate = self.order.popleft()
-            if state := self.pending.pop(candidate, None):
-                return state
-        return None
+        return self.pending.pop(next(iter(self.pending))) if self.pending else None
 
     def _persist(self, state: _CallAgentRunState, spoken_text: str, original_status: RunStatus) -> None:
         with open_resolved_scope_session_context(
@@ -213,23 +229,10 @@ async def build_call_tools(
         user_id=requester_id,
         agent_name=agent_name,
     )
-    refresh_scheduler = context.orchestrator.knowledge_refresh_scheduler if context.orchestrator is not None else None
-    knowledge_resolution = resolve_agent_knowledge_access(
-        agent_name,
-        config,
-        runtime_paths,
-        refresh_scheduler=refresh_scheduler,
-        execution_identity=execution_identity,
-    )
-    knowledge = knowledge_resolution.knowledge
     if enable_responder:
-        enrichment_items: tuple[EnrichmentItem, ...] = ()
+        voice_enrichment_items: tuple[EnrichmentItem, ...] = ()
         if voice_instructions:
-            enrichment_items = (EnrichmentItem(key="voice_call", text=voice_instructions, cache_policy="stable"),)
-        enrichment_items = append_knowledge_availability_enrichment(
-            enrichment_items,
-            knowledge_resolution.unavailable,
-        )
+            voice_enrichment_items = (EnrichmentItem(key="voice_call", text=voice_instructions, cache_policy="stable"),)
         response_tracker = _CallResponseTracker(
             agent_name=agent_name,
             config=config,
@@ -244,12 +247,10 @@ async def build_call_tools(
             tool_support=tool_support,
             context=context,
             execution_identity=execution_identity,
-            knowledge=knowledge,
-            refresh_scheduler=refresh_scheduler,
             room_id=room_id,
             requester_id=requester_id,
             session_id=session_id,
-            enrichment_items=enrichment_items,
+            voice_enrichment_items=voice_enrichment_items,
             response_tracker=response_tracker,
         )
         return CallAgentTooling(
@@ -259,6 +260,15 @@ async def build_call_tools(
             finalize_spoken_response=response_tracker.finalize,
         )
 
+    refresh_scheduler = context.orchestrator.knowledge_refresh_scheduler if context.orchestrator is not None else None
+    knowledge_resolution = resolve_agent_knowledge_access(
+        agent_name,
+        config,
+        runtime_paths,
+        refresh_scheduler=refresh_scheduler,
+        execution_identity=execution_identity,
+    )
+    knowledge = knowledge_resolution.knowledge
     agent = await asyncio.to_thread(
         functools.partial(
             create_agent,
@@ -338,17 +348,28 @@ async def _run_call_agent(
     tool_support: ToolRuntimeSupport,
     context: ToolRuntimeContext,
     execution_identity: ToolExecutionIdentity,
-    knowledge: Knowledge | None,
-    refresh_scheduler: KnowledgeRefreshScheduler | None,
     room_id: str,
     requester_id: str,
     session_id: str,
-    enrichment_items: tuple[EnrichmentItem, ...],
+    voice_enrichment_items: tuple[EnrichmentItem, ...],
     response_tracker: _CallResponseTracker,
 ) -> CallAgentResponse:
     """Run one finalized call transcript through the normal MindRoom agent."""
     from mindroom.ai import ResponseTurnContext, ai_response  # noqa: PLC0415 - heavy optional call path
 
+    await response_tracker.wait_for_settlements()
+    refresh_scheduler = context.orchestrator.knowledge_refresh_scheduler if context.orchestrator is not None else None
+    knowledge_resolution = resolve_agent_knowledge_access(
+        agent_name,
+        config,
+        runtime_paths,
+        refresh_scheduler=refresh_scheduler,
+        execution_identity=execution_identity,
+    )
+    enrichment_items = append_knowledge_availability_enrichment(
+        voice_enrichment_items,
+        knowledge_resolution.unavailable,
+    )
     recorder = TurnRecorder(user_message=transcript)
     fallback_run_id = f"{session_id}:turn:{uuid4().hex}"
     turn = ResponseTurnContext(
@@ -370,7 +391,7 @@ async def _run_call_agent(
             prompt=transcript,
             runtime_paths=runtime_paths,
             config=config,
-            knowledge=knowledge,
+            knowledge=knowledge_resolution.knowledge,
             run_id_callback=recorder.set_run_id,
             include_interactive_questions=False,
             tool_function_filter=context.tool_function_filter,

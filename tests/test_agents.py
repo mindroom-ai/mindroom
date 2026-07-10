@@ -2838,6 +2838,47 @@ def test_tool_function_filter_prunes_resolved_functions() -> None:
     assert toolkit.async_functions == {}
 
 
+@pytest.mark.asyncio
+async def test_create_agent_tool_filter_applies_to_agno_generated_knowledge_function(tmp_path: Path) -> None:
+    """The stored channel policy filters functions Agno adds after construction."""
+    config = _test_config()
+    config.agents["general"].knowledge_bases = ["docs"]
+    config.knowledge_bases = {
+        "docs": KnowledgeBaseConfig(description="Reference docs.", path="./knowledge_docs/docs"),
+    }
+    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
+    seen: list[str] = []
+
+    def allow_call_function(function: Function) -> bool:
+        seen.append(function.name)
+        return function.name != "search_knowledge_base"
+
+    agent = _create_agent_for_test(
+        "general",
+        config,
+        knowledge=Knowledge(name="docs"),
+        tool_function_filter=allow_call_function,
+    )
+    run_output = RunOutput(
+        run_id="run-call-policy",
+        agent_id="general",
+        agent_name="GeneralAgent",
+        session_id="session-call-policy",
+    )
+    run_context = RunContext(run_id="run-call-policy", session_id="session-call-policy")
+    session = AgentSession(
+        session_id="session-call-policy",
+        agent_id="general",
+        created_at=1,
+        updated_at=1,
+    )
+
+    tools = await agent.aget_tools(run_output, run_context, session)
+
+    assert "search_knowledge_base" in seen
+    assert all(not isinstance(tool, Function) or tool.name != "search_knowledge_base" for tool in tools)
+
+
 @patch("mindroom.agent_storage.SqliteDb")
 def test_create_agent_disable_runtime_capabilities_omits_all_tools_and_skills(
     mock_storage: MagicMock,  # noqa: ARG001

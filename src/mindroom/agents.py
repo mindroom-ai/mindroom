@@ -1217,8 +1217,13 @@ def _initialize_agent_instance(**agent_kwargs: Any) -> Agent:  # noqa: ANN401
         "tuple[KnowledgeSourceDescription, ...]",
         agent_kwargs.pop("knowledge_sources", ()),
     )
+    tool_function_filter = cast(
+        "Callable[[Function], bool] | None",
+        agent_kwargs.pop("tool_function_filter", None),
+    )
     agent = Agent(**agent_kwargs)
     agent.knowledge_sources = knowledge_sources
+    agent.tool_function_filter = tool_function_filter
     return agent
 
 
@@ -1778,6 +1783,7 @@ def create_agent(
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         knowledge=knowledge if knowledge_enabled else None,
         knowledge_sources=knowledge_sources,
+        tool_function_filter=tool_function_filter,
         search_knowledge=knowledge_enabled,
         add_history_to_context=persist_runtime_state,
         add_session_summary_to_context=persist_runtime_state,
