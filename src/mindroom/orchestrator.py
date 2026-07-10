@@ -603,7 +603,9 @@ class _MultiAgentOrchestrator:
             )
             self._mcp_manager = manager
         bind_mcp_server_manager(manager)
-        return await manager.sync_servers(config)
+        changed_server_ids = await manager.sync_servers(config)
+        refresh_mcp_tool_state_for_runtime(self.runtime_paths, config)
+        return changed_server_ids
 
     def _entities_blocked_by_failed_mcp_servers(self, entity_names: set[str], config: RuntimeConfig) -> set[str]:
         """Return entities blocked because a required MCP server is currently unavailable."""
@@ -795,9 +797,12 @@ class _MultiAgentOrchestrator:
                 cancel_existing_tasks=True,
             )
             self.config = refreshed_config
+            if self._mcp_manager is not None:
+                self._mcp_manager.bind_runtime_config(refreshed_config)
             for bot in self.agent_bots.values():
                 bot.config = refreshed_config
             self._activate_hook_registry(result.hook_registry)
+            self._external_trigger_runtime.bind_if_ready(refreshed_config, self.agent_bots)
             logger.info(
                 "Plugin reload complete",
                 source=source,

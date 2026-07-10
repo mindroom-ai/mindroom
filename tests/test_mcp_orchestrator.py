@@ -158,6 +158,27 @@ def _manager_with_failed_server(*, required: bool) -> MagicMock:
     return manager
 
 
+@pytest.mark.asyncio
+async def test_sync_mcp_manager_refreshes_bound_tool_state_after_discovery(tmp_path: Path) -> None:
+    """Publish synchronously discovered MCP functions to the exact runtime config."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _config(tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    manager = MagicMock(spec=MCPServerManager)
+    manager.sync_servers = AsyncMock(return_value={"demo"})
+    orchestrator._mcp_manager = manager
+
+    with (
+        patch("mindroom.orchestrator.bind_mcp_server_manager"),
+        patch("mindroom.orchestrator.refresh_mcp_tool_state_for_runtime") as refresh_tool_state,
+    ):
+        changed_server_ids = await orchestrator._sync_mcp_manager(config)
+
+    assert changed_server_ids == {"demo"}
+    manager.sync_servers.assert_awaited_once_with(config)
+    refresh_tool_state.assert_called_once_with(runtime_paths, config)
+
+
 def test_entities_blocked_only_by_failed_required_mcp_servers(tmp_path: Path) -> None:
     """A failed optional MCP server must not block dependent entity startup."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))

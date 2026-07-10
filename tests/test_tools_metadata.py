@@ -823,6 +823,41 @@ def test_tool_validation_snapshot_round_trips_mcp_override_validation(tmp_path: 
     assert restored_snapshot["mcp_demo"].agent_override_fields is not None
 
 
+def test_mcp_refresh_preserves_plugin_tool_matching_disabled_server(tmp_path: Path) -> None:
+    """A disabled MCP server must not claim the matching plugin tool name."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml")
+    config = RuntimeConfig.from_authored(
+        Config.model_validate(
+            {
+                "defaults": {"tools": []},
+                "mcp_servers": {
+                    "demo": {
+                        "enabled": False,
+                        "transport": "stdio",
+                        "command": "python",
+                    },
+                },
+            },
+        ),
+        runtime_paths,
+    )
+    plugin_factory = TOOL_REGISTRY["shell"]
+    plugin_metadata = replace(TOOL_METADATA["shell"], name="mcp_demo")
+    plugin_state = metadata_module.resolved_tool_runtime_state_from_registry(
+        runtime_paths,
+        config,
+        {"mcp_demo": plugin_factory},
+        {"mcp_demo": plugin_metadata},
+    )
+    metadata_module.bind_resolved_tool_state_cache(plugin_state, config)
+
+    metadata_module.refresh_mcp_tool_state_for_runtime(runtime_paths, config)
+
+    refreshed_state = metadata_module._resolved_tool_state_for_runtime(runtime_paths, config)
+    assert refreshed_state.tool_registry["mcp_demo"] is plugin_factory
+    assert refreshed_state.tool_metadata["mcp_demo"] is plugin_metadata
+
+
 def test_deserialize_tool_validation_snapshot_rejects_non_boolean_runtime_loadable() -> None:
     """Validation snapshot payloads should type-check runtime_loadable strictly."""
     with pytest.raises(TypeError, match="runtime_loadable to a boolean"):

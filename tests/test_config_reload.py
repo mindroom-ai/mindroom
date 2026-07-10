@@ -26,6 +26,7 @@ from mindroom.file_watcher import _tree_snapshot
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.mcp.manager import MCPServerManager
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.config_updates import (
     ConfigUpdatePlan,
@@ -861,6 +862,8 @@ async def test_reload_plugins_now_keeps_event_loop_responsive_during_plugin_scan
     prepared_reload = MagicMock()
     prepared_reload.resolved_tool_state = MagicMock()
     expected_result = PluginReloadResult(HookRegistry.empty(), (), 0)
+    mcp_manager = MagicMock(spec=MCPServerManager)
+    orchestrator._mcp_manager = mcp_manager
 
     def blocking_refresh(_config: object) -> None:
         loop.call_soon_threadsafe(scan_started.set)
@@ -876,6 +879,7 @@ async def test_reload_plugins_now_keeps_event_loop_responsive_during_plugin_scan
             new=AsyncMock(return_value=object()),
         ),
         patch.object(orchestrator._external_trigger_runtime, "publish_prepared_api_config_snapshot"),
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready") as bind_external_runtime,
         patch("mindroom.orchestrator.apply_prepared_plugin_reload", return_value=expected_result),
     ):
         reload_task = asyncio.create_task(orchestrator.reload_plugins_now(source="test"))
@@ -891,6 +895,9 @@ async def test_reload_plugins_now_keeps_event_loop_responsive_during_plugin_scan
                 reload_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await reload_task
+
+    mcp_manager.bind_runtime_config.assert_called_once_with(config)
+    bind_external_runtime.assert_called_once_with(config, orchestrator.agent_bots)
 
 
 @pytest.mark.asyncio

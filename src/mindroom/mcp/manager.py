@@ -126,7 +126,7 @@ class MCPServerManager:
 
     async def sync_servers(self, config: RuntimeConfig) -> set[str]:
         """Reconcile live server sessions against the active config."""
-        self._config = config
+        self.bind_runtime_config(config)
         changed_server_ids: set[str] = set()
         desired_servers = {
             server_id: server_config for server_id, server_config in config.mcp_servers.items() if server_config.enabled
@@ -168,6 +168,10 @@ class MCPServerManager:
         changed_server_ids.difference_update(invalid_server_ids)
         changed_server_ids.difference_update(self.failed_server_ids())
         return changed_server_ids
+
+    def bind_runtime_config(self, config: RuntimeConfig) -> None:
+        """Bind the runtime config used to validate local and MCP function surfaces."""
+        self._config = config
 
     async def shutdown(self) -> None:
         """Close all tracked sessions and background refresh tasks."""

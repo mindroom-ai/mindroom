@@ -1059,13 +1059,14 @@ def refresh_mcp_tool_state_for_runtime(
     config: RuntimeConfig,
 ) -> None:
     """Refresh MCP entries without rediscovering the config's committed plugins."""
-    from mindroom.mcp.registry import mcp_tool_name  # noqa: PLC0415
+    from mindroom.mcp.registry import resolved_mcp_tool_state  # noqa: PLC0415
 
     current_state = _resolved_tool_state_for_runtime(
         runtime_paths,
         config,
     )
-    mcp_tool_names = {mcp_tool_name(server_id) for server_id in config.mcp_servers}
+    mcp_registry, _ = resolved_mcp_tool_state(config)
+    mcp_tool_names = set(mcp_registry)
     refreshed_state = resolved_tool_runtime_state_from_registry(
         runtime_paths,
         config,
