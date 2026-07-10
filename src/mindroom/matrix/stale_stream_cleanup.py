@@ -218,12 +218,15 @@ async def auto_resume_interrupted_threads(
     if not interrupted or (max_resumes is not None and max_resumes <= 0):
         return 0
 
-    selected_threads = _select_threads_to_resume(interrupted, max_resumes=max_resumes)
-    if not selected_threads:
+    candidate_threads = _threads_to_consider_for_resume(interrupted, max_resumes=max_resumes)
+    if not candidate_threads:
         return 0
 
     resumed_count = 0
-    for index, interrupted_thread in enumerate(selected_threads):
+    send_attempted = False
+    for interrupted_thread in candidate_threads:
+        if max_resumes is not None and resumed_count >= max_resumes:
+            break
         try:
             if await _has_newer_human_thread_activity(
                 interrupted_thread,
@@ -243,6 +246,9 @@ async def auto_resume_interrupted_threads(
                 config=config,
                 runtime_paths=runtime_paths,
             )
+            if send_attempted:
+                await asyncio.sleep(delay)
+            send_attempted = True
             delivered = await send_message_result(client, interrupted_thread.room_id, content)
             if delivered is not None:
                 if conversation_cache is not None:
@@ -274,8 +280,6 @@ async def auto_resume_interrupted_threads(
                 target_event_id=interrupted_thread.target_event_id,
                 error=str(exc),
             )
-        if index < len(selected_threads) - 1:
-            await asyncio.sleep(delay)
 
     return resumed_count
 
@@ -1492,6 +1496,18 @@ def _select_threads_to_resume(
     if max_resumes is None or max_resumes >= len(unique_threads):
         return unique_threads
     return unique_threads[-max_resumes:]
+
+
+def _threads_to_consider_for_resume(
+    interrupted: list[InterruptedThread],
+    *,
+    max_resumes: int | None,
+) -> list[InterruptedThread]:
+    """Return unique candidates in the order needed to honor the resume cap."""
+    candidates = _select_threads_to_resume(interrupted, max_resumes=None)
+    if max_resumes is None:
+        return candidates
+    return list(reversed(candidates))
 
 
 def _has_restart_interrupted_note(body: str) -> bool:

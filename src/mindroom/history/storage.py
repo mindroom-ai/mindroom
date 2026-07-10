@@ -266,9 +266,9 @@ def scope_has_recovered_interrupted_event(
     event_id: str,
 ) -> bool:
     """Return whether visible history recovered or superseded one interrupted source event."""
-    if event_id in _read_preserved_scope_seen_event_ids(session, scope):
-        return True
+    source_seen_without_interruption = event_id in _read_preserved_scope_seen_event_ids(session, scope)
     interrupted_source_seen = False
+    recovered_after_interruption = False
     for run in session.runs or []:
         if not isinstance(run, (RunOutput, TeamRunOutput)):
             continue
@@ -280,11 +280,15 @@ def scope_has_recovered_interrupted_event(
             and metadata.get(MINDROOM_REPLAY_STATE_METADATA_KEY) == MINDROOM_REPLAY_STATE_INTERRUPTED
         )
         if is_interrupted_replay:
-            interrupted_source_seen = interrupted_source_seen or event_id in _run_seen_event_ids(run)
+            if event_id in _run_seen_event_ids(run):
+                interrupted_source_seen = True
+                recovered_after_interruption = False
             continue
-        if interrupted_source_seen or event_id in _run_seen_event_ids(run):
-            return True
-    return False
+        if interrupted_source_seen:
+            recovered_after_interruption = True
+        elif event_id in _run_seen_event_ids(run):
+            source_seen_without_interruption = True
+    return recovered_after_interruption if interrupted_source_seen else source_seen_without_interruption
 
 
 def _run_seen_event_ids(run: RunOutput | TeamRunOutput) -> set[str]:

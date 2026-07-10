@@ -158,6 +158,12 @@ def test_sync_restart_recovery_ignores_interrupted_replay_until_later_visible_ru
 
     assert scope_has_recovered_interrupted_event(session, scope, "source-event") is False
 
+    prior_continuation = _completed_run("prior-continuation")
+    prior_continuation.metadata = {"matrix_seen_event_ids": ["source-event"]}
+    session.runs = [prior_continuation, interrupted]
+
+    assert scope_has_recovered_interrupted_event(session, scope, "source-event") is False
+
     child = _completed_run("child")
     child.parent_run_id = interrupted.run_id
     child.metadata = {"matrix_seen_event_ids": ["newer-child-event"]}
@@ -180,6 +186,15 @@ def test_sync_restart_recovery_includes_compaction_preserved_seen_events(tmp_pat
     update_scope_seen_event_ids(session, scope, ["source-event"])
 
     assert scope_has_recovered_interrupted_event(session, scope, "source-event") is True
+
+    interrupted = _completed_run("interrupted")
+    interrupted.metadata = {
+        "matrix_seen_event_ids": ["source-event"],
+        MINDROOM_REPLAY_STATE_METADATA_KEY: MINDROOM_REPLAY_STATE_INTERRUPTED,
+    }
+    session.runs = [interrupted]
+
+    assert scope_has_recovered_interrupted_event(session, scope, "source-event") is False
 
 
 def test_scope_states_do_not_bleed_between_scopes(tmp_path: Path) -> None:

@@ -21,10 +21,14 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
+    MINDROOM_REPLAY_STATE_INTERRUPTED,
+    MINDROOM_REPLAY_STATE_METADATA_KEY,
     ROUTER_AGENT_NAME,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.history.storage import scope_has_recovered_interrupted_event, update_scope_seen_event_ids
 from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EVENT_SESSION_STARTED,
     HookRegistry,
@@ -797,7 +801,17 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_f
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
-    storage = _SessionStorage()
+    target = MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg")
+    scope = HistoryScope(kind="team", scope_id="ultimate")
+    initial_session = TeamSession(
+        session_id=target.session_id,
+        team_id="ultimate",
+        runs=[],
+        created_at=1,
+        updated_at=1,
+    )
+    update_scope_seen_event_ids(initial_session, scope, ["$user_msg"])
+    storage = _SessionStorage(initial_session)
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
@@ -811,7 +825,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_f
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             team_history_storage=storage,
-            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            message_target=target,
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
         _set_gateway_method(
@@ -824,7 +838,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_f
             turn_recorder = cast("TurnRecorder", kwargs["turn_recorder"])
             turn_recorder.set_run_id("team-run-delivery-cancel")
             turn_recorder.record_completed(
-                run_metadata={},
+                run_metadata={"matrix_seen_event_ids": ["$user_msg"]},
                 assistant_text="🤝 Team Response:\n\nTeam hello",
                 completed_tools=[],
             )
@@ -849,6 +863,9 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_f
         ("user", "Hello"),
         ("assistant", "🤝 Team Response:\n\nTeam hello\n\n(turn interrupted by the user before completion)"),
     ]
+    assert persisted_run.metadata is not None
+    assert persisted_run.metadata[MINDROOM_REPLAY_STATE_METADATA_KEY] == MINDROOM_REPLAY_STATE_INTERRUPTED
+    assert scope_has_recovered_interrupted_event(persisted_session, scope, "$user_msg") is False
 
 
 @pytest.mark.asyncio
