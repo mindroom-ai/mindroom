@@ -5,10 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.api.config_lifecycle import ApiSnapshot
-from mindroom.config.main import Config
+from mindroom.config.main import Config, RuntimeConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.oauth import registry as oauth_registry
 from mindroom.oauth.providers import OAuthProvider
+from mindroom.tool_system.declarations import ToolCategory, ToolMetadata
+from mindroom.tool_system.registry_state import TOOL_METADATA
 from tests.config_test_utils import runtime_config_from_data
 
 if TYPE_CHECKING:
@@ -48,38 +50,28 @@ def test_load_oauth_provider_registry_caches_loaded_registry(
 ) -> None:
     """The shared loader should own cache reads, provider merge, validation, and cache writes."""
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config()
     builtin_provider = _provider("builtin_provider")
     plugin_provider = _provider("plugin_provider")
-    load_calls: list[tuple[Config, RuntimePaths, bool]] = []
-
-    def load_plugin_providers(
-        received_config: Config,
-        received_runtime_paths: RuntimePaths,
-        *,
-        skip_broken_plugins: bool,
-    ) -> list[OAuthProvider]:
-        load_calls.append((received_config, received_runtime_paths, skip_broken_plugins))
-        return [plugin_provider]
+    config = RuntimeConfig.from_authored(
+        Config(),
+        runtime_paths,
+        plugin_oauth_providers=(plugin_provider,),
+    )
 
     monkeypatch.setattr(oauth_registry, "_builtin_oauth_providers", lambda: (builtin_provider,))
-    monkeypatch.setattr(oauth_registry, "_load_plugin_oauth_providers", load_plugin_providers)
-    monkeypatch.setattr(oauth_registry, "_reject_tool_service_collisions", lambda _providers: None)
 
-    cache_key = ("config", id(config), runtime_paths, True)
+    cache_key = ("config", id(config), runtime_paths)
     oauth_registry.clear_oauth_provider_cache()
     try:
         providers = oauth_registry._load_oauth_provider_registry(
             config,
             runtime_paths,
             cache_key,
-            skip_broken_plugins=True,
         )
         cached_providers = oauth_registry._load_oauth_provider_registry(
             config,
             runtime_paths,
             cache_key,
-            skip_broken_plugins=True,
         )
     finally:
         oauth_registry.clear_oauth_provider_cache()
@@ -89,35 +81,32 @@ def test_load_oauth_provider_registry_caches_loaded_registry(
         "builtin_provider": builtin_provider,
         "plugin_provider": plugin_provider,
     }
-    assert load_calls == [(config, runtime_paths, True)]
 
 
 def test_load_oauth_providers_uses_config_cache_key(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Direct config loading should preserve the existing cache key shape."""
+    """Direct config loading should cache by the exact runtime config object."""
     runtime_paths = _runtime_paths(tmp_path)
-    config = Config()
+    config = runtime_config_from_data({}, runtime_paths)
     expected_providers = {"provider": _provider("provider")}
-    calls: list[tuple[Config, RuntimePaths, tuple[object, ...], bool]] = []
+    calls: list[tuple[RuntimeConfig, RuntimePaths, tuple[object, ...]]] = []
 
     def load_registry(
-        received_config: Config,
+        received_config: RuntimeConfig,
         received_runtime_paths: RuntimePaths,
         cache_key: tuple[object, ...],
-        *,
-        skip_broken_plugins: bool,
     ) -> dict[str, OAuthProvider]:
-        calls.append((received_config, received_runtime_paths, cache_key, skip_broken_plugins))
+        calls.append((received_config, received_runtime_paths, cache_key))
         return expected_providers
 
     monkeypatch.setattr(oauth_registry, "_load_oauth_provider_registry", load_registry)
 
-    providers = oauth_registry.load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
+    providers = oauth_registry.load_oauth_providers(config, runtime_paths)
 
     assert providers is expected_providers
-    assert calls == [(config, runtime_paths, ("config", id(config), runtime_paths, False), False)]
+    assert calls == [(config, runtime_paths, ("config", id(config), runtime_paths))]
 
 
 def test_load_oauth_providers_for_snapshot_uses_runtime_config_and_cache_key(
@@ -134,24 +123,22 @@ def test_load_oauth_providers_for_snapshot_uses_runtime_config_and_cache_key(
         runtime_config=runtime_config,
     )
     expected_providers = {"provider": _provider("provider")}
-    calls: list[tuple[Config, RuntimePaths, tuple[object, ...], bool]] = []
+    calls: list[tuple[RuntimeConfig, RuntimePaths, tuple[object, ...]]] = []
 
     def load_registry(
-        received_config: Config,
+        received_config: RuntimeConfig,
         received_runtime_paths: RuntimePaths,
         cache_key: tuple[object, ...],
-        *,
-        skip_broken_plugins: bool,
     ) -> dict[str, OAuthProvider]:
-        calls.append((received_config, received_runtime_paths, cache_key, skip_broken_plugins))
+        calls.append((received_config, received_runtime_paths, cache_key))
         return expected_providers
 
     monkeypatch.setattr(oauth_registry, "_load_oauth_provider_registry", load_registry)
 
-    providers = oauth_registry.load_oauth_providers_for_snapshot(snapshot, skip_broken_plugins=False)
+    providers = oauth_registry.load_oauth_providers_for_snapshot(snapshot)
 
     assert providers is expected_providers
-    assert calls == [(runtime_config, runtime_paths, ("snapshot", 7, id(snapshot), runtime_paths, False), False)]
+    assert calls == [(runtime_config, runtime_paths, ("snapshot", 7, id(snapshot), runtime_paths))]
 
 
 def test_load_oauth_providers_for_pre_load_snapshot_falls_back_to_empty_config(
@@ -167,16 +154,14 @@ def test_load_oauth_providers_for_pre_load_snapshot_falls_back_to_empty_config(
         runtime_config=None,
     )
     expected_providers = {"provider": _provider("provider")}
-    calls: list[Config] = []
+    calls: list[RuntimeConfig] = []
 
     def load_registry(
-        received_config: Config,
+        received_config: RuntimeConfig,
         received_runtime_paths: RuntimePaths,
         cache_key: tuple[object, ...],
-        *,
-        skip_broken_plugins: bool,
     ) -> dict[str, OAuthProvider]:
-        del received_runtime_paths, cache_key, skip_broken_plugins
+        del received_runtime_paths, cache_key
         calls.append(received_config)
         return expected_providers
 
@@ -187,3 +172,32 @@ def test_load_oauth_providers_for_pre_load_snapshot_falls_back_to_empty_config(
     assert providers is expected_providers
     assert len(calls) == 1
     assert calls[0].authored_model_dump() == {}
+
+
+def test_pinned_oauth_provider_validation_uses_snapshot_tool_metadata(tmp_path: Path) -> None:
+    """A newer global tool generation must not invalidate an older runtime snapshot."""
+    runtime_paths = _runtime_paths(tmp_path)
+    provider = _provider("pinned_plugin_service")
+    runtime_config = RuntimeConfig.from_authored(
+        Config(),
+        runtime_paths,
+        plugin_oauth_providers=(provider,),
+    )
+    previous_metadata = TOOL_METADATA.get(provider.credential_service)
+    TOOL_METADATA[provider.credential_service] = ToolMetadata(
+        name=provider.credential_service,
+        display_name="Newer colliding tool",
+        description="Only present in the newer live generation.",
+        category=ToolCategory.INTEGRATIONS,
+    )
+    oauth_registry.clear_oauth_provider_cache()
+    try:
+        providers = oauth_registry.load_oauth_providers(runtime_config, runtime_paths)
+    finally:
+        oauth_registry.clear_oauth_provider_cache()
+        if previous_metadata is None:
+            TOOL_METADATA.pop(provider.credential_service, None)
+        else:
+            TOOL_METADATA[provider.credential_service] = previous_metadata
+
+    assert providers[provider.id] is provider

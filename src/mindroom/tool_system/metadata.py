@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.hooks import HookCallback, HookRegistry
+    from mindroom.oauth.providers import OAuthProvider
 
 logger = get_logger(__name__)
 
@@ -719,14 +720,29 @@ def _remove_owned_plugin_modules(modules: tuple[tuple[str, ModuleType], ...]) ->
                 sys.modules.pop(module_name, None)
 
 
+def _remove_owned_plugin_runtime(
+    modules: tuple[tuple[str, ModuleType], ...],
+    source_snapshot_roots: tuple[Path, ...],
+) -> None:
+    _remove_owned_plugin_modules(modules)
+    for source_snapshot_root in source_snapshot_roots:
+        plugin_module._remove_plugin_source_snapshot(source_snapshot_root)
+
+
 @dataclass(frozen=True)
 class _OwnedPluginModules:
-    """Keep one validation package importable until its resolved state is released."""
+    """Own one isolated plugin package and its source until resolved state is released."""
 
     modules: tuple[tuple[str, ModuleType], ...]
+    source_snapshot_roots: tuple[Path, ...] = ()
 
     def __post_init__(self) -> None:
-        weakref.finalize(self, _remove_owned_plugin_modules, self.modules)
+        weakref.finalize(
+            self,
+            _remove_owned_plugin_runtime,
+            self.modules,
+            self.source_snapshot_roots,
+        )
 
 
 @dataclass(frozen=True)
@@ -737,6 +753,7 @@ class _ResolvedToolState:
     tool_metadata: dict[str, ToolMetadata]
     unavailable_tool_metadata: dict[str, ToolMetadata]
     hook_registry: HookRegistry
+    plugin_oauth_providers: tuple[OAuthProvider, ...] = ()
     owned_plugin_modules: _OwnedPluginModules | None = None
 
 
@@ -756,6 +773,7 @@ class ResolvedToolRuntimeState:
 
     runtime_paths: RuntimePaths
     validation_snapshot: Mapping[str, ToolValidationInfo]
+    plugin_oauth_providers: tuple[OAuthProvider, ...]
     _state: _ResolvedToolState = dataclass_field(repr=False)
 
 
@@ -967,7 +985,7 @@ def _resolve_validation_plugin_modules(
     candidate_registrations: dict[str, dict[str, ToolMetadata]],
     candidate_active_plugins: list[tuple[str, str]],
     candidate_owned_modules: dict[str, ModuleType],
-) -> tuple[HookCallback, ...]:
+) -> tuple[tuple[HookCallback, ...], str]:
     """Resolve one plugin's validation modules and clean partial imports on failure."""
     candidate_hooks: tuple[HookCallback, ...] = ()
     validation_plugin_name = (
@@ -1011,10 +1029,40 @@ def _resolve_validation_plugin_modules(
     except BaseException:
         _remove_owned_plugin_modules(tuple(sorted(candidate_owned_modules.items())))
         raise
-    return candidate_hooks
+    return candidate_hooks, validation_plugin_name
 
 
-def _compute_resolved_tool_state_for_runtime(
+def _resolve_validation_plugin_oauth(
+    plugin_base: plugin_module._PluginBase,
+    plugin_entry: PluginEntryConfig,
+    runtime_paths: RuntimePaths,
+    candidate_registrations: dict[str, dict[str, ToolMetadata]],
+    candidate_owned_modules: dict[str, ModuleType],
+    *,
+    validation_plugin_name: str,
+) -> tuple[OAuthProvider, ...]:
+    """Materialize OAuth providers inside the same isolated validation package."""
+    if plugin_base.oauth_module_path is None:
+        return ()
+    module_name, _, oauth_modules = _execute_validation_plugin_module(
+        plugin_base.name,
+        plugin_base.root,
+        plugin_base.oauth_module_path,
+        candidate_registrations,
+        validation_plugin_name=validation_plugin_name,
+    )
+    candidate_owned_modules.update(oauth_modules)
+    oauth_module = dict(oauth_modules)[module_name]
+    from mindroom.oauth.registry import plugin_oauth_providers_from_module  # noqa: PLC0415
+
+    return plugin_oauth_providers_from_module(
+        oauth_module,
+        plugin_entry.settings,
+        runtime_paths,
+    )
+
+
+def _compute_resolved_tool_state_for_runtime(  # noqa: PLR0915
     runtime_paths: RuntimePaths,
     config: Config,
     *,
@@ -1045,18 +1093,20 @@ def _compute_resolved_tool_state_for_runtime(
     )
 
     plugin_module._reject_duplicate_plugin_manifest_names(plugin_bases)
+    plugin_bases, source_snapshot_root = plugin_module._snapshot_plugin_bases(plugin_bases)
 
     validation_registrations: dict[str, dict[str, ToolMetadata]] = {}
     unavailable_tool_metadata: dict[str, ToolMetadata] = {}
     active_plugins: list[tuple[str, str]] = []
     hook_plugins: list[_ResolvedPluginHooks] = []
+    plugin_oauth_providers: list[OAuthProvider] = []
     owned_plugin_modules: dict[str, ModuleType] = {}
     for plugin_base, plugin_entry, plugin_order in plugin_bases:
         candidate_registrations: dict[str, dict[str, ToolMetadata]] = {}
         candidate_active_plugins: list[tuple[str, str]] = []
         candidate_owned_modules: dict[str, ModuleType] = {}
         try:
-            candidate_hooks = _resolve_validation_plugin_modules(
+            candidate_hooks, validation_plugin_name = _resolve_validation_plugin_modules(
                 plugin_base,
                 candidate_registrations,
                 candidate_active_plugins,
@@ -1065,19 +1115,43 @@ def _compute_resolved_tool_state_for_runtime(
         except BaseException as exc:
             if not isinstance(exc, Exception):
                 _remove_owned_plugin_modules(tuple(sorted(owned_plugin_modules.items())))
+                plugin_module._remove_plugin_source_snapshot(source_snapshot_root)
                 raise
             if not tolerate_plugin_load_errors:
                 _remove_owned_plugin_modules(tuple(sorted(owned_plugin_modules.items())))
+                plugin_module._remove_plugin_source_snapshot(source_snapshot_root)
                 raise
-            plugin_module._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
+            plugin_module._log_skipped_plugin_entry(plugin_entry.path, plugin_base.configured_root, exc)
             unavailable_tool_metadata.update(
                 _unavailable_tool_metadata_from_failed_plugin(plugin_base, candidate_registrations),
             )
             continue
 
+        try:
+            candidate_oauth_providers = _resolve_validation_plugin_oauth(
+                plugin_base,
+                plugin_entry,
+                runtime_paths,
+                candidate_registrations,
+                candidate_owned_modules,
+                validation_plugin_name=validation_plugin_name,
+            )
+        except (Exception, SystemExit) as exc:
+            if not tolerate_plugin_load_errors:
+                _remove_owned_plugin_modules(tuple(sorted(candidate_owned_modules.items())))
+                _remove_owned_plugin_modules(tuple(sorted(owned_plugin_modules.items())))
+                plugin_module._remove_plugin_source_snapshot(source_snapshot_root)
+                if isinstance(exc, SystemExit):
+                    msg = f"Plugin OAuth provider registration failed for {plugin_base.configured_root}: {exc}"
+                    raise ToolMetadataValidationError(msg) from exc
+                raise
+            plugin_module._log_skipped_plugin_entry(plugin_entry.path, plugin_base.configured_root, exc)
+            candidate_oauth_providers = ()
+
         validation_registrations.update(candidate_registrations)
         active_plugins.extend(candidate_active_plugins)
         owned_plugin_modules.update(candidate_owned_modules)
+        plugin_oauth_providers.extend(candidate_oauth_providers)
         hook_plugins.append(
             _ResolvedPluginHooks(
                 name=plugin_base.name,
@@ -1102,15 +1176,20 @@ def _compute_resolved_tool_state_for_runtime(
             desired_metadata,
         )
         hook_registry = HookRegistry.from_plugins(hook_plugins)
-        module_owner = _OwnedPluginModules(tuple(sorted(owned_plugin_modules.items())))
+        module_owner = _OwnedPluginModules(
+            tuple(sorted(owned_plugin_modules.items())),
+            (source_snapshot_root,) if source_snapshot_root is not None else (),
+        )
     except BaseException:
         _remove_owned_plugin_modules(tuple(sorted(owned_plugin_modules.items())))
+        plugin_module._remove_plugin_source_snapshot(source_snapshot_root)
         raise
     return _ResolvedToolState(
         desired_registry,
         desired_metadata,
         unavailable_tool_metadata,
         hook_registry,
+        tuple(plugin_oauth_providers),
         module_owner,
     )
 
@@ -1200,6 +1279,7 @@ def refresh_mcp_tool_state_for_runtime(
         hook_registry=current_state.hook_registry,
         unavailable_tool_names=config.unavailable_plugin_tool_names,
         owned_plugin_modules=current_state.owned_plugin_modules,
+        plugin_oauth_providers=current_state.plugin_oauth_providers,
     )
     bind_resolved_tool_state_cache(refreshed_state, config)
 
@@ -1313,6 +1393,8 @@ def resolved_tool_runtime_state_from_registry(
     hook_registry: HookRegistry | None = None,
     unavailable_tool_names: Iterable[str] = (),
     owned_plugin_modules: Mapping[str, ModuleType] | _OwnedPluginModules | None = None,
+    owned_plugin_source_roots: tuple[Path, ...] = (),
+    plugin_oauth_providers: tuple[OAuthProvider, ...] = (),
 ) -> ResolvedToolRuntimeState:
     """Build carried runtime state from one already-staged plugin registry."""
     from mindroom.hooks import HookRegistry  # noqa: PLC0415
@@ -1333,7 +1415,10 @@ def resolved_tool_runtime_state_from_registry(
         if tool_name not in metadata
     }
     module_owner = (
-        _OwnedPluginModules(tuple(sorted(owned_plugin_modules.items())))
+        _OwnedPluginModules(
+            tuple(sorted(owned_plugin_modules.items())),
+            owned_plugin_source_roots,
+        )
         if owned_plugin_modules is not None and not isinstance(owned_plugin_modules, _OwnedPluginModules)
         else owned_plugin_modules
     )
@@ -1344,6 +1429,7 @@ def resolved_tool_runtime_state_from_registry(
             metadata,
             unavailable_metadata,
             hook_registry or HookRegistry.empty(),
+            plugin_oauth_providers,
             module_owner,
         ),
     )
@@ -1365,6 +1451,7 @@ def _resolved_tool_runtime_state_snapshot(
             validation_metadata,
             unavailable_plugin_tool_names=frozenset(resolved_state.unavailable_tool_metadata),
         ),
+        plugin_oauth_providers=resolved_state.plugin_oauth_providers,
         _state=resolved_state,
     )
 

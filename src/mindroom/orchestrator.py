@@ -743,7 +743,6 @@ class _MultiAgentOrchestrator:
         self,
         config: RuntimeConfig,
         resolved_tool_state: ResolvedToolRuntimeState,
-        plugin_oauth_providers: tuple[object, ...],
     ) -> RuntimeConfig:
         """Materialize runtime config from the exact plugin snapshot staged for commit."""
         refreshed_config = RuntimeConfig.from_authored(
@@ -752,7 +751,7 @@ class _MultiAgentOrchestrator:
             tolerate_plugin_load_errors=True,
             source_files=config.source_files,
             tool_validation_snapshot=resolved_tool_state.validation_snapshot,
-            plugin_oauth_providers=plugin_oauth_providers if config.plugins else None,
+            plugin_oauth_providers=resolved_tool_state.plugin_oauth_providers,
         )
         bind_resolved_tool_state_cache(resolved_tool_state, refreshed_config)
         return refreshed_config
@@ -785,7 +784,6 @@ class _MultiAgentOrchestrator:
                     self._rebuild_config_with_tool_state,
                     config,
                     prepared_plugin_reload.resolved_tool_state,
-                    prepared_plugin_reload.plugin_oauth_providers,
                 )
                 await asyncio.to_thread(ensure_config_source_current, refreshed_config, self.runtime_paths)
                 prepared_api_snapshot = await self._external_trigger_runtime.prepare_api_config_snapshot(
@@ -836,7 +834,6 @@ class _MultiAgentOrchestrator:
             self._rebuild_config_with_tool_state,
             new_config,
             prepared_plugin_reload.resolved_tool_state,
-            prepared_plugin_reload.plugin_oauth_providers,
         )
         pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
             current_config,
@@ -941,7 +938,6 @@ class _MultiAgentOrchestrator:
         config = self._rebuild_config_with_tool_state(
             config,
             prepared_plugin_reload.resolved_tool_state,
-            prepared_plugin_reload.plugin_oauth_providers,
         )
         entity_names = configured_entity_names(config)
         self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=True)
@@ -1181,7 +1177,6 @@ class _MultiAgentOrchestrator:
             self._rebuild_config_with_tool_state,
             new_config,
             prepared_plugin_reload.resolved_tool_state,
-            prepared_plugin_reload.plugin_oauth_providers,
         )
         entity_names = configured_entity_names(new_config)
         self._preflight_account_provisioning(

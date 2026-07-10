@@ -323,12 +323,17 @@ def build_runtime_config(
         for tool_name, validation_info in resolved_snapshot.items()
         if validation_info.unavailable_due_to_plugin_load_error
     )
+    resolved_plugin_oauth_providers = plugin_oauth_providers
+    if resolved_plugin_oauth_providers is None:
+        resolved_plugin_oauth_providers = (
+            resolved_tool_state.plugin_oauth_providers if resolved_tool_state is not None else ()
+        )
     runtime_config = runtime_config_type.model_validate(
         {
             **effective_authored.authored_model_dump(),
             "runtime_paths": runtime_paths,
             "source_files": source_files,
-            "runtime_plugin_oauth_providers": plugin_oauth_providers,
+            "runtime_plugin_oauth_providers": resolved_plugin_oauth_providers,
             "unavailable_plugin_tool_names": unavailable_plugin_tool_names,
             "agent_tool_runtime_overrides": tuple(
                 (

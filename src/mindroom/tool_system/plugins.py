@@ -75,6 +75,7 @@ class _Plugin:
     skill_dirs: list[Path]
     discovered_hooks: tuple[HookCallback, ...]
     oauth_providers: tuple[OAuthProvider, ...]
+    source_snapshot_root: Path | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +100,6 @@ class _PreparedPluginReload:
     module_import_cache: dict[Path, Any]
     synthetic_modules: dict[str, ModuleType]
     previous_package_roots: frozenset[str]
-    plugin_oauth_providers: tuple[OAuthProvider, ...]
 
 
 def _hook_display_name(callback: HookCallback) -> str:
@@ -127,13 +127,32 @@ def _sync_loaded_plugin_tools(
     )
 
 
-def load_plugins(
+def _plugin_bases_for_load(
+    config: RuntimeConfig,
+    runtime_paths: RuntimePaths,
+    *,
+    skip_broken_plugins: bool,
+    snapshot_sources: bool,
+) -> tuple[list[tuple[plugin_imports._PluginBase, PluginEntryConfig, int]], Path | None]:
+    plugin_bases = plugin_imports._collect_plugin_bases(
+        config.plugins,
+        runtime_paths,
+        skip_broken_plugins=skip_broken_plugins,
+    )
+    plugin_imports._reject_duplicate_plugin_manifest_names(plugin_bases)
+    if snapshot_sources:
+        return plugin_imports._snapshot_plugin_bases(plugin_bases)
+    return plugin_bases, None
+
+
+def load_plugins(  # noqa: C901
     config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     *,
     set_skill_roots: bool = True,
     skip_broken_plugins: bool = True,
     import_name_suffix: str = "",
+    snapshot_sources: bool = False,
 ) -> list[_Plugin]:
     """Load plugins from config and register their tools and skills."""
     import mindroom.tools  # noqa: F401, PLC0415
@@ -148,15 +167,14 @@ def load_plugins(
             return []
         plugins: list[_Plugin] = []
         skill_roots: list[Path] = []
-        plugin_bases = plugin_imports._collect_plugin_bases(
-            plugin_entries,
+        plugin_bases, source_snapshot_root = _plugin_bases_for_load(
+            config,
             runtime_paths,
             skip_broken_plugins=skip_broken_plugins,
+            snapshot_sources=snapshot_sources,
         )
         snapshot = capture_tool_registry_snapshot()
         try:
-            plugin_imports._reject_duplicate_plugin_manifest_names(plugin_bases)
-
             for plugin_base, plugin_entry, plugin_order in plugin_bases:
                 plugin_snapshot = capture_tool_registry_snapshot()
                 try:
@@ -167,15 +185,16 @@ def load_plugins(
                         module_plugin_name=f"{plugin_base.name}{import_name_suffix}",
                         runtime_paths=runtime_paths,
                         skip_broken_plugins=skip_broken_plugins,
+                        source_snapshot_root=source_snapshot_root,
                     )
                 except (Exception, SystemExit) as exc:
                     restore_tool_registry_snapshot(plugin_snapshot)
                     if not skip_broken_plugins:
                         if isinstance(exc, SystemExit):
-                            msg = f"Plugin materialization failed for {plugin_base.root}: {exc}"
+                            msg = f"Plugin materialization failed for {plugin_base.configured_root}: {exc}"
                             raise _PluginValidationError(msg) from exc
                         raise
-                    plugin_imports._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
+                    plugin_imports._log_skipped_plugin_entry(plugin_entry.path, plugin_base.configured_root, exc)
                     continue
                 plugins.append(plugin)
                 skill_roots.extend(plugin.skill_dirs)
@@ -189,7 +208,11 @@ def load_plugins(
                 set_plugin_skill_roots(skill_roots)
         except BaseException:
             restore_tool_registry_snapshot(snapshot)
+            plugin_imports._remove_plugin_source_snapshot(source_snapshot_root)
             raise
+
+        if source_snapshot_root is not None and not plugins:
+            plugin_imports._remove_plugin_source_snapshot(source_snapshot_root)
 
         return plugins
 
@@ -258,6 +281,7 @@ def prepare_plugin_reload(
         previous_snapshot = capture_tool_registry_snapshot()
         previous_plugin_skill_roots = tuple(get_plugin_skill_roots())
         prepared_succeeded = False
+        candidate_source_snapshot_roots: tuple[Path, ...] = ()
         try:
             _clear_plugin_import_caches()
             plugins = load_plugins(
@@ -265,6 +289,12 @@ def prepare_plugin_reload(
                 runtime_paths,
                 skip_broken_plugins=skip_broken_plugins,
                 import_name_suffix=f"{_RUNTIME_PLUGIN_MODULE_SUFFIX}{next(_RUNTIME_PLUGIN_GENERATIONS)}",
+                snapshot_sources=True,
+            )
+            candidate_source_snapshot_roots = tuple(
+                dict.fromkeys(
+                    plugin.source_snapshot_root for plugin in plugins if plugin.source_snapshot_root is not None
+                ),
             )
             active_tool_module_names = {module_name for _, module_name in _active_plugin_tool_modules(plugins)}
             candidate_tool_registry_snapshot = capture_tool_registry_snapshot()
@@ -301,6 +331,8 @@ def prepare_plugin_reload(
                 hook_registry=candidate_hook_registry,
                 unavailable_tool_names=config.unavailable_plugin_tool_names,
                 owned_plugin_modules=candidate_synthetic_modules,
+                owned_plugin_source_roots=candidate_source_snapshot_roots,
+                plugin_oauth_providers=tuple(provider for plugin in plugins for provider in plugin.oauth_providers),
             )
             prepared_reload = _PreparedPluginReload(
                 hook_registry=candidate_hook_registry,
@@ -312,7 +344,6 @@ def prepare_plugin_reload(
                 module_import_cache=candidate_module_import_cache,
                 synthetic_modules=candidate_synthetic_modules,
                 previous_package_roots=frozenset(previous_package_roots),
-                plugin_oauth_providers=tuple(provider for plugin in plugins for provider in plugin.oauth_providers),
             )
             prepared_succeeded = True
             return prepared_reload
@@ -321,6 +352,8 @@ def prepare_plugin_reload(
             if not prepared_succeeded:
                 _cancel_plugin_module_tasks(candidate_package_roots)
                 _evict_synthetic_plugin_subtrees(candidate_package_roots)
+                for source_snapshot_root in candidate_source_snapshot_roots:
+                    plugin_imports._remove_plugin_source_snapshot(source_snapshot_root)
             plugin_imports._PLUGIN_CACHE.clear()
             plugin_imports._PLUGIN_CACHE.update(previous_plugin_cache)
             plugin_imports._MODULE_IMPORT_CACHE.clear()
@@ -457,11 +490,29 @@ def _materialize_plugin(
     module_plugin_name: str,
     runtime_paths: RuntimePaths,
     skip_broken_plugins: bool,
+    source_snapshot_root: Path | None,
 ) -> _Plugin:
-    tools_module = load_plugin_module(module_plugin_name, plugin.root, plugin.tools_module_path, kind="tools")
+    def cache_path(module_path: Path | None) -> Path | None:
+        if module_path is None:
+            return None
+        return plugin.configured_root / module_path.relative_to(plugin.root)
+
+    tools_module = _load_plugin_module(
+        module_plugin_name,
+        plugin.root,
+        plugin.tools_module_path,
+        kind="tools",
+        cache_path=cache_path(plugin.tools_module_path),
+    )
     hooks_module_path = plugin.hooks_module_path or plugin.tools_module_path
     hooks_module = (
-        load_plugin_module(module_plugin_name, plugin.root, hooks_module_path, kind="hooks")
+        _load_plugin_module(
+            module_plugin_name,
+            plugin.root,
+            hooks_module_path,
+            kind="hooks",
+            cache_path=cache_path(hooks_module_path),
+        )
         if hooks_module_path
         else None
     )
@@ -477,11 +528,12 @@ def _materialize_plugin(
     oauth_providers: tuple[OAuthProvider, ...] = ()
     if plugin.oauth_module_path is not None:
         try:
-            oauth_module = load_plugin_module(
+            oauth_module = _load_plugin_module(
                 module_plugin_name,
                 plugin.root,
                 plugin.oauth_module_path,
                 kind="oauth",
+                cache_path=cache_path(plugin.oauth_module_path),
             )
             if oauth_module is not None:
                 from mindroom.oauth.registry import plugin_oauth_providers_from_module  # noqa: PLC0415
@@ -494,13 +546,13 @@ def _materialize_plugin(
         except (Exception, SystemExit) as exc:
             if not skip_broken_plugins:
                 if isinstance(exc, SystemExit):
-                    msg = f"Plugin OAuth provider registration failed for {plugin.root}: {exc}"
+                    msg = f"Plugin OAuth provider registration failed for {plugin.configured_root}: {exc}"
                     raise _PluginValidationError(msg) from exc
                 raise
-            plugin_imports._log_skipped_plugin_entry(entry_config.path, plugin.root, exc)
+            plugin_imports._log_skipped_plugin_entry(entry_config.path, plugin.configured_root, exc)
     return _Plugin(
         name=plugin.name,
-        root=plugin.root,
+        root=plugin.configured_root,
         manifest_path=plugin.manifest_path,
         entry_config=entry_config,
         plugin_order=plugin_order,
@@ -510,6 +562,7 @@ def _materialize_plugin(
         skill_dirs=plugin.skill_dirs,
         discovered_hooks=discovered_hooks,
         oauth_providers=oauth_providers,
+        source_snapshot_root=source_snapshot_root,
     )
 
 
@@ -546,12 +599,13 @@ def _restore_failed_plugin_tool_module_reload(
         plugin_imports._MODULE_IMPORT_CACHE.pop(module_path, None)
 
 
-def load_plugin_module(
+def _load_plugin_module(
     plugin_name: str,
     plugin_root: Path,
     module_path: Path | None,
     *,
     kind: str,
+    cache_path: Path | None = None,
 ) -> ModuleType | None:
     """Load a plugin module from a configured plugin root."""
     if module_path is None:
@@ -564,7 +618,8 @@ def load_plugin_module(
         raise _PluginValidationError(msg) from exc
 
     module_name = plugin_imports._module_name(plugin_name, plugin_root, module_path)
-    cached = plugin_imports._MODULE_IMPORT_CACHE.get(module_path)
+    module_cache_path = cache_path or module_path
+    cached = plugin_imports._MODULE_IMPORT_CACHE.get(module_cache_path)
     if cached is not None and cached.mtime == mtime and cached.module_name == module_name:
         return cached.module
 
@@ -573,7 +628,7 @@ def load_plugin_module(
     )
 
     if kind == "oauth":
-        _evict_stale_oauth_package_modules(plugin_name, plugin_root, module_path)
+        _evict_stale_oauth_package_modules(plugin_name, plugin_root, module_cache_path)
 
     if cached is not None and cached.module_name != module_name:
         sys.modules.pop(cached.module_name, None)
@@ -589,7 +644,7 @@ def load_plugin_module(
     except BaseException as exc:
         if kind == "tools":
             _restore_failed_plugin_tool_module_reload(
-                module_path,
+                module_cache_path,
                 module_name,
                 cached,
                 previous_registrations_by_module_name,
@@ -597,17 +652,17 @@ def load_plugin_module(
         else:
             sys.modules.pop(module_name, None)
             if cached is not None:
-                plugin_imports._MODULE_IMPORT_CACHE[module_path] = cached
+                plugin_imports._MODULE_IMPORT_CACHE[module_cache_path] = cached
                 sys.modules[cached.module_name] = cached.module
             else:
-                plugin_imports._MODULE_IMPORT_CACHE.pop(module_path, None)
+                plugin_imports._MODULE_IMPORT_CACHE.pop(module_cache_path, None)
         plugin_imports._restore_plugin_package_chain(previous_packages)
         _raise_if_host_control_exception(exc)
         msg = f"Plugin {kind} module execution failed for {module_path}: {exc}"
         logger.exception("Plugin module execution failed", path=str(module_path), kind=kind, error=str(exc))
         raise _PluginValidationError(msg) from exc
 
-    plugin_imports._MODULE_IMPORT_CACHE[module_path] = plugin_imports._ModuleCacheEntry(
+    plugin_imports._MODULE_IMPORT_CACHE[module_cache_path] = plugin_imports._ModuleCacheEntry(
         mtime=mtime,
         module_name=module_name,
         module=module,

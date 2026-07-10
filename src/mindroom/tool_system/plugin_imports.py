@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shutil
 import sys
-from dataclasses import dataclass
+import tempfile
+from dataclasses import dataclass, replace
 from importlib import util
 from pathlib import Path
 from types import ModuleType
@@ -46,6 +48,7 @@ class _PluginBase:
 
     name: str
     root: Path
+    configured_root: Path
     manifest_path: Path
     tools_module_path: Path | None
     hooks_module_path: Path | None
@@ -167,6 +170,73 @@ def _reject_duplicate_plugin_manifest_names(
     raise PluginValidationError(msg)
 
 
+def _snapshot_plugin_bases(
+    plugin_bases: list[tuple[_PluginBase, PluginEntryConfig, int]],
+) -> tuple[list[tuple[_PluginBase, PluginEntryConfig, int]], Path | None]:
+    """Copy plugin sources once so validation and later lazy imports read the same bytes."""
+    if not plugin_bases:
+        return plugin_bases, None
+
+    snapshot_root = Path(tempfile.mkdtemp(prefix="mindroom-plugin-snapshot-"))
+    snapshots: list[tuple[_PluginBase, PluginEntryConfig, int]] = []
+    try:
+        for index, (plugin_base, entry_config, plugin_order) in enumerate(plugin_bases):
+            copied_root = snapshot_root / f"{index}-{_plugin_slug(plugin_base.name)}"
+            shutil.copytree(plugin_base.root, copied_root)
+
+            snapshots.append(
+                (
+                    replace(
+                        plugin_base,
+                        root=copied_root,
+                        manifest_path=_copied_plugin_path(
+                            plugin_base.manifest_path,
+                            original_root=plugin_base.root,
+                            copied_root=copied_root,
+                        ),
+                        tools_module_path=_copied_plugin_path(
+                            plugin_base.tools_module_path,
+                            original_root=plugin_base.root,
+                            copied_root=copied_root,
+                        ),
+                        hooks_module_path=_copied_plugin_path(
+                            plugin_base.hooks_module_path,
+                            original_root=plugin_base.root,
+                            copied_root=copied_root,
+                        ),
+                        oauth_module_path=_copied_plugin_path(
+                            plugin_base.oauth_module_path,
+                            original_root=plugin_base.root,
+                            copied_root=copied_root,
+                        ),
+                    ),
+                    entry_config,
+                    plugin_order,
+                ),
+            )
+    except BaseException:
+        _remove_plugin_source_snapshot(snapshot_root)
+        raise
+    return snapshots, snapshot_root
+
+
+def _copied_plugin_path(
+    path: Path | None,
+    *,
+    original_root: Path,
+    copied_root: Path,
+) -> Path | None:
+    if path is None:
+        return None
+    return copied_root / path.relative_to(original_root)
+
+
+def _remove_plugin_source_snapshot(snapshot_root: Path | None) -> None:
+    """Delete one no-longer-owned immutable plugin source tree."""
+    if snapshot_root is not None:
+        shutil.rmtree(snapshot_root, ignore_errors=True)
+
+
 def _resolve_plugin_root(plugin_path: str, runtime_paths: RuntimePaths) -> Path:
     parsed_python_spec = _parse_python_plugin_spec(plugin_path)
     if parsed_python_spec is not None and parsed_python_spec[2]:
@@ -276,6 +346,7 @@ def _load_plugin_base(root: Path) -> _PluginBase:
     return _PluginBase(
         name=manifest.name,
         root=root,
+        configured_root=root,
         manifest_path=manifest_path,
         tools_module_path=tools_module_path,
         hooks_module_path=hooks_module_path,

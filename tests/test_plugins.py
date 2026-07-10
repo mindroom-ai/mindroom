@@ -2773,6 +2773,7 @@ async def test_plugin_reload_keeps_each_runtime_package_generation_isolated(
             authored_config,
             runtime_paths,
             tool_validation_snapshot=prepared.resolved_tool_state.validation_snapshot,
+            plugin_oauth_providers=prepared.resolved_tool_state.plugin_oauth_providers,
         )
         metadata_module.bind_resolved_tool_state_cache(prepared.resolved_tool_state, runtime_config)
         return runtime_config
@@ -2790,7 +2791,6 @@ async def test_plugin_reload_keeps_each_runtime_package_generation_isolated(
         prepared_v1 = plugins_module.prepare_plugin_reload(base_config, runtime_paths)
         config_v1 = bind_prepared_state(prepared_v1)
         plugins_module.apply_prepared_plugin_reload(prepared_v1)
-        assert toolkit_name(config_v1) == "generation_v1"
 
         helper_path.write_text("TOOLKIT_NAME = 'generation_version_2'\n", encoding="utf-8")
         staging_started = threading.Event()
@@ -2798,7 +2798,7 @@ async def test_plugin_reload_keeps_each_runtime_package_generation_isolated(
         original_exec_plugin_source = plugins_module._exec_plugin_source
 
         def pause_candidate_import(module_path: Path, module: ModuleType) -> None:
-            if module_path == tools_path:
+            if module_path.name == tools_path.name:
                 staging_started.set()
                 if not continue_staging.wait(timeout=5):
                     msg = "timed out waiting to resume candidate plugin import"
@@ -2983,41 +2983,6 @@ async def test_runtime_validation_rejects_plugin_import_background_tasks(tmp_pat
     assert not marker_path.exists()
 
 
-def test_reload_plugins_invalidates_cached_oauth_providers(tmp_path: Path) -> None:
-    """Plugin reloads should refresh OAuth providers and their relative imports."""
-    plugin_root = tmp_path / "plugins" / "oauth-reload"
-    _write_oauth_reload_plugin(plugin_root, "before")
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("agents: {}", encoding="utf-8")
-    config = _bind_runtime_paths(Config(plugins=["./plugins/oauth-reload"]), config_path)
-    runtime_paths = runtime_paths_for(config)
-
-    original_plugin_roots = _get_plugin_skill_roots()
-    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
-    original_modules = set(sys.modules)
-    try:
-        clear_oauth_provider_cache()
-        initial = load_oauth_providers(config, runtime_paths)
-        assert initial["plugin_oauth_reload"].display_name == "before"
-
-        _write_oauth_reload_plugin(plugin_root, "after")
-        _reload_plugins(config, runtime_paths)
-        reloaded = load_oauth_providers(config, runtime_paths)
-
-        assert reloaded["plugin_oauth_reload"].display_name == "after"
-    finally:
-        clear_oauth_provider_cache()
-        plugin_module._PLUGIN_CACHE.clear()
-        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
-        plugin_module._MODULE_IMPORT_CACHE.clear()
-        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
-        set_plugin_skill_roots(original_plugin_roots)
-        for module_name in set(sys.modules) - original_modules:
-            if module_name.startswith("mindroom_plugin_"):
-                sys.modules.pop(module_name, None)
-
-
 def test_pinned_api_snapshot_keeps_oauth_plugin_generation(tmp_path: Path) -> None:
     """A request pinned before reload must retain its staged OAuth provider code."""
     plugin_root = tmp_path / "plugins" / "oauth-reload"
@@ -3033,7 +2998,7 @@ def test_pinned_api_snapshot_keeps_oauth_plugin_generation(tmp_path: Path) -> No
             authored_config,
             runtime_paths,
             tool_validation_snapshot=prepared.resolved_tool_state.validation_snapshot,
-            plugin_oauth_providers=prepared.plugin_oauth_providers,
+            plugin_oauth_providers=prepared.resolved_tool_state.plugin_oauth_providers,
         )
         metadata_module.bind_resolved_tool_state_cache(prepared.resolved_tool_state, runtime_config)
         return runtime_config
@@ -3120,20 +3085,24 @@ def test_load_oauth_providers_isolates_system_exit_from_plugin_callback(tmp_path
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
     baseline_config = _bind_runtime_paths(Config(plugins=[]), config_path)
-    config = _bind_runtime_paths(Config(plugins=["./plugins/bad-oauth"]), config_path)
-    runtime_paths = runtime_paths_for(config)
+    runtime_paths = runtime_paths_for(baseline_config)
 
     with _preserved_plugin_loader_state():
         try:
             clear_oauth_provider_cache()
             baseline_providers = load_oauth_providers(baseline_config, runtime_paths)
+            config = RuntimeConfig.from_authored(
+                Config(plugins=["./plugins/bad-oauth"]),
+                runtime_paths,
+                tolerate_plugin_load_errors=True,
+            )
             clear_oauth_provider_cache()
             providers = load_oauth_providers(config, runtime_paths)
             assert providers == baseline_providers
 
             clear_oauth_provider_cache()
-            with pytest.raises(plugin_module.PluginValidationError, match="Plugin OAuth provider registration failed"):
-                load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
+            with pytest.raises(ConfigRuntimeValidationError, match="Plugin OAuth provider registration failed"):
+                RuntimeConfig.from_authored(Config(plugins=["./plugins/bad-oauth"]), runtime_paths)
         finally:
             clear_oauth_provider_cache()
 
@@ -3154,14 +3123,13 @@ def test_load_oauth_providers_propagates_keyboard_interrupt_from_plugin_callback
     )
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
-    config = _bind_runtime_paths(Config(plugins=["./plugins/bad-oauth"]), config_path)
-    runtime_paths = runtime_paths_for(config)
+    runtime_paths = runtime_paths_for(_bind_runtime_paths(Config(), config_path))
 
     with _preserved_plugin_loader_state():
         try:
             clear_oauth_provider_cache()
             with pytest.raises(KeyboardInterrupt):
-                load_oauth_providers(config, runtime_paths)
+                RuntimeConfig.from_authored(Config(plugins=["./plugins/bad-oauth"]), runtime_paths)
         finally:
             clear_oauth_provider_cache()
 

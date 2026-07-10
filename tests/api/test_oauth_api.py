@@ -423,7 +423,7 @@ def test_plugin_oauth_provider_rejects_duplicate_service_names(tmp_path: Path) -
     )
 
     with pytest.raises(plugin_imports.PluginValidationError, match="Duplicate OAuth provider service name"):
-        load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
+        load_oauth_providers(config, runtime_paths)
 
 
 def test_oauth_provider_requires_client_config_service() -> None:
@@ -475,7 +475,7 @@ def test_plugin_oauth_provider_rejects_tool_config_overlap(tmp_path: Path) -> No
     )
 
     with pytest.raises(plugin_imports.PluginValidationError, match="Duplicate OAuth provider service name"):
-        load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
+        load_oauth_providers(config, runtime_paths)
 
 
 def test_plugin_oauth_provider_rejects_ordinary_tool_credential_service_overlap(tmp_path: Path) -> None:
@@ -515,7 +515,7 @@ def test_plugin_oauth_provider_rejects_ordinary_tool_credential_service_overlap(
     )
 
     with pytest.raises(plugin_imports.PluginValidationError, match="overlap existing tool service"):
-        load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
+        load_oauth_providers(config, runtime_paths)
 
 
 def test_plugin_oauth_provider_rejects_unrelated_tool_config_service_overlap(tmp_path: Path) -> None:
@@ -556,7 +556,7 @@ def test_plugin_oauth_provider_rejects_unrelated_tool_config_service_overlap(tmp
     )
 
     with pytest.raises(plugin_imports.PluginValidationError, match="overlap existing tool service"):
-        load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
+        load_oauth_providers(config, runtime_paths)
 
 
 def test_plugin_oauth_provider_rejects_client_config_token_service_overlap(tmp_path: Path) -> None:
@@ -587,16 +587,14 @@ def test_plugin_oauth_provider_rejects_client_config_token_service_overlap(tmp_p
         encoding="utf-8",
     )
     runtime_paths = _runtime_paths(tmp_path)
-    config = runtime_config_from_data(
-        {
-            **_config_payload(),
-            "plugins": [{"path": str(plugin_dir)}],
-        },
-        runtime_paths,
-    )
-
     with pytest.raises(ValueError, match=r"credential_service.*must not end with '_oauth_client'"):
-        load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
+        runtime_config_from_data(
+            {
+                **_config_payload(),
+                "plugins": [{"path": str(plugin_dir)}],
+            },
+            runtime_paths,
+        )
 
 
 def test_plugin_oauth_provider_rejects_provider_specific_client_config_reuse(tmp_path: Path) -> None:
@@ -636,7 +634,7 @@ def test_plugin_oauth_provider_rejects_provider_specific_client_config_reuse(tmp
     )
 
     with pytest.raises(plugin_imports.PluginValidationError, match="Duplicate OAuth provider service name"):
-        load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
+        load_oauth_providers(config, runtime_paths)
 
 
 def test_plugin_oauth_provider_allows_explicit_shared_client_config_reuse() -> None:

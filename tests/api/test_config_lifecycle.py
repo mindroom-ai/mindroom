@@ -19,6 +19,7 @@ from mindroom import constants
 from mindroom.api import config_lifecycle
 from mindroom.config.errors import ConfigSourceChangedError
 from mindroom.config.main import Config, load_config
+from mindroom.oauth.registry import clear_oauth_provider_cache, load_oauth_providers_for_snapshot
 
 VALID_CONFIG: dict[str, Any] = {
     "models": {"default": {"provider": "ollama", "id": "test-model"}},
@@ -105,6 +106,46 @@ class TestLoadAndValidationFailure:
         assert snapshot.runtime_config is not None
         assert snapshot.config_load_result == config_lifecycle.ConfigLoadResult(success=True)
         assert snapshot.source_fingerprint is not None
+
+    def test_initial_load_pins_plugin_oauth_provider_generation(self, runtime_paths: constants.RuntimePaths) -> None:
+        """An API lifecycle snapshot must materialize plugin OAuth before source changes."""
+        plugin_root = runtime_paths.config_dir / "oauth-plugin"
+        plugin_root.mkdir()
+        (plugin_root / "mindroom.plugin.json").write_text(
+            '{"name": "api-oauth", "oauth_module": "oauth_provider.py", "skills": []}',
+            encoding="utf-8",
+        )
+        helper_path = plugin_root / "helper.py"
+        helper_path.write_text("DISPLAY_NAME = 'before'\n", encoding="utf-8")
+        (plugin_root / "oauth_provider.py").write_text(
+            "from .helper import DISPLAY_NAME\n"
+            "from mindroom.oauth import OAuthProvider\n"
+            "\n"
+            "def register_oauth_providers(settings, runtime_paths):\n"
+            "    del settings, runtime_paths\n"
+            "    return [OAuthProvider(\n"
+            "        id='api_oauth', display_name=DISPLAY_NAME,\n"
+            "        authorization_url='https://auth.example.test/authorize',\n"
+            "        token_url='https://auth.example.test/token',\n"
+            "        scopes=('api.read',),\n"
+            "        credential_service='api_oauth',\n"
+            "        client_config_services=('api_oauth_oauth_client',),\n"
+            "    )]\n",
+            encoding="utf-8",
+        )
+        _write_config(runtime_paths.config_path, {"agents": {}, "plugins": ["./oauth-plugin"]})
+        api_app = _make_api_app(runtime_paths)
+        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+        snapshot = _snapshot(api_app)
+
+        helper_path.write_text("DISPLAY_NAME = 'after'\n", encoding="utf-8")
+        clear_oauth_provider_cache()
+        try:
+            providers = load_oauth_providers_for_snapshot(snapshot)
+        finally:
+            clear_oauth_provider_cache()
+
+        assert providers["api_oauth"].display_name == "before"
 
     def test_reload_of_unchanged_source_does_not_bump_generation(self, loaded_app: FastAPI) -> None:
         """Reloading byte-identical source keeps the generation stable."""

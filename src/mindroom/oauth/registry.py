@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -17,7 +17,6 @@ from mindroom.oauth.google_sheets import google_sheets_oauth_provider
 from mindroom.oauth.providers import OAuthProvider
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.catalog import TOOL_METADATA
-from mindroom.tool_system.plugins import load_plugin_module
 
 if TYPE_CHECKING:
     from mindroom.api.config_lifecycle import ApiSnapshot
@@ -85,51 +84,11 @@ def plugin_oauth_providers_from_module(
     return tuple(_coerce_oauth_providers(callback(settings, runtime_paths)))
 
 
-def _load_plugin_oauth_providers(
-    config: RuntimeConfig,
-    runtime_paths: RuntimePaths,
+def _provider_registry(
+    providers: Iterable[OAuthProvider],
     *,
-    skip_broken_plugins: bool,
-) -> list[OAuthProvider]:
-    if config.runtime_plugin_oauth_providers is not None:
-        return cast("list[OAuthProvider]", list(config.runtime_plugin_oauth_providers))
-    providers: list[OAuthProvider] = []
-    plugin_bases = plugin_imports._collect_plugin_bases(
-        config.plugins,
-        runtime_paths,
-        skip_broken_plugins=skip_broken_plugins,
-    )
-    plugin_imports._reject_duplicate_plugin_manifest_names(plugin_bases)
-    for plugin_base, plugin_entry, _plugin_order in plugin_bases:
-        if plugin_base.oauth_module_path is None:
-            continue
-        try:
-            module = load_plugin_module(
-                plugin_base.name,
-                plugin_base.root,
-                plugin_base.oauth_module_path,
-                kind="oauth",
-            )
-            if module is None:
-                continue
-            providers.extend(
-                plugin_oauth_providers_from_module(
-                    module,
-                    plugin_entry.settings,
-                    runtime_paths,
-                ),
-            )
-        except (Exception, SystemExit) as exc:
-            if not skip_broken_plugins:
-                if isinstance(exc, SystemExit):
-                    msg = f"Plugin OAuth provider registration failed for {plugin_base.root}: {exc}"
-                    raise plugin_imports.PluginValidationError(msg) from exc
-                raise
-            plugin_imports._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
-    return providers
-
-
-def _provider_registry(providers: Iterable[OAuthProvider]) -> dict[str, OAuthProvider]:
+    tool_metadata: Mapping[str, Any] | None = None,
+) -> dict[str, OAuthProvider]:
     registry: dict[str, OAuthProvider] = {}
     duplicate_ids: set[str] = set()
     service_owners: dict[str, tuple[str, str]] = {}
@@ -165,18 +124,25 @@ def _provider_registry(providers: Iterable[OAuthProvider]) -> dict[str, OAuthPro
         duplicate_list = ", ".join(sorted(duplicate_services))
         msg = f"Duplicate OAuth provider service name(s): {duplicate_list}"
         raise plugin_imports.PluginValidationError(msg)
-    _reject_tool_service_collisions(registry.values())
+    _reject_tool_service_collisions(registry.values(), tool_metadata=tool_metadata)
     return registry
 
 
-def _registered_tool_service_auth_providers() -> dict[str, str | None]:
+def _registered_tool_service_auth_providers(
+    tool_metadata: Mapping[str, Any] | None = None,
+) -> dict[str, str | None]:
     import mindroom.tools as _mindroom_tools  # noqa: F401, PLC0415
 
-    return {tool_name: metadata.auth_provider for tool_name, metadata in TOOL_METADATA.items()}
+    metadata_by_name = TOOL_METADATA if tool_metadata is None else tool_metadata
+    return {tool_name: metadata.auth_provider for tool_name, metadata in metadata_by_name.items()}
 
 
-def _reject_tool_service_collisions(providers: Iterable[OAuthProvider]) -> None:
-    tool_auth_providers = _registered_tool_service_auth_providers()
+def _reject_tool_service_collisions(
+    providers: Iterable[OAuthProvider],
+    *,
+    tool_metadata: Mapping[str, Any] | None = None,
+) -> None:
+    tool_auth_providers = _registered_tool_service_auth_providers(tool_metadata)
     collisions: list[str] = []
     for provider in providers:
         provider_services = [
@@ -203,21 +169,20 @@ def _load_oauth_provider_registry(
     config: RuntimeConfig,
     runtime_paths: RuntimePaths,
     cache_key: tuple[object, ...],
-    *,
-    skip_broken_plugins: bool,
 ) -> dict[str, OAuthProvider]:
     global _provider_cache
     with _provider_cache_lock:
         if _provider_cache is not None and _provider_cache.key == cache_key:
             return _provider_cache.providers
-    plugin_providers = _load_plugin_oauth_providers(
-        config,
-        runtime_paths,
-        skip_broken_plugins=skip_broken_plugins,
-    )
+    plugin_providers = cast("list[OAuthProvider]", list(config.runtime_plugin_oauth_providers))
     mcp_providers = tuple(mcp_oauth_providers_for_config(config.mcp_servers))
     providers = (*_builtin_oauth_providers(), *mcp_providers, *plugin_providers)
-    registry = _provider_registry(providers)
+    from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime  # noqa: PLC0415
+
+    registry = _provider_registry(
+        providers,
+        tool_metadata=resolved_tool_metadata_for_runtime(runtime_paths, config),
+    )
     with _provider_cache_lock:
         _provider_cache = _ProviderCacheEntry(cache_key, registry)
     logger.debug("Loaded OAuth providers", providers=sorted(registry))
@@ -227,21 +192,17 @@ def _load_oauth_provider_registry(
 def load_oauth_providers(
     config: RuntimeConfig,
     runtime_paths: RuntimePaths,
-    *,
-    skip_broken_plugins: bool = True,
 ) -> dict[str, OAuthProvider]:
     """Return all OAuth providers available for one runtime config."""
-    cache_key = ("config", id(config), runtime_paths, skip_broken_plugins)
-    return _load_oauth_provider_registry(config, runtime_paths, cache_key, skip_broken_plugins=skip_broken_plugins)
+    cache_key = ("config", id(config), runtime_paths)
+    return _load_oauth_provider_registry(config, runtime_paths, cache_key)
 
 
 def load_oauth_providers_for_snapshot(
     snapshot: ApiSnapshot,
-    *,
-    skip_broken_plugins: bool = True,
 ) -> dict[str, OAuthProvider]:
     """Return OAuth providers cached by one API config snapshot."""
-    cache_key = ("snapshot", snapshot.generation, id(snapshot), snapshot.runtime_paths, skip_broken_plugins)
+    cache_key = ("snapshot", snapshot.generation, id(snapshot), snapshot.runtime_paths)
     config = snapshot.runtime_config
     if config is None:
         # Only pre-first-load snapshots lack a runtime config; they expose built-in providers only.
@@ -250,5 +211,4 @@ def load_oauth_providers_for_snapshot(
         config,
         snapshot.runtime_paths,
         cache_key,
-        skip_broken_plugins=skip_broken_plugins,
     )
