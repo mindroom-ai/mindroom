@@ -57,6 +57,7 @@ class TurnStore:
     A present handled-turn ledger row owns canonical source identity and anchor.
     Newer delivered Agno run metadata repairs mutable response and regeneration
     facts; older or incomplete runs only backfill absent optional facts.
+    Recovery never replaces a ledger record changed while metadata was loading.
     Any recovered or enriched record is repaired back into the ledger before it
     is returned to the caller.
     """
@@ -201,6 +202,7 @@ class TurnStore:
         requester_user_id: str,
     ) -> TurnRecord | None:
         """Load, deterministically merge, and repair one durable turn record."""
+        ledger_record_before_recovery = self._ledger.get_turn_record(original_event_id)
         recovery_record = self._load_persisted_turn_record(
             _LoadPersistedTurnRequest(
                 room=room,
@@ -215,7 +217,11 @@ class TurnStore:
         def repaired_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
             ledger_record = existing_records.get(original_event_id)
             return (
-                _reconcile_ledger_and_recovery(ledger_record, recovery_record)
+                _reconcile_ledger_and_recovery(
+                    ledger_record,
+                    recovery_record,
+                    recovery_may_replace=ledger_record == ledger_record_before_recovery,
+                )
                 if ledger_record is not None
                 else recovery_record
             )
@@ -392,10 +398,16 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
     )
 
 
-def _reconcile_ledger_and_recovery(ledger_record: TurnRecord, recovery_record: TurnRecord) -> TurnRecord:
+def _reconcile_ledger_and_recovery(
+    ledger_record: TurnRecord,
+    recovery_record: TurnRecord,
+    *,
+    recovery_may_replace: bool,
+) -> TurnRecord:
     """Keep ledger identity while accepting a newer delivered run's mutable facts."""
     if (
-        recovery_record.timestamp < int(ledger_record.timestamp)
+        not recovery_may_replace
+        or recovery_record.timestamp < int(ledger_record.timestamp)
         or recovery_record.response_event_id is None
         or not same_turn_identity(ledger_record, recovery_record)
     ):

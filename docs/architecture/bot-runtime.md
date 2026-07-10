@@ -70,6 +70,7 @@ One codec projects that schema into the versioned handled-turn ledger and recove
 Interactive-selection discovery aliases remain separate from canonical source identity, so recovery can index every triggering event without making one message look coalesced.
 The two physical stores remain intentionally redundant so run metadata can repair a ledger write lost during a crash.
 `TurnStore` applies deterministic field precedence: a present ledger record owns canonical source identity and anchor, while a newer delivered run can repair mutable response and regeneration facts after a crash.
+Recovery never replaces a ledger record that changed while run metadata was loading.
 Older or incomplete run metadata only backfills absent optional facts, and conflicting discovery aliases are pruned instead of claiming another completed turn.
 Run metadata supplies a complete record when the ledger row is absent and otherwise participates only through that precedence rule.
 `TurnStore` immediately writes a recovered or enriched record back to the ledger, so callers never own backfill or repair decisions.

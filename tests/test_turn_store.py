@@ -8,6 +8,8 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from mindroom import constants
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
@@ -522,14 +524,27 @@ def test_visible_echo_cannot_overwrite_concurrent_terminal_outcome(tmp_path: Pat
     assert record.visible_echo_event_id == "$echo"
 
 
-def test_recovery_cannot_overwrite_concurrent_terminal_outcome(tmp_path: Path) -> None:
-    """Slow crash recovery must merge against ledger state written while it was loading."""
+@pytest.mark.parametrize("recovery_response_event_id", [None, "$stale-response"])
+def test_recovery_cannot_overwrite_concurrent_terminal_outcome(
+    tmp_path: Path,
+    recovery_response_event_id: str | None,
+) -> None:
+    """Slow incomplete or delivered recovery must preserve a concurrent terminal write."""
     store = _store(tmp_path)
+    store._ledger.record_handled_turn(
+        TurnRecord.create(["$event"], response_event_id="$old-response", timestamp=9),
+    )
     recovery_started = threading.Event()
     release_recovery = threading.Event()
     load_finished = threading.Event()
     loaded_record: list[TurnRecord | None] = []
-    recovery_record = TurnRecord.create(["$event"], completed=False, response_owner="agent")
+    recovery_record = TurnRecord.create(
+        ["$event"],
+        response_event_id=recovery_response_event_id,
+        completed=recovery_response_event_id is not None,
+        response_owner="agent",
+        timestamp=10,
+    )
 
     def load_recovery(_request: object) -> TurnRecord:
         recovery_started.set()
@@ -552,7 +567,8 @@ def test_recovery_cannot_overwrite_concurrent_terminal_outcome(tmp_path: Path) -
         load_thread.start()
         assert recovery_started.wait(timeout=2)
 
-        store.record_turn(TurnRecord.create(["$event"], response_event_id="$response"))
+        with patch("mindroom.handled_turns.time.time", return_value=10.9):
+            store.record_turn(TurnRecord.create(["$event"], response_event_id="$response"))
         release_recovery.set()
         assert load_finished.wait(timeout=2)
         load_thread.join(timeout=2)
@@ -563,6 +579,7 @@ def test_recovery_cannot_overwrite_concurrent_terminal_outcome(tmp_path: Path) -
     assert loaded_record[0].completed
     assert loaded_record[0].response_event_id == "$response"
     assert loaded_record[0].response_owner == "agent"
+    assert loaded_record[0].timestamp > 10.9
     record = store.get_turn_record("$event")
     assert record == loaded_record[0]
 
