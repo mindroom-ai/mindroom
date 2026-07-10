@@ -34,6 +34,7 @@ import uuid
 import wave
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import certifi
 import httpx
@@ -60,6 +61,10 @@ from mindroom.matrix_rtc.events import (  # noqa: E402
 from mindroom.matrix_rtc.focus import OpenIDToken, request_sfu_grant  # noqa: E402
 from mindroom.tool_system.runtime_context import ToolRuntimeContext  # noqa: E402
 from mindroom.tool_system.worker_routing import build_tool_execution_identity  # noqa: E402
+
+if TYPE_CHECKING:
+    from mindroom.message_target import MessageTarget
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 HOMESERVER = "https://mindroom.chat"
 SERVICE_URL = "https://mindroom.chat/livekit/jwt"
@@ -317,23 +322,32 @@ async def main() -> int:  # noqa: PLR0915
     class LiveToolSupport:
         """Minimal stand-in for the bot-runtime ToolRuntimeSupport."""
 
-        def build_context(self, target, *, user_id, session_id=None, **_kw: object):  # noqa: ANN001, ANN202
+        def build_context(
+            self,
+            target: MessageTarget,
+            *,
+            user_id: str | None,
+            **_kw: object,
+        ) -> ToolRuntimeContext:
             return ToolRuntimeContext(
                 agent_name=AGENT,
-                room_id=target.room_id,
-                thread_id=None,
-                resolved_thread_id=None,
+                target=target,
                 requester_id=user_id or bot_id,
                 client=bot_client,
                 config=config,
                 runtime_paths=paths,
                 event_cache=SimpleNamespace(),
                 conversation_cache=SimpleNamespace(),
-                session_id=session_id,
                 storage_path=paths.storage_root,
             )
 
-        def build_execution_identity(self, *, target, user_id, session_id, agent_name=None):  # noqa: ANN001, ANN202
+        def build_execution_identity(
+            self,
+            *,
+            target: MessageTarget,
+            user_id: str | None,
+            agent_name: str | None = None,
+        ) -> ToolExecutionIdentity:
             return build_tool_execution_identity(
                 channel="matrix",
                 agent_name=agent_name or AGENT,
@@ -341,9 +355,9 @@ async def main() -> int:  # noqa: PLR0915
                 runtime_paths=paths,
                 requester_id=user_id or bot_id,
                 room_id=target.room_id,
-                thread_id=None,
-                resolved_thread_id=None,
-                session_id=session_id,
+                thread_id=target.source_thread_id,
+                resolved_thread_id=target.resolved_thread_id,
+                session_id=target.session_id,
             )
 
     manager = cm.CallManager(

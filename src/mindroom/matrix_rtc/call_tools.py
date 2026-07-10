@@ -82,14 +82,13 @@ async def build_call_tools(
         reply_to_event_id=None,
         session_id=session_id,
     )
-    context = tool_support.build_context(target, user_id=None, session_id=session_id)
+    context = tool_support.build_context(target, user_id=None)
     if context is None:
         logger.warning("call_tools_unavailable_no_runtime_context", agent=agent_name, room_id=room_id)
         return CallAgentTooling(tools=[], tool_names=())
     execution_identity = tool_support.build_execution_identity(
         target=target,
         user_id=None,
-        session_id=session_id,
         agent_name=agent_name,
     )
     agent = await asyncio.to_thread(

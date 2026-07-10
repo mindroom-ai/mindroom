@@ -186,10 +186,10 @@ class CallSession:
         self._key_retry_attempt = 0
         await self._distribute_keys()
 
-    def on_key_received(self, received: ReceivedFrameKey) -> None:
-        """Install a remote participant's frame key on the media bridge."""
+    def on_key_received(self, received: ReceivedFrameKey) -> bool:
+        """Install a current participant's frame key and report roster admission."""
         if self._stopped:
-            return
+            return True
         member = next(
             (
                 candidate
@@ -199,13 +199,7 @@ class CallSession:
             None,
         )
         if member is None:
-            logger.warning(
-                "call_frame_key_rejected_nonmember",
-                room_id=self.room_id,
-                user_id=received.user_id,
-                device_id=received.claimed_device_id,
-            )
-            return
+            return False
         participant_identity = f"{member.user_id}:{member.device_id}"
         inbound = self._key_manager.receive(
             received,
@@ -213,7 +207,7 @@ class CallSession:
             participant_identity=participant_identity,
         )
         if inbound is None:
-            return
+            return True
         self.deps.bridge.set_frame_key(inbound.participant_identity, inbound.key, inbound.key_index)
         logger.debug(
             "call_frame_key_installed",
@@ -221,6 +215,7 @@ class CallSession:
             participant=inbound.participant_identity,
             key_index=inbound.key_index,
         )
+        return True
 
     async def stop(self) -> None:
         """Leave the call: clear membership, cancel tasks, close media."""

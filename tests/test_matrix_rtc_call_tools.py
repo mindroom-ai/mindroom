@@ -17,6 +17,8 @@ from tests.conftest import test_runtime_paths
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.message_target import MessageTarget
+
 AGENT = "helper"
 
 
@@ -206,21 +208,40 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
         "mindroom.matrix_rtc.call_tools.create_agent",
         fake_create_agent,
     )
-    tool_support = SimpleNamespace(
-        build_context=lambda *_a, **_k: _context(),
-        build_execution_identity=lambda **_k: SimpleNamespace(),
-    )
+    seen_targets: list[MessageTarget] = []
+
+    class StrictToolSupport:
+        def build_context(self, target: MessageTarget, *, user_id: str | None) -> SimpleNamespace:
+            assert user_id is None
+            seen_targets.append(target)
+            return _context()
+
+        def build_execution_identity(
+            self,
+            *,
+            target: MessageTarget,
+            user_id: str | None,
+            agent_name: str | None = None,
+        ) -> SimpleNamespace:
+            assert user_id is None
+            assert agent_name == AGENT
+            seen_targets.append(target)
+            return SimpleNamespace()
+
     tooling = await build_call_tools(
         agent_name=AGENT,
         config=_config(),
         runtime_paths=test_runtime_paths(tmp_path),
-        tool_support=tool_support,  # type: ignore[arg-type]
+        tool_support=StrictToolSupport(),  # type: ignore[arg-type]
         room_id="!room:example.org",
     )
     assert tooling.tool_names == ("add",)
     assert len(tooling.tools) == 1
     assert tooling.instructions == "THE CHAT SYSTEM PROMPT"
     assert create_kwargs["eager_deferred_tools"] is True
+    assert len(seen_targets) == 2
+    assert seen_targets[0] is seen_targets[1]
+    assert seen_targets[0].session_id == "!room:example.org"
 
 
 @pytest.mark.asyncio

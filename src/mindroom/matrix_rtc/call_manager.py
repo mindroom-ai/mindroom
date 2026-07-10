@@ -184,13 +184,22 @@ class CallManager:
         ):
             return
         session = self._sessions.get(room_id)
-        if session is not None:
-            session.on_key_received(received)
+        if session is not None and session.on_key_received(received):
             return
         members = await self._fetch_remote_members(room_id)
         if members is None or not self._received_key_matches_member(received, members):
+            logger.warning(
+                "call_frame_key_rejected_nonmember",
+                room_id=room_id,
+                user_id=received.user_id,
+                device_id=received.claimed_device_id,
+            )
             return
         self._queue_pending_key(room_id, received)
+        if session is not None:
+            room = self._observed_rooms.get(room_id) or self._client.rooms.get(room_id)
+            if room is not None:
+                await self._reconcile(room)
 
     async def reconcile_joined_rooms(self) -> None:
         """Reconcile configured calls after a successful Matrix sync response."""
@@ -283,6 +292,7 @@ class CallManager:
             logger.warning("call_membership_update_failed", room_id=room.room_id, error=str(error))
             self._schedule_reconcile_retry(room)
         else:
+            self._replay_pending_keys(room.room_id, session)
             self._clear_reconcile_retry(room.room_id)
 
     def _is_configured_call_room(self, room: nio.MatrixRoom) -> bool:
@@ -316,6 +326,18 @@ class CallManager:
         if len(pending) >= _MAX_PENDING_KEYS_PER_ROOM:
             pending.pop(next(iter(pending)))
         pending[identity] = received
+
+    def _replay_pending_keys(self, room_id: str, session: CallSession) -> None:
+        """Replay validated keys after the session receives an authoritative roster."""
+        for received in self._pending_keys.pop(room_id, {}).values():
+            if session.on_key_received(received):
+                continue
+            logger.warning(
+                "call_frame_key_rejected_nonmember",
+                room_id=room_id,
+                user_id=received.user_id,
+                device_id=received.claimed_device_id,
+            )
 
     def _is_authorized_call_member(self, user_id: str, room_id: str) -> bool:
         """Return whether a participant may hear and invoke this voice agent."""
@@ -449,8 +471,7 @@ class CallManager:
             await self._stop_session(session)
             return False
         self._sessions[room_id] = session
-        for received in self._pending_keys.pop(room_id, {}).values():
-            session.on_key_received(received)
+        self._replay_pending_keys(room_id, session)
         logger.info("call_session_started", room_id=room_id, agent=self._agent_name)
         return True
 

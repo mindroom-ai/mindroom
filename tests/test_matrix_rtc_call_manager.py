@@ -211,7 +211,12 @@ def _member_unknown_event() -> nio.UnknownEvent:
     )
 
 
-def _frame_key_event(*, room_id: str = ROOM_ID, user_id: str = "@alice:example.org") -> nio.UnknownToDeviceEvent:
+def _frame_key_event(
+    *,
+    room_id: str = ROOM_ID,
+    user_id: str = "@alice:example.org",
+    device_id: str = "ALICEDEV",
+) -> nio.UnknownToDeviceEvent:
     """Build one decrypted inbound Element Call frame key event."""
     key_base64 = base64.b64encode(b"A" * 16).decode("ascii")
     event = nio.UnknownToDeviceEvent.from_dict(
@@ -222,8 +227,8 @@ def _frame_key_event(*, room_id: str = ROOM_ID, user_id: str = "@alice:example.o
                 key_base64=key_base64,
                 key_index=2,
                 room_id=room_id,
-                member_id=f"{user_id}:ALICEDEV",
-                device_id="ALICEDEV",
+                member_id=f"{user_id}:{device_id}",
+                device_id=device_id,
                 sent_ts=1_500,
             ),
         },
@@ -692,7 +697,7 @@ async def test_session_installs_inbound_keys_on_bridge() -> None:
     await session.start([_member("@alice:example.org", "ALICEDEV")])
     bridge.frame_keys.clear()
 
-    session.on_key_received(
+    accepted = session.on_key_received(
         ReceivedFrameKey(
             user_id="@alice:example.org",
             claimed_device_id="ALICEDEV",
@@ -702,6 +707,7 @@ async def test_session_installs_inbound_keys_on_bridge() -> None:
         ),
     )
 
+    assert accepted is True
     assert bridge.frame_keys == [("@alice:example.org:ALICEDEV", b"A" * 16, 2)]
     await session.stop()
 
@@ -714,7 +720,7 @@ async def test_session_rejects_inbound_key_from_device_outside_roster() -> None:
     await session.start([_member("@alice:example.org", "ALICEDEV")])
     bridge.frame_keys.clear()
 
-    session.on_key_received(
+    accepted = session.on_key_received(
         ReceivedFrameKey(
             user_id="@alice:example.org",
             claimed_device_id="OTHERDEV",
@@ -724,6 +730,7 @@ async def test_session_rejects_inbound_key_from_device_outside_roster() -> None:
         ),
     )
 
+    assert accepted is False
     assert bridge.frame_keys == []
     await session.stop()
 
@@ -794,6 +801,38 @@ async def test_manager_replays_a_key_received_before_startup_reconciliation(
     await manager.reconcile_joined_rooms()
 
     assert ("@alice:example.org:ALICEDEV", b"A" * 16, 2) in bridge.frame_keys
+
+
+@pytest.mark.asyncio
+async def test_manager_replays_a_key_received_before_active_roster_update(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A key racing ahead of a new member state event is replayed after reconciliation."""
+
+    async def send_key(_self: object, *, targets: list[CallMember], **_kwargs: object) -> list[CallMember]:
+        return targets
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
+    config = _config()
+    config.authorization.global_users.append("@bob:example.org")
+    client = _client()
+    room = _room(encrypted=True)
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, config)
+
+    await manager.on_room_event(room, _member_unknown_event())
+
+    client.room_get_state.return_value = _state_response(
+        _remote_member_event(),
+        _remote_member_event(user="@bob:example.org", device="BOBDEV"),
+    )
+    await manager.on_to_device_event(
+        _frame_key_event(user_id="@bob:example.org", device_id="BOBDEV"),
+    )
+
+    assert ("@bob:example.org:BOBDEV", b"A" * 16, 2) in bridge.frame_keys
 
 
 @pytest.mark.asyncio
