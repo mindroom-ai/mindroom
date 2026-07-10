@@ -2547,6 +2547,48 @@ async def test_reload_plugins_invalidates_helper_modules_under_plugin_root(tmp_p
                 sys.modules.pop(module_name, None)
 
 
+def test_prepare_plugin_reload_keeps_live_import_state_until_apply(tmp_path: Path) -> None:
+    """Preparing a plugin reload should not expose candidate modules or caches."""
+    plugin_root = tmp_path / "plugins" / "staged-reload"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "staged-reload", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    hooks_path = (plugin_root / "hooks.py").resolve()
+    hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/staged-reload"]), config_path)
+    runtime_paths = runtime_paths_for(config)
+
+    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_modules = set(sys.modules)
+    try:
+        _reload_plugins(config, runtime_paths)
+        live_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path].module
+        assert live_module.VALUE == 1
+
+        hooks_path.write_text("VALUE = 2\n", encoding="utf-8")
+        prepared = plugins_module.prepare_plugin_reload(config, runtime_paths)
+
+        assert plugin_module._MODULE_IMPORT_CACHE[hooks_path].module is live_module
+        assert sys.modules[live_module.__name__] is live_module
+        plugins_module.apply_prepared_plugin_reload(prepared, cancel_existing_tasks=True)
+        assert plugin_module._MODULE_IMPORT_CACHE[hooks_path].module.VALUE == 2
+    finally:
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+        for module_name in set(sys.modules) - original_modules:
+            if module_name.startswith("mindroom_plugin_"):
+                sys.modules.pop(module_name, None)
+
+
 def test_reload_plugins_invalidates_cached_oauth_providers(tmp_path: Path) -> None:
     """Plugin reloads should refresh OAuth providers loaded through the registry."""
     plugin_root = tmp_path / "plugins" / "oauth-reload"

@@ -843,16 +843,23 @@ def publish_prepared_runtime_config_into_app(
             )
             return False
         same_config = current.config_data == prepared.validated_payload
-        if current.generation != prepared.observed_generation and not same_config:
-            logger.info(
-                "Discarding stale API config publish after config changed",
-                publish_config_path=str(prepared.runtime_paths.config_path),
+        if current.generation != prepared.observed_generation:
+            if not same_config or (current.config_load_result is not None and not current.config_load_result.success):
+                logger.info(
+                    "Discarding stale API config publish after config changed",
+                    publish_config_path=str(prepared.runtime_paths.config_path),
+                )
+                return False
+            current_state.snapshot = _published_snapshot(
+                current,
+                increment_generation=False,
+                runtime_config=prepared.runtime_config,
             )
-            return False
+            return True
         same_source = prepared.source_fingerprint == current.source_fingerprint
         current_state.snapshot = _published_snapshot(
             current,
-            increment_generation=not (same_source or same_config),
+            increment_generation=not same_source,
             config_data=prepared.validated_payload,
             runtime_config=prepared.runtime_config,
             config_load_result=ConfigLoadResult(success=True),

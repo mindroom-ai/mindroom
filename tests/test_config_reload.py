@@ -699,7 +699,8 @@ async def test_plugin_reload_rebuilds_runtime_tool_overrides(tmp_path: Path) -> 
     def write_tool(agent_override_type: str, field_name: str = "paths") -> None:
         tools_path.write_text(
             "from agno.tools import Toolkit\n"
-            "from mindroom.tool_system.metadata import ConfigField, ToolCategory, register_tool_with_metadata\n"
+            "from mindroom.tool_system.declarations import ConfigField, ToolCategory\n"
+            "from mindroom.tool_system.registration import register_tool_with_metadata\n"
             "\n"
             "class ReloadOverrideTool(Toolkit):\n"
             "    def __init__(self) -> None:\n"
@@ -906,9 +907,70 @@ async def test_reload_plugins_now_retains_last_good_snapshot_after_failure(tmp_p
 
         assert not shared_task.cancelled()
         assert len(orchestrator.hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED)) == 1
+        assert plugin_module._MODULE_IMPORT_CACHE[hooks_path].module is hooks_module
+        assert sys.modules[hooks_module.__name__] is hooks_module
     finally:
         shared_task.cancel()
         await asyncio.gather(shared_task, return_exceptions=True)
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+        for module_name in set(sys.modules) - original_modules:
+            if module_name.startswith("mindroom_plugin_"):
+                sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_reload_plugins_now_discards_candidate_tasks_when_api_publish_fails(tmp_path: Path) -> None:
+    """A rejected API commit should cancel tasks created by the discarded plugin candidate."""
+    plugin_root = tmp_path / "plugins" / "discarded-reload"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        '{"name": "discarded-reload", "hooks_module": "hooks.py", "skills": []}',
+        encoding="utf-8",
+    )
+    hooks_path = (plugin_root / "hooks.py").resolve()
+    hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
+    config = _runtime_bound_config(Config(plugins=["./plugins/discarded-reload"]), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), api_enabled=False)
+    orchestrator.config = config
+    orchestrator.running = True
+
+    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_modules = set(sys.modules)
+    try:
+        await orchestrator.reload_plugins_now(source="initial")
+        live_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path].module
+        hooks_path.write_text(
+            "import asyncio\nCANDIDATE_TASK = asyncio.create_task(asyncio.Event().wait())\nVALUE = 2\n",
+            encoding="utf-8",
+        )
+        discard = MagicMock(wraps=orchestrator_module.discard_prepared_plugin_reload)
+
+        with (
+            patch.object(
+                orchestrator._external_trigger_runtime,
+                "publish_prepared_api_config_snapshot",
+                side_effect=RuntimeError("stale API snapshot"),
+            ),
+            patch("mindroom.orchestrator.discard_prepared_plugin_reload", new=discard),
+            pytest.raises(RuntimeError, match="stale API snapshot"),
+        ):
+            await orchestrator.reload_plugins_now(source="test")
+        await asyncio.sleep(0)
+
+        prepared_reload = discard.call_args.args[0]
+        candidate_module = next(
+            module for module in prepared_reload.synthetic_modules.values() if "CANDIDATE_TASK" in vars(module)
+        )
+        assert candidate_module.CANDIDATE_TASK.cancelled()
+        assert plugin_module._MODULE_IMPORT_CACHE[hooks_path].module is live_module
+        assert live_module.VALUE == 1
+    finally:
         plugin_module._PLUGIN_CACHE.clear()
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
         plugin_module._MODULE_IMPORT_CACHE.clear()
@@ -1534,6 +1596,8 @@ async def test_plugin_reload_stages_before_commit_and_serializes_config_publicat
 
             assert orchestrator.config is last_good_config
             assert orchestrator.hook_registry is last_good_hooks
+            assert plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module.VALUE == 1
+            assert not apply_prepared.called
 
             config_reload_task = asyncio.create_task(orchestrator.config_reload.update_config())
             await asyncio.sleep(0)
