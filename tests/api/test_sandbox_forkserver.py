@@ -170,13 +170,17 @@ def test_timeout_kills_child_and_keeps_template_alive(
     """A timed-out request must SIGKILL the fork child without recycling the template."""
     manager, spawned = stub_manager
     pid_file = tmp_path / "child.pid"
-    # Warm the template first so the 2 s deadline below covers only the
+    # Warm the template first so the short deadline below covers only the
     # request, not stub startup on a loaded CI machine.
     assert _stub_execute(manager).returncode == 0
 
     with pytest.raises(ForkserverTimeoutError):
-        _stub_execute(manager, envelope=f"sleep:{pid_file}", timeout_seconds=2.0)
+        _stub_execute(manager, envelope=f"sleep:{pid_file}", timeout_seconds=0.5)
 
+    pid_deadline = time.monotonic() + 2.0
+    while not pid_file.exists() and time.monotonic() < pid_deadline:
+        time.sleep(0.01)
+    assert pid_file.exists(), "forked child did not start before the request timeout"
     child_pid = int(pid_file.read_text(encoding="utf-8"))
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
@@ -215,18 +219,25 @@ def test_template_startup_failure_pins_fingerprint() -> None:
 def test_slow_template_warmup_survives_request_timeouts(tmp_path: Path) -> None:
     """A ready-wait timeout must leave the template importing instead of killing and pinning it."""
     script = tmp_path / "slow_template.py"
-    script.write_text("import time\n\ntime.sleep(2)\n\n" + _STUB_TEMPLATE, encoding="utf-8")
+    release_file = tmp_path / "release-template"
+    script.write_text(
+        "import sys\nimport time\nfrom pathlib import Path\n\n"
+        "while not Path(sys.argv[2]).exists():\n"
+        "    time.sleep(0.01)\n\n" + _STUB_TEMPLATE,
+        encoding="utf-8",
+    )
     spawned: list[str] = []
 
     def _command(python_executable: str, socket_path: str) -> list[str]:
         spawned.append(socket_path)
-        return [python_executable, str(script), socket_path]
+        return [python_executable, str(script), socket_path, str(release_file)]
 
     manager = _SandboxForkserver(template_command=_command)
     try:
         with pytest.raises(ForkserverTimeoutError):
-            _stub_execute(manager, timeout_seconds=0.5)
+            _stub_execute(manager, timeout_seconds=0.05)
 
+        release_file.touch()
         assert _stub_execute(manager, timeout_seconds=30.0).returncode == 0
     finally:
         manager.shutdown()

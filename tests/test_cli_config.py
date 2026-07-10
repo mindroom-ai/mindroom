@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+import structlog
 import typer
 import yaml
 from anthropic import PermissionDeniedError
@@ -138,6 +139,22 @@ def test_format_config_search_locations_numbers_paths_and_statuses(
 
     assert lines[0] == f"  1. {missing.resolve()} ([dim]not found[/dim])"
     assert lines[1] == f"  2. {existing.resolve()} ([green]exists[/green])"
+
+
+def test_load_config_quiet_restores_unconfigured_structlog(tmp_path: Path) -> None:
+    """Quiet CLI loads must exercise and restore the unconfigured structlog path."""
+    config_path = tmp_path / "config.yaml"
+    _write_minimal_runtime_config(config_path)
+    runtime_paths = constants_module.resolve_primary_runtime_paths(config_path=config_path, process_env={})
+
+    structlog.reset_defaults()
+    assert structlog.is_configured() is False
+    with patch.object(structlog, "configure", wraps=structlog.configure) as configure:
+        loaded_config = config_cli.load_config_quiet(runtime_paths)
+
+    configure.assert_called_once()
+    assert loaded_config.agents
+    assert structlog.is_configured() is False
 
 
 def test_activate_cli_runtime_explicit_path_keeps_exported_storage_override(

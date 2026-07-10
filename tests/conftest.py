@@ -14,6 +14,7 @@ from collections.abc import (
     Awaitable,
     Callable,
     Generator,
+    Iterable,
     Iterator,
     Mapping,
     MutableMapping,
@@ -29,10 +30,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 import pytest_asyncio
+import structlog
 import yaml
 from agno.models.base import Model
 from agno.models.response import ModelResponse
 from aioresponses import aioresponses
+from structlog.testing import ReturnLoggerFactory
+from structlog.typing import BindableLogger, Context, Processor, WrappedLogger
 
 import mindroom.bot  # noqa: F401
 from mindroom.agent_storage import get_agent_session, get_team_session
@@ -96,6 +100,43 @@ if TYPE_CHECKING:
     from mindroom.dispatch_handoff import DispatchEvent
     from mindroom.matrix.cache import ConversationEventCache
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+
+_STRUCTLOG_CONFIGURE = structlog.configure
+
+
+def _configure_quiet_structlog() -> None:
+    """Keep incidental test logging cheap and silent."""
+    _STRUCTLOG_CONFIGURE(
+        processors=[],
+        context_class=dict,
+        logger_factory=ReturnLoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=False,
+    )
+
+
+def _configure_uncached_structlog(
+    processors: Iterable[Processor] | None = None,
+    wrapper_class: type[BindableLogger] | None = None,
+    context_class: type[Context] | None = None,
+    logger_factory: Callable[..., WrappedLogger] | None = None,
+    cache_logger_on_first_use: bool | None = None,
+) -> None:
+    """Prevent logging tests from leaving cached production renderers behind."""
+    # Cached proxies outlive one test, so the suite intentionally overrides this request.
+    _ = cache_logger_on_first_use
+    _STRUCTLOG_CONFIGURE(
+        processors=processors,
+        wrapper_class=wrapper_class,
+        context_class=context_class,
+        logger_factory=logger_factory,
+        cache_logger_on_first_use=False,
+    )
+
+
+_configure_quiet_structlog()
+
 
 __all__ = [
     "TEST_ACCESS_TOKEN",
@@ -1375,6 +1416,19 @@ async def aioresponse() -> AsyncGenerator[aioresponses, None]:
     # Based on https://github.com/matrix-nio/matrix-nio/blob/main/tests/conftest_async.py
     with aioresponses() as m:
         yield m
+
+
+@pytest.fixture(autouse=True)
+def _isolate_structlog_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> Generator[None, None, None]:
+    """Silence incidental logs and prevent global logging configuration leaks."""
+    _configure_quiet_structlog()
+    if request.node.path.name != "test_logging_config.py":
+        monkeypatch.setattr(structlog, "configure", _configure_uncached_structlog)
+    yield
+    _configure_quiet_structlog()
 
 
 @pytest.fixture(autouse=True)

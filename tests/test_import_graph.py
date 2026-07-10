@@ -132,21 +132,27 @@ loaded = sorted(
 print(json.dumps(loaded))
 """
 
-# mypyc-compiled dependencies register hash-named helper modules (e.g.
-# "4ef79d...__mypyc") that vary per build, so they are excluded from the
-# footprint along with private roots and mindroom itself.
-_ALLOWLIST_PROBE_TEMPLATE = """
+_SLIM_PROBE_TEMPLATE = """
 import importlib, json, sys
 
 stdlib = set(sys.stdlib_module_names)
 baseline = {{name.split(".")[0] for name in sys.modules}}
 importlib.import_module({module!r})
-roots = sorted(
+banned_roots = {banned_roots!r}
+banned = sorted(
+    name
+    for name in sys.modules
+    if any(name == root or name.startswith(root + ".") for root in banned_roots)
+)
+# mypyc-compiled dependencies register hash-named helper modules (e.g.
+# "4ef79d...__mypyc") that vary per build, so they are excluded from the
+# footprint along with private roots and mindroom itself.
+third_party = sorted(
     root
     for root in {{name.split(".")[0] for name in sys.modules}} - stdlib - baseline
     if not root.startswith("_") and not root.endswith("__mypyc") and not root.startswith("mindroom")
 )
-print(json.dumps(roots))
+print(json.dumps({{"banned": banned, "third_party": third_party}}))
 """
 
 
@@ -161,27 +167,41 @@ def _run_probe(probe: str) -> list[str]:
     return json.loads(result.stdout)
 
 
+def _run_slim_probe(module: str) -> tuple[list[str], frozenset[str]]:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _SLIM_PROBE_TEMPLATE.format(
+                module=module,
+                banned_roots=_PROVIDER_SDK_ROOTS + _SLIM_ONLY_ROOTS,
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    )
+    payload = json.loads(result.stdout)
+    return payload["banned"], frozenset(payload["third_party"])
+
+
 def _assert_probe_clean(module: str, roots: tuple[str, ...]) -> None:
     loaded = _run_probe(_BAN_PROBE_TEMPLATE.format(module=module, roots=roots))
     assert loaded == [], f"importing {module} pulled in banned modules: {loaded}"
 
 
-@pytest.mark.parametrize(
-    "module",
-    [
-        "mindroom.config.main",
-        "mindroom.model_loading",
-        "mindroom.tool_system.declarations",
-        "mindroom.tool_system.metadata",
-        "mindroom.tool_system.catalog",
-        "mindroom.tool_system.registration",
-        "mindroom.tools",
-        "mindroom.api.sandbox_runner",
-    ],
-)
-def test_slim_entry_points_do_not_import_provider_sdks(module: str) -> None:
-    """Slim entry points must keep provider SDKs and the matrix client unimported."""
-    _assert_probe_clean(module, _PROVIDER_SDK_ROOTS + _SLIM_ONLY_ROOTS)
+@pytest.mark.parametrize("module", sorted(_ALLOWED_THIRD_PARTY_ROOTS))
+def test_slim_entry_point_import_contract(module: str) -> None:
+    """One isolated import must satisfy both the banned-module and third-party contracts."""
+    banned, third_party = _run_slim_probe(module)
+    assert banned == [], f"importing {module} pulled in banned modules: {banned}"
+    unexpected = sorted(third_party - _ALLOWED_THIRD_PARTY_ROOTS[module])
+    assert not unexpected, (
+        f"importing {module} now loads third-party packages not in its allowlist: {unexpected}. "
+        "Defer the import to first use (see the CLAUDE.md function-level import rule), "
+        "or extend the allowlist here if the dependency is genuinely needed at import time."
+    )
 
 
 def test_primary_runtime_does_not_import_provider_sdks() -> None:
@@ -203,21 +223,4 @@ def test_tool_auto_install_smoke_entrypoint_imports() -> None:
         [sys.executable, "-c", "import scripts.testing.tool_auto_install_smoke"],
         check=True,
         timeout=120,
-    )
-
-
-@pytest.mark.parametrize("module", sorted(_ALLOWED_THIRD_PARTY_ROOTS))
-def test_slim_entry_points_only_load_allowlisted_packages(module: str) -> None:
-    """A new third-party package in a slim import graph must be a conscious decision.
-
-    The check is subset-based (new packages fail, absent ones pass) so
-    platform-conditional dependencies do not flake. If this fails, prefer
-    deferring the import to first use over extending the allowlist.
-    """
-    loaded = frozenset(_run_probe(_ALLOWLIST_PROBE_TEMPLATE.format(module=module)))
-    unexpected = sorted(loaded - _ALLOWED_THIRD_PARTY_ROOTS[module])
-    assert not unexpected, (
-        f"importing {module} now loads third-party packages not in its allowlist: {unexpected}. "
-        "Defer the import to first use (see the CLAUDE.md function-level import rule), "
-        "or extend the allowlist here if the dependency is genuinely needed at import time."
     )

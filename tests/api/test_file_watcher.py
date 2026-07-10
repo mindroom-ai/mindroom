@@ -1,6 +1,5 @@
 """Tests for file watching functionality."""
 
-import time
 from pathlib import Path
 
 import yaml
@@ -67,8 +66,6 @@ def test_config_format_validation(test_client: TestClient, temp_config_file: Pat
 
     with temp_config_file.open("w") as f:
         yaml.dump(valid_config, f)
-
-    time.sleep(0.5)
 
     # Should be able to load the fixed config
     response = test_client.post("/api/config/load")

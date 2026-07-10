@@ -566,9 +566,13 @@ async def test_voice_message_signals_active_turn_before_stt(mock_home_bot: Agent
     prepare_started = asyncio.Event()
     allow_prepare = asyncio.Event()
 
-    async def prepare_voice_event(*_args: object, **_kwargs: object) -> None:
+    async def prepare_voice_event(
+        *_args: object,
+        **_kwargs: object,
+    ) -> inbound_turn_normalizer._VoiceNormalizationResult:
         prepare_started.set()
         await allow_prepare.wait()
+        return _normalized_voice_result(event=voice_event, text="voice transcript")
 
     turn_active = True
     queued_signal.begin_response_turn()

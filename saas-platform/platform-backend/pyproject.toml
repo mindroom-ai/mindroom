@@ -53,11 +53,7 @@ extend-exclude = [ "tests/conftest.py" ]
 testpaths = [ "tests" ]
 python_files = "test_*.py"
 addopts = """
-    -vvv
-    --cov=backend
-    --cov-report term
-    --cov-report html
-    --cov-report xml
+    -q
     --asyncio-mode=strict
     --timeout 60
     --durations 20

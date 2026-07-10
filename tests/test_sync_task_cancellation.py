@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
@@ -202,6 +203,7 @@ async def test_sync_forever_with_restart_restarts_stalled_sync(monkeypatch: pyte
     monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_STARTUP_GRACE_SECONDS", 0.01)
     monkeypatch.setattr(runtime_helpers, "_MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS", 0.01)
     monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr(runtime_helpers, "_stalled_restart_jitter_seconds", lambda: 0.0)
 
     await sync_forever_with_restart(bot, max_retries=2)
 
@@ -324,6 +326,7 @@ async def test_sync_forever_with_restart_retries_on_sync_restart_cancel(
 
     monkeypatch.setattr(_SyncIteration, "_watch", staticmethod(fake_watch))
     monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr(runtime_helpers, "_stalled_restart_jitter_seconds", lambda: 0.0)
 
     bot.sync_forever = sync_then_stop
 
@@ -1695,6 +1698,7 @@ async def test_restart_resets_monotonic_clock(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_STARTUP_GRACE_SECONDS", 0.5)
     monkeypatch.setattr(runtime_helpers, "_MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS", 0.01)
     monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr(runtime_helpers, "_stalled_restart_jitter_seconds", lambda: 0.0)
 
     await sync_forever_with_restart(bot, max_retries=3)
 
@@ -1812,7 +1816,6 @@ async def test_immediate_sync_failure_retries(monkeypatch: pytest.MonkeyPatch) -
 @pytest.mark.asyncio
 async def test_single_failure_no_duplicate_cleanup_logs(
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A single sync failure should produce exactly 1 cleanup warning, not 2+.
 
@@ -1835,8 +1838,8 @@ async def test_single_failure_no_duplicate_cleanup_logs(
     monkeypatch.setattr(runtime_helpers, "_MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS", 0.01)
     monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
 
-    with caplog.at_level("WARNING", logger="mindroom.orchestration.runtime"):
+    with capture_logs() as logs:
         await sync_forever_with_restart(bot, max_retries=1)
 
-    cleanup_warnings = [r for r in caplog.records if "Suppressed error during sync iteration cleanup" in r.message]
-    assert len(cleanup_warnings) <= 1, f"Expected at most 1 cleanup warning, got {len(cleanup_warnings)}"
+    cleanup_warnings = [entry for entry in logs if entry["event"] == "Suppressed error during sync iteration cleanup"]
+    assert len(cleanup_warnings) == 1, f"Expected exactly 1 cleanup warning, got {len(cleanup_warnings)}"
