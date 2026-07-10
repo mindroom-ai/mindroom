@@ -296,6 +296,10 @@ async def _has_newer_human_thread_activity(
             interrupted_thread.thread_id,
             caller_label="auto_resume_after_restart",
         )
+        original_event = await conversation_cache.get_event(
+            interrupted_thread.room_id,
+            interrupted_thread.target_event_id,
+        )
         internal_sender_ids = current_internal_sender_ids(config, runtime_paths)
     except Exception as exc:
         logger.warning(
@@ -305,9 +309,11 @@ async def _has_newer_human_thread_activity(
             error=str(exc),
         )
         return False
+    original_timestamp_ms = interrupted_thread.timestamp_ms
+    if isinstance(original_event, nio.RoomGetEventResponse) and isinstance(original_event.event.server_timestamp, int):
+        original_timestamp_ms = original_event.event.server_timestamp
     return any(
-        message.timestamp > interrupted_thread.timestamp_ms and message.sender not in internal_sender_ids
-        for message in history
+        message.timestamp >= original_timestamp_ms and message.sender not in internal_sender_ids for message in history
     )
 
 

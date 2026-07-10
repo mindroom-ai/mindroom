@@ -2842,7 +2842,15 @@ async def team_response_stream(  # noqa: C901, PLR0915
 
                     if pending_retry_decision is not None:
                         pending_retry_decision.record_retry_success()
-                    if ctx.reply_to_event_id:
+                    event_has_visible = _has_visible_team_output(event)
+                    event_is_empty = (
+                        event.status == RunStatus.completed and not event_tool_executions and not event_has_visible
+                    )
+                    if (
+                        ctx.reply_to_event_id
+                        and event.status not in MODEL_HISTORY_EXCLUDED_RUN_STATUSES
+                        and not event_is_empty
+                    ):
                         _persist_bound_seen_event_ids(
                             scope_context=run.scope_context,
                             session_id=ctx.session_id,
@@ -2852,7 +2860,6 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         event,
                         team_display_names=team_members.display_names,
                     )
-                    event_has_visible = _has_visible_team_output(event)
                     # The driver emits response_text only after settling the
                     # attempt: a pre-settle yield would leak the fallback
                     # placeholder before an empty-run retry, or stale
@@ -2862,11 +2869,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                             response_text=response_text,
                             replayable_text=response_text if event_has_visible else "",
                             has_visible_content=event_has_visible,
-                            is_empty=(
-                                event.status == RunStatus.completed
-                                and not event_tool_executions
-                                and not event_has_visible
-                            ),
+                            is_empty=event_is_empty,
                             session_id=event.session_id,
                             run_id=event.run_id,
                             attempt_run_id=attempt_run_id,

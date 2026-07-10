@@ -863,8 +863,12 @@ async def test_auto_resume_records_outbound_message_when_send_succeeds(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_auto_resume_skips_thread_with_newer_human_activity(tmp_path: Path) -> None:
-    """A human follow-up that already restarted the conversation should suppress the recovery relay."""
+@pytest.mark.parametrize("human_timestamp", [100, 200])
+async def test_auto_resume_skips_human_activity_after_original_event(
+    tmp_path: Path,
+    human_timestamp: int,
+) -> None:
+    """Human activity after the original response suppresses recovery despite later bot edits."""
     config = _make_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     client = AsyncMock(spec=nio.AsyncClient)
@@ -874,17 +878,25 @@ async def test_auto_resume_skips_thread_with_newer_human_activity(tmp_path: Path
             sender=BOT_USER_ID,
             body="Interrupted response",
             event_id="$target",
-            timestamp=100,
+            timestamp=300,
             thread_id="$threaded",
         ),
         ResolvedVisibleMessage.synthetic(
             sender=USER_ID,
             body="Please continue",
             event_id="$new-user-message",
-            timestamp=200,
+            timestamp=human_timestamp,
             thread_id="$threaded",
         ),
     ]
+    conversation_cache.get_event.return_value = _room_get_event_response(
+        _make_message_event(
+            event_id="$target",
+            body="Interrupted response",
+            timestamp_ms=100,
+            relates_to=_thread_reply_relation("$threaded", "$threaded"),
+        ),
+    )
     interrupted = [
         InterruptedThread(
             room_id=ROOM_ID,
@@ -893,7 +905,7 @@ async def test_auto_resume_skips_thread_with_newer_human_activity(tmp_path: Path
             partial_text="Interrupted response",
             agent_name="test_agent",
             original_sender_id=USER_ID,
-            timestamp_ms=100,
+            timestamp_ms=300,
         ),
     ]
 
@@ -916,6 +928,7 @@ async def test_auto_resume_skips_thread_with_newer_human_activity(tmp_path: Path
         "$threaded",
         caller_label="auto_resume_after_restart",
     )
+    conversation_cache.get_event.assert_awaited_once_with(ROOM_ID, "$target")
 
 
 @pytest.mark.asyncio

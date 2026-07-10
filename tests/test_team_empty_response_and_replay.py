@@ -192,6 +192,66 @@ async def test_team_response_stream_yields_fallback_notice_when_retry_is_also_em
 
 
 @pytest.mark.asyncio
+async def test_team_response_stream_does_not_preserve_seen_ids_for_double_empty_run() -> None:
+    """Discarded streaming attempts cannot consume Matrix events."""
+    orchestrator, config = _make_orchestrator()
+
+    async def empty_stream(run_id: str) -> AsyncIterator[object]:
+        yield _empty_team_run(run_id)
+
+    mock_team = _make_test_team()
+    mock_team.arun = MagicMock(side_effect=[empty_stream("team-run-1"), empty_stream("team-run-2")])
+
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2], patch("mindroom.teams._persist_bound_seen_event_ids") as persist_seen:
+        _ = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="Say something.",
+                turn_recorder=TurnRecorder(user_message="Say something."),
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id="session-1", reply_to_event_id="$source"),
+            )
+        ]
+
+    persist_seen.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_does_not_preserve_seen_ids_for_paused_run() -> None:
+    """Paused streaming runs are absent from model history and cannot consume Matrix events."""
+    orchestrator, config = _make_orchestrator()
+    paused_run = TeamRunOutput(content="Approval required", run_id="team-run-1", session_id="session-1")
+    paused_run.status = RunStatus.paused
+
+    async def paused_stream() -> AsyncIterator[object]:
+        yield paused_run
+
+    mock_team = _make_test_team()
+    mock_team.arun = MagicMock(return_value=paused_stream())
+
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2], patch("mindroom.teams._persist_bound_seen_event_ids") as persist_seen:
+        _ = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="Run the action.",
+                turn_recorder=TurnRecorder(user_message="Run the action."),
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id="session-1", reply_to_event_id="$source"),
+            )
+        ]
+
+    persist_seen.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_team_response_stream_empty_event_stream_retries_then_notices() -> None:
     """A stream that ends with no events at all still triggers the empty-run guard.
 
