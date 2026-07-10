@@ -334,7 +334,14 @@ async def _has_newer_human_thread_activity(
         )
         return True
     return any(
-        message.timestamp >= original_timestamp_ms and message.sender not in internal_sender_ids for message in history
+        message.timestamp >= original_timestamp_ms
+        and _effective_requester_for_message(
+            message,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+        not in internal_sender_ids
+        for message in history
     )
 
 
