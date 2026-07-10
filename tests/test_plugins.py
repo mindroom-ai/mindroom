@@ -2012,10 +2012,71 @@ def test_load_config_disables_unknown_tool_when_any_plugin_failed_to_load(
 
         assert config.resolve_entity("assistant").available_tools == ["shell", "scheduler"]
         assert any(
-            call.args == ("Unknown tool may belong to a plugin that failed to load; disabling it for this run",)
+            call.args
+            == (
+                "Unknown tool may belong to a plugin that failed to load; "
+                "disabling it for this run (verify the tool name is not a typo)",
+            )
             and call.kwargs["tool_name"] == "dynamic_plugin_tool"
             and call.kwargs["config_path"] == "agents.assistant.tools[1]"
             and call.kwargs["failed_plugins"] == ["broken_plugin"]
+            for call in mock_logger.warning.call_args_list
+        )
+
+
+def test_load_config_disables_unknown_tool_when_plugin_fails_before_manifest_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plugins skipped before their manifest resolves must still count as failed plugins."""
+    plugin_root = tmp_path / "plugins" / "broken"
+    plugin_root.mkdir(parents=True)
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        (
+            "models:\n"
+            "  default:\n"
+            "    provider: openai\n"
+            "    id: gpt-5.4\n"
+            "router:\n"
+            "  model: default\n"
+            "agents:\n"
+            "  assistant:\n"
+            "    display_name: Assistant\n"
+            "    role: test\n"
+            "    tools:\n"
+            "      - shell\n"
+            "      - manifestless_plugin_tool\n"
+            "plugins:\n"
+            "  - ./plugins/broken\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    mock_logger = MagicMock()
+    monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
+
+    with _preserved_plugin_loader_state():
+        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+
+        assert config.resolve_entity("assistant").available_tools == ["shell", "scheduler"]
+        assert any(
+            call.args
+            == (
+                "Unknown tool may belong to a plugin that failed to load; "
+                "disabling it for this run (verify the tool name is not a typo)",
+            )
+            and call.kwargs["tool_name"] == "manifestless_plugin_tool"
+            and call.kwargs["config_path"] == "agents.assistant.tools[1]"
+            and call.kwargs["failed_plugins"] == ["./plugins/broken"]
             for call in mock_logger.warning.call_args_list
         )
 

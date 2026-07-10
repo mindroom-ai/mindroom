@@ -825,7 +825,7 @@ def _compute_resolved_tool_state_for_runtime(
         )
         return _ResolvedToolState(builtin_registry, builtin_metadata, {})
 
-    plugin_bases = plugin_module._collect_plugin_bases(
+    plugin_bases, skipped_plugin_specs = plugin_module._collect_plugin_bases(
         plugin_entries,
         runtime_paths,
         skip_broken_plugins=tolerate_plugin_load_errors,
@@ -835,7 +835,9 @@ def _compute_resolved_tool_state_for_runtime(
 
     validation_registrations: dict[str, dict[str, ToolMetadata]] = {}
     unavailable_tool_metadata: dict[str, ToolMetadata] = {}
-    failed_plugin_names: set[str] = set()
+    # Entries skipped before their manifest resolved have no recoverable tool
+    # declarations at all, so they count as failed plugins by entry spec.
+    failed_plugin_names: set[str] = set(skipped_plugin_specs)
     active_plugins: list[tuple[str, str]] = []
     for plugin_base, plugin_entry, _ in plugin_bases:
         candidate_registrations: dict[str, dict[str, ToolMetadata]] = {}
@@ -1027,14 +1029,14 @@ def _is_register_tool_with_metadata_call(node: ast.expr) -> bool:
 def _literal_string_keyword(
     node: ast.Call,
     keyword_name: str,
-    module_constants: Mapping[str, str] | None = None,
+    module_constants: Mapping[str, str],
 ) -> str | None:
     for keyword in node.keywords:
         if keyword.arg != keyword_name:
             continue
         if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
             return keyword.value.value
-        if module_constants is not None and isinstance(keyword.value, ast.Name):
+        if isinstance(keyword.value, ast.Name):
             return module_constants.get(keyword.value.id)
     return None
 

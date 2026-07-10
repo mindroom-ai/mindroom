@@ -1362,7 +1362,8 @@ class Config(BaseModel):
                 # broken source, so this unknown name may belong to one of them;
                 # disable the tool instead of refusing to start.
                 logger.warning(
-                    "Unknown tool may belong to a plugin that failed to load; disabling it for this run",
+                    "Unknown tool may belong to a plugin that failed to load; "
+                    "disabling it for this run (verify the tool name is not a typo)",
                     config_path=config_path_prefix,
                     tool_name=entry.name,
                     failed_plugins=sorted(self._plugin_load_failure_names),
