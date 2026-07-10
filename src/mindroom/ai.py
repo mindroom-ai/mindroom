@@ -1893,6 +1893,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         pending_retry_decision: MediaRetryDecision | None = None
 
         def _build_interrupted_metadata(
+            attempt_state: _StreamingAttemptState,
             status: RunStatus,
             event_run_id: str | None,
             event_session_id: str | None,
@@ -1900,9 +1901,9 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             if run_metadata_collector is None:
                 return None
             fallback_metrics = build_model_request_metrics_fallback(
-                state.request_metric_totals,
-                state.first_token_latency,
-                state.observed_request_metric_fields,
+                attempt_state.request_metric_totals,
+                attempt_state.first_token_latency,
+                attempt_state.observed_request_metric_fields,
             )
             return build_ai_run_metadata_content(
                 config=config,
@@ -1910,14 +1911,14 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 run_id=event_run_id,
                 session_id=event_session_id or session_id,
                 status=status,
-                model=state.latest_model_id,
-                model_provider=state.latest_model_provider,
+                model=attempt_state.latest_model_id,
+                model_provider=attempt_state.latest_model_provider,
                 metrics=fallback_metrics,
                 context_input_tokens=prepared_context_input_tokens,
-                context_raw_input_tokens=state.latest_request_input_tokens,
-                context_cache_read_tokens=state.latest_request_cache_read_tokens,
-                context_cache_write_tokens=state.latest_request_cache_write_tokens,
-                tool_count=state.observed_tool_calls,
+                context_raw_input_tokens=attempt_state.latest_request_input_tokens,
+                context_cache_read_tokens=attempt_state.latest_request_cache_read_tokens,
+                context_cache_write_tokens=attempt_state.latest_request_cache_write_tokens,
+                tool_count=attempt_state.observed_tool_calls,
                 prepared_history=prepared_run.prepared_history,
             )
 
@@ -1970,6 +1971,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
 
             if state.cancelled_run_event is not None:
                 cancelled_metadata = _build_interrupted_metadata(
+                    state,
                     RunStatus.cancelled,
                     state.cancelled_run_event.run_id,
                     state.cancelled_run_event.session_id,
@@ -1989,6 +1991,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
 
             if state.paused_run_event is not None:
                 paused_metadata = _build_interrupted_metadata(
+                    state,
                     RunStatus.paused,
                     state.paused_run_event.run_id,
                     state.paused_run_event.session_id,
