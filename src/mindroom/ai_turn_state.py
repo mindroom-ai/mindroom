@@ -98,6 +98,7 @@ class AITurnState:
         recorder: TurnRecorder,
         *,
         run_metadata: Mapping[str, Any] | None,
+        original_status: RunStatus | None = None,
     ) -> None:
         """Mark the recorder interrupted using its already-canonical live state."""
         self.assistant_text = recorder.assistant_text
@@ -108,5 +109,5 @@ class AITurnState:
             assistant_text=self.assistant_text,
             completed_tools=self.completed_tools,
             interrupted_tools=self.interrupted_tools,
-            original_status=recorder.interruption_status,
+            original_status=recorder.interruption_status if original_status is None else original_status,
         )

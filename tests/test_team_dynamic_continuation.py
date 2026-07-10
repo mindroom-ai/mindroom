@@ -11,6 +11,7 @@ from agno.models.response import ToolExecution
 from agno.run.agent import RunContentEvent as AgentRunContentEvent
 from agno.run.agent import RunOutput
 from agno.run.agent import ToolCallCompletedEvent as AgentToolCallCompletedEvent
+from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
 
 from mindroom import teams as teams_module
@@ -237,6 +238,40 @@ async def test_team_response_stream_continues_after_streamed_member_dynamic_tool
     assert recorder.outcome == "completed"
     assert "Used the loaded tool." in recorder.assistant_text
     assert any(entry.tool_name == "load_tool" for entry in recorder.completed_tools)
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_error_does_not_duplicate_continuation_tools() -> None:
+    """Errored continuation reuses canonical recorder tools without prefixing them twice."""
+    orchestrator, config = _make_orchestrator()
+
+    async def first_stream() -> AsyncIterator[object]:
+        yield AgentToolCallCompletedEvent(agent_name="GeneralAgent", tool=_load_tool_execution())
+
+    async def second_stream() -> AsyncIterator[object]:
+        yield TeamRunErrorEvent(content="provider exploded")
+
+    mock_team = _make_test_team()
+    mock_team.arun = MagicMock(side_effect=[first_stream(), second_stream()])
+    recorder = TurnRecorder(user_message="Load the sleep tool and use it.")
+
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2]:
+        _ = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="Load the sleep tool and use it.",
+                turn_recorder=recorder,
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id=None),
+            )
+        ]
+
+    assert recorder.outcome == "interrupted"
+    assert [tool.tool_name for tool in recorder.completed_tools] == ["load_tool"]
 
 
 @pytest.mark.asyncio

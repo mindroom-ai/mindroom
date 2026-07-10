@@ -2590,12 +2590,9 @@ async def team_response_stream(  # noqa: C901, PLR0915
         def _record_interrupted_team_turn() -> None:
             """Record an errored team turn, including failures with no partial output."""
             _sync_live_turn_recorder()
-            run.turn_state.record_interrupted(
+            run.turn_state.record_interrupted_from_recorder(
                 turn_recorder,
                 run_metadata=run_metadata,
-                assistant_text=turn_recorder.assistant_text,
-                completed_tools=turn_recorder.completed_tools,
-                interrupted_tools=turn_recorder.interrupted_tools,
                 original_status=RunStatus.error,
             )
 
