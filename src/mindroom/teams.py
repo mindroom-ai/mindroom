@@ -39,6 +39,7 @@ from mindroom.ai_run_metadata import (
     build_model_request_metrics_fallback,
     build_prepared_history_metadata_content,
 )
+from mindroom.ai_turn_state import merge_tool_trace_snapshots
 from mindroom.authorization import get_available_responders_in_room
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
@@ -3131,8 +3132,12 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 elif isinstance(event, TeamRunPausedEvent):
                     event_completed_tools, event_interrupted_tools = split_interrupted_tool_trace(event.tools)
                     canonical_text = _current_canonical_partial_text()
-                    paused_body = canonical_text or str(event.content or "")
-                    paused_text = _format_team_header(team_members.display_names) + paused_body if paused_body else ""
+                    paused_partial_text = canonical_text or str(event.content or "")
+                    paused_text = (
+                        _format_team_header(team_members.display_names) + paused_partial_text
+                        if paused_partial_text
+                        else ""
+                    )
                     paused_metadata: dict[str, Any] | None = None
                     if run_metadata_collector is not None:
                         paused_metadata = _build_streamed_team_run_metadata_content(
@@ -3148,11 +3153,15 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     yield AttemptResolved(
                         ErroredAttempt(
                             "" if emitted_output else paused_text,
-                            partial_text=paused_text,
-                            completed_tools=(*completed_tools, *event_completed_tools),
-                            interrupted_tools=(
-                                *(pending.trace_entry for pending in pending_tools),
-                                *event_interrupted_tools,
+                            partial_text=paused_partial_text,
+                            completed_tools=tuple(
+                                merge_tool_trace_snapshots(completed_tools, event_completed_tools),
+                            ),
+                            interrupted_tools=tuple(
+                                merge_tool_trace_snapshots(
+                                    [pending.trace_entry for pending in pending_tools],
+                                    event_interrupted_tools,
+                                ),
                             ),
                             session_id=event.session_id,
                             run_id=event.run_id or attempt_run_id,

@@ -41,7 +41,7 @@ from mindroom.execution_preparation import (
     prepare_bound_team_run_context,
 )
 from mindroom.history.interrupted_replay import _render_interrupted_replay_content
-from mindroom.history.runtime import open_bound_scope_session_context
+from mindroom.history.runtime import open_bound_scope_session_context, resolve_bound_team_scope_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import CompactionDecision, CompactionReplyOutcome, PreparedHistoryState
@@ -3148,13 +3148,17 @@ async def test_team_response_stream_retries_errored_output_with_fresh_run_id() -
     orchestrator.knowledge_managers = {}
     orchestrator.agent_bots = {"general": MagicMock(running=True)}
 
+    fake_agent = _make_test_agent("GeneralAgent")
     team_members = ResolvedExactTeamMembers(
         requested_agent_names=["general"],
-        agents=[],
+        agents=[fake_agent],
         display_names=["GeneralAgent"],
         materialized_agent_names={"general"},
         failed_agent_names=[],
     )
+    bound_scope = resolve_bound_team_scope_context(agents=[fake_agent], config=config)
+    assert bound_scope is not None
+    mock_team = _make_test_team(team_id=bound_scope.scope.scope_id)
 
     call_run_ids: list[str | None] = []
     callback_run_ids: list[str] = []
@@ -3167,7 +3171,13 @@ async def test_team_response_stream_retries_errored_output_with_fresh_run_id() -
         if len(call_run_ids) == 1:
             yield TeamRunOutput(content="Error code: 500 - audio input is not supported", status=RunStatus.error)
             return
-        yield TeamRunOutput(content="Recovered consensus", status=RunStatus.completed)
+        yield TeamRunOutput(
+            content="Recovered consensus",
+            run_id=_kwargs["run_id"],
+            session_id=_kwargs["session_id"],
+            team_id=_kwargs["team"].id,
+            status=RunStatus.completed,
+        )
 
     team_agent_ids = [
         fixture_entity_matrix_id(
@@ -3183,7 +3193,7 @@ async def test_team_response_stream_retries_errored_output_with_fresh_run_id() -
             new=MagicMock(return_value=_KnowledgeResolution(knowledge=None)),
         ),
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
-        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
     ):
         chunks = [
@@ -3194,7 +3204,7 @@ async def test_team_response_stream_retries_errored_output_with_fresh_run_id() -
                 turn_recorder=recorder,
                 orchestrator=orchestrator,
                 execution_identity=None,
-                ctx=make_turn_context(run_id="run-789", session_id=None),
+                ctx=make_turn_context(run_id="run-789", session_id="session-1"),
                 mode=TeamMode.COORDINATE,
                 media=MediaInputs(audio=[MagicMock(name="audio_input")]),
                 run_id_callback=callback_run_ids.append,

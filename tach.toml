@@ -129,6 +129,7 @@ path = "mindroom.ai_turn_state"
 depends_on = []
 visibility = [
     "mindroom.response_turn",
+    "mindroom.teams",
 ]
 
 [[modules]]
@@ -1291,6 +1292,7 @@ depends_on = [
     "mindroom.ai",
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
+    "mindroom.ai_turn_state",
     "mindroom.authorization",
     "mindroom.constants",
     "mindroom.entity_resolution",

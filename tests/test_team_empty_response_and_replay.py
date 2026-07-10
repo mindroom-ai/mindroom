@@ -10,6 +10,8 @@ from agno.models.message import Message
 from agno.models.response import ToolExecution
 from agno.run.agent import RunContentEvent as AgentRunContentEvent
 from agno.run.agent import RunOutput
+from agno.run.agent import ToolCallCompletedEvent as AgentToolCallCompletedEvent
+from agno.run.agent import ToolCallStartedEvent as AgentToolCallStartedEvent
 from agno.run.base import RunStatus
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import RunPausedEvent as TeamRunPausedEvent
@@ -405,6 +407,50 @@ async def test_team_response_stream_records_paused_terminal_event() -> None:
     assert "Approval required" in rendered
     assert recorder.outcome == "interrupted"
     assert recorder.interruption_status is RunStatus.paused
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_paused_event_reuses_live_partial_and_tool_snapshots() -> None:
+    """A cumulative pause event must not duplicate already streamed replay state."""
+    orchestrator, config = _make_orchestrator()
+    completed_tool = ToolExecution(tool_name="run_shell_command", tool_args={"cmd": "pwd"}, result="/app")
+    pending_tool = ToolExecution(tool_name="save_file", tool_args={"path": "result.txt"})
+
+    async def paused_stream() -> AsyncIterator[object]:
+        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Partial answer")
+        yield AgentToolCallStartedEvent(agent_name="GeneralAgent", tool=completed_tool)
+        yield AgentToolCallCompletedEvent(agent_name="GeneralAgent", tool=completed_tool)
+        yield AgentToolCallStartedEvent(agent_name="GeneralAgent", tool=pending_tool)
+        yield TeamRunPausedEvent(
+            content="Partial answer",
+            run_id="team-run-paused",
+            session_id="session-1",
+            tools=[completed_tool, pending_tool],
+        )
+
+    mock_team = _make_test_team()
+    mock_team.arun = MagicMock(return_value=paused_stream())
+    recorder = TurnRecorder(user_message="Run the action.")
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2]:
+        _ = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="Run the action.",
+                turn_recorder=recorder,
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id="session-1", reply_to_event_id="$source"),
+            )
+        ]
+
+    assert recorder.outcome == "interrupted"
+    assert recorder.interruption_status is RunStatus.paused
+    assert recorder.assistant_text.count("Partial answer") == 1
+    assert [tool.tool_name for tool in recorder.completed_tools] == ["run_shell_command"]
+    assert [tool.tool_name for tool in recorder.interrupted_tools] == ["save_file"]
 
 
 @pytest.mark.asyncio
