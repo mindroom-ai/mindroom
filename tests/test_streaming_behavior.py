@@ -94,7 +94,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
 
 IN_PROGRESS_MARKER = " ⋯"
-_INTERRUPTION_SUMMARY = "(turn interrupted by the user before completion)"
+_INTERRUPTION_SUMMARY = "(turn interrupted before completion)"
 
 
 async def _aiter(*events: object) -> AsyncIterator[object]:

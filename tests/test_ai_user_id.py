@@ -1173,8 +1173,7 @@ class TestUserIdPassthrough:
             ("user", "test"),
             (
                 "assistant",
-                "Half done\n\n(turn interrupted by the user before completion; "
-                "1 tool call(s) had completed: run_shell_command)",
+                "Half done\n\n(turn interrupted before completion; 1 tool call(s) had completed: run_shell_command)",
             ),
         ]
 
@@ -1226,7 +1225,7 @@ class TestUserIdPassthrough:
         assert persisted_run.messages is not None
         assert [(message.role, message.content) for message in persisted_run.messages] == [
             ("user", "test"),
-            ("assistant", "Half done\n\n(turn interrupted by the user before completion)"),
+            ("assistant", "Half done\n\n(turn interrupted before completion)"),
         ]
 
     @pytest.mark.asyncio
@@ -1280,7 +1279,7 @@ class TestUserIdPassthrough:
             ("user", "test"),
             (
                 "assistant",
-                "Half done\n\n(turn interrupted by the user before completion; "
+                "Half done\n\n(turn interrupted before completion; "
                 "1 tool call(s) were still running: run_shell_command)",
             ),
         ]
@@ -3513,7 +3512,7 @@ class TestUserIdPassthrough:
             ("user", "test"),
             (
                 "assistant",
-                "Half done\n\n(turn interrupted by the user before completion; "
+                "Half done\n\n(turn interrupted before completion; "
                 "1 tool call(s) had completed: run_shell_command; "
                 "1 tool call(s) were still running: save_file)",
             ),
@@ -3591,7 +3590,7 @@ class TestUserIdPassthrough:
             ("user", "test"),
             (
                 "assistant",
-                "Half done\n\n(turn interrupted by the user before completion; "
+                "Half done\n\n(turn interrupted before completion; "
                 "1 tool call(s) had completed: run_shell_command; "
                 "1 tool call(s) were still running: run_shell_command)",
             ),
@@ -3650,7 +3649,7 @@ class TestUserIdPassthrough:
         assert persisted_run.messages is not None
         assert [(message.role, message.content) for message in persisted_run.messages] == [
             ("user", "test"),
-            ("assistant", "Half done\n\n(turn interrupted by the user before completion)"),
+            ("assistant", "Half done\n\n(turn interrupted before completion)"),
         ]
 
     @pytest.mark.asyncio

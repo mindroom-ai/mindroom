@@ -789,7 +789,7 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
     assert persisted_run.messages[0].role == "user"
     assert "Hello" in cast("str", persisted_run.messages[0].content)
     assert [(message.role, message.content) for message in persisted_run.messages[-1:]] == [
-        ("assistant", "(turn interrupted by the user before completion)"),
+        ("assistant", "(turn interrupted before completion)"),
     ]
 
 
@@ -861,7 +861,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_f
     assert persisted_run.messages is not None
     assert [(message.role, message.content) for message in persisted_run.messages] == [
         ("user", "Hello"),
-        ("assistant", "🤝 Team Response:\n\nTeam hello\n\n(turn interrupted by the user before completion)"),
+        ("assistant", "🤝 Team Response:\n\nTeam hello\n\n(turn interrupted before completion)"),
     ]
     assert persisted_run.metadata is not None
     assert persisted_run.metadata[MINDROOM_REPLAY_STATE_METADATA_KEY] == MINDROOM_REPLAY_STATE_INTERRUPTED
@@ -996,7 +996,7 @@ async def test_generate_team_response_helper_preserves_structured_stream_cancel_
     assert persisted_run.messages is not None
     assert [(message.role, message.content) for message in persisted_run.messages] == [
         ("user", "Hello"),
-        ("assistant", "Team hello\n\n(turn interrupted by the user before completion)"),
+        ("assistant", "Team hello\n\n(turn interrupted before completion)"),
     ]
 
 
@@ -1315,7 +1315,7 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
     assert persisted_run.messages is not None
     assert [(message.role, message.content) for message in persisted_run.messages] == [
         ("user", "Hello"),
-        ("assistant", "(turn interrupted by the user before completion)"),
+        ("assistant", "(turn interrupted before completion)"),
     ]
 
 

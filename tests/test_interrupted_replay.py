@@ -122,7 +122,7 @@ def test_build_interrupted_replay_run_creates_completed_agent_run_with_summary_a
         (
             "assistant",
             "Half done\n\n"
-            "(turn interrupted by the user before completion; "
+            "(turn interrupted before completion; "
             "1 tool call(s) had completed: run_shell_command; "
             "1 tool call(s) were still running: save_file)",
         ),
@@ -164,7 +164,7 @@ def test_interrupted_replay_content_contains_no_raw_tool_trace() -> None:
     assert "[interrupted]" not in content
     assert '{"attachment"' not in content
     assert content.startswith("Half done")
-    assert "turn interrupted by the user before completion" in content
+    assert "turn interrupted before completion" in content
     assert "get_attachment" in content
 
 
@@ -221,6 +221,29 @@ def test_build_interrupted_replay_run_describes_provider_error_as_failure() -> N
     assert _assistant_text(run) == "Half done\n\n(turn failed before completion)"
     assert run.metadata is not None
     assert run.metadata["mindroom_original_status"] == "error"
+
+
+def test_cancelled_replay_uses_neutral_interruption_summary_for_sync_restart() -> None:
+    """Cancelled replay text must not claim a sync-restart interruption came from the user."""
+    snapshot = build_interrupted_replay_snapshot(
+        user_message="Please continue",
+        partial_text="",
+        completed_tools=[],
+        interrupted_tools=[],
+        run_metadata=None,
+        response_event_id=None,
+        original_status=RunStatus.cancelled,
+    )
+
+    run = _build_interrupted_replay_run(
+        snapshot=snapshot,
+        run_id="sync-restart-replay",
+        scope_id="test_agent",
+        session_id="session-1",
+        is_team=False,
+    )
+
+    assert _assistant_text(run) == "(turn interrupted before completion)"
 
 
 def test_build_interrupted_replay_run_preserves_coalesced_source_metadata() -> None:
@@ -424,6 +447,6 @@ def test_persist_interrupted_replay_snapshot_keeps_minimal_interrupted_turn(tmp_
         assert persisted is not None
         assert persisted.runs is not None
         assert len(persisted.runs) == 1
-        assert _assistant_text(persisted.runs[0]) == "(turn interrupted by the user before completion)"
+        assert _assistant_text(persisted.runs[0]) == "(turn interrupted before completion)"
     finally:
         storage.close()

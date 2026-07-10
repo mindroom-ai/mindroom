@@ -139,7 +139,7 @@ def _render_interruption_summary(snapshot: InterruptedReplaySnapshot) -> str:
     summary = (
         "(turn failed before completion"
         if snapshot.original_status is RunStatus.error
-        else "(turn interrupted by the user before completion"
+        else "(turn interrupted before completion"
     )
     if details:
         summary += "; " + "; ".join(details)

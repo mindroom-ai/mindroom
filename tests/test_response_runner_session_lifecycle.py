@@ -1390,7 +1390,7 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
     assert persisted_run.messages[0].role == "user"
     assert "Hello" in cast("str", persisted_run.messages[0].content)
     assert [(message.role, message.content) for message in persisted_run.messages[-1:]] == [
-        ("assistant", "(turn interrupted by the user before completion)"),
+        ("assistant", "(turn interrupted before completion)"),
     ]
 
 
