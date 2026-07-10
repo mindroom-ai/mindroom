@@ -153,10 +153,8 @@ Treat Codex prompt caching as best-effort rather than guaranteed.
 
 ## OpenRouter Provider Routing
 
-Use `provider: openrouter` to reach many hosted models through a single API key.
-OpenRouter routes each request to one of several upstream providers serving that model, often including quantized (fp8/fp4) third-party deployments.
-Upstream quality varies: we have seen a third-party upstream leak raw model tool-call markup (DeepSeek `<|DSML|>` tokens) into visible replies when a tool call contained heavily nested quoting, and quantized hosts can degrade tool-calling reliability in general.
-Pin routing to trusted upstreams with OpenRouter [provider preferences](https://openrouter.ai/docs/features/provider-routing), passed through `extra_kwargs.extra_body`:
+OpenRouter routes each request to one of several upstream providers serving the model, and upstream quality varies (we have seen a third-party host leak raw tool-call markup into a visible reply).
+Control routing by passing OpenRouter [provider preferences](https://openrouter.ai/docs/features/provider-routing) through `extra_kwargs.extra_body`:
 
 ```yaml
 models:
@@ -167,31 +165,14 @@ models:
     extra_kwargs:
       extra_body:
         provider:
-          order: [fireworks, together]  # upstreams to try, in order
-          allow_fallbacks: false        # fail instead of routing to unlisted upstreams
+          sort: price                     # cheapest available endpoint
+          # order: [fireworks, together]  # or pin specific upstreams, in order
+          # allow_fallbacks: false        # fail instead of using unlisted upstreams
 ```
 
-Provider slugs are listed on each model's Providers tab on openrouter.ai, or in the `tag` field of `https://openrouter.ai/api/v1/models/<model-id>/endpoints`.
-With `allow_fallbacks: false`, requests fail when every listed upstream is down or rate-limited, instead of silently degrading to an unvetted host; for agents doing heavy tool calling we recommend this trade-off.
-A softer alternative is `require_parameters: true`, which keeps fallbacks but only routes to upstreams that support every request parameter, including tools.
-When cost matters more than picking specific upstreams, use `sort: price` instead of `order` to always route to the cheapest endpoint your account can reach, optionally with an `ignore:` list to exclude upstreams that have misbehaved:
-
-```yaml
-    extra_kwargs:
-      extra_body:
-        provider:
-          sort: price
-```
-
-Account-level OpenRouter settings (ignored providers and data-policy filters) are applied on top of request preferences and cannot be overridden per request, so a pinned upstream that your account excludes yields `No endpoints found` errors when `allow_fallbacks` is `false`.
-Always verify a new pin with a direct test request and confirm the `provider` field in the response before relying on it:
-
-```bash
-curl -s https://openrouter.ai/api/v1/chat/completions \
-  -H "Authorization: Bearer $OPENROUTER_API_KEY" -H "Content-Type: application/json" \
-  -d '{"model": "deepseek/deepseek-v4-pro", "messages": [{"role": "user", "content": "Say OK"}],
-       "max_tokens": 5, "provider": {"order": ["fireworks", "together"], "allow_fallbacks": false}}'
-```
+Provider slugs are in the `tag` field of `https://openrouter.ai/api/v1/models/<model-id>/endpoints`.
+Account-level OpenRouter settings (ignored providers, data-policy filters) still apply and cannot be overridden per request, so pinning an upstream your account excludes fails with `No endpoints found`.
+Verify a new pin with a direct API test request and check the `provider` field in the response.
 
 ## Azure OpenAI
 
