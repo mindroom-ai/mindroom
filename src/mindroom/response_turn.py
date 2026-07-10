@@ -404,11 +404,25 @@ def _fallback_matrix_run_metadata(ctx: ResponseTurnContext, run: TurnRunState) -
     )
 
 
+def _interrupted_run_metadata(
+    ctx: ResponseTurnContext,
+    sinks: TurnSinks,
+    run: TurnRunState,
+) -> dict[str, Any] | None:
+    """Keep the best Matrix metadata available when an attempt is interrupted."""
+    if run.run_metadata is not None:
+        return run.run_metadata
+    if sinks.turn_recorder is not None and sinks.turn_recorder.run_metadata is not None:
+        return sinks.turn_recorder.run_metadata
+    return _fallback_matrix_run_metadata(ctx, run)
+
+
 def _persist_excluded_attempt_replay(
     ctx: ResponseTurnContext,
     persist: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None],
     run: TurnRunState,
     resolution: ExcludedAttempt,
+    run_metadata: dict[str, Any] | None,
 ) -> None:
     persist(
         run.scope_context,
@@ -418,7 +432,7 @@ def _persist_excluded_attempt_replay(
             partial_text=resolution.partial_text,
             completed_tools=run.turn_state.completed_tools_for(resolution.completed_tools),
             interrupted_tools=list(resolution.interrupted_tools),
-            run_metadata=run.run_metadata,
+            run_metadata=run_metadata,
             original_status=resolution.original_status,
         ),
     )
@@ -439,11 +453,7 @@ def _record_turn_excluded_fallback(
     if recorder is not None:
         if recorder.outcome == "completed":
             return
-        run_metadata = (
-            run.run_metadata
-            if run.run_metadata is not None
-            else recorder.run_metadata or _fallback_matrix_run_metadata(ctx, run)
-        )
+        run_metadata = _interrupted_run_metadata(ctx, sinks, run)
         if use_recorder_state:
             run.turn_state.record_interrupted_from_recorder(
                 recorder,
@@ -470,7 +480,7 @@ def _record_turn_excluded_fallback(
             partial_text=snapshot.assistant_text,
             completed_tools=run.turn_state.completed_tools_for(snapshot.completed_tools),
             interrupted_tools=list(snapshot.interrupted_tools),
-            run_metadata=run.run_metadata if run.run_metadata is not None else _fallback_matrix_run_metadata(ctx, run),
+            run_metadata=_interrupted_run_metadata(ctx, sinks, run),
             original_status=original_status,
         ),
     )
@@ -612,16 +622,23 @@ def _settle_blocking_attempt(
     # continuation attempt's payload must not ride out on a later resolution.
     if isinstance(resolution, ExcludedAttempt):
         _publish_run_metadata(sinks, resolution.metadata_content)
+        run_metadata = _interrupted_run_metadata(ctx, sinks, run)
         run.turn_state.record_interrupted(
             sinks.turn_recorder,
-            run_metadata=run.run_metadata,
+            run_metadata=run_metadata,
             assistant_text=resolution.partial_text,
             completed_tools=list(resolution.completed_tools),
             interrupted_tools=list(resolution.interrupted_tools),
             original_status=resolution.original_status,
         )
         if sinks.turn_recorder is None and adapter.persist_standalone_replay is not None:
-            _persist_excluded_attempt_replay(ctx, adapter.persist_standalone_replay, run, resolution)
+            _persist_excluded_attempt_replay(
+                ctx,
+                adapter.persist_standalone_replay,
+                run,
+                resolution,
+                run_metadata,
+            )
         if resolution.original_status is RunStatus.cancelled:
             raise build_cancelled_error(resolution.reason)
         return resolution.response_text
@@ -791,9 +808,10 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                         )
                         return
                     if isinstance(resolution, ExcludedAttempt):
+                        run_metadata = _interrupted_run_metadata(ctx, sinks, run)
                         run.turn_state.record_interrupted(
                             sinks.turn_recorder,
-                            run_metadata=run.run_metadata,
+                            run_metadata=run_metadata,
                             assistant_text=resolution.partial_text,
                             completed_tools=list(resolution.completed_tools),
                             interrupted_tools=list(resolution.interrupted_tools),
@@ -806,6 +824,7 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                                 adapter.persist_standalone_replay,
                                 run,
                                 resolution,
+                                run_metadata,
                             )
                         if resolution.original_status is RunStatus.cancelled:
                             raise build_cancelled_error(resolution.reason)

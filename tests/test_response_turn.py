@@ -308,6 +308,28 @@ def test_blocking_errored_attempt_returns_user_text() -> None:
     assert result == "friendly error"
 
 
+def test_blocking_errored_attempt_preserves_seeded_recorder_metadata() -> None:
+    """A pre-prepare failure keeps Matrix source metadata seeded on the recorder."""
+    log = _AdapterLog()
+    seeded_metadata = {"matrix_source_event_ids": ["$source"], "matrix_seen_event_ids": ["$source"]}
+    recorder = _FakeTurnRecorder(run_metadata=seeded_metadata)
+
+    async def _attempt(_run: TurnRunState, _c: DynamicContinuationRunState) -> ExcludedAttempt:
+        return ExcludedAttempt(RunStatus.error, "friendly error")
+
+    result = asyncio.run(
+        run_blocking_response_turn(
+            _ctx(),
+            _blocking_adapter(log, _attempt),
+            TurnSinks(turn_recorder=cast("Any", recorder)),
+            continuation=_continuation(),
+        ),
+    )
+
+    assert result == "friendly error"
+    assert recorder.interrupted_calls[-1]["run_metadata"] == seeded_metadata
+
+
 def test_blocking_cancelled_attempt_records_persists_and_raises() -> None:
     """A cancelled attempt without recorder persists one standalone replay and raises."""
     log = _AdapterLog()
