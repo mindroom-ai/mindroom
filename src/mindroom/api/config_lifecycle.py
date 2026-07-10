@@ -796,7 +796,7 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
             published_source_files = source_files | current.source_files
         current_state.snapshot = _published_snapshot(
             current,
-            increment_generation=not same_source,
+            increment_generation=not same_source or result != current.config_load_result,
             config_data=validated_payload if validated_payload is not None else current.config_data,
             runtime_config=runtime_config if runtime_config is not None else current.runtime_config,
             config_load_result=result,

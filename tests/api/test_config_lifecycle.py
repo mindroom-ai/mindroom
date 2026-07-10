@@ -389,6 +389,42 @@ class TestExternalWriterPublishing:
         assert config_lifecycle.publish_prepared_runtime_config_into_app(prepared, loaded_app) is False
         assert _snapshot(loaded_app) is failed
 
+    def test_stale_runtime_publish_does_not_overwrite_same_source_load_failure(
+        self,
+        loaded_app: FastAPI,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A newer load outcome invalidates a prepared publish even when source bytes match."""
+        before = _snapshot(loaded_app)
+        assert before.runtime_config is not None
+        prepared = config_lifecycle.prepare_runtime_config_publish(
+            before.runtime_config.model_copy(),
+            before.runtime_paths,
+            loaded_app,
+        )
+        failed_result = config_lifecycle.ConfigLoadResult(
+            success=False,
+            error_status_code=422,
+            error_detail="runtime validation failed",
+        )
+        monkeypatch.setattr(
+            config_lifecycle,
+            "_load_config_result",
+            lambda _runtime_paths: (
+                failed_result,
+                None,
+                None,
+                before.source_fingerprint,
+                before.source_files,
+            ),
+        )
+
+        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app) is False
+        failed = _snapshot(loaded_app)
+        assert failed.generation == before.generation + 1
+        assert config_lifecycle.publish_prepared_runtime_config_into_app(prepared, loaded_app) is False
+        assert _snapshot(loaded_app) is failed
+
     def test_same_config_with_new_source_identity_advances_generation(
         self,
         loaded_app: FastAPI,
