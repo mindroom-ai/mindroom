@@ -46,7 +46,7 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Iterable, Mapping
     from types import ModuleType
 
     from agno.tools import Toolkit
@@ -1067,6 +1067,53 @@ def resolved_tool_runtime_state_for_runtime(
         config,
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
     )
+    return _resolved_tool_runtime_state_snapshot(
+        runtime_paths,
+        resolved_state,
+        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+    )
+
+
+def resolved_tool_runtime_state_from_registry(
+    runtime_paths: RuntimePaths,
+    config: Config,
+    tool_registry: Mapping[str, Callable[[], type[Toolkit]]],
+    tool_metadata: Mapping[str, ToolMetadata],
+    *,
+    unavailable_tool_names: Iterable[str] = (),
+    tolerate_plugin_load_errors: bool = False,
+) -> ResolvedToolRuntimeState:
+    """Build carried runtime state from one already-staged plugin registry."""
+    from mindroom.mcp.registry import resolved_mcp_tool_state  # noqa: PLC0415
+
+    registry = dict(tool_registry)
+    metadata = dict(tool_metadata)
+    mcp_registry, mcp_metadata = resolved_mcp_tool_state(config)
+    _merge_mcp_tool_state(registry, metadata, mcp_registry, mcp_metadata)
+    unavailable_metadata = {
+        tool_name: ToolMetadata(
+            name=tool_name,
+            display_name=tool_name,
+            description="Unavailable plugin tool",
+            category=ToolCategory.INTEGRATIONS,
+        )
+        for tool_name in unavailable_tool_names
+        if tool_name not in metadata
+    }
+    return _resolved_tool_runtime_state_snapshot(
+        runtime_paths,
+        _ResolvedToolState(registry, metadata, unavailable_metadata),
+        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+    )
+
+
+def _resolved_tool_runtime_state_snapshot(
+    runtime_paths: RuntimePaths,
+    resolved_state: _ResolvedToolState,
+    *,
+    tolerate_plugin_load_errors: bool,
+) -> ResolvedToolRuntimeState:
+    """Project one resolved catalog into its validation and cache-binding value."""
     validation_metadata = {
         **resolved_state.tool_metadata,
         **resolved_state.unavailable_tool_metadata,

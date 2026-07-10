@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookCallback
+    from mindroom.tool_system.catalog import ResolvedToolRuntimeState
     from mindroom.tool_system.declarations import ToolMetadata
 
 logger = get_logger(__name__)
@@ -83,6 +84,7 @@ class _PreparedPluginReload:
     hook_registry: HookRegistry
     active_plugin_names: tuple[str, ...]
     tool_registry_snapshot: Any
+    resolved_tool_state: ResolvedToolRuntimeState
     plugin_skill_roots: tuple[Path, ...]
     plugin_cache: dict[Path, Any]
     module_import_cache: dict[Path, Any]
@@ -237,13 +239,25 @@ def prepare_plugin_reload(
             _clear_plugin_import_caches()
             _evict_synthetic_plugin_subtrees(previous_package_roots)
             plugins = load_plugins(config, runtime_paths, skip_broken_plugins=skip_broken_plugins)
+            candidate_tool_registry_snapshot = capture_tool_registry_snapshot()
+            from mindroom.tool_system.catalog import resolved_tool_runtime_state_from_registry  # noqa: PLC0415
+
+            resolved_tool_state = resolved_tool_runtime_state_from_registry(
+                runtime_paths,
+                config,
+                candidate_tool_registry_snapshot.registry,
+                candidate_tool_registry_snapshot.metadata,
+                unavailable_tool_names=config.unavailable_plugin_tool_names,
+                tolerate_plugin_load_errors=True,
+            )
             candidate_plugin_cache = plugin_imports._PLUGIN_CACHE.copy()
             candidate_module_import_cache = plugin_imports._MODULE_IMPORT_CACHE.copy()
             candidate_package_roots = _package_roots(candidate_module_import_cache)
             prepared_reload = _PreparedPluginReload(
                 hook_registry=HookRegistry.from_plugins(plugins),
                 active_plugin_names=tuple(plugin.name for plugin in plugins),
-                tool_registry_snapshot=capture_tool_registry_snapshot(),
+                tool_registry_snapshot=candidate_tool_registry_snapshot,
+                resolved_tool_state=resolved_tool_state,
                 plugin_skill_roots=tuple(get_plugin_skill_roots()),
                 plugin_cache=candidate_plugin_cache,
                 module_import_cache=candidate_module_import_cache,

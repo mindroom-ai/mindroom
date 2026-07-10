@@ -55,6 +55,40 @@ def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> C
     return bind_runtime_paths(config, runtime_paths)
 
 
+def _write_reload_override_plugin(
+    plugin_root: Path,
+    agent_override_type: str,
+    field_name: str = "paths",
+) -> None:
+    """Write the reload test plugin with one configurable override declaration."""
+    plugin_root.mkdir(parents=True, exist_ok=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "override_reload", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.declarations import ConfigField, ToolCategory\n"
+        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "\n"
+        "class ReloadOverrideTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='reload_override', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='reload_override_tool',\n"
+        "    display_name='Reload Override Tool',\n"
+        "    description='Tool with reloadable override metadata',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        f"    config_fields=[ConfigField(name='{field_name}', label='Paths', type='text')],\n"
+        f"    agent_override_fields=[ConfigField(name='{field_name}', label='Paths', type='{agent_override_type}')],\n"
+        ")\n"
+        "def reload_override_tools():\n"
+        "    return ReloadOverrideTool\n",
+        encoding="utf-8",
+    )
+
+
 def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
     """Helper to setup a test bot with required attributes."""
     bot.client = mock_client
@@ -689,37 +723,7 @@ async def test_manual_plugin_reload_consumes_pending_watcher_changes(
 async def test_plugin_reload_rebuilds_runtime_tool_overrides(tmp_path: Path) -> None:
     """A plugin metadata edit should publish one newly resolved runtime config everywhere."""
     plugin_root = tmp_path / "plugins" / "override-reload"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "override_reload", "tools_module": "tools.py", "skills": []}),
-        encoding="utf-8",
-    )
-    tools_path = plugin_root / "tools.py"
-
-    def write_tool(agent_override_type: str, field_name: str = "paths") -> None:
-        tools_path.write_text(
-            "from agno.tools import Toolkit\n"
-            "from mindroom.tool_system.declarations import ConfigField, ToolCategory\n"
-            "from mindroom.tool_system.registration import register_tool_with_metadata\n"
-            "\n"
-            "class ReloadOverrideTool(Toolkit):\n"
-            "    def __init__(self) -> None:\n"
-            "        super().__init__(name='reload_override', tools=[])\n"
-            "\n"
-            "@register_tool_with_metadata(\n"
-            "    name='reload_override_tool',\n"
-            "    display_name='Reload Override Tool',\n"
-            "    description='Tool with reloadable override metadata',\n"
-            "    category=ToolCategory.DEVELOPMENT,\n"
-            f"    config_fields=[ConfigField(name='{field_name}', label='Paths', type='text')],\n"
-            f"    agent_override_fields=[ConfigField(name='{field_name}', label='Paths', type='{agent_override_type}')],\n"
-            ")\n"
-            "def reload_override_tools():\n"
-            "    return ReloadOverrideTool\n",
-            encoding="utf-8",
-        )
-
-    write_tool("text")
+    _write_reload_override_plugin(plugin_root, "text")
     config = _runtime_bound_config(
         Config(
             agents={
@@ -752,7 +756,21 @@ async def test_plugin_reload_rebuilds_runtime_tool_overrides(tmp_path: Path) -> 
             "paths": "one,\ntwo",
         }
 
-        write_tool("string[]")
+        async def edit_plugin_during_api_prepare(_config: object) -> None:
+            _write_reload_override_plugin(plugin_root, "string[]")
+
+        with patch.object(
+            orchestrator._external_trigger_runtime,
+            "prepare_api_config_snapshot",
+            new=AsyncMock(side_effect=edit_plugin_during_api_prepare),
+        ):
+            await orchestrator.reload_plugins_now(source="test")
+
+        assert orchestrator.config.resolve_entity("general").tool_runtime_overrides("reload_override_tool") == {
+            "paths": "one,\ntwo",
+        }
+        assert (TOOL_METADATA["reload_override_tool"].agent_override_fields or [])[0].type == "text"
+
         await orchestrator.reload_plugins_now(source="test")
 
         assert orchestrator.config.resolve_entity("general").tool_runtime_overrides("reload_override_tool") == {
@@ -761,13 +779,70 @@ async def test_plugin_reload_rebuilds_runtime_tool_overrides(tmp_path: Path) -> 
         assert bot.config is orchestrator.config
 
         last_good_config = orchestrator.config
-        write_tool("text", field_name="other")
+        _write_reload_override_plugin(plugin_root, "text", field_name="other")
         with pytest.raises(ConfigRuntimeValidationError, match="paths"):
             await orchestrator.reload_plugins_now(source="test")
 
         assert orchestrator.config is last_good_config
         assert bot.config is last_good_config
         assert [field.name for field in TOOL_METADATA["reload_override_tool"].agent_override_fields or []] == ["paths"]
+    finally:
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+        for module_name in set(sys.modules) - original_modules:
+            if module_name.startswith("mindroom_plugin_"):
+                sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_config_update_rebuilds_runtime_from_prepared_plugin_snapshot(tmp_path: Path) -> None:
+    """A plugin edit after config loading cannot split config and live registry generations."""
+    plugin_root = tmp_path / "plugins" / "override-reload"
+    _write_reload_override_plugin(plugin_root, "text")
+    current_config = _runtime_bound_config(Config(defaults={"tools": []}), tmp_path)
+    new_config = _runtime_bound_config(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    tools=[{"reload_override_tool": {"paths": "one,\ntwo"}}],
+                ),
+            },
+            defaults={"tools": []},
+            plugins=["./plugins/override-reload"],
+        ),
+        tmp_path,
+    )
+    _write_reload_override_plugin(plugin_root, "string[]")
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config), api_enabled=False)
+    orchestrator.config = current_config
+    orchestrator.running = True
+
+    original_registry = TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_modules = set(sys.modules)
+    try:
+        with patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())):
+            rebuilt_config, _ = await orchestrator._apply_plugin_changes_for_config_update(
+                current_config=current_config,
+                new_config=new_config,
+                changed_server_ids=set(),
+            )
+
+        assert rebuilt_config.resolve_entity("general").tool_runtime_overrides("reload_override_tool") == {
+            "paths": "one, two",
+        }
+        assert (TOOL_METADATA["reload_override_tool"].agent_override_fields or [])[0].type == "string[]"
     finally:
         TOOL_REGISTRY.clear()
         TOOL_REGISTRY.update(original_registry)

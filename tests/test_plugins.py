@@ -3022,7 +3022,11 @@ def test_reload_plugins_skip_broken_plugins_keeps_healthy_plugin_when_explicit_p
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
     runtime_paths = _minimal_runtime_paths(tmp_path)
-    config = Config(plugins=["./plugins/good", "python:definitely_missing_package.sub"])
+    config = RuntimeConfig.from_authored(
+        Config(plugins=["./plugins/good", "python:definitely_missing_package.sub"]),
+        runtime_paths,
+        tolerate_plugin_load_errors=True,
+    )
 
     original_plugin_roots = _get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()

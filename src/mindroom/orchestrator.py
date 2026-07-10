@@ -70,9 +70,9 @@ from mindroom.startup_errors import PermanentStartupError
 from mindroom.startup_maintenance import StartupMaintenanceController
 from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_system.catalog import (
+    ResolvedToolRuntimeState,
     bind_resolved_tool_state_cache,
     clear_resolved_tool_state_cache,
-    resolved_tool_runtime_state_for_runtime,
 )
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
@@ -744,6 +744,22 @@ class _MultiAgentOrchestrator:
         for bot in self.agent_bots.values():
             bot.hook_registry = hook_registry
 
+    def _rebuild_config_with_tool_state(
+        self,
+        config: RuntimeConfig,
+        resolved_tool_state: ResolvedToolRuntimeState,
+    ) -> RuntimeConfig:
+        """Materialize runtime config from the exact plugin snapshot staged for commit."""
+        refreshed_config = RuntimeConfig.from_authored(
+            Config.model_validate(config.authored_model_dump()),
+            self.runtime_paths,
+            tolerate_plugin_load_errors=True,
+            source_files=config.source_files,
+            tool_validation_snapshot=resolved_tool_state.validation_snapshot,
+        )
+        bind_resolved_tool_state_cache(resolved_tool_state, refreshed_config)
+        return refreshed_config
+
     async def reload_plugins_now(
         self,
         *,
@@ -763,24 +779,14 @@ class _MultiAgentOrchestrator:
             )
             self.plugin_watch.refresh(config)
             try:
-                authored_config = Config.model_validate(config.authored_model_dump())
-                resolved_tool_state = resolved_tool_runtime_state_for_runtime(
-                    self.runtime_paths,
-                    authored_config,
-                    tolerate_plugin_load_errors=True,
+                prepared_plugin_reload = prepare_plugin_reload(config, self.runtime_paths)
+                refreshed_config = self._rebuild_config_with_tool_state(
+                    config,
+                    prepared_plugin_reload.resolved_tool_state,
                 )
-                refreshed_config = RuntimeConfig.from_authored(
-                    authored_config,
-                    self.runtime_paths,
-                    tolerate_plugin_load_errors=True,
-                    source_files=config.source_files,
-                    tool_validation_snapshot=resolved_tool_state.validation_snapshot,
-                )
-                bind_resolved_tool_state_cache(resolved_tool_state, refreshed_config)
                 prepared_api_snapshot = await self._external_trigger_runtime.prepare_api_config_snapshot(
                     refreshed_config,
                 )
-                prepared_plugin_reload = prepare_plugin_reload(refreshed_config, self.runtime_paths)
             except Exception:
                 logger.warning("Plugin reload failed; previous runtime snapshot retained", source=source)
                 raise
@@ -808,13 +814,17 @@ class _MultiAgentOrchestrator:
         current_config: RuntimeConfig,
         new_config: RuntimeConfig,
         changed_server_ids: set[str],
-    ) -> set[str]:
+    ) -> tuple[RuntimeConfig, set[str]]:
         """Stage and commit plugin changes without interleaving live reloads."""
         prepared_plugin_roots, prepared_plugin_root_snapshots = self.plugin_watch.capture(new_config)
         prepared_plugin_reload = prepare_plugin_reload(
             new_config,
             self.runtime_paths,
             skip_broken_plugins=True,
+        )
+        new_config = self._rebuild_config_with_tool_state(
+            new_config,
+            prepared_plugin_reload.resolved_tool_state,
         )
         pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
             current_config,
@@ -832,7 +842,7 @@ class _MultiAgentOrchestrator:
         )
         self._activate_hook_registry(new_hook_registry)
         clear_worker_validation_snapshot_cache()
-        return pre_stopped_mcp_entities
+        return new_config, pre_stopped_mcp_entities
 
     async def _start_entities_once(
         self,
@@ -1374,11 +1384,12 @@ class _MultiAgentOrchestrator:
 
         try:
             if plugin_changes:
-                pre_stopped_mcp_entities = await self._apply_plugin_changes_for_config_update(
+                new_config, pre_stopped_mcp_entities = await self._apply_plugin_changes_for_config_update(
                     current_config=current_config,
                     new_config=new_config,
                     changed_server_ids=plan.changed_mcp_servers,
                 )
+                plan = replace(plan, new_config=new_config)
             else:
                 pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
                     current_config,
