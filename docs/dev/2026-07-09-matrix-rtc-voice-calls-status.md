@@ -39,6 +39,7 @@ The lab (`mindroom.lab.mindroom.chat`, incus container on the `mindroom` host) i
 | Real `CallManager` joins a call, publishes membership | ✅ live | job-tmp `live_botcall_test.py`; found + fixed the PL0 bug (below) |
 | E2EE frame-key exchange | ✅ real olm crypto | `tests/test_matrix_rtc_e2ee_roundtrip.py` — active since the nio 0.27 pin bump (no longer skipped), passes in the normal suite |
 | In-call tools, same-agent prompt, transcripts, memory references | ✅ unit tests | The sole caller is the real Matrix requester; effective Agno tools include knowledge and skills; approval/interactive/external flows stay hidden; covered by `tests/test_matrix_rtc_call_tools.py`, `..._transcript.py`, `..._call_manager.py` |
+| Cascaded STT → normal agent → TTS | ✅ live | `tests/manual/scratch/live_agent_speaking_test.py` against production MatrixRTC on 2026-07-10: agent greeted aloud, understood a VAD-split spoken question, ran the real `multiply` tool, spoke "15 times 23 is 345", and wrote the transcript plus memory reference (all 6 legs PASS) |
 | gpt-realtime endpoint/model wiring | ✅ live probe | WS to `wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1` reached session layer; previously failed only on the placeholder key |
 | gpt-realtime agent actually speaking in a call | ✅ live | `tests/manual/scratch/live_agent_speaking_test.py`: real CallManager + real key; agent greeted aloud, understood a spoken question, ran the real `multiply` calculator tool, spoke "The result is 345", transcript + memory reference written (all 6 legs PASS) |
 | Roster-filtered audio input satisfies the current LiveKit AgentSession contract | ✅ regression test in #1485; live redeploy not recorded here | `AgentSession.start()` can traverse the wrapper's terminal `source = None` property instead of aborting after the SFU connection |
@@ -59,6 +60,7 @@ The lab (`mindroom.lab.mindroom.chat`, incus container on the `mindroom` host) i
 7. **The merged voice agent joined the SFU and immediately left before starting the realtime session** — `livekit-agents` 1.6.4 walks `AgentSession.input.audio.source` while logging its IO chain, but `_AuthorizedParticipantAudioInput` duck-typed the interface without a `source` property.
    Fixed in #1485 by exposing the terminal `source = None` property and comparing the wrapper with every public `AudioInput` attribute in a regression test.
    The same PR adds structured `call_output_permissions_applied`, `call_audio_stream_added`, `call_audio_first_frame`, and `call_media_snapshot` events so permissions, subscription, actual inbound media, publications, mute state, and the authorized roster can be distinguished during diagnosis.
+8. **Fresh-head review and the cascaded live test found lifecycle and turn-fidelity gaps** — the follow-up closes owned STT/TTS clients, validates component endpoints, preserves call tool restrictions through delegation and realtime mode, records exactly the assistant audio played before an interruption, and joins consecutive user fragments when VAD splits one utterance.
 
 ## Deployed agent backend (mindroom-chat on the `mindroom` LXC)
 
@@ -87,7 +89,7 @@ LiveKit DTLS-timeout warnings in earlier server logs were teardown noise from sh
 ## Test assets
 
 - Committed: `tests/manual/matrix_rtc_live_smoke.py` (register → well-known → OpenID → JWT → SFU connect, needs `REG_TOKEN`).
-- Committed: `tests/manual/scratch/live_agent_speaking_test.py` (the full loop: synthetic caller speaks a TTS question into the SFU, real CallManager agent greets, answers, runs a real tool; checks audio energy, transcript, and memory reference).
+- Committed: `tests/manual/scratch/live_agent_speaking_test.py` (the full loop for either backend: a synthetic caller speaks a TTS question into the SFU, the real CallManager agent greets, answers, and runs a real tool; checks audio energy, transcript, and memory reference).
 - The harness accepts exactly one account mode: set `MINDROOM_REG_TOKEN` to register throwaway users, or set all six of `CALLER_USER_ID`, `CALLER_DEVICE_ID`, `CALLER_TOKEN`, `BOT_USER_ID`, `BOT_DEVICE_ID`, and `BOT_TOKEN` to reuse existing accounts; `OPENAI_API_KEY` is required in both modes.
 - Existing-account mode uses a private test room, clears the caller's call membership, and makes both accounts leave and forget the room during cleanup.
 - Job scratch (`~/.claude/jobs/147b583c/tmp/`): `live_botcall_test.py` (real CallManager in a live call), `live_bridge_test.py` (RealtimeVoiceBridge + optional realtime agent), `e2ee_framekey_test.py` (real-olm round trip), `cinny_join_repro.py` (headless Playwright browser-join repro against prod Cinny: seeds the session via localStorage, creates an `org.matrix.msc3417.call` room, clicks Join, taps console/network/postMessage; `BLOCK_SW=1` and `HOST_RULES` env knobs).

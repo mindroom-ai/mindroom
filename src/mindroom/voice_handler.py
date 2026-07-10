@@ -489,7 +489,8 @@ async def _transcribe_audio(
 
         filename, upload_mime_type = _stt_upload_filename_and_mime_type(mime_type)
         files = {"file": (filename, audio_data, upload_mime_type)}
-        form_data = {"model": config.voice.stt.model}
+        form_data: dict[str, object] = {"model": config.voice.stt.model}
+        form_data.update(config.voice.stt.extra_kwargs)
 
         async with httpx.AsyncClient() as http_client:
             response = await http_client.post(url, headers=headers, files=files, data=form_data)

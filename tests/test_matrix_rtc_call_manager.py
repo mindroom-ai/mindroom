@@ -2226,6 +2226,13 @@ def test_openai_compatible_speech_config_requires_endpoint() -> None:
         SpeechServiceConfig(provider="openai_compatible", model="whisper-large-v3")
 
 
+@pytest.mark.parametrize("host", [" ", "localhost:9000", "ftp://stt.example.test"])
+def test_speech_config_rejects_unsafe_endpoint(host: str) -> None:
+    """Blank or non-HTTP endpoints cannot turn a local config into a cloud call."""
+    with pytest.raises(ValueError, match=r"non-empty HTTP\(S\) URL"):
+        SpeechServiceConfig(provider="openai_compatible", model="whisper-large-v3", host=host)
+
+
 def test_speech_config_rejects_connection_fields_in_extra_kwargs() -> None:
     """Typed connection fields cannot be ambiguously overridden by provider options."""
     with pytest.raises(ValueError, match="must not redefine: api_key, base_url"):

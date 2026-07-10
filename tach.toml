@@ -1006,6 +1006,7 @@ depends_on = [
 visibility = [
     "mindroom.ai",
     "mindroom.history.turn_recorder",
+    "mindroom.matrix_rtc.call_tools",
     "mindroom.response_runner",
     "mindroom.teams",
 ]
@@ -1015,6 +1016,7 @@ path = "mindroom.history.turn_recorder"
 depends_on = ["mindroom.history.interrupted_replay"]
 visibility = [
     "mindroom.ai",
+    "mindroom.matrix_rtc.call_tools",
     "mindroom.response_runner",
     "mindroom.teams",
 ]
@@ -2139,6 +2141,10 @@ depends_on = [
     "mindroom.agent_run_context",
     "mindroom.agents",
     "mindroom.ai",
+    "mindroom.history.interrupted_replay",
+    "mindroom.history.runtime",
+    "mindroom.history.turn_recorder",
+    "mindroom.history.types",
     "mindroom.hooks",
     "mindroom.knowledge.utils",
     "mindroom.logging_config",

@@ -205,13 +205,23 @@ async def test_agent_session_uses_group_safe_room_options(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
-async def test_cascaded_session_wires_stt_normal_agent_and_tts(
+async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, PLR0915
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The cascaded bridge gives LiveKit speech legs and the MindRoom LLM adapter."""
     built: dict[str, object] = {}
     turns: list[tuple[str, str]] = []
     tool_uses: list[list[str]] = []
+    finalized: list[tuple[str | None, str, bool]] = []
+    responder_inputs: list[str] = []
+
+    class FakeSpeechModel:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
 
     class FakeSession:
         def __init__(self, **kwargs: object) -> None:
@@ -231,25 +241,42 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(
         def say(self, text: str) -> None:
             self.greetings.append(text)
 
+        async def aclose(self) -> None:
+            built["session_closed"] = True
+
     async def respond(transcript: str) -> CallAgentResponse:
-        return CallAgentResponse(text=f"heard {transcript}", tool_names=("weather",))
+        responder_inputs.append(transcript)
+        return CallAgentResponse(text=f"heard {transcript}", tool_names=("weather",), turn_id="turn-1")
+
+    async def finalize_spoken_response(token: str | None, text: str, interrupted: bool) -> None:
+        finalized.append((token, text, interrupted))
 
     fake_session = FakeSession()
+    stt = FakeSpeechModel()
+    tts = FakeSpeechModel()
     monkeypatch.setattr(
         "livekit.agents.AgentSession",
         lambda **kwargs: (built.update(session_kwargs=kwargs), fake_session)[1],
     )
     monkeypatch.setattr("livekit.agents.Agent", lambda **kwargs: SimpleNamespace(**kwargs))
     monkeypatch.setattr("livekit.agents.inference.VAD", lambda **kwargs: ("vad", kwargs))
-    monkeypatch.setattr("livekit.plugins.openai.STT", lambda **kwargs: ("stt", kwargs))
-    monkeypatch.setattr("livekit.plugins.openai.TTS", lambda **kwargs: ("tts", kwargs))
+    monkeypatch.setattr(
+        "livekit.plugins.openai.STT",
+        lambda **kwargs: (setattr(stt, "kwargs", kwargs), stt)[1],
+    )
+    monkeypatch.setattr(
+        "livekit.plugins.openai.TTS",
+        lambda **kwargs: (setattr(tts, "kwargs", kwargs), tts)[1],
+    )
     fake_audio_input = MagicMock()
+    fake_audio_input.aclose = AsyncMock()
     monkeypatch.setattr(
         "mindroom.matrix_rtc.voice_agent._AuthorizedParticipantAudioInput",
         lambda *_args: fake_audio_input,
     )
     bridge = CascadedVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
     bridge._room = MagicMock()
+    bridge._room.disconnect = AsyncMock()
     options = CascadedVoiceAgentOptions(
         stt=SpeechServiceOptions(
             provider="openai_compatible",
@@ -265,6 +292,7 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(
             extra_kwargs={"voice": "ash"},
         ),
         respond=respond,
+        finalize_spoken_response=finalize_spoken_response,
         greeting_text="Hello.",
         on_conversation_turn=lambda role, text: turns.append((role, text)),
         on_tools_executed=tool_uses.append,
@@ -273,16 +301,15 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(
     await bridge.start_agent(options)
 
     session_kwargs = cast("dict[str, object]", built["session_kwargs"])
-    assert session_kwargs["stt"] == (
-        "stt",
-        {
-            "language": "en",
-            "model": "whisper-large-v3",
-            "api_key": "local-stt",
-            "base_url": "http://127.0.0.1:9000/v1",
-        },
-    )
-    assert session_kwargs["tts"] == ("tts", {"voice": "ash", "model": "tts-1", "api_key": "tts-key"})
+    assert session_kwargs["stt"] is stt
+    assert stt.kwargs == {
+        "language": "en",
+        "model": "whisper-large-v3",
+        "api_key": "local-stt",
+        "base_url": "http://127.0.0.1:9000/v1",
+    }
+    assert session_kwargs["tts"] is tts
+    assert tts.kwargs == {"voice": "ash", "model": "tts-1", "api_key": "tts-key"}
     assert session_kwargs["vad"] == ("vad", {"model": "silero"})
     assert session_kwargs["turn_handling"] == {
         "turn_detection": "vad",
@@ -298,12 +325,75 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(
     assert turns == [("user", "hello")]
 
     chat_context = llm.ChatContext.empty()
-    chat_context.add_message(role="user", content="status")
+    chat_context.add_message(role="user", content="status part one")
+    chat_context.add_message(role="user", content="status part two")
     stream = session_kwargs["llm"].chat(chat_ctx=chat_context)  # type: ignore[union-attr]
     assert stream._conn_options.max_retry == 0
     chunks = [chunk async for chunk in stream]
-    assert [chunk.delta.content for chunk in chunks] == ["heard status"]
+    assert responder_inputs == ["status part one\nstatus part two"]
+    assert [chunk.delta.content for chunk in chunks] == ["heard status part one\nstatus part two"]
+    assert chunks[0].delta.extra == {"mindroom_call_turn_id": "turn-1"}
     assert tool_uses == [["weather"]]
+
+    assistant_message = llm.ChatContext.empty().add_message(
+        role="assistant",
+        content="heard sta",
+        interrupted=True,
+        extra={"mindroom_call_turn_id": "turn-1"},
+    )
+    callback(SimpleNamespace(item=assistant_message))
+    await asyncio.sleep(0)
+    assert finalized == [("turn-1", "heard sta", True)]
+
+    class UnforwardedSpeech:
+        def __init__(self) -> None:
+            self.chat_items: list[object] = []
+
+        def add_done_callback(self, done: Callable[[object], None]) -> None:
+            done(self)
+
+    speech_callback = cast("Callable[[object], None]", fake_session.handlers["speech_created"])
+    speech_callback(SimpleNamespace(source="generate_reply", speech_handle=UnforwardedSpeech()))
+    await asyncio.sleep(0)
+    assert finalized[-1] == (None, "", True)
+
+    await bridge.aclose()
+    assert stt.closed
+    assert tts.closed
+    assert built["session_closed"] is True
+    fake_audio_input.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cascaded_start_closes_stt_when_tts_construction_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Partial speech-provider construction cannot leak the first client."""
+
+    class FakeSTT:
+        closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    stt = FakeSTT()
+    monkeypatch.setattr("livekit.plugins.openai.STT", lambda **_kwargs: stt)
+
+    def fail_tts(**_kwargs: object) -> None:
+        msg = "tts construction failed"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr("livekit.plugins.openai.TTS", fail_tts)
+    bridge = CascadedVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    bridge._room = MagicMock()
+    options = CascadedVoiceAgentOptions(
+        stt=SpeechServiceOptions(provider="openai", model="gpt-4o-transcribe", api_key="stt-key"),
+        tts=SpeechServiceOptions(provider="openai", model="tts-1", api_key="tts-key"),
+        respond=AsyncMock(),
+    )
+
+    with pytest.raises(RuntimeError, match="tts construction failed"):
+        await bridge.start_agent(options)
+
+    assert stt.closed
 
 
 @pytest.mark.asyncio
@@ -600,6 +690,8 @@ async def test_authorized_audio_input_mixes_all_and_only_rostered_microphones() 
         frozenset({"@alice:example.org:ALICEDEV", "@bob:example.org:BOBDEV"}),
     )
 
+    assert audio_input.label == "authorized MatrixRTC participants"
+    assert audio_input.source is None
     assert alice_publication.subscription_changes == [True]
     assert bob_publication.subscription_changes == [True]
     assert rogue_publication.subscription_changes == [False]

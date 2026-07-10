@@ -19,7 +19,8 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
-from dataclasses import dataclass, replace
+from collections import deque
+from dataclasses import dataclass, field, replace
 from inspect import isasyncgenfunction, iscoroutinefunction
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -32,6 +33,10 @@ from agno.tools.function import Function, FunctionCall
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
+from mindroom.history.interrupted_replay import persist_interrupted_replay
+from mindroom.history.runtime import open_resolved_scope_session_context
+from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
@@ -62,7 +67,7 @@ _TEXT_CHAT_REQUIRED_MESSAGE = (
 )
 
 _MAX_TOOL_RESULT_CHARS = 8000
-_CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS = frozenset({"run_workflow"})
+_CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS = frozenset({"run_workflow", "sessions_send", "sessions_spawn"})
 
 
 @dataclass(frozen=True)
@@ -71,6 +76,7 @@ class CallAgentResponse:
 
     text: str
     tool_names: tuple[str, ...] = ()
+    turn_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +90,79 @@ class CallAgentTooling:
     tools: tuple[Any, ...]
     instructions: str
     responder: Callable[[str], Awaitable[CallAgentResponse]] | None = None
+    finalize_spoken_response: Callable[[str | None, str, bool], Awaitable[None] | None] | None = None
+
+
+@dataclass(frozen=True)
+class _CallAgentRunState:
+    """Durable facts needed to reconcile generated text with spoken text."""
+
+    session_id: str
+    run_id: str
+    user_message: str
+    completed_tools: tuple[ToolTraceEntry, ...]
+    interrupted_tools: tuple[ToolTraceEntry, ...]
+    run_metadata: dict[str, Any]
+
+
+@dataclass
+class _CallResponseTracker:
+    """Match LiveKit's exact playout transcript back to one Agno run."""
+
+    agent_name: str
+    config: Config
+    runtime_paths: RuntimePaths
+    execution_identity: ToolExecutionIdentity
+    pending: dict[str, _CallAgentRunState] = field(default_factory=dict)
+    order: deque[str] = field(default_factory=deque)
+
+    def register(self, state: _CallAgentRunState) -> str:
+        """Remember a completed agent response until LiveKit settles playout."""
+        correlation_id = uuid4().hex
+        self.pending[correlation_id] = state
+        self.order.append(correlation_id)
+        return correlation_id
+
+    def finalize(self, token: str | None, spoken_text: str, interrupted: bool) -> Awaitable[None] | None:
+        """Claim one response and reconcile it when playout was incomplete."""
+        state = self._pop(token)
+        if state is None or not interrupted:
+            return None
+        return asyncio.to_thread(self._persist, state, spoken_text)
+
+    async def persist_cancelled(self, state: _CallAgentRunState) -> None:
+        """Persist a generation cancelled before LiveKit received any text."""
+        await asyncio.shield(asyncio.to_thread(self._persist, state, ""))
+
+    def _pop(self, token: str | None) -> _CallAgentRunState | None:
+        if token is not None:
+            return self.pending.pop(token, None)
+        while self.order:
+            candidate = self.order.popleft()
+            if state := self.pending.pop(candidate, None):
+                return state
+        return None
+
+    def _persist(self, state: _CallAgentRunState, spoken_text: str) -> None:
+        with open_resolved_scope_session_context(
+            agent_name=self.agent_name,
+            scope=HistoryScope(kind="agent", scope_id=self.agent_name),
+            session_id=state.session_id,
+            runtime_paths=self.runtime_paths,
+            config=self.config,
+            execution_identity=self.execution_identity,
+        ) as scope_context:
+            persist_interrupted_replay(
+                scope_context=scope_context,
+                session_id=state.session_id,
+                run_id=state.run_id,
+                user_message=state.user_message,
+                partial_text=spoken_text,
+                completed_tools=state.completed_tools,
+                interrupted_tools=state.interrupted_tools,
+                run_metadata=state.run_metadata,
+                is_team=False,
+            )
 
 
 async def build_call_tools(
@@ -111,6 +190,14 @@ async def build_call_tools(
     if context is None:
         msg = f"Tool runtime context unavailable for voice agent {agent_name}"
         raise RuntimeError(msg)
+    context = replace(
+        context,
+        tool_function_filter=functools.partial(
+            _function_available_during_call,
+            config=config,
+            agent_name=agent_name,
+        ),
+    )
     execution_identity = tool_support.build_execution_identity(
         target=target,
         user_id=requester_id,
@@ -126,20 +213,18 @@ async def build_call_tools(
     )
     knowledge = knowledge_resolution.knowledge
     if enable_responder:
-        context = replace(
-            context,
-            tool_function_filter=functools.partial(
-                _function_available_during_call,
-                config=config,
-                agent_name=agent_name,
-            ),
-        )
         enrichment_items: tuple[EnrichmentItem, ...] = ()
         if voice_instructions:
             enrichment_items = (EnrichmentItem(key="voice_call", text=voice_instructions, cache_policy="stable"),)
         enrichment_items = append_knowledge_availability_enrichment(
             enrichment_items,
             knowledge_resolution.unavailable,
+        )
+        response_tracker = _CallResponseTracker(
+            agent_name=agent_name,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
         )
         responder = functools.partial(
             _run_call_agent,
@@ -155,8 +240,14 @@ async def build_call_tools(
             requester_id=requester_id,
             session_id=session_id,
             enrichment_items=enrichment_items,
+            response_tracker=response_tracker,
         )
-        return CallAgentTooling(tools=(), instructions="", responder=responder)
+        return CallAgentTooling(
+            tools=(),
+            instructions="",
+            responder=responder,
+            finalize_spoken_response=response_tracker.finalize,
+        )
 
     agent = await asyncio.to_thread(
         functools.partial(
@@ -169,6 +260,7 @@ async def build_call_tools(
             hook_registry=context.hook_registry,
             knowledge=knowledge,
             include_interactive_questions=False,
+            tool_function_filter=context.tool_function_filter,
             refresh_scheduler=refresh_scheduler,
             eager_deferred_tools=True,
         ),
@@ -241,11 +333,12 @@ async def _run_call_agent(
     requester_id: str,
     session_id: str,
     enrichment_items: tuple[EnrichmentItem, ...],
+    response_tracker: _CallResponseTracker,
 ) -> CallAgentResponse:
     """Run one finalized call transcript through the normal MindRoom agent."""
     from mindroom.ai import ResponseTurnContext, ai_response  # noqa: PLC0415 - heavy optional call path
 
-    tool_trace: list[ToolTraceEntry] = []
+    recorder = TurnRecorder(user_message=transcript)
     turn = ResponseTurnContext(
         entity_label=agent_name,
         session_id=session_id,
@@ -266,17 +359,40 @@ async def _run_call_agent(
             runtime_paths=runtime_paths,
             config=config,
             knowledge=knowledge,
+            run_id_callback=recorder.set_run_id,
             include_interactive_questions=False,
             tool_function_filter=context.tool_function_filter,
             show_tool_calls=False,
-            tool_trace_collector=tool_trace,
             execution_identity=execution_identity,
             refresh_scheduler=refresh_scheduler,
+            turn_recorder=recorder,
         )
 
-    response = await tool_support.run_in_context(tool_context=context, operation=_respond)
-    tool_names = tuple(dict.fromkeys(entry.tool_name for entry in tool_trace if entry.type == "tool_call_completed"))
-    return CallAgentResponse(text=response, tool_names=tool_names)
+    try:
+        response = await tool_support.run_in_context(tool_context=context, operation=_respond)
+    except asyncio.CancelledError:
+        if state := _call_agent_run_state(recorder, session_id=session_id):
+            await response_tracker.persist_cancelled(state)
+        raise
+    completed_tools = tuple(recorder.completed_tools)
+    tool_names = tuple(dict.fromkeys(entry.tool_name for entry in completed_tools))
+    state = _call_agent_run_state(recorder, session_id=session_id)
+    turn_id = response_tracker.register(state) if state is not None and response else None
+    return CallAgentResponse(text=response, tool_names=tool_names, turn_id=turn_id)
+
+
+def _call_agent_run_state(recorder: TurnRecorder, *, session_id: str) -> _CallAgentRunState | None:
+    """Snapshot one real Agno run for later spoken-text reconciliation."""
+    if recorder.run_id is None:
+        return None
+    return _CallAgentRunState(
+        session_id=session_id,
+        run_id=recorder.run_id,
+        user_message=recorder.user_message,
+        completed_tools=tuple(recorder.completed_tools),
+        interrupted_tools=tuple(recorder.interrupted_tools),
+        run_metadata=dict(recorder.run_metadata or {}),
+    )
 
 
 async def _render_system_prompt(

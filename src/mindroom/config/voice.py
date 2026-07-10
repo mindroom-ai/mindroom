@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Literal, Self
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -36,6 +37,19 @@ class SpeechServiceConfig(BaseModel):
         description="Provider-specific options passed to the speech adapter",
     )
 
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, value: str | None) -> str | None:
+        """Require explicit HTTP endpoints and reject cloud-fallback-shaped blanks."""
+        if value is None:
+            return None
+        normalized = value.strip().rstrip("/")
+        parsed = urlparse(normalized)
+        if not normalized or parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            msg = "Speech host must be a non-empty HTTP(S) URL"
+            raise ValueError(msg)
+        return normalized
+
     @field_validator("extra_kwargs")
     @classmethod
     def validate_extra_kwargs(cls, value: dict[str, Any]) -> dict[str, Any]:
@@ -49,7 +63,7 @@ class SpeechServiceConfig(BaseModel):
     @model_validator(mode="after")
     def validate_compatible_endpoint(self) -> Self:
         """OpenAI-compatible services need an explicit endpoint."""
-        if self.provider == "openai_compatible" and not self.host:
+        if self.provider == "openai_compatible" and self.host is None:
             msg = "OpenAI-compatible speech services require host"
             raise ValueError(msg)
         return self

@@ -27,8 +27,14 @@ if TYPE_CHECKING:
     from livekit.agents import Agent as LiveKitAgent
     from livekit.agents import AgentSession, APIConnectOptions, NotGivenOr
     from livekit.agents.llm import LLM, ChatContext, LLMStream, Tool, ToolChoice
-    from livekit.agents.voice.events import CloseEvent, ConversationItemAddedEvent, FunctionToolsExecutedEvent
+    from livekit.agents.voice.events import (
+        CloseEvent,
+        ConversationItemAddedEvent,
+        FunctionToolsExecutedEvent,
+        SpeechCreatedEvent,
+    )
     from livekit.agents.voice.io import AudioInput
+    from livekit.agents.voice.speech_handle import SpeechHandle
 
     from mindroom.matrix_rtc.call_tools import CallAgentResponse
     from mindroom.matrix_rtc.focus import SfuGrant
@@ -44,6 +50,7 @@ _SFU_CONNECT_CANCEL_TIMEOUT_S = 1.0
 _AUDIO_SAMPLE_RATE = 24_000
 _AUDIO_CHANNELS = 1
 _AUDIO_FRAME_SIZE_MS = 50
+_CALL_TURN_CORRELATION_KEY = "mindroom_call_turn_id"
 
 
 class _AudioFrameStream:
@@ -72,8 +79,6 @@ class _AudioFrameStream:
 class _AuthorizedParticipantAudioInput:
     """Mix microphone audio only from identities in the Matrix call roster."""
 
-    label = "matrix-rtc-authorized-participants"
-
     def __init__(self, room: rtc.Room, rtc_module: ModuleType, participant_identities: frozenset[str]) -> None:
         self._room = room
         self._rtc = rtc_module
@@ -97,6 +102,16 @@ class _AuthorizedParticipantAudioInput:
 
     def __aiter__(self) -> _AuthorizedParticipantAudioInput:
         return self
+
+    @property
+    def label(self) -> str:
+        """Describe this leaf in LiveKit's input-chain diagnostics."""
+        return "authorized MatrixRTC participants"
+
+    @property
+    def source(self) -> None:
+        """Mark this custom input as the leaf of LiveKit's source chain."""
+        return None
 
     async def __anext__(self) -> rtc.AudioFrame:
         return await self._mixer.__anext__()
@@ -282,6 +297,7 @@ class CascadedVoiceAgentOptions:
     stt: SpeechServiceOptions
     tts: SpeechServiceOptions
     respond: Callable[[str], Awaitable[CallAgentResponse]]
+    finalize_spoken_response: Callable[[str | None, str, bool], Awaitable[None] | None] | None = None
     greeting_text: str | None = None
     on_conversation_turn: Callable[[str, str], None] | None = None
     on_tools_executed: Callable[[list[str]], None] | None = None
@@ -300,6 +316,8 @@ class RealtimeVoiceBridge:
         self._room: Any = None
         self._connect_task: asyncio.Task[None] | None = None
         self._session: Any = None
+        self._owned_speech_models: tuple[Any, ...] = ()
+        self._session_event_tasks: set[asyncio.Future[None]] = set()
         self._audio_input: _AuthorizedParticipantAudioInput | None = None
         self._participant_identities: frozenset[str] = frozenset()
 
@@ -438,20 +456,9 @@ class RealtimeVoiceBridge:
         )
 
     def _register_session_listeners(self, session: AgentSession, options: CallVoiceAgentOptions) -> None:
-        from livekit.agents.llm import ChatMessage  # noqa: PLC0415
-
-        on_turn = options.on_conversation_turn
-        if on_turn is not None:
-
-            def _on_item_added(event: ConversationItemAddedEvent) -> None:
-                item = event.item
-                if not isinstance(item, ChatMessage):
-                    return
-                text = item.text_content
-                if text:
-                    on_turn(str(item.role), text)
-
-            session.on("conversation_item_added", _on_item_added)
+        self._register_conversation_listener(session, options)
+        if isinstance(options, CascadedVoiceAgentOptions) and options.finalize_spoken_response is not None:
+            self._register_unforwarded_speech_listener(session, options.finalize_spoken_response)
 
         on_tools = options.on_tools_executed
         if on_tools is not None:
@@ -462,6 +469,75 @@ class RealtimeVoiceBridge:
             session.on("function_tools_executed", _on_tools_executed)
 
         self._register_termination_listener(session, options)
+
+    def _register_conversation_listener(self, session: AgentSession, options: CallVoiceAgentOptions) -> None:
+        """Record transcript items and reconcile cascaded assistant playout."""
+        from livekit.agents.llm import ChatMessage  # noqa: PLC0415
+
+        on_turn = options.on_conversation_turn
+        finalize_spoken_response = (
+            options.finalize_spoken_response if isinstance(options, CascadedVoiceAgentOptions) else None
+        )
+        if on_turn is not None or finalize_spoken_response is not None:
+
+            def _on_item_added(event: ConversationItemAddedEvent) -> None:
+                item = event.item
+                if not isinstance(item, ChatMessage):
+                    return
+                text = item.text_content
+                if text:
+                    if on_turn is not None:
+                        on_turn(str(item.role), text)
+                    if item.role == "assistant" and finalize_spoken_response is not None:
+                        correlation_id = item.extra.get(_CALL_TURN_CORRELATION_KEY)
+                        self._schedule_session_event(
+                            finalize_spoken_response(
+                                correlation_id if isinstance(correlation_id, str) else None,
+                                text,
+                                item.interrupted,
+                            ),
+                        )
+
+            session.on("conversation_item_added", _on_item_added)
+
+    def _register_unforwarded_speech_listener(
+        self,
+        session: AgentSession,
+        finalize_spoken_response: Callable[[str | None, str, bool], Awaitable[None] | None],
+    ) -> None:
+        """Reconcile generated responses that produced no assistant transcript."""
+        from livekit.agents.llm import ChatMessage  # noqa: PLC0415
+
+        def _on_speech_created(event: SpeechCreatedEvent) -> None:
+            if event.source != "generate_reply":
+                return
+
+            def _on_speech_done(handle: SpeechHandle) -> None:
+                forwarded = any(
+                    isinstance(item, ChatMessage)
+                    and item.role == "assistant"
+                    and isinstance(item.extra.get(_CALL_TURN_CORRELATION_KEY), str)
+                    for item in handle.chat_items
+                )
+                if not forwarded:
+                    self._schedule_session_event(finalize_spoken_response(None, "", True))
+
+            event.speech_handle.add_done_callback(_on_speech_done)
+
+        session.on("speech_created", _on_speech_created)
+
+    def _schedule_session_event(self, operation: Awaitable[None] | None) -> None:
+        """Track async session-event work so call teardown waits for persistence."""
+        if operation is None:
+            return
+        task = asyncio.ensure_future(operation)
+        self._session_event_tasks.add(task)
+        task.add_done_callback(self._observe_session_event_task)
+
+    def _observe_session_event_task(self, task: asyncio.Future[None]) -> None:
+        self._session_event_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning("call_session_event_failed", error=str(task.exception()))
 
     def _register_termination_listener(self, session: AgentSession, options: CallVoiceAgentOptions) -> None:
         from livekit.agents import APIError, CloseReason  # noqa: PLC0415
@@ -483,6 +559,8 @@ class RealtimeVoiceBridge:
         """Tear down the agent session and leave the SFU."""
         session = self._session
         self._session = None
+        owned_speech_models = self._owned_speech_models
+        self._owned_speech_models = ()
         audio_input = self._audio_input
         self._audio_input = None
         connect_task = self._connect_task
@@ -491,30 +569,38 @@ class RealtimeVoiceBridge:
         self._room = None
         try:
             if connect_task is not None:
-                done, pending = await asyncio.wait({connect_task}, timeout=_SFU_CONNECT_TIMEOUT_S)
-                if pending:
-                    logger.warning("call_sfu_connect_teardown_timeout", identity=self._local_identity)
-                    connect_task.cancel()
-                    cancelled, pending = await asyncio.wait(
-                        pending,
-                        timeout=_SFU_CONNECT_CANCEL_TIMEOUT_S,
-                    )
-                    done.update(cancelled)
-                if pending:
-                    logger.error("call_sfu_connect_cancel_timeout", identity=self._local_identity)
-                    for task in pending:
-                        task.add_done_callback(_consume_task_result)
-                if done:
-                    await asyncio.gather(*done, return_exceptions=True)
+                await self._settle_connect_task(connect_task)
             if session is not None:
                 await session.aclose()
         finally:
             try:
-                if audio_input is not None:
-                    await audio_input.aclose()
+                if self._session_event_tasks:
+                    await asyncio.gather(*self._session_event_tasks, return_exceptions=True)
             finally:
-                if room is not None:
-                    await room.disconnect()
+                try:
+                    await _close_speech_models(owned_speech_models)
+                finally:
+                    try:
+                        if audio_input is not None:
+                            await audio_input.aclose()
+                    finally:
+                        if room is not None:
+                            await room.disconnect()
+
+    async def _settle_connect_task(self, connect_task: asyncio.Task[None]) -> None:
+        """Wait for or cancel an in-flight native SFU connection deterministically."""
+        done, pending = await asyncio.wait({connect_task}, timeout=_SFU_CONNECT_TIMEOUT_S)
+        if pending:
+            logger.warning("call_sfu_connect_teardown_timeout", identity=self._local_identity)
+            connect_task.cancel()
+            cancelled, pending = await asyncio.wait(pending, timeout=_SFU_CONNECT_CANCEL_TIMEOUT_S)
+            done.update(cancelled)
+        if pending:
+            logger.error("call_sfu_connect_cancel_timeout", identity=self._local_identity)
+            for task in pending:
+                task.add_done_callback(_consume_task_result)
+        if done:
+            await asyncio.gather(*done, return_exceptions=True)
 
 
 class CascadedVoiceBridge(RealtimeVoiceBridge):
@@ -534,7 +620,12 @@ class CascadedVoiceBridge(RealtimeVoiceBridge):
             raise TypeError(msg)
 
         stt = openai.STT(**_speech_component_kwargs(options.stt))
-        tts = openai.TTS(**_speech_component_kwargs(options.tts))
+        try:
+            tts = openai.TTS(**_speech_component_kwargs(options.tts))
+        except BaseException:
+            await stt.aclose()
+            raise
+        self._owned_speech_models = (stt, tts)
         mindroom_llm = _build_mindroom_llm(options.respond, options.on_tools_executed)
         session = AgentSession(
             stt=stt,
@@ -572,15 +663,8 @@ def _build_mindroom_llm(
 
     class _MindRoomLLMStream(llm.LLMStream):
         async def _run(self) -> None:
-            transcript = next(
-                (
-                    item.text_content
-                    for item in reversed(self._chat_ctx.items)
-                    if isinstance(item, llm.ChatMessage) and item.role == "user" and item.text_content
-                ),
-                None,
-            )
-            if transcript is None:
+            transcript = _consecutive_user_transcript(self._chat_ctx)
+            if not transcript:
                 msg = "Cascaded voice turn has no finalized user transcript"
                 raise ValueError(msg)
             result = await respond(transcript)
@@ -590,7 +674,13 @@ def _build_mindroom_llm(
                 self._event_ch.send_nowait(
                     llm.ChatChunk(
                         id=f"mindroom-{id(self)}",
-                        delta=llm.ChoiceDelta(role="assistant", content=result.text),
+                        delta=llm.ChoiceDelta(
+                            role="assistant",
+                            content=result.text,
+                            extra=(
+                                {_CALL_TURN_CORRELATION_KEY: result.turn_id} if result.turn_id is not None else None
+                            ),
+                        ),
                     ),
                 )
 
@@ -622,6 +712,31 @@ def _build_mindroom_llm(
             )
 
     return _MindRoomLLM()
+
+
+def _consecutive_user_transcript(chat_ctx: ChatContext) -> str:
+    """Join VAD-split user fragments that have no intervening assistant turn."""
+    from livekit.agents.llm import ChatMessage  # noqa: PLC0415
+
+    transcript_parts: list[str] = []
+    for item in reversed(chat_ctx.items):
+        if not isinstance(item, ChatMessage):
+            continue
+        if item.role == "assistant":
+            break
+        if item.role == "user" and item.text_content:
+            transcript_parts.append(item.text_content)
+    return "\n".join(reversed(transcript_parts))
+
+
+async def _close_speech_models(models: tuple[Any, ...]) -> None:
+    """Close caller-owned LiveKit speech providers without blocking room teardown."""
+    if not models:
+        return
+    results = await asyncio.gather(*(model.aclose() for model in models), return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException):
+            logger.warning("call_speech_model_close_failed", error=str(result))
 
 
 def _consume_task_result(task: asyncio.Task[None]) -> None:

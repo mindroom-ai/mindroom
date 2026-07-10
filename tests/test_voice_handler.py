@@ -184,6 +184,7 @@ class TestVoiceHandler:
                         api_key="configured-api-key",
                         host="https://stt.example.test/v1",
                         model="whisper-1",
+                        extra_kwargs={"language": "nl", "temperature": 0},
                     ),
                 ),
             ),
@@ -241,7 +242,7 @@ class TestVoiceHandler:
                 "url": "https://stt.example.test/v1/audio/transcriptions",
                 "headers": {"Authorization": "Bearer configured-api-key"},
                 "files": {"file": ("audio.ogg", b"audio-bytes", "audio/ogg")},
-                "data": {"model": "whisper-1"},
+                "data": {"model": "whisper-1", "language": "nl", "temperature": 0},
             },
         ]
 
