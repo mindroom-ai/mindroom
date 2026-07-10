@@ -144,9 +144,9 @@ The 20 slowest tests are reported at the end of every run (`--durations 20`).
 Normal test runs skip coverage instrumentation so the fast feedback path stays fast.
 Run `just test-backend-coverage` for core backend coverage or `just test-saas-backend-coverage` for SaaS backend coverage.
 
-## Running All Tests
+## Running Standard Test Suites
 
-Use the convenience script to run the core Python, core frontend, SaaS backend, SaaS frontend, and SaaS frontend API-command suites:
+Use `just test-standard` or the convenience script to run the core Python, core frontend, SaaS backend, SaaS frontend, and SaaS frontend API-command suites:
 
 ```bash
 ./run-tests.sh

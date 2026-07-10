@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace, TracebackType
@@ -648,7 +649,7 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
     ]:
         if runtime_paths == first_runtime:
             started.set()
-            allow_finish.wait(timeout=1)
+            allow_finish.wait()
             return (
                 config_lifecycle.ConfigLoadResult(
                     success=False,
@@ -664,19 +665,20 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
 
     main.initialize_api_app(fresh_app, first_runtime)
 
-    with patch.object(config_lifecycle, "_load_config_result", side_effect=_fake_load_result):
-        stale_thread = threading.Thread(
-            target=config_lifecycle.load_config_into_app,
-            args=(first_runtime, fresh_app),
-        )
-        stale_thread.start()
-        assert started.wait(timeout=1)
+    with (
+        patch.object(config_lifecycle, "_load_config_result", side_effect=_fake_load_result),
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        stale_result = executor.submit(config_lifecycle.load_config_into_app, first_runtime, fresh_app)
+        try:
+            assert started.wait(timeout=1)
 
-        main.initialize_api_app(fresh_app, second_runtime)
-        assert config_lifecycle.load_config_into_app(second_runtime, fresh_app) is True
-        allow_finish.set()
-        stale_thread.join(timeout=1)
-        assert not stale_thread.is_alive()
+            main.initialize_api_app(fresh_app, second_runtime)
+            assert config_lifecycle.load_config_into_app(second_runtime, fresh_app) is True
+        finally:
+            allow_finish.set()
+
+        assert stale_result.result(timeout=1) is False
 
     context = main._app_context(fresh_app)
     assert context.runtime_paths == second_runtime

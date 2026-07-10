@@ -147,7 +147,7 @@ def _walk_runtime_nodes(
 
 @functools.cache
 def _parsed_python_module(py_path: Path) -> ast.Module:
-    return ast.parse(py_path.read_text())
+    return ast.parse(py_path.read_text(encoding="utf-8"))
 
 
 def _runtime_direct_imports(py_path: Path, importer_module: str, target_modules: set[str]) -> set[str]:

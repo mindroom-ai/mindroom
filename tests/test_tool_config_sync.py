@@ -56,12 +56,14 @@ def test_registered_tool_contract(tool_name: str) -> None:
     try:
         tool_class = tool_factory()
     except Exception as exc:
-        if isinstance(exc, ImportError) and tool_name in OPTIONAL_TOOL_IMPORTS:
+        if (
+            metadata.status == ToolStatus.REQUIRES_CONFIG
+            and isinstance(exc, ImportError)
+            and tool_name in OPTIONAL_TOOL_IMPORTS
+        ):
             pytest.skip(f"{tool_name} optional dependency not installed: {exc}")
-        if isinstance(exc, NotImplementedError):
+        if metadata.status == ToolStatus.REQUIRES_CONFIG and isinstance(exc, NotImplementedError):
             pytest.skip(f"{tool_name} tool is not implemented: {exc}")
-        if isinstance(exc, RuntimeError) and tool_name == "openbb" and ".build.lock" in str(exc):
-            pytest.skip(f"{tool_name} import is transiently locked by upstream build process: {exc}")
         raise
 
     assert isinstance(tool_class, type)

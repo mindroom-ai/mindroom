@@ -73,7 +73,9 @@ NODE_BIN="$(
 
 # Bun follows JavaScript bin shebangs through PATH. Require real Node so
 # Vitest and Jest do not run inside Bun's Node compatibility layer.
-export PATH="$(dirname "$NODE_BIN")${PATH:+:$PATH}"
+NODE_DIR="$(dirname "$NODE_BIN")"
+PATH="$NODE_DIR${PATH:+:$PATH}"
+export PATH
 
 section "Toolchain"
 printf 'uv: %s\n' "$UV_BIN"
@@ -114,4 +116,4 @@ section "SaaS frontend API command test"
     "$BUN_BIN" run test:api-check
 )
 
-section "All automated test suites passed"
+section "All standard cross-platform test suites passed"

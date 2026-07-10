@@ -124,6 +124,7 @@ def _configure_uncached_structlog(
     cache_logger_on_first_use: bool | None = None,
 ) -> None:
     """Prevent logging tests from leaving cached production renderers behind."""
+    # Cached proxies outlive one test, so the suite intentionally overrides this request.
     _ = cache_logger_on_first_use
     _STRUCTLOG_CONFIGURE(
         processors=processors,

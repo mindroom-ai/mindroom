@@ -221,8 +221,8 @@ test-backend-coverage *args:
     uv sync --all-extras
     uv run --all-extras pytest --cov=mindroom --cov-report=term-missing {{ args }}
 
-# Run every local automated test suite with dependency preflight and fail-fast behavior
-test-all:
+# Run the standard cross-platform test suites with dependency preflight and fail-fast behavior
+test-standard:
     ./run-tests.sh
 
 # Check for public symbols that should be private
