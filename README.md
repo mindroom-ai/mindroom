@@ -13,9 +13,7 @@
 
 **AI agents that live in your chat rooms.**
 
-MindRoom is an open-source multi-agent runtime built on [Matrix](https://matrix.org/).
-**Use almost any [AI model provider](docs/configuration/models.md), cloud or local.**
-Connect directly to OpenAI (API or Codex subscription), Azure OpenAI, Anthropic (directly or through Amazon Bedrock or Google Vertex AI), Google Gemini, OpenRouter, DeepSeek, Z.ai, Groq, Cerebras, Ollama, llama.cpp, or any OpenAI-compatible endpoint — and mix providers across agents, rooms, and threads.
+MindRoom is an open-source multi-agent runtime built on [Matrix](https://matrix.org/) that works with nearly any [cloud or local AI model](docs/configuration/models.md).
 You define agents in a YAML file or in the web dashboard; MindRoom gives each one a Matrix account, and you talk to them in threads in the [MindRoom chat client](https://github.com/mindroom-ai/mindroom-cinny) — or any other Matrix client you already use.
 Because Matrix bridges to other platforms, the same agents also work in Slack, Telegram, Discord, WhatsApp, IRC, and email — with the same persistent memory everywhere.
 Self-host the whole stack, or run only the MindRoom backend locally and pair it with hosted Matrix at [mindroom.chat](https://mindroom.chat).
@@ -29,7 +27,7 @@ https://github.com/user-attachments/assets/1f121c89-5418-4f42-bdfe-fb9de0fecd03
 - **100+ tool integrations** — Gmail, GitHub, Google Drive, Home Assistant, shell, Python, web search, and more, plus native Matrix tools and a per-thread `todo` planner, with sandboxed execution and per-tool approval rules.
 - **Knowledge bases (RAG)** — point an agent at a folder of files; MindRoom indexes it and can watch it for changes.
 - **Scheduling & automation** — cron or natural-language scheduled tasks (`!schedule`), background work with human escalation.
-- **Model-provider freedom** — mix cloud and local models in one deployment and choose a different model per agent, room, or thread (`!model`), with built-in providers and OpenAI-compatible endpoints covered in the [model guide](docs/configuration/models.md).
+- **Model routing** — a different model per agent, room, or thread (`!model`); route sensitive rooms to local Ollama and everything else to a cloud model.
 - **Voice** — transcription of Matrix voice messages, and text-to-speech tools via OpenAI, Groq, ElevenLabs, and Cartesia.
 - **Streaming responses** — agents type into the room with progressive edits, visible tool traces, and cancellation.
 - **Plugins & hooks** — drop-in [plugins](docs/plugins.md) add custom tools, skills, and OAuth providers, and a typed [event-hook system](docs/hooks.md) (per-hook timeouts, fault isolation) lets them observe and transform messages; reload plugins at runtime with `!reload-plugins`.
