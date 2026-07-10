@@ -11,7 +11,12 @@ from unittest.mock import MagicMock, patch
 from mindroom import constants
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
-from mindroom.handled_turns import SourceEventMetadata, TurnRecord, TurnRecordCodec
+from mindroom.handled_turns import (
+    SourceEventMetadata,
+    TurnRecord,
+    TurnRecordCodec,
+    _reset_handled_turn_ledger_runtime,
+)
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -148,6 +153,52 @@ def test_discovery_alias_recovery_repairs_anchor_and_alias_rows(tmp_path: Path) 
             assert repaired.source_event_ids == ("$question",)
             assert repaired.discovery_event_ids == ("$selection",)
             assert store.is_handled(indexed_event_id)
+
+
+def test_recovery_does_not_replace_a_conflicting_completed_identity(tmp_path: Path) -> None:
+    """Repair missing aliases without overwriting another completed source turn."""
+    store = _store(tmp_path)
+    store.record_turn(TurnRecord.create(["$selection"], response_event_id="$selection-response"))
+    recovery_record = TurnRecord.create(
+        ["$question"],
+        discovery_event_ids=["$selection"],
+        response_event_id="$question-response",
+    )
+
+    loaded = _load_with_recovery(
+        store,
+        original_event_id="$question",
+        recovery_record=recovery_record,
+    )
+
+    assert loaded is not None
+    assert loaded.source_event_ids == ("$question",)
+    assert store.get_turn_record("$question") == loaded
+    selection_record = store.get_turn_record("$selection")
+    assert selection_record is not None
+    assert selection_record.source_event_ids == ("$selection",)
+    assert selection_record.response_event_id == "$selection-response"
+
+    store._ledger.flush()
+    _reset_handled_turn_ledger_runtime()
+    reloaded_store = _store(tmp_path)
+    assert reloaded_store.get_turn_record("$question") == loaded
+    assert reloaded_store.get_turn_record("$selection") == selection_record
+
+
+def test_terminal_turn_can_replace_a_provisional_source_identity(tmp_path: Path) -> None:
+    """A partial visible echo may join the canonical coalesced turn that completes it."""
+    store = _store(tmp_path)
+    store.record_visible_echo("$second", "$echo")
+
+    store.record_turn(TurnRecord.create(["$first", "$second"], response_event_id="$response"))
+
+    first_record = store.get_turn_record("$first")
+    second_record = store.get_turn_record("$second")
+    assert first_record is not None
+    assert first_record == second_record
+    assert first_record.source_event_ids == ("$first", "$second")
+    assert first_record.visible_echo_event_id == "$echo"
 
 
 def test_run_metadata_without_current_schema_version_is_not_recovery_data() -> None:

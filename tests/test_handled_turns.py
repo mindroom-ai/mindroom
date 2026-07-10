@@ -569,6 +569,20 @@ def test_record_without_requester_or_correlation_loads_cleanly(temp_dir: Path) -
 def test_current_codec_rejects_incomplete_ledger_records() -> None:
     """Current-version ledger rows require the full canonical identity and outcome fields."""
     assert TurnRecordCodec.from_ledger_record("$event", {}) is None
+    assert (
+        TurnRecordCodec.from_ledger_record(
+            "$event",
+            {
+                "anchor_event_id": "$event",
+                "source_event_ids": ["", None],
+                "discovery_event_ids": ["$event"],
+                "response_event_id": "$response",
+                "completed": True,
+                "timestamp": time.time(),
+            },
+        )
+        is None
+    )
 
 
 def test_large_coalesced_turn_round_trips(temp_dir: Path) -> None:

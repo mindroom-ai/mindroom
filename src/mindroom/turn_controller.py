@@ -1295,18 +1295,14 @@ class TurnController:
         selection_handled_turn = self.deps.turn_store.attach_response_context(
             TurnRecord.create(
                 [selection.question_event_id],
+                discovery_event_ids=((source_event_id,) if source_event_id != selection.question_event_id else ()),
                 requester_id=user_id,
                 correlation_id=selection.question_event_id,
             ),
             history_scope=self.deps.turn_store.response_history_scope(ResponseAction(kind="individual")),
             conversation_target=response_target,
         )
-        selection_matrix_run_metadata = self.deps.turn_store.build_run_metadata(
-            selection_handled_turn,
-            additional_discovery_event_ids=(
-                (source_event_id,) if source_event_id != selection.question_event_id else ()
-            ),
-        )
+        selection_matrix_run_metadata = self.deps.turn_store.build_run_metadata(selection_handled_turn)
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         response_envelope = MessageEnvelope(
             source_event_id=source_event_id,
@@ -1341,19 +1337,6 @@ class TurnController:
             self._mark_source_events_responded(
                 replace(selection_handled_turn, response_event_id=response_event_id),
             )
-            if source_event_id != selection.question_event_id:
-                self._mark_source_events_responded(
-                    self.deps.turn_store.attach_response_context(
-                        TurnRecord.create(
-                            [source_event_id],
-                            response_event_id=response_event_id,
-                            requester_id=user_id,
-                            correlation_id=selection.question_event_id,
-                        ),
-                        history_scope=selection_handled_turn.history_scope,
-                        conversation_target=response_target,
-                    ),
-                )
 
     def _router_handoff_extra_content(
         self,

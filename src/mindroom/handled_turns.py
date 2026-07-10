@@ -246,6 +246,8 @@ class TurnRecordCodec:
         ):
             return None
         source_event_ids = _normalize_source_event_ids(raw_source_event_ids)
+        if not source_event_ids:
+            return None
         turn_record = TurnRecord.create(
             source_event_ids,
             discovery_event_ids=_normalize_source_event_ids(raw_discovery_event_ids),
@@ -378,7 +380,7 @@ def _reset_handled_turn_ledger_runtime() -> None:
 
 @dataclass
 class HandledTurnLedger:
-    """Store exact canonical records without owning merge or recovery policy."""
+    """Store exact canonical records without reassigning completed source identities."""
 
     agent_name: str
     base_path: Path
@@ -423,7 +425,7 @@ class HandledTurnLedger:
         lookup_event_ids: Sequence[str],
         update: Callable[[Mapping[str, TurnRecord]], TurnRecord],
     ) -> TurnRecord | None:
-        """Atomically derive and persist one exact record from current indexed rows."""
+        """Atomically update compatible rows while preserving completed identities."""
         normalized_lookup_event_ids = _normalize_source_event_ids(lookup_event_ids)
         if not normalized_lookup_event_ids:
             return None
@@ -442,10 +444,18 @@ class HandledTurnLedger:
             persisted_record = (
                 turn_record if turn_record.timestamp != 0.0 else replace(turn_record, timestamp=time.time())
             )
-            for event_id in persisted_record.indexed_event_ids:
+            writable_event_ids = tuple(
+                event_id
+                for event_id in persisted_record.indexed_event_ids
+                if (existing_record := self._responses.get(event_id)) is None
+                or not existing_record.completed
+                or _same_turn_identity(existing_record, persisted_record)
+            )
+            for event_id in writable_event_ids:
                 self._responses[event_id] = persisted_record
-            self._schedule_persist_locked(persisted_record.indexed_event_ids)
-        logger.debug("handled_turn_recorded", indexed_event_count=len(persisted_record.indexed_event_ids))
+            if writable_event_ids:
+                self._schedule_persist_locked(writable_event_ids)
+        logger.debug("handled_turn_recorded", indexed_event_count=len(writable_event_ids))
         return persisted_record
 
     def has_responded(self, event_id: str) -> bool:
@@ -506,7 +516,14 @@ class HandledTurnLedger:
         try:
             with advisory_file_lock(self._responses_lock_file, exclusive=True):
                 persisted_responses = self._read_responses_file_locked()
-                persisted_responses.update(records)
+                for event_id, record in records.items():
+                    existing_record = persisted_responses.get(event_id)
+                    if (
+                        existing_record is None
+                        or not existing_record.completed
+                        or _same_turn_identity(existing_record, record)
+                    ):
+                        persisted_responses[event_id] = record
                 self._write_responses_file_locked(persisted_responses)
         except Exception:
             logger.exception(
@@ -618,6 +635,11 @@ def _normalize_source_event_ids(source_event_ids: Sequence[object]) -> tuple[str
         seen_event_ids.add(event_id)
         normalized_event_ids.append(event_id)
     return tuple(normalized_event_ids)
+
+
+def _same_turn_identity(first: TurnRecord, second: TurnRecord) -> bool:
+    """Return whether two records identify the same canonical source turn."""
+    return first.source_event_ids == second.source_event_ids and first.anchor_event_id == second.anchor_event_id
 
 
 def _normalize_string(value: object) -> str | None:
