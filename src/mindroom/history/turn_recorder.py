@@ -110,7 +110,11 @@ class TurnRecorder:
 
     def mark_restart_recovery_pending(self) -> None:
         """Record that sync-restart recovery still needs this replay provenance."""
+        if self.restart_recovery_pending:
+            return
         self.restart_recovery_pending = True
+        if self.outcome == "interrupted":
+            self.interrupted_persisted = False
 
     def interrupted_snapshot(self) -> InterruptedReplaySnapshot:
         """Build one canonical interrupted snapshot from the recorded facts."""

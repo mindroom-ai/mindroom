@@ -103,7 +103,7 @@ def test_scope_seen_event_ids_include_persisted_response_event_ids(tmp_path: Pat
 
 
 def test_pending_restart_recovery_run_ids_only_keeps_latest_flagged_replay() -> None:
-    """Generic failures clear protection; repeated restart cancels replace it."""
+    """Generic failures retain protection; repeated restart cancels replace it."""
     first = _completed_run("first")
     first.metadata = {
         MINDROOM_REPLAY_STATE_METADATA_KEY: MINDROOM_REPLAY_STATE_INTERRUPTED,
@@ -115,7 +115,7 @@ def test_pending_restart_recovery_run_ids_only_keeps_latest_flagged_replay() -> 
     provider_error.metadata = {MINDROOM_REPLAY_STATE_METADATA_KEY: MINDROOM_REPLAY_STATE_INTERRUPTED}
 
     assert pending_restart_recovery_run_ids([first, second]) == {"second"}
-    assert pending_restart_recovery_run_ids([first, provider_error]) == set()
+    assert pending_restart_recovery_run_ids([first, provider_error]) == {"first"}
 
 
 @pytest.mark.parametrize("excluded_status", [RunStatus.cancelled, RunStatus.error, RunStatus.paused])

@@ -620,7 +620,7 @@ def test_blocking_continuation_limit_returns_limit_message() -> None:
 
 
 def test_blocking_empty_run_grants_one_retry_then_notice() -> None:
-    """The empty-run guard discards, retries once, then falls back to the notice."""
+    """The empty-run guard retries once and keeps the final run as history carrier."""
     log = _AdapterLog()
     recorder = _FakeTurnRecorder()
     attempts = 0
@@ -641,7 +641,7 @@ def test_blocking_empty_run_grants_one_retry_then_notice() -> None:
 
     assert result == EMPTY_RESPONSE_NOTICE
     assert attempts == 2
-    assert [discard.run_id for discard in log.discards] == ["run-1", "run-2"]
+    assert [discard.run_id for discard in log.discards] == ["run-1"]
     assert log.released == 1
     assert recorder.completed_calls == [
         {"run_metadata": None, "assistant_text": "", "completed_tools": []},
@@ -1031,7 +1031,7 @@ def test_streaming_external_cancel_without_recorder_persists_snapshot() -> None:
 
 
 def test_streaming_empty_run_retries_then_yields_notice_and_records() -> None:
-    """The streaming empty-run guard retries once, then yields the notice and records."""
+    """The streaming empty-run guard keeps the final run while yielding the notice."""
     log = _AdapterLog()
     recorder = _FakeTurnRecorder()
     attempts = 0
@@ -1057,7 +1057,7 @@ def test_streaming_empty_run_retries_then_yields_notice_and_records() -> None:
 
     assert chunks == [f"notice:{EMPTY_RESPONSE_NOTICE}"]
     assert attempts == 2
-    assert [discard.run_id for discard in log.discards] == ["run-1", "run-2"]
+    assert [discard.run_id for discard in log.discards] == ["run-1"]
     # The notice-only turn still records an empty completion.
     assert recorder.completed_calls[-1]["assistant_text"] == ""
 

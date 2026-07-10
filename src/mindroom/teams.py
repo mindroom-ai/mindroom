@@ -22,6 +22,7 @@ from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
 from agno.run.team import RunCompletedEvent as TeamRunCompletedEvent
 from agno.run.team import RunContentEvent as TeamRunContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
+from agno.run.team import RunPausedEvent as TeamRunPausedEvent
 from agno.run.team import TeamRunOutput
 from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
@@ -2239,6 +2240,8 @@ async def team_response(  # noqa: C901, PLR0915
                 partial_text=_extract_errored_team_partial_text(response),
                 completed_tools=tuple(completed_tools),
                 interrupted_tools=tuple(interrupted_tools),
+                session_id=response.session_id,
+                run_id=response.run_id or attempt_run_id,
                 metadata_content=metadata_content,
             )
         if pending_retry_decision is not None:
@@ -2299,6 +2302,22 @@ async def team_response(  # noqa: C901, PLR0915
             if isinstance(response, (TeamRunOutput, RunOutput))
             else _format_team_header(team_members.display_names) + team_response_text
         )
+        if (
+            isinstance(response, (TeamRunOutput, RunOutput))
+            and not is_empty_run
+            and not _is_bound_team_history_visible_run(response, run.scope_context)
+        ):
+            completed_tools, interrupted_tools = _extract_cancelled_team_tool_trace(response)
+            return ErroredAttempt(
+                response_text,
+                partial_text=response_text if has_visible_output else "",
+                completed_tools=tuple(completed_tools),
+                interrupted_tools=tuple(interrupted_tools),
+                session_id=response.session_id,
+                run_id=response.run_id or attempt_run_id,
+                metadata_content=metadata_content,
+                original_status=(RunStatus.paused if response.status == RunStatus.paused else RunStatus.error),
+            )
         return CompletedAttempt(
             response_text=response_text,
             # Match the streaming path: the "No team response generated."
@@ -2503,7 +2522,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
     config = orchestrator.config
     holder = _TeamTurnHolder(team_members=team_members)
 
-    async def _run_team_stream_attempt(  # noqa: C901, PLR0912, PLR0915
+    async def _run_team_stream_attempt(  # noqa: C901, PLR0911, PLR0912, PLR0915
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
     ) -> AsyncGenerator[_TeamStreamChunk | AttemptResolved, None]:
@@ -2895,6 +2914,8 @@ async def team_response_stream(  # noqa: C901, PLR0915
                                 partial_text=_extract_errored_team_partial_text(event),
                                 completed_tools=tuple(completed_tool_trace),
                                 interrupted_tools=tuple(interrupted_tool_trace),
+                                session_id=event.session_id,
+                                run_id=event.run_id or attempt_run_id,
                                 metadata_content=event_metadata_content,
                             ),
                         )
@@ -2920,6 +2941,23 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         event,
                         team_display_names=team_members.display_names,
                     )
+                    if not event_is_empty and not _is_bound_team_history_visible_run(event, run.scope_context):
+                        completed_tool_trace, interrupted_tool_trace = _extract_cancelled_team_tool_trace(event)
+                        yield AttemptResolved(
+                            ErroredAttempt(
+                                response_text,
+                                partial_text=response_text if event_has_visible else "",
+                                completed_tools=tuple(completed_tool_trace),
+                                interrupted_tools=tuple(interrupted_tool_trace),
+                                session_id=event.session_id,
+                                run_id=event.run_id or attempt_run_id,
+                                metadata_content=event_metadata_content,
+                                original_status=(
+                                    RunStatus.paused if event.status == RunStatus.paused else RunStatus.error
+                                ),
+                            ),
+                        )
+                        return
                     # The driver emits response_text only after settling the
                     # attempt: a pre-settle yield would leak the fallback
                     # placeholder before an empty-run retry, or stale
@@ -3090,6 +3128,39 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     # this event is the stream's usage/identity source instead.
                     completed_run_event = event
                     continue
+                elif isinstance(event, TeamRunPausedEvent):
+                    event_completed_tools, event_interrupted_tools = split_interrupted_tool_trace(event.tools)
+                    canonical_text = _current_canonical_partial_text()
+                    paused_body = canonical_text or str(event.content or "")
+                    paused_text = _format_team_header(team_members.display_names) + paused_body if paused_body else ""
+                    paused_metadata: dict[str, Any] | None = None
+                    if run_metadata_collector is not None:
+                        paused_metadata = _build_streamed_team_run_metadata_content(
+                            config=config,
+                            prepared_execution=prepared_execution,
+                            completed_run_event=None,
+                            usage=usage,
+                            run_id=event.run_id or attempt_run_id,
+                            session_id=event.session_id or ctx.session_id,
+                            status=RunStatus.paused,
+                            tool_count=len(completed_tool_executions),
+                        )
+                    yield AttemptResolved(
+                        ErroredAttempt(
+                            "" if emitted_output else paused_text,
+                            partial_text=paused_text,
+                            completed_tools=(*completed_tools, *event_completed_tools),
+                            interrupted_tools=(
+                                *(pending.trace_entry for pending in pending_tools),
+                                *event_interrupted_tools,
+                            ),
+                            session_id=event.session_id,
+                            run_id=event.run_id or attempt_run_id,
+                            metadata_content=paused_metadata,
+                            original_status=RunStatus.paused,
+                        ),
+                    )
+                    return
                 elif isinstance(event, TeamModelRequestCompletedEvent):
                     usage.track(event)
                     continue

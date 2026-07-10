@@ -619,6 +619,34 @@ class ResponseRunner:
             # the replay snapshot is the lesser harm.
             self.deps.logger.exception("Failed to persist interrupted replay state")
 
+    async def _emit_session_started_with_cancel_guard(
+        self,
+        *,
+        emit_session_started: Callable[[], Awaitable[None]],
+        recorder: TurnRecorder,
+        session_scope: HistoryScope,
+        session_id: str,
+        execution_identity: ToolExecutionIdentity | None,
+        run_id: str | None,
+        is_team: bool,
+        response_event_id: str | None,
+    ) -> None:
+        """Persist the turn when cancellation interrupts the post-settle session hook."""
+        try:
+            await emit_session_started()
+        except asyncio.CancelledError as exc:
+            _mark_restart_recovery_pending(recorder, classify_cancel_source(exc))
+            await self._persist_interrupted_recorder_off_loop(
+                recorder=recorder,
+                session_scope=session_scope,
+                session_id=session_id,
+                execution_identity=execution_identity,
+                run_id=run_id,
+                is_team=is_team,
+                response_event_id=response_event_id,
+            )
+            raise
+
     def _record_stream_delivery_error(
         self,
         *,
@@ -1591,7 +1619,16 @@ class ResponseRunner:
                         )
                         raise
                     finally:
-                        await lifecycle.emit_session_started(session_started_watch)
+                        await self._emit_session_started_with_cancel_guard(
+                            emit_session_started=lambda: lifecycle.emit_session_started(session_started_watch),
+                            recorder=team_turn_recorder,
+                            session_scope=session_scope,
+                            session_id=session_id,
+                            execution_identity=tool_dispatch.execution_identity,
+                            run_id=response_run_id,
+                            is_team=True,
+                            response_event_id=progress.tracked_event_id,
+                        )
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark("streaming_complete")
                 if team_turn_recorder.outcome == "interrupted":
@@ -1674,7 +1711,16 @@ class ResponseRunner:
                                 )
                                 raise
                     finally:
-                        await lifecycle.emit_session_started(session_started_watch)
+                        await self._emit_session_started_with_cancel_guard(
+                            emit_session_started=lambda: lifecycle.emit_session_started(session_started_watch),
+                            recorder=team_turn_recorder,
+                            session_scope=session_scope,
+                            session_id=session_id,
+                            execution_identity=tool_dispatch.execution_identity,
+                            run_id=response_run_id,
+                            is_team=True,
+                            response_event_id=progress.tracked_event_id,
+                        )
                 except asyncio.CancelledError as exc:
                     log_cancelled_response(
                         self.deps.logger,
@@ -2241,7 +2287,16 @@ class ResponseRunner:
                     pipeline_timing=request.pipeline_timing,
                 )
             finally:
-                await lifecycle.emit_session_started(session_started_watch)
+                await self._emit_session_started_with_cancel_guard(
+                    emit_session_started=lambda: lifecycle.emit_session_started(session_started_watch),
+                    recorder=turn_recorder,
+                    session_scope=session_scope,
+                    session_id=runtime.session_id,
+                    execution_identity=runtime.tool_dispatch.execution_identity,
+                    run_id=run_id,
+                    is_team=False,
+                    response_event_id=request.existing_event_id,
+                )
         except asyncio.CancelledError as exc:
             cancel_source = classify_cancel_source(exc)
             log_cancelled_response(
@@ -2385,7 +2440,16 @@ class ResponseRunner:
                     pipeline_timing=request.pipeline_timing,
                 )
             finally:
-                await lifecycle.emit_session_started(session_started_watch)
+                await self._emit_session_started_with_cancel_guard(
+                    emit_session_started=lambda: lifecycle.emit_session_started(session_started_watch),
+                    recorder=turn_recorder,
+                    session_scope=session_scope,
+                    session_id=runtime.session_id,
+                    execution_identity=runtime.tool_dispatch.execution_identity,
+                    run_id=run_id,
+                    is_team=False,
+                    response_event_id=request.existing_event_id,
+                )
         except StreamingDeliveryError as error:
             stream_transport_outcome = error.transport_outcome
             if stream_transport_outcome.terminal_status == "cancelled":

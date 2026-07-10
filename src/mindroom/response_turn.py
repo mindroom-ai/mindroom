@@ -281,13 +281,16 @@ class CancelledAttempt:
 
 @dataclass(frozen=True)
 class ErroredAttempt:
-    """One attempt that resolved to user-facing error text."""
+    """One attempt whose provider run is absent from model-visible history."""
 
     user_message_text: str
     partial_text: str = ""
     completed_tools: tuple[ToolTraceEntry, ...] = ()
     interrupted_tools: tuple[ToolTraceEntry, ...] = ()
+    session_id: str | None = None
+    run_id: str | None = None
     metadata_content: dict[str, Any] | None = None
+    original_status: RunStatus = RunStatus.error
 
 
 @dataclass(frozen=True)
@@ -431,15 +434,16 @@ def _record_errored_turn(
     run: TurnRunState,
     resolution: ErroredAttempt | None = None,
 ) -> None:
-    """Record one failed turn through the canonical interrupted-replay path."""
+    """Record one history-excluded turn through the canonical replay path."""
     recorder = sinks.turn_recorder
     run_metadata = _interrupted_run_metadata(ctx, sinks, run)
+    original_status = resolution.original_status if resolution is not None else RunStatus.error
     if recorder is not None:
         if resolution is None:
             run.turn_state.record_interrupted_from_recorder(
                 recorder,
                 run_metadata=run_metadata,
-                original_status=RunStatus.error,
+                original_status=original_status,
             )
         else:
             live_assistant_text = merge_text_snapshots(
@@ -467,7 +471,7 @@ def _record_errored_turn(
                     live_interrupted_tools,
                     resolution.interrupted_tools,
                 ),
-                original_status=RunStatus.error,
+                original_status=original_status,
             )
         return
     if run.standalone_replay_persisted or persist is None:
@@ -486,13 +490,13 @@ def _record_errored_turn(
     persist(
         run.scope_context,
         StandaloneReplaySnapshot(
-            session_id=ctx.session_id,
-            run_id=ctx.run_id or str(uuid4()),
+            session_id=(resolution.session_id if resolution is not None else None) or ctx.session_id,
+            run_id=(resolution.run_id if resolution is not None else None) or ctx.run_id or str(uuid4()),
             partial_text=partial_text,
             completed_tools=completed_tools,
             interrupted_tools=interrupted_tools,
             run_metadata=run_metadata,
-            original_status=RunStatus.error,
+            original_status=original_status,
         ),
     )
     run.standalone_replay_persisted = True
@@ -578,15 +582,15 @@ def _settle_empty_run(
     iteration budget stays authoritative; a granted retry closes the spent
     entity's runtime state exactly like the continuation handoff.
     """
-    discard_empty_run(
-        run.scope_context,
-        EmptyRunDiscard(
-            session_id=resolution.session_id or ctx.session_id,
-            run_id=resolution.run_id,
-            output_tokens=resolution.output_tokens,
-        ),
-    )
     if not run.empty_response_retried and continuation_count < DYNAMIC_TOOL_CONTINUATION_LIMIT:
+        discard_empty_run(
+            run.scope_context,
+            EmptyRunDiscard(
+                session_id=resolution.session_id or ctx.session_id,
+                run_id=resolution.run_id,
+                output_tokens=resolution.output_tokens,
+            ),
+        )
         run.empty_response_retried = True
         release_attempt_entity(run.scope_context)
         return True

@@ -416,6 +416,19 @@ def test_turn_recorder_record_helpers_capture_completed_and_interrupted_turns() 
     assert [tool.tool_name for tool in snapshot.interrupted_tools] == ["save_file"]
 
 
+def test_restart_recovery_marker_reopens_persisted_interrupted_recorder() -> None:
+    """A late restart cancellation can rewrite an earlier generic replay with protection."""
+    recorder = TurnRecorder(user_message="Please continue")
+    recorder.mark_interrupted(original_status=RunStatus.error)
+    assert recorder.claim_interrupted_persistence() is True
+    assert recorder.claim_interrupted_persistence() is False
+
+    recorder.mark_restart_recovery_pending()
+
+    assert recorder.restart_recovery_pending is True
+    assert recorder.claim_interrupted_persistence() is True
+
+
 def test_persist_interrupted_replay_snapshot_keeps_minimal_interrupted_turn(tmp_path: Path) -> None:
     """Even hard-cancelled turns with no observed assistant state should persist one interrupted record."""
     storage = create_state_storage(

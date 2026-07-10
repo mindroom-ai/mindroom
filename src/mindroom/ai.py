@@ -19,6 +19,7 @@ from agno.run.agent import (
     RunContentEvent,
     RunErrorEvent,
     RunOutput,
+    RunPausedEvent,
     ToolCallCompletedEvent,
     ToolCallStartedEvent,
 )
@@ -312,6 +313,7 @@ class _StreamingAttemptState:
     latest_request_cache_read_tokens: int | None = None
     latest_request_cache_write_tokens: int | None = None
     cancelled_run_event: RunCancelledEvent | None = None
+    paused_run_event: RunPausedEvent | None = None
     completed_run_event: RunCompletedEvent | None = None
     canonical_final_body_candidate: str | None = None
     completed_tool_executions: list[ToolExecution] = field(default_factory=list)
@@ -1260,7 +1262,7 @@ async def _prepare_agent_run_context(
     )
 
 
-async def ai_response(
+async def ai_response(  # noqa: C901
     ctx: ResponseTurnContext,
     prompt: str,
     runtime_paths: RuntimePaths,
@@ -1488,6 +1490,19 @@ async def ai_response(
                 interrupted_tools=tuple(interrupted_tools),
                 metadata_content=metadata_content,
             )
+        if response.status == RunStatus.paused:
+            completed_tools, interrupted_tools = _extract_cancelled_tool_trace(response)
+            partial_text = _extract_interrupted_partial_text(response.content, messages=response.messages)
+            return ErroredAttempt(
+                _extract_response_content(response, show_tool_calls=show_tool_calls),
+                partial_text=partial_text,
+                completed_tools=tuple(completed_tools),
+                interrupted_tools=tuple(interrupted_tools),
+                session_id=response.session_id,
+                run_id=response.run_id or attempt.attempt_run_id,
+                metadata_content=metadata_content,
+                original_status=RunStatus.paused,
+            )
         return CompletedAttempt(
             response_text=_extract_response_content(response, show_tool_calls=show_tool_calls),
             replayable_text=_extract_replayable_response_text(response),
@@ -1615,6 +1630,12 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
 
             if isinstance(event, RunCancelledEvent):
                 state.cancelled_run_event = event
+                if state_updated is not None:
+                    state_updated()
+                return
+
+            if isinstance(event, RunPausedEvent):
+                state.paused_run_event = event
                 if state_updated is not None:
                     state_updated()
                 return
@@ -1830,7 +1851,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             entity_name=agent_name,
         )
 
-    async def _run_streaming_attempt(  # noqa: C901, PLR0915
+    async def _run_streaming_attempt(  # noqa: C901, PLR0912, PLR0915
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
@@ -1987,6 +2008,48 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                         session_id=state.cancelled_run_event.session_id,
                         run_id=state.cancelled_run_event.run_id or attempt.attempt_run_id,
                         metadata_content=cancelled_metadata,
+                    ),
+                )
+                return
+
+            if state.paused_run_event is not None:
+                paused_event = state.paused_run_event
+                paused_completed, paused_interrupted = split_interrupted_tool_trace(paused_event.tools)
+                completed_tools = list(state.completed_tools) or paused_completed
+                interrupted_tools = [pending.trace_entry for pending in state.pending_tools] or paused_interrupted
+                partial_text = state.assistant_text or str(paused_event.content or "")
+                paused_metadata: dict[str, Any] | None = None
+                if run_metadata_collector is not None:
+                    paused_metadata = build_ai_run_metadata_content(
+                        config=config,
+                        model_name=prepared_run.runtime_model_name,
+                        run_id=paused_event.run_id,
+                        session_id=paused_event.session_id or session_id,
+                        status=RunStatus.paused,
+                        model=state.latest_model_id,
+                        model_provider=state.latest_model_provider,
+                        metrics=build_model_request_metrics_fallback(
+                            state.request_metric_totals,
+                            state.first_token_latency,
+                            state.observed_request_metric_fields,
+                        ),
+                        context_input_tokens=prepared_context_input_tokens,
+                        context_raw_input_tokens=state.latest_request_input_tokens,
+                        context_cache_read_tokens=state.latest_request_cache_read_tokens,
+                        context_cache_write_tokens=state.latest_request_cache_write_tokens,
+                        tool_count=state.observed_tool_calls,
+                        prepared_history=prepared_run.prepared_history,
+                    )
+                yield AttemptResolved(
+                    ErroredAttempt(
+                        "" if state.assistant_text else partial_text,
+                        partial_text=partial_text,
+                        completed_tools=tuple(completed_tools),
+                        interrupted_tools=tuple(interrupted_tools),
+                        session_id=paused_event.session_id,
+                        run_id=paused_event.run_id or attempt.attempt_run_id,
+                        metadata_content=paused_metadata,
+                        original_status=RunStatus.paused,
                     ),
                 )
                 return

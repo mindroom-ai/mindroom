@@ -17,12 +17,14 @@ from agno.run.team import TeamRunOutput
 from agno.session.team import TeamSession
 
 from mindroom.bot import AgentBot
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
     MINDROOM_REPLAY_STATE_INTERRUPTED,
     MINDROOM_REPLAY_STATE_METADATA_KEY,
+    MINDROOM_RESTART_RECOVERY_PENDING_METADATA_KEY,
     ROUTER_AGENT_NAME,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
@@ -67,6 +69,73 @@ from tests.identity_helpers import fixture_entity_matrix_id
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
+
+
+@pytest.mark.parametrize("use_streaming", [False, True])
+@pytest.mark.asyncio
+async def test_team_session_started_cancellation_persists_restart_replay(
+    tmp_path: Path,
+    use_streaming: bool,
+) -> None:
+    """Team turns keep a restart carrier when session hooks are cancelled after settle."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    storage = _SessionStorage()
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+        team_history_storage=storage,
+        message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        orchestrator=_team_orchestrator(config, runtime_paths),
+    )
+
+    def settle_recorder(recorder: TurnRecorder) -> None:
+        recorder.set_run_id("team-hook")
+        recorder.record_completed(
+            run_metadata={"matrix_seen_event_ids": ["$user_msg"]},
+            assistant_text="Team hello",
+            completed_tools=[],
+        )
+
+    async def fake_team_response(**kwargs: object) -> str:
+        settle_recorder(cast("TurnRecorder", kwargs["turn_recorder"]))
+        return "Team hello"
+
+    async def fake_team_stream(**kwargs: object) -> AsyncIterator[str]:
+        settle_recorder(cast("TurnRecorder", kwargs["turn_recorder"]))
+        yield "Team hello"
+
+    async def consume_stream(request: object) -> StreamTransportOutcome:
+        _ = [chunk async for chunk in request.response_stream]
+        return _stream_outcome("$streaming", "Team hello")
+
+    coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_stream
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=use_streaming)),
+        patch("mindroom.response_runner.team_response", new=fake_team_response),
+        patch("mindroom.response_runner.team_response_stream", new=fake_team_stream),
+        patch(
+            "mindroom.response_lifecycle.ResponseLifecycle.emit_session_started",
+            new=AsyncMock(side_effect=asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)),
+        ),
+        suppress(asyncio.CancelledError),
+    ):
+        await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    persisted_session = cast("TeamSession", storage.session)
+    assert persisted_session.runs is not None
+    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    assert persisted_run.metadata is not None
+    assert persisted_run.metadata[MINDROOM_RESTART_RECOVERY_PENDING_METADATA_KEY] is True
+    assert persisted_run.metadata["mindroom_original_status"] == "cancelled"
 
 
 @pytest.mark.asyncio

@@ -27,7 +27,7 @@ from mindroom.ai import (
     _PreparedAgentRun,
 )
 from mindroom.bot import AgentBot
-from mindroom.cancellation import USER_STOP_CANCEL_MSG, TaskCancelSource, request_task_cancel
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, TaskCancelSource, request_task_cancel
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -420,6 +420,73 @@ def test_session_started_event_is_registered() -> None:
     with pytest.raises(ValueError, match="reserved namespace"):
         validate_event_name("session:custom")
     assert default_timeout_ms_for_event(EVENT_SESSION_STARTED) == 5000
+
+
+@pytest.mark.parametrize("use_streaming", [False, True])
+@pytest.mark.asyncio
+async def test_agent_session_started_cancellation_persists_restart_replay(
+    tmp_path: Path,
+    use_streaming: bool,
+) -> None:
+    """Agent turns keep a restart carrier when session hooks are cancelled after settle."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    storage = _SessionStorage()
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+        history_storage=storage,
+        message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+    )
+
+    def settle_recorder(recorder: TurnRecorder) -> None:
+        recorder.set_run_id("run-hook")
+        recorder.record_completed(
+            run_metadata={"matrix_seen_event_ids": ["$user_msg"]},
+            assistant_text="Hello",
+            completed_tools=[],
+        )
+
+    if use_streaming:
+
+        async def generate_streaming(*_args: object, **kwargs: object) -> StreamTransportOutcome:
+            settle_recorder(cast("TurnRecorder", kwargs["turn_recorder"]))
+            return _stream_outcome("$streaming", "Hello")
+
+        coordinator.generate_streaming_ai_response = AsyncMock(side_effect=generate_streaming)
+        operation = coordinator.process_and_respond_streaming(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+        )
+    else:
+
+        async def generate_blocking(*_args: object, **kwargs: object) -> _NonStreamingGeneration:
+            settle_recorder(cast("TurnRecorder", kwargs["turn_recorder"]))
+            return _NonStreamingGeneration(response_text="Hello", tool_trace=[], run_metadata_content={})
+
+        coordinator.generate_non_streaming_ai_response = AsyncMock(side_effect=generate_blocking)
+        operation = coordinator.process_and_respond(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+        )
+
+    with (
+        patch(
+            "mindroom.response_lifecycle.ResponseLifecycle.emit_session_started",
+            new=AsyncMock(side_effect=asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)),
+        ),
+        suppress(asyncio.CancelledError),
+    ):
+        await operation
+
+    persisted_session = cast("AgentSession", storage.session)
+    assert persisted_session.runs is not None
+    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    assert persisted_run.metadata is not None
+    assert persisted_run.metadata[MINDROOM_RESTART_RECOVERY_PENDING_METADATA_KEY] is True
+    assert persisted_run.metadata["mindroom_original_status"] == "cancelled"
 
 
 @pytest.mark.asyncio

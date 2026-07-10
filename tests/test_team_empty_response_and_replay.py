@@ -12,6 +12,7 @@ from agno.run.agent import RunContentEvent as AgentRunContentEvent
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
+from agno.run.team import RunPausedEvent as TeamRunPausedEvent
 from agno.run.team import TeamRunOutput
 
 from mindroom import ai_runtime
@@ -51,13 +52,18 @@ def _team_patches(mock_team: AgnoTeam) -> list[AbstractContextManager[object]]:
 
 
 def _empty_team_run(run_id: str) -> TeamRunOutput:
-    output = TeamRunOutput(content="", run_id=run_id, session_id="session-1")
+    output = TeamRunOutput(content="", run_id=run_id, session_id="session-1", team_id="team_general")
     output.status = RunStatus.completed
     return output
 
 
 def _completed_team_run(content: str) -> TeamRunOutput:
-    output = TeamRunOutput(content=content, run_id="team-run-final", session_id="session-1")
+    output = TeamRunOutput(
+        content=content,
+        run_id="team-run-final",
+        session_id="session-1",
+        team_id="team_general",
+    )
     output.status = RunStatus.completed
     return output
 
@@ -139,23 +145,32 @@ async def test_team_response_does_not_preserve_seen_ids_for_paused_run() -> None
     """Paused runs are absent from Agno model history and cannot consume Matrix events."""
     orchestrator, _config = _make_orchestrator()
     mock_team = _make_test_team()
-    paused_run = TeamRunOutput(content="Approval required", run_id="team-run-1", session_id="session-1")
+    paused_run = TeamRunOutput(
+        content="Approval required",
+        run_id="team-run-1",
+        session_id="session-1",
+        team_id="team_general",
+    )
     paused_run.status = RunStatus.paused
     mock_team.arun = AsyncMock(return_value=paused_run)
+    recorder = TurnRecorder(user_message="Run the action.")
 
     patches = _team_patches(mock_team)
     with patches[0], patches[1], patches[2], patch("mindroom.teams._persist_bound_seen_event_ids") as persist_seen:
-        await team_response(
+        response = await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
             message="Run the action.",
-            turn_recorder=TurnRecorder(user_message="Run the action."),
+            turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
             ctx=make_turn_context(session_id="session-1", reply_to_event_id="$source"),
         )
 
     persist_seen.assert_not_called()
+    assert "Approval required" in response
+    assert recorder.outcome == "interrupted"
+    assert recorder.interruption_status is RunStatus.paused
 
 
 @pytest.mark.asyncio
@@ -170,6 +185,7 @@ async def test_team_response_does_not_preserve_seen_ids_for_child_run() -> None:
         status=RunStatus.completed,
     )
     mock_team.arun = AsyncMock(return_value=child_run)
+    recorder = TurnRecorder(user_message="Run the action.")
 
     patches = _team_patches(mock_team)
     with patches[0], patches[1], patches[2], patch("mindroom.teams._persist_bound_seen_event_ids") as persist_seen:
@@ -177,13 +193,15 @@ async def test_team_response_does_not_preserve_seen_ids_for_child_run() -> None:
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
             message="Run the action.",
-            turn_recorder=TurnRecorder(user_message="Run the action."),
+            turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
             ctx=make_turn_context(session_id="session-1", reply_to_event_id="$source"),
         )
 
     persist_seen.assert_not_called()
+    assert recorder.outcome == "interrupted"
+    assert recorder.interruption_status is RunStatus.error
 
 
 @pytest.mark.asyncio
@@ -280,7 +298,12 @@ async def test_team_response_stream_does_not_preserve_seen_ids_for_double_empty_
 async def test_team_response_stream_does_not_preserve_seen_ids_for_paused_run() -> None:
     """Paused streaming runs are absent from model history and cannot consume Matrix events."""
     orchestrator, config = _make_orchestrator()
-    paused_run = TeamRunOutput(content="Approval required", run_id="team-run-1", session_id="session-1")
+    paused_run = TeamRunOutput(
+        content="Approval required",
+        run_id="team-run-1",
+        session_id="session-1",
+        team_id="team_general",
+    )
     paused_run.status = RunStatus.paused
 
     async def paused_stream() -> AsyncIterator[object]:
@@ -288,6 +311,7 @@ async def test_team_response_stream_does_not_preserve_seen_ids_for_paused_run() 
 
     mock_team = _make_test_team()
     mock_team.arun = MagicMock(return_value=paused_stream())
+    recorder = TurnRecorder(user_message="Run the action.")
 
     patches = _team_patches(mock_team)
     with patches[0], patches[1], patches[2], patch("mindroom.teams._persist_bound_seen_event_ids") as persist_seen:
@@ -297,7 +321,7 @@ async def test_team_response_stream_does_not_preserve_seen_ids_for_paused_run() 
                 agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
                 mode=TeamMode.COORDINATE,
                 message="Run the action.",
-                turn_recorder=TurnRecorder(user_message="Run the action."),
+                turn_recorder=recorder,
                 orchestrator=orchestrator,
                 execution_identity=None,
                 ctx=make_turn_context(session_id="session-1", reply_to_event_id="$source"),
@@ -305,6 +329,8 @@ async def test_team_response_stream_does_not_preserve_seen_ids_for_paused_run() 
         ]
 
     persist_seen.assert_not_called()
+    assert recorder.outcome == "interrupted"
+    assert recorder.interruption_status is RunStatus.paused
 
 
 @pytest.mark.asyncio
@@ -323,6 +349,7 @@ async def test_team_response_stream_does_not_preserve_seen_ids_for_child_run() -
 
     mock_team = _make_test_team()
     mock_team.arun = MagicMock(return_value=child_stream())
+    recorder = TurnRecorder(user_message="Run the action.")
 
     patches = _team_patches(mock_team)
     with patches[0], patches[1], patches[2], patch("mindroom.teams._persist_bound_seen_event_ids") as persist_seen:
@@ -332,7 +359,7 @@ async def test_team_response_stream_does_not_preserve_seen_ids_for_child_run() -
                 agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
                 mode=TeamMode.COORDINATE,
                 message="Run the action.",
-                turn_recorder=TurnRecorder(user_message="Run the action."),
+                turn_recorder=recorder,
                 orchestrator=orchestrator,
                 execution_identity=None,
                 ctx=make_turn_context(session_id="session-1", reply_to_event_id="$source"),
@@ -340,6 +367,44 @@ async def test_team_response_stream_does_not_preserve_seen_ids_for_child_run() -
         ]
 
     persist_seen.assert_not_called()
+    assert recorder.outcome == "interrupted"
+    assert recorder.interruption_status is RunStatus.error
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_records_paused_terminal_event() -> None:
+    """A native team paused event leaves a replay carrier instead of a completed turn."""
+    orchestrator, config = _make_orchestrator()
+
+    async def paused_stream() -> AsyncIterator[object]:
+        yield TeamRunPausedEvent(
+            content="Approval required",
+            run_id="team-run-paused",
+            session_id="session-1",
+        )
+
+    mock_team = _make_test_team()
+    mock_team.arun = MagicMock(return_value=paused_stream())
+    recorder = TurnRecorder(user_message="Run the action.")
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2]:
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="Run the action.",
+                turn_recorder=recorder,
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id="session-1", reply_to_event_id="$source"),
+            )
+        ]
+
+    rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
+    assert "Approval required" in rendered
+    assert recorder.outcome == "interrupted"
+    assert recorder.interruption_status is RunStatus.paused
 
 
 @pytest.mark.asyncio
@@ -419,7 +484,12 @@ async def test_team_response_stream_empty_event_stream_retries_then_notices() ->
 async def test_team_response_discards_whitespace_only_completed_run() -> None:
     """Whitespace-only completed content triggers the empty-run guard."""
     orchestrator, _config = _make_orchestrator()
-    whitespace_run = TeamRunOutput(content="\n\n  ", run_id="team-run-1", session_id="session-1")
+    whitespace_run = TeamRunOutput(
+        content="\n\n  ",
+        run_id="team-run-1",
+        session_id="session-1",
+        team_id="team_general",
+    )
     whitespace_run.status = RunStatus.completed
     mock_team = _make_test_team()
     mock_team.arun = AsyncMock(side_effect=[whitespace_run, _completed_team_run("Recovered answer")])
@@ -454,6 +524,7 @@ async def test_team_response_ignores_history_messages_for_empty_detection() -> N
         content=None,
         run_id="team-run-1",
         session_id="session-1",
+        team_id="team_general",
         messages=[Message(role="assistant", content="Previous turn answer", from_history=True)],
     )
     history_only_run.status = RunStatus.completed
@@ -482,10 +553,13 @@ async def test_team_empty_retry_shares_budget_with_dynamic_continuations() -> No
     """One empty retry plus dynamic-tool continuations stay within the shared budget."""
     orchestrator, _config = _make_orchestrator()
     mock_team = _make_test_team()
+    continuation_outputs = [_dynamic_tool_team_output() for _ in range(DYNAMIC_TOOL_CONTINUATION_LIMIT)]
+    for output in continuation_outputs:
+        output.team_id = "team_general"
     mock_team.arun = AsyncMock(
         side_effect=[
             _empty_team_run("team-run-1"),
-            *[_dynamic_tool_team_output() for _ in range(DYNAMIC_TOOL_CONTINUATION_LIMIT)],
+            *continuation_outputs,
         ],
     )
 
@@ -516,6 +590,7 @@ async def test_team_response_records_empty_replayable_text_for_tool_only_run() -
         content="",
         run_id="team-run-1",
         session_id="session-1",
+        team_id="team_general",
         member_responses=[
             RunOutput(
                 agent_name="GeneralAgent",
@@ -592,7 +667,12 @@ async def test_team_response_stream_records_interrupted_turn_when_stream_errors(
 async def test_team_response_stream_records_interrupted_turn_on_errored_run_output() -> None:
     """A terminal errored run output after partial output marks the recorder interrupted."""
     orchestrator, config = _make_orchestrator()
-    errored_run = TeamRunOutput(content="", run_id="team-run-1", session_id="session-1")
+    errored_run = TeamRunOutput(
+        content="",
+        run_id="team-run-1",
+        session_id="session-1",
+        team_id="team_general",
+    )
     errored_run.status = RunStatus.error
 
     async def stream() -> AsyncIterator[object]:
