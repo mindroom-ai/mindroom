@@ -156,7 +156,7 @@ def test_has_responded_empty(temp_dir: Path) -> None:
     assert tracker.get_turn_record("event123") is None
 
 
-def test_handled_turn_state_normalizes_ids_and_prompt_map() -> None:
+def test_turn_record_normalizes_ids_and_prompt_map() -> None:
     """The handled-turn carrier should normalize IDs, prompts, and empty event IDs."""
     handled_turn = TurnRecord.create(
         ["$a", "", "$a", "$b"],
@@ -173,7 +173,7 @@ def test_handled_turn_state_normalizes_ids_and_prompt_map() -> None:
     assert handled_turn.is_coalesced
 
 
-def test_handled_turn_state_preserves_response_context() -> None:
+def test_turn_record_preserves_response_context() -> None:
     """The handled-turn carrier should keep response owner, history scope, and target intact."""
     conversation_target = MessageTarget.resolve(
         room_id="!room:example.com",
@@ -194,7 +194,7 @@ def test_handled_turn_state_preserves_response_context() -> None:
     assert handled_turn.conversation_target == conversation_target
 
 
-def test_handled_turn_state_preserves_requester_and_correlation() -> None:
+def test_turn_record_preserves_requester_and_correlation() -> None:
     """The handled-turn carrier should keep requester and correlation ids intact."""
     handled_turn = TurnRecord.create(
         ["$event:example.com"],

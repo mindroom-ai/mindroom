@@ -421,12 +421,10 @@ class HandledTurnLedger:
 
     def record_handled_turn(self, turn_record: TurnRecord) -> None:
         """Persist one exact record for every source event in the turn."""
-        persisted_record = self.update_handled_turn(
+        self.update_handled_turn(
             turn_record.indexed_event_ids,
             lambda _existing_records: turn_record,
         )
-        if persisted_record is None:
-            return
 
     def update_handled_turn(
         self,
