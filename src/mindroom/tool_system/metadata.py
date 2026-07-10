@@ -715,8 +715,6 @@ def _execute_validation_plugin_module(
 ) -> str:
     """Execute one plugin module into a temporary validation import context."""
     runtime_module_name = plugin_module._module_name(plugin_name, plugin_root, module_path)
-    package_root = runtime_module_name.split(".", 1)[0]
-    previous_plugin_task_ids = plugin_module.snapshot_module_subtree_task_ids(package_root)
     validation_module_name = f"{runtime_module_name}{_VALIDATION_PLUGIN_MODULE_SUFFIX}{id(registrations_by_module)}"
     loaded_modules = sys.modules.copy()
     previous_module = loaded_modules.get(validation_module_name)
@@ -741,11 +739,6 @@ def _execute_validation_plugin_module(
         msg = f"Plugin validation module execution failed for {module_path}: {exc}"
         raise ToolMetadataValidationError(msg) from exc
     finally:
-        plugin_module.cancel_new_module_subtree_tasks(
-            package_root,
-            previous_plugin_task_ids,
-            additional_modules=(module,),
-        )
         for loaded_module_name, loaded_module in sys.modules.copy().items():
             if loaded_module_name not in previous_modules_within_root and _module_origin_within_root(
                 loaded_module,

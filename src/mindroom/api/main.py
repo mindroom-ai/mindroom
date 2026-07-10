@@ -529,34 +529,15 @@ def bind_external_trigger_runtime(
     conversation_cache: object,
     *,
     is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]],
-    expected_config: Config,
-    expected_runtime_paths: constants.RuntimePaths,
-) -> bool:
-    """Attach router delivery only to the matching committed API config snapshot."""
-    expected_config_data = expected_config.authored_model_dump()
+) -> None:
+    """Attach router Matrix delivery runtime to one API app."""
     api_state = config_lifecycle.require_api_state(api_app)
-    app_state = config_lifecycle.app_state(api_app)
-    with api_state.config_lock:
-        snapshot = config_lifecycle.require_api_state(api_app).snapshot
-        snapshot_config = snapshot.runtime_config
-        snapshot_matches = (
-            snapshot.runtime_paths == expected_runtime_paths
-            and snapshot.config_data == expected_config_data
-            and snapshot_config is not None
-            and snapshot_config.authored_model_dump() == expected_config_data
-            and snapshot.config_load_result is not None
-            and snapshot.config_load_result.success
-        )
-        if not snapshot_matches:
-            app_state.external_trigger_runtime = None
-            return False
-        app_state.external_trigger_runtime = config_lifecycle.ExternalTriggerRuntime(
-            client=client,
-            conversation_cache=conversation_cache,
-            config_generation=snapshot.generation,
-            is_trigger_snapshot_ready=is_trigger_snapshot_ready,
-        )
-    return True
+    config_lifecycle.app_state(api_app).external_trigger_runtime = config_lifecycle.ExternalTriggerRuntime(
+        client=client,
+        conversation_cache=conversation_cache,
+        config_generation=api_state.snapshot.generation,
+        is_trigger_snapshot_ready=is_trigger_snapshot_ready,
+    )
 
 
 def unbind_external_trigger_runtime(api_app: FastAPI) -> None:

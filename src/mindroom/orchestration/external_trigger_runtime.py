@@ -29,28 +29,26 @@ class ExternalTriggerRuntimeCoordinator:
         self,
         config: Config | None,
         bots: Mapping[str, AgentBot | TeamBot],
-    ) -> bool:
-        """Bind trigger delivery runtime when router and API config snapshots agree."""
+    ) -> None:
+        """Bind trigger delivery runtime after router is running."""
         if not self.api_enabled:
-            return False
+            return
         if config is None:
-            return False
+            return
         router_bot = bots.get(ROUTER_AGENT_NAME)
         if router_bot is None or router_bot.client is None or not router_bot.running:
-            return False
+            return
 
         async def is_trigger_snapshot_ready(snapshot: TriggerDeliverySnapshot) -> bool:
             return await self.is_ready(snapshot, bots)
 
         from mindroom.api import main as api_main  # noqa: PLC0415
 
-        return api_main.bind_external_trigger_runtime(
+        api_main.bind_external_trigger_runtime(
             api_main.app,
             client=router_bot.client,
             conversation_cache=router_bot._conversation_cache,
             is_trigger_snapshot_ready=is_trigger_snapshot_ready,
-            expected_config=config,
-            expected_runtime_paths=self.runtime_paths,
         )
 
     def unbind(self) -> None:

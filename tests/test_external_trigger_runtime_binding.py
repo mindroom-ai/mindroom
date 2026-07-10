@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import FastAPI
 
 from mindroom.api import main as api_main
 from mindroom.config.main import Config
@@ -24,11 +23,11 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     return resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
 
 
-def _config(*, role: str = "Write code") -> Config:
+def _config() -> Config:
     return Config.model_validate(
         {
             "models": {"default": {"provider": "openai", "id": "gpt-5.5"}},
-            "agents": {"code": {"display_name": "Code", "role": role, "rooms": ["campground"]}},
+            "agents": {"code": {"display_name": "Code", "role": "Write code", "rooms": ["campground"]}},
             "rooms": {"campground": {"display_name": "Campground"}},
         },
     )
@@ -81,48 +80,7 @@ def test_runtime_coordinator_binds_router_with_snapshot_readiness_gate(tmp_path:
     assert mock_bind.call_args.args == (api_main.app,)
     assert mock_bind.call_args.kwargs["client"] is router_bot.client
     assert mock_bind.call_args.kwargs["conversation_cache"] is router_bot._conversation_cache
-    assert mock_bind.call_args.kwargs["expected_config"] == _config()
-    assert mock_bind.call_args.kwargs["expected_runtime_paths"] == coordinator.runtime_paths
     assert callable(mock_bind.call_args.kwargs["is_trigger_snapshot_ready"])
-
-
-def test_api_runtime_bind_requires_matching_config_snapshot(tmp_path: Path) -> None:
-    """Trigger runtime binding must not stamp a generation owned by a different config."""
-    api_app = FastAPI()
-    runtime_paths = _runtime_paths(tmp_path)
-    published_config = _config()
-    divergent_config = _config(role="Review code")
-    api_main.initialize_api_app(api_app, runtime_paths)
-    assert api_main.config_lifecycle._publish_runtime_config_into_app(
-        published_config,
-        runtime_paths,
-        api_app,
-    )
-
-    async def is_trigger_snapshot_ready(_snapshot: TriggerDeliverySnapshot) -> bool:
-        return True
-
-    assert not api_main.bind_external_trigger_runtime(
-        api_app,
-        client=object(),
-        conversation_cache=object(),
-        is_trigger_snapshot_ready=is_trigger_snapshot_ready,
-        expected_config=divergent_config,
-        expected_runtime_paths=runtime_paths,
-    )
-    assert api_main.config_lifecycle.app_state(api_app).external_trigger_runtime is None
-
-    assert api_main.bind_external_trigger_runtime(
-        api_app,
-        client=object(),
-        conversation_cache=object(),
-        is_trigger_snapshot_ready=is_trigger_snapshot_ready,
-        expected_config=published_config,
-        expected_runtime_paths=runtime_paths,
-    )
-    runtime = api_main.config_lifecycle.app_state(api_app).external_trigger_runtime
-    assert runtime is not None
-    assert runtime.config_generation == api_main.config_lifecycle.require_api_state(api_app).snapshot.generation
 
 
 @pytest.mark.asyncio

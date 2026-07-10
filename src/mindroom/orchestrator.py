@@ -142,20 +142,10 @@ class _PreparedPluginConfigUpdate:
 
 @dataclass(frozen=True)
 class _PreStoppedMcpEntities:
-    """Entities stopped ahead of an MCP sync, split by pre-stop lifecycle state."""
+    """Entities stopped ahead of an MCP sync, split by pre-stop liveness."""
 
     affected: frozenset[str] = frozenset()
     running_before_stop: frozenset[str] = frozenset()
-    retrying_before_stop: frozenset[str] = frozenset()
-
-
-@dataclass(frozen=True)
-class _PreStoppedMcpRecovery:
-    """Lifecycle actions needed to restore one failed pre-publication stop."""
-
-    running_survivors: frozenset[str]
-    recreate_entities: frozenset[str]
-    retained_retrying_entities: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -395,9 +385,7 @@ class _MultiAgentOrchestrator:
             permanent_error_check=is_permanent_startup_error,
             update_runtime_state=False,
         )
-        config = self._require_config()
-        await self._external_trigger_runtime.sync_api_config_snapshot(config)
-        self._external_trigger_runtime.bind_if_ready(config, self.agent_bots)
+        self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
 
     async def _sync_event_cache_service(self, config: Config) -> None:
         """Ensure the runtime has one initialized shared event-cache service."""
@@ -782,67 +770,37 @@ class _MultiAgentOrchestrator:
             msg = "Plugin reload unavailable until startup finishes."
             raise RuntimeError(msg)
         async with self._config_update_lock:
-            return self._reload_plugins_locked(source=source, changed_paths=changed_paths)
-
-    async def reload_plugins_from_watcher(
-        self,
-        *,
-        source: str,
-        changed_paths: tuple[Path, ...] = (),
-        expected_revision: int,
-    ) -> bool:
-        """Reload watcher edits only if no newer publication consumed them while waiting."""
-        if not self.running:
-            return False
-        async with self._config_update_lock:
-            if self.plugin_watch.revision != expected_revision:
-                logger.info(
-                    "Skipping stale watcher plugin reload",
-                    expected_revision=expected_revision,
-                    current_revision=self.plugin_watch.revision,
-                )
-                return False
-            self._reload_plugins_locked(source=source, changed_paths=changed_paths)
-            return True
-
-    def _reload_plugins_locked(
-        self,
-        *,
-        source: str,
-        changed_paths: tuple[Path, ...],
-    ) -> PluginReloadResult:
-        """Rebuild and swap plugin runtime while the config-update lock is held."""
-        config = self._require_config()
-        logger.info(
-            "Reloading plugins",
-            source=source,
-            changed_paths=[str(path) for path in changed_paths],
-        )
-        # Capture watcher baselines before loading so an edit landing during
-        # the reload still diffs against pre-reload state on the next scan.
-        watch_roots, watch_root_snapshots = self.plugin_watch.capture(config)
-        try:
-            result = reload_plugins(config, self.runtime_paths)
-        except Exception:
-            recovery_result, warning_message, warning_kwargs = _recover_failed_plugin_reload(
-                config,
-                self.runtime_paths,
+            config = self._require_config()
+            logger.info(
+                "Reloading plugins",
+                source=source,
+                changed_paths=[str(path) for path in changed_paths],
             )
-            self._activate_hook_registry(recovery_result.hook_registry)
+            # Capture watcher baselines before loading so an edit landing during
+            # the reload still diffs against pre-reload state on the next scan.
+            watch_roots, watch_root_snapshots = self.plugin_watch.capture(config)
+            try:
+                result = reload_plugins(config, self.runtime_paths)
+            except Exception:
+                recovery_result, warning_message, warning_kwargs = _recover_failed_plugin_reload(
+                    config,
+                    self.runtime_paths,
+                )
+                self._activate_hook_registry(recovery_result.hook_registry)
+                clear_worker_validation_snapshot_cache()
+                self.plugin_watch.replace_snapshots(watch_roots, watch_root_snapshots)
+                logger.warning(warning_message, source=source, **warning_kwargs)
+                raise
+            self._activate_hook_registry(result.hook_registry)
             clear_worker_validation_snapshot_cache()
             self.plugin_watch.replace_snapshots(watch_roots, watch_root_snapshots)
-            logger.warning(warning_message, source=source, **warning_kwargs)
-            raise
-        self._activate_hook_registry(result.hook_registry)
-        clear_worker_validation_snapshot_cache()
-        self.plugin_watch.replace_snapshots(watch_roots, watch_root_snapshots)
-        logger.info(
-            "Plugin reload complete",
-            source=source,
-            active_plugins=list(result.active_plugin_names),
-            cancelled_task_count=result.cancelled_task_count,
-        )
-        return result
+            logger.info(
+                "Plugin reload complete",
+                source=source,
+                active_plugins=list(result.active_plugin_names),
+                cancelled_task_count=result.cancelled_task_count,
+            )
+            return result
 
     def _prepare_plugin_update_for_config_update(self, new_config: Config) -> _PreparedPluginConfigUpdate:
         """Stage the plugin runtime for one config update without mutating live state."""
@@ -1271,16 +1229,7 @@ class _MultiAgentOrchestrator:
             for entity_name in affected_entities
             if (bot := self.agent_bots.get(entity_name)) is not None and bot.running
         )
-        retrying_before_stop = frozenset(
-            entity_name
-            for entity_name in affected_entities
-            if (task := self._bot_start_tasks.get(entity_name)) is not None and not task.done()
-        )
-        return _PreStoppedMcpEntities(
-            affected=affected_entities,
-            running_before_stop=running_before_stop,
-            retrying_before_stop=retrying_before_stop,
-        )
+        return _PreStoppedMcpEntities(affected=affected_entities, running_before_stop=running_before_stop)
 
     async def _stop_entities_before_mcp_sync(
         self,
@@ -1315,130 +1264,37 @@ class _MultiAgentOrchestrator:
             await self._sync_event_cache_service(current_config)
         except Exception:
             logger.exception("Resyncing the event-cache service to the last-good config failed during rollback")
-        try:
-            await self._restore_pre_stopped_mcp_entities(pre_stopped, current_config)
-        except Exception:
-            logger.exception("Restoring MCP-dependent entities failed during config rollback")
-
-        # The embedded API has its own file watcher and may already have advanced
-        # independently. Republish the last-good snapshot, then bind synchronously
-        # so no event-loop task can interleave a different generation between them.
-        try:
-            self._external_trigger_runtime.unbind()
-        except Exception:
-            logger.exception("Unbinding the external-trigger runtime failed during config rollback")
-        try:
-            await self._external_trigger_runtime.sync_api_config_snapshot(current_config)
-        except Exception:
-            logger.exception("Restoring the external-trigger API snapshot failed during config rollback")
-        else:
-            try:
-                self._external_trigger_runtime.bind_if_ready(current_config, self.agent_bots)
-            except Exception:
-                logger.exception("Rebinding the external-trigger runtime failed during config rollback")
-
-    def _plan_pre_stopped_mcp_recovery(
-        self,
-        pre_stopped: _PreStoppedMcpEntities,
-        config: Config,
-    ) -> _PreStoppedMcpRecovery:
-        """Classify pre-stopped entities by the recovery action they still need."""
-        configured_entities = set(configured_entity_names(config))
-        recoverable_entities = (
-            pre_stopped.running_before_stop | pre_stopped.retrying_before_stop
-        ) & configured_entities
-        running_survivors = frozenset(
-            entity_name
-            for entity_name in recoverable_entities
-            if (bot := self.agent_bots.get(entity_name)) is not None and bot.running
-        )
-        recreate_entities = frozenset(
-            entity_name
-            for entity_name in recoverable_entities - running_survivors
-            if (bot := self.agent_bots.get(entity_name)) is None
-            or (entity_name in pre_stopped.running_before_stop and not bot.running)
-        )
-        retained_retrying_entities = frozenset(
-            entity_name
-            for entity_name in pre_stopped.retrying_before_stop & configured_entities
-            if entity_name not in recreate_entities
-            and (bot := self.agent_bots.get(entity_name)) is not None
-            and not bot.running
-        )
-        return _PreStoppedMcpRecovery(
-            running_survivors=running_survivors,
-            recreate_entities=recreate_entities,
-            retained_retrying_entities=retained_retrying_entities,
-        )
-
-    def _restart_rollback_sync_tasks(self, entity_names: frozenset[str]) -> None:
-        """Repair sync supervisors for bots that survived a partial stop."""
-        for entity_name in sorted(entity_names):
-            try:
-                self._start_sync_task(entity_name, self.agent_bots[entity_name])
-            except Exception:
-                logger.exception(
-                    "Restarting a surviving bot sync task failed during config rollback",
-                    entity_name=entity_name,
-                )
-
-    async def _schedule_rollback_start_retries(self, entity_names: set[str]) -> None:
-        """Restore background start retries without aborting later recovery work."""
-        for entity_name in sorted(entity_names):
-            try:
-                await self._schedule_bot_start_retry(entity_name)
-            except Exception:
-                logger.exception(
-                    "Scheduling a bot retry failed during config rollback",
-                    entity_name=entity_name,
-                )
+        await self._restore_pre_stopped_mcp_entities(pre_stopped, current_config)
 
     async def _restore_pre_stopped_mcp_entities(
         self,
         pre_stopped: _PreStoppedMcpEntities,
         config: Config,
     ) -> None:
-        """Restore running and retrying entities stopped for a sync that never published."""
-        recovery = self._plan_pre_stopped_mcp_recovery(pre_stopped, config)
-        self._restart_rollback_sync_tasks(recovery.running_survivors)
-
-        started_bots: list[AgentBot | TeamBot] = []
-        retry_entities = set(recovery.retained_retrying_entities)
-        permanently_failed_entities: list[str] = []
-        for entity_name in sorted(recovery.recreate_entities):
-            try:
-                start_result = await self._create_and_start_entities(
-                    {entity_name},
-                    config,
-                    start_sync_tasks=True,
-                )
-            except Exception:
-                logger.exception(
-                    "Recreating a bot failed during config rollback",
-                    entity_name=entity_name,
-                )
-                partially_created_bot = self.agent_bots.get(entity_name)
-                if partially_created_bot is not None:
-                    if partially_created_bot.running:
-                        self._restart_rollback_sync_tasks(frozenset({entity_name}))
-                        started_bots.append(partially_created_bot)
-                    else:
-                        retry_entities.add(entity_name)
-                continue
-            started_bots.extend(start_result.started_bots)
-            retry_entities.update(start_result.retryable_entities)
-            permanently_failed_entities.extend(start_result.permanently_failed_entities)
-
-        if started_bots:
-            try:
-                await self._setup_rooms_and_memberships(started_bots)
-            except Exception:
-                logger.exception("Restoring bot rooms and memberships failed during config rollback")
-        await self._schedule_rollback_start_retries(retry_entities)
-        if permanently_failed_entities:
+        """Recreate previously running entities stopped for a sync that never published."""
+        restartable_entities = {
+            entity_name
+            for entity_name in pre_stopped.running_before_stop & set(configured_entity_names(config))
+            if (bot := self.agent_bots.get(entity_name)) is None or not bot.running
+        }
+        start_results = EntityStartResults()
+        if restartable_entities:
+            start_results = await self._create_and_start_entities(
+                restartable_entities,
+                config,
+                start_sync_tasks=True,
+            )
+        if start_results.started_bots:
+            await self._setup_rooms_and_memberships(start_results.started_bots)
+        if pre_stopped.affected:
+            # Stopping unbound the trigger runtime even when nothing is restartable.
+            self._external_trigger_runtime.bind_if_ready(config, self.agent_bots)
+        for entity_name in start_results.retryable_entities:
+            await self._schedule_bot_start_retry(entity_name)
+        if start_results.permanently_failed_entities:
             logger.warning(
                 "Config update rollback left some bots disabled",
-                entities=permanently_failed_entities,
+                entities=start_results.permanently_failed_entities,
             )
 
     async def _restart_changed_entities(

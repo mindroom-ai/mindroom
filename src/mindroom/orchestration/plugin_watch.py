@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.plugins import PluginReloadResult
 
 logger = get_logger(__name__)
 
@@ -72,14 +73,13 @@ class _PluginWatcherRuntime(Protocol):
     config: Config | None
     plugin_watch: PluginWatchState
 
-    async def reload_plugins_from_watcher(
+    async def reload_plugins_now(
         self,
         *,
         source: str,
         changed_paths: tuple[Path, ...] = (),
-        expected_revision: int,
-    ) -> bool:
-        """Reload only if no newer publication consumed the watcher's edits."""
+    ) -> PluginReloadResult:
+        """Rebuild and atomically swap the live plugin registry snapshot."""
 
 
 async def watch_plugins_task(orchestrator: _PluginWatcherRuntime) -> None:
@@ -131,10 +131,9 @@ async def watch_plugins_task(orchestrator: _PluginWatcherRuntime) -> None:
                 changed_paths = tuple(sorted(pending_changes))
                 pending_changes.clear()
                 last_change_at = None
-                await orchestrator.reload_plugins_from_watcher(
+                await orchestrator.reload_plugins_now(
                     source="watcher",
                     changed_paths=changed_paths,
-                    expected_revision=watch_state_revision,
                 )
         except Exception:
             logger.exception("Exception during plugin watcher callback - continuing to watch")

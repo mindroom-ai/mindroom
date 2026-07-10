@@ -1,7 +1,5 @@
 """Test tool metadata JSON snapshot for dashboard consumption."""
 
-import asyncio
-import builtins
 import gc
 import inspect
 import json
@@ -25,7 +23,6 @@ from mindroom.config.main import Config, load_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.redaction import REDACTED
 from mindroom.server_fetch_url import ServerFetchUrlError
-from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
 from mindroom.tool_system.metadata import (
     _AUTHORED_OVERRIDE_INHERIT,
@@ -49,7 +46,6 @@ from mindroom.tool_system.registry_state import (
     PLUGIN_MODULE_PREFIX,
     TOOL_METADATA,
     TOOL_REGISTRY,
-    ToolMetadataValidationError,
     capture_tool_registry_snapshot,
     reconcile_dynamic_tool_state,
     restore_tool_registry_snapshot,
@@ -383,81 +379,6 @@ def test_plugin_validation_uses_sys_modules_snapshot(tmp_path: Path, monkeypatch
     assert module_name
     assert "demo" in module_name
     assert "__validation__" in module_name
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("module_raises", [False, True])
-async def test_plugin_validation_cancels_ephemeral_module_tasks(tmp_path: Path, module_raises: bool) -> None:
-    """Validation-only plugin imports must cancel tasks on both success and failure."""
-    plugin_root = tmp_path / "plugins" / "task-validation"
-    plugin_root.mkdir(parents=True)
-    module_path = plugin_root / "tools.py"
-    module_path.write_text(
-        "import asyncio\n"
-        "import builtins\n"
-        "_TASK = asyncio.create_task(asyncio.Event().wait())\n"
-        "builtins._MINDROOM_VALIDATION_TASK = _TASK\n"
-        + ("raise RuntimeError('validation failed')\n" if module_raises else ""),
-        encoding="utf-8",
-    )
-
-    try:
-        if module_raises:
-            with pytest.raises(ToolMetadataValidationError, match="validation failed"):
-                _execute_validation_plugin_module("task-validation", plugin_root, module_path, {})
-        else:
-            _execute_validation_plugin_module("task-validation", plugin_root, module_path, {})
-
-        task = builtins._MINDROOM_VALIDATION_TASK
-        await asyncio.sleep(0)
-        assert task.cancelled()
-    finally:
-        task = getattr(builtins, "_MINDROOM_VALIDATION_TASK", None)
-        if task is not None:
-            if not task.done():
-                task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            delattr(builtins, "_MINDROOM_VALIDATION_TASK")
-
-
-@pytest.mark.asyncio
-async def test_plugin_validation_does_not_cancel_reexported_live_task(tmp_path: Path) -> None:
-    """Validation cleanup must preserve tasks already owned by the live plugin subtree."""
-    plugin_root = (tmp_path / "plugins" / "live-task").resolve()
-    plugin_root.mkdir(parents=True)
-    module_path = plugin_root / "tools.py"
-    module_path.write_text("from .helper import LIVE_TASK\n", encoding="utf-8")
-    package_root = plugin_imports._plugin_package_name("live-task", plugin_root)
-    package_module = ModuleType(package_root)
-    package_module.__file__ = str(plugin_root / "__init__.py")
-    package_module.__package__ = package_root
-    package_module.__path__ = [str(plugin_root)]
-    helper_module_name = f"{package_root}.helper"
-    helper_module = ModuleType(helper_module_name)
-    helper_module.__file__ = str(plugin_root / "helper.py")
-    helper_module.__package__ = package_root
-    live_task = asyncio.create_task(asyncio.Event().wait())
-    helper_module.LIVE_TASK = live_task
-    previous_package = sys.modules.get(package_root)
-    previous_helper = sys.modules.get(helper_module_name)
-    sys.modules[package_root] = package_module
-    sys.modules[helper_module_name] = helper_module
-
-    try:
-        _execute_validation_plugin_module("live-task", plugin_root, module_path, {})
-        await asyncio.sleep(0)
-        assert not live_task.done()
-    finally:
-        live_task.cancel()
-        await asyncio.gather(live_task, return_exceptions=True)
-        if previous_package is None:
-            sys.modules.pop(package_root, None)
-        else:
-            sys.modules[package_root] = previous_package
-        if previous_helper is None:
-            sys.modules.pop(helper_module_name, None)
-        else:
-            sys.modules[helper_module_name] = previous_helper
 
 
 def test_module_origin_within_root_caches_path_resolution(

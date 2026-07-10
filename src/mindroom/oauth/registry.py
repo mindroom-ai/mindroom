@@ -91,11 +91,6 @@ def _load_plugin_oauth_providers(
     for plugin_base, plugin_entry, _plugin_order in plugin_bases:
         if plugin_base.oauth_module_path is None:
             continue
-        package_root = plugin_imports._plugin_package_name(plugin_base.name, plugin_base.root)
-        previous_modules = plugin_imports.snapshot_module_subtree(package_root)
-        previous_task_ids = plugin_imports.snapshot_module_subtree_task_ids(package_root)
-        previous_cache_entry = plugin_imports._MODULE_IMPORT_CACHE.get(plugin_base.oauth_module_path)
-        module = None
         try:
             module = load_plugin_module(
                 plugin_base.name,
@@ -108,19 +103,7 @@ def _load_plugin_oauth_providers(
             callback = _module_oauth_provider_callback(module)
             registered = callback(plugin_entry.settings, runtime_paths)
             providers.extend(_coerce_oauth_providers(registered))
-        except BaseException as exc:
-            plugin_imports.cancel_new_module_subtree_tasks(
-                package_root,
-                previous_task_ids,
-                additional_modules=(() if module is None else (module,)),
-            )
-            plugin_imports.restore_module_subtree(package_root, previous_modules)
-            if previous_cache_entry is None:
-                plugin_imports._MODULE_IMPORT_CACHE.pop(plugin_base.oauth_module_path, None)
-            else:
-                plugin_imports._MODULE_IMPORT_CACHE[plugin_base.oauth_module_path] = previous_cache_entry
-            if not isinstance(exc, Exception | SystemExit):
-                raise
+        except (Exception, SystemExit) as exc:
             if not skip_broken_plugins:
                 if isinstance(exc, SystemExit):
                     msg = f"Plugin OAuth provider registration failed for {plugin_base.root}: {exc}"
