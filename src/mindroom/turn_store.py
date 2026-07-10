@@ -12,7 +12,7 @@ from agno.run.team import TeamRunOutput
 
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.agents import remove_run_by_event_id
-from mindroom.handled_turns import HandledTurnLedger, TurnRecord, TurnRecordCodec
+from mindroom.handled_turns import HandledTurnLedger, TurnRecord, TurnRecordCodec, same_turn_identity
 from mindroom.session_ids import create_session_id
 
 if TYPE_CHECKING:
@@ -53,9 +53,9 @@ class TurnStoreDeps:
 class TurnStore:
     """Own replication, precedence, backfill, and repair for one entity's turns.
 
-    The handled-turn ledger is authoritative whenever a row exists.
-    Agno run metadata recovers a missing ledger row and backfills only optional
-    facts that are absent from an existing row.
+    A present handled-turn ledger row owns canonical source identity and anchor.
+    Newer delivered Agno run metadata repairs mutable response and regeneration
+    facts; older or incomplete runs only backfill absent optional facts.
     Any recovered or enriched record is repaired back into the ledger before it
     is returned to the caller.
     """
@@ -80,7 +80,12 @@ class TurnStore:
             return
 
         def terminal_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
-            existing_record = next(iter(existing_records.values()), None)
+            compatible_existing_records = tuple(
+                existing
+                for existing in existing_records.values()
+                if not existing.completed or same_turn_identity(existing, turn_record)
+            )
+            existing_record = next(iter(compatible_existing_records), None)
             merged_record = (
                 _backfill_missing_turn_facts(turn_record, existing_record)
                 if existing_record is not None
@@ -89,7 +94,7 @@ class TurnStore:
             visible_echo_event_id = merged_record.visible_echo_event_id or next(
                 (
                     existing.visible_echo_event_id
-                    for existing in existing_records.values()
+                    for existing in compatible_existing_records
                     if existing.visible_echo_event_id is not None
                 ),
                 None,
@@ -98,6 +103,7 @@ class TurnStore:
                 merged_record,
                 completed=True,
                 visible_echo_event_id=visible_echo_event_id,
+                timestamp=0.0,
             )
 
         self._ledger.update_handled_turn(turn_record.indexed_event_ids, terminal_record)
@@ -208,7 +214,7 @@ class TurnStore:
         def repaired_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
             ledger_record = existing_records.get(original_event_id)
             return (
-                _backfill_missing_turn_facts(ledger_record, recovery_record)
+                _reconcile_ledger_and_recovery(ledger_record, recovery_record)
                 if ledger_record is not None
                 else recovery_record
             )
@@ -251,10 +257,14 @@ class TurnStore:
                 and original_event_id not in turn_record.indexed_event_ids
             ):
                 continue
-            run_created_at = run.created_at if isinstance(run.created_at, int | float) else 0
+            run_created_at = (
+                run.created_at
+                if isinstance(run.created_at, int | float) and not isinstance(run.created_at, bool)
+                else 0
+            )
             sort_key = (run_created_at, run_index)
             if newest_match is None or sort_key > newest_match[0]:
-                newest_match = (sort_key, turn_record)
+                newest_match = (sort_key, replace(turn_record, timestamp=float(run_created_at)))
         return newest_match
 
     def _load_persisted_turn_record(
@@ -378,4 +388,28 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
         correlation_id=authority.correlation_id or recovery.correlation_id,
         history_scope=authority.history_scope or recovery.history_scope,
         conversation_target=authority.conversation_target or recovery.conversation_target,
+    )
+
+
+def _reconcile_ledger_and_recovery(ledger_record: TurnRecord, recovery_record: TurnRecord) -> TurnRecord:
+    """Keep ledger identity while accepting a newer delivered run's mutable facts."""
+    if (
+        recovery_record.timestamp < int(ledger_record.timestamp)
+        or recovery_record.response_event_id is None
+        or not same_turn_identity(ledger_record, recovery_record)
+    ):
+        return _backfill_missing_turn_facts(ledger_record, recovery_record)
+    return replace(
+        ledger_record,
+        discovery_event_ids=(*ledger_record.discovery_event_ids, *recovery_record.discovery_event_ids),
+        response_event_id=recovery_record.response_event_id,
+        completed=recovery_record.completed,
+        source_event_prompts=recovery_record.source_event_prompts or ledger_record.source_event_prompts,
+        source_event_metadata=recovery_record.source_event_metadata or ledger_record.source_event_metadata,
+        response_owner=recovery_record.response_owner or ledger_record.response_owner,
+        requester_id=recovery_record.requester_id or ledger_record.requester_id,
+        correlation_id=recovery_record.correlation_id or ledger_record.correlation_id,
+        history_scope=recovery_record.history_scope or ledger_record.history_scope,
+        conversation_target=recovery_record.conversation_target or ledger_record.conversation_target,
+        timestamp=recovery_record.timestamp,
     )

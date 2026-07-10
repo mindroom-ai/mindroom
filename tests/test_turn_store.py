@@ -173,6 +173,8 @@ def test_recovery_does_not_replace_a_conflicting_completed_identity(tmp_path: Pa
 
     assert loaded is not None
     assert loaded.source_event_ids == ("$question",)
+    assert loaded.discovery_event_ids == ()
+    assert loaded.indexed_event_ids == ("$question",)
     assert store.get_turn_record("$question") == loaded
     selection_record = store.get_turn_record("$selection")
     assert selection_record is not None
@@ -184,6 +186,95 @@ def test_recovery_does_not_replace_a_conflicting_completed_identity(tmp_path: Pa
     reloaded_store = _store(tmp_path)
     assert reloaded_store.get_turn_record("$question") == loaded
     assert reloaded_store.get_turn_record("$selection") == selection_record
+
+
+def test_newer_delivered_run_recovers_mutable_facts_after_crash(tmp_path: Path) -> None:
+    """A delivered run newer than the ledger should repair the edit crash window."""
+    store = _store(tmp_path)
+    ledger_record = TurnRecord.create(
+        ["$first", "$anchor"],
+        response_event_id="$old-response",
+        source_event_prompts={"$first": "old first", "$anchor": "old anchor"},
+        visible_echo_event_id="$echo",
+        timestamp=10,
+    )
+    store._ledger.record_handled_turn(ledger_record)
+    recovery_record = TurnRecord.create(
+        ["$first", "$anchor"],
+        response_event_id="$new-response",
+        source_event_prompts={"$first": "edited first", "$anchor": "old anchor"},
+        response_owner="agent",
+        timestamp=20,
+    )
+
+    loaded = _load_with_recovery(
+        store,
+        original_event_id="$first",
+        recovery_record=recovery_record,
+    )
+
+    assert loaded is not None
+    assert loaded.source_event_ids == ledger_record.source_event_ids
+    assert loaded.anchor_event_id == ledger_record.anchor_event_id
+    assert loaded.response_event_id == "$new-response"
+    assert loaded.source_event_prompts == {"$first": "edited first", "$anchor": "old anchor"}
+    assert loaded.visible_echo_event_id == "$echo"
+    assert loaded.response_owner == "agent"
+    assert loaded.timestamp == 20
+
+
+def test_same_second_delivered_run_repairs_fractional_ledger_timestamp(tmp_path: Path) -> None:
+    """Second-resolution run times should still repair a later run from the same second."""
+    store = _store(tmp_path)
+    store._ledger.record_handled_turn(
+        TurnRecord.create(["$event"], response_event_id="$old-response", timestamp=10.9),
+    )
+    recovery_record = TurnRecord.create(["$event"], response_event_id="$new-response", timestamp=10)
+
+    loaded = _load_with_recovery(
+        store,
+        original_event_id="$event",
+        recovery_record=recovery_record,
+    )
+
+    assert loaded is not None
+    assert loaded.response_event_id == "$new-response"
+    assert loaded.timestamp == 10
+
+
+def test_newer_interrupted_run_keeps_delivered_ledger_outcome(tmp_path: Path) -> None:
+    """A newer run without Matrix delivery must not replace a visible response."""
+    store = _store(tmp_path)
+    store._ledger.record_handled_turn(
+        TurnRecord.create(["$event"], response_event_id="$response", timestamp=10),
+    )
+    recovery_record = TurnRecord.create(["$event"], completed=False, timestamp=20)
+
+    loaded = _load_with_recovery(
+        store,
+        original_event_id="$event",
+        recovery_record=recovery_record,
+    )
+
+    assert loaded is not None
+    assert loaded.response_event_id == "$response"
+    assert loaded.completed
+    assert loaded.timestamp == 10
+
+
+def test_terminal_write_refreshes_ledger_precedence_timestamp(tmp_path: Path) -> None:
+    """A successful terminal write should become newer than its recovered input."""
+    store = _store(tmp_path)
+    store._ledger.record_handled_turn(
+        TurnRecord.create(["$event"], response_event_id="$old-response", timestamp=1),
+    )
+
+    store.record_turn(TurnRecord.create(["$event"], response_event_id="$new-response", timestamp=1))
+
+    updated = store.get_turn_record("$event")
+    assert updated is not None
+    assert updated.response_event_id == "$new-response"
+    assert updated.timestamp > 1
 
 
 def test_terminal_turn_can_replace_a_provisional_source_identity(tmp_path: Path) -> None:
@@ -199,6 +290,20 @@ def test_terminal_turn_can_replace_a_provisional_source_identity(tmp_path: Path)
     assert first_record == second_record
     assert first_record.source_event_ids == ("$first", "$second")
     assert first_record.visible_echo_event_id == "$echo"
+
+
+def test_terminal_turn_rejects_conflicting_completed_canonical_source(tmp_path: Path) -> None:
+    """A completed source cannot be reassigned into a different canonical turn."""
+    store = _store(tmp_path)
+    store.record_turn(TurnRecord.create(["$first"], response_event_id="$first-response"))
+
+    store.record_turn(TurnRecord.create(["$first", "$second"], response_event_id="$other-response"))
+
+    first_record = store.get_turn_record("$first")
+    assert first_record is not None
+    assert first_record.source_event_ids == ("$first",)
+    assert first_record.response_event_id == "$first-response"
+    assert store.get_turn_record("$second") is None
 
 
 def test_run_metadata_without_current_schema_version_is_not_recovery_data() -> None:

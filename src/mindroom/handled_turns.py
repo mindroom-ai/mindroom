@@ -425,7 +425,7 @@ class HandledTurnLedger:
         lookup_event_ids: Sequence[str],
         update: Callable[[Mapping[str, TurnRecord]], TurnRecord],
     ) -> TurnRecord | None:
-        """Atomically update compatible rows while preserving completed identities."""
+        """Atomically validate and update one record against completed identities."""
         normalized_lookup_event_ids = _normalize_source_event_ids(lookup_event_ids)
         if not normalized_lookup_event_ids:
             return None
@@ -441,21 +441,16 @@ class HandledTurnLedger:
             turn_record = update(existing_records)
             if not turn_record.source_event_ids:
                 return None
-            persisted_record = (
+            candidate_record = (
                 turn_record if turn_record.timestamp != 0.0 else replace(turn_record, timestamp=time.time())
             )
-            writable_event_ids = tuple(
-                event_id
-                for event_id in persisted_record.indexed_event_ids
-                if (existing_record := self._responses.get(event_id)) is None
-                or not existing_record.completed
-                or _same_turn_identity(existing_record, persisted_record)
-            )
-            for event_id in writable_event_ids:
+            persisted_record = _compatible_turn_record(candidate_record, self._responses)
+            if persisted_record is None:
+                return None
+            for event_id in persisted_record.indexed_event_ids:
                 self._responses[event_id] = persisted_record
-            if writable_event_ids:
-                self._schedule_persist_locked(writable_event_ids)
-        logger.debug("handled_turn_recorded", indexed_event_count=len(writable_event_ids))
+            self._schedule_persist_locked(persisted_record)
+        logger.debug("handled_turn_recorded", indexed_event_count=len(persisted_record.indexed_event_ids))
         return persisted_record
 
     def has_responded(self, event_id: str) -> bool:
@@ -504,26 +499,22 @@ class HandledTurnLedger:
         for future in pending:
             future.result()
 
-    def _schedule_persist_locked(self, source_event_ids: tuple[str, ...]) -> None:
+    def _schedule_persist_locked(self, turn_record: TurnRecord) -> None:
         """Queue one write-behind disk merge for records already applied to memory."""
-        records = {event_id: self._responses[event_id] for event_id in source_event_ids}
-        future = _persist_executor().submit(self._persist_records, records)
+        future = _persist_executor().submit(self._persist_record, turn_record)
         self._state.pending_persists = [pending for pending in self._state.pending_persists if not pending.done()]
         self._state.pending_persists.append(future)
 
-    def _persist_records(self, records: dict[str, TurnRecord]) -> None:
+    def _persist_record(self, turn_record: TurnRecord) -> None:
         """Merge already-applied records into the persisted ledger from a worker thread."""
         try:
             with advisory_file_lock(self._responses_lock_file, exclusive=True):
                 persisted_responses = self._read_responses_file_locked()
-                for event_id, record in records.items():
-                    existing_record = persisted_responses.get(event_id)
-                    if (
-                        existing_record is None
-                        or not existing_record.completed
-                        or _same_turn_identity(existing_record, record)
-                    ):
-                        persisted_responses[event_id] = record
+                compatible_record = _compatible_turn_record(turn_record, persisted_responses)
+                if compatible_record is None:
+                    return
+                for event_id in compatible_record.indexed_event_ids:
+                    persisted_responses[event_id] = compatible_record
                 self._write_responses_file_locked(persisted_responses)
         except Exception:
             logger.exception(
@@ -637,9 +628,32 @@ def _normalize_source_event_ids(source_event_ids: Sequence[object]) -> tuple[str
     return tuple(normalized_event_ids)
 
 
-def _same_turn_identity(first: TurnRecord, second: TurnRecord) -> bool:
+def same_turn_identity(first: TurnRecord, second: TurnRecord) -> bool:
     """Return whether two records identify the same canonical source turn."""
     return first.source_event_ids == second.source_event_ids and first.anchor_event_id == second.anchor_event_id
+
+
+def _compatible_turn_record(
+    turn_record: TurnRecord,
+    existing_records: Mapping[str, TurnRecord],
+) -> TurnRecord | None:
+    """Reject canonical conflicts and remove discovery aliases owned by other turns."""
+    for event_id in turn_record.source_event_ids:
+        existing_record = existing_records.get(event_id)
+        if (
+            existing_record is not None
+            and existing_record.completed
+            and not same_turn_identity(existing_record, turn_record)
+        ):
+            return None
+    discovery_event_ids = tuple(
+        event_id
+        for event_id in turn_record.discovery_event_ids
+        if (existing_record := existing_records.get(event_id)) is None
+        or not existing_record.completed
+        or same_turn_identity(existing_record, turn_record)
+    )
+    return replace(turn_record, discovery_event_ids=discovery_event_ids)
 
 
 def _normalize_string(value: object) -> str | None:

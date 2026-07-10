@@ -733,6 +733,40 @@ def test_cross_process_lock_defers_persist_without_blocking_writers(temp_dir: Pa
     assert _get_response_event_id(tracker_c, "$second") == "$response-b"
 
 
+def test_disk_merge_prunes_discovery_alias_claimed_by_another_completed_turn(temp_dir: Path) -> None:
+    """A cross-process winner should remove a stale writer's conflicting discovery alias."""
+    tracker = HandledTurnLedger("test_cross_process_alias", base_path=temp_dir)
+    assert tracker.get_turn_record("$warm") is None
+
+    with advisory_file_lock(tracker._responses_lock_file):
+        tracker.record_handled_turn(
+            TurnRecord.create(
+                ["$question"],
+                discovery_event_ids=["$selection"],
+                response_event_id="$question-response",
+            ),
+        )
+        _write_responses_file(
+            tracker,
+            {
+                "$selection": {
+                    "response_event_id": "$selection-response",
+                    "completed": True,
+                },
+            },
+        )
+
+    tracker.flush()
+    reloaded = _reload_ledger("test_cross_process_alias", temp_dir)
+    question_record = reloaded.get_turn_record("$question")
+    selection_record = reloaded.get_turn_record("$selection")
+    assert question_record is not None
+    assert question_record.discovery_event_ids == ()
+    assert selection_record is not None
+    assert selection_record.source_event_ids == ("$selection",)
+    assert selection_record.response_event_id == "$selection-response"
+
+
 def test_multiple_instances_merge_updates(temp_dir: Path) -> None:
     """Stale instances should merge with disk state instead of clobbering prior writes."""
     tracker_a = HandledTurnLedger("test_multi_instance", base_path=temp_dir)

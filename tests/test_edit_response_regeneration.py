@@ -2897,6 +2897,7 @@ def test_load_turn_prefers_newest_match_across_thread_and_room_sessions(tmp_path
 
     assert loaded_turn is not None
     assert loaded_turn.response_event_id == "$response-room:example.com"
+    assert loaded_turn.timestamp == 2
     assert loaded_turn.source_event_prompts == {
         "$first:example.com": "first room",
         "$primary:example.com": "primary room",
@@ -3490,10 +3491,10 @@ async def test_handle_message_edit_recovers_missing_single_turn_without_rerunnin
 
 
 @pytest.mark.asyncio
-async def test_handle_message_edit_keeps_ledger_response_event_id_after_restart(
+async def test_handle_message_edit_recovers_newer_run_response_event_id_after_restart(
     tmp_path: Path,
 ) -> None:
-    """A fresh bot should keep ledger response linkage when run metadata disagrees."""
+    """A fresh bot should repair stale ledger linkage from a delivered persisted run."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:example.com",
@@ -3692,9 +3693,9 @@ async def test_handle_message_edit_keeps_ledger_response_event_id_after_restart(
 
     mock_generate_response.assert_awaited_once()
     request = mock_generate_response.call_args.args[0]
-    assert request.existing_event_id == "$response-old:example.com"
+    assert request.existing_event_id == "$response-new:example.com"
     assert request.response_envelope.target.session_id == "!test:example.com"
-    assert _response_event_id(restarted_bot, "$original:example.com") == "$response-old:example.com"
+    assert _response_event_id(restarted_bot, "$original:example.com") == "$response-new:example.com"
 
 
 @pytest.mark.asyncio
