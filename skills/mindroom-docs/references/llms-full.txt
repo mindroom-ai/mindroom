@@ -2400,13 +2400,31 @@ models:
     extra_kwargs:
       extra_body:
         provider:
-          order: [deepseek]        # upstreams to try, in order
-          allow_fallbacks: false   # fail instead of routing to unlisted upstreams
+          order: [fireworks, together]  # upstreams to try, in order
+          allow_fallbacks: false        # fail instead of routing to unlisted upstreams
 ```
 
 Provider slugs are listed on each model's Providers tab on openrouter.ai, or in the `tag` field of `https://openrouter.ai/api/v1/models/<model-id>/endpoints`.
 With `allow_fallbacks: false`, requests fail when every listed upstream is down or rate-limited, instead of silently degrading to an unvetted host; for agents doing heavy tool calling we recommend this trade-off.
 A softer alternative is `require_parameters: true`, which keeps fallbacks but only routes to upstreams that support every request parameter, including tools.
+When cost matters more than picking specific upstreams, use `sort: price` instead of `order` to always route to the cheapest endpoint your account can reach, optionally with an `ignore:` list to exclude upstreams that have misbehaved:
+
+```yaml
+    extra_kwargs:
+      extra_body:
+        provider:
+          sort: price
+```
+
+Account-level OpenRouter settings (ignored providers and data-policy filters) are applied on top of request preferences and cannot be overridden per request, so a pinned upstream that your account excludes yields `No endpoints found` errors when `allow_fallbacks` is `false`.
+Always verify a new pin with a direct test request and confirm the `provider` field in the response before relying on it:
+
+```bash
+curl -s https://openrouter.ai/api/v1/chat/completions \
+  -H "Authorization: Bearer $OPENROUTER_API_KEY" -H "Content-Type: application/json" \
+  -d '{"model": "deepseek/deepseek-v4-pro", "messages": [{"role": "user", "content": "Say OK"}],
+       "max_tokens": 5, "provider": {"order": ["fireworks", "together"], "allow_fallbacks": false}}'
+```
 
 ## Azure OpenAI
 
