@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import ModuleType, SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock
@@ -36,6 +37,42 @@ async def test_bridge_connect_disables_automatic_sfu_subscriptions(monkeypatch: 
 
     assert room.options is not None
     assert room.options.auto_subscribe is False
+
+
+@pytest.mark.asyncio
+async def test_aclose_settles_cancelled_connect_before_disconnect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cancelling the join cannot orphan a native connection still completing."""
+
+    class FakeRoom:
+        def __init__(self) -> None:
+            self.local_participant = MagicMock()
+            self.connect_started = asyncio.Event()
+            self.release_connect = asyncio.Event()
+            self.disconnected = False
+
+        async def connect(self, _url: str, _jwt: str, _options: object) -> None:
+            self.connect_started.set()
+            await self.release_connect.wait()
+
+        async def disconnect(self) -> None:
+            self.disconnected = True
+
+    room = FakeRoom()
+    monkeypatch.setattr("livekit.rtc.Room", lambda: room)
+    bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    connect_waiter = asyncio.create_task(bridge.connect(SfuGrant(url="wss://sfu.example.org", jwt="jwt")))
+    await room.connect_started.wait()
+
+    connect_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await connect_waiter
+    close_waiter = asyncio.create_task(bridge.aclose())
+    await asyncio.sleep(0)
+
+    assert not close_waiter.done()
+    room.release_connect.set()
+    await close_waiter
+    assert room.disconnected
 
 
 @pytest.mark.asyncio

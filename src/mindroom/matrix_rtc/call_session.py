@@ -46,6 +46,8 @@ _MEMBERSHIP_REFRESH_RETRY_MS = 60 * 1000
 #: polling the homeserver forever for a device that may never come online.
 _KEY_DISTRIBUTION_RETRY_DELAYS_S = (1.0, 5.0, 30.0)
 
+_MATRIX_NETWORK_ERRORS = (nio.exceptions.ProtocolError, OSError, aiohttp.ClientError)
+
 
 class CallJoinError(RuntimeError):
     """Joining the call failed before the media bridge came up."""
@@ -297,7 +299,11 @@ class CallSession:
         finally:
             self._key_distribution_retry_scheduled = False
         if not self._stopped:
-            await self._distribute_keys()
+            try:
+                await self._distribute_keys()
+            except _MATRIX_NETWORK_ERRORS as error:
+                logger.warning("call_key_distribution_error", room_id=self.room_id, error=str(error))
+                self._schedule_key_distribution_retry()
 
     def _apply_own_key(self, key: bytes, key_index: int) -> None:
         self.deps.bridge.set_frame_key(self.local_identity, key, key_index)
@@ -358,7 +364,7 @@ class CallSession:
             try:
                 next_iteration = self._refresh_iteration + 1
                 published = await self._publish_membership(initial=False, expires_iteration=next_iteration)
-            except (nio.exceptions.ProtocolError, OSError, aiohttp.ClientError) as error:
+            except _MATRIX_NETWORK_ERRORS as error:
                 logger.warning("call_membership_refresh_error", room_id=self.room_id, error=str(error))
                 published = False
             if not published:
@@ -378,7 +384,7 @@ class CallSession:
                 {},
                 state_key=membership_state_key(client.user_id, required_device_id(client)),
             )
-        except (nio.exceptions.ProtocolError, OSError, aiohttp.ClientError) as error:
+        except _MATRIX_NETWORK_ERRORS as error:
             logger.warning("call_membership_clear_failed", room_id=self.room_id, error=str(error))
             return
         if isinstance(response, nio.RoomPutStateError):

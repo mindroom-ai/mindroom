@@ -57,45 +57,50 @@ async def test_frame_key_round_trips_through_real_olm() -> None:
     """A frame key survives olm encryption, decryption, and parsing."""
     with tempfile.TemporaryDirectory() as tmp:
         bot_olm, rec_olm, _rec_dev = _olm_pair(tmp)
+        try:
+            client = AsyncMock(spec=nio.AsyncClient)
+            client.user_id = BOT
+            client.device_id = "BOTDEV"
+            client.olm = bot_olm
+            client.device_store = bot_olm.device_store
+            sent: list[nio.ToDeviceMessage] = []
 
-        client = AsyncMock(spec=nio.AsyncClient)
-        client.user_id = BOT
-        client.device_id = "BOTDEV"
-        client.olm = bot_olm
-        client.device_store = bot_olm.device_store
-        sent: list[nio.ToDeviceMessage] = []
+            async def _capture(message: nio.ToDeviceMessage) -> nio.ToDeviceResponse:
+                sent.append(message)
+                return nio.ToDeviceResponse(message)
 
-        async def _capture(message: nio.ToDeviceMessage) -> nio.ToDeviceResponse:
-            sent.append(message)
-            return nio.ToDeviceResponse(message)
+            client.to_device = _capture
+            client.keys_claim = AsyncMock()
 
-        client.to_device = _capture
-        client.keys_claim = AsyncMock()
+            transport = ToDeviceFrameKeyTransport(client)
+            target = CallMember(
+                user_id=REC,
+                device_id="RECDEV",
+                created_ts=0,
+                expires_ms=10_000_000,
+                membership_id=f"{REC}:RECDEV",
+            )
 
-        transport = ToDeviceFrameKeyTransport(client)
-        target = CallMember(
-            user_id=REC,
-            device_id="RECDEV",
-            created_ts=0,
-            expires_ms=10_000_000,
-            membership_id=f"{REC}:RECDEV",
-        )
+            await transport.send_key(room_id=ROOM, key_base64=KEY_B64, key_index=5, targets=[target])
 
-        await transport.send_key(room_id=ROOM, key_base64=KEY_B64, key_index=5, targets=[target])
+            assert len(sent) == 1
+            assert sent[0].type == "m.room.encrypted"
+            assert sent[0].recipient == REC
 
-        assert len(sent) == 1
-        assert sent[0].type == "m.room.encrypted"
-        assert sent[0].recipient == REC
+            olm_event = nio.OlmEvent.from_dict(
+                {"type": "m.room.encrypted", "sender": BOT, "content": sent[0].content},
+            )
+            decrypted = rec_olm.decrypt_event(olm_event)
+            assert isinstance(decrypted, nio.UnknownToDeviceEvent)
+            assert decrypted.type == CALL_ENCRYPTION_KEYS_EVENT_TYPE
 
-        olm_event = nio.OlmEvent.from_dict({"type": "m.room.encrypted", "sender": BOT, "content": sent[0].content})
-        decrypted = rec_olm.decrypt_event(olm_event)
-        assert isinstance(decrypted, nio.UnknownToDeviceEvent)
-        assert decrypted.type == CALL_ENCRYPTION_KEYS_EVENT_TYPE
-
-        parsed = transport.parse_incoming(decrypted)
-        assert parsed is not None
-        room_id, received = parsed
-        assert room_id == ROOM
-        assert received.key_base64 == KEY_B64
-        assert received.key_index == 5
-        assert received.claimed_device_id == "BOTDEV"
+            parsed = transport.parse_incoming(decrypted)
+            assert parsed is not None
+            room_id, received = parsed
+            assert room_id == ROOM
+            assert received.key_base64 == KEY_B64
+            assert received.key_index == 5
+            assert received.claimed_device_id == "BOTDEV"
+        finally:
+            bot_olm.store.database.close()
+            rec_olm.store.database.close()

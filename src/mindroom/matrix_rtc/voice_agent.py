@@ -250,6 +250,7 @@ class RealtimeVoiceBridge:
         self._local_identity = local_identity
         self._e2ee_enabled = e2ee_enabled
         self._room: Any = None
+        self._connect_task: asyncio.Task[None] | None = None
         self._session: Any = None
         self._audio_input: _AuthorizedParticipantAudioInput | None = None
         self._participant_identities: frozenset[str] = frozenset()
@@ -277,8 +278,17 @@ class RealtimeVoiceBridge:
                 ),
             )
         room = rtc.Room()
-        await room.connect(grant.url, grant.jwt, options)
         self._room = room
+        connect_task = asyncio.create_task(
+            room.connect(grant.url, grant.jwt, options),
+            name="matrix_rtc_livekit_connect",
+        )
+        self._connect_task = connect_task
+        try:
+            await asyncio.shield(connect_task)
+        finally:
+            if connect_task.done():
+                self._connect_task = None
         self._apply_output_permissions()
         logger.info("call_sfu_connected", url=grant.url, identity=self._local_identity)
 
@@ -366,9 +376,13 @@ class RealtimeVoiceBridge:
         self._session = None
         audio_input = self._audio_input
         self._audio_input = None
+        connect_task = self._connect_task
+        self._connect_task = None
         room = self._room
         self._room = None
         try:
+            if connect_task is not None:
+                await asyncio.gather(connect_task, return_exceptions=True)
             if session is not None:
                 await session.aclose()
         finally:

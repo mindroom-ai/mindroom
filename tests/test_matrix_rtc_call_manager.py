@@ -1411,6 +1411,52 @@ async def test_session_retries_members_that_did_not_receive_a_key(monkeypatch: p
 
 
 @pytest.mark.asyncio
+async def test_key_distribution_retry_survives_transport_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A transient homeserver failure cannot terminate the bounded retry chain."""
+
+    class FlakyTransport(FakeKeyTransport):
+        async def send_key(
+            self,
+            *,
+            room_id: str,
+            key_base64: str,
+            key_index: int,
+            targets: list[CallMember],
+        ) -> list[CallMember]:
+            await super().send_key(
+                room_id=room_id,
+                key_base64=key_base64,
+                key_index=key_index,
+                targets=targets,
+            )
+            if len(self.sent) == 1:
+                return []
+            if len(self.sent) == 2:
+                message = "offline"
+                raise aiohttp.ClientError(message)
+            return targets
+
+    real_sleep = asyncio.sleep
+
+    async def immediate_sleep(_seconds: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", immediate_sleep)
+    transport = FlakyTransport()
+    session = _session(_client(), FakeBridge(), transport, [1_000])
+    session._members = [_member("@alice:example.org", "ALICEDEV")]
+
+    await session._distribute_keys()
+    for _ in range(20):
+        if len(transport.sent) == 3:
+            break
+        await real_sleep(0)
+
+    assert len(transport.sent) == 3
+    await session.stop()
+
+
+@pytest.mark.asyncio
 async def test_key_distribution_serializes_roster_change_after_inflight_send() -> None:
     """A leaver during key delivery is followed by a rotation for the latest roster."""
 
