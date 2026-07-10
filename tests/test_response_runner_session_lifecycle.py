@@ -1045,6 +1045,75 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_d
 
 
 @pytest.mark.asyncio
+async def test_process_and_respond_streaming_delivery_error_overrides_induced_stream_cancellation(
+    tmp_path: Path,
+) -> None:
+    """Delivery failure remains an error after it cancels unfinished generation."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    storage = _SessionStorage()
+    stream_blocked = asyncio.Event()
+
+    with patch("mindroom.response_runner.stream_agent_response") as mock_stream:
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@bob:localhost",
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        async def fail_while_generation_is_blocked(request: object) -> StreamTransportOutcome:
+            response_stream = cast("AsyncIterator[object]", request.response_stream)
+            first_chunk = await anext(response_stream)
+            next_chunk = asyncio.create_task(anext(response_stream))
+            await stream_blocked.wait()
+            next_chunk.cancel()
+            with suppress(asyncio.CancelledError):
+                await next_chunk
+            raise StreamingDeliveryError(
+                RuntimeError("delivery boom"),
+                event_id="$terminal",
+                accumulated_text=str(first_chunk),
+                tool_trace=[],
+                transport_outcome=_stream_outcome(
+                    "$terminal",
+                    str(first_chunk),
+                    terminal_status="error",
+                    failure_reason="delivery boom",
+                ),
+            )
+
+        coordinator.deps.delivery_gateway.deliver_stream.side_effect = fail_while_generation_is_blocked
+
+        def fake_stream_agent_response(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+            async def fake_stream() -> AsyncIterator[str]:
+                yield "Partial answer"
+                stream_blocked.set()
+                await asyncio.Event().wait()
+
+            return fake_stream()
+
+        mock_stream.side_effect = fake_stream_agent_response
+
+        generation = await coordinator.process_and_respond_streaming(
+            _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
+        )
+
+    assert generation.delivery.failure_reason == "delivery boom"
+    persisted_session = cast("AgentSession", storage.session)
+    assert persisted_session.runs is not None
+    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    assert persisted_run.metadata is not None
+    assert persisted_run.metadata["mindroom_original_status"] == "error"
+    assert persisted_run.messages is not None
+    assert persisted_run.messages[1].content == "Partial answer\n\n(turn failed before completion)"
+
+
+@pytest.mark.asyncio
 async def test_process_and_respond_streaming_persists_interrupted_history_when_model_stream_errors(
     tmp_path: Path,
 ) -> None:

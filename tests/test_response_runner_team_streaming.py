@@ -1175,8 +1175,33 @@ def test_record_stream_delivery_error_preserves_hidden_tool_state_when_visible_t
     assert [tool.tool_name for tool in snapshot.interrupted_tools] == ["save_file"]
 
 
-def test_record_stream_delivery_error_merges_live_and_delivery_completed_tools(tmp_path: Path) -> None:
-    """Delivery traces supplement canonical tools from earlier continuation attempts."""
+def test_record_stream_delivery_error_uses_delivery_tools_without_live_tool_state(tmp_path: Path) -> None:
+    """Delivery traces supply tool state when generation recorded none."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+    )
+    recorder = TurnRecorder(user_message="Hello")
+
+    coordinator._record_stream_delivery_error(
+        recorder=recorder,
+        accumulated_text="Partial answer",
+        tool_trace=[ToolTraceEntry(type="tool_call_completed", tool_name="run_shell_command")],
+        original_status=RunStatus.error,
+    )
+
+    snapshot = recorder.interrupted_snapshot()
+    assert [tool.tool_name for tool in snapshot.completed_tools] == ["run_shell_command"]
+
+
+def test_record_stream_delivery_error_prefers_live_tools_over_stale_delivery_trace(tmp_path: Path) -> None:
+    """A lagging visible trace cannot resurrect completed tools or drop newer pending tools."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
@@ -1191,16 +1216,20 @@ def test_record_stream_delivery_error_merges_live_and_delivery_completed_tools(t
     recorder.set_completed_tools(
         [ToolTraceEntry(type="tool_call_completed", tool_name="load_tool")],
     )
+    recorder.set_interrupted_tools(
+        [ToolTraceEntry(type="tool_call_started", tool_name="save_file")],
+    )
 
     coordinator._record_stream_delivery_error(
         recorder=recorder,
         accumulated_text="Partial answer",
-        tool_trace=[ToolTraceEntry(type="tool_call_completed", tool_name="run_shell_command")],
+        tool_trace=[ToolTraceEntry(type="tool_call_started", tool_name="load_tool")],
         original_status=RunStatus.error,
     )
 
     snapshot = recorder.interrupted_snapshot()
-    assert [tool.tool_name for tool in snapshot.completed_tools] == ["load_tool", "run_shell_command"]
+    assert [tool.tool_name for tool in snapshot.completed_tools] == ["load_tool"]
+    assert [tool.tool_name for tool in snapshot.interrupted_tools] == ["save_file"]
 
 
 def test_record_stream_delivery_error_records_zero_output_interruption(
@@ -1260,6 +1289,31 @@ def test_record_stream_delivery_error_preserves_provider_error_status(tmp_path: 
         accumulated_text="Provider failed",
         tool_trace=[],
         original_status=RunStatus.cancelled,
+    )
+
+    assert recorder.interruption_status is RunStatus.error
+
+
+def test_record_stream_delivery_error_promotes_delivery_error_over_stream_cancellation(tmp_path: Path) -> None:
+    """A transport error must outrank cancellation induced while stopping generation."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+    )
+    recorder = TurnRecorder(user_message="Hello")
+    recorder.mark_interrupted(original_status=RunStatus.cancelled)
+
+    coordinator._record_stream_delivery_error(
+        recorder=recorder,
+        accumulated_text="Partial answer",
+        tool_trace=[],
+        original_status=RunStatus.error,
     )
 
     assert recorder.interruption_status is RunStatus.error

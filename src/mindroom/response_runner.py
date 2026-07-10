@@ -16,7 +16,6 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
 from mindroom.ai import ResponseTurnContext, ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
-from mindroom.ai_turn_state import merge_tool_trace_snapshots
 from mindroom.background_tasks import create_background_task
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
@@ -628,13 +627,18 @@ class ResponseRunner:
         user's message (agno drops the cancelled/error run itself).
         """
         partial_text = clean_partial_reply_text(strip_visible_tool_markers(accumulated_text))
-        completed_tools, interrupted_tools = _split_delivery_tool_trace(tool_trace)
+        delivery_completed_tools, delivery_interrupted_tools = _split_delivery_tool_trace(tool_trace)
         if not partial_text:
             partial_text = recorder.assistant_text
-        completed_tools = merge_tool_trace_snapshots(recorder.completed_tools, completed_tools)
-        if not interrupted_tools:
+        if recorder.completed_tools or recorder.interrupted_tools:
+            completed_tools = list(recorder.completed_tools)
             interrupted_tools = list(recorder.interrupted_tools)
-        interruption_status = recorder.interruption_status if recorder.outcome == "interrupted" else original_status
+        else:
+            completed_tools = delivery_completed_tools
+            interrupted_tools = delivery_interrupted_tools
+        interruption_status = original_status
+        if recorder.outcome == "interrupted" and recorder.interruption_status is RunStatus.error:
+            interruption_status = RunStatus.error
         recorder.record_interrupted(
             run_metadata=recorder.run_metadata,
             assistant_text=partial_text,
