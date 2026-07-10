@@ -358,6 +358,40 @@ class TestFileWatcherReload:
         assert after.generation == before.generation + 1
         assert after.config_data["agents"]["test_agent"]["role"] == "Edited outside the API"
 
+    def test_initial_load_retries_source_edit_after_validation(
+        self,
+        runtime_paths: constants.RuntimePaths,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Initial publication retries when disk changes after runtime validation."""
+        api_app = _make_api_app(runtime_paths)
+        real_load = config_lifecycle._load_config_result
+        load_count = 0
+
+        def load_then_edit_source(
+            paths: constants.RuntimePaths,
+        ) -> tuple[
+            config_lifecycle.ConfigLoadResult,
+            dict[str, Any] | None,
+            Config | None,
+            str | None,
+            frozenset[Path] | None,
+        ]:
+            nonlocal load_count
+            loaded = real_load(paths)
+            load_count += 1
+            if load_count == 1:
+                edited = copy.deepcopy(VALID_CONFIG)
+                edited["agents"]["test_agent"]["role"] = "Edited during validation"
+                _write_config(paths.config_path, edited)
+            return loaded
+
+        monkeypatch.setattr(config_lifecycle, "_load_config_result", load_then_edit_source)
+
+        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+        assert load_count == 2
+        assert _snapshot(api_app).config_data["agents"]["test_agent"]["role"] == "Edited during validation"
+
     def test_stale_load_is_discarded_after_concurrent_commit(
         self,
         loaded_app: FastAPI,

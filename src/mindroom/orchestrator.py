@@ -929,6 +929,10 @@ class _MultiAgentOrchestrator:
         logger.info("Initializing multi-agent system...")
 
         config = await asyncio.to_thread(load_config, self.runtime_paths, tolerate_plugin_load_errors=True)
+        prepared_plugin_roots, prepared_plugin_root_snapshots = await asyncio.to_thread(
+            self.plugin_watch.capture,
+            config,
+        )
         prepared_plugin_reload = await asyncio.to_thread(
             prepare_plugin_reload,
             config,
@@ -946,6 +950,10 @@ class _MultiAgentOrchestrator:
         await asyncio.to_thread(ensure_config_source_current, config, self.runtime_paths)
         self.config = config
         self._activate_hook_registry(apply_prepared_plugin_reload(prepared_plugin_reload).hook_registry)
+        self.plugin_watch.replace_snapshots(
+            prepared_plugin_roots,
+            prepared_plugin_root_snapshots,
+        )
         await self._sync_mcp_manager(config)
         await self._sync_event_cache_service(config)
         self._configure_approval_store_transport()
@@ -1167,6 +1175,10 @@ class _MultiAgentOrchestrator:
 
     async def _load_initial_config(self, new_config: RuntimeConfig) -> bool:
         """Handle config loading before the runtime has an active config."""
+        prepared_plugin_roots, prepared_plugin_root_snapshots = await asyncio.to_thread(
+            self.plugin_watch.capture,
+            new_config,
+        )
         prepared_plugin_reload = await asyncio.to_thread(
             prepare_plugin_reload,
             new_config,
@@ -1189,6 +1201,10 @@ class _MultiAgentOrchestrator:
         await asyncio.to_thread(ensure_config_source_current, new_config, self.runtime_paths)
         self.config = new_config
         self._activate_hook_registry(apply_prepared_plugin_reload(prepared_plugin_reload).hook_registry)
+        self.plugin_watch.replace_snapshots(
+            prepared_plugin_roots,
+            prepared_plugin_root_snapshots,
+        )
         await self._sync_mcp_manager(new_config)
         await self._sync_runtime_support_services(new_config, start_watcher=self.running)
         return False

@@ -21,6 +21,7 @@ from mindroom.config.main import (
     Config,
     ConfigRuntimeValidationError,
     RuntimeConfig,
+    ensure_config_source_current,
     iter_config_validation_messages,
 )
 from mindroom.config.yaml_includes import (
@@ -180,6 +181,7 @@ def _load_config_result(
             Config.model_validate(data),
             runtime_paths,
             tolerate_plugin_load_errors=True,
+            source_files=source_files,
         )
         validated_payload = runtime_config.authored_model_dump()
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
@@ -780,7 +782,21 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
     """Load config from disk into one API app's committed config cache."""
     initial_state = require_api_state(api_app)
     snapshot = initial_state.snapshot
-    result, validated_payload, runtime_config, source_fingerprint, source_files = _load_config_result(runtime_paths)
+    for attempt in range(2):
+        result, validated_payload, runtime_config, source_fingerprint, source_files = _load_config_result(runtime_paths)
+        if not result.success or runtime_config is None:
+            break
+        try:
+            ensure_config_source_current(runtime_config, runtime_paths)
+        except (ConfigSourceChangedError, *CONFIG_LOAD_USER_ERROR_TYPES):
+            logger.info(
+                "Retrying API config load after source changed during validation",
+                config_path=str(runtime_paths.config_path),
+            )
+            if attempt == 1:
+                return False
+        else:
+            break
     with initial_state.config_lock:
         current_state = require_api_state(api_app)
         current = current_state.snapshot

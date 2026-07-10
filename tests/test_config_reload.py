@@ -9,7 +9,7 @@ import tempfile
 import threading
 from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1120,9 +1120,17 @@ async def test_initial_config_rebuilds_runtime_from_prepared_plugin_snapshot(
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_modules = set(sys.modules)
+    real_prepare_plugin_reload = orchestrator_module.prepare_plugin_reload
+
+    def prepare_then_edit_plugin(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        prepared = real_prepare_plugin_reload(*args, **kwargs)
+        _write_reload_override_plugin(plugin_root, "number")
+        return prepared
+
     try:
         with (
             patch("mindroom.orchestrator.load_config", return_value=config),
+            patch("mindroom.orchestrator.prepare_plugin_reload", side_effect=prepare_then_edit_plugin),
             patch.object(orchestrator, "_prepare_user_account", new=AsyncMock()),
             patch.object(orchestrator, "_prepare_entity_accounts", new=AsyncMock(return_value=entity_users)),
             patch.object(orchestrator, "_create_managed_bot"),
@@ -1140,6 +1148,8 @@ async def test_initial_config_rebuilds_runtime_from_prepared_plugin_snapshot(
             "paths": "one, two",
         }
         assert (TOOL_METADATA["reload_override_tool"].agent_override_fields or [])[0].type == "string[]"
+        configured_root = plugin_root.resolve()
+        assert orchestrator.plugin_watch.last_snapshot_by_root[configured_root] != _tree_snapshot(configured_root)
     finally:
         TOOL_REGISTRY.clear()
         TOOL_REGISTRY.update(original_registry)

@@ -2913,7 +2913,6 @@ def test_config_reload_uses_source_fingerprint_from_validated_source(
     initial_response = test_client.post("/api/config/load")
     assert initial_response.status_code == 200
     initial_generation = int(initial_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER])
-    initial_agents = initial_response.json()["agents"]
 
     interleaved_source = yaml.safe_dump(_authored_config_payload("interleaved"), sort_keys=True)
     original_read_bytes = Path.read_bytes
@@ -2932,14 +2931,15 @@ def test_config_reload_uses_source_fingerprint_from_validated_source(
 
     reloaded_response = test_client.post("/api/config/load")
     assert reloaded_response.status_code == 200
-    assert reloaded_response.json()["agents"] == initial_agents
-    assert int(reloaded_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER]) == initial_generation
+    assert list(reloaded_response.json()["agents"]) == ["interleaved"]
+    interleaved_generation = int(reloaded_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER])
+    assert interleaved_generation > initial_generation
 
     assert config_lifecycle.load_config_into_app(main._app_runtime_paths(test_client.app), main.app) is True
     interleaved_response = test_client.post("/api/config/load")
     assert interleaved_response.status_code == 200
     assert list(interleaved_response.json()["agents"]) == ["interleaved"]
-    assert int(interleaved_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER]) > initial_generation
+    assert int(interleaved_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER]) == interleaved_generation
 
     stale_save_response = test_client.put(
         "/api/config/save",
