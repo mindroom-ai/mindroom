@@ -44,6 +44,7 @@ from tests.history_helpers import (  # noqa: F401
     _completed_run,
     _make_config,
     _session,
+    _team_session,
 )
 
 
@@ -193,6 +194,27 @@ def test_sync_restart_recovery_includes_compaction_preserved_seen_events(tmp_pat
         MINDROOM_REPLAY_STATE_METADATA_KEY: MINDROOM_REPLAY_STATE_INTERRUPTED,
     }
     session.runs = [interrupted]
+
+    assert scope_has_recovered_interrupted_event(session, scope, "source-event") is False
+
+
+def test_sync_restart_recovery_prefers_live_interrupted_team_replay_over_preserved_seen_state(
+    tmp_path: Path,
+) -> None:
+    """Pre-delivery team seen state cannot suppress the interrupted turn's own retry."""
+    _make_config(tmp_path)
+    scope = HistoryScope(kind="team", scope_id="team-123")
+    interrupted = TeamRunOutput(
+        run_id="interrupted",
+        team_id="team-123",
+        status=RunStatus.completed,
+        metadata={
+            "matrix_seen_event_ids": ["source-event"],
+            MINDROOM_REPLAY_STATE_METADATA_KEY: MINDROOM_REPLAY_STATE_INTERRUPTED,
+        },
+    )
+    session = _team_session("session-1", team_id="team-123", runs=[interrupted])
+    update_scope_seen_event_ids(session, scope, ["source-event"])
 
     assert scope_has_recovered_interrupted_event(session, scope, "source-event") is False
 

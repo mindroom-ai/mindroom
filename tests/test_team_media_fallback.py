@@ -660,6 +660,62 @@ async def test_team_response_uses_compaction_aware_member_execution() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_team_response_records_preparation_failure(streaming: bool) -> None:
+    """Team preparation failures must keep the current Matrix turn replayable."""
+    config = _build_test_config()
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+    fake_agent = _make_test_agent("GeneralAgent")
+    mock_team = _make_test_team()
+    recorder = TurnRecorder(
+        user_message="Analyze this.",
+        run_metadata={"matrix_source_event_ids": ["$source"]},
+    )
+
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch(
+            "mindroom.teams.prepare_bound_team_run_context",
+            new=AsyncMock(side_effect=RuntimeError("prepare failed")),
+        ),
+        patch("mindroom.teams.get_user_friendly_error_message", return_value="friendly-team-error"),
+    ):
+        if streaming:
+            response = [
+                chunk
+                async for chunk in team_response_stream(
+                    agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                    message="Analyze this.",
+                    turn_recorder=recorder,
+                    orchestrator=orchestrator,
+                    execution_identity=None,
+                    ctx=make_turn_context(session_id="session-123", reply_to_event_id="$source"),
+                )
+            ]
+        else:
+            response = await team_response(
+                agent_names=["general"],
+                mode=TeamMode.COORDINATE,
+                message="Analyze this.",
+                turn_recorder=recorder,
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id="session-123", reply_to_event_id="$source"),
+            )
+
+    assert response == (["friendly-team-error"] if streaming else "friendly-team-error")
+    assert recorder.outcome == "interrupted"
+    assert recorder.interruption_status is RunStatus.error
+    assert recorder.run_metadata == {"matrix_source_event_ids": ["$source"]}
+
+
+@pytest.mark.asyncio
 async def test_team_response_prefers_persisted_history_over_thread_context_fallback() -> None:
     """Persisted team history should let Agno replay natively and skip thread stuffing."""
     config = _build_test_config()

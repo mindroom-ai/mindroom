@@ -929,6 +929,42 @@ class TestUserIdPassthrough:
         assert mock_prepare.await_args.kwargs["include_openai_compat_guidance"] is True
 
     @pytest.mark.asyncio
+    async def test_stream_agent_response_records_preparation_failure(self, tmp_path: Path) -> None:
+        """A streaming preparation failure must leave replayable Matrix source state."""
+        storage = _SessionStorage()
+        recorder = TurnRecorder(
+            user_message="test",
+            run_metadata={MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$source"]},
+        )
+
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch(
+                "mindroom.ai._prepare_agent_and_prompt",
+                new=AsyncMock(side_effect=RuntimeError("prepare failed")),
+            ),
+            patch("mindroom.ai.get_user_friendly_error_message", return_value="friendly-error"),
+        ):
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    make_turn_context("general", session_id="session1", reply_to_event_id="$source"),
+                    prompt="test",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    turn_recorder=recorder,
+                )
+            ]
+
+        assert [chunk.content for chunk in chunks] == ["friendly-error"]
+        assert recorder.outcome == "interrupted"
+        assert recorder.interruption_status is RunStatus.error
+        assert recorder.run_metadata == {MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$source"]}
+
+    @pytest.mark.asyncio
     async def test_stream_agent_response_omits_current_sender_for_openai_compat_guidance(self, tmp_path: Path) -> None:
         """Streaming OpenAI-compatible requests should keep plain role-labeled prompt formatting."""
         mock_agent = MagicMock()

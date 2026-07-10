@@ -281,7 +281,7 @@ class CancelledAttempt:
 
 @dataclass(frozen=True)
 class ErroredAttempt:
-    """One attempt that resolved to user-facing error text (blocking only)."""
+    """One attempt that resolved to user-facing error text."""
 
     user_message_text: str
     metadata_content: dict[str, Any] | None = None
@@ -293,7 +293,7 @@ class HandledAttempt:
 
 
 BlockingAttemptResolution = CompletedAttempt | CancelledAttempt | ErroredAttempt
-StreamAttemptResolution = CompletedAttempt | CancelledAttempt | HandledAttempt
+StreamAttemptResolution = CompletedAttempt | CancelledAttempt | ErroredAttempt | HandledAttempt
 
 
 @dataclass(frozen=True)
@@ -406,6 +406,43 @@ def _fallback_matrix_run_metadata(ctx: ResponseTurnContext, run: TurnRunState) -
         correlation_id=ctx.correlation_id,
         extra_metadata=deepcopy(ctx.matrix_run_metadata),
     )
+
+
+def _record_errored_turn(
+    ctx: ResponseTurnContext,
+    persist: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None] | None,
+    sinks: TurnSinks,
+    run: TurnRunState,
+) -> None:
+    """Record one failed turn through the canonical interrupted-replay path."""
+    recorder = sinks.turn_recorder
+    run_metadata = run.run_metadata
+    if run_metadata is None and recorder is not None:
+        run_metadata = recorder.run_metadata
+    if run_metadata is None:
+        run_metadata = _fallback_matrix_run_metadata(ctx, run)
+    if recorder is not None:
+        run.turn_state.record_interrupted_from_recorder(
+            recorder,
+            run_metadata=run_metadata,
+            original_status=RunStatus.error,
+        )
+        return
+    if run.standalone_replay_persisted or persist is None:
+        return
+    persist(
+        run.scope_context,
+        StandaloneReplaySnapshot(
+            session_id=ctx.session_id,
+            run_id=ctx.run_id or str(uuid4()),
+            partial_text=run.turn_state.assistant_text,
+            completed_tools=list(run.turn_state.completed_tools),
+            interrupted_tools=list(run.turn_state.interrupted_tools),
+            run_metadata=run_metadata,
+            original_status=RunStatus.error,
+        ),
+    )
+    run.standalone_replay_persisted = True
 
 
 def _persist_attempt_cancelled_replay(
@@ -576,6 +613,7 @@ async def run_blocking_response_turn(
         if adapter.unexpected_error_text is None:
             raise
         logger.exception("Response turn failed", entity=ctx.entity_label)
+        _record_errored_turn(ctx, adapter.persist_standalone_replay, sinks, run)
         return adapter.unexpected_error_text(e)
     finally:
         adapter.close_runtime_dbs(run.scope_context)
@@ -612,34 +650,7 @@ def _settle_blocking_attempt(
         # A failed attempt's run is dropped from agno history, so record the
         # interruption to keep the user's message replayable even with zero
         # partial output.
-        run.turn_state.record_interrupted(
-            sinks.turn_recorder,
-            run_metadata=run.run_metadata,
-            assistant_text="",
-            completed_tools=[],
-            interrupted_tools=[],
-            original_status=RunStatus.error,
-        )
-        if (
-            sinks.turn_recorder is None
-            and adapter.persist_standalone_replay is not None
-            and not run.standalone_replay_persisted
-        ):
-            adapter.persist_standalone_replay(
-                run.scope_context,
-                StandaloneReplaySnapshot(
-                    session_id=ctx.session_id,
-                    run_id=ctx.run_id or str(uuid4()),
-                    partial_text="",
-                    completed_tools=run.turn_state.completed_tools_for([]),
-                    interrupted_tools=[],
-                    run_metadata=run.run_metadata
-                    if run.run_metadata is not None
-                    else _fallback_matrix_run_metadata(ctx, run),
-                    original_status=RunStatus.error,
-                ),
-            )
-            run.standalone_replay_persisted = True
+        _record_errored_turn(ctx, adapter.persist_standalone_replay, sinks, run)
         return resolution.user_message_text
     settle = _settle_completed_attempt(
         ctx,
@@ -767,7 +778,7 @@ def _settle_completed_attempt(
     )
 
 
-async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912
+async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     ctx: ResponseTurnContext,
     adapter: StreamingTurnAdapter[ChunkT],
     sinks: TurnSinks,
@@ -816,6 +827,11 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912
                                 resolution,
                             )
                         raise build_cancelled_error(resolution.reason)
+                    if isinstance(resolution, ErroredAttempt):
+                        _publish_run_metadata(sinks, resolution.metadata_content)
+                        _record_errored_turn(ctx, adapter.persist_standalone_replay, sinks, run)
+                        yield adapter.make_text_chunk(resolution.user_message_text)
+                        return
                     settle = _settle_completed_attempt(
                         ctx,
                         sinks,
@@ -858,6 +874,7 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912
         if adapter.unexpected_error_text is None:
             raise
         logger.exception("Response turn failed", entity=ctx.entity_label)
+        _record_errored_turn(ctx, adapter.persist_standalone_replay, sinks, run)
         yield adapter.make_text_chunk(adapter.unexpected_error_text(e))
         return
     finally:

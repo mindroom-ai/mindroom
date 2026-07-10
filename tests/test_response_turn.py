@@ -336,6 +336,29 @@ def test_blocking_errored_attempt_persists_zero_output_replay() -> None:
     assert snapshot.original_status is RunStatus.error
 
 
+def test_blocking_errored_attempt_preserves_seeded_recorder_metadata() -> None:
+    """A pre-prepare failure keeps Matrix source metadata already seeded on the recorder."""
+    log = _AdapterLog()
+    seeded_metadata = {"matrix_source_event_ids": ["$source"], "matrix_seen_event_ids": ["$source"]}
+    recorder = _FakeTurnRecorder(run_metadata=seeded_metadata)
+
+    async def _attempt(_run: TurnRunState, _c: DynamicContinuationRunState) -> ErroredAttempt:
+        return ErroredAttempt("friendly error")
+
+    result = asyncio.run(
+        run_blocking_response_turn(
+            _ctx(),
+            _blocking_adapter(log, _attempt),
+            TurnSinks(turn_recorder=cast("Any", recorder)),
+            continuation=_continuation(),
+        ),
+    )
+
+    assert result == "friendly error"
+    assert recorder.interrupted_calls[-1]["run_metadata"] == seeded_metadata
+    assert recorder.interrupted_calls[-1]["original_status"] == RunStatus.error
+
+
 def test_blocking_cancelled_attempt_records_persists_and_raises() -> None:
     """A cancelled attempt without recorder persists one standalone replay and raises."""
     log = _AdapterLog()
@@ -682,16 +705,20 @@ def test_blocking_unexpected_error_uses_shaper_when_configured() -> None:
         msg = "boom"
         raise RuntimeError(msg)
 
+    seeded_metadata = {"matrix_seen_event_ids": ["$source"]}
+    recorder = _FakeTurnRecorder(run_metadata=seeded_metadata)
     result = asyncio.run(
         run_blocking_response_turn(
             _ctx(),
             _blocking_adapter(log, _attempt, unexpected_error_text=lambda e: f"shaped: {e}"),
-            TurnSinks(),
+            TurnSinks(turn_recorder=cast("Any", recorder)),
             continuation=_continuation(),
         ),
     )
 
     assert result == "shaped: boom"
+    assert recorder.interrupted_calls[-1]["run_metadata"] == seeded_metadata
+    assert recorder.interrupted_calls[-1]["original_status"] == RunStatus.error
 
 
 def test_streaming_turn_yields_chunks_and_filters_sentinel() -> None:
@@ -752,6 +779,34 @@ def test_streaming_handled_attempt_ends_turn_without_recording() -> None:
     assert chunks == ["friendly error"]
     assert recorder.completed_calls == []
     assert log.finalized == 1
+
+
+def test_streaming_errored_attempt_records_seeded_metadata_and_yields_notice() -> None:
+    """A streaming preparation failure records replay state before emitting its friendly error."""
+    log = _AdapterLog()
+    seeded_metadata = {"matrix_seen_event_ids": ["$source"]}
+    recorder = _FakeTurnRecorder(run_metadata=seeded_metadata)
+
+    async def _attempt(
+        _run: TurnRunState,
+        _c: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        yield AttemptResolved(ErroredAttempt("friendly error"))
+
+    chunks = asyncio.run(
+        _collect(
+            stream_response_turn(
+                _ctx(),
+                _streaming_adapter(log, _attempt),
+                TurnSinks(turn_recorder=cast("Any", recorder)),
+                continuation=_continuation(),
+            ),
+        ),
+    )
+
+    assert chunks == ["notice:friendly error"]
+    assert recorder.interrupted_calls[-1]["run_metadata"] == seeded_metadata
+    assert recorder.interrupted_calls[-1]["original_status"] == RunStatus.error
 
 
 def test_streaming_cancelled_attempt_records_updates_collector_and_raises() -> None:
@@ -1034,18 +1089,22 @@ def test_streaming_unexpected_error_yields_shaped_notice_chunk() -> None:
         msg = "boom"
         raise RuntimeError(msg)
 
+    seeded_metadata = {"matrix_seen_event_ids": ["$source"]}
+    recorder = _FakeTurnRecorder(run_metadata=seeded_metadata)
     chunks = asyncio.run(
         _collect(
             stream_response_turn(
                 _ctx(),
                 _streaming_adapter(log, _attempt, unexpected_error_text=lambda e: f"shaped: {e}"),
-                TurnSinks(),
+                TurnSinks(turn_recorder=cast("Any", recorder)),
                 continuation=_continuation(),
             ),
         ),
     )
 
     assert chunks == ["chunk", "notice:shaped: boom"]
+    assert recorder.interrupted_calls[-1]["run_metadata"] == seeded_metadata
+    assert recorder.interrupted_calls[-1]["original_status"] == RunStatus.error
 
 
 def test_streaming_completed_response_text_is_emitted_after_settle() -> None:
@@ -1211,7 +1270,7 @@ def test_streaming_aclose_runs_cleanup_without_recording() -> None:
     assert recorder.interrupted_calls == []
 
 
-def test_stream_resolution_union_covers_handled() -> None:
-    """The streaming resolution union accepts the handled sentinel."""
-    resolution: StreamAttemptResolution = HandledAttempt()
-    assert isinstance(resolution, HandledAttempt)
+@pytest.mark.parametrize("resolution", [HandledAttempt(), ErroredAttempt("error")])
+def test_stream_resolution_union_covers_terminal_shortcuts(resolution: StreamAttemptResolution) -> None:
+    """The streaming resolution union accepts both terminal shortcut sentinels."""
+    assert isinstance(resolution, HandledAttempt | ErroredAttempt)

@@ -1861,8 +1861,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             )
         except Exception as e:
             logger.exception("Error preparing agent for streaming", agent=agent_name)
-            yield get_user_friendly_error_message(e, agent_name)
-            yield AttemptResolved(HandledAttempt())
+            yield AttemptResolved(ErroredAttempt(get_user_friendly_error_message(e, agent_name)))
             return
         prepared_run = run_context.prepared_run
         holder.agent = prepared_run.agent
