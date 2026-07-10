@@ -37,6 +37,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
+from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_projection import (
     SupportsVisibleThreadMessage,
     latest_visible_thread_event_id_by_thread,
@@ -316,9 +317,25 @@ async def _has_newer_human_thread_activity(
             error=str(exc),
         )
         return True
-    original_timestamp_ms = interrupted_thread.timestamp_ms
-    if isinstance(original_event, nio.RoomGetEventResponse) and isinstance(original_event.event.server_timestamp, int):
-        original_timestamp_ms = original_event.event.server_timestamp
+    if not history.is_full_history or is_thread_history_degraded(history):
+        logger.warning(
+            "Skipping auto-resume because thread activity history is not authoritative",
+            room_id=interrupted_thread.room_id,
+            thread_id=interrupted_thread.thread_id,
+        )
+        return True
+    if not isinstance(original_event, nio.RoomGetEventResponse) or not isinstance(
+        original_event.event.server_timestamp,
+        int,
+    ):
+        logger.warning(
+            "Skipping auto-resume because the original event lookup failed",
+            room_id=interrupted_thread.room_id,
+            thread_id=interrupted_thread.thread_id,
+            target_event_id=interrupted_thread.target_event_id,
+        )
+        return True
+    original_timestamp_ms = original_event.event.server_timestamp
     return any(
         message.timestamp >= original_timestamp_ms and message.sender not in internal_sender_ids for message in history
     )

@@ -24,6 +24,7 @@ from mindroom.constants import (
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import MissingManagedEntityAccountError, entity_identity_registry
 from mindroom.matrix import stale_stream_cleanup as stale_stream_cleanup_module
+from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.stale_stream_cleanup import (
@@ -873,22 +874,25 @@ async def test_auto_resume_skips_human_activity_after_original_event(
     runtime_paths = runtime_paths_for(config)
     client = AsyncMock(spec=nio.AsyncClient)
     conversation_cache = AsyncMock()
-    conversation_cache.get_thread_history.return_value = [
-        ResolvedVisibleMessage.synthetic(
-            sender=BOT_USER_ID,
-            body="Interrupted response",
-            event_id="$target",
-            timestamp=300,
-            thread_id="$threaded",
-        ),
-        ResolvedVisibleMessage.synthetic(
-            sender=USER_ID,
-            body="Please continue",
-            event_id="$new-user-message",
-            timestamp=human_timestamp,
-            thread_id="$threaded",
-        ),
-    ]
+    conversation_cache.get_thread_history.return_value = ThreadHistoryResult(
+        messages=[
+            ResolvedVisibleMessage.synthetic(
+                sender=BOT_USER_ID,
+                body="Interrupted response",
+                event_id="$target",
+                timestamp=300,
+                thread_id="$threaded",
+            ),
+            ResolvedVisibleMessage.synthetic(
+                sender=USER_ID,
+                body="Please continue",
+                event_id="$new-user-message",
+                timestamp=human_timestamp,
+                thread_id="$threaded",
+            ),
+        ],
+        is_full_history=True,
+    )
     client.room_get_event.return_value = _room_get_event_response(
         _make_message_event(
             event_id="$target",
@@ -938,22 +942,25 @@ async def test_auto_resume_skips_when_original_event_lookup_fails(tmp_path: Path
     runtime_paths = runtime_paths_for(config)
     client = AsyncMock(spec=nio.AsyncClient)
     conversation_cache = AsyncMock()
-    conversation_cache.get_thread_history.return_value = [
-        ResolvedVisibleMessage.synthetic(
-            sender=BOT_USER_ID,
-            body="Interrupted response",
-            event_id="$target",
-            timestamp=300,
-            thread_id="$threaded",
-        ),
-        ResolvedVisibleMessage.synthetic(
-            sender=USER_ID,
-            body="Please continue",
-            event_id="$new-user-message",
-            timestamp=200,
-            thread_id="$threaded",
-        ),
-    ]
+    conversation_cache.get_thread_history.return_value = ThreadHistoryResult(
+        messages=[
+            ResolvedVisibleMessage.synthetic(
+                sender=BOT_USER_ID,
+                body="Interrupted response",
+                event_id="$target",
+                timestamp=300,
+                thread_id="$threaded",
+            ),
+            ResolvedVisibleMessage.synthetic(
+                sender=USER_ID,
+                body="Please continue",
+                event_id="$new-user-message",
+                timestamp=200,
+                thread_id="$threaded",
+            ),
+        ],
+        is_full_history=True,
+    )
     client.room_get_event.side_effect = RuntimeError("event lookup failed")
     interrupted = [
         InterruptedThread(
@@ -971,6 +978,90 @@ async def test_auto_resume_skips_when_original_event_lookup_fails(tmp_path: Path
         "mindroom.matrix.stale_stream_cleanup.send_message_result",
         new=AsyncMock(return_value=delivered_matrix_event("$resume")),
     ) as mock_send:
+        resumed_count = await auto_resume_interrupted_threads(
+            client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths,
+            conversation_cache=conversation_cache,
+        )
+
+    assert resumed_count == 0
+    mock_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("is_full_history", "diagnostics"),
+    [
+        (False, {}),
+        (True, {"thread_read_degraded": True}),
+    ],
+)
+async def test_auto_resume_skips_nonauthoritative_thread_history(
+    tmp_path: Path,
+    is_full_history: bool,
+    diagnostics: dict[str, bool],
+) -> None:
+    """Incomplete or degraded activity history cannot authorize restart recovery."""
+    config = _make_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    client = AsyncMock(spec=nio.AsyncClient)
+    conversation_cache = AsyncMock()
+    conversation_cache.get_thread_history.return_value = ThreadHistoryResult(
+        messages=[],
+        is_full_history=is_full_history,
+        diagnostics=diagnostics,
+    )
+    interrupted = [
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$threaded",
+            target_event_id="$target",
+            partial_text="Interrupted response",
+            agent_name="test_agent",
+            timestamp_ms=300,
+        ),
+    ]
+
+    with patch("mindroom.matrix.stale_stream_cleanup.send_message_result", new=AsyncMock()) as mock_send:
+        resumed_count = await auto_resume_interrupted_threads(
+            client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths,
+            conversation_cache=conversation_cache,
+        )
+
+    assert resumed_count == 0
+    mock_send.assert_not_awaited()
+    client.room_get_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_skips_event_error_result(tmp_path: Path) -> None:
+    """A typed original-event lookup failure cannot authorize restart recovery."""
+    config = _make_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    client = AsyncMock(spec=nio.AsyncClient)
+    conversation_cache = AsyncMock()
+    conversation_cache.get_thread_history.return_value = ThreadHistoryResult(
+        messages=[],
+        is_full_history=True,
+    )
+    client.room_get_event.return_value = nio.RoomGetEventError("missing", status_code="M_NOT_FOUND")
+    interrupted = [
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$threaded",
+            target_event_id="$target",
+            partial_text="Interrupted response",
+            agent_name="test_agent",
+            timestamp_ms=300,
+        ),
+    ]
+
+    with patch("mindroom.matrix.stale_stream_cleanup.send_message_result", new=AsyncMock()) as mock_send:
         resumed_count = await auto_resume_interrupted_threads(
             client,
             interrupted,
