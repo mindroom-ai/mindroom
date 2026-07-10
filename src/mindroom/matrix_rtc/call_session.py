@@ -321,7 +321,7 @@ class CallSession:
 
     async def _apply_own_key_later(self, key: bytes, key_index: int, delay_ms: int) -> None:
         await asyncio.sleep(delay_ms / 1000)
-        if not self._stopped:
+        if not self._stopped and self._key_manager.is_current_outbound_key(key, key_index):
             self._apply_own_key(key, key_index)
 
     async def _publish_membership(self, *, initial: bool, expires_iteration: int | None = None) -> bool:

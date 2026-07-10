@@ -85,6 +85,26 @@ def test_joiner_after_grace_period_rotates_key_for_everyone() -> None:
     assert second.apply_after_ms == _USE_KEY_DELAY_MS
 
 
+def test_joiner_during_pending_rotation_keeps_remaining_activation_delay() -> None:
+    """Sharing a pending rotated key cannot make it active early."""
+    manager = _manager()
+    alice = _member("@alice:example.org")
+    first = manager.update_memberships([alice], now_ms=0)
+    assert first is not None
+    manager.mark_distributed(first)
+
+    bob = _member("@bob:example.org")
+    rotated = manager.update_memberships([alice, bob], now_ms=_KEY_ROTATION_GRACE_PERIOD_MS + 1)
+    assert rotated is not None
+    manager.mark_distributed(rotated)
+    charlie = _member("@charlie:example.org")
+    shared = manager.update_memberships([alice, bob, charlie], now_ms=_KEY_ROTATION_GRACE_PERIOD_MS + 501)
+
+    assert shared is not None
+    assert shared.key == rotated.key
+    assert shared.apply_after_ms == 500
+
+
 def test_leaver_rotates_key() -> None:
     """Leaver rotates key."""
     manager = _manager()

@@ -70,6 +70,7 @@ class FrameKeyManager:
     _key: bytes | None = field(default=None, init=False)
     _key_index: int = field(default=0, init=False)
     _key_created_ms: int = field(default=0, init=False)
+    _key_activation_ms: int = field(default=0, init=False)
     _shared_with: list[_SharedWith] = field(default_factory=list, init=False)
     _newest_inbound_ts: dict[tuple[str, str, int], int] = field(default_factory=dict, init=False)
 
@@ -95,6 +96,7 @@ class FrameKeyManager:
             self._key = secrets.token_bytes(_KEY_SIZE_BYTES)
             self._key_index = 0
             self._key_created_ms = now_ms
+            self._key_activation_ms = now_ms
             return _KeyDistribution(
                 key=self._key,
                 key_index=self._key_index,
@@ -112,7 +114,12 @@ class FrameKeyManager:
         if joined:
             if now_ms - self._key_created_ms < _KEY_ROTATION_GRACE_PERIOD_MS:
                 targets = tuple(members_by_identity[(s.user_id, s.device_id, s.membership_ts)] for s in joined)
-                return _KeyDistribution(key=self._key, key_index=self._key_index, targets=targets, apply_after_ms=0)
+                return _KeyDistribution(
+                    key=self._key,
+                    key_index=self._key_index,
+                    targets=targets,
+                    apply_after_ms=max(0, self._key_activation_ms - now_ms),
+                )
             return self._rotate(members_by_identity, remote, now_ms)
         return None
 
@@ -125,6 +132,7 @@ class FrameKeyManager:
         self._key = secrets.token_bytes(_KEY_SIZE_BYTES)
         self._key_index = (self._key_index + 1) % _KEY_INDEX_MODULUS
         self._key_created_ms = now_ms
+        self._key_activation_ms = now_ms + _USE_KEY_DELAY_MS
         self._shared_with = []
         del remote  # rotation always re-shares with every current member
         return _KeyDistribution(
@@ -133,6 +141,10 @@ class FrameKeyManager:
             targets=tuple(members_by_identity.values()),
             apply_after_ms=_USE_KEY_DELAY_MS,
         )
+
+    def is_current_outbound_key(self, key: bytes, key_index: int) -> bool:
+        """Return whether a delayed activation still targets the newest key."""
+        return self._key == key and self._key_index == key_index
 
     def mark_distributed(
         self,

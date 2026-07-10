@@ -1610,6 +1610,52 @@ async def test_key_distribution_serializes_roster_change_after_inflight_send() -
     await session.stop()
 
 
+@pytest.mark.asyncio
+async def test_rapid_roster_changes_preserve_key_activation_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pending key stays delayed and is skipped if another rotation supersedes it."""
+    release_delays = asyncio.Event()
+    delays: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def controlled_sleep(seconds: float) -> None:
+        delays.append(seconds)
+        await release_delays.wait()
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", controlled_sleep)
+    bridge = FakeBridge()
+    clock = [0]
+    session = _session(_client(), bridge, FakeKeyTransport(), clock)
+    alice = _member("@alice:example.org", "ALICEDEV")
+    bob = _member("@bob:example.org", "BOBDEV")
+    charlie = _member("@charlie:example.org", "CHARLIEDEV")
+
+    session._members = [alice]
+    await session._distribute_keys()
+    clock[0] = 10_001
+    session._members = [alice, bob]
+    await session._distribute_keys()
+    await real_sleep(0)
+    clock[0] = 10_501
+    session._members = [alice, bob, charlie]
+    await session._distribute_keys()
+    await real_sleep(0)
+    clock[0] = 10_502
+    session._members = [alice, charlie]
+    await session._distribute_keys()
+    await real_sleep(0)
+
+    assert [key_index for _, _, key_index in bridge.frame_keys] == [0]
+    assert delays == [1.0, 0.5, 1.0]
+    release_delays.set()
+    for _ in range(5):
+        await real_sleep(0)
+
+    assert [key_index for _, _, key_index in bridge.frame_keys] == [0, 2]
+    await session.stop()
+
+
 def test_calls_config_rejects_unknown_agents() -> None:
     """Call configuration may reference only declared agents."""
     with pytest.raises(ValueError, match=r"calls\.agents references unknown agent"):
