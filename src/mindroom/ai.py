@@ -1984,6 +1984,8 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                         partial_text=state.assistant_text or paused_content,
                         completed_tools=tuple(state.completed_tools),
                         interrupted_tools=tuple(pending.trace_entry for pending in state.pending_tools),
+                        session_id=state.paused_run_event.session_id,
+                        run_id=state.paused_run_event.run_id or attempt.attempt_run_id,
                     ),
                 )
                 return
