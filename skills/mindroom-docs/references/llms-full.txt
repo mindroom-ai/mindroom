@@ -2384,6 +2384,30 @@ Live testing against the Codex subscription endpoint reported `cached_tokens` on
 Repeated long requests then reported cache hits, while requests without those headers stayed at `cached_tokens: 0`, and `prompt_cache_retention` was rejected.
 Treat Codex prompt caching as best-effort rather than guaranteed.
 
+## OpenRouter Provider Routing
+
+Use `provider: openrouter` to reach many hosted models through a single API key.
+OpenRouter routes each request to one of several upstream providers serving that model, often including quantized (fp8/fp4) third-party deployments.
+Upstream quality varies: we have seen a third-party upstream leak raw model tool-call markup (DeepSeek `<|DSML|>` tokens) into visible replies when a tool call contained heavily nested quoting, and quantized hosts can degrade tool-calling reliability in general.
+Pin routing to trusted upstreams with OpenRouter [provider preferences](https://openrouter.ai/docs/features/provider-routing), passed through `extra_kwargs.extra_body`:
+
+```yaml
+models:
+  deepseek:
+    provider: openrouter
+    id: deepseek/deepseek-v4-pro
+    context_window: 1048576
+    extra_kwargs:
+      extra_body:
+        provider:
+          order: [deepseek]        # upstreams to try, in order
+          allow_fallbacks: false   # fail instead of routing to unlisted upstreams
+```
+
+Provider slugs are listed on each model's Providers tab on openrouter.ai, or in the `tag` field of `https://openrouter.ai/api/v1/models/<model-id>/endpoints`.
+With `allow_fallbacks: false`, requests fail when every listed upstream is down or rate-limited, instead of silently degrading to an unvetted host; for agents doing heavy tool calling we recommend this trade-off.
+A softer alternative is `require_parameters: true`, which keeps fallbacks but only routes to upstreams that support every request parameter, including tools.
+
 ## Azure OpenAI
 
 Use `provider: azure` when your model is deployed through Azure OpenAI.
@@ -2459,6 +2483,7 @@ The `extra_kwargs` field passes additional parameters directly to the underlying
 - `base_url` - Custom API endpoint (useful for OpenAI-compatible servers)
 - `temperature` - Sampling temperature
 - `max_tokens` - Maximum tokens in response
+- `extra_body` - Extra JSON body fields for OpenAI-compatible providers (e.g., OpenRouter provider routing above)
 
 ## Environment Variables
 
