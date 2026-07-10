@@ -161,7 +161,7 @@ async def test_runtime_coordinator_is_ready_rejects_inactive_runtime(
 
 
 @pytest.mark.asyncio
-async def test_runtime_coordinator_sync_api_config_snapshot_runs_for_policy_changes(tmp_path: Path) -> None:
+async def test_runtime_coordinator_prepares_and_publishes_api_config_for_policy_changes(tmp_path: Path) -> None:
     """Coordinator publishes API snapshots even when no authored trigger records exist."""
     config = _config()
     coordinator = ExternalTriggerRuntimeCoordinator(runtime_paths=_runtime_paths(tmp_path))
@@ -177,7 +177,8 @@ async def test_runtime_coordinator_sync_api_config_snapshot_runs_for_policy_chan
             return_value=True,
         ) as mock_publish,
     ):
-        await coordinator.sync_api_config_snapshot(config)
+        prepared_snapshot = await coordinator.prepare_api_config_snapshot(config)
+        coordinator.publish_prepared_api_config_snapshot(prepared_snapshot)
 
     mock_to_thread.assert_awaited_once_with(
         api_main.config_lifecycle.prepare_runtime_config_publish,

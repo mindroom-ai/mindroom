@@ -26,7 +26,12 @@ from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.orchestration.config_updates import ConfigUpdatePlan, _get_changed_agents, build_config_update_plan
+from mindroom.orchestration.config_updates import (
+    ConfigUpdatePlan,
+    _get_changed_agents,
+    build_config_update_plan,
+    plugin_change_paths,
+)
 from mindroom.orchestration.plugin_watch import _drop_unconfigured_plugin_root_snapshots, watch_plugins_task
 from mindroom.orchestration.runtime import log_startup_phase_finished, log_startup_phase_started
 from mindroom.orchestrator import _MultiAgentOrchestrator, _watch_skills_task
@@ -887,7 +892,7 @@ async def test_config_update_rebuilds_runtime_from_prepared_plugin_snapshot(tmp_
             ),
             pytest.raises(RuntimeError, match="stale API snapshot"),
         ):
-            await orchestrator._apply_plugin_changes_for_config_update(
+            await orchestrator._apply_plugin_snapshot_for_config_update(
                 current_config=current_config,
                 new_config=new_config,
                 changed_server_ids=set(),
@@ -897,13 +902,93 @@ async def test_config_update_rebuilds_runtime_from_prepared_plugin_snapshot(tmp_
         assert original_metadata == TOOL_METADATA
 
         with patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())):
-            rebuilt_config, _ = await orchestrator._apply_plugin_changes_for_config_update(
+            rebuilt_config, _ = await orchestrator._apply_plugin_snapshot_for_config_update(
                 current_config=current_config,
                 new_config=new_config,
                 changed_server_ids=set(),
             )
 
         assert rebuilt_config.resolve_entity("general").tool_runtime_overrides("reload_override_tool") == {
+            "paths": "one, two",
+        }
+        assert (TOOL_METADATA["reload_override_tool"].agent_override_fields or [])[0].type == "string[]"
+    finally:
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+        for module_name in set(sys.modules) - original_modules:
+            if module_name.startswith("mindroom_plugin_"):
+                sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_config_update_stages_plugin_snapshot_when_entries_are_unchanged(tmp_path: Path) -> None:
+    """Every YAML publication must bind config and live plugins to one source generation."""
+    plugin_root = tmp_path / "plugins" / "override-reload"
+    _write_reload_override_plugin(plugin_root, "text")
+    authored = Config(
+        agents={
+            "general": AgentConfig(
+                display_name="General",
+                tools=[{"reload_override_tool": {"paths": "one,\ntwo"}}],
+            ),
+        },
+        defaults={"tools": []},
+        plugins=["./plugins/override-reload"],
+    )
+    current_config = _runtime_bound_config(authored, tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config), api_enabled=False)
+    orchestrator.config = current_config
+    orchestrator.running = True
+
+    original_registry = TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_modules = set(sys.modules)
+    try:
+        await orchestrator.reload_plugins_now(source="initial")
+        current_config = orchestrator.config
+        assert current_config is not None
+        assert (TOOL_METADATA["reload_override_tool"].agent_override_fields or [])[0].type == "text"
+
+        _write_reload_override_plugin(plugin_root, "string[]")
+        new_config = _runtime_bound_config(
+            Config.model_validate({**authored.authored_model_dump(), "timezone": "America/New_York"}),
+            tmp_path,
+        )
+        assert plugin_change_paths(current_config, new_config) == ()
+        plan = ConfigUpdatePlan(
+            new_config=new_config,
+            changed_mcp_servers=set(),
+            configured_entities=set(),
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
+        )
+
+        with (
+            patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
+            patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
+            patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
+            patch.object(orchestrator, "_finalize_config_reload", new=AsyncMock()),
+        ):
+            updated = await orchestrator._apply_config_update_plan(current_config, plan, ())
+
+        assert updated is False
+        assert orchestrator.config is not None
+        assert orchestrator.config.resolve_entity("general").tool_runtime_overrides("reload_override_tool") == {
             "paths": "one, two",
         }
         assert (TOOL_METADATA["reload_override_tool"].agent_override_fields or [])[0].type == "string[]"

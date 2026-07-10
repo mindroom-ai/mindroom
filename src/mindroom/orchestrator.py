@@ -808,14 +808,14 @@ class _MultiAgentOrchestrator:
             )
             return result
 
-    async def _apply_plugin_changes_for_config_update(
+    async def _apply_plugin_snapshot_for_config_update(
         self,
         *,
         current_config: RuntimeConfig,
         new_config: RuntimeConfig,
         changed_server_ids: set[str],
     ) -> tuple[RuntimeConfig, set[str]]:
-        """Stage and commit plugin changes without interleaving live reloads."""
+        """Publish one config with the exact plugin snapshot staged for it."""
         prepared_plugin_roots, prepared_plugin_root_snapshots = self.plugin_watch.capture(new_config)
         prepared_plugin_reload = prepare_plugin_reload(
             new_config,
@@ -1385,32 +1385,18 @@ class _MultiAgentOrchestrator:
         replay_startup_maintenance = await self._startup_maintenance.cancel()
 
         try:
-            if plugin_changes:
-                new_config, pre_stopped_mcp_entities = await self._apply_plugin_changes_for_config_update(
-                    current_config=current_config,
-                    new_config=new_config,
-                    changed_server_ids=plan.changed_mcp_servers,
-                )
-                plan = replace(plan, new_config=new_config)
-            else:
-                pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
-                    current_config,
-                    new_config,
-                    plan.changed_mcp_servers,
-                )
-                # Only apply the new config after validation and account checks succeed.
-                self.config = new_config
-                self.plugin_watch.sync_roots(new_config)
-                self._activate_hook_registry(self.hook_registry)
-                clear_worker_validation_snapshot_cache()
+            new_config, pre_stopped_mcp_entities = await self._apply_plugin_snapshot_for_config_update(
+                current_config=current_config,
+                new_config=new_config,
+                changed_server_ids=plan.changed_mcp_servers,
+            )
+            plan = replace(plan, new_config=new_config)
             changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
             await self._sync_event_cache_service(new_config)
             logger.info(
                 "updating_config_authorization",
                 authorized_user_ids=new_config.authorization.global_users,
             )
-            if not plugin_changes:
-                await self._external_trigger_runtime.sync_api_config_snapshot(new_config)
             if changed_runtime_mcp_servers:
                 plan = replace(
                     plan,

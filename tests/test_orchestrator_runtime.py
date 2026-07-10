@@ -2315,16 +2315,9 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_update_config_syncs_runtime_services_when_running(self, tmp_path: Path) -> None:
         """Hot reload should sync runtime services without global knowledge refresh work."""
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-
-        config = MagicMock()
-        config.agents = {}
-        config.teams = {}
-        config.mindroom_user = None
-        config.matrix_room_access = MagicMock()
-        config.authorization = MagicMock()
-        config.cache = MagicMock()
-        config.defaults.enable_streaming = True
+        runtime_paths = TestAgentBot._runtime_paths(tmp_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=False)
+        config = bind_runtime_paths(Config(), runtime_paths)
 
         orchestrator.config = config
         orchestrator.running = True
@@ -2342,17 +2335,16 @@ class TestMultiAgentOrchestrator:
                 return_value=set(),
             ),
             patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
-            patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()) as mock_sync_runtime,
         ):
             updated = await orchestrator.config_reload.update_config()
 
         assert updated is False
-        mock_sync_runtime.assert_awaited_once_with(
-            config,
-            start_watcher=True,
-            previous_config=config,
-        )
+        mock_sync_runtime.assert_awaited_once()
+        published_config = mock_sync_runtime.await_args.args[0]
+        assert published_config is orchestrator.config
+        assert published_config.authored_model_dump() == config.authored_model_dump()
+        assert mock_sync_runtime.await_args.kwargs == {"start_watcher": True, "previous_config": config}
         assert not hasattr(orchestrator, "_schedule_knowledge_refresh")
 
     @pytest.mark.asyncio
@@ -2649,40 +2641,35 @@ class TestMultiAgentOrchestrator:
     async def test_update_config_uses_custom_config_path(self, tmp_path: Path) -> None:
         """Hot reload should keep reading the orchestrator's custom config path."""
         config_path = tmp_path / "custom-config.yaml"
-        current_config = MagicMock()
-        current_config.authorization.global_users = []
-        current_config.cache = MagicMock()
-        new_config = MagicMock()
-        new_config.authorization.global_users = []
-        new_config.cache = MagicMock()
-        new_config.defaults.enable_streaming = True
-
+        runtime_paths = resolve_runtime_paths(
+            config_path=config_path,
+            storage_path=tmp_path,
+            process_env={},
+        )
+        current_config = bind_runtime_paths(Config(), runtime_paths)
+        new_config = bind_runtime_paths(Config(timezone="America/New_York"), runtime_paths)
         orchestrator = _MultiAgentOrchestrator(
-            runtime_paths=resolve_runtime_paths(
-                config_path=config_path,
-                storage_path=tmp_path,
-                process_env={},
-            ),
+            runtime_paths=runtime_paths,
+            api_enabled=False,
         )
         orchestrator.config = current_config
-        plan = SimpleNamespace(
-            mindroom_user_changed=False,
+        plan = ConfigUpdatePlan(
             new_config=new_config,
             changed_mcp_servers=set(),
             configured_entities=set(),
             entities_to_restart=set(),
             new_entities=set(),
-            added_entities=set(),
             removed_entities=set(),
-            only_support_service_changes=True,
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
         )
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config) as mock_load_config,
-            patch("mindroom.orchestrator.load_plugins"),
             patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
             patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
-            patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         ):
             updated = await orchestrator.config_reload.update_config()

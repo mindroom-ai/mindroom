@@ -1249,9 +1249,10 @@ async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tm
 @pytest.mark.asyncio
 async def test_update_config_replays_cancelled_startup_maintenance_and_runs_approval_cleanup(tmp_path: Path) -> None:
     """Hot reload during startup maintenance must not lose one-shot restart cleanup."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-    current_config = Config()
-    new_config = Config()
+    runtime_paths = orchestrator_runtime_paths(tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=False)
+    current_config = RuntimeConfig.from_authored(Config(), runtime_paths)
+    new_config = RuntimeConfig.from_authored(Config(), runtime_paths)
 
     plan = ConfigUpdatePlan(
         new_config=new_config,
@@ -1276,7 +1277,7 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
 
     maintenance_started = asyncio.Event()
     maintenance_released = asyncio.Event()
-    replayed: list[tuple[list[object], object, int]] = []
+    replayed: list[tuple[list[object], RuntimeConfig, int]] = []
 
     async def blocked_startup_maintenance() -> None:
         maintenance_started.set()
@@ -1287,7 +1288,7 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
         orchestrator._startup_maintenance.task = old_maintenance_task
         await asyncio.wait_for(maintenance_started.wait(), timeout=1.0)
 
-        def replay_startup_maintenance(bots: list[object], config: object, *, startup_cutoff_ms: int) -> None:
+        def replay_startup_maintenance(bots: list[object], config: RuntimeConfig, *, startup_cutoff_ms: int) -> None:
             replayed.append((bots, config, startup_cutoff_ms))
 
         with (
@@ -1310,7 +1311,11 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
 
         assert updated is False
         assert old_maintenance_task.cancelled()
-        assert replayed == [([router_bot], new_config, 123456)]
+        assert len(replayed) == 1
+        assert replayed[0][0] == [router_bot]
+        assert replayed[0][1] is orchestrator.config
+        assert replayed[0][1].authored_model_dump() == new_config.authored_model_dump()
+        assert replayed[0][2] == 123456
         mark_startup_runtime_support_ready.assert_awaited_once()
     finally:
         maintenance_released.set()

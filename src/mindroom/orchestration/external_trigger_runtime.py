@@ -131,11 +131,3 @@ class ExternalTriggerRuntimeCoordinator:
             self.unbind()
             message = "Failed to publish external trigger API config snapshot"
             raise RuntimeError(message)
-
-    async def sync_api_config_snapshot(
-        self,
-        new_config: RuntimeConfig,
-    ) -> None:
-        """Publish the current config to the bundled API before binding trigger runtime."""
-        prepared = await self.prepare_api_config_snapshot(new_config)
-        self.publish_prepared_api_config_snapshot(prepared)

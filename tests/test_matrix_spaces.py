@@ -781,16 +781,21 @@ async def test_setup_rooms_and_memberships_runs_root_space_after_each_room_recon
 @pytest.mark.asyncio
 async def test_update_config_matrix_space_change_reconciles_without_room_membership_setup(tmp_path) -> None:  # noqa: ANN001
     """Space-only config changes should avoid the full room membership flow."""
-    initial_config = Config(
+    initial_config = _config_with_runtime_paths(
+        tmp_path,
         agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
         matrix_space={"enabled": False},
     )
-    updated_config = Config(
+    updated_config = _config_with_runtime_paths(
+        tmp_path,
         agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
         matrix_space={"enabled": True, "name": "Workspace"},
     )
 
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(
+        runtime_paths=orchestrator_runtime_paths(tmp_path),
+        api_enabled=False,
+    )
     orchestrator.config = initial_config
 
     general_bot = MagicMock()
@@ -821,8 +826,9 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
         updated = await orchestrator.config_reload.update_config()
 
     assert updated is True
-    assert general_bot.config == updated_config
-    assert router_bot.config == updated_config
+    assert general_bot.config is orchestrator.config
+    assert router_bot.config is orchestrator.config
+    assert orchestrator.config.authored_model_dump() == updated_config.authored_model_dump()
     mock_setup.assert_not_awaited()
     mock_rooms.assert_awaited_once_with()
     mock_root_space.assert_awaited_once_with({"lobby": "!room1:localhost"})
