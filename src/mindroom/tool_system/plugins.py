@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import sys
 import tokenize
 from dataclasses import dataclass
@@ -42,6 +43,9 @@ logger = get_logger(__name__)
 
 _PluginValidationError = plugin_imports.PluginValidationError
 _CONFIGURED_PLUGIN_ROOT_CACHE_MAX_SIZE = 128
+_RUNTIME_PLUGIN_MODULE_SUFFIX = "__runtime__"
+_RUNTIME_PLUGIN_GENERATIONS = itertools.count()
+_ACTIVE_PLUGIN_RUNTIME_STATE: ResolvedToolRuntimeState | None = None
 
 
 class _ConfiguredPluginRootCacheKey(NamedTuple):
@@ -65,6 +69,7 @@ class _Plugin:
     entry_config: PluginEntryConfig
     plugin_order: int
     tools_module_path: Path | None
+    tools_module_name: str | None
     hooks_module_path: Path | None
     skill_dirs: list[Path]
     discovered_hooks: tuple[HookCallback, ...]
@@ -92,7 +97,6 @@ class _PreparedPluginReload:
     module_import_cache: dict[Path, Any]
     synthetic_modules: dict[str, ModuleType]
     previous_package_roots: frozenset[str]
-    candidate_package_roots: frozenset[str]
 
 
 def _hook_display_name(callback: HookCallback) -> str:
@@ -106,11 +110,7 @@ def _raise_if_host_control_exception(exc: BaseException) -> None:
 
 def _active_plugin_tool_modules(plugins: list[_Plugin]) -> list[tuple[str, str]]:
     """Return the registry owners for active plugin tool modules."""
-    return [
-        (plugin.name, plugin_imports._module_name(plugin.name, plugin.root, plugin.tools_module_path))
-        for plugin in plugins
-        if plugin.tools_module_path is not None
-    ]
+    return [(plugin.name, plugin.tools_module_name) for plugin in plugins if plugin.tools_module_name is not None]
 
 
 def _sync_loaded_plugin_tools(
@@ -130,6 +130,7 @@ def load_plugins(
     *,
     set_skill_roots: bool = True,
     skip_broken_plugins: bool = True,
+    import_name_suffix: str = "",
 ) -> list[_Plugin]:
     """Load plugins from config and register their tools and skills."""
     import mindroom.tools  # noqa: F401, PLC0415
@@ -156,7 +157,12 @@ def load_plugins(
             for plugin_base, plugin_entry, plugin_order in plugin_bases:
                 plugin_snapshot = capture_tool_registry_snapshot()
                 try:
-                    plugin = _materialize_plugin(plugin_base, plugin_entry, plugin_order)
+                    plugin = _materialize_plugin(
+                        plugin_base,
+                        plugin_entry,
+                        plugin_order,
+                        module_plugin_name=f"{plugin_base.name}{import_name_suffix}",
+                    )
                 except (Exception, SystemExit) as exc:
                     restore_tool_registry_snapshot(plugin_snapshot)
                     if not skip_broken_plugins:
@@ -244,14 +250,17 @@ def prepare_plugin_reload(
         previous_plugin_cache = plugin_imports._PLUGIN_CACHE.copy()
         previous_module_import_cache = plugin_imports._MODULE_IMPORT_CACHE.copy()
         previous_package_roots = _package_roots(previous_module_import_cache)
-        previous_synthetic_modules = _synthetic_plugin_modules(previous_package_roots)
         previous_snapshot = capture_tool_registry_snapshot()
         previous_plugin_skill_roots = tuple(get_plugin_skill_roots())
         prepared_succeeded = False
         try:
             _clear_plugin_import_caches()
-            _evict_synthetic_plugin_subtrees(previous_package_roots)
-            plugins = load_plugins(config, runtime_paths, skip_broken_plugins=skip_broken_plugins)
+            plugins = load_plugins(
+                config,
+                runtime_paths,
+                skip_broken_plugins=skip_broken_plugins,
+                import_name_suffix=f"{_RUNTIME_PLUGIN_MODULE_SUFFIX}{next(_RUNTIME_PLUGIN_GENERATIONS)}",
+            )
             candidate_tool_registry_snapshot = capture_tool_registry_snapshot()
             from mindroom.mcp.registry import reconcile_mcp_tool_registry  # noqa: PLC0415
             from mindroom.tool_system.catalog import resolved_tool_runtime_state_from_registry  # noqa: PLC0415
@@ -266,6 +275,10 @@ def prepare_plugin_reload(
                 _active_plugin_tool_modules(plugins),
                 candidate_tool_registry_snapshot.plugin_tool_metadata_by_module,
             )
+            candidate_plugin_cache = plugin_imports._PLUGIN_CACHE.copy()
+            candidate_module_import_cache = plugin_imports._MODULE_IMPORT_CACHE.copy()
+            candidate_package_roots = _package_roots(candidate_module_import_cache)
+            candidate_synthetic_modules = _synthetic_plugin_modules(candidate_package_roots)
             resolved_runtime_tool_state = resolved_tool_runtime_state_from_registry(
                 runtime_paths,
                 config,
@@ -273,10 +286,8 @@ def prepare_plugin_reload(
                 candidate_plugin_metadata,
                 hook_registry=candidate_hook_registry,
                 unavailable_tool_names=config.unavailable_plugin_tool_names,
+                owned_plugin_modules=candidate_synthetic_modules,
             )
-            candidate_plugin_cache = plugin_imports._PLUGIN_CACHE.copy()
-            candidate_module_import_cache = plugin_imports._MODULE_IMPORT_CACHE.copy()
-            candidate_package_roots = _package_roots(candidate_module_import_cache)
             prepared_reload = _PreparedPluginReload(
                 hook_registry=candidate_hook_registry,
                 active_plugin_names=tuple(plugin.name for plugin in plugins),
@@ -285,9 +296,8 @@ def prepare_plugin_reload(
                 plugin_skill_roots=tuple(get_plugin_skill_roots()),
                 plugin_cache=candidate_plugin_cache,
                 module_import_cache=candidate_module_import_cache,
-                synthetic_modules=_synthetic_plugin_modules(candidate_package_roots),
+                synthetic_modules=candidate_synthetic_modules,
                 previous_package_roots=frozenset(previous_package_roots),
-                candidate_package_roots=frozenset(candidate_package_roots),
             )
             prepared_succeeded = True
             return prepared_reload
@@ -295,8 +305,7 @@ def prepare_plugin_reload(
             candidate_package_roots = _package_roots(plugin_imports._MODULE_IMPORT_CACHE)
             if not prepared_succeeded:
                 _cancel_plugin_module_tasks(candidate_package_roots)
-            _evict_synthetic_plugin_subtrees(previous_package_roots | candidate_package_roots)
-            sys.modules.update(previous_synthetic_modules)
+                _evict_synthetic_plugin_subtrees(candidate_package_roots)
             plugin_imports._PLUGIN_CACHE.clear()
             plugin_imports._PLUGIN_CACHE.update(previous_plugin_cache)
             plugin_imports._MODULE_IMPORT_CACHE.clear()
@@ -312,12 +321,11 @@ def apply_prepared_plugin_reload(
     cancel_existing_tasks: bool = False,
 ) -> PluginReloadResult:
     """Commit one previously prepared plugin runtime snapshot."""
+    global _ACTIVE_PLUGIN_RUNTIME_STATE
+
     with locked_tool_registry_state():
         if cancel_existing_tasks:
             cancelled_task_count = _cancel_plugin_module_tasks(set(prepared_reload.previous_package_roots))
-        _evict_synthetic_plugin_subtrees(
-            set(prepared_reload.previous_package_roots | prepared_reload.candidate_package_roots),
-        )
         sys.modules.update(prepared_reload.synthetic_modules)
         plugin_imports._PLUGIN_CACHE.clear()
         plugin_imports._PLUGIN_CACHE.update(prepared_reload.plugin_cache)
@@ -328,6 +336,7 @@ def apply_prepared_plugin_reload(
         clear_tool_schema_cache()
         _clear_configured_plugin_roots_cache()
         _clear_oauth_provider_cache_after_plugin_change()
+        _ACTIVE_PLUGIN_RUNTIME_STATE = prepared_reload.resolved_tool_state
     return PluginReloadResult(
         hook_registry=prepared_reload.hook_registry,
         active_plugin_names=prepared_reload.active_plugin_names,
@@ -412,11 +421,15 @@ def _materialize_plugin(
     plugin: plugin_imports._PluginBase,
     entry_config: PluginEntryConfig,
     plugin_order: int,
+    *,
+    module_plugin_name: str,
 ) -> _Plugin:
-    tools_module = load_plugin_module(plugin.name, plugin.root, plugin.tools_module_path, kind="tools")
+    tools_module = load_plugin_module(module_plugin_name, plugin.root, plugin.tools_module_path, kind="tools")
     hooks_module_path = plugin.hooks_module_path or plugin.tools_module_path
     hooks_module = (
-        load_plugin_module(plugin.name, plugin.root, hooks_module_path, kind="hooks") if hooks_module_path else None
+        load_plugin_module(module_plugin_name, plugin.root, hooks_module_path, kind="hooks")
+        if hooks_module_path
+        else None
     )
     if hooks_module is None and plugin.hooks_module_path is None:
         hooks_module = tools_module
@@ -434,6 +447,7 @@ def _materialize_plugin(
         entry_config=entry_config,
         plugin_order=plugin_order,
         tools_module_path=plugin.tools_module_path,
+        tools_module_name=tools_module.__name__ if tools_module is not None else None,
         hooks_module_path=plugin.hooks_module_path,
         skill_dirs=plugin.skill_dirs,
         discovered_hooks=discovered_hooks,

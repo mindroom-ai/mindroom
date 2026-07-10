@@ -1664,7 +1664,7 @@ async def test_update_config_cancels_tasks_for_removed_plugins(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Config-driven plugin removal should tear down the old live plugin runtime."""
+    """Config-driven plugin removal should tear down the active plugin runtime."""
     hooks_path = _write_plugin_removal_test_files(tmp_path)
     original_plugin_roots = _get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
@@ -1678,7 +1678,6 @@ async def test_update_config_cancels_tasks_for_removed_plugins(
         await orchestrator.initialize()
 
         hooks_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module
-        package_root = plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module_name.split(".", 1)[0]
         hooks_module._AUTO_POKE_TASK = task
 
         _write_plugin_removal_test_config(tmp_path, with_plugin=False)
@@ -1688,9 +1687,6 @@ async def test_update_config_cancels_tasks_for_removed_plugins(
         assert updated is True
         assert task.cancelled()
         assert hooks_path.resolve() not in plugin_module._MODULE_IMPORT_CACHE
-        assert not any(
-            module_name == package_root or module_name.startswith(f"{package_root}.") for module_name in sys.modules
-        )
         assert not orchestrator.hook_registry.has_hooks(EVENT_MESSAGE_RECEIVED)
     finally:
         if not task.done():

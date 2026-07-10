@@ -1269,7 +1269,7 @@ def resolved_tool_runtime_state_from_registry(
     *,
     hook_registry: HookRegistry | None = None,
     unavailable_tool_names: Iterable[str] = (),
-    owned_plugin_modules: _OwnedPluginModules | None = None,
+    owned_plugin_modules: Mapping[str, ModuleType] | _OwnedPluginModules | None = None,
 ) -> ResolvedToolRuntimeState:
     """Build carried runtime state from one already-staged plugin registry."""
     from mindroom.hooks import HookRegistry  # noqa: PLC0415
@@ -1289,6 +1289,11 @@ def resolved_tool_runtime_state_from_registry(
         for tool_name in unavailable_tool_names
         if tool_name not in metadata
     }
+    module_owner = (
+        _OwnedPluginModules(tuple(sorted(owned_plugin_modules.items())))
+        if owned_plugin_modules is not None and not isinstance(owned_plugin_modules, _OwnedPluginModules)
+        else owned_plugin_modules
+    )
     return _resolved_tool_runtime_state_snapshot(
         runtime_paths,
         _ResolvedToolState(
@@ -1296,7 +1301,7 @@ def resolved_tool_runtime_state_from_registry(
             metadata,
             unavailable_metadata,
             hook_registry or HookRegistry.empty(),
-            owned_plugin_modules,
+            module_owner,
         ),
     )
 

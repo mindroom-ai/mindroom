@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -31,6 +32,7 @@ from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from types import ModuleType
 
 
 def _bind_runtime_paths(config: Config, config_path: Path) -> RuntimeConfig:
@@ -198,6 +200,7 @@ def _preserved_plugin_loader_state(*, module_prefixes: tuple[str, ...] = ()) -> 
     original_plugin_roots = _get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_active_runtime_state = plugins_module._ACTIVE_PLUGIN_RUNTIME_STATE
     original_modules = set(sys.modules)
 
     try:
@@ -211,6 +214,7 @@ def _preserved_plugin_loader_state(*, module_prefixes: tuple[str, ...] = ()) -> 
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
         plugin_module._MODULE_IMPORT_CACHE.clear()
         plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        plugins_module._ACTIVE_PLUGIN_RUNTIME_STATE = original_active_runtime_state
         set_plugin_skill_roots(original_plugin_roots)
         for module_name in set(sys.modules) - original_modules:
             if module_name.startswith("mindroom_plugin_") or any(
@@ -2621,7 +2625,7 @@ async def test_reload_plugins_invalidates_helper_modules_under_plugin_root(tmp_p
 
 
 def test_prepare_plugin_reload_keeps_live_import_state_until_apply(tmp_path: Path) -> None:
-    """Preparing a plugin reload should not expose candidate modules or caches."""
+    """Preparing a plugin reload should not replace live modules or caches."""
     plugin_root = tmp_path / "plugins" / "staged-reload"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -2660,6 +2664,101 @@ def test_prepare_plugin_reload_keeps_live_import_state_until_apply(tmp_path: Pat
         for module_name in set(sys.modules) - original_modules:
             if module_name.startswith("mindroom_plugin_"):
                 sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_plugin_reload_keeps_each_runtime_package_generation_isolated(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Staging and committing V2 must not replace lazy imports pinned by config V1."""
+    plugin_root = tmp_path / "plugins" / "generation-reload"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "generation-reload", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    helper_path = plugin_root / "helper.py"
+    helper_path.write_text("TOOLKIT_NAME = 'generation_v1'\n", encoding="utf-8")
+    tools_path = plugin_root / "tools.py"
+    tools_path.write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.declarations import ToolCategory\n"
+        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "\n"
+        "class GenerationToolkit(Toolkit):\n"
+        "    def __init__(self):\n"
+        "        from .helper import TOOLKIT_NAME\n"
+        "        super().__init__(name=TOOLKIT_NAME, tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='generation_tool',\n"
+        "    display_name='Generation Tool',\n"
+        "    description='Test isolated runtime plugin generations.',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def generation_tool():\n"
+        "    return GenerationToolkit\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    authored_config = Config(plugins=["./plugins/generation-reload"])
+    base_config = _bind_runtime_paths(authored_config, config_path)
+    runtime_paths = runtime_paths_for(base_config)
+
+    def bind_prepared_state(prepared: plugins_module._PreparedPluginReload) -> RuntimeConfig:
+        runtime_config = RuntimeConfig.from_authored(
+            authored_config,
+            runtime_paths,
+            tool_validation_snapshot=prepared.resolved_tool_state.validation_snapshot,
+        )
+        metadata_module.bind_resolved_tool_state_cache(prepared.resolved_tool_state, runtime_config)
+        return runtime_config
+
+    def toolkit_name(runtime_config: RuntimeConfig) -> str:
+        return get_tool_by_name(
+            "generation_tool",
+            runtime_paths,
+            runtime_config=runtime_config,
+            disable_sandbox_proxy=True,
+            worker_target=None,
+        ).name
+
+    with _preserved_plugin_loader_state():
+        prepared_v1 = plugins_module.prepare_plugin_reload(base_config, runtime_paths)
+        config_v1 = bind_prepared_state(prepared_v1)
+        plugins_module.apply_prepared_plugin_reload(prepared_v1)
+        assert toolkit_name(config_v1) == "generation_v1"
+
+        helper_path.write_text("TOOLKIT_NAME = 'generation_version_2'\n", encoding="utf-8")
+        staging_started = threading.Event()
+        continue_staging = threading.Event()
+        original_exec_plugin_source = plugins_module._exec_plugin_source
+
+        def pause_candidate_import(module_path: Path, module: ModuleType) -> None:
+            if module_path == tools_path:
+                staging_started.set()
+                if not continue_staging.wait(timeout=5):
+                    msg = "timed out waiting to resume candidate plugin import"
+                    raise RuntimeError(msg)
+            original_exec_plugin_source(module_path, module)
+
+        monkeypatch.setattr(plugins_module, "_exec_plugin_source", pause_candidate_import)
+        prepare_task = asyncio.create_task(
+            asyncio.to_thread(plugins_module.prepare_plugin_reload, base_config, runtime_paths),
+        )
+        try:
+            assert await asyncio.to_thread(staging_started.wait, 5)
+            assert toolkit_name(config_v1) == "generation_v1"
+        finally:
+            continue_staging.set()
+        prepared_v2 = await prepare_task
+        config_v2 = bind_prepared_state(prepared_v2)
+        plugins_module.apply_prepared_plugin_reload(prepared_v2)
+
+        assert toolkit_name(config_v1) == "generation_v1"
+        assert toolkit_name(config_v2) == "generation_version_2"
 
 
 @pytest.mark.asyncio
