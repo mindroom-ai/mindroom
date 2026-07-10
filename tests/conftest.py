@@ -95,6 +95,7 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
     from agno.session.agent import AgentSession
     from agno.session.team import TeamSession
+    from xdist.workermanage import WorkerController
 
     from mindroom.config.models import CompactionConfig
     from mindroom.dispatch_handoff import DispatchEvent
@@ -103,6 +104,8 @@ if TYPE_CHECKING:
 
 
 _STRUCTLOG_CONFIGURE = structlog.configure
+_POSTGRES_CONTAINER_NAME_STASH_KEY = pytest.StashKey[str]()
+_POSTGRES_CONTAINER_PREFIX = "mindroom-postgres-cache-test-"
 
 
 def _configure_quiet_structlog() -> None:
@@ -438,21 +441,75 @@ def _wait_for_postgres_container(database_url: str) -> None:
     raise RuntimeError(msg) from last_error
 
 
-def _postgres_url_from_container_port(docker: str, container_name: str) -> str:
-    result = subprocess.run(
-        [docker, "port", container_name, "5432/tcp"],
-        check=True,
+def _create_postgres_worker_database(database_url: str, worker_id: str) -> str:
+    """Create an isolated database for one worker on the shared Postgres server."""
+    import psycopg  # noqa: PLC0415
+    from psycopg import sql  # noqa: PLC0415
+
+    database_name = f"mindroom_{worker_id}"
+    with psycopg.connect(database_url, autocommit=True) as db:
+        db.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database_name)))
+    return f"{database_url.rsplit('/', 1)[0]}/{database_name}"
+
+
+def _wait_for_postgres_container_port(docker: str, container_name: str) -> str:
+    """Wait for Docker to publish a shared container's random host port."""
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            [docker, "port", container_name, "5432/tcp"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            mapped_port = result.stdout.strip().splitlines()[-1]
+            host, port = mapped_port.rsplit(":", 1)
+            clean_host = host.removeprefix("[").removesuffix("]")
+            return f"postgresql://cache:test@{clean_host}:{port}/mindroom"
+        time.sleep(0.05)
+    msg = "Postgres test container did not publish a port"
+    raise RuntimeError(msg)
+
+
+def _postgres_container_name(run_id: str) -> str:
+    """Return the deterministic disposable Postgres container name for one test run."""
+    return f"{_POSTGRES_CONTAINER_PREFIX}{run_id}"
+
+
+def _remove_postgres_container(docker: str, container_name: str) -> None:
+    """Remove one disposable Postgres container if it exists."""
+    subprocess.run(
+        [docker, "rm", "-f", container_name],
+        check=False,
         capture_output=True,
         text=True,
     )
-    mapped_port = result.stdout.strip().splitlines()[-1]
-    host, port = mapped_port.rsplit(":", 1)
-    return f"postgresql://cache:test@{host.removeprefix('[').removesuffix(']')}:{port}/mindroom"
+
+
+def pytest_configure_node(node: "WorkerController") -> None:
+    """Remember the shared Postgres container name in the xdist controller."""
+    node.config.stash[_POSTGRES_CONTAINER_NAME_STASH_KEY] = _postgres_container_name(
+        node.workerinput["testrunuid"],
+    )
+
+
+def pytest_sessionfinish(session: pytest.Session) -> None:
+    """Remove the shared Postgres container after every xdist worker has finished."""
+    if hasattr(session.config, "workerinput"):
+        return
+    container_name = session.config.stash.get(_POSTGRES_CONTAINER_NAME_STASH_KEY, None)
+    docker = shutil.which("docker")
+    if container_name is not None and docker is not None:
+        _remove_postgres_container(docker, container_name)
 
 
 @pytest.fixture(scope="session")
-def postgres_event_cache_url() -> Iterator[str]:
-    """Start a disposable Postgres server when Docker is available."""
+def postgres_event_cache_url(
+    worker_id: str,
+    testrun_uid: str,
+) -> Iterator[str]:
+    """Start or reuse one disposable Postgres server for the current test run."""
     docker = shutil.which("docker")
     if docker is None:
         pytest.skip("Docker is required for Postgres event-cache integration tests")
@@ -466,7 +523,9 @@ def postgres_event_cache_url() -> Iterator[str]:
     if info_result.returncode != 0:
         pytest.skip("Docker daemon is unavailable for Postgres event-cache integration tests")
 
-    container_name = f"mindroom-postgres-cache-test-{uuid.uuid4().hex}"
+    shared_across_workers = worker_id != "master"
+    run_id = testrun_uid if shared_across_workers else uuid.uuid4().hex
+    container_name = _postgres_container_name(run_id)
     run_result = subprocess.run(
         [
             docker,
@@ -475,6 +534,8 @@ def postgres_event_cache_url() -> Iterator[str]:
             "-d",
             "--name",
             container_name,
+            "--label",
+            f"mindroom.pytest.run={run_id}",
             "-e",
             "POSTGRES_USER=cache",
             "-e",
@@ -490,19 +551,24 @@ def postgres_event_cache_url() -> Iterator[str]:
         text=True,
     )
     if run_result.returncode != 0:
-        pytest.skip(f"Could not start Postgres test container: {run_result.stderr.strip()}")
-
-    try:
-        database_url = _postgres_url_from_container_port(docker, container_name)
-        _wait_for_postgres_container(database_url)
-        yield database_url
-    finally:
-        subprocess.run(
-            [docker, "rm", "-f", container_name],
+        inspect_result = subprocess.run(
+            [docker, "inspect", container_name],
             check=False,
             capture_output=True,
             text=True,
         )
+        if not shared_across_workers or inspect_result.returncode != 0:
+            pytest.skip(f"Could not start Postgres test container: {run_result.stderr.strip()}")
+
+    try:
+        database_url = _wait_for_postgres_container_port(docker, container_name)
+        _wait_for_postgres_container(database_url)
+        if shared_across_workers:
+            database_url = _create_postgres_worker_database(database_url, worker_id)
+        yield database_url
+    finally:
+        if not shared_across_workers:
+            _remove_postgres_container(docker, container_name)
 
 
 @pytest.fixture(params=("sqlite", "postgres"), ids=("sqlite", "postgres"))
