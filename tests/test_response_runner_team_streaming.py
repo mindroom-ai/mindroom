@@ -321,6 +321,7 @@ async def test_generate_team_response_preserves_retry_model_prompt(tmp_path: Pat
 
     async def fake_team_response(*_args: object, **kwargs: object) -> str:
         model_message = cast("str", kwargs["message"])
+        cast("TurnRecorder", kwargs["turn_recorder"]).mark_completed()
         run_id = cast("str | None", kwargs["ctx"].run_id)
         seen_run_ids.append(run_id)
         run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
@@ -894,9 +895,10 @@ async def test_generate_team_response_helper_preserves_visible_stream_when_final
             AsyncMock(side_effect=consume_stream),
         )
 
-        def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        def fake_team_response_stream(*_args: object, **kwargs: object) -> AsyncIterator[str]:
             async def fake_stream() -> AsyncIterator[str]:
                 yield "Team hello"
+                cast("TurnRecorder", kwargs["turn_recorder"]).mark_completed()
 
             return fake_stream()
 
@@ -1146,6 +1148,23 @@ def test_record_stream_delivery_error_preserves_hidden_tool_state_when_visible_t
     assert snapshot.partial_text == "Partial answer"
     assert [tool.tool_name for tool in snapshot.completed_tools] == ["run_shell_command"]
     assert [tool.tool_name for tool in snapshot.interrupted_tools] == ["save_file"]
+
+    paused_recorder = TurnRecorder(user_message="Hello")
+    paused_recorder.mark_interrupted(RunStatus.paused)
+    assert coordinator._record_stream_delivery_error(
+        recorder=paused_recorder,
+        accumulated_text="delivery failed",
+        tool_trace=[],
+    )
+    assert paused_recorder.original_status is RunStatus.paused
+
+    empty_recorder = TurnRecorder(user_message="Hello")
+    assert coordinator._record_stream_delivery_error(
+        recorder=empty_recorder,
+        accumulated_text="",
+        tool_trace=[],
+    )
+    assert empty_recorder.original_status is RunStatus.error
 
 
 @pytest.mark.asyncio
@@ -1454,6 +1473,7 @@ async def test_generate_team_response_helper_uses_persisted_team_scope_for_sessi
         async def fake_team_response(*_args: object, **kwargs: object) -> str:
             session_id = kwargs["ctx"].session_id
             assert isinstance(session_id, str)
+            cast("TurnRecorder", kwargs["turn_recorder"]).mark_interrupted(RunStatus.error)
             storage.session = TeamSession(
                 session_id=session_id,
                 team_id="team_general",
@@ -1471,6 +1491,7 @@ async def test_generate_team_response_helper_uses_persisted_team_scope_for_sessi
         )
 
     assert sequence == ["started:team:team_general:team_general"]
+    assert len(cast("TeamSession", storage.session).runs or []) == 1
 
 
 @pytest.mark.asyncio

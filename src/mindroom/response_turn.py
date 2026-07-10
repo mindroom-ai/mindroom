@@ -269,7 +269,9 @@ class CompletedAttempt:
 
 
 @dataclass(frozen=True)
-class ExcludedAttempt:  # noqa: D101
+class ExcludedAttempt:
+    """One attempt whose provider result is excluded from model history."""
+
     original_status: RunStatus = RunStatus.cancelled
     response_text: str = ""
     reason: str | None = None
@@ -490,6 +492,8 @@ def _settle_empty_run(
     iteration budget stays authoritative; a granted retry closes the spent
     entity's runtime state exactly like the continuation handoff.
     """
+    if run.empty_response_retried or continuation_count >= DYNAMIC_TOOL_CONTINUATION_LIMIT:
+        return False
     discard_empty_run(
         run.scope_context,
         EmptyRunDiscard(
@@ -498,11 +502,9 @@ def _settle_empty_run(
             output_tokens=resolution.output_tokens,
         ),
     )
-    if not run.empty_response_retried and continuation_count < DYNAMIC_TOOL_CONTINUATION_LIMIT:
-        run.empty_response_retried = True
-        release_attempt_entity(run.scope_context)
-        return True
-    return False
+    run.empty_response_retried = True
+    release_attempt_entity(run.scope_context)
+    return True
 
 
 def _advance_turn_continuation(

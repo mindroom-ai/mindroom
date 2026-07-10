@@ -180,7 +180,7 @@ async def test_team_response_stream_empty_event_stream_retries_then_notices() ->
     assert mock_team.arun.call_count == 2
     rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
     assert ai_runtime.EMPTY_RESPONSE_NOTICE in rendered
-    assert recorder.outcome == "interrupted"
+    assert recorder.outcome == "completed"
     assert recorder.assistant_text == ""
 
 

@@ -3106,16 +3106,6 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     event_ids=[ctx.reply_to_event_id, *unseen_event_ids],
                 )
             canonical_text = _current_canonical_partial_text()
-            if not emitted_output and not completed_tool_executions and run.empty_response_retried:
-                yield AttemptResolved(
-                    ExcludedAttempt(
-                        original_status=RunStatus.error,
-                        response_text=ai_runtime.EMPTY_RESPONSE_NOTICE,
-                        partial_text=canonical_text,
-                        completed_tools=tuple(completed_tools),
-                    ),
-                )
-                return
             # Real Agno team streams end without a terminal run output, so this
             # is the resolution point where the empty-run guard must fire.
             end_metadata_content: dict[str, Any] | None = None
