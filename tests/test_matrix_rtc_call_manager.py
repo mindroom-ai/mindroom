@@ -1005,14 +1005,14 @@ async def test_manager_replays_a_key_received_while_starting(
 
 
 @pytest.mark.asyncio
-async def test_manager_uses_oldest_membership_federated_https_focus(
+async def test_manager_rejects_participant_selected_remote_focus(
     tmp_path: Path,
 ) -> None:
-    """A federated call follows the sticky HTTPS focus advertised by its oldest member."""
+    """A server-hosted agent never dials a participant-selected remote focus."""
     config = Config(
         agents={"helper": AgentConfig(display_name="Helper")},
         models={},
-        calls=CallsConfig(enabled=True, agents=["helper"]),
+        calls=CallsConfig(enabled=True, agents=["helper"], livekit_service_url=SERVICE_URL),
     )
     manager = _manager(_client(), FakeBridge(), tmp_path, config)
     members = [
@@ -1025,18 +1025,14 @@ async def test_manager_uses_oldest_membership_federated_https_focus(
         _member("@newer:example.org", "NEW", created_ts=2),
     ]
 
-    service = await manager._resolve_service(members)
-
-    assert service is not None
-    assert service.url == "https://rtc.remote.example"
-    assert not service.allow_private_networks
+    assert await manager._resolve_service(members) is None
 
 
 @pytest.mark.asyncio
-async def test_manager_guards_unpinned_same_server_focus_as_public_network(
+async def test_manager_rejects_unconfigured_same_server_focus(
     tmp_path: Path,
 ) -> None:
-    """An inherited same-server focus remains usable without private-network access."""
+    """A local participant cannot redirect the server-hosted agent to another focus."""
     config = Config(
         agents={"helper": AgentConfig(display_name="Helper")},
         models={},
@@ -1049,38 +1045,53 @@ async def test_manager_guards_unpinned_same_server_focus_as_public_network(
         livekit_service_url="https://rtc.founder.example",
     )
 
-    service = await manager._resolve_service([member])
-
-    assert service is not None
-    assert service.url == "https://rtc.founder.example"
-    assert not service.allow_private_networks
+    assert await manager._resolve_service([member]) is None
 
 
 @pytest.mark.asyncio
 async def test_manager_recovers_inherited_focus_after_founder_leaves(tmp_path: Path) -> None:
-    """A restarted bot follows the focus a remaining follower inherited from a departed founder."""
+    """A remote follower may inherit and advertise the trusted local focus."""
     config = Config(
         agents={"helper": AgentConfig(display_name="Helper")},
         models={},
-        calls=CallsConfig(enabled=True, agents=["helper"]),
+        calls=CallsConfig(enabled=True, agents=["helper"], livekit_service_url=SERVICE_URL),
     )
     manager = _manager(_client(), FakeBridge(), tmp_path, config)
     follower = _member(
         "@follower:follower.example",
         "FOLLOWER",
-        livekit_service_url="https://rtc.founder.example",
+        livekit_service_url=SERVICE_URL,
     )
 
     service = await manager._resolve_service([follower])
 
-    assert service is not None
-    assert service.url == "https://rtc.founder.example"
-    assert not service.allow_private_networks
+    assert service == SERVICE_URL
 
 
 @pytest.mark.asyncio
-async def test_manager_rejects_insecure_federated_focus(tmp_path: Path) -> None:
-    """Federated membership cannot redirect an OpenID token over plaintext HTTP."""
+async def test_manager_fetches_grant_with_local_network_trust(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The operator-selected authorization service may resolve to local infrastructure."""
+    seen: dict[str, object] = {}
+
+    async def capture_grant(service_url: str, **kwargs: object) -> SfuGrant:
+        seen["service_url"] = service_url
+        seen.update(kwargs)
+        return GRANT
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.request_sfu_grant", capture_grant)
+    manager = _manager(_client(), FakeBridge(), tmp_path)
+
+    assert await manager._fetch_grant(ROOM_ID, SERVICE_URL) == GRANT
+    assert seen["service_url"] == SERVICE_URL
+    assert seen["allow_private_networks"] is True
+
+
+@pytest.mark.asyncio
+async def test_manager_rejects_insecure_remote_focus(tmp_path: Path) -> None:
+    """A remote plaintext focus cannot receive the bot's OpenID token."""
     config = Config(
         agents={"helper": AgentConfig(display_name="Helper")},
         models={},
@@ -1285,6 +1296,41 @@ async def test_stop_drains_cancelled_background_tasks() -> None:
 
     assert cancelled.is_set()
     assert session._tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_stop_cleanup_survives_caller_cancellation() -> None:
+    """Cancelling one stop waiter cannot strand partially closed call state."""
+    client = _client()
+    bridge = FakeBridge()
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+    finalized: list[bool] = []
+
+    async def blocking_close() -> None:
+        close_started.set()
+        await release_close.wait()
+        bridge.closed = True
+
+    async def on_stopped() -> None:
+        finalized.append(True)
+
+    bridge.aclose = blocking_close  # type: ignore[method-assign]
+    session = _plain_session(client, bridge, on_stopped=on_stopped)
+    first_waiter = asyncio.create_task(session.stop())
+    await close_started.wait()
+
+    first_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_waiter
+
+    release_close.set()
+    await session.stop()
+
+    assert bridge.closed
+    assert finalized == [True]
+    assert session._stop_task is not None
+    assert session._stop_task.done()
 
 
 @pytest.mark.asyncio

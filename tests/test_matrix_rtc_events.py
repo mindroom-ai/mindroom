@@ -15,7 +15,6 @@ from mindroom.matrix_rtc.events import (
     parse_membership_event,
 )
 from mindroom.matrix_rtc.focus import OpenIDToken, discover_livekit_service_url, request_sfu_grant
-from mindroom.server_fetch_url import ServerFetchUrlError
 
 USER = "@alice:example.org"
 DEVICE = "DEVICEID"
@@ -179,10 +178,6 @@ async def test_request_sfu_grant_posts_openid_exchange(monkeypatch: pytest.Monke
         return transport
 
     monkeypatch.setattr("mindroom.matrix_rtc.focus.ServerFetchAsyncHTTPTransport", guarded_transport)
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.focus.validate_server_fetch_url",
-        lambda url, **_kwargs: url,
-    )
     grant = await request_sfu_grant(
         "https://rtc.example.org/",
         room_id="!room:example.org",
@@ -202,43 +197,56 @@ async def test_request_sfu_grant_posts_openid_exchange(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
-async def test_request_sfu_grant_rejects_private_endpoint_from_unpinned_focus(
+@pytest.mark.parametrize("sfu_url", ["ws://127.0.0.1:7880", "wss://10.0.0.8:7880"])
+async def test_request_sfu_grant_accepts_operator_trusted_private_endpoint(
     monkeypatch: pytest.MonkeyPatch,
+    sfu_url: str,
 ) -> None:
-    """An unpinned authorization service cannot redirect LiveKit into a private network."""
+    """A trusted local authorization service may return its private LiveKit endpoint."""
     _patched_httpx_client(
         monkeypatch,
-        lambda _request: httpx.Response(200, json={"url": "wss://127.0.0.1:7880", "jwt": "token123"}),
+        lambda _request: httpx.Response(200, json={"url": sfu_url, "jwt": "token123"}),
     )
 
-    with pytest.raises(ServerFetchUrlError):
-        await request_sfu_grant(
-            "https://rtc.remote.example",
-            room_id="!room:example.org",
-            device_id=DEVICE,
-            openid_token=OpenIDToken(
-                access_token="opaque",  # noqa: S106
-                expires_in=3600,
-                matrix_server_name="example.org",
-                token_type="Bearer",  # noqa: S106
-            ),
-            allow_private_networks=False,
-        )
+    grant = await request_sfu_grant(
+        "http://rtc.internal.example",
+        room_id="!room:example.org",
+        device_id=DEVICE,
+        openid_token=OpenIDToken(
+            access_token="opaque",  # noqa: S106
+            expires_in=3600,
+            matrix_server_name="example.org",
+            token_type="Bearer",  # noqa: S106
+        ),
+        allow_private_networks=True,
+    )
+
+    assert grant.url == sfu_url
 
 
 @pytest.mark.asyncio
-async def test_request_sfu_grant_rejects_insecure_endpoint_from_unpinned_focus(
+@pytest.mark.parametrize(
+    "sfu_url",
+    [
+        "not-a-url",
+        "https://sfu.example.org",
+        "wss://user:secret@sfu.example.org",
+        "wss://sfu.example.org/#fragment",
+    ],
+)
+async def test_request_sfu_grant_rejects_malformed_endpoint(
     monkeypatch: pytest.MonkeyPatch,
+    sfu_url: str,
 ) -> None:
-    """An unpinned authorization service must return an encrypted WebSocket endpoint."""
+    """A trusted authorization service must still return a valid WebSocket URL."""
     _patched_httpx_client(
         monkeypatch,
-        lambda _request: httpx.Response(200, json={"url": "ws://8.8.8.8:7880", "jwt": "token123"}),
+        lambda _request: httpx.Response(200, json={"url": sfu_url, "jwt": "token123"}),
     )
 
     with pytest.raises(ValueError, match="invalid SFU URL"):
         await request_sfu_grant(
-            "https://rtc.remote.example",
+            "http://rtc.internal.example",
             room_id="!room:example.org",
             device_id=DEVICE,
             openid_token=OpenIDToken(
@@ -247,7 +255,7 @@ async def test_request_sfu_grant_rejects_insecure_endpoint_from_unpinned_focus(
                 matrix_server_name="example.org",
                 token_type="Bearer",  # noqa: S106
             ),
-            allow_private_networks=False,
+            allow_private_networks=True,
         )
 
 

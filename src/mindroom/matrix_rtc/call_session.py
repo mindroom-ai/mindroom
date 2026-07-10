@@ -126,6 +126,7 @@ class CallSession:
     _refresh_iteration: int = field(default=1, init=False)
     _created_ts: int | None = field(default=None, init=False)
     _stopped: bool = field(default=False, init=False)
+    _stop_task: asyncio.Task[None] | None = field(default=None, init=False)
     _members: list[CallMember] = field(default_factory=list, init=False)
     _key_distribution_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _key_distribution_retry_scheduled: bool = field(default=False, init=False)
@@ -218,10 +219,17 @@ class CallSession:
         return True
 
     async def stop(self) -> None:
-        """Leave the call: clear membership, cancel tasks, close media."""
-        if self._stopped:
-            return
-        self._stopped = True
+        """Leave the call through one cancellation-safe shared cleanup task."""
+        if self._stop_task is None:
+            self._stopped = True
+            self._stop_task = asyncio.create_task(
+                self._run_stop(),
+                name=f"matrix_rtc_stop_{self.room_id}",
+            )
+        await asyncio.shield(self._stop_task)
+
+    async def _run_stop(self) -> None:
+        """Clear membership, cancel background work, and close media once."""
         tasks = list(self._tasks)
         for task in tasks:
             task.cancel()

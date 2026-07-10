@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import aiohttp
@@ -70,14 +69,6 @@ _VOICE_STYLE_ADDENDUM = (
     "aloud: keep responses short, conversational, and natural, and never use markdown, "
     "lists, or other written formatting."
 )
-
-
-@dataclass(frozen=True)
-class _ResolvedService:
-    """Selected authorization service plus its network trust policy."""
-
-    url: str
-    allow_private_networks: bool
 
 
 def _build_call_instructions(agent_name: str, config: Config, chat_system_prompt: str | None) -> str:
@@ -459,7 +450,7 @@ class CallManager:
                     key_transport=self._key_transport,
                     fetch_grant=lambda: self._fetch_grant(room_id, service),
                     agent_options=options,
-                    livekit_service_url=service.url,
+                    livekit_service_url=service,
                     on_stopped=lambda: transcript.finalize(
                         config=self._config,
                         runtime_paths=self._runtime_paths,
@@ -567,8 +558,8 @@ class CallManager:
             logger.warning("call_tools_build_failed", agent=self._agent_name, room_id=room_id, error=str(error))
             return CallAgentTooling(tools=[], tool_names=())
 
-    async def _resolve_service(self, members: list[CallMember]) -> _ResolvedService | None:
-        """Resolve the sticky legacy oldest-membership LiveKit focus."""
+    async def _resolve_service(self, members: list[CallMember]) -> str | None:
+        """Accept only the locally configured or discovered authorization service."""
         oldest_member = min(members, key=lambda member: member.created_ts)
         advertised_url = oldest_member.livekit_service_url
         if advertised_url is None:
@@ -576,31 +567,25 @@ class CallManager:
         advertised_focus = _normalized_service_url(advertised_url)
         if advertised_focus is None:
             return None
-        oldest_server_name = MatrixID.parse(oldest_member.user_id).domain
         local_server_name = MatrixID.parse(self._client.user_id).domain
-        if oldest_server_name == local_server_name:
-            trusted_url = self._config.calls.livekit_service_url
-            if trusted_url is None:
-                trusted_url = await discover_livekit_service_url(
-                    local_server_name,
-                    ssl_verify=self._ssl_verify,
-                    allow_private_networks=True,
-                )
-            trusted_focus = _normalized_service_url(trusted_url) if trusted_url is not None else None
-            if advertised_focus == trusted_focus:
-                return _ResolvedService(url=advertised_focus, allow_private_networks=True)
-        if httpx.URL(advertised_focus).scheme != "https":
+        trusted_url = self._config.calls.livekit_service_url
+        if trusted_url is None:
+            trusted_url = await discover_livekit_service_url(
+                local_server_name,
+                ssl_verify=self._ssl_verify,
+                allow_private_networks=True,
+            )
+        trusted_focus = _normalized_service_url(trusted_url) if trusted_url is not None else None
+        if advertised_focus != trusted_focus:
             logger.warning(
-                "call_unpinned_focus_requires_https",
+                "call_focus_not_trusted",
                 user_id=oldest_member.user_id,
                 advertised_url=advertised_url,
             )
             return None
-        # The advertised focus may have been inherited from a departed
-        # founder, even when the oldest remaining member is on our server.
-        return _ResolvedService(url=advertised_focus, allow_private_networks=False)
+        return advertised_focus
 
-    async def _fetch_grant(self, room_id: str, service: _ResolvedService) -> SfuGrant:
+    async def _fetch_grant(self, room_id: str, service_url: str) -> SfuGrant:
         client = self._client
         response = await client.get_openid_token(client.user_id)
         if isinstance(response, nio.responses.GetOpenIDTokenError):
@@ -613,12 +598,12 @@ class CallManager:
             token_type=response.token_type,
         )
         return await request_sfu_grant(
-            service.url,
+            service_url,
             room_id=room_id,
             device_id=required_device_id(client),
             openid_token=openid_token,
             ssl_verify=self._ssl_verify,
-            allow_private_networks=service.allow_private_networks,
+            allow_private_networks=True,
         )
 
 
