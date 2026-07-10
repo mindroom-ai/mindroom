@@ -46,7 +46,6 @@ _COLD_START_GRACE_SECONDS = 1.5
 _WAITING_PROGRESS_INTERVAL_SECONDS = 5.0
 _PROGRESS_REPORTER_JOIN_TIMEOUT_SECONDS = 1.0
 _READY_WORKER_REVALIDATE_SECONDS = 300.0
-_MAX_LAST_USED_PERSIST_INTERVAL_SECONDS = 60.0
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +63,6 @@ class _ReadyWorkerCacheEntry:
     spec: WorkerSpec
     handle: WorkerHandle
     validated_at: float
-    persisted_last_used_at: float
     credentials_encryption_key_hash: str | None
 
 
@@ -489,7 +487,7 @@ class KubernetesWorkerBackend:
                     **final_annotations,
                 }
                 handle = self._handle_from_deployment(deployment, now=timestamp)
-                self._store_ready_worker(spec, handle, validated_at=timestamp, persisted_last_used_at=timestamp)
+                self._store_ready_worker(spec, handle, validated_at=timestamp)
                 return handle
         finally:
             if progress_sink is not None:
@@ -524,12 +522,7 @@ class KubernetesWorkerBackend:
         """List workers known to this backend."""
         timestamp = time.time() if now is None else now
         handles = [
-            self._handle_with_cached_usage(
-                self._handle_from_deployment(deployment, now=timestamp),
-                running=int(deployment.spec.replicas or 0) > 0,
-                now=timestamp,
-            )
-            for deployment in self._resources.list_deployments()
+            self._handle_from_deployment(deployment, now=timestamp) for deployment in self._resources.list_deployments()
         ]
         return filter_and_sort_worker_handles(handles, include_idle)
 
@@ -538,42 +531,21 @@ class KubernetesWorkerBackend:
         timestamp = time.time() if now is None else now
         cleaned: list[WorkerHandle] = []
         for deployment in self._resources.list_deployments():
-            handle = self._handle_with_cached_usage(
-                self._handle_from_deployment(deployment, now=timestamp),
-                running=int(deployment.spec.replicas or 0) > 0,
-                now=timestamp,
-            )
+            handle = self._handle_from_deployment(deployment, now=timestamp)
             if handle.status != "idle" or int(deployment.spec.replicas or 0) == 0:
                 continue
-            worker_lock = self._worker_lock(handle.worker_key)
-            if not worker_lock.acquire(blocking=False):
-                continue
-            try:
-                live = self._resources.read_deployment(handle.worker_id)
-                if live is None:
-                    self._invalidate_ready_worker(handle.worker_key)
-                    continue
-                live_handle = self._handle_with_cached_usage(
-                    self._handle_from_deployment(live, now=timestamp),
-                    running=int(live.spec.replicas or 0) > 0,
-                    now=timestamp,
-                )
-                if live_handle.status != "idle" or int(live.spec.replicas or 0) == 0:
-                    continue
-                annotations = dict(live.metadata.annotations or {})
-                resources.apply_lifecycle_annotations(
-                    annotations,
-                    mark_worker_idle(resources.lifecycle_from_annotations(annotations, now=timestamp)),
-                )
-                self._resources.patch_deployment(live_handle.worker_id, replicas=0, annotations=annotations)
-                self._resources.delete_service(live_handle.worker_id)
-                self._resources.delete_secret(live_handle.worker_id)
-                self._invalidate_ready_worker(live_handle.worker_key)
-                live.spec.replicas = 0
-                live.metadata.annotations = annotations
-                cleaned.append(self._handle_from_deployment(live, now=timestamp))
-            finally:
-                worker_lock.release()
+            annotations = dict(deployment.metadata.annotations or {})
+            resources.apply_lifecycle_annotations(
+                annotations,
+                mark_worker_idle(resources.lifecycle_from_annotations(annotations, now=timestamp)),
+            )
+            self._resources.patch_deployment(handle.worker_id, replicas=0, annotations=annotations)
+            self._resources.delete_service(handle.worker_id)
+            self._resources.delete_secret(handle.worker_id)
+            self._invalidate_ready_worker(handle.worker_key)
+            deployment.spec.replicas = 0
+            deployment.metadata.annotations = annotations
+            cleaned.append(self._handle_from_deployment(deployment, now=timestamp))
         return cleaned
 
     def reconcile_drifted_workers(self, *, now: float | None = None) -> list[WorkerHandle]:
@@ -718,14 +690,19 @@ class KubernetesWorkerBackend:
         )
 
     def _reuse_cached_ready_worker(self, spec: WorkerSpec, *, now: float) -> WorkerHandle | None:
-        handle = self._cached_ready_worker(spec, now=now)
-        if handle is None:
+        entry = self._cached_ready_worker(spec.worker_key, spec=spec, now=now)
+        if entry is None:
             return None
         try:
+            handle = self._patch_cached_worker_usage(entry, now=now)
+            if handle is None:
+                return None
             self._sync_shared_credentials(spec.worker_key)
         except WorkerBackendError:
+            self._invalidate_ready_worker(spec.worker_key)
             raise
         except Exception as exc:
+            self._invalidate_ready_worker(spec.worker_key)
             raise WorkerBackendError(str(exc)) from exc
         return handle
 
@@ -741,13 +718,11 @@ class KubernetesWorkerBackend:
         handle: WorkerHandle,
         *,
         validated_at: float,
-        persisted_last_used_at: float,
     ) -> None:
         entry = _ReadyWorkerCacheEntry(
             spec=spec,
             handle=handle,
             validated_at=validated_at,
-            persisted_last_used_at=persisted_last_used_at,
             credentials_encryption_key_hash=self._current_credentials_encryption_key_hash(),
         )
         with self._ready_workers_lock:
@@ -757,48 +732,37 @@ class KubernetesWorkerBackend:
         with self._ready_workers_lock:
             self._ready_workers.pop(worker_key, None)
 
-    def _cached_ready_worker(self, spec: WorkerSpec, *, now: float) -> WorkerHandle | None:
-        with self._ready_workers_lock:
-            entry = self._ready_workers.get(spec.worker_key)
-            if entry is None:
-                return None
-            cache_invalid = (
-                entry.spec != spec
-                or entry.credentials_encryption_key_hash != self._current_credentials_encryption_key_hash()
-                or now - entry.validated_at >= _READY_WORKER_REVALIDATE_SECONDS
-                or now - entry.handle.last_used_at >= self.idle_timeout_seconds
-            )
-            if cache_invalid:
-                self._ready_workers.pop(spec.worker_key, None)
-                return None
-            handle = replace(entry.handle, last_used_at=now)
-            self._ready_workers[spec.worker_key] = replace(entry, handle=handle)
-            return handle
-
-    def _touch_cached_worker(self, worker_key: str, *, now: float) -> WorkerHandle | None:
+    def _cached_ready_worker(
+        self,
+        worker_key: str,
+        *,
+        spec: WorkerSpec | None = None,
+        now: float,
+    ) -> _ReadyWorkerCacheEntry | None:
         with self._ready_workers_lock:
             entry = self._ready_workers.get(worker_key)
             if entry is None:
                 return None
             cache_invalid = (
-                entry.credentials_encryption_key_hash != self._current_credentials_encryption_key_hash()
+                (spec is not None and entry.spec != spec)
+                or entry.credentials_encryption_key_hash != self._current_credentials_encryption_key_hash()
                 or now - entry.validated_at >= _READY_WORKER_REVALIDATE_SECONDS
                 or now - entry.handle.last_used_at >= self.idle_timeout_seconds
             )
             if cache_invalid:
                 self._ready_workers.pop(worker_key, None)
                 return None
-            handle = replace(entry.handle, last_used_at=now, status="ready", failure_reason=None)
-            flush_interval = min(
-                _MAX_LAST_USED_PERSIST_INTERVAL_SECONDS,
-                self.idle_timeout_seconds / 4,
-            )
-            if now - entry.persisted_last_used_at < flush_interval:
-                self._ready_workers[worker_key] = replace(entry, handle=handle)
-                return handle
-            self._ready_workers.pop(worker_key, None)
+            return entry
 
-        self._resources.patch_deployment_annotations(
+    def _touch_cached_worker(self, worker_key: str, *, now: float) -> WorkerHandle | None:
+        entry = self._cached_ready_worker(worker_key, now=now)
+        if entry is None:
+            return None
+        return self._patch_cached_worker_usage(entry, now=now)
+
+    def _patch_cached_worker_usage(self, entry: _ReadyWorkerCacheEntry, *, now: float) -> WorkerHandle | None:
+        handle = replace(entry.handle, last_used_at=now, status="ready", failure_reason=None)
+        exists = self._resources.patch_deployment_annotations(
             handle.worker_id,
             annotations={
                 resources.ANNOTATION_LAST_USED_AT: str(now),
@@ -806,28 +770,15 @@ class KubernetesWorkerBackend:
                 resources.ANNOTATION_FAILURE_REASON: "",
             },
         )
+        if not exists:
+            self._invalidate_ready_worker(entry.spec.worker_key)
+            return None
         self._store_ready_worker(
             entry.spec,
             handle,
             validated_at=entry.validated_at,
-            persisted_last_used_at=now,
         )
         return handle
-
-    def _handle_with_cached_usage(self, handle: WorkerHandle, *, running: bool, now: float) -> WorkerHandle:
-        if not running or handle.status == "failed":
-            return handle
-        with self._ready_workers_lock:
-            entry = self._ready_workers.get(handle.worker_key)
-        if entry is None or entry.handle.last_used_at <= handle.last_used_at:
-            return handle
-        status = effective_idle_status("ready", entry.handle.last_used_at, self.idle_timeout_seconds, now)
-        return replace(
-            handle,
-            last_used_at=entry.handle.last_used_at,
-            status=status,
-            failure_reason=None,
-        )
 
     def _record_startup_failure_or_cleanup_secret(
         self,

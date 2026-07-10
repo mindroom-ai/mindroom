@@ -210,7 +210,9 @@ class _FakeAppsApi:
     def patch_namespaced_deployment(self, name: str, namespace: str, body: dict[str, object]) -> object:
         _ = namespace
         self.patched_bodies.append((name, body))
-        deployment = self.read_namespaced_deployment(name, namespace)
+        deployment = self.deployments.get(name)
+        if deployment is None:
+            raise _FakeApiError(404)
         metadata = body.get("metadata")
         if isinstance(metadata, dict):
             annotations = metadata.get("annotations")
@@ -2074,8 +2076,8 @@ def _kubernetes_api_call_counts(apps_api: _FakeAppsApi, core_api: _FakeCoreApi) 
     )
 
 
-def test_kubernetes_backend_reuses_recent_ready_worker_without_cluster_calls() -> None:
-    """A recently validated ready worker should stay on the local hot path."""
+def test_kubernetes_backend_reuses_recent_ready_worker_with_one_metadata_patch() -> None:
+    """A recently validated ready worker should skip cluster reconciliation."""
     backend, apps_api, core_api = _backend()
     first = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
     calls_after_first_ensure = _kubernetes_api_call_counts(apps_api, core_api)
@@ -2084,7 +2086,34 @@ def test_kubernetes_backend_reuses_recent_ready_worker_without_cluster_calls() -
 
     assert second.worker_id == first.worker_id
     assert second.last_used_at == 20.0
-    assert _kubernetes_api_call_counts(apps_api, core_api) == calls_after_first_ensure
+    calls_after_second_ensure = _kubernetes_api_call_counts(apps_api, core_api)
+    assert tuple(
+        after - before for before, after in zip(calls_after_first_ensure, calls_after_second_ensure, strict=True)
+    ) == (
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    )
+    assert apps_api.deployments[first.worker_id].metadata.annotations["mindroom.ai/last-used-at"] == "20.0"
+
+
+def test_kubernetes_backend_reconciles_when_cached_worker_disappears() -> None:
+    """A missing cached Deployment should fall back to full reconciliation."""
+    backend, apps_api, _core_api = _backend()
+    first = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    apps_api.deployments.pop(first.worker_id)
+
+    recreated = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=20.0)
+
+    assert recreated.status == "ready"
+    assert len(apps_api.created_bodies) == 2
 
 
 def test_kubernetes_backend_periodically_revalidates_cached_ready_worker() -> None:
@@ -2094,17 +2123,24 @@ def test_kubernetes_backend_periodically_revalidates_cached_ready_worker() -> No
     calls_after_first_ensure = _kubernetes_api_call_counts(apps_api, core_api)
 
     backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=309.0)
-    assert _kubernetes_api_call_counts(apps_api, core_api) == calls_after_first_ensure
+    calls_before_revalidation = _kubernetes_api_call_counts(apps_api, core_api)
+    assert calls_before_revalidation[0] == calls_after_first_ensure[0]
+    assert calls_before_revalidation[2] == calls_after_first_ensure[2] + 1
+    assert calls_before_revalidation[4:] == calls_after_first_ensure[4:]
 
     backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=310.0)
-    assert _kubernetes_api_call_counts(apps_api, core_api) != calls_after_first_ensure
+    calls_after_revalidation = _kubernetes_api_call_counts(apps_api, core_api)
+    assert calls_after_revalidation[0] > calls_before_revalidation[0]
+    assert calls_after_revalidation[4] > calls_before_revalidation[4]
+    assert calls_after_revalidation[6] > calls_before_revalidation[6]
 
 
-def test_kubernetes_backend_coalesces_recent_last_used_patches() -> None:
-    """Frequent worker touches should retain fresh local state without patching Kubernetes each time."""
+def test_kubernetes_backend_cached_touch_uses_one_metadata_patch() -> None:
+    """A cached touch should persist usage without reading or reconciling cluster objects."""
     backend, apps_api, _core_api = _backend()
     handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
     patch_count_after_ensure = len(apps_api.patched_bodies)
+    read_count_after_ensure = len(apps_api.read_names)
 
     first_touch = backend.touch_worker(_TEST_SCOPED_WORKER_KEY_A, now=11.0)
     second_touch = backend.touch_worker(_TEST_SCOPED_WORKER_KEY_A, now=12.0)
@@ -2112,32 +2148,13 @@ def test_kubernetes_backend_coalesces_recent_last_used_patches() -> None:
     assert first_touch is not None
     assert second_touch is not None
     assert second_touch.last_used_at == 12.0
-    assert len(apps_api.patched_bodies) == patch_count_after_ensure
+    assert len(apps_api.patched_bodies) == patch_count_after_ensure + 2
+    assert len(apps_api.read_names) == read_count_after_ensure
     assert backend.list_workers(now=12.0)[0].last_used_at == 12.0
-    assert apps_api.deployments[handle.worker_id].metadata.annotations["mindroom.ai/last-used-at"] == "10.0"
-
-    persisted_touch = backend.touch_worker(_TEST_SCOPED_WORKER_KEY_A, now=25.0)
-
-    assert persisted_touch is not None
-    assert len(apps_api.patched_bodies) == patch_count_after_ensure + 1
-    assert apps_api.deployments[handle.worker_id].metadata.annotations["mindroom.ai/last-used-at"] == "25.0"
+    assert apps_api.deployments[handle.worker_id].metadata.annotations["mindroom.ai/last-used-at"] == "12.0"
     assert apps_api.deployments[handle.worker_id].metadata.annotations[ANNOTATION_WORKER_KEY] == (
         _TEST_SCOPED_WORKER_KEY_A
     )
-
-
-def test_kubernetes_backend_cleanup_honors_deferred_last_used_update() -> None:
-    """Idle cleanup should use fresher cached usage before scaling down a worker."""
-    backend, apps_api, _core_api = _backend(idle_timeout_seconds=20.0)
-    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
-
-    touched = backend.touch_worker(_TEST_SCOPED_WORKER_KEY_A, now=2.0)
-    cleaned = backend.cleanup_idle_workers(now=21.0)
-
-    assert touched is not None
-    assert apps_api.deployments[handle.worker_id].metadata.annotations["mindroom.ai/last-used-at"] == "0.0"
-    assert cleaned == []
-    assert apps_api.deployments[handle.worker_id].spec.replicas == 1
 
 
 def test_kubernetes_backend_failure_invalidates_ready_cache() -> None:
