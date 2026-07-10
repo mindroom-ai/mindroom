@@ -1224,6 +1224,7 @@ def test_replay_safe_tool_search_results_drops_only_orphaned_search_uses() -> No
     ]
     assert request_kwargs["messages"][0]["content"][0] == _ORPHAN_TOOL_SEARCH_USE_BLOCK
     assert "citations" in request_kwargs["messages"][0]["content"][3]
+    assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
 
 
 @pytest.mark.asyncio

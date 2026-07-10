@@ -237,6 +237,19 @@ def _model_deferred_tool_names(model: AnthropicClaude) -> frozenset[str]:
     return deferred_tool_names if isinstance(deferred_tool_names, frozenset) else frozenset()
 
 
+def _tool_search_result_ids(content: list[Any]) -> set[str]:
+    """Return tool-use IDs paired with search results in one message."""
+    result_ids: set[str] = set()
+    for block in content:
+        block_dict = _as_dict(block)
+        if block_dict is None or block_dict.get("type") != _TOOL_SEARCH_RESULT_BLOCK_TYPE:
+            continue
+        tool_use_id = block_dict.get("tool_use_id")
+        if isinstance(tool_use_id, str):
+            result_ids.add(tool_use_id)
+    return result_ids
+
+
 def _request_kwargs_with_replay_safe_tool_search_results(request_kwargs: dict[str, Any]) -> dict[str, Any]:
     """Repair replayed tool-search blocks before sending assistant history.
 
@@ -264,13 +277,7 @@ def _request_kwargs_with_replay_safe_tool_search_results(request_kwargs: dict[st
         content = message_dict.get("content") if message_dict is not None else None
         if message_dict is None or not isinstance(content, list):
             continue
-        paired_result_ids = {
-            tool_use_id
-            for block in content
-            if (block_dict := _as_dict(block)) is not None
-            and block_dict.get("type") == _TOOL_SEARCH_RESULT_BLOCK_TYPE
-            and isinstance(tool_use_id := block_dict.get("tool_use_id"), str)
-        }
+        paired_result_ids = _tool_search_result_ids(content)
         sanitized_content: list[Any] = []
         content_changed = False
         for block in content:
@@ -286,8 +293,9 @@ def _request_kwargs_with_replay_safe_tool_search_results(request_kwargs: dict[st
             ):
                 content_changed = True
                 continue
-            if block_dict.get("type") == _TOOL_SEARCH_RESULT_BLOCK_TYPE and not (
-                set(block_dict) <= _TOOL_SEARCH_RESULT_INPUT_KEYS
+            if (
+                block_dict.get("type") == _TOOL_SEARCH_RESULT_BLOCK_TYPE
+                and not block_dict.keys() <= _TOOL_SEARCH_RESULT_INPUT_KEYS
             ):
                 prepared_block = {
                     key: value for key, value in block_dict.items() if key in _TOOL_SEARCH_RESULT_INPUT_KEYS
