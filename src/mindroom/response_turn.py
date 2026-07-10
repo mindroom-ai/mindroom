@@ -27,7 +27,7 @@ from uuid import uuid4
 from agno.run.base import RunStatus
 
 from mindroom import ai_runtime
-from mindroom.ai_turn_state import AITurnState, merge_tool_trace_snapshots
+from mindroom.ai_turn_state import AITurnState, merge_text_snapshots, merge_tool_trace_snapshots
 from mindroom.cancellation import build_cancelled_error
 from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
@@ -442,6 +442,10 @@ def _record_errored_turn(
                 original_status=RunStatus.error,
             )
         else:
+            live_assistant_text = merge_text_snapshots(
+                run.turn_state.assistant_text,
+                recorder.assistant_text,
+            )
             live_completed_tools = merge_tool_trace_snapshots(
                 run.turn_state.completed_tools,
                 recorder.completed_tools,
@@ -450,33 +454,35 @@ def _record_errored_turn(
                 live_completed_tools,
                 run.turn_state.completed_tools_for(resolution.completed_tools),
             )
+            live_interrupted_tools = merge_tool_trace_snapshots(
+                run.turn_state.interrupted_tools,
+                recorder.interrupted_tools,
+            )
             run.turn_state.record_interrupted_canonical(
                 recorder,
                 run_metadata=run_metadata,
-                assistant_text=resolution.partial_text or recorder.assistant_text,
+                assistant_text=merge_text_snapshots(live_assistant_text, resolution.partial_text),
                 completed_tools=completed_tools,
-                interrupted_tools=(
-                    list(resolution.interrupted_tools)
-                    or list(recorder.interrupted_tools)
-                    or list(run.turn_state.interrupted_tools)
+                interrupted_tools=merge_tool_trace_snapshots(
+                    live_interrupted_tools,
+                    resolution.interrupted_tools,
                 ),
                 original_status=RunStatus.error,
             )
         return
     if run.standalone_replay_persisted or persist is None:
         return
-    partial_text = resolution.partial_text if resolution is not None else run.turn_state.assistant_text
+    partial_text = run.turn_state.assistant_text
     completed_tools = list(run.turn_state.completed_tools)
     if resolution is not None:
+        partial_text = merge_text_snapshots(partial_text, resolution.partial_text)
         completed_tools = merge_tool_trace_snapshots(
             completed_tools,
             run.turn_state.completed_tools_for(resolution.completed_tools),
         )
-    interrupted_tools = (
-        list(resolution.interrupted_tools) or list(run.turn_state.interrupted_tools)
-        if resolution is not None
-        else list(run.turn_state.interrupted_tools)
-    )
+    interrupted_tools = list(run.turn_state.interrupted_tools)
+    if resolution is not None:
+        interrupted_tools = merge_tool_trace_snapshots(interrupted_tools, resolution.interrupted_tools)
     persist(
         run.scope_context,
         StandaloneReplaySnapshot(

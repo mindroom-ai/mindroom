@@ -1477,6 +1477,7 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
     ) as scope_context:
         assert scope_context is not None
         assert scope_context.session is not None
+        mock_team.arun.return_value.team_id = scope_context.scope.scope_id
         scope_context.storage.upsert_session(scope_context.session)
 
     with (

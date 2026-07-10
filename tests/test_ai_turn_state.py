@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mindroom.ai_turn_state import AITurnState, merge_tool_trace_snapshots
+from mindroom.ai_turn_state import AITurnState, merge_text_snapshots, merge_tool_trace_snapshots
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.tool_system.events import ToolTraceEntry
 
@@ -58,3 +58,13 @@ def test_merge_tool_trace_snapshots_preserves_canonical_overlap() -> None:
 
     assert merge_tool_trace_snapshots([load_tool, shell_tool], [shell_tool]) == [load_tool, shell_tool]
     assert merge_tool_trace_snapshots([load_tool], [load_tool, shell_tool]) == [load_tool, shell_tool]
+    assert merge_tool_trace_snapshots(
+        [load_tool, _tool("read_file")],
+        [load_tool, shell_tool],
+    ) == [load_tool, _tool("read_file"), shell_tool]
+
+
+def test_merge_text_snapshots_preserves_divergent_fragments() -> None:
+    """Divergent partial snapshots retain both model-produced fragments."""
+    assert merge_text_snapshots("Live partial", "Terminal partial") == "Live partial\n\nTerminal partial"
+    assert merge_text_snapshots("Half", "Half done") == "Half done"

@@ -265,6 +265,39 @@ async def test_sync_restart_retry_skips_generation_when_later_run_recovered_sour
 
 
 @pytest.mark.asyncio
+async def test_sync_restart_retry_skips_generation_when_history_check_fails(tmp_path: Path) -> None:
+    """An indeterminate recovery lookup must fail closed to avoid a duplicate reply."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    request = _response_request(
+        reply_to_event_id="$source",
+        thread_id="$thread-root",
+        user_id="@alice:localhost",
+    )
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+        message_target=request.response_envelope.target,
+    )
+    coordinator.deps.state_writer.create_storage = MagicMock(side_effect=RuntimeError("storage unavailable"))
+    retry_request = replace(
+        request,
+        sync_restart_retry_source_event_id="$source",
+    )
+
+    with patch("mindroom.response_runner.ai_response", new=AsyncMock()) as mock_ai_response:
+        response_event_id = await coordinator.generate_response(retry_request)
+
+    assert response_event_id is None
+    mock_ai_response.assert_not_awaited()
+    coordinator.deps.delivery_gateway.deps.response_hooks.emit_after_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_process_and_respond_propagates_before_response_cancellation_to_runner(
     tmp_path: Path,
 ) -> None:

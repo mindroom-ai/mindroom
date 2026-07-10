@@ -840,21 +840,18 @@ class ResponseRunner:
             return False
 
         storage = None
+        superseded = False
         try:
             storage = self.deps.state_writer.create_storage(execution_identity, scope=scope)
             session = storage.get_session(session_id, self.deps.state_writer.session_type_for_scope(scope))
             if not isinstance(session, AgentSession | TeamSession):
-                return False
-        except Exception as error:
-            self.deps.logger.warning(
-                "sync_restart_retry_history_check_failed",
-                session_id=session_id,
-                scope=scope.key,
-                source_event_id=source_event_id,
-                exception_type=error.__class__.__name__,
-            )
-            return False
-        else:
+                self.deps.logger.warning(
+                    "sync_restart_retry_history_missing",
+                    session_id=session_id,
+                    scope=scope.key,
+                    source_event_id=source_event_id,
+                )
+                return True
             superseded = scope_has_recovered_interrupted_event(session, scope, source_event_id)
             if superseded:
                 self.deps.logger.info(
@@ -863,7 +860,15 @@ class ResponseRunner:
                     scope=scope.key,
                     source_event_id=source_event_id,
                 )
-            return superseded
+        except Exception as error:
+            self.deps.logger.warning(
+                "sync_restart_retry_history_check_failed",
+                session_id=session_id,
+                scope=scope.key,
+                source_event_id=source_event_id,
+                exception_type=error.__class__.__name__,
+            )
+            return True
         finally:
             if storage is not None:
                 try:
@@ -876,6 +881,7 @@ class ResponseRunner:
                         source_event_id=source_event_id,
                         exception_type=error.__class__.__name__,
                     )
+        return superseded
 
     async def _refresh_model_history_after_lock(
         self,

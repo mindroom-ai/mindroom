@@ -1204,6 +1204,19 @@ def _run_metadata_seen_event_ids(run_metadata: dict[str, Any] | None) -> list[st
     return [event_id for event_id in raw_event_ids if isinstance(event_id, str) and event_id]
 
 
+def _is_bound_team_history_visible_run(
+    response: TeamRunOutput | RunOutput,
+    scope_context: ScopeSessionContext | None,
+) -> bool:
+    """Return whether this response belongs to the bound top-level team history."""
+    return (
+        isinstance(response, TeamRunOutput)
+        and scope_context is not None
+        and response.team_id == scope_context.scope.scope_id
+        and is_model_history_visible_run(response)
+    )
+
+
 def _extract_interrupted_team_partial_text(response: TeamRunOutput | RunOutput) -> str:
     """Extract persisted interrupted text for a top-level team run."""
     if isinstance(response, TeamRunOutput):
@@ -2261,7 +2274,7 @@ async def team_response(  # noqa: C901, PLR0915
         if (
             ctx.reply_to_event_id
             and isinstance(response, (TeamRunOutput, RunOutput))
-            and is_model_history_visible_run(response)
+            and _is_bound_team_history_visible_run(response, run.scope_context)
             and not is_empty_run
         ):
             _persist_bound_seen_event_ids(
@@ -2893,7 +2906,11 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     event_is_empty = (
                         event.status == RunStatus.completed and not event_tool_executions and not event_has_visible
                     )
-                    if ctx.reply_to_event_id and is_model_history_visible_run(event) and not event_is_empty:
+                    if (
+                        ctx.reply_to_event_id
+                        and _is_bound_team_history_visible_run(event, run.scope_context)
+                        and not event_is_empty
+                    ):
                         _persist_bound_seen_event_ids(
                             scope_context=run.scope_context,
                             session_id=ctx.session_id,

@@ -692,9 +692,9 @@ def _extract_interrupted_partial_text(
             and not message.from_history
         )
     ]
-    for part in reversed(assistant_parts):
-        if part and not _is_run_cancelled_boilerplate(part):
-            return part
+    replayable_parts = [part for part in assistant_parts if part and not _is_run_cancelled_boilerplate(part)]
+    if replayable_parts:
+        return "\n\n".join(replayable_parts)
     if not isinstance(content, str):
         return ""
     stripped = content.strip()

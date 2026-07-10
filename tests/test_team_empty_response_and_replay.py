@@ -187,6 +187,34 @@ async def test_team_response_does_not_preserve_seen_ids_for_child_run() -> None:
 
 
 @pytest.mark.asyncio
+async def test_team_response_does_not_preserve_seen_ids_for_plain_top_level_run() -> None:
+    """A plain agent run is not a member of the bound top-level team history."""
+    orchestrator, _config = _make_orchestrator()
+    mock_team = _make_test_team()
+    mock_team.arun = AsyncMock(
+        return_value=RunOutput(
+            content="Fallback answer",
+            run_id="agent-run",
+            status=RunStatus.completed,
+        ),
+    )
+
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2], patch("mindroom.teams._persist_bound_seen_event_ids") as persist_seen:
+        await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Run the action.",
+            turn_recorder=TurnRecorder(user_message="Run the action."),
+            orchestrator=orchestrator,
+            execution_identity=None,
+            ctx=make_turn_context(session_id="session-1", reply_to_event_id="$source"),
+        )
+
+    persist_seen.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_team_response_stream_yields_fallback_notice_when_retry_is_also_empty() -> None:
     """The streaming empty-run guard retries once, then yields the notice chunk."""
     orchestrator, config = _make_orchestrator()
@@ -295,6 +323,39 @@ async def test_team_response_stream_does_not_preserve_seen_ids_for_child_run() -
 
     mock_team = _make_test_team()
     mock_team.arun = MagicMock(return_value=child_stream())
+
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2], patch("mindroom.teams._persist_bound_seen_event_ids") as persist_seen:
+        _ = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="Run the action.",
+                turn_recorder=TurnRecorder(user_message="Run the action."),
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id="session-1", reply_to_event_id="$source"),
+            )
+        ]
+
+    persist_seen.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_does_not_preserve_seen_ids_for_plain_top_level_run() -> None:
+    """A streamed agent fallback cannot advance bound team seen state."""
+    orchestrator, config = _make_orchestrator()
+
+    async def fallback_stream() -> AsyncIterator[object]:
+        yield RunOutput(
+            content="Fallback answer",
+            run_id="agent-run",
+            status=RunStatus.completed,
+        )
+
+    mock_team = _make_test_team()
+    mock_team.arun = MagicMock(return_value=fallback_stream())
 
     patches = _team_patches(mock_team)
     with patches[0], patches[1], patches[2], patch("mindroom.teams._persist_bound_seen_event_ids") as persist_seen:

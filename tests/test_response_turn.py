@@ -399,17 +399,27 @@ def test_blocking_errored_attempt_preserves_seeded_recorder_metadata() -> None:
     assert recorder.interrupted_calls[-1]["original_status"] == RunStatus.error
 
 
-def test_blocking_errored_attempt_preserves_live_completed_tools_when_resolution_omits_them() -> None:
-    """Terminal error snapshots must not erase tools already observed by the turn."""
+def test_blocking_errored_attempt_merges_live_and_terminal_artifacts() -> None:
+    """Terminal error snapshots must not erase divergent live turn artifacts."""
     log = _AdapterLog()
+    prior_tool = _trace("load_tool")
     live_tool = _trace("write_file")
+    terminal_tool = _trace("run_shell_command")
+    live_pending = ToolTraceEntry(type="tool_call_started", tool_name="search")
+    terminal_pending = ToolTraceEntry(type="tool_call_started", tool_name="browse")
     recorder = _FakeTurnRecorder(
-        assistant_text="Partial answer",
-        completed_tools=[live_tool],
+        assistant_text="Live partial",
+        completed_tools=[prior_tool, live_tool],
+        interrupted_tools=[live_pending],
     )
 
     async def _attempt(_run: TurnRunState, _c: DynamicContinuationRunState) -> ErroredAttempt:
-        return ErroredAttempt("friendly error")
+        return ErroredAttempt(
+            "friendly error",
+            partial_text="Terminal partial",
+            completed_tools=(prior_tool, terminal_tool),
+            interrupted_tools=(terminal_pending,),
+        )
 
     result = asyncio.run(
         run_blocking_response_turn(
@@ -421,8 +431,9 @@ def test_blocking_errored_attempt_preserves_live_completed_tools_when_resolution
     )
 
     assert result == "friendly error"
-    assert recorder.interrupted_calls[-1]["assistant_text"] == "Partial answer"
-    assert recorder.interrupted_calls[-1]["completed_tools"] == [live_tool]
+    assert recorder.interrupted_calls[-1]["assistant_text"] == "Live partial\n\nTerminal partial"
+    assert recorder.interrupted_calls[-1]["completed_tools"] == [prior_tool, live_tool, terminal_tool]
+    assert recorder.interrupted_calls[-1]["interrupted_tools"] == [live_pending, terminal_pending]
 
 
 def test_blocking_cancelled_attempt_records_persists_and_raises() -> None:

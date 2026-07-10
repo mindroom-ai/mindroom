@@ -21,19 +21,43 @@ def merge_tool_trace_snapshots(
     """Merge cumulative tool snapshots without dropping or duplicating overlap."""
     canonical_list = list(canonical)
     supplemental_list = list(supplemental)
-    if not canonical_list:
-        return supplemental_list
-    if not supplemental_list:
-        return canonical_list
+    if not canonical_list or not supplemental_list:
+        return canonical_list or supplemental_list
     if canonical_list[: len(supplemental_list)] == supplemental_list:
         return canonical_list
     if supplemental_list[: len(canonical_list)] == canonical_list:
         return supplemental_list
+    shared_prefix = 0
+    while (
+        shared_prefix < min(len(canonical_list), len(supplemental_list))
+        and canonical_list[shared_prefix] == supplemental_list[shared_prefix]
+    ):
+        shared_prefix += 1
+    if shared_prefix:
+        return [*canonical_list, *supplemental_list[shared_prefix:]]
     max_overlap = min(len(canonical_list), len(supplemental_list))
     for overlap in range(max_overlap, 0, -1):
         if canonical_list[-overlap:] == supplemental_list[:overlap]:
-            return [*canonical_list, *supplemental_list[overlap:]]
+            supplemental_list = supplemental_list[overlap:]
+            break
     return [*canonical_list, *supplemental_list]
+
+
+def merge_text_snapshots(canonical: str, supplemental: str) -> str:
+    """Merge cumulative partial-text snapshots while preserving divergent fragments."""
+    if not canonical:
+        return supplemental
+    if not supplemental:
+        return canonical
+    if canonical.startswith(supplemental):
+        return canonical
+    if supplemental.startswith(canonical):
+        return supplemental
+    max_overlap = min(len(canonical), len(supplemental))
+    for overlap in range(max_overlap, 0, -1):
+        if canonical[-overlap:] == supplemental[:overlap]:
+            return f"{canonical}{supplemental[overlap:]}"
+    return f"{canonical}\n\n{supplemental}"
 
 
 @dataclass
