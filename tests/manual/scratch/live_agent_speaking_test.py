@@ -308,7 +308,14 @@ async def main() -> int:  # noqa: PLR0915
     state.save(paths)
 
     config = Config(
-        agents={AGENT: AgentConfig(display_name="Assistant", role="Helpful voice assistant", tools=["calculator"])},
+        agents={
+            AGENT: AgentConfig(
+                display_name="Assistant",
+                role="Helpful voice assistant",
+                tools=["calculator"],
+                rooms=[room_id],
+            ),
+        },
         models={"default": ModelConfig(provider="openai", id="gpt-5.5")},
         memory=MemoryConfig(backend="none"),
         calls=CallsConfig(enabled=True, agents=[AGENT], livekit_service_url=SERVICE_URL),

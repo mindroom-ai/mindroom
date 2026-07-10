@@ -297,6 +297,17 @@ async def _await_result(awaitable: Awaitable[_ToolHookResult]) -> _ToolHookResul
     return await awaitable
 
 
+async def _resolve_async_tool_hook_result(result: _ToolHookResult) -> _ToolHookResult:
+    """Await values returned indirectly by synchronous hooks in an async chain."""
+    while True:
+        if isinstance(result, _DeferredAsyncToolHookResult):
+            result = await result.awaitable
+        elif inspect.isawaitable(result):
+            result = await result
+        else:
+            return result
+
+
 def _run_coroutine_from_sync(coroutine: _ToolHookResult) -> _ToolHookResult:
     if not inspect.isawaitable(coroutine):
         return coroutine
@@ -384,9 +395,7 @@ def _patch_agno_async_tool_hook_chain() -> None:
             args: dict[str, Any],
         ) -> _ToolHookResult:
             result = await execution_chain(name, func, args)
-            while isinstance(result, _DeferredAsyncToolHookResult):
-                result = await result.awaitable
-            return result
+            return await _resolve_async_tool_hook_result(result)
 
         return _wrapped_execution_chain
 

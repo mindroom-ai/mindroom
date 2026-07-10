@@ -40,25 +40,16 @@ def _function(entrypoint: object, parameters: dict | None = None) -> Function:
     )
 
 
-def _wrap(function: Function, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, approve: bool = True):  # noqa: ANN202
-    async def fake_evaluate(*_args: object, **_kwargs: object) -> tuple[bool, float]:
-        return (not approve, 0.0)
-
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.evaluate_tool_approval", fake_evaluate)
+def _wrap(function: Function):  # noqa: ANN202
     return _wrap_agno_function(
         function,
         context=_context(),
-        config=_config(),
-        runtime_paths=test_runtime_paths(tmp_path),
         agent_name=AGENT,
     )
 
 
 @pytest.mark.asyncio
-async def test_wrapped_tool_executes_sync_entrypoint_in_context(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_wrapped_tool_executes_sync_entrypoint_in_context() -> None:
     """Sync entrypoints run in a worker thread with the runtime context bound."""
     seen_context: list[object] = []
 
@@ -66,7 +57,7 @@ async def test_wrapped_tool_executes_sync_entrypoint_in_context(
         seen_context.append(get_tool_runtime_context())
         return a + b
 
-    tool = _wrap(_function(add), tmp_path, monkeypatch)
+    tool = _wrap(_function(add))
     result = await tool({"a": 2, "b": 3})
     assert result == "5"
     assert seen_context
@@ -74,18 +65,18 @@ async def test_wrapped_tool_executes_sync_entrypoint_in_context(
 
 
 @pytest.mark.asyncio
-async def test_wrapped_tool_executes_async_entrypoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_wrapped_tool_executes_async_entrypoint() -> None:
     """Async entrypoints are awaited directly."""
 
     async def add(a: int, b: int) -> str:
         return f"sum={a + b}"
 
-    tool = _wrap(_function(add), tmp_path, monkeypatch)
+    tool = _wrap(_function(add))
     assert await tool({"a": 1, "b": 1}) == "sum=2"
 
 
 @pytest.mark.asyncio
-async def test_wrapped_tool_runs_agno_tool_hooks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_wrapped_tool_runs_agno_tool_hooks() -> None:
     """Voice tool execution preserves Agno hook policy and result transformations."""
     calls: list[str] = []
 
@@ -100,17 +91,14 @@ async def test_wrapped_tool_runs_agno_tool_hooks(tmp_path: Path, monkeypatch: py
 
     function = _function(add)
     function.tool_hooks = [hook]
-    tool = _wrap(function, tmp_path, monkeypatch)
+    tool = _wrap(function)
 
     assert await tool({"a": 2, "b": 4}) == "hooked=6"
     assert calls == ["add", "tool"]
 
 
 @pytest.mark.asyncio
-async def test_wrapped_tool_refuses_agno_interactive_execution_policy(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_wrapped_tool_refuses_agno_interactive_execution_policy() -> None:
     """Agno-managed confirmation flows do not execute without their text UI."""
     calls: list[str] = []
 
@@ -120,7 +108,7 @@ async def test_wrapped_tool_refuses_agno_interactive_execution_policy(
 
     function = _function(add)
     function.requires_confirmation = True
-    tool = _wrap(function, tmp_path, monkeypatch)
+    tool = _wrap(function)
 
     result = await tool({"a": 2, "b": 4})
 
@@ -129,44 +117,61 @@ async def test_wrapped_tool_refuses_agno_interactive_execution_policy(
 
 
 @pytest.mark.asyncio
-async def test_wrapped_tool_refuses_when_approval_required(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Approval-gated tools never execute during a call."""
+async def test_wrapped_tool_refuses_when_approval_required() -> None:
+    """The canonical agent hook owns approval evaluation for voice tools."""
     calls: list[object] = []
+    approval_checks: list[dict[str, int]] = []
 
     def add(a: int, b: int) -> int:
         calls.append((a, b))
         return a + b
 
-    tool = _wrap(_function(add), tmp_path, monkeypatch, approve=False)
+    async def approval_hook(name: str, function: object, arguments: dict[str, int]) -> str:
+        del name, function
+        approval_checks.append(dict(arguments))
+        return "Tool approval is required; use the text chat."
+
+    function = _function(add)
+    function.tool_hooks = [approval_hook]
+    tool = _wrap(function)
     result = await tool({"a": 1, "b": 2})
     assert "approval" in result.lower()
+    assert approval_checks == [{"a": 1, "b": 2}]
     assert calls == []
 
 
 @pytest.mark.asyncio
-async def test_wrapped_tool_reports_failures_to_the_model(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_wrapped_async_tool_awaits_coroutine_returned_by_sync_hook() -> None:
+    """A synchronous hook may delegate to an asynchronous tool entrypoint."""
+
+    async def add(a: int, b: int) -> int:
+        return a + b
+
+    def hook(name: str, function: object, arguments: dict[str, int]) -> object:
+        del name
+        return function(**arguments)  # type: ignore[operator]
+
+    function = _function(add)
+    function.tool_hooks = [hook]
+
+    assert await _wrap(function)({"a": 2, "b": 5}) == "7"
+
+
+@pytest.mark.asyncio
+async def test_wrapped_tool_reports_failures_to_the_model() -> None:
     """Tool exceptions come back as spoken-friendly error strings."""
 
     def boom() -> None:
         msg = "database on fire"
         raise RuntimeError(msg)
 
-    tool = _wrap(_function(boom, parameters={"type": "object", "properties": {}}), tmp_path, monkeypatch)
+    tool = _wrap(_function(boom, parameters={"type": "object", "properties": {}}))
     result = await tool({})
     assert "failed" in result
     assert "database on fire" in result
 
 
-def test_wrap_processes_unprocessed_toolkit_function_schema(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_wrap_processes_unprocessed_toolkit_function_schema() -> None:
     """Toolkit functions start with an empty schema; wrapping must build the real one."""
 
     def add(a: int, b: int) -> int:
@@ -175,7 +180,7 @@ def test_wrap_processes_unprocessed_toolkit_function_schema(
     # Simulate an agno toolkit function before entrypoint processing.
     function = Function(name="add", description="Add two numbers", entrypoint=add)
     assert function.parameters == {"type": "object", "properties": {}, "required": []}
-    _wrap(function, tmp_path, monkeypatch)
+    _wrap(function)
     assert set(function.parameters["properties"]) == {"a", "b"}
     assert set(function.parameters["required"]) == {"a", "b"}
 

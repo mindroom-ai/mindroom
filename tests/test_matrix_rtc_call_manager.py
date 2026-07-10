@@ -1033,10 +1033,10 @@ async def test_manager_uses_oldest_membership_federated_https_focus(
 
 
 @pytest.mark.asyncio
-async def test_manager_rejects_same_server_focus_that_config_does_not_trust(
+async def test_manager_guards_unpinned_same_server_focus_as_public_network(
     tmp_path: Path,
 ) -> None:
-    """A same-server participant cannot override the operator's configured focus."""
+    """An inherited same-server focus remains usable without private-network access."""
     config = Config(
         agents={"helper": AgentConfig(display_name="Helper")},
         models={},
@@ -1046,10 +1046,14 @@ async def test_manager_rejects_same_server_focus_that_config_does_not_trust(
     member = _member(
         "@alice:example.org",
         "ALICEDEV",
-        livekit_service_url="https://attacker.example",
+        livekit_service_url="https://rtc.founder.example",
     )
 
-    assert await manager._resolve_service([member]) is None
+    service = await manager._resolve_service([member])
+
+    assert service is not None
+    assert service.url == "https://rtc.founder.example"
+    assert not service.allow_private_networks
 
 
 @pytest.mark.asyncio

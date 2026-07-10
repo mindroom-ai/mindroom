@@ -26,7 +26,6 @@ from mindroom.agents import create_agent
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
-from mindroom.tool_approval import evaluate_tool_approval
 from mindroom.tool_system.runtime_context import tool_runtime_context
 
 if TYPE_CHECKING:
@@ -40,10 +39,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_APPROVAL_REQUIRED_MESSAGE = (
-    "This tool requires human approval and cannot run during a voice call. "
-    "Tell the user to ask for it in the text chat instead."
-)
 _TEXT_CHAT_REQUIRED_MESSAGE = (
     "This tool needs an interactive or external execution flow that is unavailable during a voice call. "
     "Tell the user to ask for it in the text chat instead."
@@ -118,8 +113,6 @@ async def build_call_tools(
                 _wrap_agno_function(
                     function,
                     context=context,
-                    config=config,
-                    runtime_paths=runtime_paths,
                     agent_name=agent_name,
                 ),
             )
@@ -167,8 +160,6 @@ def _wrap_agno_function(
     function: Function,
     *,
     context: ToolRuntimeContext,
-    config: Config,
-    runtime_paths: RuntimePaths,
     agent_name: str,
 ) -> RawFunctionTool:
     """Wrap one agno function as a livekit raw function tool."""
@@ -195,19 +186,12 @@ def _wrap_agno_function(
         ):
             logger.info("call_tool_blocked_needs_text_chat", tool=function.name, agent=agent_name)
             return _TEXT_CHAT_REQUIRED_MESSAGE
-        requires_approval, _timeout = await evaluate_tool_approval(
-            config,
-            runtime_paths,
-            function.name,
-            raw_arguments,
-            agent_name,
-        )
-        if requires_approval:
-            logger.info("call_tool_blocked_needs_approval", tool=function.name, agent=agent_name)
-            return _APPROVAL_REQUIRED_MESSAGE
         logger.info("call_tool_executing", tool=function.name, agent=agent_name, room_id=context.room_id)
         try:
             with tool_runtime_context(context):
+                # create_agent installs MindRoom's canonical hook bridge on
+                # every function. It owns approval evaluation, including the
+                # defensive argument copy, so do not preflight policy here.
                 execution = FunctionCall(function=function, arguments=raw_arguments)
                 if _function_requires_async_execution(function):
                     result = await execution.aexecute()

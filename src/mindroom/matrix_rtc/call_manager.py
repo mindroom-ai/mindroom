@@ -578,31 +578,27 @@ class CallManager:
             return None
         oldest_server_name = MatrixID.parse(oldest_member.user_id).domain
         local_server_name = MatrixID.parse(self._client.user_id).domain
-        if oldest_server_name != local_server_name:
-            if httpx.URL(advertised_focus).scheme != "https":
-                logger.warning(
-                    "call_federated_focus_requires_https",
-                    user_id=oldest_member.user_id,
-                    advertised_url=advertised_url,
+        if oldest_server_name == local_server_name:
+            trusted_url = self._config.calls.livekit_service_url
+            if trusted_url is None:
+                trusted_url = await discover_livekit_service_url(
+                    local_server_name,
+                    ssl_verify=self._ssl_verify,
+                    allow_private_networks=True,
                 )
-                return None
-            return _ResolvedService(url=advertised_focus, allow_private_networks=False)
-        trusted_url = self._config.calls.livekit_service_url
-        if trusted_url is None:
-            trusted_url = await discover_livekit_service_url(
-                local_server_name,
-                ssl_verify=self._ssl_verify,
-                allow_private_networks=True,
-            )
-        trusted_focus = _normalized_service_url(trusted_url) if trusted_url is not None else None
-        if advertised_focus != trusted_focus:
+            trusted_focus = _normalized_service_url(trusted_url) if trusted_url is not None else None
+            if advertised_focus == trusted_focus:
+                return _ResolvedService(url=advertised_focus, allow_private_networks=True)
+        if httpx.URL(advertised_focus).scheme != "https":
             logger.warning(
-                "call_focus_not_trusted",
+                "call_unpinned_focus_requires_https",
                 user_id=oldest_member.user_id,
                 advertised_url=advertised_url,
             )
             return None
-        return _ResolvedService(url=advertised_focus, allow_private_networks=True)
+        # The advertised focus may have been inherited from a departed
+        # founder, even when the oldest remaining member is on our server.
+        return _ResolvedService(url=advertised_focus, allow_private_networks=False)
 
     async def _fetch_grant(self, room_id: str, service: _ResolvedService) -> SfuGrant:
         client = self._client

@@ -2117,7 +2117,6 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.message_target",
     "mindroom.session_ids",
-    "mindroom.tool_approval",
     "mindroom.tool_system.runtime_context",
 ]
 
