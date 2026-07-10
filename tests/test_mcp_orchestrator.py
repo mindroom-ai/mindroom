@@ -586,6 +586,10 @@ async def test_config_publish_failure_restores_pre_stopped_mcp_entities(tmp_path
         call_order.append("stop")
         return {"code"}
 
+    async def sync_mcp_manager(config: Config) -> set[str]:
+        call_order.append("sync_current" if config is current_config else "sync_new")
+        return set()
+
     def reject_publish(_prepared: object) -> None:
         call_order.append("publish")
         msg = "stale API snapshot"
@@ -597,6 +601,7 @@ async def test_config_publish_failure_restores_pre_stopped_mcp_entities(tmp_path
     with (
         patch.object(orchestrator._external_trigger_runtime, "prepare_api_config_snapshot", side_effect=prepare_api),
         patch.object(orchestrator, "_stop_entities_before_mcp_sync", side_effect=stop_mcp_entities),
+        patch.object(orchestrator, "_sync_mcp_manager", side_effect=sync_mcp_manager),
         patch.object(
             orchestrator._external_trigger_runtime,
             "publish_prepared_api_config_snapshot",
@@ -611,7 +616,7 @@ async def test_config_publish_failure_restores_pre_stopped_mcp_entities(tmp_path
             changed_server_ids={"demo"},
         )
 
-    assert call_order == ["prepare", "stop", "publish", "restore"]
+    assert call_order == ["stop", "sync_new", "prepare", "publish", "sync_current", "restore"]
     restore.assert_awaited_once_with(current_config, {"code"})
     assert orchestrator.config is current_config
 

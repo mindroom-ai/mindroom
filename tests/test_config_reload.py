@@ -940,6 +940,7 @@ async def test_config_update_rebuilds_runtime_from_prepared_plugin_snapshot(tmp_
         with (
             patch.object(orchestrator_module.asyncio, "to_thread", side_effect=run_off_loop),
             patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
+            patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
             patch.object(
                 orchestrator._external_trigger_runtime,
                 "prepare_api_config_snapshot",
@@ -964,8 +965,9 @@ async def test_config_update_rebuilds_runtime_from_prepared_plugin_snapshot(tmp_
         with (
             patch.object(orchestrator_module.asyncio, "to_thread", side_effect=run_off_loop),
             patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
+            patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
         ):
-            rebuilt_config, _ = await orchestrator._apply_plugin_snapshot_for_config_update(
+            rebuilt_config, _, _ = await orchestrator._apply_plugin_snapshot_for_config_update(
                 current_config=current_config,
                 new_config=new_config,
                 changed_server_ids=set(),

@@ -8,7 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Never
 from unittest.mock import AsyncMock, Mock, patch
 
 import nio
@@ -20,6 +20,7 @@ from agno.tools import Toolkit
 from agno.workflow import Workflow, WorkflowFactory
 from agno.workflow.types import StepInput, StepOutput
 
+import mindroom.tool_system.metadata as tool_metadata_module
 import mindroom.tools  # noqa: F401
 from mindroom.approval_manager import SentApprovalEvent, initialize_approval_store
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -37,6 +38,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.tool_approval import ToolCallWorkflowOrigin, _matching_tool_approval_rule, _shutdown_approval_store
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
+from mindroom.workers.runtime import serialized_kubernetes_worker_validation_snapshot
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 
@@ -2118,6 +2120,34 @@ def test_participant_run_config_requires_approval_for_granted_tools(tmp_path: Pa
     assert run_config.tool_approval.default == "require_approval"
     assert run_config.tool_approval.rules == []
     assert context.config.tool_approval.default == "auto_approve"
+
+
+def test_participant_run_config_preserves_bound_worker_tool_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The approval-only config copy must reuse its committed tool snapshot."""
+    context = _make_context(tmp_path)
+    toolkit = Toolkit(name="fake_shell")
+    toolkit.functions["run_shell_command"] = SimpleNamespace(name="run_shell_command")
+
+    def reject_plugin_discovery(*_args: object, **_kwargs: object) -> Never:
+        msg = "participant config copy triggered plugin discovery"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(
+        tool_metadata_module,
+        "_compute_resolved_tool_state_for_runtime",
+        reject_plugin_discovery,
+    )
+
+    run_config = dynamic_workflow_module._participant_run_config(context, {"shell": toolkit})
+    snapshot = serialized_kubernetes_worker_validation_snapshot(
+        context.runtime_paths,
+        runtime_config=run_config,
+    )
+
+    assert "shell" in snapshot
 
 
 def test_participant_run_config_pre_approves_allowed_tools(tmp_path: Path) -> None:

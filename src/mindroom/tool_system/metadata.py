@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import functools
+import itertools
 import math
 import os
 import sys
@@ -63,6 +64,7 @@ _SAFE_TOOL_INIT_OVERRIDE_FIELDS = frozenset({"base_dir", "shell_path_prepend"})
 _TEXT_CONFIG_FIELD_TYPES = frozenset({"password", "select", "text", "url"})
 _AUTHORED_OVERRIDE_INHERIT = "__MINDROOM_INHERIT__"
 _VALIDATION_PLUGIN_MODULE_SUFFIX = "__validation__"
+_VALIDATION_PLUGIN_GENERATIONS = itertools.count()
 _OMIT_TOOL_CONFIG_ARG = object()
 
 
@@ -707,6 +709,25 @@ def get_tool_by_name(
             raise second_error from first_error
 
 
+def _remove_owned_plugin_modules(modules: tuple[tuple[str, ModuleType], ...]) -> None:
+    for package_name, package in modules:
+        if "." in package_name or sys.modules.get(package_name) is not package:
+            continue
+        for module_name in tuple(sys.modules):
+            if module_name == package_name or module_name.startswith(f"{package_name}."):
+                sys.modules.pop(module_name, None)
+
+
+@dataclass(frozen=True)
+class _OwnedPluginModules:
+    """Keep one validation package importable until its resolved state is released."""
+
+    modules: tuple[tuple[str, ModuleType], ...]
+
+    def __post_init__(self) -> None:
+        weakref.finalize(self, _remove_owned_plugin_modules, self.modules)
+
+
 @dataclass(frozen=True)
 class _ResolvedToolState:
     """Runtime-visible tool state plus validation-only skipped-plugin metadata."""
@@ -715,6 +736,7 @@ class _ResolvedToolState:
     tool_metadata: dict[str, ToolMetadata]
     unavailable_tool_metadata: dict[str, ToolMetadata]
     hook_registry: HookRegistry
+    owned_plugin_modules: _OwnedPluginModules | None = None
 
 
 @dataclass(frozen=True)
@@ -754,18 +776,61 @@ def _module_origin_within_root(module: ModuleType, root: Path) -> bool:
     return resolved is not None and resolved.is_relative_to(root)
 
 
+def _finish_validation_plugin_import(
+    *,
+    plugin_root: Path,
+    validation_package_root: str,
+    previous_modules_within_root: Mapping[str, ModuleType],
+    previous_packages: Mapping[str, ModuleType | None],
+    keep_validation_modules: bool,
+) -> tuple[tuple[str, ModuleType], ...]:
+    current_modules = sys.modules.copy()
+    owned_plugin_modules = tuple(
+        sorted(
+            (
+                (module_name, module)
+                for module_name, module in current_modules.items()
+                if module_name == validation_package_root or module_name.startswith(f"{validation_package_root}.")
+            ),
+            key=lambda item: item[0],
+        ),
+    )
+    owned_modules_by_name = dict(owned_plugin_modules)
+    for module_name, module in current_modules.items():
+        if keep_validation_modules and owned_modules_by_name.get(module_name) is module:
+            continue
+        if module_name not in previous_modules_within_root and _module_origin_within_root(module, plugin_root):
+            sys.modules.pop(module_name, None)
+    sys.modules.update(previous_modules_within_root)
+    if keep_validation_modules:
+        return owned_plugin_modules
+    plugin_module._restore_plugin_package_chain(dict(previous_packages))
+    for module_name, _module in owned_plugin_modules:
+        sys.modules.pop(module_name, None)
+    return ()
+
+
 def _execute_validation_plugin_module(
     plugin_name: str,
     plugin_root: Path,
     module_path: Path,
     registrations_by_module: dict[str, dict[str, ToolMetadata]],
-) -> tuple[str, tuple[HookCallback, ...]]:
+    *,
+    validation_plugin_name: str | None = None,
+) -> tuple[str, tuple[HookCallback, ...], tuple[tuple[str, ModuleType], ...]]:
     """Execute one plugin module into a temporary validation import context."""
-    runtime_module_name = plugin_module._module_name(plugin_name, plugin_root, module_path)
-    validation_module_name = f"{runtime_module_name}{_VALIDATION_PLUGIN_MODULE_SUFFIX}{id(registrations_by_module)}"
+    validation_plugin_name = validation_plugin_name or (
+        f"{plugin_name}{_VALIDATION_PLUGIN_MODULE_SUFFIX}{next(_VALIDATION_PLUGIN_GENERATIONS)}"
+    )
+    validation_module_name = plugin_module._module_name(validation_plugin_name, plugin_root, module_path)
+    validation_package_root = validation_module_name.split(".", 1)[0]
     loaded_modules = sys.modules.copy()
-    previous_module = loaded_modules.get(validation_module_name)
-    prepared_module = plugin_module._prepare_module(plugin_name, plugin_root, module_path, validation_module_name)
+    prepared_module = plugin_module._prepare_module(
+        validation_plugin_name,
+        plugin_root,
+        module_path,
+        validation_module_name,
+    )
     if prepared_module is None:
         msg = f"Failed to load plugin validation module: {module_path}"
         raise ToolMetadataValidationError(msg)
@@ -780,6 +845,7 @@ def _execute_validation_plugin_module(
     execution_error: Exception | None = None
     created_task_count = 0
     discovered_hooks: tuple[HookCallback, ...] = ()
+    owned_plugin_modules: tuple[tuple[str, ModuleType], ...] = ()
     try:
         with (
             scoped_plugin_registration_store(registrations_by_module),
@@ -793,19 +859,14 @@ def _execute_validation_plugin_module(
         execution_error = exc
     finally:
         created_task_count = plugin_module._cancel_tasks_created_since(tasks_before_import)
-        for loaded_module_name, loaded_module in sys.modules.copy().items():
-            if loaded_module_name not in previous_modules_within_root and _module_origin_within_root(
-                loaded_module,
-                plugin_root,
-            ):
-                sys.modules.pop(loaded_module_name, None)
-        for loaded_module_name, loaded_module in previous_modules_within_root.items():
-            sys.modules[loaded_module_name] = loaded_module
-        plugin_module._restore_plugin_package_chain(previous_packages)
-        if previous_module is None:
-            sys.modules.pop(validation_module_name, None)
-        else:
-            sys.modules[validation_module_name] = previous_module
+        keep_validation_modules = execution_error is None and created_task_count == 0
+        owned_plugin_modules = _finish_validation_plugin_import(
+            plugin_root=plugin_root,
+            validation_package_root=validation_package_root,
+            previous_modules_within_root=previous_modules_within_root,
+            previous_packages=previous_packages,
+            keep_validation_modules=keep_validation_modules,
+        )
 
     if execution_error is not None:
         msg = f"Plugin validation module execution failed for {module_path}: {execution_error}"
@@ -813,7 +874,7 @@ def _execute_validation_plugin_module(
     if created_task_count:
         msg = f"Plugin validation module created async tasks during import: {module_path}"
         raise ToolMetadataValidationError(msg)
-    return validation_module_name, discovered_hooks
+    return validation_module_name, discovered_hooks, owned_plugin_modules
 
 
 _RESOLVED_TOOL_STATE_LOCK = threading.RLock()
@@ -919,26 +980,35 @@ def _compute_resolved_tool_state_for_runtime(
     unavailable_tool_metadata: dict[str, ToolMetadata] = {}
     active_plugins: list[tuple[str, str]] = []
     hook_plugins: list[_ResolvedPluginHooks] = []
+    owned_plugin_modules: dict[str, ModuleType] = {}
     for plugin_base, plugin_entry, plugin_order in plugin_bases:
         candidate_registrations: dict[str, dict[str, ToolMetadata]] = {}
         candidate_active_plugins: list[tuple[str, str]] = []
         candidate_hooks: tuple[HookCallback, ...] = ()
+        candidate_owned_modules: dict[str, ModuleType] = {}
+        validation_plugin_name = (
+            f"{plugin_base.name}{_VALIDATION_PLUGIN_MODULE_SUFFIX}{next(_VALIDATION_PLUGIN_GENERATIONS)}"
+        )
         try:
             if plugin_base.tools_module_path is None:
                 if plugin_base.hooks_module_path is not None:
-                    _, candidate_hooks = _execute_validation_plugin_module(
+                    _, candidate_hooks, hook_modules = _execute_validation_plugin_module(
                         plugin_base.name,
                         plugin_base.root,
                         plugin_base.hooks_module_path,
                         candidate_registrations,
+                        validation_plugin_name=validation_plugin_name,
                     )
+                    candidate_owned_modules.update(hook_modules)
             else:
-                tool_module_name, tool_module_hooks = _execute_validation_plugin_module(
+                tool_module_name, tool_module_hooks, tool_modules = _execute_validation_plugin_module(
                     plugin_base.name,
                     plugin_base.root,
                     plugin_base.tools_module_path,
                     candidate_registrations,
+                    validation_plugin_name=validation_plugin_name,
                 )
+                candidate_owned_modules.update(tool_modules)
                 candidate_active_plugins.append(
                     (
                         plugin_base.name,
@@ -949,12 +1019,14 @@ def _compute_resolved_tool_state_for_runtime(
                     plugin_base.hooks_module_path is not None
                     and plugin_base.hooks_module_path != plugin_base.tools_module_path
                 ):
-                    _, candidate_hooks = _execute_validation_plugin_module(
+                    _, candidate_hooks, hook_modules = _execute_validation_plugin_module(
                         plugin_base.name,
                         plugin_base.root,
                         plugin_base.hooks_module_path,
                         candidate_registrations,
+                        validation_plugin_name=validation_plugin_name,
                     )
+                    candidate_owned_modules.update(hook_modules)
                 else:
                     candidate_hooks = tool_module_hooks
         except Exception as exc:
@@ -968,6 +1040,7 @@ def _compute_resolved_tool_state_for_runtime(
 
         validation_registrations.update(candidate_registrations)
         active_plugins.extend(candidate_active_plugins)
+        owned_plugin_modules.update(candidate_owned_modules)
         hook_plugins.append(
             _ResolvedPluginHooks(
                 name=plugin_base.name,
@@ -995,6 +1068,7 @@ def _compute_resolved_tool_state_for_runtime(
         desired_metadata,
         unavailable_tool_metadata,
         HookRegistry.from_plugins(hook_plugins),
+        _OwnedPluginModules(tuple(sorted(owned_plugin_modules.items()))),
     )
 
 
@@ -1082,6 +1156,7 @@ def refresh_mcp_tool_state_for_runtime(
         },
         hook_registry=current_state.hook_registry,
         unavailable_tool_names=config.unavailable_plugin_tool_names,
+        owned_plugin_modules=current_state.owned_plugin_modules,
     )
     bind_resolved_tool_state_cache(refreshed_state, config)
 
@@ -1194,6 +1269,7 @@ def resolved_tool_runtime_state_from_registry(
     *,
     hook_registry: HookRegistry | None = None,
     unavailable_tool_names: Iterable[str] = (),
+    owned_plugin_modules: _OwnedPluginModules | None = None,
 ) -> ResolvedToolRuntimeState:
     """Build carried runtime state from one already-staged plugin registry."""
     from mindroom.hooks import HookRegistry  # noqa: PLC0415
@@ -1220,6 +1296,7 @@ def resolved_tool_runtime_state_from_registry(
             metadata,
             unavailable_metadata,
             hook_registry or HookRegistry.empty(),
+            owned_plugin_modules,
         ),
     )
 

@@ -377,7 +377,7 @@ def test_plugin_validation_uses_sys_modules_snapshot(tmp_path: Path, monkeypatch
     snapshot = capture_tool_registry_snapshot()
     assert isinstance(snapshot.plugin_modules, dict)
 
-    module_name, _ = _execute_validation_plugin_module("demo", plugin_root, module_path, {})
+    module_name, _, _ = _execute_validation_plugin_module("demo", plugin_root, module_path, {})
     assert module_name
     assert "demo" in module_name
     assert "__validation__" in module_name
@@ -856,6 +856,69 @@ def test_mcp_refresh_preserves_plugin_tool_matching_disabled_server(tmp_path: Pa
     refreshed_state = metadata_module._resolved_tool_state_for_runtime(runtime_paths, config)
     assert refreshed_state.tool_registry["mcp_demo"] is plugin_factory
     assert refreshed_state.tool_metadata["mcp_demo"] is plugin_metadata
+
+
+def test_runtime_bound_plugin_factory_supports_lazy_relative_imports(tmp_path: Path) -> None:
+    """Executable plugin snapshots must retain their isolated package for lazy imports."""
+    plugin_root = tmp_path / "plugins" / "lazy"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "lazy", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "helper.py").write_text("TOOLKIT_NAME = 'lazy_toolkit'\n", encoding="utf-8")
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.declarations import ToolCategory\n"
+        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "\n"
+        "class LazyToolkit(Toolkit):\n"
+        "    def __init__(self):\n"
+        "        from .helper import TOOLKIT_NAME\n"
+        "        super().__init__(name=TOOLKIT_NAME, tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='lazy_tool',\n"
+        "    display_name='Lazy Tool',\n"
+        "    description='Test lazy relative imports.',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def lazy_tool():\n"
+        "    return LazyToolkit\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml")
+    config = RuntimeConfig.from_authored(
+        Config.model_validate({"defaults": {"tools": []}, "plugins": ["./plugins/lazy"]}),
+        runtime_paths,
+    )
+    owned_plugin_modules = metadata_module._resolved_tool_state_for_runtime(
+        runtime_paths,
+        config,
+    ).owned_plugin_modules
+    assert owned_plugin_modules is not None
+    owned_package_names = {
+        module_name for module_name, _module in owned_plugin_modules.modules if "." not in module_name
+    }
+    assert owned_package_names
+    del owned_plugin_modules
+
+    try:
+        toolkit = get_tool_by_name(
+            "lazy_tool",
+            runtime_paths,
+            runtime_config=config,
+            disable_sandbox_proxy=True,
+            worker_target=None,
+        )
+        assert toolkit.name == "lazy_toolkit"
+    finally:
+        metadata_module.clear_resolved_tool_state_cache()
+    assert not any(
+        module_name == package_name or module_name.startswith(f"{package_name}.")
+        for package_name in owned_package_names
+        for module_name in sys.modules
+    )
 
 
 def test_deserialize_tool_validation_snapshot_rejects_non_boolean_runtime_loadable() -> None:

@@ -817,7 +817,7 @@ class _MultiAgentOrchestrator:
         current_config: RuntimeConfig,
         new_config: RuntimeConfig,
         changed_server_ids: set[str],
-    ) -> tuple[RuntimeConfig, set[str]]:
+    ) -> tuple[RuntimeConfig, set[str], set[str]]:
         """Publish one config with the exact plugin snapshot staged for it."""
         prepared_plugin_roots, prepared_plugin_root_snapshots = await asyncio.to_thread(
             self.plugin_watch.capture,
@@ -834,15 +834,17 @@ class _MultiAgentOrchestrator:
             new_config,
             prepared_plugin_reload.resolved_tool_state,
         )
-        prepared_api_snapshot = await self._external_trigger_runtime.prepare_api_config_snapshot(new_config)
         pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
             current_config,
             new_config,
             changed_server_ids,
         )
         try:
+            changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
+            prepared_api_snapshot = await self._external_trigger_runtime.prepare_api_config_snapshot(new_config)
             self._external_trigger_runtime.publish_prepared_api_config_snapshot(prepared_api_snapshot)
         except Exception:
+            await self._sync_mcp_manager(current_config)
             await self._restore_pre_stopped_mcp_entities(current_config, pre_stopped_mcp_entities)
             raise
         self.config = new_config
@@ -855,7 +857,7 @@ class _MultiAgentOrchestrator:
             prepared_plugin_root_snapshots,
         )
         self._activate_hook_registry(new_hook_registry)
-        return new_config, pre_stopped_mcp_entities
+        return new_config, pre_stopped_mcp_entities, changed_runtime_mcp_servers
 
     async def _start_entities_once(
         self,
@@ -1435,13 +1437,16 @@ class _MultiAgentOrchestrator:
         replay_startup_maintenance = await self._startup_maintenance.cancel()
 
         try:
-            new_config, pre_stopped_mcp_entities = await self._apply_plugin_snapshot_for_config_update(
+            (
+                new_config,
+                pre_stopped_mcp_entities,
+                changed_runtime_mcp_servers,
+            ) = await self._apply_plugin_snapshot_for_config_update(
                 current_config=current_config,
                 new_config=new_config,
                 changed_server_ids=plan.changed_mcp_servers,
             )
             plan = replace(plan, new_config=new_config)
-            changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
             await self._sync_event_cache_service(new_config)
             logger.info(
                 "updating_config_authorization",

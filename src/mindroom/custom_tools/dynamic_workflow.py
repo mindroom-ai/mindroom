@@ -29,7 +29,11 @@ from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.tool_approval import ToolCallWorkflowOrigin
-from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
+from mindroom.tool_system.catalog import (
+    bind_resolved_tool_state_cache,
+    resolved_tool_metadata_for_runtime,
+    resolved_tool_runtime_state_for_runtime,
+)
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_execution_identity_from_runtime_context,
@@ -794,7 +798,10 @@ def _participant_run_config(context: ToolRuntimeContext, toolkits_by_name: dict[
             ],
         },
     )
-    return context.config.model_copy(update={"tool_approval": tool_approval})
+    run_config = context.config.model_copy(update={"tool_approval": tool_approval})
+    resolved_tool_state = resolved_tool_runtime_state_for_runtime(context.runtime_paths, context.config)
+    bind_resolved_tool_state_cache(resolved_tool_state, run_config)
+    return run_config
 
 
 def _workflow_allowed_tools(context: ToolRuntimeContext) -> frozenset[str]:
