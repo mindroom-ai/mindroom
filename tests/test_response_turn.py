@@ -309,13 +309,52 @@ def test_blocking_errored_attempt_returns_user_text() -> None:
     assert result == "friendly error"
 
 
+def test_blocking_errored_attempt_preserves_seeded_metadata_and_tool_artifacts() -> None:
+    """Preparation metadata and side-effecting tools survive an errored attempt."""
+    log = _AdapterLog()
+    completed = _trace("write_file")
+    interrupted = ToolTraceEntry(type="tool_call_started", tool_name="run_shell_command")
+    recorder = _FakeTurnRecorder(run_metadata={"matrix_seen_event_ids": ["$reply"]})
+
+    async def _attempt(_run: TurnRunState, _c: DynamicContinuationRunState) -> ErroredAttempt:
+        return ErroredAttempt(
+            "friendly error",
+            partial_text="Partial answer",
+            completed_tools=(completed,),
+            interrupted_tools=(interrupted,),
+        )
+
+    result = asyncio.run(
+        run_blocking_response_turn(
+            _ctx(),
+            _blocking_adapter(log, _attempt),
+            TurnSinks(turn_recorder=cast("Any", recorder)),
+            continuation=_continuation(),
+        ),
+    )
+
+    assert result == "friendly error"
+    assert recorder.interrupted_calls == [
+        {
+            "run_metadata": {"matrix_seen_event_ids": ["$reply"]},
+            "assistant_text": "Partial answer",
+            "completed_tools": [completed],
+            "interrupted_tools": [interrupted],
+            "original_status": RunStatus.error,
+        },
+    ]
+
+
 def test_blocking_errored_attempt_persists_zero_output_replay() -> None:
     """A zero-output errored attempt still persists a replay carrying the turn's events."""
     log = _AdapterLog()
 
     async def _attempt(run: TurnRunState, _c: DynamicContinuationRunState) -> ErroredAttempt:
         run.run_metadata = {"room_id": "!room", "matrix_seen_event_ids": ["$user_msg"]}
-        return ErroredAttempt("friendly error")
+        return ErroredAttempt(
+            "friendly error",
+            completed_tools=(_trace("write_file"),),
+        )
 
     result = asyncio.run(
         run_blocking_response_turn(
@@ -332,6 +371,7 @@ def test_blocking_errored_attempt_persists_zero_output_replay() -> None:
     assert snapshot.session_id == "session-1"
     assert snapshot.run_id == "run-1"
     assert snapshot.partial_text == ""
+    assert [tool.tool_name for tool in snapshot.completed_tools] == ["write_file"]
     assert snapshot.run_metadata == {"room_id": "!room", "matrix_seen_event_ids": ["$user_msg"]}
     assert snapshot.original_status is RunStatus.error
 

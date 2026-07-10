@@ -1483,11 +1483,15 @@ async def ai_response(
                 metadata_content=metadata_content,
             )
         if response.status == RunStatus.error:
+            completed_tools, interrupted_tools = _extract_cancelled_tool_trace(response)
             return ErroredAttempt(
                 get_user_friendly_error_message(
                     Exception(str(response.content or "Unknown agent error")),
                     agent_name,
                 ),
+                partial_text=_extract_interrupted_partial_text(None, messages=response.messages),
+                completed_tools=tuple(completed_tools),
+                interrupted_tools=tuple(interrupted_tools),
                 metadata_content=metadata_content,
             )
         return CompletedAttempt(

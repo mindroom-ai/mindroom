@@ -2539,6 +2539,59 @@ async def test_auto_resume_cap_backfills_after_newer_human_activity(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_auto_resume_rechecks_human_activity_after_rate_limit_delay(tmp_path: Path) -> None:
+    """A reply arriving during the send delay must suppress that thread's stale resume."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    interrupted = [
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id=f"$thread-{timestamp}",
+            target_event_id=f"$target-{timestamp}",
+            partial_text=str(timestamp),
+            agent_name="test_agent",
+            timestamp_ms=timestamp,
+        )
+        for timestamp in (100, 200, 300)
+    ]
+    human_threads: set[str] = set()
+
+    async def has_newer_human_activity(interrupted_thread: InterruptedThread, **_kwargs: object) -> bool:
+        return interrupted_thread.thread_id in human_threads
+
+    async def human_replies_during_delay(_delay: float) -> None:
+        human_threads.add("$thread-200")
+
+    with (
+        patch(
+            "mindroom.matrix.stale_stream_cleanup._has_newer_human_thread_activity",
+            new=AsyncMock(side_effect=has_newer_human_activity),
+        ),
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$resume")),
+        ) as mock_send,
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.asyncio.sleep",
+            new=AsyncMock(side_effect=human_replies_during_delay),
+        ),
+    ):
+        resumed_count = await auto_resume_interrupted_threads(
+            client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            max_resumes=2,
+        )
+
+    assert resumed_count == 2
+    assert [call.args[2]["m.relates_to"]["event_id"] for call in mock_send.await_args_list] == [
+        "$thread-300",
+        "$thread-100",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_auto_resume_cap_uses_timestamps_not_room_iteration_order(tmp_path: Path) -> None:
     """Auto-resume should prefer genuinely newer interruptions even if older rooms were appended later."""
     config = _make_config(tmp_path)

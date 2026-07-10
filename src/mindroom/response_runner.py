@@ -634,12 +634,13 @@ class ResponseRunner:
             completed_tools = list(recorder.completed_tools)
         if not interrupted_tools:
             interrupted_tools = list(recorder.interrupted_tools)
+        interruption_status = recorder.interruption_status if recorder.outcome == "interrupted" else original_status
         recorder.record_interrupted(
             run_metadata=recorder.run_metadata,
             assistant_text=partial_text,
             completed_tools=completed_tools,
             interrupted_tools=interrupted_tools,
-            original_status=original_status,
+            original_status=interruption_status,
         )
 
     def has_active_response_for_target(self, target: MessageTarget) -> bool:

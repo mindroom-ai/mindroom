@@ -1739,8 +1739,20 @@ async def test_team_response_returns_friendly_error_for_error_status() -> None:
 
     mock_team = _make_test_team()
     mock_team.arun = AsyncMock(
-        return_value=TeamRunOutput(content="validation failed in team", status=RunStatus.error),
+        return_value=TeamRunOutput(
+            content="validation failed in team",
+            tools=[
+                ToolExecution(
+                    tool_name="write_file",
+                    tool_args={"path": "result.txt"},
+                    result="saved",
+                    tool_call_error=False,
+                ),
+            ],
+            status=RunStatus.error,
+        ),
     )
+    recorder = _team_turn_recorder("Analyze this.")
 
     fake_agent = _make_test_agent("GeneralAgent")
     with (
@@ -1756,14 +1768,18 @@ async def test_team_response_returns_friendly_error_for_error_status() -> None:
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
-            turn_recorder=_team_turn_recorder("Analyze this."),
+            turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
-            ctx=make_turn_context(session_id=None),
+            ctx=make_turn_context(session_id=None, reply_to_event_id="e1"),
         )
 
     assert response == "friendly-team-error"
     mock_friendly.assert_called_once()
+    snapshot = recorder.interrupted_snapshot()
+    assert snapshot.original_status is RunStatus.error
+    assert snapshot.seen_event_ids == ("e1",)
+    assert [tool.tool_name for tool in snapshot.completed_tools] == ["write_file"]
 
 
 @pytest.mark.asyncio

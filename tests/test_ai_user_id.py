@@ -1341,10 +1341,20 @@ class TestUserIdPassthrough:
     async def test_ai_response_returns_friendly_error_for_error_status(self, tmp_path: Path) -> None:
         """Errored Agno RunOutput values must not be surfaced as successful replies."""
         mock_agent = MagicMock()
-        mock_run_output = MagicMock()
-        mock_run_output.content = "validation failed in agno"
-        mock_run_output.status = RunStatus.error
-        mock_run_output.tools = None
+        mock_run_output = RunOutput(
+            agent_id="general",
+            content="validation failed in agno",
+            tools=[
+                ToolExecution(
+                    tool_name="write_file",
+                    tool_args={"path": "result.txt"},
+                    result="saved",
+                    tool_call_error=False,
+                ),
+            ],
+            status=RunStatus.error,
+        )
+        recorder = TurnRecorder(user_message="test")
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
@@ -1357,14 +1367,19 @@ class TestUserIdPassthrough:
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
 
             response = await ai_response(
-                make_turn_context("general", session_id="session1"),
+                make_turn_context("general", session_id="session1", reply_to_event_id="e1"),
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
                 config=_config(),
+                turn_recorder=recorder,
             )
 
         assert response == "friendly-error"
         mock_friendly_error.assert_called_once()
+        snapshot = recorder.interrupted_snapshot()
+        assert snapshot.original_status is RunStatus.error
+        assert snapshot.seen_event_ids == ("e1",)
+        assert [tool.tool_name for tool in snapshot.completed_tools] == ["write_file"]
 
     @pytest.mark.asyncio
     async def test_ai_response_rejects_configured_team_targets(self, tmp_path: Path) -> None:

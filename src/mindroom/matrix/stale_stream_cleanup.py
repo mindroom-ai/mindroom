@@ -228,6 +228,9 @@ async def auto_resume_interrupted_threads(
         if max_resumes is not None and resumed_count >= max_resumes:
             break
         try:
+            if send_attempted:
+                await asyncio.sleep(delay)
+                send_attempted = False
             if await _has_newer_human_thread_activity(
                 interrupted_thread,
                 conversation_cache=conversation_cache,
@@ -246,8 +249,6 @@ async def auto_resume_interrupted_threads(
                 config=config,
                 runtime_paths=runtime_paths,
             )
-            if send_attempted:
-                await asyncio.sleep(delay)
             send_attempted = True
             delivered = await send_message_result(client, interrupted_thread.room_id, content)
             if delivered is not None:

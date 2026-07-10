@@ -284,6 +284,9 @@ class ErroredAttempt:
     """One attempt that resolved to user-facing error text."""
 
     user_message_text: str
+    partial_text: str = ""
+    completed_tools: tuple[ToolTraceEntry, ...] = ()
+    interrupted_tools: tuple[ToolTraceEntry, ...] = ()
     metadata_content: dict[str, Any] | None = None
 
 
@@ -408,36 +411,65 @@ def _fallback_matrix_run_metadata(ctx: ResponseTurnContext, run: TurnRunState) -
     )
 
 
+def _interrupted_run_metadata(
+    ctx: ResponseTurnContext,
+    sinks: TurnSinks,
+    run: TurnRunState,
+) -> dict[str, Any] | None:
+    """Return the best available Matrix metadata for an interrupted replay."""
+    if run.run_metadata is not None:
+        return run.run_metadata
+    if sinks.turn_recorder is not None and sinks.turn_recorder.run_metadata is not None:
+        return sinks.turn_recorder.run_metadata
+    return _fallback_matrix_run_metadata(ctx, run)
+
+
 def _record_errored_turn(
     ctx: ResponseTurnContext,
     persist: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None] | None,
     sinks: TurnSinks,
     run: TurnRunState,
+    resolution: ErroredAttempt | None = None,
 ) -> None:
     """Record one failed turn through the canonical interrupted-replay path."""
     recorder = sinks.turn_recorder
-    run_metadata = run.run_metadata
-    if run_metadata is None and recorder is not None:
-        run_metadata = recorder.run_metadata
-    if run_metadata is None:
-        run_metadata = _fallback_matrix_run_metadata(ctx, run)
+    run_metadata = _interrupted_run_metadata(ctx, sinks, run)
     if recorder is not None:
-        run.turn_state.record_interrupted_from_recorder(
-            recorder,
-            run_metadata=run_metadata,
-            original_status=RunStatus.error,
-        )
+        if resolution is None:
+            run.turn_state.record_interrupted_from_recorder(
+                recorder,
+                run_metadata=run_metadata,
+                original_status=RunStatus.error,
+            )
+        else:
+            run.turn_state.record_interrupted(
+                recorder,
+                run_metadata=run_metadata,
+                assistant_text=resolution.partial_text or recorder.assistant_text,
+                completed_tools=list(resolution.completed_tools),
+                interrupted_tools=list(resolution.interrupted_tools) or recorder.interrupted_tools,
+                original_status=RunStatus.error,
+            )
         return
     if run.standalone_replay_persisted or persist is None:
         return
+    partial_text = resolution.partial_text if resolution is not None else run.turn_state.assistant_text
+    completed_tools = (
+        run.turn_state.completed_tools_for(resolution.completed_tools)
+        if resolution is not None
+        else list(run.turn_state.completed_tools)
+    )
+    interrupted_tools = (
+        list(resolution.interrupted_tools) if resolution is not None else list(run.turn_state.interrupted_tools)
+    )
     persist(
         run.scope_context,
         StandaloneReplaySnapshot(
             session_id=ctx.session_id,
             run_id=ctx.run_id or str(uuid4()),
-            partial_text=run.turn_state.assistant_text,
-            completed_tools=list(run.turn_state.completed_tools),
-            interrupted_tools=list(run.turn_state.interrupted_tools),
+            partial_text=partial_text,
+            completed_tools=completed_tools,
+            interrupted_tools=interrupted_tools,
             run_metadata=run_metadata,
             original_status=RunStatus.error,
         ),
@@ -450,6 +482,7 @@ def _persist_attempt_cancelled_replay(
     persist: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None],
     run: TurnRunState,
     resolution: CancelledAttempt,
+    run_metadata: dict[str, Any] | None,
 ) -> None:
     """Persist the standalone interrupted replay for one cancelled attempt."""
     persist(
@@ -460,7 +493,7 @@ def _persist_attempt_cancelled_replay(
             partial_text=resolution.partial_text,
             completed_tools=run.turn_state.completed_tools_for(resolution.completed_tools),
             interrupted_tools=list(resolution.interrupted_tools),
-            run_metadata=run.run_metadata,
+            run_metadata=run_metadata,
         ),
     )
     run.standalone_replay_persisted = True
@@ -635,22 +668,35 @@ def _settle_blocking_attempt(
     # continuation attempt's payload must not ride out on a later resolution.
     if isinstance(resolution, CancelledAttempt):
         _publish_run_metadata(sinks, resolution.metadata_content)
+        interrupted_run_metadata = _interrupted_run_metadata(ctx, sinks, run)
         run.turn_state.record_interrupted(
             sinks.turn_recorder,
-            run_metadata=run.run_metadata,
+            run_metadata=interrupted_run_metadata,
             assistant_text=resolution.partial_text,
             completed_tools=list(resolution.completed_tools),
             interrupted_tools=list(resolution.interrupted_tools),
         )
         if sinks.turn_recorder is None and adapter.persist_standalone_replay is not None:
-            _persist_attempt_cancelled_replay(ctx, adapter.persist_standalone_replay, run, resolution)
+            _persist_attempt_cancelled_replay(
+                ctx,
+                adapter.persist_standalone_replay,
+                run,
+                resolution,
+                interrupted_run_metadata,
+            )
         raise build_cancelled_error(resolution.reason)
     if isinstance(resolution, ErroredAttempt):
         _publish_run_metadata(sinks, resolution.metadata_content)
         # A failed attempt's run is dropped from agno history, so record the
         # interruption to keep the user's message replayable even with zero
         # partial output.
-        _record_errored_turn(ctx, adapter.persist_standalone_replay, sinks, run)
+        _record_errored_turn(
+            ctx,
+            adapter.persist_standalone_replay,
+            sinks,
+            run,
+            resolution,
+        )
         return resolution.user_message_text
     settle = _settle_completed_attempt(
         ctx,
@@ -811,9 +857,10 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                     if isinstance(resolution, CancelledAttempt):
                         # The streaming envelope records the interruption before
                         # publishing cancelled run metadata to the collector.
+                        interrupted_run_metadata = _interrupted_run_metadata(ctx, sinks, run)
                         run.turn_state.record_interrupted(
                             sinks.turn_recorder,
-                            run_metadata=run.run_metadata,
+                            run_metadata=interrupted_run_metadata,
                             assistant_text=resolution.partial_text,
                             completed_tools=list(resolution.completed_tools),
                             interrupted_tools=list(resolution.interrupted_tools),
@@ -825,11 +872,18 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                                 adapter.persist_standalone_replay,
                                 run,
                                 resolution,
+                                interrupted_run_metadata,
                             )
                         raise build_cancelled_error(resolution.reason)
                     if isinstance(resolution, ErroredAttempt):
                         _publish_run_metadata(sinks, resolution.metadata_content)
-                        _record_errored_turn(ctx, adapter.persist_standalone_replay, sinks, run)
+                        _record_errored_turn(
+                            ctx,
+                            adapter.persist_standalone_replay,
+                            sinks,
+                            run,
+                            resolution,
+                        )
                         yield adapter.make_text_chunk(resolution.user_message_text)
                         return
                     settle = _settle_completed_attempt(

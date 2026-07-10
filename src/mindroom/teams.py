@@ -2174,11 +2174,14 @@ async def team_response(  # noqa: C901, PLR0915
                 metadata_content=metadata_content,
             )
         if isinstance(response, (TeamRunOutput, RunOutput)) and is_errored_run_output(response):
+            completed_tools, interrupted_tools = _extract_cancelled_team_tool_trace(response)
             return ErroredAttempt(
                 get_user_friendly_error_message(
                     Exception(str(response.content or "Unknown team error")),
                     team_name,
                 ),
+                completed_tools=tuple(completed_tools),
+                interrupted_tools=tuple(interrupted_tools),
                 metadata_content=metadata_content,
             )
         if pending_retry_decision is not None:

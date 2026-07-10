@@ -1206,6 +1206,37 @@ def test_record_stream_delivery_error_records_zero_output_interruption(
     assert snapshot.seen_event_ids == ("$user_msg",)
 
 
+def test_record_stream_delivery_error_preserves_provider_error_status(tmp_path: Path) -> None:
+    """A later delivery cancellation cannot downgrade an observed provider error."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+    )
+    recorder = TurnRecorder(user_message="Hello")
+    recorder.record_interrupted(
+        run_metadata={"matrix_seen_event_ids": ["$user_msg"]},
+        assistant_text="Provider failed",
+        completed_tools=[],
+        interrupted_tools=[],
+        original_status=RunStatus.error,
+    )
+
+    coordinator._record_stream_delivery_error(
+        recorder=recorder,
+        accumulated_text="Provider failed",
+        tool_trace=[],
+        original_status=RunStatus.cancelled,
+    )
+
+    assert recorder.interruption_status is RunStatus.error
+
+
 @pytest.mark.asyncio
 async def test_generate_team_response_helper_persists_original_user_message_for_cancelled_team_run(
     tmp_path: Path,
