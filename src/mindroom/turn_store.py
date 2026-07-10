@@ -76,20 +76,29 @@ class TurnStore:
         """Persist one terminal turn, preserving any previously recorded optional facts."""
         if not turn_record.source_event_ids:
             return
-        existing_record = self._existing_record_for_sources(turn_record.source_event_ids)
-        merged_record = (
-            _backfill_missing_turn_facts(turn_record, existing_record) if existing_record is not None else turn_record
-        )
-        visible_echo_event_id = merged_record.visible_echo_event_id or self.visible_echo_for_sources(
-            merged_record.source_event_ids,
-        )
-        self._ledger.record_handled_turn(
-            replace(
+
+        def terminal_record(existing_records: tuple[TurnRecord, ...]) -> TurnRecord:
+            existing_record = existing_records[0] if existing_records else None
+            merged_record = (
+                _backfill_missing_turn_facts(turn_record, existing_record)
+                if existing_record is not None
+                else turn_record
+            )
+            visible_echo_event_id = merged_record.visible_echo_event_id or next(
+                (
+                    existing.visible_echo_event_id
+                    for existing in existing_records
+                    if existing.visible_echo_event_id is not None
+                ),
+                None,
+            )
+            return replace(
                 merged_record,
                 completed=True,
                 visible_echo_event_id=visible_echo_event_id,
-            ),
-        )
+            )
+
+        self._ledger.update_handled_turn(turn_record.source_event_ids, terminal_record)
 
     def is_handled(self, event_id: str) -> bool:
         """Return whether one source event already has a terminal outcome."""
@@ -101,10 +110,14 @@ class TurnStore:
 
     def record_visible_echo(self, source_event_id: str, echo_event_id: str) -> None:
         """Track a visible echo without changing an existing completion outcome."""
-        turn_record = self._ledger.get_turn_record(source_event_id)
-        if turn_record is None:
-            turn_record = TurnRecord.create([source_event_id], completed=False)
-        self._ledger.record_handled_turn(replace(turn_record, visible_echo_event_id=echo_event_id))
+
+        def visible_echo_record(existing_records: tuple[TurnRecord, ...]) -> TurnRecord:
+            turn_record = (
+                existing_records[0] if existing_records else TurnRecord.create([source_event_id], completed=False)
+            )
+            return replace(turn_record, visible_echo_event_id=echo_event_id)
+
+        self._ledger.update_handled_turn((source_event_id,), visible_echo_record)
 
     def visible_echo_for_sources(self, source_event_ids: tuple[str, ...]) -> str | None:
         """Return the first visible echo already tracked for one or more source events."""
@@ -178,7 +191,6 @@ class TurnStore:
         requester_user_id: str,
     ) -> TurnRecord | None:
         """Load, deterministically merge, and repair one durable turn record."""
-        ledger_record = self._ledger.get_turn_record(original_event_id)
         recovery_record = self._load_persisted_turn_record(
             _LoadPersistedTurnRequest(
                 room=room,
@@ -187,18 +199,21 @@ class TurnStore:
                 requester_user_id=requester_user_id,
             ),
         )
-        if ledger_record is None and recovery_record is None:
-            return None
-        if ledger_record is None:
-            assert recovery_record is not None
-            merged_record = recovery_record
-        elif recovery_record is None:
-            merged_record = ledger_record
-        else:
-            merged_record = _backfill_missing_turn_facts(ledger_record, recovery_record)
-        if merged_record != ledger_record:
-            self._ledger.record_handled_turn(merged_record)
-        return merged_record
+        if recovery_record is None:
+            return self._ledger.get_turn_record(original_event_id)
+
+        def repaired_record(existing_records: tuple[TurnRecord, ...]) -> TurnRecord:
+            ledger_record = existing_records[0] if existing_records else None
+            return (
+                _backfill_missing_turn_facts(ledger_record, recovery_record)
+                if ledger_record is not None
+                else recovery_record
+            )
+
+        return self._ledger.update_handled_turn(
+            (original_event_id, *recovery_record.source_event_ids),
+            repaired_record,
+        )
 
     def remove_stale_runs_for_edit(
         self,
@@ -331,13 +346,6 @@ class TurnStore:
                 history_scope=turn_record.history_scope.key,
             )
         return removed_any
-
-    def _existing_record_for_sources(self, source_event_ids: tuple[str, ...]) -> TurnRecord | None:
-        """Return the first existing ledger record for one canonical source identity."""
-        for source_event_id in source_event_ids:
-            if turn_record := self._ledger.get_turn_record(source_event_id):
-                return turn_record
-        return None
 
 
 def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) -> TurnRecord:

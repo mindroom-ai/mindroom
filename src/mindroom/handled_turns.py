@@ -29,7 +29,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 
 if typing.TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
 logger = get_logger(__name__)
@@ -383,15 +383,40 @@ class HandledTurnLedger:
 
     def record_handled_turn(self, turn_record: TurnRecord) -> None:
         """Persist one exact record for every source event in the turn."""
-        if not turn_record.source_event_ids:
+        persisted_record = self.update_handled_turn(
+            turn_record.source_event_ids,
+            lambda _existing_records: turn_record,
+        )
+        if persisted_record is None:
             return
-        persisted_record = turn_record if turn_record.timestamp != 0.0 else replace(turn_record, timestamp=time.time())
+
+    def update_handled_turn(
+        self,
+        source_event_ids: Sequence[str],
+        update: Callable[[tuple[TurnRecord, ...]], TurnRecord],
+    ) -> TurnRecord | None:
+        """Atomically derive and persist one exact record from current source records."""
+        normalized_source_event_ids = _normalize_source_event_ids(source_event_ids)
+        if not normalized_source_event_ids:
+            return None
         with self._state.lock:
             self._ensure_loaded_locked()
+            existing_records = tuple(
+                record
+                for event_id in normalized_source_event_ids
+                if (record := self._responses.get(event_id)) is not None
+            )
+            turn_record = update(existing_records)
+            if not turn_record.source_event_ids:
+                return None
+            persisted_record = (
+                turn_record if turn_record.timestamp != 0.0 else replace(turn_record, timestamp=time.time())
+            )
             for event_id in persisted_record.source_event_ids:
                 self._responses[event_id] = persisted_record
             self._schedule_persist_locked(persisted_record.source_event_ids)
         logger.debug("handled_turn_recorded", source_event_count=len(persisted_record.source_event_ids))
+        return persisted_record
 
     def has_responded(self, event_id: str) -> bool:
         """Return whether the source event has a terminal recorded outcome."""

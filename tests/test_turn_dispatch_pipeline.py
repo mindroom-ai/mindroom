@@ -780,6 +780,15 @@ class TestAgentBot(AgentBotTestBase):
         tracker.visible_echo_event_id_for_sources.side_effect = lambda source_event_ids: (
             "$voice_echo" if tuple(source_event_ids) == ("$voice", "$text") else None
         )
+        tracker.get_turn_record.side_effect = lambda source_event_id: (
+            TurnRecord.create(
+                ["$voice", "$text"],
+                completed=False,
+                visible_echo_event_id="$voice_echo",
+            )
+            if source_event_id in {"$voice", "$text"}
+            else None
+        )
         tracker.has_responded.return_value = False
 
         room = MagicMock(spec=nio.MatrixRoom)

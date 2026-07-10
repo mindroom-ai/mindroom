@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import threading
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -219,7 +221,9 @@ def test_load_turn_repairs_missing_ledger_row_from_run_metadata(tmp_path: Path) 
         recovery_record=recovery_record,
     )
 
-    assert loaded == recovery_record
+    assert loaded is not None
+    assert loaded.timestamp > 0
+    assert replace(loaded, timestamp=0.0) == recovery_record
     repaired = store.get_turn_record("$event")
     assert repaired is not None
     assert repaired.response_event_id == "$response"
@@ -245,6 +249,99 @@ def test_record_turn_preserves_existing_optional_facts_at_the_owner_boundary(tmp
     assert record.response_event_id == "$second-response"
     assert record.requester_id == "@user:example.org"
     assert record.correlation_id == "corr-1"
+
+
+def test_visible_echo_cannot_overwrite_concurrent_terminal_outcome(tmp_path: Path) -> None:
+    """A delayed visible-echo update must preserve a terminal write racing behind it."""
+    store = _store(tmp_path)
+    terminal_record = TurnRecord.create(["$event"], response_event_id="$response")
+    echo_record_built = threading.Event()
+    release_echo_record = threading.Event()
+    terminal_started = threading.Event()
+    terminal_finished = threading.Event()
+    create_turn_record = TurnRecord.create
+
+    def blocking_create(source_event_ids: list[str], *, completed: bool = True) -> TurnRecord:
+        turn_record = create_turn_record(source_event_ids, completed=completed)
+        if not completed:
+            echo_record_built.set()
+            assert release_echo_record.wait(timeout=2)
+        return turn_record
+
+    def record_visible_echo() -> None:
+        store.record_visible_echo("$event", "$echo")
+
+    def record_terminal_outcome() -> None:
+        terminal_started.set()
+        store.record_turn(terminal_record)
+        terminal_finished.set()
+
+    with patch.object(TurnRecord, "create", side_effect=blocking_create):
+        echo_thread = threading.Thread(target=record_visible_echo)
+        echo_thread.start()
+        assert echo_record_built.wait(timeout=2)
+
+        terminal_thread = threading.Thread(target=record_terminal_outcome)
+        terminal_thread.start()
+        assert terminal_started.wait(timeout=2)
+        assert not terminal_finished.wait(timeout=0.1)
+
+        release_echo_record.set()
+        echo_thread.join(timeout=2)
+        terminal_thread.join(timeout=2)
+
+    assert not echo_thread.is_alive()
+    assert not terminal_thread.is_alive()
+    record = store.get_turn_record("$event")
+    assert record is not None
+    assert record.completed
+    assert record.response_event_id == "$response"
+    assert record.visible_echo_event_id == "$echo"
+
+
+def test_recovery_cannot_overwrite_concurrent_terminal_outcome(tmp_path: Path) -> None:
+    """Slow crash recovery must merge against ledger state written while it was loading."""
+    store = _store(tmp_path)
+    recovery_started = threading.Event()
+    release_recovery = threading.Event()
+    load_finished = threading.Event()
+    loaded_record: list[TurnRecord | None] = []
+    recovery_record = TurnRecord.create(["$event"], completed=False, response_owner="agent")
+
+    def load_recovery(_request: object) -> TurnRecord:
+        recovery_started.set()
+        assert release_recovery.wait(timeout=2)
+        return recovery_record
+
+    def load_turn() -> None:
+        loaded_record.append(
+            store.load_turn(
+                room=MagicMock(room_id="!room:example.org"),
+                thread_id=None,
+                original_event_id="$event",
+                requester_user_id="@user:example.org",
+            ),
+        )
+        load_finished.set()
+
+    with patch.object(store, "_load_persisted_turn_record", side_effect=load_recovery):
+        load_thread = threading.Thread(target=load_turn)
+        load_thread.start()
+        assert recovery_started.wait(timeout=2)
+
+        store.record_turn(TurnRecord.create(["$event"], response_event_id="$response"))
+        release_recovery.set()
+        assert load_finished.wait(timeout=2)
+        load_thread.join(timeout=2)
+
+    assert not load_thread.is_alive()
+    assert len(loaded_record) == 1
+    assert loaded_record[0] is not None
+    assert loaded_record[0].completed
+    assert loaded_record[0].response_event_id == "$response"
+    assert loaded_record[0].response_owner == "agent"
+    record = store.get_turn_record("$event")
+    assert record == loaded_record[0]
 
 
 def test_only_turn_store_imports_handled_turn_ledger_in_production() -> None:
