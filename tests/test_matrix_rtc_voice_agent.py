@@ -8,6 +8,9 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from livekit import rtc
 from livekit.agents import APIConnectionError, APIStatusError, CloseReason
 
 from mindroom.matrix_rtc.focus import SfuGrant
@@ -41,6 +44,38 @@ async def test_bridge_connect_disables_automatic_sfu_subscriptions(monkeypatch: 
 
     assert room.options is not None
     assert room.options.auto_subscribe is False
+    assert room.options.connect_timeout is not None
+
+
+@pytest.mark.asyncio
+async def test_bridge_e2ee_uses_matrix_compatible_hkdf(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Raw MatrixRTC keys derive the same AES key as Element Call's Web Crypto path."""
+
+    class FakeRoom:
+        def __init__(self) -> None:
+            self.local_participant = MagicMock()
+            self.options = None
+
+        async def connect(self, _url: str, _jwt: str, options: object) -> None:
+            self.options = options
+
+    room = FakeRoom()
+    monkeypatch.setattr("livekit.rtc.Room", lambda: room)
+    bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=True)
+
+    await bridge.connect(SfuGrant(url="wss://sfu.example.org", jwt="jwt"))
+
+    assert room.options is not None
+    provider = room.options.e2ee.key_provider_options
+    assert provider.key_derivation_function == rtc.KeyDerivationFunction.HKDF
+    derived = HKDF(
+        algorithm=hashes.SHA256(),
+        length=16,
+        salt=provider.ratchet_salt,
+        info=bytes(128),
+    ).derive(bytes(range(16)))
+    # Captured from the Web Crypto HKDF derivation used by LiveKit JS.
+    assert derived.hex() == "4086b4641064e1ae8b63d4eb83ad3e7e"
 
 
 @pytest.mark.asyncio
@@ -76,6 +111,44 @@ async def test_aclose_settles_cancelled_connect_before_disconnect(monkeypatch: p
     assert not close_waiter.done()
     room.release_connect.set()
     await close_waiter
+    assert room.disconnected
+
+
+@pytest.mark.asyncio
+async def test_aclose_cancels_stalled_connect_after_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stalled native connect cannot block call teardown forever."""
+
+    class FakeRoom:
+        def __init__(self) -> None:
+            self.local_participant = MagicMock()
+            self.connect_started = asyncio.Event()
+            self.connect_cancelled = False
+            self.disconnected = False
+
+        async def connect(self, _url: str, _jwt: str, _options: object) -> None:
+            self.connect_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.connect_cancelled = True
+                raise
+
+        async def disconnect(self) -> None:
+            self.disconnected = True
+
+    monkeypatch.setattr("mindroom.matrix_rtc.voice_agent._SFU_CONNECT_TIMEOUT_S", 0.01)
+    room = FakeRoom()
+    monkeypatch.setattr("livekit.rtc.Room", lambda: room)
+    bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    connect_waiter = asyncio.create_task(bridge.connect(SfuGrant(url="wss://sfu.example.org", jwt="jwt")))
+    await room.connect_started.wait()
+
+    connect_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await connect_waiter
+    await asyncio.wait_for(bridge.aclose(), timeout=0.5)
+
+    assert room.connect_cancelled
     assert room.disconnected
 
 

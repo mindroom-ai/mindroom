@@ -1638,6 +1638,30 @@ def _plain_session(
 
 
 @pytest.mark.asyncio
+async def test_grant_failure_closes_bridge_and_finalizes() -> None:
+    """A pre-connect grant failure still runs the full session cleanup."""
+    client = _client()
+    bridge = FakeBridge()
+    finalized: list[bool] = []
+
+    async def fetch_grant() -> SfuGrant:
+        message = "grant unavailable"
+        raise aiohttp.ClientError(message)
+
+    async def on_stopped() -> None:
+        finalized.append(True)
+
+    session = _plain_session(client, bridge, on_stopped=on_stopped)
+    session.deps.fetch_grant = fetch_grant
+
+    with pytest.raises(aiohttp.ClientError, match="grant unavailable"):
+        await session.start([_member("@alice:example.org", "ALICEDEV")])
+
+    assert bridge.closed
+    assert finalized == [True]
+
+
+@pytest.mark.asyncio
 async def test_stop_closes_bridge_and_finalizes_when_clear_membership_fails() -> None:
     """Transport failures while clearing membership must not skip media teardown."""
     client = _client()

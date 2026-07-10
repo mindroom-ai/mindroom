@@ -35,6 +35,8 @@ logger = get_logger(__name__)
 #: (``keyringSize: 256`` fits the 0-255 key indices, ``ratchetWindowSize: 10``).
 _KEY_RING_SIZE = 256
 _RATCHET_WINDOW_SIZE = 10
+_SFU_CONNECT_TIMEOUT_S = 10.0
+_SFU_CONNECT_CANCEL_TIMEOUT_S = 1.0
 _AUDIO_SAMPLE_RATE = 24_000
 _AUDIO_CHANNELS = 1
 _AUDIO_FRAME_SIZE_MS = 50
@@ -268,14 +270,16 @@ class RealtimeVoiceBridge:
         """Connect to the SFU, enabling frame encryption when required."""
         from livekit import rtc  # noqa: PLC0415
 
-        options = rtc.RoomOptions(auto_subscribe=False)
+        options = rtc.RoomOptions(auto_subscribe=False, connect_timeout=_SFU_CONNECT_TIMEOUT_S)
         if self._e2ee_enabled:
             options = rtc.RoomOptions(
                 auto_subscribe=False,
+                connect_timeout=_SFU_CONNECT_TIMEOUT_S,
                 e2ee=rtc.E2EEOptions(
                     key_provider_options=rtc.KeyProviderOptions(
                         ratchet_window_size=_RATCHET_WINDOW_SIZE,
                         key_ring_size=_KEY_RING_SIZE,
+                        key_derivation_function=rtc.KeyDerivationFunction.HKDF,
                     ),
                 ),
             )
@@ -402,7 +406,21 @@ class RealtimeVoiceBridge:
         self._room = None
         try:
             if connect_task is not None:
-                await asyncio.gather(connect_task, return_exceptions=True)
+                done, pending = await asyncio.wait({connect_task}, timeout=_SFU_CONNECT_TIMEOUT_S)
+                if pending:
+                    logger.warning("call_sfu_connect_teardown_timeout", identity=self._local_identity)
+                    connect_task.cancel()
+                    cancelled, pending = await asyncio.wait(
+                        pending,
+                        timeout=_SFU_CONNECT_CANCEL_TIMEOUT_S,
+                    )
+                    done.update(cancelled)
+                if pending:
+                    logger.error("call_sfu_connect_cancel_timeout", identity=self._local_identity)
+                    for task in pending:
+                        task.add_done_callback(_consume_task_result)
+                if done:
+                    await asyncio.gather(*done, return_exceptions=True)
             if session is not None:
                 await session.aclose()
         finally:
@@ -412,3 +430,9 @@ class RealtimeVoiceBridge:
             finally:
                 if room is not None:
                     await room.disconnect()
+
+
+def _consume_task_result(task: asyncio.Task[None]) -> None:
+    """Retrieve a late connect result after bounded teardown stopped waiting."""
+    if not task.cancelled():
+        task.exception()

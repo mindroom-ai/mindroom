@@ -153,8 +153,8 @@ class CallSession:
         """Join the call: connect media, publish membership, distribute keys."""
         self._members = members
         self._sync_bridge_participants()
-        grant = await self.deps.fetch_grant()
         try:
+            grant = await self.deps.fetch_grant()
             try:
                 await self.deps.bridge.connect(grant)
             except Exception as error:
