@@ -22,6 +22,7 @@ from mindroom.credentials_sync import get_api_key_for_provider
 from mindroom.entity_resolution import configured_call_agent_name_for_room
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.matrix_rtc.call_session import CallJoinError, CallSession, CallSessionDeps, required_device_id
 from mindroom.matrix_rtc.call_tools import CallAgentTooling, build_call_tools
 from mindroom.matrix_rtc.events import (
@@ -59,13 +60,14 @@ def _default_bridge_factory(local_identity: str, e2ee_enabled: bool) -> Realtime
 
 _CALL_EVENT_TYPES = frozenset({CALL_MEMBER_EVENT_TYPE, RTC_NOTIFICATION_EVENT_TYPE})
 _MAX_PENDING_KEYS_PER_ROOM = 64
+_PENDING_KEY_TTL_MS = 120_000
 _RECONCILE_RETRY_DELAYS_S = (1.0, 5.0, 30.0, 60.0)
 _MATRIX_NETWORK_ERRORS = (nio.exceptions.ProtocolError, OSError, aiohttp.ClientError)
 _CALL_NETWORK_ERRORS = (httpx.HTTPError, *_MATRIX_NETWORK_ERRORS)
 
 
 _VOICE_STYLE_ADDENDUM = (
-    "You are participating in a live group voice call. Everything you say is spoken "
+    "You are participating in a live voice call. Everything you say is spoken "
     "aloud: keep responses short, conversational, and natural, and never use markdown, "
     "lists, or other written formatting."
 )
@@ -141,7 +143,7 @@ class CallManager:
         self._retry_tasks: dict[str, asyncio.Task[None]] = {}
         self._retry_attempts: dict[str, int] = {}
         self._expiry_handles: dict[str, asyncio.TimerHandle] = {}
-        self._expiry_reconcile_tasks: set[asyncio.Task[None]] = set()
+        self._background_tasks: set[asyncio.Task[None]] = set()
         self._shutting_down = False
 
     async def on_room_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
@@ -161,7 +163,7 @@ class CallManager:
     async def on_to_device_event(self, event: nio.ToDeviceEvent) -> None:
         """Sync callback for decrypted call frame-key to-device events."""
         if (
-            not isinstance(event, nio.UnknownToDeviceEvent)
+            not isinstance(event, AuthenticatedToDeviceEvent)
             or event.type != CALL_ENCRYPTION_KEYS_EVENT_TYPE
             or self._shutting_down
         ):
@@ -196,9 +198,9 @@ class CallManager:
         """Leave every active call."""
         self._shutting_down = True
         self._pending_keys.clear()
-        background_tasks = [*self._retry_tasks.values(), *self._expiry_reconcile_tasks]
+        background_tasks = [*self._retry_tasks.values(), *self._background_tasks]
         self._retry_tasks.clear()
-        self._expiry_reconcile_tasks.clear()
+        self._background_tasks.clear()
         self._retry_attempts.clear()
         for handle in self._expiry_handles.values():
             handle.cancel()
@@ -249,6 +251,11 @@ class CallManager:
             self._pending_keys.pop(room_id, None)
             self._sessions.pop(room_id, None)
             await self._stop_session(session)
+            return
+        if session.requester_id != members[0].user_id:
+            self._sessions.pop(room_id, None)
+            await self._stop_session(session)
+            await self._join_if_populated(room, members)
             return
         await self._update_session_members(room, session, members)
 
@@ -306,6 +313,10 @@ class CallManager:
     def _queue_pending_key(self, room_id: str, received: ReceivedFrameKey) -> None:
         """Retain a bounded, deduplicated key set while a session is starting."""
         pending = self._pending_keys.setdefault(room_id, {})
+        cutoff = received.received_at_ms - _PENDING_KEY_TTL_MS
+        for identity, queued in list(pending.items()):
+            if queued.received_at_ms < cutoff:
+                pending.pop(identity)
         identity = (received.user_id, received.claimed_device_id, received.key_index)
         pending.pop(identity, None)
         if len(pending) >= _MAX_PENDING_KEYS_PER_ROOM:
@@ -314,15 +325,25 @@ class CallManager:
 
     def _replay_pending_keys(self, room_id: str, session: CallSession) -> None:
         """Replay bounded keys after the session receives an authoritative roster."""
-        for received in self._pending_keys.pop(room_id, {}).values():
-            if session.on_key_received(received):
+        pending = self._pending_keys.get(room_id, {})
+        if not pending:
+            return
+        retained: dict[tuple[str, str, int], ReceivedFrameKey] = {}
+        cutoff = self._clock_ms() - _PENDING_KEY_TTL_MS
+        for identity, received in pending.items():
+            if received.received_at_ms < cutoff or session.on_key_received(received):
                 continue
+            retained[identity] = received
             logger.warning(
-                "call_frame_key_rejected_nonmember",
+                "call_frame_key_waiting_for_membership",
                 room_id=room_id,
                 user_id=received.user_id,
                 device_id=received.claimed_device_id,
             )
+        if retained:
+            self._pending_keys[room_id] = retained
+        else:
+            self._pending_keys.pop(room_id, None)
 
     def _is_authorized_call_member(self, user_id: str, room_id: str) -> bool:
         """Return whether a participant may hear and invoke this voice agent."""
@@ -339,7 +360,7 @@ class CallManager:
         )
 
     def _members_are_authorized(self, members: list[CallMember], room_id: str) -> bool:
-        """Require every call participant to be eligible for this agent."""
+        """Require one authorized human identity across all call devices."""
         for member in members:
             if self._is_authorized_call_member(member.user_id, room_id):
                 continue
@@ -348,6 +369,15 @@ class CallManager:
                 room_id=room_id,
                 agent=self._agent_name,
                 user_id=member.user_id,
+            )
+            return False
+        user_ids = {member.user_id for member in members}
+        if len(user_ids) > 1:
+            logger.warning(
+                "call_join_skipped_multiple_users",
+                room_id=room_id,
+                agent=self._agent_name,
+                user_ids=sorted(user_ids),
             )
             return False
         return True
@@ -405,7 +435,7 @@ class CallManager:
             logger.warning("call_join_skipped_no_livekit_service", room_id=room_id, agent=self._agent_name)
             return "skip"
         try:
-            tooling = await self._build_tooling(room_id)
+            tooling = await self._build_tooling(room_id, requester_id=members[0].user_id)
         except Exception as error:
             logger.warning(
                 "call_join_skipped_agent_materialization_failed",
@@ -431,26 +461,33 @@ class CallManager:
             room_id=room_id,
             room_display_name=room.display_name or room_id,
         )
+        bridge = self._bridge_factory(
+            f"{self._client.user_id}:{device_id}",
+            room.encrypted,
+        )
         options = VoiceAgentOptions(
             instructions=_build_call_instructions(tooling.instructions),
             model=self._config.calls.model,
             api_key=api_key,
             voice=self._config.calls.voice,
-            greeting_instructions="Briefly greet the participants and let them know you joined the call.",
+            greeting_instructions="Briefly greet the caller and let them know you joined the call.",
             tools=tooling.tools,
             on_conversation_turn=transcript.record,
             on_tools_executed=transcript.record_tool_use,
+            on_session_terminated=lambda retryable: self._schedule_session_termination(
+                room,
+                bridge,
+                retryable=retryable,
+            ),
         )
         try:
             session = CallSession(
                 room_id=room_id,
+                requester_id=members[0].user_id,
                 e2ee_enabled=room.encrypted,
                 deps=CallSessionDeps(
                     client=self._client,
-                    bridge=self._bridge_factory(
-                        f"{self._client.user_id}:{device_id}",
-                        room.encrypted,
-                    ),
+                    bridge=bridge,
                     key_transport=self._key_transport,
                     fetch_grant=lambda: self._fetch_grant(room_id, service),
                     agent_options=options,
@@ -525,14 +562,47 @@ class CallManager:
         if self._shutting_down:
             return
         task = asyncio.create_task(self._reconcile(room))
-        self._expiry_reconcile_tasks.add(task)
-        task.add_done_callback(
-            lambda done: self._observe_expiry_reconcile(room.room_id, done),
-        )
+        self._track_background_task(task, event="call_expiry_reconcile_failed", room_id=room.room_id)
 
-    def _observe_expiry_reconcile(self, room_id: str, task: asyncio.Task[None]) -> None:
-        self._expiry_reconcile_tasks.discard(task)
-        self._observe_background_task("call_expiry_reconcile_failed", room_id, task)
+    def _track_background_task(self, task: asyncio.Task[None], *, event: str, room_id: str) -> None:
+        self._background_tasks.add(task)
+        task.add_done_callback(lambda done: self._observe_tracked_task(event, room_id, done))
+
+    def _observe_tracked_task(self, event: str, room_id: str, task: asyncio.Task[None]) -> None:
+        self._background_tasks.discard(task)
+        self._observe_background_task(event, room_id, task)
+
+    def _schedule_session_termination(
+        self,
+        room: nio.MatrixRoom,
+        bridge: VoiceBridgeLike,
+        *,
+        retryable: bool,
+    ) -> None:
+        """Schedule cleanup after an unexpected terminal realtime close."""
+        if self._shutting_down:
+            return
+        task = asyncio.create_task(self._handle_session_termination(room, bridge, retryable=retryable))
+        self._track_background_task(task, event="call_session_termination_failed", room_id=room.room_id)
+
+    async def _handle_session_termination(
+        self,
+        room: nio.MatrixRoom,
+        bridge: VoiceBridgeLike,
+        *,
+        retryable: bool,
+    ) -> None:
+        lock = self._locks.setdefault(room.room_id, asyncio.Lock())
+        async with lock:
+            session = self._sessions.get(room.room_id)
+            if session is None or session.deps.bridge is not bridge:
+                return
+            self._clear_reconcile_retry(room.room_id)
+            await self._stop_session(session, event="call_failed_session_stop_failed")
+            if self._sessions.get(room.room_id) is session:
+                self._sessions.pop(room.room_id, None)
+            if retryable and not self._shutting_down:
+                self._schedule_reconcile_retry(room)
 
     def _observe_background_task(self, event: str, room_id: str, task: asyncio.Task[None]) -> None:
         if not task.cancelled() and task.exception() is not None:
@@ -545,14 +615,15 @@ class CallManager:
         except Exception as error:
             logger.warning(event, room_id=session.room_id, error=str(error))
 
-    async def _build_tooling(self, room_id: str) -> CallAgentTooling:
-        """Build agent tools for the voice session's agent-scoped context."""
+    async def _build_tooling(self, room_id: str, *, requester_id: str) -> CallAgentTooling:
+        """Build agent tools with the sole caller as the Matrix requester."""
         return await build_call_tools(
             agent_name=self._agent_name,
             config=self._config,
             runtime_paths=self._runtime_paths,
             tool_support=self._tool_support,
             room_id=room_id,
+            requester_id=requester_id,
         )
 
     async def _resolve_service(self, members: list[CallMember]) -> str | None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING
 
 import pytest
 from agno.tools.function import Function
@@ -21,6 +21,30 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
 
 AGENT = "helper"
+REQUESTER = "@alice:example.org"
+
+
+class FakeAgnoAgent:
+    """Small typed stand-in for Agno's effective async tool surface."""
+
+    def __init__(self, tools: list[Function], *, prompt: str = "THE CHAT SYSTEM PROMPT") -> None:
+        self.name = "Helper"
+        self.model = SimpleNamespace(supports_native_structured_outputs=False)
+        self._tool_instructions: list[str] = []
+        self._team = None
+        self.tool_hooks = None
+        self._tools = tools
+        self._prompt = prompt
+        self.tool_user_ids: list[str | None] = []
+
+    async def aget_tools(self, **kwargs: object) -> list[Function]:
+        """Return the prepared effective tools and capture requester identity."""
+        self.tool_user_ids.append(kwargs.get("user_id") if isinstance(kwargs.get("user_id"), str) else None)
+        return self._tools
+
+    async def aget_system_message(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+        """Return a deterministic rendered prompt."""
+        return SimpleNamespace(content=self._prompt)
 
 
 def _config() -> Config:
@@ -201,13 +225,7 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     def add(a: int, b: int) -> int:
         return a + b
 
-    toolkit = SimpleNamespace(functions={"add": _function(add)}, async_functions={})
-
-    class FakeAgnoAgent:
-        tools: ClassVar[list] = [toolkit]
-
-        def get_system_message(self, _session: object) -> SimpleNamespace:
-            return SimpleNamespace(content="THE CHAT SYSTEM PROMPT")
+    fake_agent = FakeAgnoAgent([_function(add)])
 
     create_calls: list[tuple[object, ...]] = []
     create_kwargs: dict[str, object] = {}
@@ -218,7 +236,7 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     def fake_create_agent(*args: object, **kwargs: object) -> FakeAgnoAgent:
         create_calls.append(args)
         create_kwargs.update(kwargs)
-        return FakeAgnoAgent()
+        return fake_agent
 
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.create_agent",
@@ -231,8 +249,15 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     seen_targets: list[MessageTarget] = []
 
     class StrictToolSupport:
-        def build_context(self, target: MessageTarget, *, user_id: str | None) -> SimpleNamespace:
-            assert user_id is None
+        def build_context(
+            self,
+            target: MessageTarget,
+            *,
+            user_id: str | None,
+            agent_name: str | None = None,
+        ) -> SimpleNamespace:
+            assert user_id == REQUESTER
+            assert agent_name == AGENT
             seen_targets.append(target)
             return SimpleNamespace(
                 room_id="!room:example.org",
@@ -247,7 +272,7 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
             user_id: str | None,
             agent_name: str | None = None,
         ) -> SimpleNamespace:
-            assert user_id is None
+            assert user_id == REQUESTER
             assert agent_name == AGENT
             seen_targets.append(target)
             return SimpleNamespace()
@@ -258,6 +283,7 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
         runtime_paths=test_runtime_paths(tmp_path),
         tool_support=StrictToolSupport(),  # type: ignore[arg-type]
         room_id="!room:example.org",
+        requester_id=REQUESTER,
     )
     assert len(tooling.tools) == 1
     assert tooling.instructions == "THE CHAT SYSTEM PROMPT"
@@ -270,6 +296,7 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     assert len(seen_targets) == 2
     assert seen_targets[0] is seen_targets[1]
     assert seen_targets[0].session_id == "!room:example.org"
+    assert fake_agent.tool_user_ids == [REQUESTER]
 
 
 @pytest.mark.asyncio
@@ -283,17 +310,10 @@ async def test_build_call_tools_includes_async_only_toolkit_functions(
         return a + b
 
     function = _function(async_add)
-    toolkit = SimpleNamespace(functions={}, async_functions={"add": function})
-
-    class FakeAgnoAgent:
-        tools: ClassVar[list] = [toolkit]
-
-        def get_system_message(self, _session: object) -> SimpleNamespace:
-            return SimpleNamespace(content="THE CHAT SYSTEM PROMPT")
 
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.create_agent",
-        lambda *_args, **_kwargs: FakeAgnoAgent(),
+        lambda *_args, **_kwargs: FakeAgnoAgent([function]),
     )
     tool_support = SimpleNamespace(
         build_context=lambda *_a, **_k: _context(),
@@ -306,9 +326,49 @@ async def test_build_call_tools_includes_async_only_toolkit_functions(
         runtime_paths=test_runtime_paths(tmp_path),
         tool_support=tool_support,  # type: ignore[arg-type]
         room_id="!room:example.org",
+        requester_id=REQUESTER,
     )
 
     assert len(tooling.tools) == 1
+
+
+@pytest.mark.asyncio
+async def test_build_call_tools_includes_agno_added_knowledge_and_skill_functions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Knowledge and skill tools from Agno's effective surface reach realtime."""
+    functions = [
+        _function(lambda: "knowledge", name="search_knowledge_base"),
+        _function(lambda: "skill", name="get_skill_instructions"),
+    ]
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.create_agent",
+        lambda *_args, **_kwargs: FakeAgnoAgent(functions),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access",
+        lambda *_args, **_kwargs: SimpleNamespace(knowledge=None),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools._wrap_agno_function",
+        lambda function, **_kwargs: function.name,
+    )
+    tool_support = SimpleNamespace(
+        build_context=lambda *_args, **_kwargs: _context(),
+        build_execution_identity=lambda **_kwargs: SimpleNamespace(),
+    )
+
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=_config(),
+        runtime_paths=test_runtime_paths(tmp_path),
+        tool_support=tool_support,  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+    )
+
+    assert tooling.tools == ("search_knowledge_base", "get_skill_instructions")
 
 
 @pytest.mark.asyncio
@@ -325,19 +385,14 @@ async def test_build_call_tools_hides_functions_needing_text_chat(
     functions["user_input"].requires_user_input = True
     functions["external"].external_execution = True
     functions["agno_approval"].approval_type = "required"
-    toolkit = SimpleNamespace(functions=functions, async_functions={})
-
-    class FakeAgnoAgent:
-        tools: ClassVar[list] = [toolkit]
-
-        def get_system_message(self, _session: object) -> SimpleNamespace:
-            return SimpleNamespace(content="THE CHAT SYSTEM PROMPT")
-
     config = _config()
     config.tool_approval = ToolApprovalConfig(
         rules=[ApprovalRuleConfig(match="policy_approval", action="require_approval")],
     )
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", lambda *_a, **_k: FakeAgnoAgent())
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.create_agent",
+        lambda *_a, **_k: FakeAgnoAgent(list(functions.values())),
+    )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access",
         lambda *_a, **_k: SimpleNamespace(knowledge=None),
@@ -357,6 +412,7 @@ async def test_build_call_tools_hides_functions_needing_text_chat(
         runtime_paths=test_runtime_paths(tmp_path),
         tool_support=tool_support,  # type: ignore[arg-type]
         room_id="!room:example.org",
+        requester_id=REQUESTER,
     )
 
     assert tooling.tools == ("safe",)
@@ -374,4 +430,5 @@ async def test_build_call_tools_requires_runtime_context(tmp_path: Path) -> None
             runtime_paths=test_runtime_paths(tmp_path),
             tool_support=tool_support,  # type: ignore[arg-type]
             room_id="!room:example.org",
+            requester_id=REQUESTER,
         )

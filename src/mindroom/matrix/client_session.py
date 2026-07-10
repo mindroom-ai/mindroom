@@ -11,6 +11,7 @@ import nio
 
 from mindroom.constants import RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
+from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.startup_errors import PermanentStartupError
 
 if TYPE_CHECKING:
@@ -30,6 +31,38 @@ _PERMANENT_MATRIX_STARTUP_ERROR_CODES = frozenset(
 
 class PermanentMatrixStartupError(PermanentStartupError):
     """Raised for Matrix startup failures that should not be retried."""
+
+
+class _MindRoomAsyncClient(nio.AsyncClient):
+    """Matrix client preserving authenticated provenance for custom Olm events."""
+
+    def _handle_decrypt_to_device(self, to_device_event: nio.ToDeviceEvent) -> nio.ToDeviceEvent | None:
+        decrypted = super()._handle_decrypt_to_device(to_device_event)
+        if not isinstance(to_device_event, nio.OlmEvent) or not isinstance(decrypted, nio.UnknownToDeviceEvent):
+            return decrypted
+        sender_device = decrypted.source.get("sender_device")
+        sender_keys = decrypted.source.get("keys")
+        if not isinstance(sender_device, str) or not isinstance(sender_keys, dict) or self.olm is None:
+            return decrypted
+        sender_ed25519 = sender_keys.get("ed25519")
+        if not isinstance(sender_ed25519, str):
+            return decrypted
+        matching_devices = [
+            device
+            for device in self.olm.device_store.active_user_devices(decrypted.sender)
+            if device.curve25519 == to_device_event.sender_key
+        ]
+        if len(matching_devices) != 1:
+            return decrypted
+        device = matching_devices[0]
+        if device.id != sender_device or device.ed25519 != sender_ed25519:
+            return decrypted
+        return AuthenticatedToDeviceEvent(
+            source=decrypted.source,
+            sender=decrypted.sender,
+            type=decrypted.type,
+            authenticated_device_id=device.id,
+        )
 
 
 def _require_runtime_paths_arg(runtime_paths: object) -> RuntimePaths:
@@ -96,7 +129,7 @@ def _create_matrix_client(
         store_path = str(olm_store_dir(user_id, runtime_paths=runtime_paths))
         Path(store_path).mkdir(parents=True, exist_ok=True)
 
-    client = nio.AsyncClient(
+    client = _MindRoomAsyncClient(
         homeserver,
         user_id or "",
         store_path=store_path,

@@ -26,6 +26,7 @@ from mindroom.matrix_rtc.events import (
 )
 
 if TYPE_CHECKING:
+    from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
     from mindroom.matrix_rtc.events import CallMember, ReceivedFrameKey
 
 logger = get_logger(__name__)
@@ -127,7 +128,7 @@ class ToDeviceFrameKeyTransport:
 
     def parse_incoming(
         self,
-        event: nio.UnknownToDeviceEvent,
+        event: AuthenticatedToDeviceEvent,
         *,
         received_at_ms: int,
     ) -> tuple[str, ReceivedFrameKey] | None:
@@ -146,4 +147,6 @@ class ToDeviceFrameKeyTransport:
             room_id=room_id,
             received_at_ms=received_at_ms,
         )
-        return (room_id, received) if received is not None else None
+        if received is None or received.claimed_device_id != event.authenticated_device_id:
+            return None
+        return room_id, received

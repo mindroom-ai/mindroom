@@ -100,6 +100,7 @@ from .matrix.room_member_joins import (
     room_member_joins_from_sync_state,
     room_member_joins_from_sync_timeline,
 )
+from .matrix.to_device import AuthenticatedToDeviceEvent
 from .media_inputs import MediaInputs
 from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps, prepare_memory_and_model_context
@@ -1355,7 +1356,7 @@ class AgentBot:
                 owner=self._runtime_view,
                 on_error=self._mark_callback_failed,
             ),
-            nio.UnknownToDeviceEvent,
+            AuthenticatedToDeviceEvent,
         )
 
     async def start(self) -> None:

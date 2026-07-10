@@ -2,11 +2,12 @@
 
 The realtime model calls tools through livekit-agents' function-tool
 mechanism. This module materializes the agent's regular chat toolkits (the
-same construction path as text conversations, including workspace-aware
-base dirs and worker routing) and wraps every agno function as a raw
-livekit function tool. Tool calls run inside the standard MindRoom tool
-runtime context for the call's room. Tools needing confirmation, user input,
-external execution, or approval are omitted because voice has no approval UI.
+same construction path as text conversations, including knowledge, skills,
+workspace-aware base dirs, and worker routing) and wraps every agno function
+as a raw livekit function tool. Tool calls run inside the standard MindRoom
+tool runtime context for the call's room and sole Matrix requester. Tools
+needing confirmation, user input, external execution, or approval are omitted
+because voice has no approval UI.
 """
 
 from __future__ import annotations
@@ -18,8 +19,11 @@ from dataclasses import dataclass
 from inspect import isasyncgenfunction, iscoroutinefunction
 from typing import TYPE_CHECKING, Any
 
+from agno.agent._tools import determine_tools_for_model
+from agno.run import RunContext
+from agno.run.agent import RunOutput
 from agno.session import AgentSession as AgnoAgentSession
-from agno.tools.function import FunctionCall
+from agno.tools.function import Function, FunctionCall
 
 from mindroom.agents import create_agent
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
@@ -31,7 +35,6 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 
 if TYPE_CHECKING:
     from agno.agent import Agent as AgnoAgent
-    from agno.tools.function import Function
     from livekit.agents.llm import RawFunctionTool
 
     from mindroom.config.main import Config
@@ -67,6 +70,7 @@ async def build_call_tools(
     runtime_paths: RuntimePaths,
     tool_support: ToolRuntimeSupport,
     room_id: str,
+    requester_id: str,
 ) -> CallAgentTooling:
     """Materialize the agent's toolkits and wrap them for the realtime session."""
     session_id = create_session_id(room_id, None)
@@ -77,13 +81,13 @@ async def build_call_tools(
         reply_to_event_id=None,
         session_id=session_id,
     )
-    context = tool_support.build_context(target, user_id=None)
+    context = tool_support.build_context(target, user_id=requester_id, agent_name=agent_name)
     if context is None:
         msg = f"Tool runtime context unavailable for voice agent {agent_name}"
         raise RuntimeError(msg)
     execution_identity = tool_support.build_execution_identity(
         target=target,
-        user_id=None,
+        user_id=requester_id,
         agent_name=agent_name,
     )
     refresh_scheduler = context.orchestrator.knowledge_refresh_scheduler if context.orchestrator is not None else None
@@ -109,34 +113,67 @@ async def build_call_tools(
             eager_deferred_tools=True,
         ),
     )
-    instructions = await asyncio.to_thread(_render_system_prompt, agent, session_id)
+    run_id = f"{session_id}:voice"
+    session = AgnoAgentSession(session_id=session_id, agent_id=agent_name, user_id=requester_id)
+    run_output = RunOutput(
+        run_id=run_id,
+        agent_id=agent_name,
+        agent_name=agent.name,
+        session_id=session_id,
+        user_id=requester_id,
+    )
+    run_context = RunContext(
+        run_id=run_id,
+        session_id=session_id,
+        user_id=requester_id,
+        session_state={},
+    )
+    processed_tools = await agent.aget_tools(
+        run_response=run_output,
+        run_context=run_context,
+        session=session,
+        user_id=requester_id,
+    )
+    effective_tools = determine_tools_for_model(
+        agent,
+        model=agent.model,
+        processed_tools=processed_tools,
+        run_response=run_output,
+        run_context=run_context,
+        session=session,
+        async_mode=True,
+    )
     tools: list[Any] = []
-    seen_functions: set[int] = set()
-    seen_names: set[str] = set()
-    for toolkit in agent.tools or []:
-        for function in (*toolkit.functions.values(), *toolkit.async_functions.values()):
-            if id(function) in seen_functions or function.name in seen_names:
-                continue
-            seen_functions.add(id(function))
-            seen_names.add(function.name)
-            if _function_requires_text_chat(function, config):
-                logger.info("call_tool_hidden_needs_text_chat", tool=function.name, agent=agent_name)
-                continue
-            tools.append(
-                _wrap_agno_function(
-                    function,
-                    context=context,
-                    agent_name=agent_name,
-                    config=config,
-                ),
-            )
+    visible_functions: list[Function | dict[Any, Any]] = []
+    for tool in effective_tools:
+        if not isinstance(tool, Function):
+            msg = f"Voice calls cannot expose provider-native tool definitions for agent {agent_name}"
+            raise TypeError(msg)
+        if _function_requires_text_chat(tool, config):
+            logger.info("call_tool_hidden_needs_text_chat", tool=tool.name, agent=agent_name)
+            continue
+        visible_functions.append(tool)
+        tools.append(
+            _wrap_agno_function(
+                tool,
+                context=context,
+                agent_name=agent_name,
+                config=config,
+            ),
+        )
+    instructions = await _render_system_prompt(agent, session, run_context, visible_functions)
     logger.info("call_tools_built", agent=agent_name, room_id=room_id, tool_count=len(tools))
     return CallAgentTooling(tools=tuple(tools), instructions=instructions)
 
 
-def _render_system_prompt(agent: AgnoAgent, session_id: str) -> str:
+async def _render_system_prompt(
+    agent: AgnoAgent,
+    session: AgnoAgentSession,
+    run_context: RunContext,
+    tools: list[Function | dict[Any, Any]],
+) -> str:
     """Render the same system message the agent would use for a chat turn."""
-    message = agent.get_system_message(AgnoAgentSession(session_id=session_id))
+    message = await agent.aget_system_message(session, run_context=run_context, tools=tools)
     if message is None:
         msg = "Agent produced no system prompt for its voice session"
         raise ValueError(msg)

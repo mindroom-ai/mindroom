@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
     from livekit import rtc
     from livekit.agents import AgentSession
-    from livekit.agents.voice.events import ConversationItemAddedEvent, FunctionToolsExecutedEvent
+    from livekit.agents.voice.events import CloseEvent, ConversationItemAddedEvent, FunctionToolsExecutedEvent
     from livekit.agents.voice.io import AudioInput
 
     from mindroom.matrix_rtc.focus import SfuGrant
@@ -241,6 +241,8 @@ class VoiceAgentOptions:
     on_conversation_turn: Callable[[str, str], None] | None = None
     #: Called with executed tool names after each tool round.
     on_tools_executed: Callable[[list[str]], None] | None = None
+    #: Called after an unexpected terminal SDK close; bool means retryable.
+    on_session_terminated: Callable[[bool], None] | None = None
 
 
 class RealtimeVoiceBridge:
@@ -369,6 +371,24 @@ class RealtimeVoiceBridge:
                 on_tools([call.name for call in event.function_calls])
 
             session.on("function_tools_executed", _on_tools_executed)
+
+        self._register_termination_listener(session, options)
+
+    def _register_termination_listener(self, session: AgentSession, options: VoiceAgentOptions) -> None:
+        from livekit.agents import APIError, CloseReason  # noqa: PLC0415
+
+        on_terminated = options.on_session_terminated
+        if on_terminated is not None:
+
+            def _on_close(event: CloseEvent) -> None:
+                if self._session is not session:
+                    return
+                retryable = event.reason == CloseReason.ERROR
+                if retryable and event.error is not None and isinstance(event.error.error, APIError):
+                    retryable = event.error.error.retryable
+                on_terminated(retryable)
+
+            session.on("close", _on_close)
 
     async def aclose(self) -> None:
         """Tear down the agent session and leave the SFU."""

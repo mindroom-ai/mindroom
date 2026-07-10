@@ -18,8 +18,10 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.calls import CallsConfig
 from mindroom.config.main import Config
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.matrix_rtc.call_manager import (
     _MAX_PENDING_KEYS_PER_ROOM,
+    _PENDING_KEY_TTL_MS,
     CallManager,
     _build_call_instructions,
     maybe_build_call_manager,
@@ -217,25 +219,27 @@ def _frame_key_event(
     room_id: str = ROOM_ID,
     user_id: str = "@alice:example.org",
     device_id: str = "ALICEDEV",
-) -> nio.UnknownToDeviceEvent:
+) -> AuthenticatedToDeviceEvent:
     """Build one decrypted inbound Element Call frame key event."""
     key_base64 = base64.b64encode(b"A" * 16).decode("ascii")
-    event = nio.UnknownToDeviceEvent.from_dict(
-        {
-            "type": CALL_ENCRYPTION_KEYS_EVENT_TYPE,
-            "sender": user_id,
-            "content": build_key_to_device_content(
-                key_base64=key_base64,
-                key_index=2,
-                room_id=room_id,
-                member_id=f"{user_id}:{device_id}",
-                device_id=device_id,
-                sent_ts=1_500,
-            ),
-        },
+    source = {
+        "type": CALL_ENCRYPTION_KEYS_EVENT_TYPE,
+        "sender": user_id,
+        "content": build_key_to_device_content(
+            key_base64=key_base64,
+            key_index=2,
+            room_id=room_id,
+            member_id=f"{user_id}:{device_id}",
+            device_id=device_id,
+            sent_ts=1_500,
+        ),
+    }
+    return AuthenticatedToDeviceEvent(
+        source=source,
+        sender=user_id,
+        type=CALL_ENCRYPTION_KEYS_EVENT_TYPE,
+        authenticated_device_id=device_id,
     )
-    assert isinstance(event, nio.UnknownToDeviceEvent)
-    return event
 
 
 @pytest.fixture(autouse=True)
@@ -434,6 +438,71 @@ async def test_manager_leaves_when_a_denied_member_joins(tmp_path: Path) -> None
     await manager.on_room_event(_room(), _member_unknown_event())
 
     assert bridge.closed
+
+
+@pytest.mark.asyncio
+async def test_manager_leaves_when_second_authorized_user_joins(tmp_path: Path) -> None:
+    """Mixed speakers cannot share one requester identity for tool calls."""
+    config = _config()
+    config.authorization.global_users.append("@bob:example.org")
+    client = _client()
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, config)
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    client.room_get_state.return_value = _state_response(
+        _remote_member_event(),
+        _remote_member_event(user="@bob:example.org", device="BOBDEV"),
+    )
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    assert bridge.closed
+    assert manager._sessions == {}
+
+
+@pytest.mark.asyncio
+async def test_manager_restarts_when_sole_requester_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A direct caller replacement cannot inherit the previous requester's tools."""
+    requesters: list[str] = []
+
+    async def fake_tools(**kwargs: object) -> CallAgentTooling:
+        requesters.append(str(kwargs["requester_id"]))
+        return CallAgentTooling(tools=(), instructions="You are Helper.")
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
+    config = _config()
+    config.authorization.global_users.append("@bob:example.org")
+    client = _client()
+    alice_bridge = FakeBridge()
+    bob_bridge = FakeBridge()
+    bridges = iter((alice_bridge, bob_bridge))
+    manager = CallManager(
+        agent_name="helper",
+        config=config,
+        client=client,
+        runtime_paths=test_runtime_paths(tmp_path),
+        ssl_verify=True,
+        bridge_factory=lambda _identity, _e2ee: next(bridges),
+        tool_support=object(),  # type: ignore[arg-type]
+    )
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    client.room_get_state.return_value = _state_response(
+        _remote_member_event(user="@bob:example.org", device="BOBDEV"),
+    )
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    assert requesters == ["@alice:example.org", "@bob:example.org"]
+    assert alice_bridge.closed
+    assert bob_bridge.connected_grant is GRANT
+    assert not bob_bridge.closed
+    assert manager._sessions[ROOM_ID].requester_id == "@bob:example.org"
+    await manager.shutdown()
 
 
 @pytest.mark.asyncio
@@ -654,6 +723,7 @@ def _session(client: AsyncMock, bridge: FakeBridge, transport: FakeKeyTransport,
 
     return CallSession(
         room_id=ROOM_ID,
+        requester_id="@alice:example.org",
         e2ee_enabled=True,
         deps=CallSessionDeps(
             client=client,
@@ -832,8 +902,10 @@ async def test_manager_passes_same_agent_tools_and_prompt(
 ) -> None:
     """The realtime session gets chat tools, prompt, and transcript hooks."""
     sentinel_tool = object()
+    tool_kwargs: dict[str, object] = {}
 
-    async def fake_build_call_tools(**_kwargs: object) -> CallAgentTooling:
+    async def fake_build_call_tools(**kwargs: object) -> CallAgentTooling:
+        tool_kwargs.update(kwargs)
         return CallAgentTooling(tools=(sentinel_tool,), instructions="CHAT PROMPT")
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_build_call_tools)
@@ -850,6 +922,7 @@ async def test_manager_passes_same_agent_tools_and_prompt(
     assert options.instructions.startswith("CHAT PROMPT")
     assert options.on_conversation_turn is not None
     assert options.on_tools_executed is not None
+    assert tool_kwargs["requester_id"] == "@alice:example.org"
 
 
 @pytest.mark.asyncio
@@ -932,35 +1005,55 @@ async def test_manager_replays_key_after_transient_admission_fetch_failure(
 
 
 @pytest.mark.asyncio
+async def test_manager_ignores_plaintext_custom_key_event(tmp_path: Path) -> None:
+    """Only custom events carrying authenticated Olm provenance reach key intake."""
+    authenticated = _frame_key_event()
+    raw = nio.UnknownToDeviceEvent.from_dict(authenticated.source)
+    assert isinstance(raw, nio.UnknownToDeviceEvent)
+    client = _client()
+    client.rooms = {ROOM_ID: _room(encrypted=True)}
+    manager = _manager(client, FakeBridge(), tmp_path)
+
+    await manager.on_to_device_event(raw)
+
+    assert manager._pending_keys == {}
+    client.room_get_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_manager_replays_a_key_received_before_active_roster_update(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A key racing ahead of a new member state event is replayed after reconciliation."""
+    """An unmatched key survives stale federation state until its device appears."""
 
     async def send_key(_self: object, *, targets: list[CallMember], **_kwargs: object) -> list[CallMember]:
         return targets
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
-    config = _config()
-    config.authorization.global_users.append("@bob:example.org")
     client = _client()
     room = _room(encrypted=True)
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = FakeBridge()
-    manager = _manager(client, bridge, tmp_path, config)
+    manager = _manager(client, bridge, tmp_path)
 
     await manager.on_room_event(room, _member_unknown_event())
 
-    client.room_get_state.return_value = _state_response(
-        _remote_member_event(),
-        _remote_member_event(user="@bob:example.org", device="BOBDEV"),
-    )
     await manager.on_to_device_event(
-        _frame_key_event(user_id="@bob:example.org", device_id="BOBDEV"),
+        _frame_key_event(user_id="@alice:example.org", device_id="ALICESECOND"),
     )
 
-    assert ("@bob:example.org:BOBDEV", b"A" * 16, 2) in bridge.frame_keys
+    assert ROOM_ID in manager._pending_keys
+    assert ("@alice:example.org:ALICESECOND", b"A" * 16, 2) not in bridge.frame_keys
+
+    client.room_get_state.return_value = _state_response(
+        _remote_member_event(),
+        _remote_member_event(user="@alice:example.org", device="ALICESECOND"),
+    )
+    await manager.on_room_event(room, _member_unknown_event())
+
+    assert ("@alice:example.org:ALICESECOND", b"A" * 16, 2) in bridge.frame_keys
+    assert manager._pending_keys == {}
 
 
 @pytest.mark.asyncio
@@ -996,11 +1089,11 @@ async def test_manager_accepts_key_for_alias_only_configured_room(
 
 
 @pytest.mark.asyncio
-async def test_manager_rejects_pending_key_from_device_outside_roster(
+async def test_manager_expires_pending_key_from_device_outside_roster(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Pre-join key buffering requires an exact current user/device membership."""
+    """An unmatched key stays bounded briefly, then expires without a retry loop."""
 
     async def send_key(_self: object, *, targets: list[CallMember], **_kwargs: object) -> list[CallMember]:
         return targets
@@ -1010,12 +1103,19 @@ async def test_manager_rejects_pending_key_from_device_outside_roster(
     client.rooms = {ROOM_ID: _room(encrypted=True)}
     client.room_get_state.return_value = _state_response(_remote_member_event(device="DIFFERENTDEV"))
     bridge = FakeBridge()
-    manager = _manager(client, bridge, tmp_path)
+    clock = [1_000]
+    manager = _manager(client, bridge, tmp_path, clock_ms=lambda: clock[0])
 
     await manager.on_to_device_event(_frame_key_event())
 
-    assert manager._pending_keys == {}
+    assert ROOM_ID in manager._pending_keys
     assert ("@alice:example.org:ALICEDEV", b"A" * 16, 2) not in bridge.frame_keys
+    assert manager._retry_tasks == {}
+
+    clock[0] += _PENDING_KEY_TTL_MS + 1
+    await manager.on_room_event(_room(encrypted=True), _member_unknown_event())
+
+    assert manager._pending_keys == {}
     await manager.shutdown()
 
 
@@ -1425,6 +1525,54 @@ async def test_bridge_connect_failure_is_a_clean_join_failure(tmp_path: Path) ->
     await manager.shutdown()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retryable", [True, False])
+async def test_terminal_voice_close_stops_session_and_retries_only_when_allowed(
+    tmp_path: Path,
+    retryable: bool,
+) -> None:
+    """A terminal realtime close cannot leave live Matrix membership behind."""
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    await manager.on_room_event(_room(), _member_unknown_event())
+    assert bridge.agent_options is not None
+    assert bridge.agent_options.on_session_terminated is not None
+
+    bridge.agent_options.on_session_terminated(retryable)
+    await asyncio.gather(*list(manager._background_tasks))
+
+    assert bridge.closed
+    assert manager._sessions == {}
+    assert (ROOM_ID in manager._retry_tasks) is retryable
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_terminal_close_during_agent_start_cannot_leave_ghost_session(tmp_path: Path) -> None:
+    """A close callback racing with join registration still removes the new session."""
+
+    class ClosingBridge(FakeBridge):
+        async def start_agent(self, options: VoiceAgentOptions) -> None:
+            await super().start_agent(options)
+            assert options.on_session_terminated is not None
+            options.on_session_terminated(True)
+
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = ClosingBridge()
+    manager = _manager(client, bridge, tmp_path)
+
+    await manager.on_room_event(_room(), _member_unknown_event())
+    await asyncio.gather(*list(manager._background_tasks))
+
+    assert bridge.closed
+    assert manager._sessions == {}
+    assert ROOM_ID in manager._retry_tasks
+    await manager.shutdown()
+
+
 def _plain_session(
     client: AsyncMock,
     bridge: FakeBridge,
@@ -1436,6 +1584,7 @@ def _plain_session(
 
     return CallSession(
         room_id=ROOM_ID,
+        requester_id="@alice:example.org",
         e2ee_enabled=False,
         deps=CallSessionDeps(
             client=client,
@@ -1765,7 +1914,7 @@ def test_calls_config_rejects_unknown_agents() -> None:
 
 
 def test_calls_config_rejects_requester_private_agents() -> None:
-    """Voice calls cannot safely materialize requester-private state."""
+    """Call transcript and memory lifecycle currently require shared agents."""
     with pytest.raises(ValueError, match=r"calls\.agents cannot reference requester-private agent"):
         Config(
             models={},

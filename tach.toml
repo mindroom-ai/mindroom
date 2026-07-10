@@ -1928,7 +1928,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.matrix.client_session"
-depends_on = ["mindroom.constants"]
+depends_on = ["mindroom.constants", "mindroom.matrix.to_device"]
 visibility = [
     "mindroom.bot",
     "mindroom.cli.doctor",
@@ -1938,6 +1938,15 @@ visibility = [
     "mindroom.matrix.users",
     "mindroom.orchestration.runtime",
     "mindroom.orchestrator",
+]
+
+[[modules]]
+path = "mindroom.matrix.to_device"
+depends_on = []
+visibility = [
+    "mindroom.bot",
+    "mindroom.matrix.client_session",
+    "mindroom.matrix_rtc.call_manager",
 ]
 
 [[modules]]
@@ -2101,6 +2110,7 @@ depends_on = [
     "mindroom.credentials_sync",
     "mindroom.entity_resolution",
     "mindroom.logging_config",
+    "mindroom.matrix.to_device",
     "mindroom.matrix_rtc.call_session",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.matrix_rtc.events",
@@ -2218,6 +2228,7 @@ depends_on = [
     "mindroom.matrix.room_cleanup",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
+    "mindroom.matrix.to_device",
     "mindroom.matrix.users",
     "mindroom.matrix.visible_body",
     "mindroom.matrix_rtc.call_manager",
@@ -3335,6 +3346,10 @@ expose = [
     "restore_login",
 ]
 from = ["mindroom.matrix.client_session"]
+
+[[interfaces]]
+expose = ["AuthenticatedToDeviceEvent"]
+from = ["mindroom.matrix.to_device"]
 
 [[interfaces]]
 expose = [

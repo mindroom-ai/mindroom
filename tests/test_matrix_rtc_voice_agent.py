@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from types import ModuleType, SimpleNamespace
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from livekit.agents import APIConnectionError, APIStatusError, CloseReason
 
 from mindroom.matrix_rtc.focus import SfuGrant
 from mindroom.matrix_rtc.voice_agent import (
@@ -15,6 +16,9 @@ from mindroom.matrix_rtc.voice_agent import (
     VoiceAgentOptions,
     _AuthorizedParticipantAudioInput,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 @pytest.mark.asyncio
@@ -83,6 +87,7 @@ async def test_agent_session_uses_group_safe_room_options(monkeypatch: pytest.Mo
         def __init__(self) -> None:
             self.input = SimpleNamespace(audio=None)
             self.room_options = None
+            self.handlers: dict[str, object] = {}
 
         async def start(self, _agent: object, *, room: object, room_options: object) -> None:
             assert room is bridge._room
@@ -90,6 +95,9 @@ async def test_agent_session_uses_group_safe_room_options(monkeypatch: pytest.Mo
 
         def generate_reply(self, **_kwargs: object) -> None:
             return
+
+        def on(self, event: str, callback: object) -> None:
+            self.handlers[event] = callback
 
     fake_session = FakeSession()
     fake_audio_input = MagicMock()
@@ -110,6 +118,77 @@ async def test_agent_session_uses_group_safe_room_options(monkeypatch: pytest.Mo
     assert fake_session.room_options.text_input is False
     assert fake_session.room_options.text_output is False
     assert fake_session.room_options.close_on_disconnect is False
+
+
+@pytest.mark.parametrize(
+    ("api_error", "retryable"),
+    [
+        (APIConnectionError("offline", retryable=True), True),
+        (APIStatusError("bad key", status_code=401), False),
+    ],
+)
+def test_terminal_session_close_reports_api_retryability(api_error: object, retryable: bool) -> None:
+    """Terminal SDK errors preserve public API retryability for the manager."""
+    callbacks: list[bool] = []
+    handlers: dict[str, object] = {}
+    session = SimpleNamespace(on=lambda event, callback: handlers.__setitem__(event, callback))
+    bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    bridge._session = session
+    bridge._register_termination_listener(
+        session,  # type: ignore[arg-type]
+        VoiceAgentOptions(
+            instructions="Be concise.",
+            model="gpt-realtime-2.1",
+            api_key="sk",
+            on_session_terminated=callbacks.append,
+        ),
+    )
+
+    handler = cast("Callable[[object], None]", handlers["close"])
+    handler(
+        SimpleNamespace(
+            reason=CloseReason.ERROR,
+            error=SimpleNamespace(error=api_error),
+        ),
+    )
+
+    assert callbacks == [retryable]
+
+
+@pytest.mark.asyncio
+async def test_explicit_bridge_close_does_not_report_termination() -> None:
+    """Manager-requested shutdown cannot feed back as an unexpected close."""
+    callbacks: list[bool] = []
+    handlers: dict[str, object] = {}
+
+    class FakeSession:
+        def on(self, event: str, callback: object) -> None:
+            handlers[event] = callback
+
+        async def aclose(self) -> None:
+            handler = cast("Callable[[object], None]", handlers["close"])
+            handler(SimpleNamespace(reason=CloseReason.USER_INITIATED, error=None))
+
+    session = FakeSession()
+    bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    bridge._session = session
+    room = MagicMock()
+    room.disconnect = AsyncMock()
+    bridge._room = room
+    bridge._register_termination_listener(
+        session,  # type: ignore[arg-type]
+        VoiceAgentOptions(
+            instructions="Be concise.",
+            model="gpt-realtime-2.1",
+            api_key="sk",
+            on_session_terminated=callbacks.append,
+        ),
+    )
+
+    await bridge.aclose()
+
+    assert callbacks == []
+    room.disconnect.assert_awaited_once()
 
 
 def test_bridge_limits_output_subscriptions_to_matrix_roster() -> None:

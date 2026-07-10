@@ -5,7 +5,7 @@ This is the single source of truth for the voice-call effort; update it with eve
 
 ## Goal
 
-MindRoom agents join Element Call (MatrixRTC) voice calls in their rooms and hold real spoken conversations through an OpenAI realtime speech-to-speech model (`gpt-realtime-2.1`), as the *same agent* as in text chat: same system prompt, safe tools, knowledge, and hooks, with an incremental transcript persisted and made recallable through the configured memory backend.
+MindRoom agents join Element Call (MatrixRTC) voice calls in their rooms and hold real spoken conversations through an OpenAI realtime speech-to-speech model (`gpt-realtime-2.1`), as the *same agent* as in text chat: same rendered system prompt and effective tools, including knowledge, skills, and hooks, with an incremental transcript persisted and made recallable through the configured memory backend.
 Primary target deployment: production `mindroom.chat` (Cinny at `chat.mindroom.chat`).
 The lab (`mindroom.lab.mindroom.chat`, incus container on the `mindroom` host) is a separate deployment and gets its own RTC backend later — prod first.
 
@@ -32,10 +32,10 @@ The lab (`mindroom.lab.mindroom.chat`, incus container on the `mindroom` host) i
 | Leg | Status | How |
 |-----|--------|-----|
 | Well-known discovery, OpenID → LiveKit JWT | ✅ live | `tests/manual/matrix_rtc_live_smoke.py` against prod (all stages PASS) |
-| SFU signaling + WebRTC media relay | ✅ live | two Matrix-authed participants, bot subscribed to caller's audio track |
+| SFU signaling + WebRTC media relay | ✅ live | one Matrix-authenticated caller plus the bot, with the bot subscribed to the caller's audio track |
 | Real `CallManager` joins a call, publishes membership | ✅ live | job-tmp `live_botcall_test.py`; found + fixed the PL0 bug (below) |
 | E2EE frame-key exchange | ✅ real olm crypto | `tests/test_matrix_rtc_e2ee_roundtrip.py` — active since the nio 0.27 pin bump (no longer skipped), passes in the normal suite |
-| In-call tools, same-agent prompt, transcripts, memory references | ✅ unit tests | `tests/test_matrix_rtc_call_tools.py`, `..._transcript.py`, `..._call_manager.py` |
+| In-call tools, same-agent prompt, transcripts, memory references | ✅ unit tests | The sole caller is the real Matrix requester; effective Agno tools include knowledge and skills; approval/interactive/external flows stay hidden; covered by `tests/test_matrix_rtc_call_tools.py`, `..._transcript.py`, `..._call_manager.py` |
 | gpt-realtime endpoint/model wiring | ✅ live probe | WS to `wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1` reached session layer; previously failed only on the placeholder key |
 | gpt-realtime agent actually speaking in a call | ✅ live | `tests/manual/scratch/live_agent_speaking_test.py`: real CallManager + real key; agent greeted aloud, understood a spoken question, ran the real `multiply` calculator tool, spoke "The result is 345", transcript + memory reference written (all 6 legs PASS) |
 | Human joins call from prod Cinny | ✅ live | Root cause was the fork's service worker hijacking the widget iframe (see below); fix deployed to prod (release `20260709-080409`, cinny#96) and validated headless with the SW active: full join to the SFU websocket, in-call UI rendered. Cloudflare's cached `/sw.js` refreshed the same hour, so real browsers have the fix |
@@ -48,9 +48,10 @@ The lab (`mindroom.lab.mindroom.chat`, incus container on the `mindroom` host) i
 2. **Stock nio drops unknown decrypted olm events**, so encrypted frame keys never reach callbacks — fixed by nio#5 (validated via the real-olm round-trip test).
 3. **In-call tools were exposed to the realtime model with empty parameter schemas** — agno toolkit functions only build their JSON schema in `process_entrypoint()`, which nothing on the call path invoked, so the model called tools with no arguments and had to guess from error strings.
    Fixed in `call_tools._wrap_agno_function` (now processes the entrypoint before reading `function.parameters`), pinned by a unit test.
-   Calls use the configured agent's room-scoped context; tools requiring approval or interactive execution are omitted without a Matrix requester.
+   Calls use the sole caller's real Matrix requester identity and configured room-scoped context; tools requiring approval or interactive execution are omitted because voice has no approval UI.
 4. **Enabling calls without the `matrix_calls` extra crashed the whole agent at startup** — `find_spec("livekit.rtc")` raises `ModuleNotFoundError` (instead of returning `None`) when the parent `livekit` package is missing, so `matrix_calls_dependencies_available()` blew up `AgentBot.start()` instead of logging the dependencies-missing warning. Found during the first real deployment; fixed in `voice_agent.py` (commit `33b92df46`), pinned by a unit test.
 5. **PR review found lifecycle and credential-transport gaps** — the follow-up publishes membership before the first E2EE key, tears down partial SFU connects, accepts only the operator-configured or locally discovered focus, and sends manual-harness Matrix access tokens only in authorization headers.
+6. **PR review found requester, E2EE provenance, pending-key, and realtime-close gaps** — the follow-up limits managed calls to one distinct human user and uses that user's real requester identity, derives the effective Agno prompt/tool surface, accepts frame keys only from device-authenticated Olm events, retains early keys until membership catches up, and cleans up or retries unexpected realtime-session termination.
 
 ## Deployed agent backend (mindroom-chat on the `mindroom` LXC)
 
@@ -60,7 +61,9 @@ The lab (`mindroom.lab.mindroom.chat`, incus container on the `mindroom` host) i
 - `--extra matrix_calls` in the shared uv wrapper (dotfiles, merged via #69): the service's own `uv run` sync prunes manually-synced extras, so the extra must be part of the requested set.
 - Call-membership PL0 reconciled across all 26 managed rooms at boot.
 - **Lag vs the PR branch**: the host snapshot predates the nio 0.27 pin bump, so it still runs mindroom-nio 0.25.2 — encrypted-room hearing is NOT active there until the next deploy (unencrypted rooms, including Cinny Voice Rooms created with encryption off, work fully).
-- Prompt parity finding from live use: the voice agent gets Mind's real chat system prompt (51k chars, rendered identically) + all 23 tools, but `defaults.max_preload_chars` (50k) truncates ~37k chars of Mind's context (USER.md among the casualties) — this affects chat too; chat masks it with thread history, a cold call session doesn't. Open decision: raise the cap and/or strengthen the voice addendum against gpt-realtime's privacy-caginess.
+- Prompt parity finding from the historical deployed snapshot: the voice agent got Mind's real chat system prompt (51k chars, rendered identically) plus its then-visible 23 tools, but `defaults.max_preload_chars` (50k) truncated ~37k chars of Mind's context (USER.md among the casualties) — this affects chat too; chat masks it with thread history, a cold call session doesn't.
+  The current PR branch derives the effective Agno tool surface and filters functions that require text-only interaction.
+  Open decision: raise the cap and/or strengthen the voice addendum against gpt-realtime's privacy-caginess.
 
 ## RESOLVED: prod Cinny “stuck on Joining” (2026-07-09)
 

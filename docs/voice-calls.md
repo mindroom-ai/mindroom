@@ -14,13 +14,14 @@ When a call starts in a room, the configured agent:
 2. Exchanges a Matrix OpenID token for a LiveKit JWT at the MatrixRTC authorization service (`lk-jwt-service`).
 3. Connects to the LiveKit SFU and publishes its own call membership state event, so it appears in the call roster.
 4. In encrypted rooms, distributes its media frame key over encrypted to-device messages and installs the other participants' keys, following the same per-sender key rotation policy as Element Call.
-5. Runs an OpenAI realtime session on the call audio until everyone else leaves.
+5. Runs an OpenAI realtime session on the call audio until the managed session ends.
 
-The voice agent is the same agent you chat with: it carries the agent's regular system prompt (with a spoken-style addendum) and the same tools it has in text conversations.
-Tool calls run in the configured agent's room-scoped runtime context.
-MatrixRTC does not identify an individual speaker as a Matrix requester, so tools requiring confirmation, user input, external execution, or `tool_approval` are hidden from the voice tool schema.
+The voice agent is the same agent you chat with: it carries the agent's regular rendered system prompt (with a spoken-style addendum) and its effective text-chat tool surface, including tools added by knowledge and skills.
+MindRoom keeps a managed call active only while its devices belong to one Matrix user, and uses that user's ID as the real requester for the room-scoped tool runtime.
+Multiple devices belonging to that same user are supported.
+Tools requiring confirmation, user input, external execution, or `tool_approval` are hidden from the voice tool schema because a voice call has no approval UI.
 
-The agent leaves the call (and clears its membership state event) when the last other participant leaves, or when the bot shuts down.
+The agent leaves the call (and clears its membership state event) when the caller leaves, a second distinct Matrix user joins, the realtime session terminates, or the bot shuts down.
 
 ## Configuration
 
@@ -35,8 +36,8 @@ calls:
 
 Voice calls require the `matrix_calls` extra (`pip install "mindroom[matrix_calls]"` or `uv sync --extra matrix_calls`) and an `OPENAI_API_KEY` in your credentials.
 MindRoom enforces at most one calls-enabled agent per room.
-Calls only join rooms configured for that agent and only while every call participant passes the normal room and per-agent reply permissions.
-Requester-private agents cannot join calls because MatrixRTC cannot bind each spoken turn to a Matrix requester.
+Calls only join rooms configured for that agent and only while the sole caller passes the normal room and per-agent reply permissions.
+Requester-private agents are not currently supported for calls.
 
 ## Server requirements
 
@@ -82,4 +83,5 @@ When the call ends, file memory stores a relative transcript reference, Mem0 sto
 ## Limitations
 
 - Audio only: the agent neither publishes nor consumes video and screen shares.
+- Managed agent calls support one distinct human Matrix user at a time, although that user may join from multiple devices.
 - Legacy 1:1 `m.call.*` calls (non-MatrixRTC) are not supported.

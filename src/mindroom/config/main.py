@@ -575,7 +575,7 @@ class Config(BaseModel):
         if private_agents:
             msg = (
                 "calls.agents cannot reference requester-private agent(s): "
-                f"{', '.join(private_agents)}; MatrixRTC does not identify each speaker"
+                f"{', '.join(private_agents)}; call agents must currently be shared agents"
             )
             raise ValueError(msg)
 

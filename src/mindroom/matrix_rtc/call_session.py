@@ -121,6 +121,7 @@ class CallSession:
     """Drives one agent's participation in one room call."""
 
     room_id: str
+    requester_id: str
     e2ee_enabled: bool
     deps: CallSessionDeps
     _key_manager: FrameKeyManager = field(init=False)

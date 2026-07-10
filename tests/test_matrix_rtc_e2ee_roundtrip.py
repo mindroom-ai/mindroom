@@ -13,6 +13,7 @@ Until that lands in the pinned nio, the test skips.
 from __future__ import annotations
 
 import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import nio
@@ -21,8 +22,11 @@ from nio.crypto import Olm, OlmDevice
 from nio.crypto.olm_machine import DecryptedOlmT
 from nio.store import DefaultStore
 
+from mindroom.matrix.client_session import matrix_client
+from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.matrix_rtc.events import CALL_ENCRYPTION_KEYS_EVENT_TYPE, CallMember
 from mindroom.matrix_rtc.key_transport import ToDeviceFrameKeyTransport
+from tests.conftest import test_runtime_paths
 
 _NIO_SURFACES_UNKNOWN_OLM = "UnknownToDeviceEvent" in str(DecryptedOlmT)
 pytestmark = pytest.mark.skipif(
@@ -89,17 +93,39 @@ async def test_frame_key_round_trips_through_real_olm() -> None:
             olm_event = nio.OlmEvent.from_dict(
                 {"type": "m.room.encrypted", "sender": BOT, "content": sent[0].content},
             )
-            decrypted = rec_olm.decrypt_event(olm_event)
-            assert isinstance(decrypted, nio.UnknownToDeviceEvent)
-            assert decrypted.type == CALL_ENCRYPTION_KEYS_EVENT_TYPE
+            runtime_paths = test_runtime_paths(Path(tmp) / "runtime")
+            async with matrix_client("https://example.org", runtime_paths, user_id=REC) as rec_client:
+                rec_client.device_id = "RECDEV"
+                rec_client.olm = rec_olm
+                decrypted = rec_client._handle_decrypt_to_device(olm_event)
+                assert isinstance(decrypted, AuthenticatedToDeviceEvent)
+                assert decrypted.type == CALL_ENCRYPTION_KEYS_EVENT_TYPE
+                assert decrypted.authenticated_device_id == "BOTDEV"
 
-            parsed = transport.parse_incoming(decrypted, received_at_ms=1_000)
-            assert parsed is not None
-            room_id, received = parsed
-            assert room_id == ROOM
-            assert received.key_base64 == KEY_B64
-            assert received.key_index == 5
-            assert received.claimed_device_id == "BOTDEV"
+                parsed = transport.parse_incoming(decrypted, received_at_ms=1_000)
+                assert parsed is not None
+                room_id, received = parsed
+                assert room_id == ROOM
+                assert received.key_base64 == KEY_B64
+                assert received.key_index == 5
+                assert received.claimed_device_id == "BOTDEV"
+                spoofed_device = AuthenticatedToDeviceEvent(
+                    source=decrypted.source,
+                    sender=decrypted.sender,
+                    type=decrypted.type,
+                    authenticated_device_id="OTHER",
+                )
+                assert transport.parse_incoming(spoofed_device, received_at_ms=1_001) is None
+
+                duplicate = OlmDevice(BOT, "BOTDUP", bot_olm.account.identity_keys)
+                rec_olm.device_store.add(duplicate)
+                await transport.send_key(room_id=ROOM, key_base64=KEY_B64, key_index=6, targets=[target])
+                ambiguous_olm_event = nio.OlmEvent.from_dict(
+                    {"type": "m.room.encrypted", "sender": BOT, "content": sent[1].content},
+                )
+                ambiguous = rec_client._handle_decrypt_to_device(ambiguous_olm_event)
+                assert isinstance(ambiguous, nio.UnknownToDeviceEvent)
+                assert not isinstance(ambiguous, AuthenticatedToDeviceEvent)
         finally:
             bot_olm.store.database.close()
             rec_olm.store.database.close()

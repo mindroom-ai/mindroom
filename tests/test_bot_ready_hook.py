@@ -27,6 +27,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
+from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
@@ -186,7 +187,7 @@ def test_call_manager_registers_call_and_room_membership_callbacks(tmp_path: Pat
         nio.UnknownEvent,
         nio.RoomMemberEvent,
     ]
-    client.add_to_device_callback.assert_called_once_with(ANY, nio.UnknownToDeviceEvent)
+    client.add_to_device_callback.assert_called_once_with(ANY, AuthenticatedToDeviceEvent)
 
 
 @pytest.mark.asyncio
