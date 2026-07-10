@@ -1827,6 +1827,7 @@ depends_on = []
 path = "mindroom.sync_restart_retry"
 depends_on = [
     "mindroom.constants",
+    "mindroom.history.storage",
     "mindroom.history.types",
     "mindroom.logging_config",
 ]

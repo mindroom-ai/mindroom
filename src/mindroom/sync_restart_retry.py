@@ -15,10 +15,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_SOURCE_EVENT_IDS_METADATA_KEY
+from mindroom.history.storage import is_model_history_visible_run
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -31,7 +31,6 @@ logger = get_logger(__name__)
 _MAX_ATTEMPTED_KEYS = 512
 _INTERRUPTED_REPLAY_STATE_KEY = "mindroom_replay_state"
 _INTERRUPTED_REPLAY_STATE = "interrupted"
-_MODEL_INVISIBLE_RUN_STATUSES = {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
 
 
 def _run_matches_scope(run: RunOutput | TeamRunOutput, scope: HistoryScope) -> bool:
@@ -66,11 +65,7 @@ def interrupted_source_needs_retry(
     """Return whether stored run order ends in this source's interrupted replay."""
     interrupted_replay_found = False
     for run in runs:
-        if (
-            run.parent_run_id is not None
-            or run.status in _MODEL_INVISIBLE_RUN_STATUSES
-            or not _run_matches_scope(run, scope)
-        ):
+        if not is_model_history_visible_run(run) or not _run_matches_scope(run, scope):
             continue
         run_source_event_ids = _run_source_event_ids(run)
         if run_source_event_ids is None:
