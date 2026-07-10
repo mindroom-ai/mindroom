@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import ast
+import json
+
+from agno.exceptions import ModelProviderError
+
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 
 logger = get_logger(__name__)
 
-_TRANSIENT_PROVIDER_ERROR_MARKERS = (
-    "overloaded_error",
-    "model overloaded",
-)
+_TRANSIENT_PROVIDER_STATUS_CODES = frozenset({200, 408, 409, 429, 500, 502, 503, 504, 529})
 
 
 class AvatarGenerationError(RuntimeError):
@@ -32,11 +34,47 @@ def _extract_provider_from_error(error: Exception) -> str | None:
     return None
 
 
-def _is_transient_provider_error(error_str: str) -> bool:
+def _structured_provider_error(error_str: str) -> tuple[str, str] | None:
+    """Extract ``(type, message)`` from one JSON or Python-repr provider payload."""
+    start = error_str.find("{")
+    end = error_str.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    candidate = error_str[start : end + 1]
+    try:
+        payload = json.loads(candidate)
+    except (TypeError, ValueError):
+        try:
+            payload = ast.literal_eval(candidate)
+        except (SyntaxError, ValueError):
+            return None
+    if not isinstance(payload, dict) or payload.get("type") != "error":
+        return None
+    provider_error = payload.get("error")
+    if not isinstance(provider_error, dict):
+        return None
+    error_type = provider_error.get("type")
+    message = provider_error.get("message")
+    if not isinstance(error_type, str) or not isinstance(message, str):
+        return None
+    return error_type.casefold(), message.casefold()
+
+
+def _is_transient_provider_error(error: Exception) -> bool:
     """Recognize provider failures that already exhausted automatic retries."""
-    if any(marker in error_str for marker in _TRANSIENT_PROVIDER_ERROR_MARKERS):
+    status_code = getattr(error, "status_code", None)
+    if isinstance(error, ModelProviderError) and status_code in _TRANSIENT_PROVIDER_STATUS_CODES:
         return True
-    return "api_error" in error_str and "internal server error" in error_str
+    if _extract_provider_from_error(error) is not None and status_code in _TRANSIENT_PROVIDER_STATUS_CODES:
+        return True
+
+    structured_error = _structured_provider_error(str(error))
+    if structured_error is None:
+        return False
+    error_type, message = structured_error
+    return error_type in {"overloaded", "overloaded_error"} or (
+        error_type == "api_error" and "internal server error" in message
+    )
 
 
 def get_user_friendly_error_message(error: Exception, agent_name: str | None = None) -> str:
@@ -69,7 +107,7 @@ def get_user_friendly_error_message(error: Exception, agent_name: str | None = N
         return f"{agent_prefix}❌ Authentication failed{provider_hint}: {safe_error}"
     if any(x in error_str for x in ["rate", "429", "quota"]):
         return f"{agent_prefix}⏱️ Rate limited. Please wait a moment and try again."
-    if _is_transient_provider_error(error_str):
+    if _is_transient_provider_error(error):
         return (
             f"{agent_prefix}⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
         )
