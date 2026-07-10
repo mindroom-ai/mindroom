@@ -1127,13 +1127,21 @@ class _MultiAgentOrchestrator:
 
     async def _update_unchanged_bots(self, plan: ConfigUpdatePlan) -> None:
         """Apply the new config to bots that do not require restart."""
-        for entity_name, bot in self.agent_bots.items():
-            if entity_name in plan.entities_to_restart:
-                continue
+        unchanged_bots = [
+            (entity_name, bot)
+            for entity_name, bot in self.agent_bots.items()
+            if entity_name not in plan.entities_to_restart
+        ]
+        for _, bot in unchanged_bots:
             bot.config = plan.new_config
             bot.enable_streaming = plan.new_config.defaults.enable_streaming
             bot.hook_registry = self.hook_registry
-            await bot._set_presence_with_model_info()
+
+        for entity_name, bot in unchanged_bots:
+            try:
+                await bot._set_presence_with_model_info()
+            except Exception:
+                logger.exception("bot_presence_update_failed", agent=entity_name)
             logger.debug("bot_config_updated", agent=entity_name)
 
     async def _emit_config_reloaded(

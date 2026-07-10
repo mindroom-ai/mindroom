@@ -2313,6 +2313,55 @@ class TestMultiAgentOrchestrator:
         reset_runtime_state()
 
     @pytest.mark.asyncio
+    async def test_update_unchanged_bots_binds_all_before_best_effort_presence(self, tmp_path: Path) -> None:
+        """Presence failures must not expose mixed config or block later unchanged bots."""
+        old_config = Config(defaults={"enable_streaming": True})
+        new_config = Config(defaults={"enable_streaming": False})
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        new_hook_registry = HookRegistry.empty()
+        orchestrator.hook_registry = new_hook_registry
+        first_bot = _mock_managed_bot(old_config)
+        second_bot = _mock_managed_bot(old_config)
+        orchestrator.agent_bots = {"first": first_bot, "second": second_bot}
+        second_bot_state_at_first_await: list[tuple[bool, bool, bool]] = []
+
+        async def fail_first_presence_update() -> None:
+            second_bot_state_at_first_await.append(
+                (
+                    second_bot.config is new_config,
+                    second_bot.enable_streaming is False,
+                    second_bot.hook_registry is new_hook_registry,
+                ),
+            )
+            msg = "presence unavailable"
+            raise RuntimeError(msg)
+
+        first_bot._set_presence_with_model_info.side_effect = fail_first_presence_update
+        plan = ConfigUpdatePlan(
+            new_config=new_config,
+            changed_mcp_servers=set(),
+            configured_entities={"first", "second"},
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
+        )
+
+        with patch("mindroom.orchestrator.logger.exception") as mock_log_exception:
+            await orchestrator._update_unchanged_bots(plan)
+
+        assert first_bot.config is new_config
+        assert first_bot.enable_streaming is False
+        assert first_bot.hook_registry is new_hook_registry
+        assert second_bot_state_at_first_await == [(True, True, True)]
+        first_bot._set_presence_with_model_info.assert_awaited_once_with()
+        second_bot._set_presence_with_model_info.assert_awaited_once_with()
+        mock_log_exception.assert_called_once_with("bot_presence_update_failed", agent="first")
+
+    @pytest.mark.asyncio
     async def test_update_config_syncs_runtime_services_when_running(self, tmp_path: Path) -> None:
         """Hot reload should sync runtime services without global knowledge refresh work."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
