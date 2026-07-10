@@ -262,7 +262,7 @@ def seen_event_ids_for_runs(runs: Iterable[RunOutput | TeamRunOutput]) -> set[st
 
 
 def pending_restart_recovery_run_ids(runs: Iterable[RunOutput | TeamRunOutput]) -> set[str]:
-    """Return the latest restart replay not superseded by a completed visible run."""
+    """Return the latest replay still needed by sync-restart recovery."""
     pending_run_ids: set[str] = set()
     for run in runs:
         if not is_model_history_visible_run(run):
@@ -273,14 +273,9 @@ def pending_restart_recovery_run_ids(runs: Iterable[RunOutput | TeamRunOutput]) 
             and metadata.get(MINDROOM_REPLAY_STATE_METADATA_KEY) == MINDROOM_REPLAY_STATE_INTERRUPTED
             and metadata.get(MINDROOM_RESTART_RECOVERY_PENDING_METADATA_KEY) is True
         )
+        pending_run_ids.clear()
         if is_pending_restart_recovery and isinstance(run.run_id, str) and run.run_id:
-            pending_run_ids.clear()
             pending_run_ids.add(run.run_id)
-        elif not (
-            isinstance(metadata, dict)
-            and metadata.get(MINDROOM_REPLAY_STATE_METADATA_KEY) == MINDROOM_REPLAY_STATE_INTERRUPTED
-        ):
-            pending_run_ids.clear()
     return pending_run_ids
 
 
