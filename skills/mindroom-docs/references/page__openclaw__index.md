@@ -30,7 +30,7 @@ Not included:
 ## The `openclaw_compat` preset
 
 `openclaw_compat` is a config macro, not a runtime toolkit.
-`Config.get_agent_tools` expands it into native MindRoom tools and dedupes while preserving order.
+`RuntimeConfig.resolve_entity` expands it into native MindRoom tools and dedupes while preserving order.
 
 Preset expansion:
 
