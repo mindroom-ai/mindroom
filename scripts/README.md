@@ -46,6 +46,7 @@ uv run python scripts/testing/benchmark_tool_call_overhead.py --iterations 1000 
 ### Benchmark pre-model prompt preparation
 ```bash
 uv run python scripts/testing/benchmark_prompt_preparation.py --iterations 30 --warmup 3
+uv run python scripts/testing/benchmark_prompt_preparation.py --iterations 30 --warmup 3 --memory-backend file
 ```
 
 ### Generate and sync managed avatars

@@ -47,6 +47,11 @@ def _summarize_samples(samples: Sequence[float]) -> dict[str, float | int]:
     }
 
 
+def _simulate_sync_memory_prefix(delay_s: float) -> None:
+    """Model Mem0 client construction before its first storage await."""
+    time.sleep(delay_s)
+
+
 async def _run_sample(
     *,
     config: Config,
@@ -56,7 +61,7 @@ async def _run_sample(
     history_delay_s: float,
 ) -> None:
     async def _prepare_memory(*_args: object, **_kwargs: object) -> MemoryPromptParts:
-        await asyncio.sleep(memory_delay_s)
+        _simulate_sync_memory_prefix(memory_delay_s)
         return MemoryPromptParts(session_preamble="stable memory", turn_context="turn memory")
 
     def _build_agent(*_args: object, **_kwargs: object) -> SimpleNamespace:
@@ -114,7 +119,13 @@ async def _benchmark(args: argparse.Namespace) -> dict[str, object]:
         config = Config.model_validate(
             {
                 "models": {"default": default_model.to_config_dict()},
-                "agents": {"benchmark": {"display_name": "Benchmark", "role": "Benchmark prompt preparation"}},
+                "agents": {
+                    "benchmark": {
+                        "display_name": "Benchmark",
+                        "role": "Benchmark prompt preparation",
+                        "memory_backend": args.memory_backend,
+                    },
+                },
             },
         )
         delays = {
@@ -140,6 +151,7 @@ async def _benchmark(args: argparse.Namespace) -> dict[str, object]:
 
     return {
         "case": "pre_model_prompt_preparation",
+        "memory_backend": args.memory_backend,
         "warmup": args.warmup,
         **delays,
         **_summarize_samples(samples),
@@ -154,6 +166,12 @@ def main() -> None:
     parser.add_argument("--memory-ms", type=float, default=700.0)
     parser.add_argument("--agent-ms", type=float, default=1000.0)
     parser.add_argument("--history-ms", type=float, default=600.0)
+    parser.add_argument(
+        "--memory-backend",
+        choices=["mem0", "file"],
+        default="mem0",
+        help="Use mem0 for parallel preparation or file for serial baseline behavior.",
+    )
     args = parser.parse_args()
     if args.iterations < 1:
         parser.error("--iterations must be >= 1")

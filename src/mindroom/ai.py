@@ -1190,6 +1190,7 @@ async def _prepare_agent_and_prompt(
             thread_history=thread_history,
             runtime_paths=runtime_paths,
             config=config,
+            resolved_runtime_model=runtime_model,
             compaction_lifecycle=compaction_lifecycle,
             current_sender_id=None if include_openai_compat_guidance else ctx.requester_id,
             current_timestamp_ms=current_timestamp_ms,

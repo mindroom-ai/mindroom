@@ -15,7 +15,7 @@ from agno.tools.function import Function
 
 from mindroom import execution_preparation
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
-from mindroom.config.main import Config
+from mindroom.config.main import Config, ResolvedRuntimeModel
 from mindroom.config.models import CompactionConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, RuntimePaths, resolve_runtime_paths
 from mindroom.execution_preparation import (
@@ -134,6 +134,38 @@ def test_fallback_static_token_budget_preserves_context_window_bounds() -> None:
     assert _fallback_static_token_budget(context_window=0, reserve_tokens=100) is None
     assert _fallback_static_token_budget(context_window=1_000, reserve_tokens=800) == 500
     assert _fallback_static_token_budget(context_window=1_000, reserve_tokens=100) == 900
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_execution_context_uses_supplied_runtime_model_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """History preparation should use the same runtime-model snapshot as agent construction."""
+    config, runtime_paths = _bound_agent_config(tmp_path)
+    snapshot = ResolvedRuntimeModel(model_name="default", context_window=6_000)
+    prepared = MagicMock()
+    prepare_common = AsyncMock(return_value=prepared)
+    resolve_runtime_model = MagicMock(side_effect=AssertionError("runtime model was re-resolved"))
+    monkeypatch.setattr(Config, "resolve_runtime_model", resolve_runtime_model)
+    monkeypatch.setattr(execution_preparation, "agent_static_token_estimator", MagicMock())
+    monkeypatch.setattr(execution_preparation, "_prepare_execution_context_common", prepare_common)
+
+    result = await prepare_agent_execution_context(
+        make_turn_context("test_agent"),
+        scope_context=None,
+        agent=MagicMock(),
+        prompt="Current request",
+        thread_history=None,
+        runtime_paths=runtime_paths,
+        config=config,
+        resolved_runtime_model=snapshot,
+        include_openai_compat_guidance=True,
+    )
+
+    assert result is prepared
+    resolve_runtime_model.assert_not_called()
+    assert prepare_common.await_args.kwargs["fallback_static_token_budget"] == 6_000
 
 
 @pytest.mark.asyncio

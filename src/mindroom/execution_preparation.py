@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from agno.team import Team
 
     from mindroom.attachments import AttachmentRecord
-    from mindroom.config.main import Config
+    from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.history.types import CompactionLifecycle, PreparedHistoryState, ResolvedReplayPlan
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_turn import ResponseTurnContext
@@ -771,6 +771,7 @@ async def prepare_agent_execution_context(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     runtime_paths: RuntimePaths,
     config: Config,
+    resolved_runtime_model: ResolvedRuntimeModel | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     current_sender_id: str | None = None,
     current_timestamp_ms: float | None = None,
@@ -784,7 +785,7 @@ async def prepare_agent_execution_context(
     if not include_openai_compat_guidance:
         response_sender_id = entity_identity_registry(config, runtime_paths).current_ids.get(agent_name)
         response_sender = response_sender_id.full_id if response_sender_id is not None else None
-    runtime_model = config.resolve_runtime_model(
+    runtime_model = resolved_runtime_model or config.resolve_runtime_model(
         entity_name=agent_name,
         room_id=ctx.room_id,
         thread_id=ctx.thread_id,
