@@ -7,6 +7,11 @@ from mindroom.redaction import redact_sensitive_text
 
 logger = get_logger(__name__)
 
+_TRANSIENT_PROVIDER_ERROR_MARKERS = (
+    "overloaded_error",
+    "model overloaded",
+)
+
 
 class AvatarGenerationError(RuntimeError):
     """Raised when managed avatar generation cannot produce required assets."""
@@ -25,6 +30,13 @@ def _extract_provider_from_error(error: Exception) -> str | None:
     if top_module in known_providers:
         return top_module
     return None
+
+
+def _is_transient_provider_error(error_str: str) -> bool:
+    """Recognize provider failures that already exhausted automatic retries."""
+    if any(marker in error_str for marker in _TRANSIENT_PROVIDER_ERROR_MARKERS):
+        return True
+    return "api_error" in error_str and "internal server error" in error_str
 
 
 def get_user_friendly_error_message(error: Exception, agent_name: str | None = None) -> str:
@@ -57,6 +69,10 @@ def get_user_friendly_error_message(error: Exception, agent_name: str | None = N
         return f"{agent_prefix}❌ Authentication failed{provider_hint}: {safe_error}"
     if any(x in error_str for x in ["rate", "429", "quota"]):
         return f"{agent_prefix}⏱️ Rate limited. Please wait a moment and try again."
+    if _is_transient_provider_error(error_str):
+        return (
+            f"{agent_prefix}⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
+        )
     if "timeout" in error_str:
         return f"{agent_prefix}⏰ Request timed out. Please try again."
     # Generic error with the actual error message for transparency

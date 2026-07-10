@@ -41,8 +41,10 @@ logger = get_logger(__name__)
 
 _STREAM_RETRY_HOOK_ATTR = "_mindroom_claude_stream_retry_hook_installed"
 
-# One initial attempt plus this many re-issued requests.
-_MAX_TRANSIENT_RETRIES = 2
+# One initial attempt plus this many re-issued requests. Provider overloads can
+# outlive the SDK's short HTTP retry window, especially when they arrive as
+# mid-stream SSE error events after the response has already started with 200.
+_MAX_TRANSIENT_RETRIES = 4
 _RETRY_BASE_DELAY_SECONDS = 1.0
 
 # Statuses that indicate a transient provider fault. 200 is the mid-stream SSE

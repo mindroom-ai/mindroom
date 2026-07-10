@@ -180,6 +180,25 @@ async def test_retries_rate_limit_then_gives_up() -> None:
     assert len(calls) == claude_stream_retry._MAX_TRANSIENT_RETRIES + 1
 
 
+@pytest.mark.asyncio
+async def test_retries_sustained_overload_before_success() -> None:
+    """A provider overload lasting beyond the old retry window can recover."""
+    model, calls = _hooked_model_with_async_attempts(
+        [
+            [ModelRateLimitError(message="overloaded_error", status_code=529)],
+            [ModelRateLimitError(message="overloaded_error", status_code=529)],
+            [ModelRateLimitError(message="overloaded_error", status_code=529)],
+            [ModelRateLimitError(message="overloaded_error", status_code=529)],
+            [ModelResponse(content="recovered")],
+        ],
+    )
+
+    responses = await _collect(model.ainvoke_stream([], object()))
+
+    assert [response.content for response in responses] == ["recovered"]
+    assert len(calls) == 5
+
+
 def test_sync_stream_retries_transient_error() -> None:
     """The synchronous stream path retries transient errors too."""
     model, calls = _hooked_model_with_sync_attempts(

@@ -64,6 +64,33 @@ def test_rate_limit_error() -> None:
     assert "Rate limited" in message
 
 
+def test_overloaded_provider_error_is_user_friendly() -> None:
+    """An exhausted provider overload must not dump its raw payload to Matrix."""
+    error = Exception(
+        "{'type': 'error', 'error': {'type': 'overloaded_error', 'message': 'Overloaded'}, 'request_id': 'req_secret'}",
+    )
+
+    message = get_user_friendly_error_message(error, "assistant")
+
+    assert message == (
+        "[assistant] ⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
+    )
+    assert "req_secret" not in message
+
+
+def test_internal_provider_error_is_user_friendly() -> None:
+    """A transient provider api_error gets the same bounded-retry message."""
+    error = Exception(
+        "{'type': 'error', 'error': {'type': 'api_error', 'message': 'Internal server error'}, "
+        "'request_id': 'req_secret'}",
+    )
+
+    message = get_user_friendly_error_message(error)
+
+    assert "Model provider temporarily unavailable after automatic retries" in message
+    assert "req_secret" not in message
+
+
 def test_timeout_error() -> None:
     """Test timeout error message."""
     error = TimeoutError("Request timeout")
