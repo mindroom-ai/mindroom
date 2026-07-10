@@ -133,6 +133,12 @@ def _read_persisted_records(tracker: HandledTurnLedger) -> dict[str, object]:
     return records
 
 
+def _wait_for_disk_persists_without_flushing(tracker: HandledTurnLedger) -> None:
+    """Wait for worker writes while leaving live reconciliation to the next read."""
+    for future in list(tracker._state.pending_persists):
+        future.result(timeout=5)
+
+
 def test_handled_turn_ledger_init(temp_dir: Path) -> None:
     """Initialization should create an empty in-memory ledger."""
     tracker = HandledTurnLedger("test_agent", base_path=temp_dir)
@@ -756,6 +762,15 @@ def test_disk_merge_prunes_discovery_alias_claimed_by_another_completed_turn(tem
             },
         )
 
+    _wait_for_disk_persists_without_flushing(tracker)
+    live_question_record = tracker.get_turn_record("$question")
+    live_selection_record = tracker.get_turn_record("$selection")
+    assert live_question_record is not None
+    assert live_question_record.discovery_event_ids == ()
+    assert live_selection_record is not None
+    assert live_selection_record.source_event_ids == ("$selection",)
+    assert live_selection_record.response_event_id == "$selection-response"
+
     tracker.flush()
     reloaded = _reload_ledger("test_cross_process_alias", temp_dir)
     question_record = reloaded.get_turn_record("$question")
@@ -765,6 +780,52 @@ def test_disk_merge_prunes_discovery_alias_claimed_by_another_completed_turn(tem
     assert selection_record is not None
     assert selection_record.source_event_ids == ("$selection",)
     assert selection_record.response_event_id == "$selection-response"
+
+
+def test_disk_merge_keeps_newer_same_turn_record_and_reconciles_live_state(temp_dir: Path) -> None:
+    """A stale writer should keep only additive echo and discovery facts."""
+    tracker = HandledTurnLedger("test_cross_process_stale", base_path=temp_dir)
+    assert tracker.get_turn_record("$warm") is None
+
+    with advisory_file_lock(tracker._responses_lock_file):
+        tracker.record_handled_turn(
+            TurnRecord.create(
+                ["$event"],
+                discovery_event_ids=["$alias"],
+                response_event_id="$stale-response",
+                visible_echo_event_id="$echo",
+                source_event_prompts={"$event": "stale prompt"},
+                response_owner="stale-owner",
+                timestamp=10,
+            ),
+        )
+        _write_responses_file(
+            tracker,
+            {
+                "$event": {
+                    "response_event_id": "$new-response",
+                    "completed": True,
+                    "source_event_prompts": {"$event": "new prompt"},
+                    "response_owner": "new-owner",
+                    "timestamp": 20,
+                },
+            },
+        )
+
+    _wait_for_disk_persists_without_flushing(tracker)
+    live_record = tracker.get_turn_record("$event")
+    assert live_record is not None
+    assert live_record.response_event_id == "$new-response"
+    assert live_record.source_event_prompts == {"$event": "new prompt"}
+    assert live_record.response_owner == "new-owner"
+    assert live_record.visible_echo_event_id == "$echo"
+    assert live_record.discovery_event_ids == ("$alias",)
+    assert tracker.get_turn_record("$alias") == live_record
+
+    tracker.flush()
+    reloaded = _reload_ledger("test_cross_process_stale", temp_dir)
+    assert reloaded.get_turn_record("$event") == live_record
+    assert reloaded.get_turn_record("$alias") == live_record
 
 
 def test_multiple_instances_merge_updates(temp_dir: Path) -> None:

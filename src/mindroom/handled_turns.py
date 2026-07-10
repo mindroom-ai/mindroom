@@ -339,7 +339,15 @@ class _LedgerState:
     responses: dict[str, TurnRecord] = field(default_factory=dict)
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     loaded: bool = False
-    pending_persists: list[Future[None]] = field(default_factory=list, repr=False)
+    pending_persists: list[Future[_PersistedTurnResult | None]] = field(default_factory=list, repr=False)
+
+
+@dataclass(frozen=True)
+class _PersistedTurnResult:
+    """Authoritative disk rows resolved for one asynchronous write request."""
+
+    requested_record: TurnRecord
+    records_by_event_id: tuple[tuple[str, TurnRecord | None], ...]
 
 
 _LEDGER_STATES: dict[str, _LedgerState] = {}
@@ -431,6 +439,7 @@ class HandledTurnLedger:
             return None
         with self._state.lock:
             self._ensure_loaded_locked()
+            self._apply_completed_persists_locked()
             existing_records = MappingProxyType(
                 {
                     event_id: record
@@ -444,7 +453,7 @@ class HandledTurnLedger:
             candidate_record = (
                 turn_record if turn_record.timestamp != 0.0 else replace(turn_record, timestamp=time.time())
             )
-            persisted_record = _compatible_turn_record(candidate_record, self._responses)
+            persisted_record = _resolve_turn_record(candidate_record, self._responses)
             if persisted_record is None:
                 return None
             for event_id in persisted_record.indexed_event_ids:
@@ -457,6 +466,7 @@ class HandledTurnLedger:
         """Return whether the source event has a terminal recorded outcome."""
         with self._state.lock:
             self._ensure_loaded_locked()
+            self._apply_completed_persists_locked()
             record = self._responses.get(event_id)
             return record.completed if record is not None else False
 
@@ -464,6 +474,7 @@ class HandledTurnLedger:
         """Return the tracked visible echo event ID for one source event."""
         with self._state.lock:
             self._ensure_loaded_locked()
+            self._apply_completed_persists_locked()
             record = self._responses.get(source_event_id)
             return record.visible_echo_event_id if record is not None else None
 
@@ -471,6 +482,7 @@ class HandledTurnLedger:
         """Return the first visible echo already tracked for one or more source events."""
         with self._state.lock:
             self._ensure_loaded_locked()
+            self._apply_completed_persists_locked()
             for event_id in _normalize_source_event_ids(source_event_ids):
                 record = self._responses.get(event_id)
                 if record is not None and record.visible_echo_event_id is not None:
@@ -481,6 +493,7 @@ class HandledTurnLedger:
         """Return the canonical record for one source event."""
         with self._state.lock:
             self._ensure_loaded_locked()
+            self._apply_completed_persists_locked()
             return self._responses.get(source_event_id)
 
     def _ensure_loaded_locked(self) -> None:
@@ -497,31 +510,71 @@ class HandledTurnLedger:
         pending = list(self._state.pending_persists)
         self._state.pending_persists.clear()
         for future in pending:
-            future.result()
+            result = future.result()
+            if result is not None:
+                self._apply_persist_result_locked(result)
+
+    def _apply_completed_persists_locked(self) -> None:
+        """Publish completed asynchronous disk resolutions before serving live state."""
+        completed: list[Future[_PersistedTurnResult | None]] = []
+        pending: list[Future[_PersistedTurnResult | None]] = []
+        for future in self._state.pending_persists:
+            if future.done():
+                completed.append(future)
+            else:
+                pending.append(future)
+        self._state.pending_persists = pending
+        for future in completed:
+            result = future.result()
+            if result is not None:
+                self._apply_persist_result_locked(result)
 
     def _schedule_persist_locked(self, turn_record: TurnRecord) -> None:
         """Queue one write-behind disk merge for records already applied to memory."""
         future = _persist_executor().submit(self._persist_record, turn_record)
-        self._state.pending_persists = [pending for pending in self._state.pending_persists if not pending.done()]
         self._state.pending_persists.append(future)
 
-    def _persist_record(self, turn_record: TurnRecord) -> None:
+    def _persist_record(self, turn_record: TurnRecord) -> _PersistedTurnResult | None:
         """Merge already-applied records into the persisted ledger from a worker thread."""
         try:
             with advisory_file_lock(self._responses_lock_file, exclusive=True):
                 persisted_responses = self._read_responses_file_locked()
-                compatible_record = _compatible_turn_record(turn_record, persisted_responses)
-                if compatible_record is None:
-                    return
-                for event_id in compatible_record.indexed_event_ids:
-                    persisted_responses[event_id] = compatible_record
-                self._write_responses_file_locked(persisted_responses)
+                resolved_record = _resolve_turn_record(turn_record, persisted_responses)
+                if resolved_record is not None:
+                    for event_id in resolved_record.indexed_event_ids:
+                        persisted_responses[event_id] = resolved_record
+                    self._write_responses_file_locked(persisted_responses)
+                resolved_event_ids = tuple(
+                    dict.fromkeys(
+                        (
+                            *turn_record.indexed_event_ids,
+                            *(resolved_record.indexed_event_ids if resolved_record is not None else ()),
+                        ),
+                    ),
+                )
+                return _PersistedTurnResult(
+                    requested_record=turn_record,
+                    records_by_event_id=tuple(
+                        (event_id, persisted_responses.get(event_id)) for event_id in resolved_event_ids
+                    ),
+                )
         except Exception:
             logger.exception(
                 "handled_turn_persist_failed",
                 agent=self.agent_name,
                 responses_file=str(self._responses_file),
             )
+            return None
+
+    def _apply_persist_result_locked(self, result: _PersistedTurnResult) -> None:
+        """Replace still-current requested rows with their authoritative disk values."""
+        for event_id, persisted_record in result.records_by_event_id:
+            if self._responses.get(event_id) != result.requested_record:
+                continue
+            if persisted_record is None:
+                self._responses.pop(event_id, None)
+            else:
+                self._responses[event_id] = persisted_record
 
     def _write_responses_file_locked(self, responses: dict[str, TurnRecord]) -> None:
         """Atomically write one versioned ledger payload while the file lock is held."""
@@ -633,11 +686,11 @@ def same_turn_identity(first: TurnRecord, second: TurnRecord) -> bool:
     return first.source_event_ids == second.source_event_ids and first.anchor_event_id == second.anchor_event_id
 
 
-def _compatible_turn_record(
+def _resolve_turn_record(
     turn_record: TurnRecord,
     existing_records: Mapping[str, TurnRecord],
 ) -> TurnRecord | None:
-    """Reject canonical conflicts and remove discovery aliases owned by other turns."""
+    """Resolve one candidate against completed identities and newer same-turn rows."""
     for event_id in turn_record.source_event_ids:
         existing_record = existing_records.get(event_id)
         if (
@@ -646,14 +699,36 @@ def _compatible_turn_record(
             and not same_turn_identity(existing_record, turn_record)
         ):
             return None
+    same_identity_records = (
+        existing_record
+        for event_id in turn_record.indexed_event_ids
+        if (existing_record := existing_records.get(event_id)) is not None
+        and same_turn_identity(existing_record, turn_record)
+    )
+    newest_existing_record = max(same_identity_records, key=lambda record: record.timestamp, default=None)
+    resolved_record = (
+        _merge_same_identity_records(turn_record, newest_existing_record)
+        if newest_existing_record is not None
+        else turn_record
+    )
     discovery_event_ids = tuple(
         event_id
-        for event_id in turn_record.discovery_event_ids
+        for event_id in resolved_record.discovery_event_ids
         if (existing_record := existing_records.get(event_id)) is None
         or not existing_record.completed
-        or same_turn_identity(existing_record, turn_record)
+        or same_turn_identity(existing_record, resolved_record)
     )
-    return replace(turn_record, discovery_event_ids=discovery_event_ids)
+    return replace(resolved_record, discovery_event_ids=discovery_event_ids)
+
+
+def _merge_same_identity_records(candidate: TurnRecord, existing: TurnRecord) -> TurnRecord:
+    """Keep the newer same-turn record while preserving older echo and discovery facts."""
+    newer, older = (candidate, existing) if candidate.timestamp >= existing.timestamp else (existing, candidate)
+    return replace(
+        newer,
+        discovery_event_ids=(*newer.discovery_event_ids, *older.discovery_event_ids),
+        visible_echo_event_id=newer.visible_echo_event_id or older.visible_echo_event_id,
+    )
 
 
 def _normalize_string(value: object) -> str | None:

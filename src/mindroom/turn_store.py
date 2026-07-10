@@ -411,5 +411,5 @@ def _reconcile_ledger_and_recovery(ledger_record: TurnRecord, recovery_record: T
         correlation_id=recovery_record.correlation_id or ledger_record.correlation_id,
         history_scope=recovery_record.history_scope or ledger_record.history_scope,
         conversation_target=recovery_record.conversation_target or ledger_record.conversation_target,
-        timestamp=recovery_record.timestamp,
+        timestamp=max(recovery_record.timestamp, ledger_record.timestamp),
     )

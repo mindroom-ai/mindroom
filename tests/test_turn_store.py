@@ -239,7 +239,7 @@ def test_same_second_delivered_run_repairs_fractional_ledger_timestamp(tmp_path:
 
     assert loaded is not None
     assert loaded.response_event_id == "$new-response"
-    assert loaded.timestamp == 10
+    assert loaded.timestamp == 10.9
 
 
 def test_newer_interrupted_run_keeps_delivered_ledger_outcome(tmp_path: Path) -> None:
