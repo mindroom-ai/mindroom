@@ -2589,6 +2589,7 @@ path = "mindroom.tool_system.plugins"
 depends_on = [
     "mindroom.constants",
     "mindroom.hooks",
+    "mindroom.mcp.registry",
     "mindroom.tool_schema_cache",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.plugin_imports",

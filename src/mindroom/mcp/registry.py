@@ -37,7 +37,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _MCP_TOOL_PREFIX = "mcp_"
-_MCP_TOOL_NAMES: set[str] = set()
 _MCP_TOOL_FACTORY_MARKER = "__mindroom_mcp_tool_factory__"
 # MindRoomMCPToolkit declares these constructor args for every MCP tool; metadata
 # mirrors that contract even though credentials are used only by OAuth-backed servers.
@@ -58,22 +57,10 @@ def mcp_server_id_from_tool_name(tool_name: str) -> str | None:
     if not tool_name.startswith(_MCP_TOOL_PREFIX):
         return None
     factory = TOOL_REGISTRY.get(tool_name)
-    if tool_name not in _MCP_TOOL_NAMES and not getattr(factory, _MCP_TOOL_FACTORY_MARKER, False):
+    if not getattr(factory, _MCP_TOOL_FACTORY_MARKER, False):
         return None
     server_id = tool_name.removeprefix(_MCP_TOOL_PREFIX)
     return server_id or None
-
-
-def _registered_mcp_tool_names() -> set[str]:
-    """Return tool names that are actually owned by the dynamic MCP registry."""
-    return {
-        *_MCP_TOOL_NAMES,
-        *(
-            tool_name
-            for tool_name, factory in TOOL_REGISTRY.items()
-            if getattr(factory, _MCP_TOOL_FACTORY_MARKER, False)
-        ),
-    }
 
 
 def _tool_override_fields() -> list[ConfigField]:
@@ -225,19 +212,28 @@ def _desired_server_entries(config: Config | None) -> dict[str, MCPServerConfig]
 
 def sync_mcp_tool_registry(config: RuntimeConfig | None) -> None:
     """Reconcile the dynamic registry entries for configured MCP servers."""
+    reconcile_mcp_tool_registry(TOOL_REGISTRY, TOOL_METADATA, config)
+
+
+def reconcile_mcp_tool_registry(
+    registry: dict[str, Callable[[], type[Toolkit]]],
+    metadata: dict[str, ToolMetadata],
+    config: Config | None,
+) -> set[str]:
+    """Reconcile MCP entries in one live or staged registry snapshot."""
     desired_registry, desired_metadata = resolved_mcp_tool_state(config)
-    desired_tool_names = reconcile_dynamic_tool_state(
-        TOOL_REGISTRY,
-        TOOL_METADATA,
+    return reconcile_dynamic_tool_state(
+        registry,
+        metadata,
         desired_registry,
         desired_metadata,
-        owned_tool_names=_registered_mcp_tool_names(),
+        owned_tool_names={
+            tool_name for tool_name, factory in registry.items() if getattr(factory, _MCP_TOOL_FACTORY_MARKER, False)
+        },
         collision_error=lambda tool_name: ValueError(
             f"MCP tool '{tool_name}' conflicts with an existing registered tool",
         ),
     )
-    _MCP_TOOL_NAMES.clear()
-    _MCP_TOOL_NAMES.update(desired_tool_names)
 
 
 def resolved_mcp_tool_state(

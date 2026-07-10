@@ -253,8 +253,14 @@ def prepare_plugin_reload(
             _evict_synthetic_plugin_subtrees(previous_package_roots)
             plugins = load_plugins(config, runtime_paths, skip_broken_plugins=skip_broken_plugins)
             candidate_tool_registry_snapshot = capture_tool_registry_snapshot()
+            from mindroom.mcp.registry import reconcile_mcp_tool_registry  # noqa: PLC0415
             from mindroom.tool_system.catalog import resolved_tool_runtime_state_from_registry  # noqa: PLC0415
 
+            reconcile_mcp_tool_registry(
+                candidate_tool_registry_snapshot.registry,
+                candidate_tool_registry_snapshot.metadata,
+                config,
+            )
             candidate_plugin_registry, candidate_plugin_metadata = resolved_tool_state(
                 _active_plugin_tool_modules(plugins),
                 candidate_tool_registry_snapshot.plugin_tool_metadata_by_module,

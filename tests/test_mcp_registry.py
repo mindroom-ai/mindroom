@@ -13,7 +13,6 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.mcp.errors import MCPTimeoutError
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import (
-    _MCP_TOOL_NAMES,
     mcp_server_id_from_tool_name,
     mcp_tool_name,
     resolved_mcp_tool_state,
@@ -52,7 +51,6 @@ _BASE_TOOL_METADATA = {
 
 @pytest.fixture(autouse=True)
 def _restore_tool_registry() -> Iterator[None]:
-    _MCP_TOOL_NAMES.clear()
     TOOL_REGISTRY.clear()
     TOOL_REGISTRY.update(_BASE_TOOL_REGISTRY)
     TOOL_METADATA.clear()
@@ -60,7 +58,6 @@ def _restore_tool_registry() -> Iterator[None]:
     bind_mcp_server_manager(None)
     sync_mcp_tool_registry(None)
     yield
-    _MCP_TOOL_NAMES.clear()
     TOOL_REGISTRY.clear()
     TOOL_REGISTRY.update(_BASE_TOOL_REGISTRY)
     TOOL_METADATA.clear()
@@ -197,11 +194,10 @@ def test_sync_mcp_tool_registry_marks_oauth_mcp_tools(tmp_path: Path) -> None:
     )
 
 
-def test_sync_mcp_tool_registry_removes_untracked_dynamic_entries(tmp_path: Path) -> None:
-    """Remove leaked dynamic MCP entries even if the helper name set is stale."""
+def test_sync_mcp_tool_registry_removes_entries_owned_by_marked_factories(tmp_path: Path) -> None:
+    """Remove dynamic MCP entries based on the registry factory ownership marker."""
     config = _config(tmp_path)
     sync_mcp_tool_registry(config)
-    _MCP_TOOL_NAMES.clear()
     sync_mcp_tool_registry(
         runtime_config_from_data(
             {

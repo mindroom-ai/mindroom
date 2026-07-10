@@ -49,8 +49,7 @@ from mindroom.tool_system.dynamic_toolkits import (
     visible_tool_surface,
 )
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
-from mindroom.tool_system.plugins import load_plugins
-from mindroom.tool_system.runtime_context import ToolDispatchContext
+from mindroom.tool_system.runtime_context import ToolDispatchContext, get_tool_runtime_context
 from mindroom.tool_system.skills import build_agent_skills
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import (
@@ -76,7 +75,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import RuntimeConfig
     from mindroom.config.models import DefaultsConfig
     from mindroom.credentials import CredentialsManager
-    from mindroom.hooks import HookRegistryPlugin
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
@@ -1042,27 +1040,23 @@ def _resolve_agent_culture(
     return culture_manager, settings
 
 
-@timed("system_prompt_assembly.agent_create.load_plugins")
-def _load_agent_plugins(config: RuntimeConfig, runtime_paths: constants.RuntimePaths) -> list[HookRegistryPlugin]:
-    return cast("list[HookRegistryPlugin]", load_plugins(config, runtime_paths))
-
-
-@timed("system_prompt_assembly.agent_create.tool_registry_sync")
-def _sync_agent_tool_registry(config: RuntimeConfig, runtime_paths: constants.RuntimePaths) -> None:
-    ensure_tool_registry_loaded(runtime_paths, config, load_plugin_tools=False)
-
-
 @timed("system_prompt_assembly.agent_create.hook_bridge")
 def _build_agent_tool_hook_bridge(
     *,
     hook_registry: HookRegistry | None,
-    plugins: list[HookRegistryPlugin],
     agent_name: str,
     dispatch_context: ToolDispatchContext | None,
     config: RuntimeConfig,
     runtime_paths: constants.RuntimePaths,
 ) -> Callable[..., Any] | None:
-    active_hook_registry = hook_registry if hook_registry is not None else HookRegistry.from_plugins(plugins)
+    runtime_context = get_tool_runtime_context()
+    active_hook_registry = (
+        hook_registry
+        if hook_registry is not None
+        else runtime_context.hook_registry
+        if runtime_context is not None
+        else HookRegistry.empty()
+    )
     return build_tool_hook_bridge(
         active_hook_registry,
         agent_name=agent_name,
@@ -1226,11 +1220,8 @@ def _assemble_agent_toolkits(
     native_deferred_tools: bool,
 ) -> _AgentToolAssembly:
     """Assemble runtime toolkits and the dynamic-tool visibility for one agent instance."""
-    plugins = _load_agent_plugins(config, runtime_paths)
-    _sync_agent_tool_registry(config, runtime_paths)
     tool_hook_bridge = _build_agent_tool_hook_bridge(
         hook_registry=hook_registry,
-        plugins=plugins,
         agent_name=agent_name,
         dispatch_context=(
             ToolDispatchContext(execution_identity=execution_identity) if execution_identity is not None else None

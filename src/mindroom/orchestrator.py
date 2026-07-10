@@ -80,7 +80,7 @@ from mindroom.tool_system.plugins import (
     prepare_plugin_reload,
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
-from mindroom.workers.runtime import clear_worker_validation_snapshot_cache, shutdown_primary_worker_manager
+from mindroom.workers.runtime import shutdown_primary_worker_manager
 
 from . import file_watcher
 from .bot import AgentBot, TeamBot, create_bot_for_entity
@@ -771,10 +771,15 @@ class _MultiAgentOrchestrator:
                 source=source,
                 changed_paths=[str(path) for path in changed_paths],
             )
-            self.plugin_watch.refresh(config)
+            await asyncio.to_thread(self.plugin_watch.refresh, config)
             try:
-                prepared_plugin_reload = prepare_plugin_reload(config, self.runtime_paths)
-                refreshed_config = self._rebuild_config_with_tool_state(
+                prepared_plugin_reload = await asyncio.to_thread(
+                    prepare_plugin_reload,
+                    config,
+                    self.runtime_paths,
+                )
+                refreshed_config = await asyncio.to_thread(
+                    self._rebuild_config_with_tool_state,
                     config,
                     prepared_plugin_reload.resolved_tool_state,
                 )
@@ -793,7 +798,6 @@ class _MultiAgentOrchestrator:
             for bot in self.agent_bots.values():
                 bot.config = refreshed_config
             self._activate_hook_registry(result.hook_registry)
-            clear_worker_validation_snapshot_cache()
             logger.info(
                 "Plugin reload complete",
                 source=source,
@@ -846,7 +850,6 @@ class _MultiAgentOrchestrator:
             prepared_plugin_root_snapshots,
         )
         self._activate_hook_registry(new_hook_registry)
-        clear_worker_validation_snapshot_cache()
         return new_config, pre_stopped_mcp_entities
 
     async def _start_entities_once(
@@ -1174,7 +1177,6 @@ class _MultiAgentOrchestrator:
         self._activate_hook_registry(apply_prepared_plugin_reload(prepared_plugin_reload).hook_registry)
         await self._sync_mcp_manager(new_config)
         await self._sync_runtime_support_services(new_config, start_watcher=self.running)
-        clear_worker_validation_snapshot_cache()
         return False
 
     async def _update_unchanged_bots(self, plan: ConfigUpdatePlan) -> None:
@@ -1328,7 +1330,6 @@ class _MultiAgentOrchestrator:
             if not self.running or self.config is None:
                 return
             clear_resolved_tool_state_cache()
-            clear_worker_validation_snapshot_cache()
             changed_entities = self.config.get_entities_referencing_tools({mcp_tool_name(server_id)})
             if not changed_entities:
                 return

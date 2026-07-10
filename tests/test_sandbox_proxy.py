@@ -4346,11 +4346,10 @@ def test_get_worker_manager_passes_committed_snapshot_from_tool_runtime_context(
     assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
 
 
-def test_get_worker_manager_reuses_cached_kubernetes_validation_snapshot(
+def test_get_worker_manager_serializes_kubernetes_validation_snapshot_per_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Repeated proxy worker-manager access should not repeatedly resolve validation metadata."""
-    workers_runtime_module.clear_worker_validation_snapshot_cache()
+    """Repeated proxy access should serialize independent payloads from the bound runtime config."""
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
@@ -4398,7 +4397,7 @@ def test_get_worker_manager_reuses_cached_kubernetes_validation_snapshot(
         sandbox_proxy_module._get_worker_manager(runtime_paths, proxy_config)
         sandbox_proxy_module._get_worker_manager(runtime_paths, proxy_config)
 
-    assert resolver_call_count == 1
+    assert resolver_call_count == 2
     assert len(captured_snapshots) == 2
     assert captured_snapshots[0] == captured_snapshots[1]
     assert captured_snapshots[0] is not captured_snapshots[1]

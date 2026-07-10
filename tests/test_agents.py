@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import stat
@@ -22,6 +23,7 @@ from agno.session import AgentSession
 from agno.tools.function import Function
 from pydantic import ValidationError
 
+import mindroom.tool_system.plugins as plugins_module
 from mindroom.agent_storage import get_agent_runtime_state_dbs
 from mindroom.agents import (
     _CULTURE_MANAGER_CACHE,
@@ -56,7 +58,14 @@ from mindroom.prompts import (
 )
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.teams import materialize_exact_team_members
+from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
+from mindroom.tool_system.registry_state import (
+    TOOL_REGISTRY,
+    capture_tool_registry_snapshot,
+    restore_tool_registry_snapshot,
+)
+from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     _private_instance_state_root_path,
@@ -621,11 +630,11 @@ def test_create_agent_passes_merged_tool_config_overrides_to_registered_tools(
 
 @patch("mindroom.agents.get_tool_by_name")
 @patch("mindroom.agent_storage.SqliteDb")
-def test_create_agent_bootstraps_tool_registry_once_for_multiple_tools(
+def test_create_agent_uses_preloaded_tool_registry_for_multiple_tools(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
 ) -> None:
-    """Agent construction should not reload plugin/MCP registry state per toolkit."""
+    """Agent construction should consume the committed registry without rebuilding it."""
     mock_get_tool_by_name.return_value = MagicMock()
     config = _test_config()
     config.agents["general"].tools = ["shell", "coding", "duckduckgo", "website"]
@@ -635,7 +644,7 @@ def test_create_agent_bootstraps_tool_registry_once_for_multiple_tools(
         _create_agent_for_test("general", config=config)
 
     assert len(mock_get_tool_by_name.call_args_list) == 4
-    assert mock_ensure_registry.call_count == 1
+    mock_ensure_registry.assert_not_called()
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -1604,23 +1613,64 @@ def test_create_agent_keeps_tool_default_base_dir_without_memory_workspace(
     assert overrides_by_tool["duckduckgo"] is None
 
 
-@patch("mindroom.agents.load_plugins")
-def test_create_agent_threads_config_path_to_plugin_loading(
-    mock_load_plugins: MagicMock,
-    tmp_path: Path,
-) -> None:
-    """Agent creation should resolve relative plugin paths from the active config file."""
-    config_path = tmp_path / "cfg" / "config.yaml"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config = _test_config()
-    runtime_paths = _runtime_paths(tmp_path, config_path=config_path)
+def test_create_agent_preserves_committed_plugins_after_rejected_reload(tmp_path: Path) -> None:
+    """Agent construction must not revisit broken plugin files after a rejected reload."""
+    plugin_root = tmp_path / "plugins" / "reload-tool"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "reload_tool", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    tools_path = plugin_root / "tools.py"
+    tools_path.write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.declarations import ToolCategory\n"
+        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "class ReloadTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='reload', tools=[])\n"
+        "@register_tool_with_metadata(\n"
+        "    name='reload_plugin_tool',\n"
+        "    display_name='Reload Plugin Tool',\n"
+        "    description='Tool retained across a rejected reload',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def reload_plugin_tools():\n"
+        "    return ReloadTool\n",
+        encoding="utf-8",
+    )
+    runtime_paths = _runtime_paths(tmp_path)
+    runtime_paths.config_path.write_text("agents: {}\n", encoding="utf-8")
+    original_registry = capture_tool_registry_snapshot()
+    original_plugin_cache = plugin_imports._PLUGIN_CACHE.copy()
+    original_plugin_roots = _get_plugin_skill_roots()
+    try:
+        config = _bind_runtime_paths(
+            Config(
+                agents={"general": AgentConfig(display_name="General", tools=[])},
+                defaults={"tools": []},
+                models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
+                plugins=["./plugins/reload-tool"],
+            ),
+            runtime_paths,
+        )
+        prepared = plugins_module.prepare_plugin_reload(config, runtime_paths)
+        plugins_module.apply_prepared_plugin_reload(prepared)
+        committed_factory = TOOL_REGISTRY["reload_plugin_tool"]
 
-    with patch("mindroom.agent_storage.SqliteDb"):
-        _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
+        tools_path.write_text("raise ImportError('reload failure')\n", encoding="utf-8")
+        with pytest.raises(plugin_imports.PluginValidationError, match="reload failure"):
+            plugins_module.prepare_plugin_reload(config, runtime_paths)
 
-    mock_load_plugins.assert_called_once()
-    assert mock_load_plugins.call_args.args[0] is not None  # config
-    assert mock_load_plugins.call_args.args[1] is not None  # runtime_paths
+        with patch("mindroom.agent_storage.SqliteDb"):
+            _create_agent_for_test("general", config=config)
+
+        assert TOOL_REGISTRY["reload_plugin_tool"] is committed_factory
+    finally:
+        restore_tool_registry_snapshot(original_registry)
+        plugin_imports._PLUGIN_CACHE.clear()
+        plugin_imports._PLUGIN_CACHE.update(original_plugin_cache)
+        set_plugin_skill_roots(original_plugin_roots)
 
 
 def test_config_rejects_removed_memory_file_path_field() -> None:

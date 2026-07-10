@@ -21,6 +21,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.main import Config, ConfigRuntimeValidationError, RuntimeConfig, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
+from mindroom.mcp.registry import resolved_mcp_tool_state
 from mindroom.oauth.registry import clear_oauth_provider_cache, load_oauth_providers
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
 from mindroom.tool_system.plugins import PluginReloadResult, get_configured_plugin_roots, load_plugins
@@ -1408,32 +1409,44 @@ def test_load_plugins_preserves_non_plugin_dynamic_tools(tmp_path: Path) -> None
         set_plugin_skill_roots(original_plugin_roots)
 
 
-def test_prepare_plugin_reload_resolves_configured_mcp_once_when_live_registry_contains_it(tmp_path: Path) -> None:
-    """The staged carried state must not merge an already-live MCP entry twice."""
+def test_prepare_plugin_reload_replaces_live_mcp_entries_in_staged_registry(tmp_path: Path) -> None:
+    """A staged registry must contain only the target config's MCP entries."""
     runtime_paths = _minimal_runtime_paths(tmp_path)
     config = runtime_config_from_data(
         {
             "mcp_servers": {
-                "demo": {
+                "beta": {
                     "transport": "stdio",
-                    "command": "demo-command",
+                    "command": "beta-command",
                 },
             },
         },
         runtime_paths,
     )
-    dynamic_factory = MagicMock()
+    live_registry, live_metadata = resolved_mcp_tool_state(
+        Config(
+            mcp_servers={
+                "alpha": {
+                    "transport": "stdio",
+                    "command": "alpha-command",
+                },
+            },
+        ),
+    )
     original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
 
     try:
-        TOOL_REGISTRY["mcp_demo"] = dynamic_factory
-        TOOL_METADATA["mcp_demo"] = replace(TOOL_METADATA["shell"], name="mcp_demo", factory=dynamic_factory)
+        TOOL_REGISTRY.update(live_registry)
+        TOOL_METADATA.update(live_metadata)
 
         prepared = plugins_module.prepare_plugin_reload(config, runtime_paths)
 
-        assert "mcp_demo" in prepared.resolved_tool_state.validation_snapshot
-        assert prepared.tool_registry_snapshot.registry["mcp_demo"] is dynamic_factory
+        assert "mcp_alpha" not in prepared.tool_registry_snapshot.registry
+        assert "mcp_alpha" not in prepared.tool_registry_snapshot.metadata
+        assert "mcp_beta" in prepared.tool_registry_snapshot.registry
+        assert "mcp_beta" in prepared.tool_registry_snapshot.metadata
+        assert "mcp_beta" in prepared.resolved_tool_state.validation_snapshot
     finally:
         TOOL_REGISTRY.clear()
         TOOL_REGISTRY.update(original_registry)

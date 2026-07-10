@@ -6,6 +6,7 @@ import asyncio
 import json
 import sys
 import tempfile
+import threading
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -845,6 +846,51 @@ async def test_plugin_reload_rebuilds_runtime_tool_overrides(tmp_path: Path) -> 
         for module_name in set(sys.modules) - original_modules:
             if module_name.startswith("mindroom_plugin_"):
                 sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_reload_plugins_now_keeps_event_loop_responsive_during_plugin_scan(tmp_path: Path) -> None:
+    """Manual plugin reload should offload recursive filesystem and import work."""
+    config = _runtime_bound_config(Config(defaults={"tools": []}), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), api_enabled=False)
+    orchestrator.config = config
+    orchestrator.running = True
+    loop = asyncio.get_running_loop()
+    scan_started = asyncio.Event()
+    release_scan = threading.Event()
+    prepared_reload = MagicMock()
+    prepared_reload.resolved_tool_state = MagicMock()
+    expected_result = PluginReloadResult(HookRegistry.empty(), (), 0)
+
+    def blocking_refresh(_config: object) -> None:
+        loop.call_soon_threadsafe(scan_started.set)
+        assert release_scan.wait(timeout=2)
+
+    with (
+        patch.object(orchestrator.plugin_watch, "refresh", side_effect=blocking_refresh),
+        patch("mindroom.orchestrator.prepare_plugin_reload", return_value=prepared_reload),
+        patch.object(orchestrator, "_rebuild_config_with_tool_state", return_value=config),
+        patch.object(
+            orchestrator._external_trigger_runtime,
+            "prepare_api_config_snapshot",
+            new=AsyncMock(return_value=object()),
+        ),
+        patch.object(orchestrator._external_trigger_runtime, "publish_prepared_api_config_snapshot"),
+        patch("mindroom.orchestrator.apply_prepared_plugin_reload", return_value=expected_result),
+    ):
+        reload_task = asyncio.create_task(orchestrator.reload_plugins_now(source="test"))
+        try:
+            await asyncio.wait_for(scan_started.wait(), timeout=1)
+            await asyncio.sleep(0)
+            assert not reload_task.done()
+            release_scan.set()
+            assert await reload_task is expected_result
+        finally:
+            release_scan.set()
+            if not reload_task.done():
+                reload_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await reload_task
 
 
 @pytest.mark.asyncio

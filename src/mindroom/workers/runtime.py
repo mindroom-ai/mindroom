@@ -1,4 +1,4 @@
-"""Primary-runtime worker backend selection and caching."""
+"""Primary-runtime worker backend selection and lifecycle."""
 
 from __future__ import annotations
 
@@ -6,9 +6,7 @@ import json
 import logging
 import threading
 import time
-from copy import deepcopy
 from dataclasses import dataclass
-from hashlib import sha256
 from typing import TYPE_CHECKING, cast
 
 from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS
@@ -28,7 +26,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     "PrimaryWorkerManagerLease",
-    "clear_worker_validation_snapshot_cache",
     "get_primary_worker_manager",
     "lease_primary_worker_manager",
     "primary_worker_backend_available",
@@ -43,8 +40,6 @@ _PRIMARY_WORKER_BACKEND_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["worke
 _DEDICATED_WORKER_BACKENDS = frozenset({"docker", "kubernetes"})
 _PRIMARY_WORKER_MANAGER_LOCK = threading.Lock()
 _PRIMARY_WORKER_MANAGER_CONDITION = threading.Condition(_PRIMARY_WORKER_MANAGER_LOCK)
-_WORKER_VALIDATION_SNAPSHOT_CACHE: dict[tuple[str, ...], dict[str, dict[str, object]]] = {}
-_WORKER_VALIDATION_SNAPSHOT_CACHE_LOCK = threading.Lock()
 logger = logging.getLogger(__name__)
 _DEFAULT_PRIMARY_WORKER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
@@ -90,37 +85,6 @@ _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES: list[_WorkerManagerEntry] = []
 _PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES: set[tuple[str, ...]] = set()
 
 
-def _stable_json_digest(payload: object) -> str:
-    """Return a stable in-memory identity for JSON-like config payloads."""
-    serialized = json.dumps(payload, default=repr, separators=(",", ":"), sort_keys=True)
-    return sha256(serialized.encode("utf-8")).hexdigest()
-
-
-def _worker_validation_snapshot_cache_key(
-    runtime_paths: RuntimePaths,
-    runtime_config: RuntimeConfig,
-) -> tuple[str, ...]:
-    """Return the cheap explicit inputs that affect worker validation metadata."""
-    plugins_identity = [plugin_entry.model_dump(mode="json") for plugin_entry in runtime_config.plugins]
-    mcp_identity = {
-        server_id: server_config.model_dump(mode="json")
-        for server_id, server_config in runtime_config.mcp_servers.items()
-    }
-    return (
-        str(runtime_paths.config_path),
-        str(runtime_paths.config_dir),
-        str(runtime_paths.storage_root),
-        _stable_json_digest(plugins_identity),
-        _stable_json_digest(mcp_identity),
-    )
-
-
-def clear_worker_validation_snapshot_cache() -> None:
-    """Clear serialized worker snapshots without invalidating resolved runtime configs."""
-    with _WORKER_VALIDATION_SNAPSHOT_CACHE_LOCK:
-        _WORKER_VALIDATION_SNAPSHOT_CACHE.clear()
-
-
 def serialized_kubernetes_worker_validation_snapshot(
     runtime_paths: RuntimePaths,
     *,
@@ -134,23 +98,17 @@ def serialized_kubernetes_worker_validation_snapshot(
     else:
         config = runtime_config
 
-    with _WORKER_VALIDATION_SNAPSHOT_CACHE_LOCK:
-        cache_key = _worker_validation_snapshot_cache_key(runtime_paths, config)
-        cached_snapshot = _WORKER_VALIDATION_SNAPSHOT_CACHE.get(cache_key)
-        if cached_snapshot is None:
-            from mindroom.tool_system.catalog import (  # noqa: PLC0415
-                resolved_tool_validation_snapshot_for_runtime,
-                serialize_tool_validation_snapshot,
-            )
+    from mindroom.tool_system.catalog import (  # noqa: PLC0415
+        resolved_tool_validation_snapshot_for_runtime,
+        serialize_tool_validation_snapshot,
+    )
 
-            snapshot = resolved_tool_validation_snapshot_for_runtime(
-                runtime_paths,
-                config,
-                tolerate_plugin_load_errors=True,
-            )
-            cached_snapshot = serialize_tool_validation_snapshot(snapshot)
-            _WORKER_VALIDATION_SNAPSHOT_CACHE[cache_key] = cached_snapshot
-        return deepcopy(cached_snapshot)
+    snapshot = resolved_tool_validation_snapshot_for_runtime(
+        runtime_paths,
+        config,
+        tolerate_plugin_load_errors=True,
+    )
+    return serialize_tool_validation_snapshot(snapshot)
 
 
 def _normalize_backend_name(raw_value: str | None) -> str:
