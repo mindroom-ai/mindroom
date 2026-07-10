@@ -299,11 +299,21 @@ async def _has_newer_human_thread_activity(
     if conversation_cache is None or interrupted_thread.thread_id is None or interrupted_thread.timestamp_ms <= 0:
         return False
     try:
+        original_event = await client.room_get_event(
+            interrupted_thread.room_id,
+            interrupted_thread.target_event_id,
+        )
+        if not isinstance(original_event, nio.RoomGetEventResponse):
+            return True
+        original_timestamp_ms = original_event.event.server_timestamp
+        if not isinstance(original_timestamp_ms, int) or isinstance(original_timestamp_ms, bool):
+            return True
         history = await conversation_cache.get_thread_history(
             interrupted_thread.room_id,
             interrupted_thread.thread_id,
             caller_label="auto_resume_after_restart",
         )
+        internal_sender_ids = current_internal_sender_ids(config, runtime_paths)
     except Exception as exc:
         logger.warning(
             "Failed to check newer thread activity before auto-resume",
@@ -319,32 +329,6 @@ async def _has_newer_human_thread_activity(
             thread_id=interrupted_thread.thread_id,
         )
         return True
-    try:
-        original_event = await client.room_get_event(
-            interrupted_thread.room_id,
-            interrupted_thread.target_event_id,
-        )
-        internal_sender_ids = current_internal_sender_ids(config, runtime_paths)
-    except Exception as exc:
-        logger.warning(
-            "Failed to check newer thread activity before auto-resume",
-            room_id=interrupted_thread.room_id,
-            thread_id=interrupted_thread.thread_id,
-            error=str(exc),
-        )
-        return True
-    if not isinstance(original_event, nio.RoomGetEventResponse) or not isinstance(
-        original_event.event.server_timestamp,
-        int,
-    ):
-        logger.warning(
-            "Skipping auto-resume because the original event lookup failed",
-            room_id=interrupted_thread.room_id,
-            thread_id=interrupted_thread.thread_id,
-            target_event_id=interrupted_thread.target_event_id,
-        )
-        return True
-    original_timestamp_ms = original_event.event.server_timestamp
     return any(
         message.timestamp >= original_timestamp_ms and message.sender not in internal_sender_ids for message in history
     )

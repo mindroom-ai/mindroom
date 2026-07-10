@@ -1741,6 +1741,7 @@ async def test_team_response_returns_friendly_error_for_error_status() -> None:
     mock_team.arun = AsyncMock(
         return_value=TeamRunOutput(
             content="validation failed in team",
+            messages=[Message(role="assistant", content="Consensus partial")],
             member_responses=[
                 RunOutput(
                     agent_name="GeneralAgent",
@@ -1787,6 +1788,7 @@ async def test_team_response_returns_friendly_error_for_error_status() -> None:
     assert snapshot.original_status is RunStatus.error
     assert snapshot.seen_event_ids == ("e1",)
     assert "Half done" in snapshot.partial_text
+    assert "Consensus partial" in snapshot.partial_text
     assert [tool.tool_name for tool in snapshot.completed_tools] == ["write_file"]
 
 
@@ -3002,6 +3004,7 @@ async def test_team_response_stream_returns_friendly_error_for_errored_run_outpu
     async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
         yield TeamRunOutput(
             content="validation failed in team",
+            messages=[Message(role="assistant", content="Consensus partial")],
             member_responses=[
                 RunOutput(
                     agent_name="GeneralAgent",
@@ -3057,6 +3060,7 @@ async def test_team_response_stream_returns_friendly_error_for_errored_run_outpu
     assert snapshot.original_status is RunStatus.error
     assert snapshot.seen_event_ids == ("e1",)
     assert "Half done" in snapshot.partial_text
+    assert "Consensus partial" in snapshot.partial_text
     assert [tool.tool_name for tool in snapshot.completed_tools] == ["write_file"]
 
 

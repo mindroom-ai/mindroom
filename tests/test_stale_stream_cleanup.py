@@ -988,6 +988,8 @@ async def test_auto_resume_skips_when_original_event_lookup_fails(tmp_path: Path
 
     assert resumed_count == 0
     mock_send.assert_not_awaited()
+    conversation_cache.get_thread_history.assert_not_awaited()
+    client.room_get_event.assert_awaited_once_with(ROOM_ID, "$target")
 
 
 @pytest.mark.asyncio
@@ -1013,6 +1015,14 @@ async def test_auto_resume_skips_nonauthoritative_thread_history(
         is_full_history=is_full_history,
         diagnostics=diagnostics,
     )
+    client.room_get_event.return_value = _room_get_event_response(
+        _make_message_event(
+            event_id="$target",
+            body="Interrupted response",
+            timestamp_ms=100,
+            relates_to=_thread_reply_relation("$threaded", "$threaded"),
+        ),
+    )
     interrupted = [
         InterruptedThread(
             room_id=ROOM_ID,
@@ -1035,7 +1045,12 @@ async def test_auto_resume_skips_nonauthoritative_thread_history(
 
     assert resumed_count == 0
     mock_send.assert_not_awaited()
-    client.room_get_event.assert_not_awaited()
+    client.room_get_event.assert_awaited_once_with(ROOM_ID, "$target")
+    conversation_cache.get_thread_history.assert_awaited_once_with(
+        ROOM_ID,
+        "$threaded",
+        caller_label="auto_resume_after_restart",
+    )
 
 
 @pytest.mark.asyncio
@@ -1072,12 +1087,77 @@ async def test_auto_resume_skips_event_error_result(tmp_path: Path) -> None:
 
     assert resumed_count == 0
     mock_send.assert_not_awaited()
-    conversation_cache.get_thread_history.assert_awaited_once_with(
-        ROOM_ID,
-        "$threaded",
-        caller_label="auto_resume_after_restart",
-    )
+    conversation_cache.get_thread_history.assert_not_awaited()
     client.room_get_event.assert_awaited_once_with(ROOM_ID, "$target")
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_fetches_history_after_original_timestamp(tmp_path: Path) -> None:
+    """Human activity arriving during target lookup must appear in the later history read."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    conversation_cache = AsyncMock()
+    call_order: list[str] = []
+    human_replied = False
+
+    async def fetch_original_after_human_reply(*_args: object) -> nio.RoomGetEventResponse:
+        nonlocal human_replied
+        call_order.append("target")
+        human_replied = True
+        return _room_get_event_response(
+            _make_message_event(
+                event_id="$target",
+                body="Interrupted response",
+                timestamp_ms=100,
+                relates_to=_thread_reply_relation("$threaded", "$threaded"),
+            ),
+        )
+
+    async def fetch_history_after_target(*_args: object, **_kwargs: object) -> ThreadHistoryResult:
+        call_order.append("history")
+        assert human_replied is True
+        return ThreadHistoryResult(
+            messages=[
+                ResolvedVisibleMessage.synthetic(
+                    sender=USER_ID,
+                    body="Please continue",
+                    event_id="$new-user-message",
+                    timestamp=200,
+                    thread_id="$threaded",
+                ),
+            ],
+            is_full_history=True,
+        )
+
+    client.room_get_event.side_effect = fetch_original_after_human_reply
+    conversation_cache.get_thread_history.side_effect = fetch_history_after_target
+    interrupted = [
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$threaded",
+            target_event_id="$target",
+            partial_text="Interrupted response",
+            agent_name="test_agent",
+            timestamp_ms=300,
+        ),
+    ]
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.send_message_result",
+        new=AsyncMock(return_value=delivered_matrix_event("$resume")),
+    ) as mock_send:
+        resumed_count = await auto_resume_interrupted_threads(
+            client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            conversation_cache=conversation_cache,
+        )
+
+    assert resumed_count == 0
+    mock_send.assert_not_awaited()
+    assert call_order == ["target", "history"]
+    conversation_cache.get_thread_history.assert_awaited_once()
 
 
 @pytest.mark.asyncio

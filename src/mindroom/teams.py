@@ -60,7 +60,10 @@ from mindroom.history.runtime import (
     open_bound_scope_session_context,
     resolve_bound_team_scope_context,
 )
-from mindroom.history.storage import MODEL_HISTORY_EXCLUDED_RUN_STATUSES, update_scope_seen_event_ids
+from mindroom.history.storage import (
+    is_model_history_visible_run,
+    update_scope_seen_event_ids,
+)
 from mindroom.hooks import render_system_enrichment_block
 from mindroom.knowledge import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
 from mindroom.llm_request_logging import (
@@ -1198,7 +1201,14 @@ def _extract_interrupted_team_partial_text(response: TeamRunOutput | RunOutput) 
 def _extract_errored_team_partial_text(response: TeamRunOutput | RunOutput) -> str:
     """Extract model-produced partial text without persisting provider error prose."""
     if isinstance(response, TeamRunOutput):
-        return _extract_interrupted_team_partial_text(replace(response, content=None))
+        response_without_error = replace(response, content=None)
+        parts = _format_contributions_recursive(response_without_error, indent=0, include_consensus=False)
+        consensus = _get_response_content(response_without_error).strip()
+        if consensus:
+            parts.extend(_format_team_consensus(consensus))
+        elif parts:
+            parts.append(_format_no_consensus_note())
+        return "\n\n".join(parts).strip()
     assistant_parts = [
         str(message.content).strip()
         for message in response.messages or []
@@ -2236,7 +2246,7 @@ async def team_response(  # noqa: C901, PLR0915
         if (
             ctx.reply_to_event_id
             and isinstance(response, (TeamRunOutput, RunOutput))
-            and response.status not in MODEL_HISTORY_EXCLUDED_RUN_STATUSES
+            and is_model_history_visible_run(response)
             and not is_empty_run
         ):
             _persist_bound_seen_event_ids(
@@ -2868,11 +2878,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     event_is_empty = (
                         event.status == RunStatus.completed and not event_tool_executions and not event_has_visible
                     )
-                    if (
-                        ctx.reply_to_event_id
-                        and event.status not in MODEL_HISTORY_EXCLUDED_RUN_STATUSES
-                        and not event_is_empty
-                    ):
+                    if ctx.reply_to_event_id and is_model_history_visible_run(event) and not event_is_empty:
                         _persist_bound_seen_event_ids(
                             scope_context=run.scope_context,
                             session_id=ctx.session_id,
