@@ -14,7 +14,7 @@ from agno.media import Audio
 from mindroom import voice_handler
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.voice import VoiceConfig, _VoiceLLMConfig, _VoiceSTTConfig
+from mindroom.config.voice import VoiceConfig, VoiceSTTConfig, _VoiceLLMConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import persist_actual_entity_accounts
@@ -112,7 +112,7 @@ class TestVoiceHandler:
             Config(
                 voice=VoiceConfig(
                     enabled=True,
-                    stt=_VoiceSTTConfig(provider="openai", model="whisper-1"),
+                    stt=VoiceSTTConfig(provider="openai", model="whisper-1"),
                     intelligence=_VoiceLLMConfig(model="default"),
                 ),
             ),
@@ -121,6 +121,12 @@ class TestVoiceHandler:
         assert config.voice.stt.provider == "openai"
         assert config.voice.stt.model == "whisper-1"
         assert config.voice.intelligence.model == "default"
+
+    def test_voice_stt_keeps_model_default_for_partial_config(self) -> None:
+        """Promoting the shared speech config does not break existing partial voice STT blocks."""
+        config = VoiceConfig.model_validate({"stt": {"provider": "openai"}})
+
+        assert config.stt.model == "gpt-4o-transcribe"
 
     @pytest.mark.parametrize(
         ("matrix_mime_type", "expected_filename", "expected_mime_type"),
@@ -174,9 +180,9 @@ class TestVoiceHandler:
             Config(
                 voice=VoiceConfig(
                     enabled=True,
-                    stt=_VoiceSTTConfig(
+                    stt=VoiceSTTConfig(
                         api_key="configured-api-key",
-                        host="https://stt.example.test",
+                        host="https://stt.example.test/v1",
                         model="whisper-1",
                     ),
                 ),

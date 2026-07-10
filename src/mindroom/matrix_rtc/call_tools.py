@@ -1,4 +1,4 @@
-"""Bridge MindRoom agent tools into a LiveKit realtime voice session.
+"""Materialize one MindRoom agent for realtime or cascaded voice calls.
 
 The realtime model calls tools through livekit-agents' function-tool
 mechanism. This module materializes the agent's regular chat toolkits (the
@@ -8,6 +8,10 @@ as a raw livekit function tool. Tool calls run inside the standard MindRoom
 tool runtime context for the call's room and sole Matrix requester. Tools
 needing confirmation, user input, external execution, or approval are omitted
 because voice has no approval UI.
+
+The cascaded backend delegates each transcript to the normal ``ai_response``
+path instead. LiveKit receives no tools there; Agno remains the sole model and
+tool loop, preserving text-chat model resolution, prompts, memory, and hooks.
 """
 
 from __future__ import annotations
@@ -15,9 +19,10 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from inspect import isasyncgenfunction, iscoroutinefunction
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from agno.agent._tools import determine_tools_for_model
 from agno.run import RunContext
@@ -25,7 +30,9 @@ from agno.run.agent import RunOutput
 from agno.session import AgentSession as AgnoAgentSession
 from agno.tools.function import Function, FunctionCall
 
+from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
+from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
@@ -34,12 +41,18 @@ from mindroom.tool_approval import tool_requires_approval_for_openai_compat
 from mindroom.tool_system.runtime_context import tool_runtime_context
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from agno.agent import Agent as AgnoAgent
+    from agno.knowledge.knowledge import Knowledge
     from livekit.agents.llm import RawFunctionTool
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.knowledge import KnowledgeRefreshScheduler
+    from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 
@@ -49,18 +62,28 @@ _TEXT_CHAT_REQUIRED_MESSAGE = (
 )
 
 _MAX_TOOL_RESULT_CHARS = 8000
+_CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS = frozenset({"run_workflow"})
+
+
+@dataclass(frozen=True)
+class CallAgentResponse:
+    """One normal MindRoom agent turn returned to the cascaded voice pipe."""
+
+    text: str
+    tool_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class CallAgentTooling:
-    """The realtime-session materialization of one chat agent.
+    """The call-session materialization of one chat agent.
 
-    Carries the same tools and the same rendered system prompt the agent
-    would use in a text conversation, so the voice agent is the same agent.
+    Realtime carries wrapped tools and the rendered prompt.
+    Cascaded carries a responder using the normal agent-turn path.
     """
 
     tools: tuple[Any, ...]
     instructions: str
+    responder: Callable[[str], Awaitable[CallAgentResponse]] | None = None
 
 
 async def build_call_tools(
@@ -71,9 +94,12 @@ async def build_call_tools(
     tool_support: ToolRuntimeSupport,
     room_id: str,
     requester_id: str,
+    session_id: str | None = None,
+    enable_responder: bool = False,
+    voice_instructions: str | None = None,
 ) -> CallAgentTooling:
-    """Materialize the agent's toolkits and wrap them for the realtime session."""
-    session_id = create_session_id(room_id, None)
+    """Materialize the agent for the selected voice backend."""
+    session_id = session_id or create_session_id(room_id, None)
     target = MessageTarget(
         room_id=room_id,
         source_thread_id=None,
@@ -91,13 +117,47 @@ async def build_call_tools(
         agent_name=agent_name,
     )
     refresh_scheduler = context.orchestrator.knowledge_refresh_scheduler if context.orchestrator is not None else None
-    knowledge = resolve_agent_knowledge_access(
+    knowledge_resolution = resolve_agent_knowledge_access(
         agent_name,
         config,
         runtime_paths,
         refresh_scheduler=refresh_scheduler,
         execution_identity=execution_identity,
-    ).knowledge
+    )
+    knowledge = knowledge_resolution.knowledge
+    if enable_responder:
+        context = replace(
+            context,
+            tool_function_filter=functools.partial(
+                _function_available_during_call,
+                config=config,
+                agent_name=agent_name,
+            ),
+        )
+        enrichment_items: tuple[EnrichmentItem, ...] = ()
+        if voice_instructions:
+            enrichment_items = (EnrichmentItem(key="voice_call", text=voice_instructions, cache_policy="stable"),)
+        enrichment_items = append_knowledge_availability_enrichment(
+            enrichment_items,
+            knowledge_resolution.unavailable,
+        )
+        responder = functools.partial(
+            _run_call_agent,
+            agent_name=agent_name,
+            config=config,
+            runtime_paths=runtime_paths,
+            tool_support=tool_support,
+            context=context,
+            execution_identity=execution_identity,
+            knowledge=knowledge,
+            refresh_scheduler=refresh_scheduler,
+            room_id=room_id,
+            requester_id=requester_id,
+            session_id=session_id,
+            enrichment_items=enrichment_items,
+        )
+        return CallAgentTooling(tools=(), instructions="", responder=responder)
+
     agent = await asyncio.to_thread(
         functools.partial(
             create_agent,
@@ -166,6 +226,59 @@ async def build_call_tools(
     return CallAgentTooling(tools=tuple(tools), instructions=instructions)
 
 
+async def _run_call_agent(
+    transcript: str,
+    *,
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    tool_support: ToolRuntimeSupport,
+    context: ToolRuntimeContext,
+    execution_identity: ToolExecutionIdentity,
+    knowledge: Knowledge | None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    room_id: str,
+    requester_id: str,
+    session_id: str,
+    enrichment_items: tuple[EnrichmentItem, ...],
+) -> CallAgentResponse:
+    """Run one finalized call transcript through the normal MindRoom agent."""
+    from mindroom.ai import ResponseTurnContext, ai_response  # noqa: PLC0415 - heavy optional call path
+
+    tool_trace: list[ToolTraceEntry] = []
+    turn = ResponseTurnContext(
+        entity_label=agent_name,
+        session_id=session_id,
+        run_id=None,
+        correlation_id=uuid4().hex,
+        reply_to_event_id=None,
+        room_id=room_id,
+        thread_id=None,
+        requester_id=requester_id,
+        matrix_run_metadata=None,
+        system_enrichment_items=enrichment_items,
+    )
+
+    async def _respond() -> str:
+        return await ai_response(
+            turn,
+            prompt=transcript,
+            runtime_paths=runtime_paths,
+            config=config,
+            knowledge=knowledge,
+            include_interactive_questions=False,
+            tool_function_filter=context.tool_function_filter,
+            show_tool_calls=False,
+            tool_trace_collector=tool_trace,
+            execution_identity=execution_identity,
+            refresh_scheduler=refresh_scheduler,
+        )
+
+    response = await tool_support.run_in_context(tool_context=context, operation=_respond)
+    tool_names = tuple(dict.fromkeys(entry.tool_name for entry in tool_trace if entry.type == "tool_call_completed"))
+    return CallAgentResponse(text=response, tool_names=tool_names)
+
+
 async def _render_system_prompt(
     agent: AgnoAgent,
     session: AgnoAgentSession,
@@ -213,8 +326,22 @@ def _function_requires_text_chat(function: Function, config: Config) -> bool:
         or function.requires_user_input
         or function.external_execution
         or function.approval_type == "required"
+        or function.name in _CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS
         or tool_requires_approval_for_openai_compat(config, function.name)
     )
+
+
+def _function_available_during_call(
+    function: Function,
+    *,
+    config: Config,
+    agent_name: str,
+) -> bool:
+    """Keep only functions whose execution can complete without text UI."""
+    unavailable = _function_requires_text_chat(function, config)
+    if unavailable:
+        logger.info("call_tool_hidden_needs_text_chat", tool=function.name, agent=agent_name)
+    return not unavailable
 
 
 def _wrap_agno_function(

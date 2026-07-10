@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
+from unittest.mock import MagicMock
 
 import pytest
 from agno.tools.function import Function
@@ -12,13 +13,16 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.matrix_rtc.call_tools import _wrap_agno_function, build_call_tools
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.message_target import MessageTarget
+    from mindroom.response_turn import ResponseTurnContext
 
 AGENT = "helper"
 REQUESTER = "@alice:example.org"
@@ -297,6 +301,128 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     assert seen_targets[0] is seen_targets[1]
     assert seen_targets[0].session_id == "!room:example.org"
     assert fake_agent.tool_user_ids == [REQUESTER]
+
+
+@pytest.mark.asyncio
+async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_functions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cascaded transcripts reuse ai_response with full identity and a function-level call policy."""
+    config = _config()
+    config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="policy_approval", action="require_approval")],
+    )
+    knowledge = object()
+    refresh_scheduler = object()
+    execution_identity = SimpleNamespace()
+    calls: list[tuple[ResponseTurnContext, dict[str, object]]] = []
+    contexts: list[ToolRuntimeContext] = []
+    runtime_paths = test_runtime_paths(tmp_path)
+
+    class StrictToolSupport:
+        def build_context(
+            self,
+            target: MessageTarget,
+            **_kwargs: object,
+        ) -> ToolRuntimeContext:
+            context = ToolRuntimeContext(
+                agent_name=AGENT,
+                target=target,
+                requester_id=REQUESTER,
+                client=MagicMock(),
+                config=config,
+                runtime_paths=runtime_paths,
+                event_cache=MagicMock(),
+                conversation_cache=MagicMock(),
+                hook_registry=MagicMock(),
+                orchestrator=SimpleNamespace(knowledge_refresh_scheduler=refresh_scheduler),  # type: ignore[arg-type]
+            )
+            contexts.append(context)
+            return context
+
+        def build_execution_identity(self, **_kwargs: object) -> SimpleNamespace:
+            return execution_identity
+
+        async def run_in_context(
+            self,
+            *,
+            tool_context: ToolRuntimeContext,
+            operation: Callable[[], Awaitable[str]],
+        ) -> str:
+            assert tool_context.tool_function_filter is not None
+            return await operation()
+
+    async def fake_ai_response(turn: ResponseTurnContext, **kwargs: object) -> str:
+        calls.append((turn, kwargs))
+        trace = kwargs["tool_trace_collector"]
+        assert isinstance(trace, list)
+        trace.extend(
+            [
+                ToolTraceEntry(type="tool_call_completed", tool_name="weather"),
+                ToolTraceEntry(type="tool_call_completed", tool_name="weather"),
+            ],
+        )
+        return "It is sunny."
+
+    create_agent_mock = MagicMock()
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", create_agent_mock)
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access",
+        lambda *_args, **_kwargs: SimpleNamespace(knowledge=knowledge, unavailable=()),
+    )
+    monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=StrictToolSupport(),  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+        session_id="!room:example.org:call:one",
+        enable_responder=True,
+        voice_instructions="Speak briefly.",
+    )
+
+    assert tooling.tools == ()
+    assert tooling.instructions == ""
+    assert tooling.responder is not None
+    response = await tooling.responder("What is the weather?")
+
+    assert response.text == "It is sunny."
+    assert response.tool_names == ("weather",)
+    create_agent_mock.assert_not_called()
+    turn, kwargs = calls[0]
+    assert turn.entity_label == AGENT
+    assert turn.requester_id == REQUESTER
+    assert turn.session_id == "!room:example.org:call:one"
+    assert turn.system_enrichment_items[0].text == "Speak briefly."
+    assert kwargs["config"] is config
+    assert kwargs["knowledge"] is knowledge
+    assert kwargs["execution_identity"] is execution_identity
+    assert kwargs["refresh_scheduler"] is refresh_scheduler
+    assert kwargs["include_interactive_questions"] is False
+    assert kwargs["show_tool_calls"] is False
+
+    tool_filter = cast("Callable[[Function], bool]", kwargs["tool_function_filter"])
+    safe = _function(lambda: "safe", {"type": "object", "properties": {}}, name="safe")
+    confirm = _function(lambda: "confirm", {"type": "object", "properties": {}}, name="confirm")
+    confirm.requires_confirmation = True
+    policy = _function(
+        lambda: "policy",
+        {"type": "object", "properties": {}},
+        name="policy_approval",
+    )
+    workflow = _function(
+        lambda: "workflow",
+        {"type": "object", "properties": {}},
+        name="run_workflow",
+    )
+    assert tool_filter(safe) is True
+    assert tool_filter(confirm) is False
+    assert tool_filter(policy) is False
+    assert tool_filter(workflow) is False
+    assert contexts[0].tool_function_filter is None
 
 
 @pytest.mark.asyncio

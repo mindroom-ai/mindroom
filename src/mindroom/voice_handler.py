@@ -17,6 +17,7 @@ from agno.media import Audio
 from mindroom import model_loading
 from mindroom.attachments import register_audio_attachment
 from mindroom.authorization import responder_candidate_entities_for_room
+from mindroom.config.voice import normalize_speech_base_url
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
@@ -32,6 +33,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import parse_current_matrix_user_id
 from mindroom.matrix.media import AudioMessageEvent, download_media_bytes, extract_media_caption, media_mime_type
 from mindroom.matrix.mentions import format_message_with_mentions, resolve_entity_name_for_mention_localpart
+from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -470,10 +472,16 @@ async def _transcribe_audio(
 
     """
     try:
-        stt_host = config.voice.stt.host
-        url = f"{stt_host}/v1/audio/transcriptions" if stt_host else "https://api.openai.com/v1/audio/transcriptions"
+        stt_base_url = normalize_speech_base_url(config.voice.stt.host)
+        url = (
+            f"{stt_base_url}/audio/transcriptions" if stt_base_url else "https://api.openai.com/v1/audio/transcriptions"
+        )
 
-        api_key = config.voice.stt.api_key or get_secret_from_env("OPENAI_API_KEY", runtime_paths)
+        api_key = config.voice.stt.api_key or (
+            LOCAL_OPENAI_API_KEY_DEFAULT
+            if stt_base_url is not None
+            else get_secret_from_env("OPENAI_API_KEY", runtime_paths)
+        )
         if not api_key:
             logger.error("No OpenAI-compatible STT API key configured for voice transcription")
             return None

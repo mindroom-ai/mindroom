@@ -272,3 +272,7 @@ _.turn_count  # read in tests/test_matrix_rtc_transcript.py (src/mindroom/matrix
 AudioInput  # type-only SDK interface for the custom MatrixRTC audio stream
 _.on_attached  # LiveKit AgentInput callback (src/mindroom/matrix_rtc/voice_agent.py)
 _.on_detached  # LiveKit AgentInput callback (src/mindroom/matrix_rtc/voice_agent.py)
+_.validate_extra_kwargs  # Pydantic validator (src/mindroom/config/voice.py)
+_.validate_compatible_endpoint  # Pydantic validator (src/mindroom/config/voice.py)
+_.validate_cascaded_services  # Pydantic validator (src/mindroom/config/calls.py)
+_.chat  # LiveKit LLM adapter override (src/mindroom/matrix_rtc/voice_agent.py)

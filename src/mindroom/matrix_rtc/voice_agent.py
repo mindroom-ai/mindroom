@@ -1,9 +1,10 @@
-"""LiveKit media bridge running an OpenAI realtime voice agent in a call.
+"""LiveKit media bridges for realtime and cascaded MindRoom voice calls.
 
 This is the media plane of a MatrixRTC call: it connects to the LiveKit SFU
 with the credentials minted by the MatrixRTC Authorization Service, applies
 per-participant frame-encryption keys, and drives a ``livekit-agents``
-``AgentSession`` backed by an OpenAI speech-to-speech realtime model.
+``AgentSession`` backed by either OpenAI realtime speech-to-speech or separate
+STT, normal MindRoom agent, and TTS components.
 
 The heavy ``livekit`` / ``livekit-agents`` dependencies are optional (the
 ``matrix_calls`` extra), so all imports happen inside functions.
@@ -13,20 +14,23 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
     from types import ModuleType
 
     from livekit import rtc
-    from livekit.agents import AgentSession
+    from livekit.agents import Agent as LiveKitAgent
+    from livekit.agents import AgentSession, APIConnectOptions, NotGivenOr
+    from livekit.agents.llm import LLM, ChatContext, LLMStream, Tool, ToolChoice
     from livekit.agents.voice.events import CloseEvent, ConversationItemAddedEvent, FunctionToolsExecutedEvent
     from livekit.agents.voice.io import AudioInput
 
+    from mindroom.matrix_rtc.call_tools import CallAgentResponse
     from mindroom.matrix_rtc.focus import SfuGrant
 
 logger = get_logger(__name__)
@@ -260,6 +264,33 @@ class VoiceAgentOptions:
     on_session_terminated: Callable[[bool], None] | None = None
 
 
+@dataclass(frozen=True)
+class SpeechServiceOptions:
+    """Resolved connection settings for one cascaded speech component."""
+
+    provider: str
+    model: str
+    api_key: str
+    base_url: str | None = None
+    extra_kwargs: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class CascadedVoiceAgentOptions:
+    """Everything the cascaded voice agent needs to join and speak."""
+
+    stt: SpeechServiceOptions
+    tts: SpeechServiceOptions
+    respond: Callable[[str], Awaitable[CallAgentResponse]]
+    greeting_text: str | None = None
+    on_conversation_turn: Callable[[str, str], None] | None = None
+    on_tools_executed: Callable[[list[str]], None] | None = None
+    on_session_terminated: Callable[[bool], None] | None = None
+
+
+type CallVoiceAgentOptions = VoiceAgentOptions | CascadedVoiceAgentOptions
+
+
 class RealtimeVoiceBridge:
     """One LiveKit connection with an OpenAI realtime agent on top."""
 
@@ -333,7 +364,7 @@ class RealtimeVoiceBridge:
             return
         self._room.e2ee_manager.key_provider.set_key(participant_identity, key, key_index)
 
-    async def start_agent(self, options: VoiceAgentOptions) -> None:
+    async def start_agent(self, options: CallVoiceAgentOptions) -> None:
         """Start the realtime agent session on the connected room."""
         from livekit import rtc  # noqa: PLC0415
         from livekit.agents import Agent, AgentSession, room_io  # noqa: PLC0415
@@ -342,21 +373,41 @@ class RealtimeVoiceBridge:
         if self._room is None:
             msg = "connect() must succeed before start_agent()"
             raise RuntimeError(msg)
+        if not isinstance(options, VoiceAgentOptions):
+            msg = "RealtimeVoiceBridge requires realtime agent options"
+            raise TypeError(msg)
         if options.voice:
             model = realtime.RealtimeModel(model=options.model, api_key=options.api_key, voice=options.voice)
         else:
             model = realtime.RealtimeModel(model=options.model, api_key=options.api_key)
         session = AgentSession(llm=model)
+        agent = Agent(instructions=options.instructions, tools=list(options.tools))
+        await self._start_session(session, agent, options, rtc_module=rtc, room_io_module=room_io)
+        if options.greeting_instructions:
+            session.generate_reply(instructions=options.greeting_instructions)
+
+    async def _start_session(
+        self,
+        session: AgentSession,
+        agent: LiveKitAgent,
+        options: CallVoiceAgentOptions,
+        *,
+        rtc_module: ModuleType,
+        room_io_module: ModuleType,
+    ) -> None:
+        """Attach authorized audio and start one configured LiveKit session."""
+        if self._room is None:
+            msg = "connect() must succeed before start_agent()"
+            raise RuntimeError(msg)
         self._session = session
-        audio_input = _AuthorizedParticipantAudioInput(self._room, rtc, self._participant_identities)
+        audio_input = _AuthorizedParticipantAudioInput(self._room, rtc_module, self._participant_identities)
         self._audio_input = audio_input
         session.input.audio = cast("AudioInput", audio_input)
         self._register_session_listeners(session, options)
-        agent = Agent(instructions=options.instructions, tools=list(options.tools))
         await session.start(
             agent,
             room=self._room,
-            room_options=room_io.RoomOptions(
+            room_options=room_io_module.RoomOptions(
                 audio_input=False,
                 text_input=False,
                 text_output=False,
@@ -364,8 +415,6 @@ class RealtimeVoiceBridge:
             ),
         )
         self._log_media_snapshot()
-        if options.greeting_instructions:
-            session.generate_reply(instructions=options.greeting_instructions)
 
     def _log_media_snapshot(self) -> None:
         """Log local publications and remote subscription state for call diagnostics."""
@@ -388,7 +437,7 @@ class RealtimeVoiceBridge:
             roster=sorted(self._participant_identities),
         )
 
-    def _register_session_listeners(self, session: AgentSession, options: VoiceAgentOptions) -> None:
+    def _register_session_listeners(self, session: AgentSession, options: CallVoiceAgentOptions) -> None:
         from livekit.agents.llm import ChatMessage  # noqa: PLC0415
 
         on_turn = options.on_conversation_turn
@@ -414,7 +463,7 @@ class RealtimeVoiceBridge:
 
         self._register_termination_listener(session, options)
 
-    def _register_termination_listener(self, session: AgentSession, options: VoiceAgentOptions) -> None:
+    def _register_termination_listener(self, session: AgentSession, options: CallVoiceAgentOptions) -> None:
         from livekit.agents import APIError, CloseReason  # noqa: PLC0415
 
         on_terminated = options.on_session_terminated
@@ -466,6 +515,113 @@ class RealtimeVoiceBridge:
             finally:
                 if room is not None:
                     await room.disconnect()
+
+
+class CascadedVoiceBridge(RealtimeVoiceBridge):
+    """Existing MatrixRTC media bridge with a cascaded speech session on top."""
+
+    async def start_agent(self, options: CallVoiceAgentOptions) -> None:
+        """Start STT -> normal MindRoom agent -> TTS on the connected room."""
+        from livekit import rtc  # noqa: PLC0415
+        from livekit.agents import Agent, AgentSession, TurnHandlingOptions, inference, room_io  # noqa: PLC0415
+        from livekit.plugins import openai  # noqa: PLC0415
+
+        if self._room is None:
+            msg = "connect() must succeed before start_agent()"
+            raise RuntimeError(msg)
+        if not isinstance(options, CascadedVoiceAgentOptions):
+            msg = "CascadedVoiceBridge requires cascaded agent options"
+            raise TypeError(msg)
+
+        stt = openai.STT(**_speech_component_kwargs(options.stt))
+        tts = openai.TTS(**_speech_component_kwargs(options.tts))
+        mindroom_llm = _build_mindroom_llm(options.respond, options.on_tools_executed)
+        session = AgentSession(
+            stt=stt,
+            vad=inference.VAD(model="silero"),
+            llm=mindroom_llm,
+            tts=tts,
+            turn_handling=TurnHandlingOptions(
+                turn_detection="vad",
+                interruption={"enabled": True, "mode": "vad"},
+                preemptive_generation={"enabled": False},
+            ),
+        )
+        agent = Agent(instructions="MindRoom owns this call's model, prompt, history, and tools.")
+        await self._start_session(session, agent, options, rtc_module=rtc, room_io_module=room_io)
+        if options.greeting_text:
+            session.say(options.greeting_text)
+
+
+def _speech_component_kwargs(options: SpeechServiceOptions) -> dict[str, Any]:
+    """Build one LiveKit OpenAI-plugin component constructor payload."""
+    kwargs = dict(options.extra_kwargs or {})
+    kwargs.update(model=options.model, api_key=options.api_key)
+    if options.base_url is not None:
+        kwargs["base_url"] = options.base_url
+    return kwargs
+
+
+def _build_mindroom_llm(
+    respond: Callable[[str], Awaitable[CallAgentResponse]],
+    on_tools_executed: Callable[[list[str]], None] | None,
+) -> LLM:
+    """Adapt finalized LiveKit transcripts to the normal MindRoom agent path."""
+    from livekit.agents import NOT_GIVEN, llm  # noqa: PLC0415
+    from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS  # noqa: PLC0415
+
+    class _MindRoomLLMStream(llm.LLMStream):
+        async def _run(self) -> None:
+            transcript = next(
+                (
+                    item.text_content
+                    for item in reversed(self._chat_ctx.items)
+                    if isinstance(item, llm.ChatMessage) and item.role == "user" and item.text_content
+                ),
+                None,
+            )
+            if transcript is None:
+                msg = "Cascaded voice turn has no finalized user transcript"
+                raise ValueError(msg)
+            result = await respond(transcript)
+            if on_tools_executed is not None and result.tool_names:
+                on_tools_executed(list(result.tool_names))
+            if result.text:
+                self._event_ch.send_nowait(
+                    llm.ChatChunk(
+                        id=f"mindroom-{id(self)}",
+                        delta=llm.ChoiceDelta(role="assistant", content=result.text),
+                    ),
+                )
+
+    class _MindRoomLLM(llm.LLM):
+        @property
+        def model(self) -> str:
+            return "configured-agent-model"
+
+        @property
+        def provider(self) -> str:
+            return "mindroom"
+
+        def chat(
+            self,
+            *,
+            chat_ctx: ChatContext,
+            tools: list[Tool] | None = None,
+            conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS,
+            parallel_tool_calls: NotGivenOr[bool] = NOT_GIVEN,
+            tool_choice: NotGivenOr[ToolChoice] = NOT_GIVEN,
+            extra_kwargs: NotGivenOr[dict[str, Any]] = NOT_GIVEN,
+        ) -> LLMStream:
+            del parallel_tool_calls, tool_choice, extra_kwargs
+            return _MindRoomLLMStream(
+                self,
+                chat_ctx=chat_ctx,
+                tools=tools or [],
+                conn_options=replace(conn_options, max_retry=0),
+            )
+
+    return _MindRoomLLM()
 
 
 def _consume_task_result(task: asyncio.Task[None]) -> None:

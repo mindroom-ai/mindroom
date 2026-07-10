@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import subprocess
+import sys
 from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -11,16 +14,21 @@ import pytest
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from livekit import rtc
-from livekit.agents import APIConnectionError, APIStatusError, CloseReason
+from livekit.agents import APIConnectionError, APIStatusError, CloseReason, llm
 from livekit.agents.voice import io as agents_io
 from structlog.testing import capture_logs
 
+from mindroom.matrix_rtc.call_tools import CallAgentResponse
 from mindroom.matrix_rtc.focus import SfuGrant
 from mindroom.matrix_rtc.voice_agent import (
+    CascadedVoiceAgentOptions,
+    CascadedVoiceBridge,
     RealtimeVoiceBridge,
+    SpeechServiceOptions,
     VoiceAgentOptions,
     _AudioFrameStream,
     _AuthorizedParticipantAudioInput,
+    _build_mindroom_llm,
 )
 
 if TYPE_CHECKING:
@@ -194,6 +202,148 @@ async def test_agent_session_uses_group_safe_room_options(monkeypatch: pytest.Mo
     assert fake_session.room_options.text_input is False
     assert fake_session.room_options.text_output is False
     assert fake_session.room_options.close_on_disconnect is False
+
+
+@pytest.mark.asyncio
+async def test_cascaded_session_wires_stt_normal_agent_and_tts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cascaded bridge gives LiveKit speech legs and the MindRoom LLM adapter."""
+    built: dict[str, object] = {}
+    turns: list[tuple[str, str]] = []
+    tool_uses: list[list[str]] = []
+
+    class FakeSession:
+        def __init__(self, **kwargs: object) -> None:
+            built["session_kwargs"] = kwargs
+            self.input = SimpleNamespace(audio=None)
+            self.handlers: dict[str, object] = {}
+            self.greetings: list[str] = []
+
+        async def start(self, agent: object, *, room: object, room_options: object) -> None:
+            built["agent"] = agent
+            built["room"] = room
+            built["room_options"] = room_options
+
+        def on(self, event: str, callback: object) -> None:
+            self.handlers[event] = callback
+
+        def say(self, text: str) -> None:
+            self.greetings.append(text)
+
+    async def respond(transcript: str) -> CallAgentResponse:
+        return CallAgentResponse(text=f"heard {transcript}", tool_names=("weather",))
+
+    fake_session = FakeSession()
+    monkeypatch.setattr(
+        "livekit.agents.AgentSession",
+        lambda **kwargs: (built.update(session_kwargs=kwargs), fake_session)[1],
+    )
+    monkeypatch.setattr("livekit.agents.Agent", lambda **kwargs: SimpleNamespace(**kwargs))
+    monkeypatch.setattr("livekit.agents.inference.VAD", lambda **kwargs: ("vad", kwargs))
+    monkeypatch.setattr("livekit.plugins.openai.STT", lambda **kwargs: ("stt", kwargs))
+    monkeypatch.setattr("livekit.plugins.openai.TTS", lambda **kwargs: ("tts", kwargs))
+    fake_audio_input = MagicMock()
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.voice_agent._AuthorizedParticipantAudioInput",
+        lambda *_args: fake_audio_input,
+    )
+    bridge = CascadedVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    bridge._room = MagicMock()
+    options = CascadedVoiceAgentOptions(
+        stt=SpeechServiceOptions(
+            provider="openai_compatible",
+            model="whisper-large-v3",
+            api_key="local-stt",
+            base_url="http://127.0.0.1:9000/v1",
+            extra_kwargs={"language": "en"},
+        ),
+        tts=SpeechServiceOptions(
+            provider="openai",
+            model="tts-1",
+            api_key="tts-key",
+            extra_kwargs={"voice": "ash"},
+        ),
+        respond=respond,
+        greeting_text="Hello.",
+        on_conversation_turn=lambda role, text: turns.append((role, text)),
+        on_tools_executed=tool_uses.append,
+    )
+
+    await bridge.start_agent(options)
+
+    session_kwargs = cast("dict[str, object]", built["session_kwargs"])
+    assert session_kwargs["stt"] == (
+        "stt",
+        {
+            "language": "en",
+            "model": "whisper-large-v3",
+            "api_key": "local-stt",
+            "base_url": "http://127.0.0.1:9000/v1",
+        },
+    )
+    assert session_kwargs["tts"] == ("tts", {"voice": "ash", "model": "tts-1", "api_key": "tts-key"})
+    assert session_kwargs["vad"] == ("vad", {"model": "silero"})
+    assert session_kwargs["turn_handling"] == {
+        "turn_detection": "vad",
+        "interruption": {"enabled": True, "mode": "vad"},
+        "preemptive_generation": {"enabled": False},
+    }
+    assert fake_session.input.audio is fake_audio_input
+    assert fake_session.greetings == ["Hello."]
+
+    user_message = llm.ChatContext.empty().add_message(role="user", content="hello")
+    callback = cast("Callable[[object], None]", fake_session.handlers["conversation_item_added"])
+    callback(SimpleNamespace(item=user_message))
+    assert turns == [("user", "hello")]
+
+    chat_context = llm.ChatContext.empty()
+    chat_context.add_message(role="user", content="status")
+    stream = session_kwargs["llm"].chat(chat_ctx=chat_context)  # type: ignore[union-attr]
+    assert stream._conn_options.max_retry == 0
+    chunks = [chunk async for chunk in stream]
+    assert [chunk.delta.content for chunk in chunks] == ["heard status"]
+    assert tool_uses == [["weather"]]
+
+
+@pytest.mark.asyncio
+async def test_cascaded_agent_failure_propagates_to_session_lifecycle() -> None:
+    """Retryable SDK errors cannot duplicate a normal-agent turn or its tools."""
+    attempts = 0
+
+    async def fail(_transcript: str) -> CallAgentResponse:
+        nonlocal attempts
+        attempts += 1
+        message = "agent unavailable"
+        raise APIConnectionError(message, retryable=True)
+
+    context = llm.ChatContext.empty()
+    context.add_message(role="user", content="hello")
+    stream = _build_mindroom_llm(fail, None).chat(chat_ctx=context)
+
+    with pytest.raises(APIConnectionError, match="agent unavailable"):
+        _ = [chunk async for chunk in stream]
+
+    assert attempts == 1
+
+
+def test_voice_agent_import_keeps_livekit_and_openai_lazy() -> None:
+    """Importing the optional bridge does not import either provider SDK."""
+    probe = (
+        "import json, sys; import mindroom.matrix_rtc.voice_agent; "
+        "print(json.dumps(sorted(name for name in sys.modules "
+        "if name == 'livekit' or name.startswith('livekit.') or name == 'openai' or name.startswith('openai.'))))"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+
+    assert json.loads(result.stdout) == []
 
 
 @pytest.mark.parametrize(

@@ -11,13 +11,16 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
+from uuid import uuid4
 
 import aiohttp
 import httpx
 import nio
 
 from mindroom.authorization import is_authorized_sender, is_sender_allowed_for_agent_reply
+from mindroom.config.voice import normalize_speech_base_url
 from mindroom.credentials_sync import get_api_key_for_provider
 from mindroom.entity_resolution import configured_call_agent_name_for_room
 from mindroom.logging_config import get_logger
@@ -37,18 +40,25 @@ from mindroom.matrix_rtc.focus import OpenIDToken, discover_livekit_service_url,
 from mindroom.matrix_rtc.key_transport import ToDeviceFrameKeyTransport
 from mindroom.matrix_rtc.transcript import CallTranscript
 from mindroom.matrix_rtc.voice_agent import (
+    CascadedVoiceAgentOptions,
+    CascadedVoiceBridge,
     RealtimeVoiceBridge,
+    SpeechServiceOptions,
     VoiceAgentOptions,
     matrix_calls_dependencies_available,
 )
+from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
+from mindroom.session_ids import create_session_id
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mindroom.config.main import Config
+    from mindroom.config.voice import SpeechServiceConfig
     from mindroom.constants import RuntimePaths
     from mindroom.matrix_rtc.call_session import VoiceBridgeLike
     from mindroom.matrix_rtc.focus import SfuGrant
+    from mindroom.matrix_rtc.voice_agent import CallVoiceAgentOptions
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 
 logger = get_logger(__name__)
@@ -56,6 +66,10 @@ logger = get_logger(__name__)
 
 def _default_bridge_factory(local_identity: str, e2ee_enabled: bool) -> RealtimeVoiceBridge:
     return RealtimeVoiceBridge(local_identity=local_identity, e2ee_enabled=e2ee_enabled)
+
+
+def _default_cascaded_bridge_factory(local_identity: str, e2ee_enabled: bool) -> CascadedVoiceBridge:
+    return CascadedVoiceBridge(local_identity=local_identity, e2ee_enabled=e2ee_enabled)
 
 
 _CALL_EVENT_TYPES = frozenset({CALL_MEMBER_EVENT_TYPE, RTC_NOTIFICATION_EVENT_TYPE})
@@ -74,6 +88,15 @@ _VOICE_STYLE_ADDENDUM = (
 
 
 _JoinResult = Literal["joined", "retry", "skip"]
+
+
+@dataclass(frozen=True)
+class _ResolvedVoiceBackend:
+    """Credentials and endpoints resolved for one configured call backend."""
+
+    realtime_api_key: str | None = None
+    stt: SpeechServiceOptions | None = None
+    tts: SpeechServiceOptions | None = None
 
 
 def _build_call_instructions(chat_system_prompt: str) -> str:
@@ -123,7 +146,7 @@ class CallManager:
         client: nio.AsyncClient,
         runtime_paths: RuntimePaths,
         ssl_verify: bool,
-        bridge_factory: Callable[[str, bool], VoiceBridgeLike] = _default_bridge_factory,
+        bridge_factory: Callable[[str, bool], VoiceBridgeLike] | None = None,
         tool_support: ToolRuntimeSupport,
         clock_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     ) -> None:
@@ -132,7 +155,9 @@ class CallManager:
         self._client = client
         self._runtime_paths = runtime_paths
         self._ssl_verify = ssl_verify
-        self._bridge_factory = bridge_factory
+        self._bridge_factory = bridge_factory or (
+            _default_cascaded_bridge_factory if config.calls.backend == "cascaded" else _default_bridge_factory
+        )
         self._tool_support = tool_support
         self._clock_ms = clock_ms
         self._key_transport = ToDeviceFrameKeyTransport(client)
@@ -419,9 +444,8 @@ class CallManager:
 
     async def _join(self, room: nio.MatrixRoom, members: list[CallMember]) -> _JoinResult:  # noqa: PLR0911
         room_id = room.room_id
-        api_key = get_api_key_for_provider("openai", self._runtime_paths)
-        if not api_key:
-            logger.warning("call_join_skipped_no_openai_key", room_id=room_id, agent=self._agent_name)
+        backend = self._resolve_voice_backend(room_id)
+        if backend is None:
             return "skip"
         try:
             service = await self._resolve_service(members)
@@ -435,7 +459,11 @@ class CallManager:
             logger.warning("call_join_skipped_no_livekit_service", room_id=room_id, agent=self._agent_name)
             return "skip"
         try:
-            tooling = await self._build_tooling(room_id, requester_id=members[0].user_id)
+            tooling = await self._build_tooling(
+                room_id,
+                requester_id=members[0].user_id,
+                cascaded=self._config.calls.backend == "cascaded",
+            )
         except Exception as error:
             logger.warning(
                 "call_join_skipped_agent_materialization_failed",
@@ -465,20 +493,12 @@ class CallManager:
             f"{self._client.user_id}:{device_id}",
             room.encrypted,
         )
-        options = VoiceAgentOptions(
-            instructions=_build_call_instructions(tooling.instructions),
-            model=self._config.calls.model,
-            api_key=api_key,
-            voice=self._config.calls.voice,
-            greeting_instructions="Briefly greet the caller and let them know you joined the call.",
-            tools=tooling.tools,
-            on_conversation_turn=transcript.record,
-            on_tools_executed=transcript.record_tool_use,
-            on_session_terminated=lambda retryable: self._schedule_session_termination(
-                room,
-                bridge,
-                retryable=retryable,
-            ),
+        options = self._build_voice_agent_options(
+            tooling=tooling,
+            transcript=transcript,
+            room=room,
+            bridge=bridge,
+            backend=backend,
         )
         try:
             session = CallSession(
@@ -585,7 +605,7 @@ class CallManager:
         *,
         retryable: bool,
     ) -> None:
-        """Schedule cleanup after an unexpected terminal realtime close."""
+        """Schedule cleanup after an unexpected terminal voice-session close."""
         if self._shutting_down:
             return
         task = asyncio.create_task(self._handle_session_termination(room, bridge, retryable=retryable))
@@ -621,8 +641,15 @@ class CallManager:
         except Exception as error:
             logger.warning(event, room_id=session.room_id, error=str(error))
 
-    async def _build_tooling(self, room_id: str, *, requester_id: str) -> CallAgentTooling:
+    async def _build_tooling(
+        self,
+        room_id: str,
+        *,
+        requester_id: str,
+        cascaded: bool,
+    ) -> CallAgentTooling:
         """Build agent tools with the sole caller as the Matrix requester."""
+        session_id = f"{create_session_id(room_id, None)}:call:{uuid4().hex}" if cascaded else None
         return await build_call_tools(
             agent_name=self._agent_name,
             config=self._config,
@@ -630,6 +657,101 @@ class CallManager:
             tool_support=self._tool_support,
             room_id=room_id,
             requester_id=requester_id,
+            session_id=session_id,
+            enable_responder=cascaded,
+            voice_instructions=_VOICE_STYLE_ADDENDUM if cascaded else None,
+        )
+
+    def _resolve_voice_backend(self, room_id: str) -> _ResolvedVoiceBackend | None:
+        """Resolve backend-specific credentials without affecting call lifecycle."""
+        if self._config.calls.backend == "realtime":
+            api_key = get_api_key_for_provider("openai", self._runtime_paths)
+            if not api_key:
+                logger.warning("call_join_skipped_no_openai_key", room_id=room_id, agent=self._agent_name)
+                return None
+            return _ResolvedVoiceBackend(realtime_api_key=api_key)
+
+        stt_config = self._config.calls.stt
+        tts_config = self._config.calls.tts
+        if stt_config is None or tts_config is None:
+            msg = "Cascaded call configuration requires STT and TTS"
+            raise ValueError(msg)
+        stt = self._resolve_speech_service(stt_config, component="stt", room_id=room_id)
+        tts = self._resolve_speech_service(tts_config, component="tts", room_id=room_id)
+        if stt is None or tts is None:
+            return None
+        return _ResolvedVoiceBackend(stt=stt, tts=tts)
+
+    def _build_voice_agent_options(
+        self,
+        *,
+        tooling: CallAgentTooling,
+        transcript: CallTranscript,
+        room: nio.MatrixRoom,
+        bridge: VoiceBridgeLike,
+        backend: _ResolvedVoiceBackend,
+    ) -> CallVoiceAgentOptions:
+        """Build selected-backend options with shared transcript hooks."""
+
+        def on_session_terminated(retryable: bool) -> None:
+            self._schedule_session_termination(room, bridge, retryable=retryable)
+
+        if self._config.calls.backend == "realtime":
+            if backend.realtime_api_key is None:
+                msg = "Realtime call API key was not resolved"
+                raise RuntimeError(msg)
+            return VoiceAgentOptions(
+                instructions=_build_call_instructions(tooling.instructions),
+                model=self._config.calls.model,
+                api_key=backend.realtime_api_key,
+                voice=self._config.calls.voice,
+                greeting_instructions="Briefly greet the caller and let them know you joined the call.",
+                tools=tooling.tools,
+                on_conversation_turn=transcript.record,
+                on_tools_executed=transcript.record_tool_use,
+                on_session_terminated=on_session_terminated,
+            )
+        if backend.stt is None or backend.tts is None or tooling.responder is None:
+            msg = "Cascaded call agent was not fully materialized"
+            raise RuntimeError(msg)
+        return CascadedVoiceAgentOptions(
+            stt=backend.stt,
+            tts=backend.tts,
+            respond=tooling.responder,
+            greeting_text="Hello, I joined the call.",
+            on_conversation_turn=transcript.record,
+            on_tools_executed=transcript.record_tool_use,
+            on_session_terminated=on_session_terminated,
+        )
+
+    def _resolve_speech_service(
+        self,
+        service: SpeechServiceConfig,
+        *,
+        component: str,
+        room_id: str,
+    ) -> SpeechServiceOptions | None:
+        """Resolve one independently credentialed cloud or local speech service."""
+        base_url = normalize_speech_base_url(service.host)
+        if base_url is not None:
+            api_key = service.api_key or LOCAL_OPENAI_API_KEY_DEFAULT
+        else:
+            api_key = service.api_key or get_api_key_for_provider(service.provider, self._runtime_paths)
+        if not api_key:
+            logger.warning(
+                "call_join_skipped_no_speech_key",
+                room_id=room_id,
+                agent=self._agent_name,
+                component=component,
+                provider=service.provider,
+            )
+            return None
+        return SpeechServiceOptions(
+            provider=service.provider,
+            model=service.model,
+            api_key=api_key,
+            base_url=base_url,
+            extra_kwargs=dict(service.extra_kwargs),
         )
 
     async def _resolve_service(self, members: list[CallMember]) -> str | None:

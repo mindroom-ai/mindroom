@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
@@ -17,6 +17,9 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.calls import CallsConfig
 from mindroom.config.main import Config
+from mindroom.config.memory import MemoryConfig
+from mindroom.config.models import ModelConfig
+from mindroom.config.voice import SpeechServiceConfig
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.matrix_rtc.call_manager import (
@@ -27,7 +30,7 @@ from mindroom.matrix_rtc.call_manager import (
     maybe_build_call_manager,
 )
 from mindroom.matrix_rtc.call_session import CallSession, CallSessionDeps
-from mindroom.matrix_rtc.call_tools import CallAgentTooling
+from mindroom.matrix_rtc.call_tools import CallAgentResponse, CallAgentTooling
 from mindroom.matrix_rtc.events import (
     CALL_ENCRYPTION_KEYS_EVENT_TYPE,
     CALL_MEMBER_EVENT_TYPE,
@@ -38,12 +41,21 @@ from mindroom.matrix_rtc.events import (
     membership_state_key,
 )
 from mindroom.matrix_rtc.focus import SfuGrant
-from mindroom.matrix_rtc.voice_agent import VoiceAgentOptions
+from mindroom.matrix_rtc.voice_agent import (
+    CallVoiceAgentOptions,
+    CascadedVoiceAgentOptions,
+    CascadedVoiceBridge,
+    VoiceAgentOptions,
+)
+from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
+from mindroom.model_loading import get_model_instance
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from agno.models.openai.chat import OpenAIChat
 
     from mindroom.matrix_rtc.events import CallMember
 
@@ -61,7 +73,7 @@ class FakeBridge:
         self.connected_grant: SfuGrant | None = None
         self.participant_rosters: list[frozenset[str]] = []
         self.frame_keys: list[tuple[str, bytes, int]] = []
-        self.agent_options: VoiceAgentOptions | None = None
+        self.agent_options: CallVoiceAgentOptions | None = None
         self.closed = False
 
     def set_participant_identities(self, participant_identities: frozenset[str]) -> None:
@@ -76,7 +88,7 @@ class FakeBridge:
         """Record the key."""
         self.frame_keys.append((participant_identity, key, key_index))
 
-    async def start_agent(self, options: VoiceAgentOptions) -> None:
+    async def start_agent(self, options: CallVoiceAgentOptions) -> None:
         """Record the agent options."""
         self.agent_options = options
 
@@ -181,6 +193,41 @@ def _config(*, enabled: bool = True) -> Config:
     )
 
 
+def _cascaded_config(*, local: bool = False) -> Config:
+    config = _config()
+    if local:
+        config.models["default"] = ModelConfig(
+            provider="openai",
+            id="local-chat-model",
+            extra_kwargs={
+                "api_key": LOCAL_OPENAI_API_KEY_DEFAULT,
+                "base_url": "http://127.0.0.1:9292/v1",
+            },
+        )
+        config.memory = MemoryConfig(backend="none")
+    config.calls = CallsConfig(
+        enabled=True,
+        backend="cascaded",
+        agents=["helper"],
+        livekit_service_url=SERVICE_URL,
+        stt=SpeechServiceConfig(
+            provider="openai_compatible" if local else "openai",
+            model="whisper-large-v3" if local else "gpt-4o-transcribe",
+            api_key=None if local else "stt-key",
+            host="http://127.0.0.1:9000" if local else None,
+            extra_kwargs={"language": "en"},
+        ),
+        tts=SpeechServiceConfig(
+            provider="openai_compatible",
+            model="tts-1",
+            api_key=None if local else "tts-key",
+            host="http://127.0.0.1:9001",
+            extra_kwargs={"voice": "ash"},
+        ),
+    )
+    return config
+
+
 def _manager(
     client: AsyncMock,
     bridge: FakeBridge,
@@ -282,6 +329,126 @@ async def test_manager_joins_call_when_remote_member_appears(tmp_path: Path) -> 
     assert args[1] == CALL_MEMBER_EVENT_TYPE
     assert args[2]["device_id"] == BOT_DEVICE
     assert kwargs["state_key"] == membership_state_key(BOT_USER, BOT_DEVICE)
+
+
+@pytest.mark.asyncio
+async def test_manager_selects_cascaded_backend_with_independent_speech_services(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cascaded calls retain separate STT/TTS credentials, endpoints, and options."""
+
+    async def respond(_transcript: str) -> CallAgentResponse:
+        return CallAgentResponse("answer")
+
+    async def fake_tools(**kwargs: object) -> CallAgentTooling:
+        assert kwargs["enable_responder"] is True
+        assert str(kwargs["session_id"]).startswith(f"{ROOM_ID}:call:")
+        return CallAgentTooling(tools=(), instructions="", responder=respond)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, _cascaded_config())
+
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    options = bridge.agent_options
+    assert isinstance(options, CascadedVoiceAgentOptions)
+    assert (options.stt.model, options.stt.api_key, options.stt.base_url) == (
+        "gpt-4o-transcribe",
+        "stt-key",
+        None,
+    )
+    assert options.stt.extra_kwargs == {"language": "en"}
+    assert (options.tts.model, options.tts.api_key, options.tts.base_url) == (
+        "tts-1",
+        "tts-key",
+        "http://127.0.0.1:9001/v1",
+    )
+    assert options.tts.extra_kwargs == {"voice": "ash"}
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cascaded_agent_start_failure_tears_down_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A cascaded pipeline startup failure uses the existing safe teardown path."""
+
+    async def respond(_transcript: str) -> CallAgentResponse:
+        return CallAgentResponse("answer")
+
+    async def fake_tools(**_kwargs: object) -> CallAgentTooling:
+        return CallAgentTooling(tools=(), instructions="", responder=respond)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+
+    async def fail_start(options: CallVoiceAgentOptions) -> None:
+        bridge.agent_options = options
+        msg = "local TTS unavailable"
+        raise RuntimeError(msg)
+
+    bridge.start_agent = fail_start  # type: ignore[method-assign]
+    manager = _manager(client, bridge, tmp_path, _cascaded_config(local=True))
+
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    assert isinstance(bridge.agent_options, CascadedVoiceAgentOptions)
+    assert bridge.closed
+    assert ROOM_ID in manager._retry_tasks
+    await manager.shutdown()
+
+
+def test_fully_local_speech_services_never_resolve_cloud_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Explicit localhost speech endpoints need no cloud key lookup."""
+
+    def reject_cloud_lookup(*_args: object) -> str:
+        msg = "cloud credential lookup is forbidden"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.get_api_key_for_provider", reject_cloud_lookup)
+    manager = _manager(_client(), FakeBridge(), tmp_path, _cascaded_config(local=True))
+
+    backend = manager._resolve_voice_backend(ROOM_ID)
+    model = cast("OpenAIChat", get_model_instance(manager._config, manager._runtime_paths))
+
+    assert backend is not None
+    assert backend.stt is not None
+    assert backend.tts is not None
+    assert backend.stt.base_url == "http://127.0.0.1:9000/v1"
+    assert backend.tts.base_url == "http://127.0.0.1:9001/v1"
+    assert backend.stt.api_key == LOCAL_OPENAI_API_KEY_DEFAULT
+    assert backend.tts.api_key == LOCAL_OPENAI_API_KEY_DEFAULT
+    assert model.id == "local-chat-model"
+    assert model.api_key == LOCAL_OPENAI_API_KEY_DEFAULT
+    assert model.base_url == "http://127.0.0.1:9292/v1"
+    assert manager._config.memory.backend == "none"
+
+
+def test_default_bridge_factory_tracks_configured_backend(tmp_path: Path) -> None:
+    """Backend config selects cascaded media without changing CallSession."""
+    config = _cascaded_config(local=True)
+    manager = CallManager(
+        agent_name="helper",
+        config=config,
+        client=_client(),
+        runtime_paths=test_runtime_paths(tmp_path),
+        ssl_verify=True,
+        tool_support=object(),  # type: ignore[arg-type]
+    )
+
+    bridge = manager._bridge_factory("@helper:example.org:BOTDEV", False)
+
+    assert isinstance(bridge, CascadedVoiceBridge)
 
 
 @pytest.mark.asyncio
@@ -1570,7 +1737,7 @@ async def test_terminal_voice_close_stops_session_and_retries_only_when_allowed(
     tmp_path: Path,
     retryable: bool,
 ) -> None:
-    """A terminal realtime close cannot leave live Matrix membership behind."""
+    """A terminal voice close cannot leave live Matrix membership behind."""
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = FakeBridge()
@@ -1593,7 +1760,7 @@ async def test_terminal_close_during_agent_start_cannot_leave_ghost_session(tmp_
     """A close callback racing with join registration still removes the new session."""
 
     class ClosingBridge(FakeBridge):
-        async def start_agent(self, options: VoiceAgentOptions) -> None:
+        async def start_agent(self, options: CallVoiceAgentOptions) -> None:
             await super().start_agent(options)
             assert options.on_session_terminated is not None
             options.on_session_terminated(True)
@@ -2040,6 +2207,31 @@ def test_calls_config_rejects_agents_sharing_a_room() -> None:
                 "two": AgentConfig(display_name="Two", rooms=["voice"]),
             },
             calls=CallsConfig(enabled=True, agents=["one", "two"]),
+        )
+
+
+def test_cascaded_calls_require_both_speech_services() -> None:
+    """Cascaded configuration fails before runtime when either speech leg is absent."""
+    speech = SpeechServiceConfig(model="gpt-4o-transcribe")
+
+    with pytest.raises(ValueError, match="Cascaded calls require: tts"):
+        CallsConfig(backend="cascaded", stt=speech)
+    with pytest.raises(ValueError, match="Cascaded calls require: stt"):
+        CallsConfig(backend="cascaded", tts=speech)
+
+
+def test_openai_compatible_speech_config_requires_endpoint() -> None:
+    """A compatible provider cannot silently fall through to OpenAI cloud."""
+    with pytest.raises(ValueError, match="require host"):
+        SpeechServiceConfig(provider="openai_compatible", model="whisper-large-v3")
+
+
+def test_speech_config_rejects_connection_fields_in_extra_kwargs() -> None:
+    """Typed connection fields cannot be ambiguously overridden by provider options."""
+    with pytest.raises(ValueError, match="must not redefine: api_key, base_url"):
+        SpeechServiceConfig(
+            model="gpt-4o-transcribe",
+            extra_kwargs={"api_key": "wrong", "base_url": "https://wrong.example"},
         )
 
 
