@@ -420,6 +420,7 @@ def _build_agent_turn_callbacks(
             interrupted_tools=snapshot.interrupted_tools,
             run_metadata=snapshot.run_metadata,
             is_team=False,
+            original_status=snapshot.original_status,
         )
 
     return _AgentTurnCallbacks(
@@ -1891,6 +1892,36 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         state = _StreamingAttemptState()
         pending_retry_decision: MediaRetryDecision | None = None
 
+        def _build_interrupted_metadata(
+            attempt_state: _StreamingAttemptState,
+            status: RunStatus,
+            event_run_id: str | None,
+            event_session_id: str | None,
+        ) -> dict[str, Any] | None:
+            if run_metadata_collector is None:
+                return None
+            fallback_metrics = build_model_request_metrics_fallback(
+                attempt_state.request_metric_totals,
+                attempt_state.first_token_latency,
+                attempt_state.observed_request_metric_fields,
+            )
+            return build_ai_run_metadata_content(
+                config=config,
+                model_name=prepared_run.runtime_model_name,
+                run_id=event_run_id,
+                session_id=event_session_id or session_id,
+                status=status,
+                model=attempt_state.latest_model_id,
+                model_provider=attempt_state.latest_model_provider,
+                metrics=fallback_metrics,
+                context_input_tokens=prepared_context_input_tokens,
+                context_raw_input_tokens=attempt_state.latest_request_input_tokens,
+                context_cache_read_tokens=attempt_state.latest_request_cache_read_tokens,
+                context_cache_write_tokens=attempt_state.latest_request_cache_write_tokens,
+                tool_count=attempt_state.observed_tool_calls,
+                prepared_history=prepared_run.prepared_history,
+            )
+
         for retried_after_media_fallback in (False, True):
             state = _StreamingAttemptState()
             holder.state = state
@@ -1939,29 +1970,12 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 return
 
             if state.cancelled_run_event is not None:
-                cancelled_metadata: dict[str, Any] | None = None
-                if run_metadata_collector is not None:
-                    fallback_metrics = build_model_request_metrics_fallback(
-                        state.request_metric_totals,
-                        state.first_token_latency,
-                        state.observed_request_metric_fields,
-                    )
-                    cancelled_metadata = build_ai_run_metadata_content(
-                        config=config,
-                        model_name=prepared_run.runtime_model_name,
-                        run_id=state.cancelled_run_event.run_id,
-                        session_id=state.cancelled_run_event.session_id or session_id,
-                        status=RunStatus.cancelled,
-                        model=state.latest_model_id,
-                        model_provider=state.latest_model_provider,
-                        metrics=fallback_metrics,
-                        context_input_tokens=prepared_context_input_tokens,
-                        context_raw_input_tokens=state.latest_request_input_tokens,
-                        context_cache_read_tokens=state.latest_request_cache_read_tokens,
-                        context_cache_write_tokens=state.latest_request_cache_write_tokens,
-                        tool_count=state.observed_tool_calls,
-                        prepared_history=prepared_run.prepared_history,
-                    )
+                cancelled_metadata = _build_interrupted_metadata(
+                    state,
+                    RunStatus.cancelled,
+                    state.cancelled_run_event.run_id,
+                    state.cancelled_run_event.session_id,
+                )
                 yield AttemptResolved(
                     ExcludedAttempt(
                         reason=state.cancelled_run_event.reason,
@@ -1976,16 +1990,22 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 return
 
             if state.paused_run_event is not None:
-                paused_content = str(state.paused_run_event.content or "")
+                paused_metadata = _build_interrupted_metadata(
+                    state,
+                    RunStatus.paused,
+                    state.paused_run_event.run_id,
+                    state.paused_run_event.session_id,
+                )
                 yield AttemptResolved(
                     ExcludedAttempt(
                         original_status=RunStatus.paused,
-                        response_text=paused_content,
-                        partial_text=state.assistant_text or paused_content,
+                        response_text=str(state.paused_run_event.content or ""),
+                        partial_text=state.assistant_text or str(state.paused_run_event.content or ""),
                         completed_tools=tuple(state.completed_tools),
                         interrupted_tools=tuple(pending.trace_entry for pending in state.pending_tools),
                         session_id=state.paused_run_event.session_id,
                         run_id=state.paused_run_event.run_id or attempt.attempt_run_id,
+                        metadata_content=paused_metadata,
                     ),
                 )
                 return
