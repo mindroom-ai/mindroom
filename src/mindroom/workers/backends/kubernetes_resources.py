@@ -609,6 +609,20 @@ class KubernetesResourceManager:
             body["spec"] = {"replicas": replicas}
         self._apps.patch_namespaced_deployment(deployment_name, self.config.namespace, body)
 
+    def patch_deployment_annotations(self, deployment_name: str, *, annotations: dict[str, str]) -> bool:
+        """Merge selected Deployment annotations, returning false when it disappeared."""
+        try:
+            self._apps.patch_namespaced_deployment(
+                deployment_name,
+                self.config.namespace,
+                {"metadata": {"annotations": annotations}},
+            )
+        except self._api_exception as exc:
+            if exc.status == 404:
+                return False
+            raise
+        return True
+
     def delete_deployment(self, deployment_name: str) -> None:
         """Delete one worker Deployment, ignoring 404s."""
         self._delete_object(self._apps.delete_namespaced_deployment, deployment_name)
