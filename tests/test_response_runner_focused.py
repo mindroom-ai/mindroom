@@ -852,6 +852,248 @@ async def test_duplicate_queued_request_without_reservation_registers_one_notice
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "delivery_outcome",
+    [
+        _completed_outcome(),
+        FinalDeliveryOutcome(
+            terminal_status="cancelled",
+            event_id="$response",
+            is_visible_response=True,
+            failure_reason="cancelled_by_user",
+        ),
+        FinalDeliveryOutcome(
+            terminal_status="error",
+            event_id="$response",
+            is_visible_response=True,
+            failure_reason="delivery_failed",
+        ),
+    ],
+    ids=["completed", "cancelled", "error"],
+)
+async def test_terminal_settlement_finalizes_and_runs_post_effects_once(
+    tmp_path: Path,
+    delivery_outcome: FinalDeliveryOutcome,
+) -> None:
+    """Every canonical terminal status should cross finalization and post-effects exactly once."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    request = _plain_request(_target())
+    progress = response_runner._DeliveryProgress()
+    post_effects = AsyncMock()
+    build_post_outcome = MagicMock(return_value=ResponseOutcome())
+
+    async def generate(_message_id: str | None) -> None:
+        progress.settle(delivery_outcome)
+
+    async def run_cancellable_response(**kwargs: object) -> str:
+        response_function = kwargs["response_function"]
+        await response_function("$response")  # type: ignore[operator]
+        return "$response"
+
+    lifecycle = coordinator._build_lifecycle(
+        identity=coordinator._response_identity(request, response_kind="ai"),
+        request=request,
+    )
+    finalize = AsyncMock(wraps=lifecycle.finalize)
+    with (
+        patch.object(
+            coordinator,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=run_cancellable_response),
+        ),
+        patch.object(lifecycle, "finalize", new=finalize),
+        patch_response_runner_module(apply_post_response_effects=post_effects),
+    ):
+        result = await coordinator._run_and_settle_locked_response(
+            request,
+            target=request.response_envelope.target,
+            lifecycle=lifecycle,
+            progress=progress,
+            response_function=generate,
+            thinking_message=None,
+            user_id=request.user_id,
+            run_id="run-1",
+            build_post_response_outcome=build_post_outcome,
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        )
+
+    assert result == "$response"
+    assert progress.delivery_outcome is delivery_outcome
+    build_post_outcome.assert_called_once_with(delivery_outcome)
+    finalize.assert_awaited_once()
+    post_effects.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_terminal_settlement_registers_retry_before_rethrowing_cancel(tmp_path: Path) -> None:
+    """A deferred sync-restart cancel should finalize once, register its retry, then re-raise."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    order: list[str] = []
+    request = replace(
+        _plain_request(_target()),
+        on_sync_restart_cancelled=lambda: order.append("retry"),
+        on_deferred_outcome_handled=lambda event_id: order.append(f"handled:{event_id}"),
+    )
+    delivery_outcome = FinalDeliveryOutcome(
+        terminal_status="cancelled",
+        event_id="$response",
+        is_visible_response=True,
+        failure_reason="sync_restart_cancelled",
+    )
+    progress = response_runner._DeliveryProgress()
+    progress.note_delivery_started("$response")
+    progress.settle(delivery_outcome)
+    post_effects = AsyncMock(side_effect=lambda *_args: order.append("post_effects"))
+    lifecycle = coordinator._build_lifecycle(
+        identity=coordinator._response_identity(request, response_kind="ai"),
+        request=request,
+    )
+    finalize = AsyncMock(wraps=lifecycle.finalize)
+
+    with (
+        patch.object(
+            coordinator,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=asyncio.CancelledError("sync_restart")),
+        ),
+        patch.object(lifecycle, "finalize", new=finalize),
+        patch_response_runner_module(apply_post_response_effects=post_effects),
+        pytest.raises(asyncio.CancelledError, match="sync_restart"),
+    ):
+        await coordinator._run_and_settle_locked_response(
+            request,
+            target=request.response_envelope.target,
+            lifecycle=lifecycle,
+            progress=progress,
+            response_function=AsyncMock(),
+            thinking_message=None,
+            user_id=request.user_id,
+            run_id="run-1",
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        )
+
+    assert order == ["post_effects", "retry", "handled:$response"]
+    assert progress.delivery_outcome is delivery_outcome
+    finalize.assert_awaited_once()
+    post_effects.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "delivery_outcome",
+    [
+        _completed_outcome(),
+        FinalDeliveryOutcome(
+            terminal_status="error",
+            event_id="$response",
+            is_visible_response=True,
+            failure_reason="delivery_failed",
+        ),
+    ],
+    ids=["completed", "error"],
+)
+async def test_terminal_settlement_late_cancel_keeps_settled_outcome_canonical(
+    tmp_path: Path,
+    delivery_outcome: FinalDeliveryOutcome,
+) -> None:
+    """A late cancel records an existing terminal outcome without queueing a duplicate retry."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    order: list[str] = []
+    request = replace(
+        _plain_request(_target()),
+        on_sync_restart_cancelled=lambda: order.append("retry"),
+        on_deferred_outcome_handled=lambda event_id: order.append(f"handled:{event_id}"),
+    )
+    progress = response_runner._DeliveryProgress()
+    progress.note_delivery_started("$response")
+    progress.settle(delivery_outcome)
+    post_effects = AsyncMock(side_effect=lambda *_args: order.append("post_effects"))
+    lifecycle = coordinator._build_lifecycle(
+        identity=coordinator._response_identity(request, response_kind="ai"),
+        request=request,
+    )
+    finalize = AsyncMock(wraps=lifecycle.finalize)
+
+    with (
+        patch.object(
+            coordinator,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=asyncio.CancelledError("sync_restart")),
+        ),
+        patch.object(lifecycle, "finalize", new=finalize),
+        patch_response_runner_module(apply_post_response_effects=post_effects),
+        pytest.raises(asyncio.CancelledError, match="sync_restart"),
+    ):
+        await coordinator._run_and_settle_locked_response(
+            request,
+            target=request.response_envelope.target,
+            lifecycle=lifecycle,
+            progress=progress,
+            response_function=AsyncMock(),
+            thinking_message=None,
+            user_id=request.user_id,
+            run_id="run-1",
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        )
+
+    assert order == ["post_effects", "handled:$response"]
+    assert progress.delivery_outcome is delivery_outcome
+    finalize.assert_awaited_once()
+    post_effects.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_terminal_settlement_rethrows_generation_error_after_post_effects(tmp_path: Path) -> None:
+    """A pre-delivery generation error should settle, finalize once, run effects, then re-raise."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    request = _plain_request(_target())
+    progress = response_runner._DeliveryProgress()
+    post_effects = AsyncMock()
+    build_post_outcome = MagicMock(return_value=ResponseOutcome())
+    lifecycle = coordinator._build_lifecycle(
+        identity=coordinator._response_identity(request, response_kind="ai"),
+        request=request,
+    )
+    finalize = AsyncMock(wraps=lifecycle.finalize)
+
+    with (
+        patch.object(
+            coordinator,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=RuntimeError("generation failed")),
+        ),
+        patch.object(lifecycle, "finalize", new=finalize),
+        patch_response_runner_module(apply_post_response_effects=post_effects),
+        pytest.raises(RuntimeError, match="generation failed"),
+    ):
+        await coordinator._run_and_settle_locked_response(
+            request,
+            target=request.response_envelope.target,
+            lifecycle=lifecycle,
+            progress=progress,
+            response_function=AsyncMock(),
+            thinking_message=None,
+            user_id=request.user_id,
+            run_id="run-1",
+            build_post_response_outcome=build_post_outcome,
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        )
+
+    assert progress.delivery_outcome is not None
+    assert progress.delivery_outcome.terminal_status == "error"
+    assert progress.delivery_outcome.failure_reason == "generation failed"
+    build_post_outcome.assert_called_once_with(progress.delivery_outcome)
+    finalize.assert_awaited_once()
+    post_effects.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_success_runs_post_response_effects_after_delivery(tmp_path: Path) -> None:
     """A successful turn applies post-response effects only after visible delivery completed."""
     bot = _bot(tmp_path)

@@ -21,6 +21,7 @@ from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS, RuntimePath
 from mindroom.credential_policy import _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
 from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
 from mindroom.matrix.state import MatrixState
+from mindroom.message_target import MessageTarget
 from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.config_test_utils import runtime_config_from_data
@@ -74,7 +75,7 @@ def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "config_manager
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -204,9 +205,11 @@ class TestConsolidatedConfigManager:
         room.members_synced = True
         runtime_context = ToolRuntimeContext(
             agent_name="present",
-            room_id=room.room_id,
-            thread_id=None,
-            resolved_thread_id=None,
+            target=MessageTarget.resolve(
+                room_id=room.room_id,
+                thread_id=None,
+                reply_to_event_id=None,
+            ),
             requester_id="@user:localhost",
             client=MagicMock(),
             config=config,

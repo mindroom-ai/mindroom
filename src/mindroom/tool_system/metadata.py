@@ -1,4 +1,4 @@
-"""Tool metadata and enhanced registration system."""
+"""Runtime tool catalog resolution, validation, and instance construction."""
 
 from __future__ import annotations
 
@@ -10,25 +10,29 @@ import sys
 import threading
 import weakref
 from dataclasses import asdict, dataclass
-from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    ToolAuthoredOverrideValidator,
+    ToolCategory,
+    ToolExecutionTarget,
+    ToolManagedInitArg,
+    ToolMetadata,
+    ToolValidationInfo,
+)
 from mindroom.tool_system.dependencies import auto_install_optional_extra_for_import_retry, ensure_tool_deps
 from mindroom.tool_system.registry_state import (
     BUILTIN_TOOL_METADATA,
     BUILTIN_TOOL_REGISTRY,
-    PLUGIN_MODULE_PREFIX,
-    PLUGIN_REGISTRATION_SCOPE,
     TOOL_METADATA,
     TOOL_REGISTRY,
     ToolMetadataValidationError,
-    register_builtin_tool_metadata,
-    register_plugin_tool_metadata,
     resolved_tool_state,
     scoped_plugin_registration_owner,
     scoped_plugin_registration_store,
@@ -65,13 +69,6 @@ class ToolInitOverrideError(ValueError):
 
 class ToolConfigOverrideError(ValueError):
     """Raised when authored tool config overrides are invalid."""
-
-
-class ToolAuthoredOverrideValidator(str, Enum):
-    """Explicit authored-override validation modes for a tool."""
-
-    DEFAULT = "default"
-    MCP = "mcp"
 
 
 def _is_authored_override_inherit(value: object) -> bool:
@@ -683,110 +680,6 @@ def get_tool_by_name(
             raise second_error from first_error
 
 
-class ToolCategory(str, Enum):
-    """Tool categories for organization."""
-
-    EMAIL = "email"
-    ENTERTAINMENT = "entertainment"
-    SOCIAL = "social"
-    DEVELOPMENT = "development"
-    RESEARCH = "research"
-    INFORMATION = "information"
-    PRODUCTIVITY = "productivity"
-    COMMUNICATION = "communication"
-    INTEGRATIONS = "integrations"
-    SMART_HOME = "smart_home"
-
-
-class ToolStatus(str, Enum):
-    """Tool availability status."""
-
-    AVAILABLE = "available"
-    REQUIRES_CONFIG = "requires_config"
-
-
-class SetupType(str, Enum):
-    """Tool setup type."""
-
-    NONE = "none"  # No setup required
-    API_KEY = "api_key"  # Requires API key
-    OAUTH = "oauth"  # OAuth flow
-    SPECIAL = "special"  # Special setup (e.g., for Google)
-
-
-class ToolExecutionTarget(str, Enum):
-    """Default runtime location for one tool."""
-
-    PRIMARY = "primary"
-    WORKER = "worker"
-
-
-class ToolManagedInitArg(str, Enum):
-    """Explicit MindRoom-managed constructor inputs."""
-
-    RUNTIME_PATHS = "runtime_paths"
-    CREDENTIALS_MANAGER = "credentials_manager"
-    WORKER_TARGET = "worker_target"
-    TOOL_OUTPUT_WORKSPACE_ROOT = "tool_output_workspace_root"
-    WORKER_TOOLS_OVERRIDE = "worker_tools_override"
-
-
-@dataclass
-class ConfigField:
-    """Definition of a configuration field."""
-
-    name: str  # Environment variable name (e.g., "SMTP_HOST")
-    label: str  # Display label (e.g., "SMTP Host")
-    type: Literal["boolean", "number", "password", "text", "url", "select", "string[]"] = "text"
-    required: bool = True
-    default: Any = None
-    placeholder: str | None = None
-    description: str | None = None
-    options: list[dict[str, str]] | None = None  # For select type
-    validation: dict[str, Any] | None = None  # min, max, pattern, etc.
-    authored_override: bool = True
-
-
-@dataclass(frozen=True)
-class ToolValidationInfo:
-    """Validation-only metadata for authored tool references."""
-
-    name: str
-    config_fields: tuple[ConfigField, ...] = ()
-    agent_override_fields: tuple[ConfigField, ...] = ()
-    authored_override_validator: ToolAuthoredOverrideValidator = ToolAuthoredOverrideValidator.DEFAULT
-    requires_room_context: bool = False
-    runtime_loadable: bool = True
-    unavailable_due_to_plugin_load_error: bool = False
-
-
-@dataclass
-class ToolMetadata:
-    """Complete metadata for a tool."""
-
-    name: str  # Internal tool name (e.g., "gmail")
-    display_name: str  # Display name (e.g., "Gmail")
-    description: str  # Description for UI
-    category: ToolCategory
-    status: ToolStatus = ToolStatus.AVAILABLE
-    setup_type: SetupType = SetupType.NONE
-    default_execution_target: ToolExecutionTarget = ToolExecutionTarget.PRIMARY
-    consumes_workspace_paths: bool = False
-    requires_room_context: bool = False
-    icon: str | None = None  # Icon identifier for frontend
-    icon_color: str | None = None  # Tailwind color class like "text-blue-500"
-    config_fields: list[ConfigField] | None = None  # Detailed field definitions
-    agent_override_fields: list[ConfigField] | None = None  # Safe per-agent override field definitions
-    authored_override_validator: ToolAuthoredOverrideValidator = ToolAuthoredOverrideValidator.DEFAULT
-    dependencies: list[str] | None = None  # Required pip packages
-    auth_provider: str | None = None  # Name of integration that provides auth (e.g., "google")
-    docs_url: str | None = None  # Documentation URL
-    helper_text: str | None = None  # Additional help text for setup
-    function_names: tuple[str, ...] = ()  # Optional explicit callable names for dispatch/error matching
-    managed_init_args: tuple[ToolManagedInitArg, ...] = ()  # Explicit MindRoom-managed constructor kwargs
-    factory: Callable | None = None  # Factory function to create tool instance
-
-
 @dataclass(frozen=True)
 class _ResolvedToolState:
     """Runtime-visible tool state plus validation-only skipped-plugin metadata."""
@@ -794,107 +687,6 @@ class _ResolvedToolState:
     tool_registry: dict[str, Callable[[], type[Toolkit]]]
     tool_metadata: dict[str, ToolMetadata]
     unavailable_tool_metadata: dict[str, ToolMetadata]
-
-
-def register_tool_with_metadata(
-    *,
-    name: str,
-    display_name: str,
-    description: str,
-    category: ToolCategory,
-    status: ToolStatus = ToolStatus.AVAILABLE,
-    setup_type: SetupType = SetupType.NONE,
-    default_execution_target: ToolExecutionTarget = ToolExecutionTarget.PRIMARY,
-    consumes_workspace_paths: bool = False,
-    requires_room_context: bool = False,
-    icon: str | None = None,
-    icon_color: str | None = None,
-    config_fields: list[ConfigField] | None = None,
-    agent_override_fields: list[ConfigField] | None = None,
-    authored_override_validator: ToolAuthoredOverrideValidator = ToolAuthoredOverrideValidator.DEFAULT,
-    dependencies: list[str] | None = None,
-    auth_provider: str | None = None,
-    docs_url: str | None = None,
-    helper_text: str | None = None,
-    function_names: tuple[str, ...] = (),
-    managed_init_args: tuple[ToolManagedInitArg, ...] = (),
-) -> Callable[[Callable[[], type]], Callable[[], type]]:
-    """Decorator to register a tool with metadata.
-
-    This decorator stores comprehensive metadata about tools that can be used
-    by the frontend and other components.
-
-    Args:
-        name: Tool identifier used in registry
-        display_name: Human-readable name for UI
-        description: Brief description of what the tool does
-        category: Tool category for organization
-        status: Availability status of the tool
-        setup_type: Type of setup required
-        default_execution_target: Default runtime location for the tool
-        consumes_workspace_paths: Whether tool functions can consume files saved into the execution workspace
-        requires_room_context: Whether tool functions require a live Matrix room context
-        icon: Icon identifier for frontend
-        icon_color: CSS color class for the icon
-        config_fields: List of configuration fields
-        agent_override_fields: Safe per-agent override fields serialized via config.yaml
-        authored_override_validator: Explicit authored-override validation mode for the tool
-        dependencies: Required Python packages
-        auth_provider: Name of integration that provides authentication
-        docs_url: Link to documentation
-        helper_text: Additional setup instructions
-        function_names: Optional explicit callable names exposed by the toolkit
-        managed_init_args: Explicit MindRoom-managed constructor kwargs
-
-    Returns:
-        Decorator function
-
-    """
-
-    def decorator(func: Callable) -> Callable:
-        # Create metadata object
-        metadata = ToolMetadata(
-            name=name,
-            display_name=display_name,
-            description=description,
-            category=category,
-            status=status,
-            setup_type=setup_type,
-            default_execution_target=default_execution_target,
-            consumes_workspace_paths=consumes_workspace_paths,
-            requires_room_context=requires_room_context,
-            icon=icon,
-            icon_color=icon_color,
-            config_fields=config_fields,
-            agent_override_fields=agent_override_fields,
-            authored_override_validator=authored_override_validator,
-            dependencies=dependencies,
-            auth_provider=auth_provider,
-            docs_url=docs_url,
-            helper_text=helper_text,
-            function_names=function_names,
-            managed_init_args=managed_init_args,
-            factory=func,
-        )
-
-        validation_owner_module_name = getattr(
-            PLUGIN_REGISTRATION_SCOPE,
-            "owner_module_name",
-            None,
-        )
-        if validation_owner_module_name is not None:
-            register_plugin_tool_metadata(validation_owner_module_name, metadata)
-            return func
-
-        if func.__module__.startswith(PLUGIN_MODULE_PREFIX):
-            register_plugin_tool_metadata(func.__module__, metadata)
-            return func
-
-        register_builtin_tool_metadata(metadata)
-
-        return func
-
-    return decorator
 
 
 @functools.lru_cache(maxsize=8192)

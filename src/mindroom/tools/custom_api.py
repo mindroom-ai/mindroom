@@ -9,7 +9,8 @@ import httpx
 
 from mindroom.redaction import redact_sensitive_data
 from mindroom.server_fetch_url import ServerFetchHTTPTransport, validate_server_fetch_url
-from mindroom.tool_system.metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
     from agno.tools.api import CustomApiTools

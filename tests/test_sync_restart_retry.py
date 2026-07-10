@@ -40,15 +40,8 @@ def _notify(
     runner: ResponseRunner,
     request: ResponseRequest,
     outcome: FinalDeliveryOutcome,
-    *,
-    delivery_cancelled: bool = True,
 ) -> None:
-    runner._notify_sync_restart_cancelled(
-        request,
-        outcome,
-        delivery_cancelled=delivery_cancelled,
-        delivery_failure_reason=outcome.failure_reason,
-    )
+    runner._notify_sync_restart_cancelled(request, outcome)
 
 
 def test_notify_fires_for_marked_handled_sync_restart_cancellation() -> None:
@@ -74,16 +67,20 @@ def test_notify_ignores_user_stop_and_unmarked_turns() -> None:
     assert calls == []
 
 
-def test_notify_uses_final_delivery_outcome_when_cancel_flag_is_missing() -> None:
-    """Streaming cancellations can surface only through the final delivery outcome."""
+def test_notify_uses_only_the_canonical_final_delivery_outcome() -> None:
+    """Transient cancellation state must not retry a turn whose final outcome completed."""
     calls: list[str] = []
     _notify(
         ResponseRunner(deps=MagicMock()),
         _request(on_sync_restart_cancelled=lambda: calls.append("retry")),
-        _cancelled_outcome(failure_reason="sync_restart_cancelled"),
-        delivery_cancelled=False,
+        FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$response",
+            is_visible_response=True,
+            failure_reason=None,
+        ),
     )
-    assert calls == ["retry"]
+    assert calls == []
 
 
 @pytest.mark.asyncio

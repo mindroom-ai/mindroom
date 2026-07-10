@@ -318,15 +318,11 @@ def _delivery_envelope() -> MessageEnvelope:
     """Build a minimal response envelope for delivery gateway tests."""
     return MessageEnvelope(
         source_event_id="$event123",
-        room_id="!test:server",
         target=MessageTarget.resolve("!test:server", "$thread", "$event123"),
-        requester_id="@user:server",
-        sender_id="@user:server",
         body="hello",
         attachment_ids=(),
         mentioned_agents=(),
         agent_name="email_agent",
-        source_kind=MESSAGE_SOURCE_KIND,
         origin=message_origin(sender_id="@user:server", requester_id="@user:server", source_kind=MESSAGE_SOURCE_KIND),
     )
 

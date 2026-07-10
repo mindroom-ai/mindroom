@@ -49,6 +49,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
+from mindroom.message_target import MessageTarget
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.token_budget import estimate_text_tokens
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -737,16 +738,19 @@ async def test_compaction_hooks_use_team_scope_agent_name(tmp_path: Path) -> Non
     client = AsyncMock()
     runtime_context = ToolRuntimeContext(
         agent_name="router",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
+        target=MessageTarget(
+            room_id="!room:localhost",
+            source_thread_id="$thread",
+            resolved_thread_id="$thread",
+            reply_to_event_id=None,
+            session_id="session-1",
+        ),
         requester_id="@user:localhost",
         client=client,
         config=config,
         runtime_paths=runtime_paths,
         event_cache=make_event_cache_mock(),
         conversation_cache=make_conversation_cache_mock(),
-        session_id="session-1",
         hook_registry=registry,
         correlation_id="corr-compaction",
         matrix_admin=build_hook_matrix_admin(client, runtime_paths),

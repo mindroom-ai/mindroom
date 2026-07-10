@@ -832,9 +832,13 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
 
     runtime_context = ToolRuntimeContext(
         agent_name="test_agent",
-        room_id="!room:localhost",
-        thread_id="thread-1",
-        resolved_thread_id="thread-1",
+        target=MessageTarget(
+            room_id="!room:localhost",
+            source_thread_id="thread-1",
+            resolved_thread_id="thread-1",
+            reply_to_event_id=None,
+            session_id="session-1",
+        ),
         requester_id="@alice:localhost",
         client=SimpleNamespace(),
         config=config,
@@ -842,7 +846,6 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
         event_cache=make_event_cache_mock(),
         conversation_cache=make_conversation_cache_mock(),
         active_model_name="large",
-        session_id="session-1",
     )
 
     with tool_runtime_context(runtime_context):
@@ -914,9 +917,13 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
 
     runtime_context = ToolRuntimeContext(
         agent_name="test_agent",
-        room_id="!room:localhost",
-        thread_id="thread-1",
-        resolved_thread_id="thread-1",
+        target=MessageTarget(
+            room_id="!room:localhost",
+            source_thread_id="thread-1",
+            resolved_thread_id="thread-1",
+            reply_to_event_id=None,
+            session_id="session-1",
+        ),
         requester_id="@alice:localhost",
         client=SimpleNamespace(),
         config=config,
@@ -924,7 +931,6 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
         event_cache=make_event_cache_mock(),
         conversation_cache=make_conversation_cache_mock(),
         active_model_name=None,
-        session_id="session-1",
     )
 
     with tool_runtime_context(runtime_context):
@@ -992,9 +998,13 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
 
     runtime_context = ToolRuntimeContext(
         agent_name="test_agent",
-        room_id="!room:localhost",
-        thread_id="thread-1",
-        resolved_thread_id="thread-1",
+        target=MessageTarget(
+            room_id="!room:localhost",
+            source_thread_id="thread-1",
+            resolved_thread_id="thread-1",
+            reply_to_event_id=None,
+            session_id="session-1",
+        ),
         requester_id="@alice:localhost",
         client=SimpleNamespace(),
         config=config,
@@ -1002,7 +1012,6 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
         event_cache=make_event_cache_mock(),
         conversation_cache=make_conversation_cache_mock(),
         active_model_name=None,
-        session_id="session-1",
     )
 
     with tool_runtime_context(runtime_context):

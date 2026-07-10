@@ -557,22 +557,20 @@ Rooms created via `create_room` are retained for the creating bot across room cl
 ```python
 MessageEnvelope(
     source_event_id: str,
-    room_id: str,
     target: MessageTarget,
-    requester_id: str,
-    sender_id: str,
     body: str,
     attachment_ids: tuple[str, ...],
     mentioned_agents: tuple[str, ...],
     agent_name: str,
-    source_kind: str,  # "message", "edit", "voice", "image", "media", "scheduled", "hook", "hook_dispatch", "trusted_internal_relay"
     origin: TurnOrigin,
     hook_source: str | None = None,
     message_received_depth: int = 0,  # internal synthetic-chain depth for hook-originated relays
     dispatch_policy_source_kind: str | None = None,
 )
 
-# target.thread_id preserves the raw inbound thread ID.
+# envelope.room_id is derived from target.room_id.
+# envelope.requester_id, envelope.sender_id, and envelope.source_kind are derived from origin.
+# target.source_thread_id preserves the raw inbound thread ID.
 # target.resolved_thread_id is the delivery thread after safe-root and room-mode resolution.
 # target.session_id is the canonical persistence key for the conversation.
 # origin is keyword-only in the dataclass constructor and is required.

@@ -18,6 +18,7 @@ from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_api import MatrixApiTools, _MatrixSearchResponse
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
+from mindroom.message_target import MessageTarget
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
@@ -64,9 +65,11 @@ def _make_context(
     resolved_conversation_cache.notify_outbound_redaction = Mock()
     return ToolRuntimeContext(
         agent_name="general",
-        room_id=room_id,
-        thread_id="$thread:localhost",
-        resolved_thread_id="$thread:localhost",
+        target=MessageTarget.resolve(
+            room_id=room_id,
+            thread_id="$thread:localhost",
+            reply_to_event_id="$reply:localhost",
+        ),
         requester_id="@user:localhost",
         client=client,
         config=config,
@@ -74,7 +77,6 @@ def _make_context(
         conversation_cache=resolved_conversation_cache,
         event_cache=make_event_cache_mock(),
         room=None,
-        reply_to_event_id="$reply:localhost",
         storage_path=runtime_root,
     )
 

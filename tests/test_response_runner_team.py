@@ -347,19 +347,15 @@ class TestAgentBot(AgentBotTestBase):
         matrix_ids = entity_ids(config, runtime_paths)
         envelope = MessageEnvelope(
             source_event_id="$reply_plain:localhost",
-            room_id="!test:localhost",
             target=MessageTarget.resolve(
                 room_id="!test:localhost",
                 thread_id="$raw_thread:localhost",
                 reply_to_event_id="$reply_plain:localhost",
             ).with_thread_root("$canonical_thread:localhost"),
-            requester_id="@user:localhost",
-            sender_id="@user:localhost",
             body="team prompt",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name=mock_agent_user.agent_name,
-            source_kind=MESSAGE_SOURCE_KIND,
             origin=message_origin(
                 sender_id="@user:localhost",
                 requester_id="@user:localhost",

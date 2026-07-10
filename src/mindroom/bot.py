@@ -2106,7 +2106,6 @@ class TeamBot(AgentBot):
         execution_identity = self._tool_runtime_support.build_execution_identity(
             target=target,
             user_id=request.user_id,
-            session_id=session_id,
         )
         with tool_execution_identity(execution_identity):
             create_background_task(

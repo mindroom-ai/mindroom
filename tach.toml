@@ -66,11 +66,11 @@ visibility = [
 
 [[modules]]
 path = "mindroom.dynamic_workflows"
-depends_on = []
+depends_on = ["mindroom.durable_write"]
 
 [[modules]]
 path = "mindroom.report_publishing"
-depends_on = []
+depends_on = ["mindroom.durable_write"]
 
 # Keep memory consumers explicit so imports are enforced rather than merely
 # interface-checked.
@@ -1606,14 +1606,25 @@ path = "mindroom.matrix.cache.agent_message_snapshot"
 depends_on = []
 
 [[modules]]
-path = "mindroom.matrix.cache.sqlite_agent_message_snapshot"
+path = "mindroom.matrix.cache.agent_message_snapshot_semantics"
 depends_on = [
     "mindroom.matrix.cache.agent_message_snapshot",
-    "mindroom.matrix.cache.sqlite_event_cache_events",
-    "mindroom.matrix.cache.sqlite_event_cache_threads",
     "mindroom.matrix.cache.thread_cache_helpers",
     "mindroom.matrix.event_info",
     "mindroom.matrix.visible_body",
+]
+visibility = [
+    "mindroom.matrix.cache.postgres_agent_message_snapshot",
+    "mindroom.matrix.cache.sqlite_agent_message_snapshot",
+]
+
+[[modules]]
+path = "mindroom.matrix.cache.sqlite_agent_message_snapshot"
+depends_on = [
+    "mindroom.matrix.cache.agent_message_snapshot",
+    "mindroom.matrix.cache.agent_message_snapshot_semantics",
+    "mindroom.matrix.cache.sqlite_event_cache_events",
+    "mindroom.matrix.cache.sqlite_event_cache_threads",
 ]
 visibility = ["mindroom.matrix.cache.sqlite_event_cache"]
 
@@ -1621,34 +1632,44 @@ visibility = ["mindroom.matrix.cache.sqlite_event_cache"]
 path = "mindroom.matrix.cache.postgres_agent_message_snapshot"
 depends_on = [
     "mindroom.matrix.cache.agent_message_snapshot",
+    "mindroom.matrix.cache.agent_message_snapshot_semantics",
     "mindroom.matrix.cache.postgres_event_cache_events",
     "mindroom.matrix.cache.postgres_event_cache_threads",
-    "mindroom.matrix.cache.thread_cache_helpers",
-    "mindroom.matrix.event_info",
-    "mindroom.matrix.visible_body",
 ]
 visibility = ["mindroom.matrix.cache.postgres_event_cache"]
 
 [[modules]]
 path = "mindroom.matrix.cache.sqlite_event_cache_threads"
 depends_on = [
-    "mindroom.matrix.cache.event_cache",
+    "mindroom.matrix.cache.event_cache_events",
     "mindroom.matrix.cache.event_normalization",
     "mindroom.matrix.cache.sqlite_event_cache_events",
+    "mindroom.matrix.cache.thread_cache_state",
 ]
 
 [[modules]]
 path = "mindroom.matrix.cache.postgres_event_cache_threads"
 depends_on = [
-    "mindroom.matrix.cache.event_cache",
+    "mindroom.matrix.cache.event_cache_events",
     "mindroom.matrix.cache.event_normalization",
     "mindroom.matrix.cache.postgres_cursor",
     "mindroom.matrix.cache.postgres_event_cache_events",
+    "mindroom.matrix.cache.thread_cache_state",
 ]
 
 [[modules]]
 path = "mindroom.matrix.cache.event_cache"
 depends_on = []
+
+[[modules]]
+path = "mindroom.matrix.cache.event_cache_events"
+depends_on = ["mindroom.matrix.event_info"]
+visibility = [
+    "mindroom.matrix.cache.postgres_event_cache_events",
+    "mindroom.matrix.cache.postgres_event_cache_threads",
+    "mindroom.matrix.cache.sqlite_event_cache_events",
+    "mindroom.matrix.cache.sqlite_event_cache_threads",
+]
 
 [[modules]]
 path = "mindroom.matrix.cache.event_normalization"
@@ -1674,6 +1695,16 @@ path = "mindroom.matrix.cache.thread_cache_helpers"
 depends_on = []
 
 [[modules]]
+path = "mindroom.matrix.cache.thread_cache_state"
+depends_on = ["mindroom.matrix.cache.event_cache"]
+visibility = [
+    "mindroom.matrix.cache.postgres_event_cache",
+    "mindroom.matrix.cache.postgres_event_cache_threads",
+    "mindroom.matrix.cache.sqlite_event_cache",
+    "mindroom.matrix.cache.sqlite_event_cache_threads",
+]
+
+[[modules]]
 path = "mindroom.matrix.cache.thread_history_result"
 depends_on = []
 
@@ -1686,15 +1717,13 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.matrix.cache.sqlite_event_cache_events"
-depends_on = [
-    "mindroom.matrix.event_info",
-]
+depends_on = ["mindroom.matrix.cache.event_cache_events"]
 
 [[modules]]
 path = "mindroom.matrix.cache.postgres_event_cache_events"
 depends_on = [
+    "mindroom.matrix.cache.event_cache_events",
     "mindroom.matrix.cache.postgres_cursor",
-    "mindroom.matrix.event_info",
 ]
 
 [[modules]]
@@ -1714,6 +1743,7 @@ path = "mindroom.matrix.cache.sqlite_event_cache"
 depends_on = [
     "mindroom.matrix.cache.event_batching",
     "mindroom.matrix.cache.event_normalization",
+    "mindroom.matrix.cache.thread_cache_state",
     "mindroom.logging_config",
     "mindroom.matrix.cache.sqlite_agent_message_snapshot",
     "mindroom.matrix.cache.sqlite_event_cache_events",
@@ -1727,6 +1757,7 @@ depends_on = [
     "mindroom.matrix.cache.event_batching",
     "mindroom.matrix.cache.event_cache",
     "mindroom.matrix.cache.event_normalization",
+    "mindroom.matrix.cache.thread_cache_state",
     "mindroom.logging_config",
     "mindroom.matrix.cache.postgres_agent_message_snapshot",
     "mindroom.matrix.cache.postgres_event_cache_events",
@@ -1967,8 +1998,7 @@ visibility = [
     "mindroom.approval_inbound",
     "mindroom.approval_events",
     "mindroom.bot",
-    "mindroom.matrix.cache.postgres_agent_message_snapshot",
-    "mindroom.matrix.cache.sqlite_agent_message_snapshot",
+    "mindroom.matrix.cache.agent_message_snapshot_semantics",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.client_thread_history",
     "mindroom.matrix.conversation_cache",
@@ -2028,12 +2058,14 @@ depends_on = [
 path = "mindroom.thread_models"
 depends_on = [
     "mindroom.constants",
+    "mindroom.durable_write",
 ]
 
 [[modules]]
 path = "mindroom.room_thread_modes"
 depends_on = [
     "mindroom.constants",
+    "mindroom.durable_write",
 ]
 
 [[modules]]
@@ -2416,6 +2448,7 @@ path = "mindroom.tool_system.metadata"
 depends_on = [
     "mindroom.constants",
     "mindroom.mcp.registry",
+    "mindroom.tool_system.declarations",
     "mindroom.tool_system.dependencies",
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.plugin_imports",
@@ -2428,7 +2461,19 @@ depends_on = [
 path = "mindroom.tool_system.catalog"
 depends_on = [
     "mindroom.tool_system.bootstrap",
+    "mindroom.tool_system.declarations",
     "mindroom.tool_system.metadata",
+]
+
+[[modules]]
+path = "mindroom.tool_system.declarations"
+depends_on = []
+
+[[modules]]
+path = "mindroom.tool_system.registration"
+depends_on = [
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registry_state",
 ]
 
 [[modules]]
@@ -3320,18 +3365,31 @@ from = ["mindroom.runtime_support"]
 
 [[interfaces]]
 expose = [
-    "TOOL_METADATA",
     "ConfigField",
     "SetupType",
     "ToolAuthoredOverrideValidator",
     "ToolCategory",
-    "ToolConfigOverrideError",
-    "ToolInitOverrideError",
+    "ToolExecutionTarget",
     "ToolManagedInitArg",
     "ToolMetadata",
-    "ToolMetadataValidationError",
     "ToolStatus",
     "ToolValidationInfo",
+]
+from = ["mindroom.tool_system.declarations"]
+
+[[interfaces]]
+expose = [
+    "register_builtin_tool_metadata",
+    "register_tool_with_metadata",
+]
+from = ["mindroom.tool_system.registration"]
+
+[[interfaces]]
+expose = [
+    "TOOL_METADATA",
+    "ToolConfigOverrideError",
+    "ToolInitOverrideError",
+    "ToolMetadataValidationError",
     "apply_authored_overrides",
     "authored_tool_overrides_to_runtime",
     "bind_resolved_tool_state_cache",
@@ -3419,6 +3477,7 @@ visibility = [
     "mindroom.mcp.registry",
     "mindroom.tool_system.metadata",
     "mindroom.tool_system.plugins",
+    "mindroom.tool_system.registration",
 ]
 exclusive = true
 

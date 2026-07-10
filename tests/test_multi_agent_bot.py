@@ -908,7 +908,7 @@ class TestAgentBot(AgentBotTestBase):
         assert context is not None
         assert context.thread_id == "$raw-thread"
         assert context.resolved_thread_id is None
-        assert MessageTarget.from_runtime_context(context).source_thread_id == "$raw-thread"
+        assert context.target.source_thread_id == "$raw-thread"
 
     def test_response_lifecycle_lock_uses_resolved_thread_root(
         self,

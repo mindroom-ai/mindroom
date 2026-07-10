@@ -14,6 +14,7 @@ import pytest
 from agno.tools import Toolkit
 
 from mindroom.constants import resolve_runtime_paths
+from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolMetadata, ToolStatus
 from mindroom.tool_system.dependencies import (
     _PIP_TO_IMPORT,
     _auto_install_optional_extra,
@@ -28,10 +29,6 @@ from mindroom.tool_system.dependencies import (
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     TOOL_REGISTRY,
-    SetupType,
-    ToolCategory,
-    ToolMetadata,
-    ToolStatus,
     get_tool_by_name,
 )
 from mindroom.tools.openbb import openbb_tools

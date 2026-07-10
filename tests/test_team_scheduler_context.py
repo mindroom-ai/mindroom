@@ -51,15 +51,11 @@ async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncIter
 def _response_envelope() -> MessageEnvelope:
     return MessageEnvelope(
         source_event_id="$user_event",
-        room_id="!team:localhost",
         target=MessageTarget.resolve("!team:localhost", "$thread_root", "$user_event"),
-        requester_id="@user:localhost",
-        sender_id="@user:localhost",
         body="Please coordinate and schedule a reminder",
         attachment_ids=(),
         mentioned_agents=(),
         agent_name="general",
-        source_kind=MESSAGE_SOURCE_KIND,
         origin=message_origin(
             sender_id="@user:localhost",
             requester_id="@user:localhost",

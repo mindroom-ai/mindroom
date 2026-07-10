@@ -346,7 +346,6 @@ class ConversationResolver:
     def build_message_envelope(
         self,
         *,
-        room_id: str,
         event: DispatchEvent,
         requester_user_id: str,
         context: MessageContext,
@@ -375,10 +374,7 @@ class ConversationResolver:
 
         return MessageEnvelope(
             source_event_id=event.event_id,
-            room_id=room_id,
             target=target,
-            requester_id=requester_user_id,
-            sender_id=event.sender,
             body=body or event.body,
             attachment_ids=tuple(
                 attachment_ids if attachment_ids is not None else parse_attachment_ids_from_event_source(event.source),
@@ -388,7 +384,6 @@ class ConversationResolver:
                 for agent_id in context.mentioned_agents
             ),
             agent_name=agent_name or self.deps.agent_name,
-            source_kind=resolved_source_kind,
             hook_source=hook_source,
             message_received_depth=message_received_depth,
             dispatch_policy_source_kind=dispatch_policy_source_kind,
@@ -404,7 +399,6 @@ class ConversationResolver:
     def build_ingress_envelope(
         self,
         *,
-        room_id: str,
         event: DispatchEvent,
         requester_user_id: str,
         target: MessageTarget,
@@ -429,17 +423,13 @@ class ConversationResolver:
         )
         return MessageEnvelope(
             source_event_id=event.event_id,
-            room_id=room_id,
             target=target,
-            requester_id=requester_user_id,
-            sender_id=event.sender,
             body=body or event.body,
             attachment_ids=tuple(
                 attachment_ids if attachment_ids is not None else parse_attachment_ids_from_event_source(event.source),
             ),
             mentioned_agents=(),
             agent_name=agent_name or self.deps.agent_name,
-            source_kind=resolved_source_kind,
             hook_source=hook_source,
             message_received_depth=message_received_depth,
             dispatch_policy_source_kind=dispatch_policy_source_kind,

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
+from mindroom.durable_write import write_json_file_durable
 from mindroom.report_publishing.static_site import (
     StaticSiteSnapshotError,
     resolve_static_site_asset,
@@ -103,7 +104,9 @@ class ReportPublishingStore:
             published_at=_utc_now(),
             public_url=_public_report_url(base_url, slug, artifact_kind=source.artifact_kind),
         )
-        _atomic_write_json(self._public_report_path(slug), _published_report_to_json(report))
+        report_path = self._public_report_path(slug)
+        payload = _published_report_to_json(report)
+        write_json_file_durable(report_path, payload, indent=2, sort_keys=True, trailing_newline=True)
         return report
 
     def get_public_report(self, slug: str, *, include_revoked: bool = False) -> PublishedReport:
@@ -140,7 +143,9 @@ class ReportPublishingStore:
         if report.revoked_at is not None:
             return report
         revoked = replace(report, revoked_at=_utc_now(), revoked_by=revoked_by)
-        _atomic_write_json(self._public_report_path(slug), _published_report_to_json(revoked))
+        report_path = self._public_report_path(slug)
+        payload = _published_report_to_json(revoked)
+        write_json_file_durable(report_path, payload, indent=2, sort_keys=True, trailing_newline=True)
         return revoked
 
     def _publish_artifact(self, source: PublishableReport, slug: str) -> str:
@@ -256,10 +261,3 @@ def _load_json_mapping(path: Path) -> dict[str, object]:
         msg = "Expected JSON mapping."
         raise ReportPublishingError(msg)
     return data
-
-
-def _atomic_write_json(path: Path, data: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
-    tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp_path.replace(path)

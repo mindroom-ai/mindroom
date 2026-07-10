@@ -18,7 +18,6 @@ from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
-from mindroom.message_target import MessageTarget
 from mindroom.responder_availability import (
     filter_materializable_responders,
     live_responder_entity_names,
@@ -704,7 +703,7 @@ class SubAgentsTools(Toolkit):
         if not message.strip():
             return _payload("sessions_send", "error", message="Message cannot be empty.")
 
-        target_session = session_key or MessageTarget.from_runtime_context(context).session_id
+        target_session = session_key or context.target.session_id
         if label and not session_key:
             resolved = await asyncio.to_thread(_resolve_by_label, context, label)
             if resolved:

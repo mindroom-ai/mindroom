@@ -99,15 +99,11 @@ def _streaming_response(config: Config) -> StreamingResponse:
 def _envelope() -> MessageEnvelope:
     return MessageEnvelope(
         source_event_id="$reply",
-        room_id="!room:localhost",
         target=MessageTarget.resolve("!room:localhost", None, "$reply"),
-        requester_id="@user:localhost",
-        sender_id="@user:localhost",
         body="hello",
         attachment_ids=(),
         mentioned_agents=(),
         agent_name="code",
-        source_kind=MESSAGE_SOURCE_KIND,
         origin=message_origin(
             sender_id="@user:localhost",
             requester_id="@user:localhost",

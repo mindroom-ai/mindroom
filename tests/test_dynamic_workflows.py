@@ -33,6 +33,7 @@ from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.message_target import MessageTarget
 from mindroom.tool_approval import ToolCallWorkflowOrigin, _matching_tool_approval_rule, _shutdown_approval_store
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
@@ -137,9 +138,11 @@ def _make_context(tmp_path: Path) -> ToolRuntimeContext:
     )
     return ToolRuntimeContext(
         agent_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread:localhost",
-        resolved_thread_id="$thread:localhost",
+        target=MessageTarget.resolve(
+            room_id="!room:localhost",
+            thread_id="$thread:localhost",
+            reply_to_event_id="$event:localhost",
+        ),
         requester_id="@user:localhost",
         client=AsyncMock(),
         config=config,
@@ -147,7 +150,6 @@ def _make_context(tmp_path: Path) -> ToolRuntimeContext:
         conversation_cache=AsyncMock(),
         event_cache=make_event_cache_mock(),
         room=None,
-        reply_to_event_id="$event:localhost",
         storage_path=None,
     )
 
@@ -173,9 +175,11 @@ def _make_multi_agent_context(tmp_path: Path, *, room_agents: list[str]) -> Tool
     room.members_synced = True
     return ToolRuntimeContext(
         agent_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread:localhost",
-        resolved_thread_id="$thread:localhost",
+        target=MessageTarget.resolve(
+            room_id="!room:localhost",
+            thread_id="$thread:localhost",
+            reply_to_event_id="$event:localhost",
+        ),
         requester_id="@user:localhost",
         client=AsyncMock(),
         config=config,
@@ -183,7 +187,6 @@ def _make_multi_agent_context(tmp_path: Path, *, room_agents: list[str]) -> Tool
         conversation_cache=AsyncMock(),
         event_cache=make_event_cache_mock(),
         room=room,
-        reply_to_event_id="$event:localhost",
         storage_path=None,
     )
 

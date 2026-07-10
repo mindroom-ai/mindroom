@@ -200,7 +200,7 @@ class DelegateTools(Toolkit):
             runtime_context,
             agent_name=agent_name,
             active_model_name=runtime_model.model_name,
-            session_id=session_id,
+            target=replace(runtime_context.target, session_id=session_id),
         )
 
 

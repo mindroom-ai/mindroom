@@ -362,7 +362,6 @@ class TurnStore:
             execution_identity = self.deps.tool_runtime.build_execution_identity(
                 target=candidate_target,
                 user_id=request.requester_user_id,
-                session_id=session_id,
             )
             storage = self.deps.state_writer.create_storage(execution_identity, scope=history_scope)
             try:
@@ -399,7 +398,6 @@ class TurnStore:
         execution_identity = self.deps.tool_runtime.build_execution_identity(
             target=turn_record.conversation_target,
             user_id=requester_user_id,
-            session_id=session_id,
         )
         storage = self.deps.state_writer.create_storage(
             execution_identity,

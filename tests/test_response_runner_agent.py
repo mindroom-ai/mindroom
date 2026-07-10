@@ -2149,20 +2149,16 @@ class TestAgentBot(AgentBotTestBase):
         _install_runtime_cache_support(bot)
         envelope = MessageEnvelope(
             source_event_id="$reply_plain:localhost",
-            room_id="!test:localhost",
             target=MessageTarget.resolve(
                 room_id="!test:localhost",
                 thread_id=None,
                 reply_to_event_id="$reply_plain:localhost",
                 thread_start_root_event_id="$thread_root:localhost",
             ),
-            requester_id="@alice:localhost",
-            sender_id="@alice:localhost",
             body="Continue",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name=mock_agent_user.agent_name,
-            source_kind=MESSAGE_SOURCE_KIND,
             origin=message_origin(
                 sender_id="@alice:localhost",
                 requester_id="@alice:localhost",

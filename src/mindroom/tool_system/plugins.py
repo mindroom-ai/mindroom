@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import RuntimeConfig
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookCallback
-    from mindroom.tool_system.metadata import ToolMetadata
+    from mindroom.tool_system.declarations import ToolMetadata
 
 logger = get_logger(__name__)
 
