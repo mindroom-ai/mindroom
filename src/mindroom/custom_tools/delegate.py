@@ -165,6 +165,9 @@ class DelegateTools(Toolkit):
                     config=self._config,
                     knowledge=knowledge_resolution.knowledge,
                     include_interactive_questions=False,
+                    tool_function_filter=(
+                        runtime_context.tool_function_filter if runtime_context is not None else None
+                    ),
                     execution_identity=execution_identity,
                     delegation_depth=self._delegation_depth + 1,
                     refresh_scheduler=self._refresh_scheduler,

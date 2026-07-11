@@ -506,7 +506,7 @@ voice:
   visible_router_echo: true        # Optional: show the normalized voice text from the router
   stt:
     provider: openai               # Default: openai
-    model: whisper-1               # Default: whisper-1
+    model: gpt-4o-transcribe       # Default: gpt-4o-transcribe
     api_key: null
     host: null
   intelligence:
@@ -515,9 +515,12 @@ voice:
 # Voice calls via Element Call / MatrixRTC (optional)
 calls:
   enabled: false                   # Default: false
+  backend: realtime                # realtime (default) or cascaded
   agents: []                       # Shared agents allowed to join calls in their configured rooms (at most one per room)
   model: gpt-realtime-2.1          # OpenAI realtime speech-to-speech model
   voice: null                      # Optional realtime voice preset
+  stt: null                        # Cascaded SpeechServiceConfig; required with backend: cascaded
+  tts: null                        # Cascaded SpeechServiceConfig; required with backend: cascaded
   livekit_service_url: null        # Optional override for .well-known discovery
 
 # Internal MindRoom user account (optional, omit for hosted/public profiles)

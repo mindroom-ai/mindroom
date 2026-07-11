@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import subprocess
+import sys
 from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -11,16 +14,22 @@ import pytest
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from livekit import rtc
-from livekit.agents import APIConnectionError, APIStatusError, CloseReason
+from livekit.agents import APIConnectionError, APIStatusError, CloseReason, llm
 from livekit.agents.voice import io as agents_io
+from openai import AsyncOpenAI
 from structlog.testing import capture_logs
 
+from mindroom.matrix_rtc.call_tools import CallAgentResponse
 from mindroom.matrix_rtc.focus import SfuGrant
 from mindroom.matrix_rtc.voice_agent import (
+    CascadedVoiceAgentOptions,
+    CascadedVoiceBridge,
     RealtimeVoiceBridge,
+    SpeechServiceOptions,
     VoiceAgentOptions,
     _AudioFrameStream,
     _AuthorizedParticipantAudioInput,
+    _build_mindroom_llm,
 )
 
 if TYPE_CHECKING:
@@ -175,17 +184,23 @@ async def test_agent_session_uses_group_safe_room_options(monkeypatch: pytest.Mo
         def on(self, event: str, callback: object) -> None:
             self.handlers[event] = callback
 
+        async def aclose(self) -> None:
+            return
+
     fake_session = FakeSession()
     fake_audio_input = MagicMock()
+    fake_audio_input.aclose = AsyncMock()
+    fake_model = SimpleNamespace(aclose=AsyncMock())
     monkeypatch.setattr("livekit.agents.AgentSession", lambda **_kwargs: fake_session)
     monkeypatch.setattr("livekit.agents.Agent", lambda **_kwargs: object())
-    monkeypatch.setattr("livekit.plugins.openai.realtime.RealtimeModel", lambda **_kwargs: object())
+    monkeypatch.setattr("livekit.plugins.openai.realtime.RealtimeModel", lambda **_kwargs: fake_model)
     monkeypatch.setattr(
         "mindroom.matrix_rtc.voice_agent._AuthorizedParticipantAudioInput",
         lambda *_args: fake_audio_input,
     )
     bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
     bridge._room = MagicMock()
+    bridge._room.disconnect = AsyncMock()
 
     await bridge.start_agent(VoiceAgentOptions(instructions="Be concise.", model="gpt-realtime-2.1", api_key="sk"))
 
@@ -194,6 +209,332 @@ async def test_agent_session_uses_group_safe_room_options(monkeypatch: pytest.Mo
     assert fake_session.room_options.text_input is False
     assert fake_session.room_options.text_output is False
     assert fake_session.room_options.close_on_disconnect is False
+
+    await bridge.aclose()
+
+    fake_model.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, PLR0915
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cascaded bridge gives LiveKit speech legs and the MindRoom LLM adapter."""
+    built: dict[str, object] = {}
+    turns: list[tuple[str, str]] = []
+    tool_uses: list[list[str]] = []
+    finalized: list[tuple[str | None, str, bool]] = []
+    responder_inputs: list[str] = []
+
+    class FakeSpeechModel:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    class FakeOpenAIClient:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class FakeSession:
+        def __init__(self, **kwargs: object) -> None:
+            built["session_kwargs"] = kwargs
+            self.input = SimpleNamespace(audio=None)
+            built["room_audio_output"] = object()
+            self.output = SimpleNamespace(audio=built["room_audio_output"], transcription=None)
+            self.handlers: dict[str, object] = {}
+            self.greetings: list[str] = []
+
+        async def start(self, agent: object, *, room: object, room_options: object) -> None:
+            built["agent"] = agent
+            built["room"] = room
+            built["room_options"] = room_options
+
+        def on(self, event: str, callback: object) -> None:
+            self.handlers[event] = callback
+
+        def say(self, text: str) -> None:
+            self.greetings.append(text)
+
+        async def aclose(self) -> None:
+            built["session_closed"] = True
+
+    class FakeTranscriptSynchronizer:
+        def __init__(self, **kwargs: object) -> None:
+            built["transcript_sync_kwargs"] = kwargs
+            self.audio_output = object()
+            self.text_output = object()
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    async def respond(
+        transcript: str,
+        on_tools_executed: Callable[[list[str]], None] | None,
+    ) -> CallAgentResponse:
+        responder_inputs.append(transcript)
+        if on_tools_executed is not None:
+            on_tools_executed(["weather"])
+        return CallAgentResponse(text=f"heard {transcript}", tool_names=("weather",), turn_id="turn-1")
+
+    async def finalize_spoken_response(token: str | None, text: str, interrupted: bool) -> None:
+        finalized.append((token, text, interrupted))
+
+    fake_session = FakeSession()
+    stt = FakeSpeechModel()
+    tts = FakeSpeechModel()
+    stt_client = FakeOpenAIClient()
+    transcript_synchronizer = FakeTranscriptSynchronizer()
+    monkeypatch.setattr(
+        "livekit.agents.AgentSession",
+        lambda **kwargs: (built.update(session_kwargs=kwargs), fake_session)[1],
+    )
+    monkeypatch.setattr("livekit.agents.Agent", lambda **kwargs: SimpleNamespace(**kwargs))
+    monkeypatch.setattr("livekit.agents.inference.VAD", lambda **kwargs: ("vad", kwargs))
+    monkeypatch.setattr(
+        "livekit.plugins.openai.STT",
+        lambda **kwargs: (setattr(stt, "kwargs", kwargs), stt)[1],
+    )
+    monkeypatch.setattr(
+        "livekit.plugins.openai.TTS",
+        lambda **kwargs: (setattr(tts, "kwargs", kwargs), tts)[1],
+    )
+    monkeypatch.setattr(
+        "openai.AsyncOpenAI",
+        lambda **kwargs: (setattr(stt_client, "kwargs", kwargs), stt_client)[1],
+    )
+    monkeypatch.setattr(
+        "livekit.agents.voice.transcription.TranscriptSynchronizer",
+        lambda **kwargs: (
+            setattr(transcript_synchronizer, "kwargs", kwargs),
+            built.__setitem__("transcript_sync_kwargs", kwargs),
+            transcript_synchronizer,
+        )[-1],
+    )
+    fake_audio_input = MagicMock()
+    fake_audio_input.aclose = AsyncMock()
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.voice_agent._AuthorizedParticipantAudioInput",
+        lambda *_args: fake_audio_input,
+    )
+    bridge = CascadedVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    bridge._room = MagicMock()
+    bridge._room.disconnect = AsyncMock()
+    options = CascadedVoiceAgentOptions(
+        stt=SpeechServiceOptions(
+            provider="openai_compatible",
+            model="whisper-large-v3",
+            api_key="local-stt",
+            base_url="http://127.0.0.1:9000/v1",
+            extra_kwargs={"language": "en"},
+        ),
+        tts=SpeechServiceOptions(
+            provider="openai",
+            model="tts-1",
+            api_key="tts-key",
+            extra_kwargs={"voice": "ash"},
+        ),
+        respond=respond,
+        finalize_spoken_response=finalize_spoken_response,
+        greeting_text="Hello.",
+        on_conversation_turn=lambda role, text: turns.append((role, text)),
+        on_tools_executed=tool_uses.append,
+    )
+
+    await bridge.start_agent(options)
+
+    session_kwargs = cast("dict[str, object]", built["session_kwargs"])
+    assert session_kwargs["stt"] is stt
+    assert stt.kwargs == {
+        "language": "en",
+        "model": "whisper-large-v3",
+        "client": stt_client,
+    }
+    assert stt_client.kwargs == {
+        "api_key": "local-stt",
+        "base_url": "http://127.0.0.1:9000/v1",
+        "max_retries": 0,
+    }
+    assert session_kwargs["tts"] is tts
+    assert tts.kwargs == {"voice": "ash", "model": "tts-1", "api_key": "tts-key"}
+    assert session_kwargs["vad"] == ("vad", {"model": "silero"})
+    assert session_kwargs["turn_handling"] == {
+        "turn_detection": "vad",
+        "endpointing": {"min_delay": 1.0},
+        "interruption": {"enabled": True, "mode": "vad"},
+        "preemptive_generation": {"enabled": False},
+    }
+    assert fake_session.input.audio is fake_audio_input
+    assert fake_session.greetings == ["Hello."]
+    room_options = built["room_options"]
+    assert room_options.text_output is False  # type: ignore[union-attr]
+    assert room_options.get_text_output_options() is None  # type: ignore[union-attr]
+    assert built["transcript_sync_kwargs"] == {
+        "next_in_chain_audio": built["room_audio_output"],
+        "next_in_chain_text": None,
+    }
+    assert fake_session.output.audio is transcript_synchronizer.audio_output
+    assert fake_session.output.transcription is transcript_synchronizer.text_output
+
+    user_message = llm.ChatContext.empty().add_message(role="user", content="hello")
+    callback = cast("Callable[[object], None]", fake_session.handlers["conversation_item_added"])
+    callback(SimpleNamespace(item=user_message))
+    assert turns == [("user", "hello")]
+
+    # An interrupted response can leave consecutive user items in LiveKit's
+    # context; replaying the first one could repeat side effects or tools.
+    chat_context = llm.ChatContext.empty()
+    chat_context.add_message(role="user", content="first side-effecting request")
+    chat_context.add_message(role="user", content="new request")
+    stream = session_kwargs["llm"].chat(chat_ctx=chat_context)  # type: ignore[union-attr]
+    assert stream._conn_options.max_retry == 0
+    chunks = [chunk async for chunk in stream]
+    assert responder_inputs == ["new request"]
+    assert [chunk.delta.content for chunk in chunks] == ["heard new request"]
+    assert chunks[0].delta.extra == {"mindroom_call_turn_id": "turn-1"}
+    assert tool_uses == [["weather"]]
+
+    assistant_message = llm.ChatContext.empty().add_message(
+        role="assistant",
+        content="heard sta",
+        interrupted=True,
+        extra={"mindroom_call_turn_id": "turn-1"},
+    )
+    callback(SimpleNamespace(item=assistant_message))
+    await asyncio.sleep(0)
+    assert finalized == [("turn-1", "heard sta", True)]
+
+    class UnforwardedSpeech:
+        def __init__(self) -> None:
+            self.chat_items: list[object] = []
+
+        def add_done_callback(self, done: Callable[[object], None]) -> None:
+            done(self)
+
+    speech_callback = cast("Callable[[object], None]", fake_session.handlers["speech_created"])
+    speech_callback(SimpleNamespace(source="generate_reply", speech_handle=UnforwardedSpeech()))
+    await asyncio.sleep(0)
+    assert finalized[-1] == (None, "", True)
+
+    await bridge.aclose()
+    assert stt_client.closed
+    assert not stt.closed
+    assert tts.closed
+    assert transcript_synchronizer.closed
+    assert built["session_closed"] is True
+    fake_audio_input.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cascaded_start_closes_stt_when_tts_construction_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Partial speech-provider construction cannot leak the first client."""
+
+    class FakeOpenAIClient:
+        closed = False
+
+        def __init__(self, **_kwargs: object) -> None:
+            return
+
+        async def close(self) -> None:
+            self.closed = True
+
+    stt_client = FakeOpenAIClient()
+    monkeypatch.setattr("openai.AsyncOpenAI", lambda **_kwargs: stt_client)
+    monkeypatch.setattr("livekit.plugins.openai.STT", lambda **_kwargs: object())
+
+    def fail_tts(**_kwargs: object) -> None:
+        msg = "tts construction failed"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr("livekit.plugins.openai.TTS", fail_tts)
+    bridge = CascadedVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    bridge._room = MagicMock()
+    options = CascadedVoiceAgentOptions(
+        stt=SpeechServiceOptions(provider="openai", model="gpt-4o-transcribe", api_key="stt-key"),
+        tts=SpeechServiceOptions(provider="openai", model="tts-1", api_key="tts-key"),
+        respond=AsyncMock(),
+    )
+
+    with pytest.raises(RuntimeError, match="tts construction failed"):
+        await bridge.start_agent(options)
+
+    assert stt_client.closed
+
+
+@pytest.mark.asyncio
+async def test_cascaded_close_closes_real_openai_stt_client() -> None:
+    """The explicitly owned OpenAI client closes despite LiveKit STT's no-op close."""
+    client = AsyncOpenAI(api_key="sk-test", base_url="http://127.0.0.1:9000/v1")
+    bridge = CascadedVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    bridge._owned_speech_resource_closers = (client.close,)
+
+    await bridge.aclose()
+
+    assert client.is_closed()
+
+
+@pytest.mark.asyncio
+async def test_cascaded_agent_failure_propagates_to_session_lifecycle() -> None:
+    """Retryable SDK errors cannot duplicate a normal-agent turn or its tools."""
+    attempts = 0
+
+    async def fail(
+        _transcript: str,
+        _on_tools_executed: Callable[[list[str]], None] | None,
+    ) -> CallAgentResponse:
+        nonlocal attempts
+        attempts += 1
+        message = "agent unavailable"
+        raise APIConnectionError(message, retryable=True)
+
+    context = llm.ChatContext.empty()
+    context.add_message(role="user", content="hello")
+    stream = _build_mindroom_llm(fail, None).chat(chat_ctx=context)
+
+    with pytest.raises(APIConnectionError, match="agent unavailable"):
+        _ = [chunk async for chunk in stream]
+
+    assert attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_cascaded_empty_transcript_is_ignored() -> None:
+    """Noise-only turns cannot terminate the active call session."""
+    respond = AsyncMock()
+    context = llm.ChatContext.empty()
+    context.add_message(role="user", content="already answered")
+    context.add_message(role="assistant", content="previous answer")
+
+    chunks = [chunk async for chunk in _build_mindroom_llm(respond, None).chat(chat_ctx=context)]
+
+    assert chunks == []
+    respond.assert_not_awaited()
+
+
+def test_voice_agent_import_keeps_livekit_and_openai_lazy() -> None:
+    """Importing the optional bridge does not import either provider SDK."""
+    probe = (
+        "import json, sys; import mindroom.matrix_rtc.voice_agent; "
+        "print(json.dumps(sorted(name for name in sys.modules "
+        "if name == 'livekit' or name.startswith('livekit.') or name == 'openai' or name.startswith('openai.'))))"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+
+    assert json.loads(result.stdout) == []
 
 
 @pytest.mark.parametrize(
@@ -450,6 +791,8 @@ async def test_authorized_audio_input_mixes_all_and_only_rostered_microphones() 
         frozenset({"@alice:example.org:ALICEDEV", "@bob:example.org:BOBDEV"}),
     )
 
+    assert audio_input.label == "authorized MatrixRTC participants"
+    assert audio_input.source is None
     assert alice_publication.subscription_changes == [True]
     assert bob_publication.subscription_changes == [True]
     assert rogue_publication.subscription_changes == [False]
@@ -514,7 +857,10 @@ async def test_start_agent_logs_detailed_media_snapshot_once(monkeypatch: pytest
     fake_session = FakeSession()
     monkeypatch.setattr("livekit.agents.AgentSession", lambda **_kwargs: fake_session)
     monkeypatch.setattr("livekit.agents.Agent", lambda **_kwargs: object())
-    monkeypatch.setattr("livekit.plugins.openai.realtime.RealtimeModel", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        "livekit.plugins.openai.realtime.RealtimeModel",
+        lambda **_kwargs: SimpleNamespace(aclose=AsyncMock()),
+    )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.voice_agent._AuthorizedParticipantAudioInput",
         lambda *_args: MagicMock(),

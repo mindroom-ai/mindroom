@@ -14,7 +14,7 @@ from agno.media import Audio
 from mindroom import voice_handler
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.voice import VoiceConfig, _VoiceLLMConfig, _VoiceSTTConfig
+from mindroom.config.voice import VoiceConfig, VoiceSTTConfig, _VoiceLLMConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import persist_actual_entity_accounts
@@ -112,7 +112,7 @@ class TestVoiceHandler:
             Config(
                 voice=VoiceConfig(
                     enabled=True,
-                    stt=_VoiceSTTConfig(provider="openai", model="whisper-1"),
+                    stt=VoiceSTTConfig(provider="openai", model="whisper-1"),
                     intelligence=_VoiceLLMConfig(model="default"),
                 ),
             ),
@@ -121,6 +121,12 @@ class TestVoiceHandler:
         assert config.voice.stt.provider == "openai"
         assert config.voice.stt.model == "whisper-1"
         assert config.voice.intelligence.model == "default"
+
+    def test_voice_stt_keeps_model_default_for_partial_config(self) -> None:
+        """Promoting the shared speech config does not break existing partial voice STT blocks."""
+        config = VoiceConfig.model_validate({"stt": {"provider": "openai"}})
+
+        assert config.stt.model == "gpt-4o-transcribe"
 
     @pytest.mark.parametrize(
         ("matrix_mime_type", "expected_filename", "expected_mime_type"),
@@ -168,16 +174,16 @@ class TestVoiceHandler:
         assert mime_type == "audio/unknown"
 
     @pytest.mark.asyncio
-    async def test_transcribe_audio_uses_configured_stt_host_and_api_key_with_tls_verification(self) -> None:
-        """STT requests should keep TLS verification enabled while honoring configured credentials."""
+    async def test_transcribe_audio_uses_configured_stt_host_and_openai_credential(self) -> None:
+        """OpenAI proxy requests keep their provider credential and TLS verification."""
         config = _runtime_bound_config(
             Config(
                 voice=VoiceConfig(
                     enabled=True,
-                    stt=_VoiceSTTConfig(
-                        api_key="configured-api-key",
-                        host="https://stt.example.test",
+                    stt=VoiceSTTConfig(
+                        host="https://stt.example.test/v1",
                         model="whisper-1",
+                        extra_kwargs={"language": "nl", "temperature": 0},
                     ),
                 ),
             ),
@@ -219,7 +225,10 @@ class TestVoiceHandler:
                 )
                 return FakeResponse()
 
-        with patch("mindroom.voice_handler.httpx.AsyncClient", FakeAsyncClient):
+        with (
+            patch("mindroom.voice_handler.httpx.AsyncClient", FakeAsyncClient),
+            patch("mindroom.voice_handler.get_secret_from_env", return_value="openai-provider-key") as get_secret,
+        ):
             transcription = await voice_handler._transcribe_audio(
                 b"audio-bytes",
                 config,
@@ -228,14 +237,15 @@ class TestVoiceHandler:
             )
 
         assert transcription == "transcribed text"
+        get_secret.assert_called_once_with("OPENAI_API_KEY", runtime_paths_for(config))
         assert len(client_init_kwargs) == 1
         assert client_init_kwargs[0].get("verify", True) is not False
         assert post_calls == [
             {
                 "url": "https://stt.example.test/v1/audio/transcriptions",
-                "headers": {"Authorization": "Bearer configured-api-key"},
+                "headers": {"Authorization": "Bearer openai-provider-key"},
                 "files": {"file": ("audio.ogg", b"audio-bytes", "audio/ogg")},
-                "data": {"model": "whisper-1"},
+                "data": {"model": "whisper-1", "language": "nl", "temperature": 0},
             },
         ]
 

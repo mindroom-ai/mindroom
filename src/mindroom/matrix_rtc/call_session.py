@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
     from mindroom.matrix_rtc.focus import SfuGrant
-    from mindroom.matrix_rtc.voice_agent import VoiceAgentOptions
+    from mindroom.matrix_rtc.voice_agent import CallVoiceAgentOptions
 
 logger = get_logger(__name__)
 
@@ -77,8 +77,8 @@ class VoiceBridgeLike(Protocol):
         """Install a media frame key for one participant."""
         ...
 
-    async def start_agent(self, options: VoiceAgentOptions) -> None:
-        """Start the realtime voice agent on the connected room."""
+    async def start_agent(self, options: CallVoiceAgentOptions) -> None:
+        """Start the configured voice agent on the connected room."""
         ...
 
     async def aclose(self) -> None:
@@ -109,7 +109,7 @@ class CallSessionDeps:
     bridge: VoiceBridgeLike
     key_transport: _FrameKeyTransportLike
     fetch_grant: Callable[[], Coroutine[None, None, SfuGrant]]
-    agent_options: VoiceAgentOptions
+    agent_options: CallVoiceAgentOptions
     livekit_service_url: str
     clock_ms: Callable[[], int] = lambda: int(time.time() * 1000)
     #: Awaited once after the session fully stopped (transcript finalization).
@@ -171,7 +171,7 @@ class CallSession:
             except Exception as error:
                 if isinstance(error, CallJoinError):
                     raise
-                msg = f"Realtime agent start failed: {error}"
+                msg = f"Voice agent start failed: {error}"
                 raise CallJoinError(msg) from error
         except BaseException:
             await self.stop()

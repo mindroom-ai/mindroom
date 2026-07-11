@@ -189,7 +189,7 @@ generate_speech("Your transcript is ready.")
 
 - `transcribe_audio()` and `translate_audio()` are more flexible than [`openai`] because they accept either local files or public URLs.
 - The current Groq TTS path always asks the API for `wav` output and returns an `audio/wav` artifact.
-- Use [`openai`] instead if you want OpenAI Whisper or OpenAI TTS specifically.
+- Use [`openai`] instead if you want OpenAI transcription or OpenAI TTS specifically.
 
 ## [`replicate`]
 

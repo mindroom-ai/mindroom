@@ -20,6 +20,7 @@ from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.session import AgentSession
 from agno.tools.function import Function
+from agno.tools.toolkit import Toolkit
 from pydantic import ValidationError
 
 from mindroom.agent_storage import get_agent_runtime_state_dbs
@@ -27,6 +28,7 @@ from mindroom.agents import (
     _CULTURE_MANAGER_CACHE,
     _PRIVATE_CULTURE_MANAGER_CACHE,
     _load_context_files,
+    _prune_toolkit_functions,
     build_agent_toolkit,
     create_agent,
     get_agent_toolkit_names,
@@ -2821,6 +2823,60 @@ def test_create_agent_disabled_tool_names_omit_resolved_tools(
 
     assert "calculator" in built_tools
     assert "memory" not in built_tools
+
+
+def test_tool_function_filter_prunes_resolved_functions() -> None:
+    """Channel policies filter actual functions without dropping a safe toolkit peer."""
+    safe = Function(name="safe", entrypoint=lambda: "safe")
+    unsafe = Function(name="unsafe", entrypoint=lambda: "unsafe")
+    toolkit = Toolkit(name="mixed", tools=[safe, unsafe])
+
+    filtered = _prune_toolkit_functions(toolkit, lambda function: function.name == "safe")
+
+    assert filtered is toolkit
+    assert set(toolkit.functions) == {"safe"}
+    assert toolkit.async_functions == {}
+
+
+@pytest.mark.asyncio
+async def test_create_agent_tool_filter_applies_to_agno_generated_knowledge_function(tmp_path: Path) -> None:
+    """The stored channel policy filters functions Agno adds after construction."""
+    config = _test_config()
+    config.agents["general"].knowledge_bases = ["docs"]
+    config.knowledge_bases = {
+        "docs": KnowledgeBaseConfig(description="Reference docs.", path="./knowledge_docs/docs"),
+    }
+    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
+    seen: list[str] = []
+
+    def allow_call_function(function: Function) -> bool:
+        seen.append(function.name)
+        return function.name != "search_knowledge_base"
+
+    agent = _create_agent_for_test(
+        "general",
+        config,
+        knowledge=Knowledge(name="docs"),
+        tool_function_filter=allow_call_function,
+    )
+    run_output = RunOutput(
+        run_id="run-call-policy",
+        agent_id="general",
+        agent_name="GeneralAgent",
+        session_id="session-call-policy",
+    )
+    run_context = RunContext(run_id="run-call-policy", session_id="session-call-policy")
+    session = AgentSession(
+        session_id="session-call-policy",
+        agent_id="general",
+        created_at=1,
+        updated_at=1,
+    )
+
+    tools = await agent.aget_tools(run_output, run_context, session)
+
+    assert "search_knowledge_base" in seen
+    assert all(not isinstance(tool, Function) or tool.name != "search_knowledge_base" for tool in tools)
 
 
 @patch("mindroom.agent_storage.SqliteDb")
