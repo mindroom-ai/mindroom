@@ -37,16 +37,25 @@ class SpeechServiceConfig(BaseModel):
         description="Provider-specific options passed to the speech adapter",
     )
 
+    @field_validator("api_key", "host", mode="before")
+    @classmethod
+    def normalize_optional_string(cls, value: object) -> object:
+        """Treat blank optional form fields as omitted configuration."""
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        return normalized or None
+
     @field_validator("host")
     @classmethod
     def validate_host(cls, value: str | None) -> str | None:
         """Require explicit HTTP endpoints and reject cloud-fallback-shaped blanks."""
         if value is None:
             return None
-        normalized = value.strip().rstrip("/")
+        normalized = value.rstrip("/")
         parsed = urlparse(normalized)
-        if not normalized or parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            msg = "Speech host must be a non-empty HTTP(S) URL"
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            msg = "Speech host must be an HTTP(S) URL"
             raise ValueError(msg)
         return normalized
 

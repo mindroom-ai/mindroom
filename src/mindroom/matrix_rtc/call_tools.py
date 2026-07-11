@@ -399,6 +399,7 @@ async def _run_call_agent(
             execution_identity=execution_identity,
             refresh_scheduler=refresh_scheduler,
             turn_recorder=recorder,
+            eager_deferred_tools=True,
         )
 
     try:

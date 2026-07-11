@@ -362,7 +362,7 @@ async def test_manager_selects_cascaded_backend_with_independent_speech_services
     assert (options.stt.model, options.stt.api_key, options.stt.base_url) == (
         "gpt-4o-transcribe",
         "stt-key",
-        None,
+        "https://api.openai.com/v1",
     )
     assert options.stt.extra_kwargs == {"language": "en"}
     assert (options.tts.model, options.tts.api_key, options.tts.base_url) == (
@@ -459,6 +459,24 @@ def test_openai_speech_with_custom_host_uses_provider_credential(
     assert service.api_key == "openai-provider-key"
     assert service.base_url == "https://proxy.example.test/v1"
     lookup.assert_called_once_with("openai", manager._runtime_paths)
+
+
+def test_openai_cloud_speech_uses_explicit_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A process-wide local OpenAI base URL cannot redirect cloud speech."""
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9292/v1")
+    manager = _manager(_client(), FakeBridge(), tmp_path, _cascaded_config())
+
+    service = manager._resolve_speech_service(
+        SpeechServiceConfig(provider="openai", model="gpt-4o-transcribe", api_key="cloud-key"),
+        component="stt",
+        room_id=ROOM_ID,
+    )
+
+    assert service is not None
+    assert service.base_url == "https://api.openai.com/v1"
 
 
 def test_default_bridge_factory_tracks_configured_backend(tmp_path: Path) -> None:
@@ -1759,6 +1777,71 @@ async def test_bridge_connect_failure_is_a_clean_join_failure(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_call_events_cannot_bypass_pending_join_backoff(tmp_path: Path) -> None:
+    """Sync echoes and membership refreshes must not bypass join backoff."""
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    manager = _manager(client, FakeBridge(), tmp_path)
+    join = AsyncMock(return_value="retry")
+    manager._join = join  # type: ignore[method-assign]
+
+    await manager.on_room_event(_room(), _member_unknown_event())
+    assert join.await_count == 1
+    assert ROOM_ID in manager._retry_tasks
+
+    retry_task = manager._retry_tasks.pop(ROOM_ID)
+    retry_task.cancel()
+    await asyncio.gather(retry_task, return_exceptions=True)
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    assert join.await_count == 1
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cascaded_retries_reuse_logical_call_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Media reconnects retain chat history until the remote call empties."""
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager._RECONCILE_RETRY_DELAYS_S", (0.0,))
+    session_ids: list[str] = []
+
+    async def fake_tools(**kwargs: object) -> CallAgentTooling:
+        session_ids.append(cast("str", kwargs["session_id"]))
+        return CallAgentTooling(tools=(), instructions="")
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    manager = _manager(client, FakeBridge(), tmp_path, _cascaded_config())
+    results = iter(("retry", "joined", "joined"))
+
+    async def fake_join(room: nio.MatrixRoom, members: list[CallMember]) -> str:
+        await manager._build_tooling(room.room_id, requester_id=members[0].user_id, cascaded=True)
+        return next(results)
+
+    manager._join = fake_join  # type: ignore[method-assign]
+
+    await manager.on_room_event(_room(), _member_unknown_event())
+    for _ in range(20):
+        if len(session_ids) == 2:
+            break
+        await asyncio.sleep(0)
+
+    assert len(session_ids) == 2
+    assert session_ids[0] == session_ids[1]
+
+    client.room_get_state.return_value = _state_response()
+    await manager.on_room_event(_room(), _member_unknown_event())
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    assert session_ids[2] != session_ids[0]
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("retryable", [True, False])
 async def test_terminal_voice_close_stops_session_and_retries_only_when_allowed(
     tmp_path: Path,
@@ -1779,6 +1862,33 @@ async def test_terminal_voice_close_stops_session_and_retries_only_when_allowed(
     assert bridge.closed
     assert manager._sessions == {}
     assert (ROOM_ID in manager._retry_tasks) is retryable
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_nonretryable_terminal_close_stays_quarantined_until_next_call(tmp_path: Path) -> None:
+    """The bot's own membership clear echo cannot reopen a terminal call."""
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    await manager.on_room_event(_room(), _member_unknown_event())
+    assert bridge.agent_options is not None
+    assert bridge.agent_options.on_session_terminated is not None
+
+    bridge.agent_options.on_session_terminated(False)
+    await asyncio.gather(*list(manager._background_tasks))
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    assert manager._sessions == {}
+    assert manager._logical_calls[ROOM_ID].join_blocked
+
+    client.room_get_state.return_value = _state_response()
+    await manager.on_room_event(_room(), _member_unknown_event())
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    assert ROOM_ID in manager._sessions
     await manager.shutdown()
 
 
@@ -2253,11 +2363,38 @@ def test_openai_compatible_speech_config_requires_endpoint() -> None:
         SpeechServiceConfig(provider="openai_compatible", model="whisper-large-v3")
 
 
-@pytest.mark.parametrize("host", [" ", "localhost:9000", "ftp://stt.example.test"])
+@pytest.mark.parametrize("host", ["localhost:9000", "ftp://stt.example.test"])
 def test_speech_config_rejects_unsafe_endpoint(host: str) -> None:
-    """Blank or non-HTTP endpoints cannot turn a local config into a cloud call."""
-    with pytest.raises(ValueError, match=r"non-empty HTTP\(S\) URL"):
+    """Non-HTTP endpoints cannot turn a local config into a cloud call."""
+    with pytest.raises(ValueError, match=r"HTTP\(S\) URL"):
         SpeechServiceConfig(provider="openai_compatible", model="whisper-large-v3", host=host)
+
+
+def test_speech_config_normalizes_blank_optional_fields() -> None:
+    """Blank form values use the same fallback behavior as omitted fields."""
+    service = SpeechServiceConfig(provider="openai", model="gpt-4o-transcribe", host=" ", api_key="")
+
+    assert service.host is None
+    assert service.api_key is None
+
+
+def test_compatible_speech_blank_key_uses_local_placeholder(tmp_path: Path) -> None:
+    """A blank local key cannot suppress the non-secret compatibility placeholder."""
+    manager = _manager(_client(), FakeBridge(), tmp_path, _cascaded_config(local=True))
+
+    service = manager._resolve_speech_service(
+        SpeechServiceConfig(
+            provider="openai_compatible",
+            model="whisper-large-v3",
+            host="http://127.0.0.1:9000",
+            api_key=" ",
+        ),
+        component="stt",
+        room_id=ROOM_ID,
+    )
+
+    assert service is not None
+    assert service.api_key == LOCAL_OPENAI_API_KEY_DEFAULT
 
 
 def test_speech_config_rejects_connection_fields_in_extra_kwargs() -> None:

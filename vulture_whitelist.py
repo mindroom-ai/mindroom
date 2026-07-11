@@ -144,6 +144,7 @@ _.validate_knowledge_base_ids_do_not_use_line_breaks  # unused method (src/mindr
 _.validate_name  # unused method (src/mindroom/config/matrix.py)
 _.validate_database_url_env  # unused method (src/mindroom/config/matrix.py)
 _.validate_path  # unused method (src/mindroom/config/plugin.py)
+_.normalize_optional_string  # unused method (src/mindroom/config/voice.py)
 _.add_metadata  # unused method (src/mindroom/hooks/context.py)
 _.add_instruction  # unused method (src/mindroom/hooks/context.py)
 readiness_check  # unused function (src/mindroom/api/main.py)

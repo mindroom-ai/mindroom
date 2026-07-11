@@ -76,6 +76,7 @@ _CALL_EVENT_TYPES = frozenset({CALL_MEMBER_EVENT_TYPE, RTC_NOTIFICATION_EVENT_TY
 _MAX_PENDING_KEYS_PER_ROOM = 64
 _PENDING_KEY_TTL_MS = 120_000
 _RECONCILE_RETRY_DELAYS_S = (1.0, 5.0, 30.0, 60.0)
+_OPENAI_SPEECH_BASE_URL = "https://api.openai.com/v1"
 _MATRIX_NETWORK_ERRORS = (nio.exceptions.ProtocolError, OSError, aiohttp.ClientError)
 _CALL_NETWORK_ERRORS = (httpx.HTTPError, *_MATRIX_NETWORK_ERRORS)
 
@@ -97,6 +98,15 @@ class _ResolvedVoiceBackend:
     realtime_api_key: str | None = None
     stt: SpeechServiceOptions | None = None
     tts: SpeechServiceOptions | None = None
+
+
+@dataclass
+class _LogicalCallState:
+    """State that survives media-session reconnects for one logical call."""
+
+    requester_id: str
+    cascaded_session_id: str | None
+    join_blocked: bool = False
 
 
 def _build_call_instructions(chat_system_prompt: str) -> str:
@@ -167,6 +177,7 @@ class CallManager:
         self._locks: dict[str, asyncio.Lock] = {}
         self._retry_tasks: dict[str, asyncio.Task[None]] = {}
         self._retry_attempts: dict[str, int] = {}
+        self._logical_calls: dict[str, _LogicalCallState] = {}
         self._expiry_handles: dict[str, asyncio.TimerHandle] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._shutting_down = False
@@ -227,6 +238,7 @@ class CallManager:
         self._retry_tasks.clear()
         self._background_tasks.clear()
         self._retry_attempts.clear()
+        self._logical_calls.clear()
         for handle in self._expiry_handles.values():
             handle.cancel()
         self._expiry_handles.clear()
@@ -239,7 +251,7 @@ class CallManager:
         for session in sessions:
             await self._stop_session(session, event="call_session_shutdown_failed")
 
-    async def _reconcile(self, room: nio.MatrixRoom) -> None:
+    async def _reconcile(self, room: nio.MatrixRoom, *, retrying: bool = False) -> None:
         if not self._is_configured_call_room(room):
             return
         self._observed_rooms[room.room_id] = room
@@ -255,39 +267,60 @@ class CallManager:
                 self._schedule_reconcile_retry(room)
                 return
             self._schedule_expiry_reconcile(room, members)
-            await self._apply_reconciled_members(room, members)
+            await self._apply_reconciled_members(room, members, retrying=retrying)
 
-    async def _apply_reconciled_members(self, room: nio.MatrixRoom, members: list[CallMember]) -> None:
+    async def _apply_reconciled_members(
+        self,
+        room: nio.MatrixRoom,
+        members: list[CallMember],
+        *,
+        retrying: bool = False,
+    ) -> None:
         """Apply one authoritative room/call roster to the active session."""
         room_id = room.room_id
         session = self._sessions.get(room_id)
         if not self._members_are_authorized(members, room_id):
-            self._clear_reconcile_retry(room_id)
+            self._clear_logical_call(room_id)
             self._pending_keys.pop(room_id, None)
             if session is not None:
                 self._sessions.pop(room_id, None)
                 await self._stop_session(session)
             return
-        if session is None:
-            await self._join_if_populated(room, members)
-            return
         if not members:
-            self._clear_reconcile_retry(room_id)
+            self._clear_logical_call(room_id)
             self._pending_keys.pop(room_id, None)
-            self._sessions.pop(room_id, None)
-            await self._stop_session(session)
+            if session is not None:
+                self._sessions.pop(room_id, None)
+                await self._stop_session(session)
             return
-        if session.requester_id != members[0].user_id:
+        logical_call = self._logical_calls.get(room_id)
+        requester_id = members[0].user_id
+        if logical_call is None or logical_call.requester_id != requester_id:
+            self._clear_logical_call(room_id)
+            logical_call = self._start_logical_call(room_id, requester_id)
+        if session is None:
+            await self._join_if_populated(room, members, retrying=retrying)
+            return
+        if session.requester_id != requester_id:
             self._sessions.pop(room_id, None)
             await self._stop_session(session)
-            await self._join_if_populated(room, members)
+            await self._join_if_populated(room, members, retrying=retrying)
             return
         await self._update_session_members(room, session, members)
 
-    async def _join_if_populated(self, room: nio.MatrixRoom, members: list[CallMember]) -> None:
+    async def _join_if_populated(
+        self,
+        room: nio.MatrixRoom,
+        members: list[CallMember],
+        *,
+        retrying: bool = False,
+    ) -> None:
         """Join a populated call or finish a successful empty reconciliation."""
         if not members:
-            self._clear_reconcile_retry(room.room_id)
+            self._clear_logical_call(room.room_id)
+            return
+        logical_call = self._logical_calls[room.room_id]
+        if logical_call.join_blocked or (room.room_id in self._retry_attempts and not retrying):
             return
         result = await self._join(room, members)
         if result == "joined":
@@ -297,6 +330,7 @@ class CallManager:
         else:
             self._clear_reconcile_retry(room.room_id)
             self._pending_keys.pop(room.room_id, None)
+            logical_call.join_blocked = True
 
     async def _update_session_members(
         self,
@@ -557,7 +591,7 @@ class CallManager:
         self._background_tasks.add(task)
         try:
             if not self._shutting_down:
-                await self._reconcile(room)
+                await self._reconcile(room, retrying=True)
         finally:
             self._background_tasks.discard(task)
 
@@ -624,10 +658,15 @@ class CallManager:
             if session is None or session.deps.bridge is not bridge:
                 return
             self._clear_reconcile_retry(room.room_id)
+            logical_call = self._logical_calls.get(room.room_id)
+            if logical_call is not None:
+                logical_call.join_blocked = True
             await self._stop_session(session, event="call_failed_session_stop_failed")
             if self._sessions.get(room.room_id) is session:
                 self._sessions.pop(room.room_id, None)
             if retryable and not self._shutting_down:
+                if logical_call is not None:
+                    logical_call.join_blocked = False
                 self._schedule_reconcile_retry(room)
 
     def _observe_background_task(self, event: str, room_id: str, task: asyncio.Task[None]) -> None:
@@ -649,7 +688,8 @@ class CallManager:
         cascaded: bool,
     ) -> CallAgentTooling:
         """Build agent tools with the sole caller as the Matrix requester."""
-        session_id = f"{create_session_id(room_id, None)}:call:{uuid4().hex}" if cascaded else None
+        logical_call = self._logical_calls[room_id]
+        session_id = logical_call.cascaded_session_id if cascaded else None
         return await build_call_tools(
             agent_name=self._agent_name,
             config=self._config,
@@ -661,6 +701,20 @@ class CallManager:
             enable_responder=cascaded,
             voice_instructions=_VOICE_STYLE_ADDENDUM if cascaded else None,
         )
+
+    def _start_logical_call(self, room_id: str, requester_id: str) -> _LogicalCallState:
+        """Create the state shared by every media attempt for one caller presence."""
+        session_id = None
+        if self._config.calls.backend == "cascaded":
+            session_id = f"{create_session_id(room_id, None)}:call:{uuid4().hex}"
+        logical_call = _LogicalCallState(requester_id=requester_id, cascaded_session_id=session_id)
+        self._logical_calls[room_id] = logical_call
+        return logical_call
+
+    def _clear_logical_call(self, room_id: str) -> None:
+        """Forget retry and conversation state after the remote call ends."""
+        self._logical_calls.pop(room_id, None)
+        self._clear_reconcile_retry(room_id)
 
     def _resolve_voice_backend(self, room_id: str) -> _ResolvedVoiceBackend | None:
         """Resolve backend-specific credentials without affecting call lifecycle."""
@@ -734,6 +788,8 @@ class CallManager:
     ) -> SpeechServiceOptions | None:
         """Resolve one independently credentialed cloud or local speech service."""
         base_url = normalize_speech_base_url(service.host)
+        if base_url is None and service.provider == "openai":
+            base_url = _OPENAI_SPEECH_BASE_URL
         api_key = service.api_key
         if api_key is None and service.provider == "openai_compatible":
             api_key = LOCAL_OPENAI_API_KEY_DEFAULT

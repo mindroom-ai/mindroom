@@ -464,6 +464,7 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
     assert kwargs["refresh_scheduler"] is refresh_scheduler
     assert kwargs["include_interactive_questions"] is False
     assert kwargs["show_tool_calls"] is False
+    assert kwargs["eager_deferred_tools"] is True
     assert tooling.finalize_spoken_response is not None
     finalize = tooling.finalize_spoken_response(response.turn_id, "It is", True)
     assert finalize is not None

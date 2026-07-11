@@ -1088,6 +1088,7 @@ async def _prepare_agent_and_prompt(
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
     pipeline_timing: DispatchPipelineTiming | None = None,
+    eager_deferred_tools: bool = False,
 ) -> _PreparedAgentRun:
     """Prepare agent and full prompt for AI processing.
 
@@ -1124,6 +1125,7 @@ async def _prepare_agent_and_prompt(
             delegation_depth=delegation_depth,
             refresh_scheduler=refresh_scheduler,
             dynamic_tool_continuation=True,
+            eager_deferred_tools=eager_deferred_tools,
         )
         return runtime_model, agent
 
@@ -1243,6 +1245,7 @@ async def _prepare_agent_run_context(
     current_prompt_is_structured: bool,
     turn_recorder: TurnRecorder | None,
     pipeline_timing: DispatchPipelineTiming | None,
+    eager_deferred_tools: bool = False,
 ) -> _AgentRunContext:
     """Prepare one agent response lifecycle through metadata assembly."""
     if pipeline_timing is not None:
@@ -1266,6 +1269,7 @@ async def _prepare_agent_run_context(
         current_timestamp_ms=current_timestamp_ms,
         current_prompt_is_structured=current_prompt_is_structured,
         pipeline_timing=pipeline_timing,
+        eager_deferred_tools=eager_deferred_tools,
     )
     if pipeline_timing is not None:
         pipeline_timing.mark("history_ready", overwrite=True)
@@ -1330,6 +1334,7 @@ async def ai_response(  # noqa: C901
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     turn_recorder: TurnRecorder | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
+    eager_deferred_tools: bool = False,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
 
@@ -1370,6 +1375,7 @@ async def ai_response(  # noqa: C901
             passed through to delegated child agents.
         turn_recorder: Optional lifecycle-owned recorder updated with trusted turn state.
         pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
+        eager_deferred_tools: Whether to materialize every deferred toolkit without the dynamic loader.
 
     Returns:
         Agent response string
@@ -1402,6 +1408,7 @@ async def ai_response(  # noqa: C901
                 refresh_scheduler=refresh_scheduler,
                 turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
+                eager_deferred_tools=eager_deferred_tools,
             ),
             show_tool_calls=show_tool_calls,
             tool_trace_collector=tool_trace_collector,
@@ -1462,6 +1469,7 @@ async def ai_response(  # noqa: C901
                 current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
                 turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
+                eager_deferred_tools=eager_deferred_tools,
             )
         except Exception as e:
             logger.exception("Error preparing agent", agent=agent_name)
@@ -1802,6 +1810,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     turn_recorder: TurnRecorder | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
+    eager_deferred_tools: bool = False,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
 
@@ -1838,6 +1847,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             passed through to delegated child agents.
         turn_recorder: Optional lifecycle-owned recorder updated with trusted turn state.
         pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
+        eager_deferred_tools: Whether to materialize every deferred toolkit without the dynamic loader.
 
     Yields:
         Streaming chunks/events as they become available
@@ -1913,6 +1923,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
                 turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
+                eager_deferred_tools=eager_deferred_tools,
             )
         except Exception as e:
             logger.exception("Error preparing agent for streaming", agent=agent_name)
