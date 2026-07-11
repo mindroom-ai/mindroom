@@ -226,7 +226,7 @@ voice:
   enabled: true
   stt:
     provider: openai
-    model: whisper-1
+    model: gpt-4o-transcribe
 
 mindroom_user:
   username: mindroom_user  # Immutable once the account is created on first run

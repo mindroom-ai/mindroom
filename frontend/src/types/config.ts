@@ -258,10 +258,11 @@ export interface RoomConfig {
 }
 
 export interface VoiceSTTConfig {
-  provider: string;
+  provider: "openai" | "openai_compatible";
   model: string;
   api_key?: string;
   host?: string;
+  extra_kwargs?: Record<string, unknown>;
 }
 
 export interface VoiceLLMConfig {

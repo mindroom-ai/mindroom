@@ -33,7 +33,7 @@ voice:
   stt:
     provider: openai
     model: gpt-4o-transcribe
-    # Optional: custom endpoint (without /v1 suffix)
+    # Optional: custom service root or /v1 base URL
     # host: http://localhost:8080
   intelligence:
     model: default  # Model used for command recognition
@@ -49,7 +49,7 @@ With `voice.visible_router_echo: true`, the router also posts the normalized tra
 
 MindRoom uses the OpenAI-compatible transcription API. Any service that implements the `/v1/audio/transcriptions` endpoint will work.
 
-### OpenAI Whisper (Cloud)
+### OpenAI Transcription (Cloud)
 
 ```yaml
 voice:
@@ -205,7 +205,7 @@ Reply-permission checks still use the original human sender, not a later router 
 
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_API_KEY` | For OpenAI Whisper API (used as fallback if no `api_key` configured) |
+| `OPENAI_API_KEY` | For OpenAI transcription (used as fallback if no `api_key` is configured) |
 
 ## Text-to-Speech Tools
 

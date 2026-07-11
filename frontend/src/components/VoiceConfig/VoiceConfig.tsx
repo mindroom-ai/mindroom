@@ -32,7 +32,7 @@ const DEFAULT_VOICE_CONFIG: VoiceConfigType = {
   visible_router_echo: true,
   stt: {
     provider: "openai",
-    model: "whisper-1",
+    model: "gpt-4o-transcribe",
     api_key: "",
     host: "",
   },
@@ -48,7 +48,6 @@ function mergeVoiceConfig(config?: Partial<VoiceConfigType>): VoiceConfigType {
     stt: {
       ...DEFAULT_VOICE_CONFIG.stt,
       ...(config?.stt || {}),
-      provider: "openai",
     },
     intelligence: {
       ...DEFAULT_VOICE_CONFIG.intelligence,
@@ -60,6 +59,25 @@ function mergeVoiceConfig(config?: Partial<VoiceConfigType>): VoiceConfigType {
 function normalizeHost(host?: string): string {
   if (!host) return "";
   return host.trim().replace(/\/+$/, "");
+}
+
+function speechBaseUrl(host?: string): string {
+  const normalized = normalizeHost(host);
+  if (!normalized) return "";
+  return normalized.endsWith("/v1") ? normalized : `${normalized}/v1`;
+}
+
+function normalizeSTTConfig(
+  stt: VoiceConfigType["stt"],
+): VoiceConfigType["stt"] {
+  const normalized = { ...stt };
+  const apiKey = stt.api_key?.trim();
+  const host = normalizeHost(stt.host);
+  if (apiKey) normalized.api_key = apiKey;
+  else delete normalized.api_key;
+  if (host) normalized.host = host;
+  else delete normalized.host;
+  return normalized;
 }
 
 export function VoiceConfig() {
@@ -85,7 +103,7 @@ export function VoiceConfig() {
 
   const handleSTTChange = (updates: Partial<VoiceConfigType["stt"]>) => {
     handleVoiceConfigChange({
-      stt: { ...voiceConfig.stt, ...updates, provider: "openai" },
+      stt: { ...voiceConfig.stt, ...updates },
     });
   };
 
@@ -99,24 +117,28 @@ export function VoiceConfig() {
 
   // Get available models from config
   const availableModels = config?.models ? Object.keys(config.models) : [];
-  const normalizedHost = normalizeHost(voiceConfig.stt.host);
-  const effectiveEndpoint = normalizedHost
-    ? `${normalizedHost}/v1/audio/transcriptions`
-    : OPENAI_TRANSCRIPTION_ENDPOINT;
-  const effectiveMode = normalizedHost ? "OpenAI-compatible API" : "OpenAI API";
+  const isCompatibleProvider = voiceConfig.stt.provider === "openai_compatible";
+  const normalizedBaseUrl = speechBaseUrl(voiceConfig.stt.host);
+  const effectiveEndpoint = normalizedBaseUrl
+    ? `${normalizedBaseUrl}/audio/transcriptions`
+    : isCompatibleProvider
+      ? "Base URL required"
+      : OPENAI_TRANSCRIPTION_ENDPOINT;
+  const effectiveMode =
+    normalizedBaseUrl || isCompatibleProvider
+      ? "OpenAI-compatible API"
+      : "OpenAI API";
   const keySource = voiceConfig.stt.api_key?.trim()
     ? "Stored in voice settings"
-    : "OPENAI_API_KEY environment variable";
-  const providerLabel = "OpenAI";
+    : isCompatibleProvider
+      ? "Non-secret compatibility placeholder"
+      : "OPENAI_API_KEY environment variable";
+  const providerLabel = isCompatibleProvider ? "OpenAI-compatible" : "OpenAI";
 
   const handleSave = async () => {
     updateVoiceConfig({
       ...voiceConfig,
-      stt: {
-        ...voiceConfig.stt,
-        provider: "openai",
-        host: normalizeHost(voiceConfig.stt.host),
-      },
+      stt: normalizeSTTConfig(voiceConfig.stt),
     });
     const result = await saveConfig();
     if (
@@ -265,12 +287,32 @@ export function VoiceConfig() {
 
             <div className="grid gap-4">
               <div className="space-y-2">
+                <Label htmlFor="stt-provider">Provider</Label>
+                <Select
+                  value={voiceConfig.stt.provider}
+                  onValueChange={(
+                    provider: VoiceConfigType["stt"]["provider"],
+                  ) => handleSTTChange({ provider })}
+                >
+                  <SelectTrigger id="stt-provider">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="openai">OpenAI</SelectItem>
+                    <SelectItem value="openai_compatible">
+                      OpenAI-compatible
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-2">
                 <Label htmlFor="stt-model">Model</Label>
                 <Input
                   id="stt-model"
                   value={voiceConfig.stt.model}
                   onChange={(e) => handleSTTChange({ model: e.target.value })}
-                  placeholder="whisper-1"
+                  placeholder="gpt-4o-transcribe"
                 />
               </div>
 
@@ -281,15 +323,23 @@ export function VoiceConfig() {
                   type="password"
                   value={voiceConfig.stt.api_key || ""}
                   onChange={(e) => handleSTTChange({ api_key: e.target.value })}
-                  placeholder="Uses OPENAI_API_KEY env var if not set"
+                  placeholder={
+                    isCompatibleProvider
+                      ? "Optional for local-compatible services"
+                      : "Uses OPENAI_API_KEY env var if not set"
+                  }
                 />
                 <p className="text-xs text-muted-foreground">
-                  Leave empty to use the OPENAI_API_KEY environment variable
+                  {isCompatibleProvider
+                    ? "Leave empty to send a non-secret compatibility placeholder"
+                    : "Leave empty to use the OPENAI_API_KEY environment variable"}
                 </p>
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="stt-base-url">Base URL (Optional)</Label>
+                <Label htmlFor="stt-base-url">
+                  Base URL {isCompatibleProvider ? "(Required)" : "(Optional)"}
+                </Label>
                 <Input
                   id="stt-base-url"
                   value={voiceConfig.stt.host || ""}
@@ -298,8 +348,8 @@ export function VoiceConfig() {
                 />
                 <p className="text-xs text-muted-foreground">
                   Leave empty to use the default OpenAI endpoint. For
-                  self-hosted OpenAI-compatible services, provide the base host
-                  URL without <code>/v1</code>.
+                  self-hosted OpenAI-compatible services, provide either the
+                  service root or its <code>/v1</code> base URL.
                 </p>
               </div>
             </div>

@@ -156,7 +156,7 @@ Manage OpenClaw-compatible skills:
 Configure voice message handling:
 
 - **Enable/disable** voice message support
-- **Speech-to-Text** - OpenAI Whisper or self-hosted
+- **Speech-to-Text** - OpenAI transcription or a self-hosted OpenAI-compatible service
 - **Command Intelligence** - Model selection for command recognition
 
 ### Integrations
