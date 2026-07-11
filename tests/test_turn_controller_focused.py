@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     from unittest.mock import AsyncMock
 
     from mindroom.coalescing_batch import CoalescedBatch
-    from mindroom.delivery_gateway import DeliveryGateway, SendTextRequest
+    from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.cache import ThreadHistoryResult
     from mindroom.matrix.event_info import EventInfo
@@ -150,10 +150,16 @@ class _RecordingDeliveryGateway:
     """Typed DeliveryGateway stand-in that records visible sends."""
 
     sent: list[SendTextRequest] = field(default_factory=list)
+    edited: list[EditTextRequest] = field(default_factory=list)
+    edit_succeeds: bool = True
 
     async def send_text(self, request: SendTextRequest) -> str | None:
         self.sent.append(request)
         return f"$sent-{len(self.sent)}:localhost"
+
+    async def edit_text(self, request: EditTextRequest) -> bool:
+        self.edited.append(request)
+        return self.edit_succeeds
 
 
 @dataclass
@@ -759,6 +765,63 @@ async def test_interactive_selection_rehydrates_attachment_context_from_thread(
     request = harness.runner.requests[0]
     assert request.attachment_ids == (record.attachment_id,)
     assert request.response_envelope.attachment_ids == (record.attachment_id,)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("edit_succeeds", "expected_send_count"), [(True, 1), (False, 2)])
+async def test_interactive_selection_attachment_setup_failure_finalizes_ack(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    edit_succeeds: bool,
+    expected_send_count: int,
+) -> None:
+    """An attachment-resolution failure visibly terminates the processing acknowledgment."""
+    harness = _build_harness(config, tmp_path)
+    harness.gateway.edit_succeeds = edit_succeeds
+
+    async def fail_attachment_resolution(
+        _normalizer: InboundTurnNormalizer,
+        _request: object,
+    ) -> object:
+        msg = "attachment lookup failed"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(
+        InboundTurnNormalizer,
+        "build_dispatch_payload_with_attachments",
+        fail_attachment_resolution,
+    )
+    room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        question_text="Process the attached report?",
+        selection_key="1",
+        selected_label="Yes",
+        selected_value="Yes",
+        thread_id="$thread-root:localhost",
+    )
+
+    await harness.controller.handle_interactive_selection(
+        room,
+        selection=selection,
+        user_id=_SENDER,
+        source_event_id="$selection:localhost",
+    )
+
+    assert harness.runner.requests == []
+    assert len(harness.gateway.sent) == expected_send_count
+    assert len(harness.gateway.edited) == 1
+    edit_request = harness.gateway.edited[0]
+    assert edit_request.event_id == "$sent-1:localhost"
+    assert edit_request.new_text == "[general] ⚠️ Error: attachment lookup failed"
+    assert edit_request.extra_content == {constants.STREAM_STATUS_KEY: constants.STREAM_STATUS_COMPLETED}
+    if not edit_succeeds:
+        fallback_request = harness.gateway.sent[1]
+        assert fallback_request.response_text == edit_request.new_text
+        assert fallback_request.extra_content == edit_request.extra_content
+    assert harness.turn_store.is_handled(selection.question_event_id) is True
+    assert harness.turn_store.is_handled("$selection:localhost") is True
 
 
 @pytest.mark.asyncio
