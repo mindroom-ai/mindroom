@@ -63,6 +63,7 @@ from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import MessageEnvelope, build_hook_matrix_admin, hook_ingress_policy
 from mindroom.inbound_turn_normalizer import (
+    DispatchPayloadWithAttachmentsRequest,
     InboundTurnNormalizer,
     TextNormalizationRequest,
     VoiceNormalizationRequest,
@@ -1292,6 +1293,20 @@ class TurnController:
                 source_event_id=selection.question_event_id,
             )
             return
+        # The selection is a synthetic turn with no Matrix message of its own, so
+        # the attachment context that ingress normally resolves per message must
+        # be rebuilt here from the conversation that asked the question.
+        selection_payload = await self.deps.normalizer.build_dispatch_payload_with_attachments(
+            DispatchPayloadWithAttachmentsRequest(
+                room_id=room.room_id,
+                prompt=interactive.build_selection_prompt(selection),
+                current_attachment_ids=[],
+                thread_id=selection.thread_id,
+                media_thread_id=response_target.resolved_thread_id,
+                thread_history=thread_history,
+            ),
+        )
+        selection_attachment_ids = tuple(selection_payload.attachment_ids or ())
         selection_handled_turn = self.deps.turn_store.attach_response_context(
             TurnRecord.create(
                 [selection.question_event_id],
@@ -1308,7 +1323,7 @@ class TurnController:
             source_event_id=source_event_id,
             target=response_target,
             body=f"The user selected: {selection.selected_value}",
-            attachment_ids=(),
+            attachment_ids=selection_attachment_ids,
             mentioned_agents=(),
             agent_name=self.deps.agent_name,
             origin=classify_turn_origin(
@@ -1324,11 +1339,13 @@ class TurnController:
 
         response_event_id = await self.deps.response_runner.generate_response(
             ResponseRequest(
-                prompt=interactive.build_selection_prompt(selection),
+                prompt=selection_payload.prompt,
+                model_prompt=selection_payload.model_prompt,
                 thread_history=thread_history,
                 existing_event_id=ack_event_id,
                 existing_event_is_placeholder=True,
                 user_id=user_id,
+                attachment_ids=selection_attachment_ids or None,
                 response_envelope=response_envelope,
                 matrix_run_metadata=selection_matrix_run_metadata,
             ),

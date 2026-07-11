@@ -23,6 +23,7 @@ import nio
 import pytest
 
 from mindroom import constants, interactive
+from mindroom.attachments import register_local_attachment
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing import CoalescingGate
 from mindroom.config.agent import AgentConfig
@@ -695,6 +696,69 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
 
     assert harness.turn_store.is_handled(selection.question_event_id) is True
     assert harness.turn_store.is_handled("$selection:localhost") is True
+
+
+@pytest.mark.asyncio
+async def test_interactive_selection_rehydrates_attachment_context_from_thread(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """A selection callback turn reaches the attachments of the conversation that asked the question.
+
+    The selection is a synthetic turn with no Matrix message of its own, so it
+    must rebuild the attachment context from the originating thread; before the
+    fix the callback request carried no attachment IDs and ``get_attachment``
+    rejected IDs that were available when the question was asked.
+    """
+    harness = _build_harness(config, tmp_path)
+    media_path = tmp_path / "incoming_media" / "report.pdf"
+    media_path.parent.mkdir(parents=True, exist_ok=True)
+    media_path.write_bytes(b"%PDF-1.4 fake report")
+    record = register_local_attachment(
+        tmp_path,
+        media_path,
+        kind="file",
+        filename="report.pdf",
+        room_id=_ROOM_ID,
+        thread_id="$thread-root:localhost",
+        sender=_SENDER,
+    )
+    assert record is not None
+    triggering_message = make_visible_message(
+        sender=_SENDER,
+        body="here is the report",
+        content={
+            "msgtype": "m.text",
+            "body": "here is the report",
+            constants.ATTACHMENT_IDS_KEY: [record.attachment_id],
+        },
+        thread_id="$thread-root:localhost",
+    )
+    harness.conversation_cache.get_strict_thread_history.return_value = thread_history_result(
+        [triggering_message],
+        is_full_history=True,
+    )
+    room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        question_text="Process the attached report?",
+        selection_key="1",
+        selected_label="Yes",
+        selected_value="Yes",
+        thread_id="$thread-root:localhost",
+    )
+
+    await harness.controller.handle_interactive_selection(
+        room,
+        selection=selection,
+        user_id=_SENDER,
+        source_event_id="$selection:localhost",
+    )
+
+    assert len(harness.runner.requests) == 1
+    request = harness.runner.requests[0]
+    assert request.attachment_ids == (record.attachment_id,)
+    assert request.response_envelope.attachment_ids == (record.attachment_id,)
 
 
 @pytest.mark.asyncio
