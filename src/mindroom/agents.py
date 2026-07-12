@@ -536,6 +536,21 @@ def _log_toolkits_without_unique_model_functions(
             seen_function_names.update(function_names)
 
 
+def _agent_tool_output_file_policy(
+    agent_runtime: ResolvedAgentRuntime,
+    runtime_paths: constants.RuntimePaths,
+    tool_output_auto_save_threshold_bytes: int,
+) -> ToolOutputFilePolicy | None:
+    """Resolve the shared output-file policy for one agent's in-process tools."""
+    if agent_runtime.tool_base_dir is None:
+        return None
+    return ToolOutputFilePolicy.from_runtime(
+        agent_runtime.tool_base_dir,
+        runtime_paths,
+        auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
+    )
+
+
 def _wrap_direct_agent_toolkit_for_output_files(
     toolkit: Toolkit,
     *,
@@ -544,14 +559,10 @@ def _wrap_direct_agent_toolkit_for_output_files(
     tool_output_auto_save_threshold_bytes: int,
 ) -> Toolkit:
     """Apply the central output-file wrapper to MindRoom-owned direct toolkits."""
-    policy = (
-        ToolOutputFilePolicy.from_runtime(
-            agent_runtime.tool_base_dir,
-            runtime_paths,
-            auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
-        )
-        if agent_runtime.tool_base_dir is not None
-        else None
+    policy = _agent_tool_output_file_policy(
+        agent_runtime,
+        runtime_paths,
+        tool_output_auto_save_threshold_bytes,
     )
     return wrap_toolkit_for_output_files(toolkit, policy)
 
@@ -1202,12 +1213,14 @@ def _load_agent_skills(
     runtime_paths: constants.RuntimePaths,
     *,
     workspace_skills_root: Path | None = None,
+    output_file_policy: ToolOutputFilePolicy | None = None,
 ) -> Skills | None:
     return build_agent_skills(
         agent_name,
         config,
         runtime_paths,
         workspace_skills_root=workspace_skills_root,
+        output_file_policy=output_file_policy,
     )
 
 
@@ -1726,6 +1739,11 @@ def create_agent(
             config,
             runtime_paths,
             workspace_skills_root=workspace.root / "skills" if workspace is not None else None,
+            output_file_policy=_agent_tool_output_file_policy(
+                agent_runtime,
+                runtime_paths,
+                config.defaults.tool_output_auto_save_threshold_bytes,
+            ),
         )
     )
     instructions = _build_agent_instructions(

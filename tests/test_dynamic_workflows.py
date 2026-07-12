@@ -26,7 +26,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
-from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
+from mindroom.custom_tools.dynamic_workflow import _MINIMAL_SPEC_EXAMPLE, DynamicWorkflowTools
 from mindroom.dynamic_workflows.agno_adapter import build_agno_workflow_factory
 from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError, execute_workflow_spec
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
@@ -2414,3 +2414,61 @@ def test_run_agent_raises_on_failed_agno_status(tmp_path: Path) -> None:
 
     with pytest.raises(dynamic_workflow_module.DynamicWorkflowExecutionError, match="provider auth failed"):
         asyncio.run(dynamic_workflow_module._arun_agent(context, fake_agent, "Write."))
+
+
+def test_validate_workflow_reports_all_spec_errors_in_one_call(tmp_path: Path) -> None:
+    """One validate_workflow call returns the full repair list, not one error per call."""
+    context = _make_context(tmp_path)
+    tool = DynamicWorkflowTools()
+
+    with tool_runtime_context(context):
+        payload = _tool_payload(
+            tool.validate_workflow(
+                {
+                    "steps": [],
+                    "schema_version": 2,
+                    "id": "x",
+                    "name": "X",
+                },
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert payload["errors"] == [
+        "Workflow spec contains unsupported field 'steps'.",
+        "Workflow spec field 'schema_version' must be 1.",
+        "Workflow spec field 'kind' is missing.",
+        "Workflow spec field 'participants' is missing.",
+        "Workflow spec field 'workflow' is missing.",
+    ]
+    assert payload["message"] == "\n".join(payload["errors"])
+    assert payload["minimal_valid_spec_example"] == _MINIMAL_SPEC_EXAMPLE
+
+
+def test_create_workflow_reports_all_spec_errors_in_one_call(tmp_path: Path) -> None:
+    """create_workflow rejects invalid specs with the same full error list."""
+    context = _make_context(tmp_path)
+    tool = DynamicWorkflowTools()
+
+    with tool_runtime_context(context):
+        payload = _tool_payload(tool.create_workflow({"schema_version": 1, "kind": "workflow"}))
+
+    assert payload["status"] == "error"
+    assert payload["errors"] == [
+        "Workflow spec field 'id' is missing.",
+        "Workflow spec field 'name' is missing.",
+        "Workflow spec field 'participants' is missing.",
+        "Workflow spec field 'workflow' is missing.",
+    ]
+
+
+def test_minimal_spec_example_in_tool_description_is_valid(tmp_path: Path) -> None:
+    """The minimal example advertised in the tool schema validates as-is."""
+    context = _make_context(tmp_path)
+    tool = DynamicWorkflowTools()
+
+    with tool_runtime_context(context):
+        payload = _tool_payload(tool.validate_workflow(json.loads(_MINIMAL_SPEC_EXAMPLE)))
+
+    assert payload["status"] == "ok"
+    assert payload["workflow_id"] == "my_flow"
