@@ -16,7 +16,11 @@ from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver
 from mindroom.durable_write import fsync_directory
 from mindroom.entity_resolution import MissingManagedEntityAccountError
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_thread_history import enumerate_room_thread_root_ids, refresh_thread_history_from_source
+from mindroom.matrix.client_thread_history import (
+    enumerate_room_thread_root_ids,
+    fetch_thread_history,
+    refresh_thread_history_from_source,
+)
 from mindroom.matrix.client_visible_messages import trusted_visible_sender_ids
 from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixRoom, matrix_state_for_runtime
@@ -66,6 +70,7 @@ class ThreadExportStats:
     rooms_exported: int = 0
     threads_seen: int = 0
     threads_exported: int = 0
+    threads_unchanged: int = 0
     truncated_rooms: int = 0
     failed_items: tuple[_ThreadExportFailure, ...] = field(default_factory=tuple)
 
@@ -173,6 +178,26 @@ def _thread_export_path(output_dir: Path, room: _ThreadExportRoom, thread_id: st
     return output_dir / _safe_path_segment(room.key) / f"{_safe_path_segment(thread_id)}.yaml"
 
 
+def _payload_without_exported_at(payload: dict[str, object]) -> dict[str, object]:
+    """Return one thread payload with the per-pass exported_at timestamp removed."""
+    normalized = dict(payload)
+    thread = normalized.get("thread")
+    if isinstance(thread, dict):
+        normalized["thread"] = {key: value for key, value in thread.items() if key != "exported_at"}
+    return normalized
+
+
+def _existing_payload_matches(path: Path, payload: dict[str, object]) -> bool:
+    """Return whether one existing export file already holds this payload, ignoring exported_at."""
+    try:
+        existing = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return False
+    if not isinstance(existing, dict):
+        return False
+    return _payload_without_exported_at(existing) == _payload_without_exported_at(payload)
+
+
 def _export_rooms(runtime_paths: RuntimePaths, room_filter: str | None) -> list[_ThreadExportRoom]:
     """Return persisted Matrix rooms selected for export."""
     rooms = matrix_state_for_runtime(runtime_paths).rooms
@@ -219,6 +244,7 @@ async def _export_threads_for_client(
     output_dir: Path | None = None,
     room_filter: str | None = None,
     max_thread_roots: int = 2000,
+    prefer_cache: bool = False,
 ) -> ThreadExportStats:
     """Export Matrix-source thread histories to YAML files."""
     resolved_output_dir = output_dir or _default_thread_export_dir(runtime_paths)
@@ -228,6 +254,7 @@ async def _export_threads_for_client(
     rooms_exported = 0
     threads_seen = 0
     threads_exported = 0
+    threads_unchanged = 0
     truncated_rooms = 0
 
     for room in rooms:
@@ -255,22 +282,36 @@ async def _export_threads_for_client(
 
         for thread_id in thread_ids:
             try:
-                history = await refresh_thread_history_from_source(
-                    client,
-                    room.room_id,
-                    thread_id,
-                    event_cache,
-                    allow_stale_fallback=False,
-                    trusted_sender_ids=trusted_sender_ids,
-                    caller_label="thread_export",
-                )
+                if prefer_cache:
+                    history = await fetch_thread_history(
+                        client,
+                        room.room_id,
+                        thread_id,
+                        event_cache,
+                        trusted_sender_ids=trusted_sender_ids,
+                        caller_label="thread_export",
+                    )
+                else:
+                    history = await refresh_thread_history_from_source(
+                        client,
+                        room.room_id,
+                        thread_id,
+                        event_cache,
+                        allow_stale_fallback=False,
+                        trusted_sender_ids=trusted_sender_ids,
+                        caller_label="thread_export",
+                    )
                 payload = _thread_payload(
                     room=room,
                     thread_id=thread_id,
                     messages=list(history),
                     exported_at=datetime.now(UTC),
                 )
-                _write_yaml_atomic(_thread_export_path(resolved_output_dir, room, thread_id), payload)
+                export_path = _thread_export_path(resolved_output_dir, room, thread_id)
+                if _existing_payload_matches(export_path, payload):
+                    threads_unchanged += 1
+                else:
+                    _write_yaml_atomic(export_path, payload)
             except Exception as exc:
                 failures.append(
                     _ThreadExportFailure(
@@ -288,6 +329,7 @@ async def _export_threads_for_client(
         rooms_exported=rooms_exported,
         threads_seen=threads_seen,
         threads_exported=threads_exported,
+        threads_unchanged=threads_unchanged,
         truncated_rooms=truncated_rooms,
         failed_items=tuple(failures),
     )
@@ -351,8 +393,15 @@ async def export_threads_once(
     output_dir: Path | None = None,
     room_filter: str | None = None,
     max_thread_roots: int = 2000,
+    prefer_cache: bool = False,
 ) -> ThreadExportStats:
-    """Login using persisted Matrix credentials and run one export pass."""
+    """Login using persisted Matrix credentials and run one export pass.
+
+    With ``prefer_cache`` thread bodies are served from the validated durable event cache and only
+    fetched from the homeserver on miss or invalidation; a failing miss-refetch may then fall back to
+    stale cached rows instead of failing the thread.
+    Only use it while the runtime keeps the cache fresh (in-process or alongside a live ``mindroom run``).
+    """
     homeserver = runtime_matrix_homeserver(runtime_paths=runtime_paths)
     export_user = _select_export_account(runtime_paths, homeserver)
     client = await login_agent_user(homeserver, export_user, runtime_paths)
@@ -373,6 +422,7 @@ async def export_threads_once(
             output_dir=output_dir,
             room_filter=room_filter,
             max_thread_roots=max_thread_roots,
+            prefer_cache=prefer_cache,
         )
     finally:
         if support is not None:
