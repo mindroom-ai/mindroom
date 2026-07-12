@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -55,6 +56,7 @@ class _ThreadExportRoom:
     room_id: str
     alias: str
     name: str
+    invited: bool = False
 
 
 @dataclass(frozen=True)
@@ -83,6 +85,50 @@ class ThreadExportStats:
     def failures(self) -> int:
         """Return failed room/thread count."""
         return len(self.failed_items)
+
+
+@dataclass(frozen=True)
+class ThreadExportTarget:
+    """One export destination and its optional room-membership scope."""
+
+    output_dir: Path
+    required_member_user_id: str | None = None
+    include_invited_rooms: bool = True
+
+
+@dataclass
+class _ThreadExportAccumulator:
+    """Mutable statistics and reconciliation state for one export target."""
+
+    target: ThreadExportTarget
+    rooms_exported: int = 0
+    threads_seen: int = 0
+    threads_exported: int = 0
+    threads_unchanged: int = 0
+    truncated_rooms: int = 0
+    failed_items: list[_ThreadExportFailure] = field(default_factory=list)
+    retained_room_keys: set[str] = field(default_factory=set)
+
+    def stats(self) -> ThreadExportStats:
+        """Return the immutable public statistics for this target."""
+        return ThreadExportStats(
+            output_dir=self.target.output_dir,
+            rooms_exported=self.rooms_exported,
+            threads_seen=self.threads_seen,
+            threads_exported=self.threads_exported,
+            threads_unchanged=self.threads_unchanged,
+            truncated_rooms=self.truncated_rooms,
+            failed_items=tuple(self.failed_items),
+        )
+
+
+@dataclass(frozen=True)
+class _ThreadExportGroup:
+    """Rooms that must be read with one persisted Matrix account."""
+
+    rooms: tuple[_ThreadExportRoom, ...]
+    user: AgentMatrixUser | None = None
+    error: str | None = None
 
 
 def _default_thread_export_dir(runtime_paths: RuntimePaths) -> Path:
@@ -200,7 +246,7 @@ def _thread_index_entry(thread_file: Path) -> tuple[int, dict[str, object]] | No
     """Return one (last-activity, entry) index pair from an exported thread file."""
     try:
         payload = yaml.safe_load(thread_file.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
         return None
     if not isinstance(payload, dict):
         return None
@@ -266,6 +312,62 @@ def _write_room_index(output_dir: Path, room: _ThreadExportRoom) -> None:
     write_json_file_durable(index_path, payload, indent=2, trailing_newline=True)
 
 
+def _room_export_dir(output_dir: Path, room: _ThreadExportRoom) -> Path:
+    """Return one room's export directory."""
+    return output_dir / _safe_path_segment(room.key)
+
+
+def _remove_room_export(output_dir: Path, room: _ThreadExportRoom) -> bool:
+    """Remove one room's exported data and return whether anything changed."""
+    room_dir = _room_export_dir(output_dir, room)
+    if not room_dir.exists() and not room_dir.is_symlink():
+        return False
+    if room_dir.is_symlink() or not room_dir.is_dir():
+        room_dir.unlink()
+    else:
+        shutil.rmtree(room_dir)
+    fsync_directory(output_dir)
+    return True
+
+
+def _remove_stale_thread_exports(
+    output_dir: Path,
+    room: _ThreadExportRoom,
+    thread_ids: Sequence[str],
+) -> bool:
+    """Remove thread files absent from a complete homeserver enumeration."""
+    room_dir = _room_export_dir(output_dir, room)
+    if not room_dir.is_dir():
+        return False
+    expected_names = {f"{_safe_path_segment(thread_id)}.yaml" for thread_id in thread_ids}
+    stale_files = [thread_file for thread_file in room_dir.glob("*.yaml") if thread_file.name not in expected_names]
+    for thread_file in stale_files:
+        thread_file.unlink()
+    if stale_files:
+        fsync_directory(room_dir)
+    return bool(stale_files)
+
+
+def _reconcile_room_directories(output_dir: Path, retained_room_keys: set[str]) -> None:
+    """Remove room directories outside the target's full-pass authorization scope."""
+    if not output_dir.is_dir():
+        return
+    retained_names = {_safe_path_segment(room_key) for room_key in retained_room_keys}
+    removed = False
+    for candidate in output_dir.iterdir():
+        if candidate.name in retained_names:
+            continue
+        if candidate.is_symlink():
+            candidate.unlink()
+        elif candidate.is_dir():
+            shutil.rmtree(candidate)
+        else:
+            continue
+        removed = True
+    if removed:
+        fsync_directory(output_dir)
+
+
 def _payload_without_exported_at(payload: dict[str, object]) -> dict[str, object]:
     """Return one thread payload with the per-pass exported_at timestamp removed."""
     normalized = dict(payload)
@@ -277,9 +379,11 @@ def _payload_without_exported_at(payload: dict[str, object]) -> dict[str, object
 
 def _existing_payload_matches(path: Path, payload: dict[str, object]) -> bool:
     """Return whether one existing export file already holds this payload, ignoring exported_at."""
+    if not path.is_file():
+        return False
     try:
         existing = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
         return False
     if not isinstance(existing, dict):
         return False
@@ -333,7 +437,15 @@ def _invited_export_rooms(
             if normalized_filter is not None and normalized_filter not in room_id.casefold():
                 continue
             known_room_ids.add(room_id)
-            entity_rooms.append(_ThreadExportRoom(key=room_id, room_id=room_id, alias="", name=""))
+            entity_rooms.append(
+                _ThreadExportRoom(
+                    key=room_id,
+                    room_id=room_id,
+                    alias="",
+                    name="",
+                    invited=True,
+                ),
+            )
         if entity_rooms:
             grouped.append((entity_name, entity_rooms))
     return grouped
@@ -347,26 +459,25 @@ def _trusted_sender_ids_for_export(config: Config, runtime_paths: RuntimePaths) 
         return frozenset()
 
 
-async def _room_has_member(client: nio.AsyncClient, room_id: str, user_id: str) -> bool:
-    """Return whether one user is currently a joined member of a room."""
+async def _joined_member_ids(client: nio.AsyncClient, room_id: str) -> frozenset[str]:
+    """Return the current joined Matrix user IDs for one room."""
     response = await client.joined_members(room_id)
     if isinstance(response, nio.JoinedMembersResponse):
-        return any(member.user_id == user_id for member in response.members)
+        return frozenset(member.user_id for member in response.members)
     msg = f"Membership lookup failed: {response}"
     raise RuntimeError(msg)
 
 
-async def _export_single_thread(
+async def _fetch_thread_payload(
     client: nio.AsyncClient,
     room: _ThreadExportRoom,
     thread_id: str,
     *,
     event_cache: ConversationEventCache,
     trusted_sender_ids: frozenset[str],
-    output_dir: Path,
     prefer_cache: bool,
-) -> bool:
-    """Export one thread to YAML; return whether the file was (re)written."""
+) -> dict[str, object]:
+    """Fetch and build one thread payload independently of export destinations."""
     if prefer_cache:
         history = await fetch_thread_history(
             client,
@@ -386,17 +497,205 @@ async def _export_single_thread(
             trusted_sender_ids=trusted_sender_ids,
             caller_label="thread_export",
         )
-    payload = _thread_payload(
+    return _thread_payload(
         room=room,
         thread_id=thread_id,
         messages=list(history),
         exported_at=datetime.now(UTC),
     )
+
+
+def _write_thread_payload(
+    output_dir: Path,
+    room: _ThreadExportRoom,
+    thread_id: str,
+    payload: dict[str, object],
+) -> bool:
+    """Write one thread payload when changed and return whether bytes were replaced."""
     export_path = _thread_export_path(output_dir, room, thread_id)
     if _existing_payload_matches(export_path, payload):
         return False
     _write_yaml_atomic(export_path, payload)
     return True
+
+
+def _target_accepts_room(target: ThreadExportTarget, room: _ThreadExportRoom) -> bool:
+    """Return whether one target includes the room's source category."""
+    return target.include_invited_rooms or not room.invited
+
+
+def _room_failure(room: _ThreadExportRoom, error: str, *, thread_id: str | None = None) -> _ThreadExportFailure:
+    """Build one target-local room or thread failure."""
+    return _ThreadExportFailure(
+        room_key=room.key,
+        room_id=room.room_id,
+        thread_id=thread_id,
+        error=error,
+    )
+
+
+async def _authorized_room_accumulators(
+    client: nio.AsyncClient,
+    room: _ThreadExportRoom,
+    accumulators: Sequence[_ThreadExportAccumulator],
+) -> list[_ThreadExportAccumulator]:
+    """Return targets authorized for one room and remove fail-closed exports."""
+    eligible = [accumulator for accumulator in accumulators if _target_accepts_room(accumulator.target, room)]
+    for accumulator in accumulators:
+        if not _target_accepts_room(accumulator.target, room):
+            _remove_room_export(accumulator.target.output_dir, room)
+
+    scoped = [accumulator for accumulator in eligible if accumulator.target.required_member_user_id is not None]
+    authorized = [accumulator for accumulator in eligible if accumulator.target.required_member_user_id is None]
+    if not scoped:
+        return authorized
+    try:
+        member_ids = await _joined_member_ids(client, room.room_id)
+    except Exception as exc:
+        for accumulator in scoped:
+            _remove_room_export(accumulator.target.output_dir, room)
+            accumulator.failed_items.append(_room_failure(room, str(exc)))
+        return authorized
+
+    for accumulator in scoped:
+        member_user_id = accumulator.target.required_member_user_id
+        if member_user_id in member_ids:
+            authorized.append(accumulator)
+        else:
+            _remove_room_export(accumulator.target.output_dir, room)
+    return authorized
+
+
+async def _write_thread_to_targets(
+    *,
+    client: nio.AsyncClient,
+    room: _ThreadExportRoom,
+    thread_id: str,
+    event_cache: ConversationEventCache,
+    trusted_sender_ids: frozenset[str],
+    prefer_cache: bool,
+    accumulators: Sequence[_ThreadExportAccumulator],
+    room_changed: dict[int, bool],
+) -> None:
+    """Fetch one thread once and write it independently to each target."""
+    try:
+        payload = await _fetch_thread_payload(
+            client,
+            room,
+            thread_id,
+            event_cache=event_cache,
+            trusted_sender_ids=trusted_sender_ids,
+            prefer_cache=prefer_cache,
+        )
+    except Exception as exc:
+        for accumulator in accumulators:
+            accumulator.failed_items.append(_room_failure(room, str(exc), thread_id=thread_id))
+        return
+
+    for accumulator in accumulators:
+        try:
+            wrote_file = _write_thread_payload(
+                accumulator.target.output_dir,
+                room,
+                thread_id,
+                payload,
+            )
+        except Exception as exc:
+            accumulator.failed_items.append(_room_failure(room, str(exc), thread_id=thread_id))
+            continue
+        accumulator.threads_exported += 1
+        if wrote_file:
+            room_changed[id(accumulator)] = True
+        else:
+            accumulator.threads_unchanged += 1
+
+
+def _finish_room_exports(
+    room: _ThreadExportRoom,
+    thread_ids: Sequence[str],
+    *,
+    truncated: bool,
+    accumulators: Sequence[_ThreadExportAccumulator],
+    room_changed: dict[int, bool],
+) -> None:
+    """Reconcile removed threads and update indexes for one enumerated room."""
+    for accumulator in accumulators:
+        try:
+            if not truncated and _remove_stale_thread_exports(
+                accumulator.target.output_dir,
+                room,
+                thread_ids,
+            ):
+                room_changed[id(accumulator)] = True
+            room_dir = _room_export_dir(accumulator.target.output_dir, room)
+            index_path = room_dir / _ROOM_INDEX_FILENAME
+            if room_changed[id(accumulator)] or not index_path.is_file():
+                _write_room_index(accumulator.target.output_dir, room)
+        except Exception as exc:
+            accumulator.failed_items.append(_room_failure(room, f"Room reconciliation failed: {exc}"))
+
+
+async def _export_threads_for_targets_for_client(
+    *,
+    client: nio.AsyncClient,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    event_cache: ConversationEventCache,
+    rooms: Sequence[_ThreadExportRoom],
+    targets: Sequence[ThreadExportTarget],
+    max_thread_roots: int = 2000,
+    prefer_cache: bool = False,
+) -> tuple[_ThreadExportAccumulator, ...]:
+    """Fetch each Matrix thread once and fan it out to authorized destinations."""
+    trusted_sender_ids = _trusted_sender_ids_for_export(config, runtime_paths)
+    accumulators = tuple(_ThreadExportAccumulator(target=target) for target in targets)
+
+    for room in rooms:
+        authorized = await _authorized_room_accumulators(client, room, accumulators)
+        if not authorized:
+            continue
+        for accumulator in authorized:
+            accumulator.retained_room_keys.add(room.key)
+
+        try:
+            thread_ids, truncated = await enumerate_room_thread_root_ids(
+                client,
+                room.room_id,
+                max_thread_roots=max_thread_roots,
+            )
+        except Exception as exc:
+            for accumulator in authorized:
+                accumulator.failed_items.append(_room_failure(room, str(exc)))
+            continue
+
+        for accumulator in authorized:
+            accumulator.rooms_exported += 1
+            accumulator.threads_seen += len(thread_ids)
+            if truncated:
+                accumulator.truncated_rooms += 1
+        room_changed = {id(accumulator): False for accumulator in authorized}
+
+        for thread_id in thread_ids:
+            await _write_thread_to_targets(
+                client=client,
+                room=room,
+                thread_id=thread_id,
+                event_cache=event_cache,
+                trusted_sender_ids=trusted_sender_ids,
+                prefer_cache=prefer_cache,
+                accumulators=authorized,
+                room_changed=room_changed,
+            )
+
+        _finish_room_exports(
+            room,
+            thread_ids,
+            truncated=truncated,
+            accumulators=authorized,
+            room_changed=room_changed,
+        )
+
+    return accumulators
 
 
 async def _export_threads_for_client(
@@ -411,91 +710,22 @@ async def _export_threads_for_client(
     prefer_cache: bool = False,
     required_member_user_id: str | None = None,
 ) -> ThreadExportStats:
-    """Export Matrix-source thread histories to YAML files."""
-    resolved_output_dir = output_dir or _default_thread_export_dir(runtime_paths)
-    trusted_sender_ids = _trusted_sender_ids_for_export(config, runtime_paths)
-    failures: list[_ThreadExportFailure] = []
-    rooms_exported = 0
-    threads_seen = 0
-    threads_exported = 0
-    threads_unchanged = 0
-    truncated_rooms = 0
-
-    for room in rooms:
-        try:
-            if required_member_user_id is not None and not await _room_has_member(
-                client,
-                room.room_id,
-                required_member_user_id,
-            ):
-                continue
-            thread_ids, truncated = await enumerate_room_thread_root_ids(
-                client,
-                room.room_id,
-                max_thread_roots=max_thread_roots,
-            )
-        except Exception as exc:
-            failures.append(
-                _ThreadExportFailure(
-                    room_key=room.key,
-                    room_id=room.room_id,
-                    thread_id=None,
-                    error=str(exc),
-                ),
-            )
-            continue
-
-        rooms_exported += 1
-        if truncated:
-            truncated_rooms += 1
-        threads_seen += len(thread_ids)
-
-        for thread_id in thread_ids:
-            try:
-                wrote_file = await _export_single_thread(
-                    client,
-                    room,
-                    thread_id,
-                    event_cache=event_cache,
-                    trusted_sender_ids=trusted_sender_ids,
-                    output_dir=resolved_output_dir,
-                    prefer_cache=prefer_cache,
-                )
-            except Exception as exc:
-                failures.append(
-                    _ThreadExportFailure(
-                        room_key=room.key,
-                        room_id=room.room_id,
-                        thread_id=thread_id,
-                        error=str(exc),
-                    ),
-                )
-                continue
-            threads_exported += 1
-            if not wrote_file:
-                threads_unchanged += 1
-
-        try:
-            _write_room_index(resolved_output_dir, room)
-        except Exception as exc:
-            failures.append(
-                _ThreadExportFailure(
-                    room_key=room.key,
-                    room_id=room.room_id,
-                    thread_id=None,
-                    error=f"Room index write failed: {exc}",
-                ),
-            )
-
-    return ThreadExportStats(
-        output_dir=resolved_output_dir,
-        rooms_exported=rooms_exported,
-        threads_seen=threads_seen,
-        threads_exported=threads_exported,
-        threads_unchanged=threads_unchanged,
-        truncated_rooms=truncated_rooms,
-        failed_items=tuple(failures),
+    """Export Matrix-source thread histories to one YAML destination."""
+    target = ThreadExportTarget(
+        output_dir=output_dir or _default_thread_export_dir(runtime_paths),
+        required_member_user_id=required_member_user_id,
     )
+    accumulators = await _export_threads_for_targets_for_client(
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths,
+        event_cache=event_cache,
+        rooms=rooms,
+        targets=(target,),
+        max_thread_roots=max_thread_roots,
+        prefer_cache=prefer_cache,
+    )
+    return accumulators[0].stats()
 
 
 def _account_user_from_state(
@@ -549,6 +779,220 @@ def _select_export_account(runtime_paths: RuntimePaths, homeserver: str) -> Agen
     raise RuntimeError(msg)
 
 
+def _merge_accumulator(target: _ThreadExportAccumulator, update: _ThreadExportAccumulator) -> None:
+    """Merge one account group's target-local result into the pass total."""
+    target.rooms_exported += update.rooms_exported
+    target.threads_seen += update.threads_seen
+    target.threads_exported += update.threads_exported
+    target.threads_unchanged += update.threads_unchanged
+    target.truncated_rooms += update.truncated_rooms
+    target.failed_items.extend(update.failed_items)
+    target.retained_room_keys.update(update.retained_room_keys)
+
+
+def _record_group_failure(
+    accumulators: Sequence[_ThreadExportAccumulator],
+    rooms: Sequence[_ThreadExportRoom],
+    error: str,
+) -> None:
+    """Record one account-level failure without leaking scoped room exports."""
+    for room in rooms:
+        for accumulator in accumulators:
+            target = accumulator.target
+            if not _target_accepts_room(target, room):
+                _remove_room_export(target.output_dir, room)
+                continue
+            if target.required_member_user_id is None:
+                accumulator.retained_room_keys.add(room.key)
+            else:
+                _remove_room_export(target.output_dir, room)
+            accumulator.failed_items.append(_room_failure(room, error))
+
+
+def _reconcile_full_pass(accumulators: Sequence[_ThreadExportAccumulator]) -> None:
+    """Remove room directories that the completed full pass did not retain."""
+    for accumulator in accumulators:
+        _reconcile_room_directories(
+            accumulator.target.output_dir,
+            accumulator.retained_room_keys,
+        )
+
+
+def _build_export_groups(
+    *,
+    runtime_paths: RuntimePaths,
+    homeserver: str,
+    state_rooms: Sequence[_ThreadExportRoom],
+    invited_groups: Sequence[tuple[str, list[_ThreadExportRoom]]],
+) -> list[_ThreadExportGroup]:
+    """Build account-specific export groups, retaining missing-account failures."""
+    groups: list[_ThreadExportGroup] = []
+    if state_rooms:
+        groups.append(
+            _ThreadExportGroup(
+                user=_select_export_account(runtime_paths, homeserver),
+                rooms=tuple(state_rooms),
+            ),
+        )
+    accounts = matrix_state_for_runtime(runtime_paths).accounts
+    for entity_name, entity_rooms in invited_groups:
+        account_key = managed_account_key(entity_name)
+        account = accounts.get(account_key)
+        if account is None:
+            groups.append(
+                _ThreadExportGroup(
+                    rooms=tuple(entity_rooms),
+                    error=f"No persisted Matrix account for invited-room entity '{entity_name}'",
+                ),
+            )
+            continue
+        groups.append(
+            _ThreadExportGroup(
+                user=_account_user_from_state(
+                    account_key=account_key,
+                    account=account,
+                    homeserver=homeserver,
+                    runtime_paths=runtime_paths,
+                ),
+                rooms=tuple(entity_rooms),
+            ),
+        )
+    return groups
+
+
+async def _run_export_group(
+    group: _ThreadExportGroup,
+    *,
+    homeserver: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    event_cache: ConversationEventCache | None,
+    targets: Sequence[ThreadExportTarget],
+    accumulators: Sequence[_ThreadExportAccumulator],
+    max_thread_roots: int,
+    prefer_cache: bool,
+) -> None:
+    """Run one account group without preventing later groups after a failure."""
+    if group.error is not None:
+        _record_group_failure(accumulators, group.rooms, group.error)
+        return
+    if group.user is None or event_cache is None:
+        msg = "Export group is missing its Matrix user or event cache"
+        raise RuntimeError(msg)
+    try:
+        client = await login_agent_user(homeserver, group.user, runtime_paths)
+    except Exception as exc:
+        _record_group_failure(accumulators, group.rooms, f"Matrix login failed: {exc}")
+        return
+    try:
+        group_accumulators = await _export_threads_for_targets_for_client(
+            client=client,
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=event_cache,
+            rooms=group.rooms,
+            targets=targets,
+            max_thread_roots=max_thread_roots,
+            prefer_cache=prefer_cache,
+        )
+    except Exception as exc:
+        _record_group_failure(accumulators, group.rooms, f"Export group failed: {exc}")
+        return
+    finally:
+        await client.close()
+    for accumulator, group_accumulator in zip(accumulators, group_accumulators, strict=True):
+        _merge_accumulator(accumulator, group_accumulator)
+
+
+async def export_threads_to_targets_once(
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    targets: Sequence[ThreadExportTarget],
+    room_filter: str | None = None,
+    max_thread_roots: int = 2000,
+    prefer_cache: bool = False,
+) -> tuple[ThreadExportStats, ...]:
+    """Login with persisted Matrix accounts and export once to every target.
+
+    Rooms come from ``matrix_state.yaml`` plus every entity's persisted invited rooms when at least
+    one target includes invited rooms.
+    Invited rooms are exported with the invited entity's own account, because the primary export
+    account is not necessarily a member of user-created rooms.
+
+    With ``prefer_cache`` thread bodies are served from the validated durable event cache and only
+    fetched from the homeserver on miss or invalidation; a failing miss-refetch may then fall back to
+    stale cached rows instead of failing the thread.
+    Only use it while the runtime keeps the cache fresh (in-process or alongside a live ``mindroom run``).
+
+    Each source thread is fetched once per room and fanned out to every authorized target.
+    Scoped targets retain only rooms where their required member is currently joined; failed
+    membership checks remove any prior room export before recording a failure.
+    """
+    resolved_targets = tuple(targets)
+    if not resolved_targets:
+        return ()
+    homeserver = runtime_matrix_homeserver(runtime_paths=runtime_paths)
+    state_rooms = _export_rooms(runtime_paths, room_filter)
+    invited_groups = (
+        _invited_export_rooms(
+            config,
+            runtime_paths,
+            room_filter,
+            known_room_ids={room.room_id for room in state_rooms},
+        )
+        if any(target.include_invited_rooms for target in resolved_targets)
+        else []
+    )
+    export_groups = _build_export_groups(
+        runtime_paths=runtime_paths,
+        homeserver=homeserver,
+        state_rooms=state_rooms,
+        invited_groups=invited_groups,
+    )
+
+    accumulators = tuple(_ThreadExportAccumulator(target=target) for target in resolved_targets)
+    if not export_groups:
+        _select_export_account(runtime_paths, homeserver)
+        if room_filter is None:
+            _reconcile_full_pass(accumulators)
+        return tuple(accumulator.stats() for accumulator in accumulators)
+
+    login_groups = [group for group in export_groups if group.user is not None]
+    support = (
+        build_owned_runtime_support(
+            cache_config=config.cache,
+            runtime_paths=runtime_paths,
+            logger=logger,
+            background_task_owner=object(),
+        )
+        if login_groups
+        else None
+    )
+    try:
+        if support is not None:
+            await support.event_cache.initialize()
+        for group in export_groups:
+            await _run_export_group(
+                group,
+                homeserver=homeserver,
+                config=config,
+                runtime_paths=runtime_paths,
+                event_cache=support.event_cache if support is not None else None,
+                targets=resolved_targets,
+                accumulators=accumulators,
+                max_thread_roots=max_thread_roots,
+                prefer_cache=prefer_cache,
+            )
+    finally:
+        if support is not None:
+            await close_owned_runtime_support(support, logger=logger)
+
+    if room_filter is None:
+        _reconcile_full_pass(accumulators)
+    return tuple(accumulator.stats() for accumulator in accumulators)
+
+
 async def export_threads_once(
     *,
     config: Config,
@@ -560,113 +1004,19 @@ async def export_threads_once(
     required_member_user_id: str | None = None,
     include_invited_rooms: bool = True,
 ) -> ThreadExportStats:
-    """Login using persisted Matrix credentials and run one export pass.
-
-    Rooms come from ``matrix_state.yaml`` plus every entity's persisted invited rooms unless
-    ``include_invited_rooms`` is disabled.
-    Invited rooms are exported with the invited entity's own account, because the primary export
-    account is not necessarily a member of user-created rooms.
-
-    With ``prefer_cache`` thread bodies are served from the validated durable event cache and only
-    fetched from the homeserver on miss or invalidation; a failing miss-refetch may then fall back to
-    stale cached rows instead of failing the thread.
-    Only use it while the runtime keeps the cache fresh (in-process or alongside a live ``mindroom run``).
-
-    With ``required_member_user_id`` only rooms where that user is currently joined are exported;
-    rooms whose membership lookup fails are skipped and recorded as failures (fail closed).
-    """
-    homeserver = runtime_matrix_homeserver(runtime_paths=runtime_paths)
-    resolved_output_dir = output_dir or _default_thread_export_dir(runtime_paths)
-    state_rooms = _export_rooms(runtime_paths, room_filter)
-    invited_groups = (
-        _invited_export_rooms(
-            config,
-            runtime_paths,
-            room_filter,
-            known_room_ids={room.room_id for room in state_rooms},
-        )
-        if include_invited_rooms
-        else []
-    )
-    failures: list[_ThreadExportFailure] = []
-    export_groups: list[tuple[AgentMatrixUser, list[_ThreadExportRoom]]] = []
-    if state_rooms:
-        export_groups.append((_select_export_account(runtime_paths, homeserver), list(state_rooms)))
-    accounts = matrix_state_for_runtime(runtime_paths).accounts
-    for entity_name, entity_rooms in invited_groups:
-        account_key = managed_account_key(entity_name)
-        account = accounts.get(account_key)
-        if account is None:
-            failures.extend(
-                _ThreadExportFailure(
-                    room_key=room.key,
-                    room_id=room.room_id,
-                    thread_id=None,
-                    error=f"No persisted Matrix account for invited-room entity '{entity_name}'",
-                )
-                for room in entity_rooms
-            )
-            continue
-        export_groups.append(
-            (
-                _account_user_from_state(
-                    account_key=account_key,
-                    account=account,
-                    homeserver=homeserver,
-                    runtime_paths=runtime_paths,
-                ),
-                entity_rooms,
-            ),
-        )
-
-    if not export_groups:
-        _select_export_account(runtime_paths, homeserver)
-        return ThreadExportStats(output_dir=resolved_output_dir, failed_items=tuple(failures))
-
-    rooms_exported = 0
-    threads_seen = 0
-    threads_exported = 0
-    threads_unchanged = 0
-    truncated_rooms = 0
-    support = build_owned_runtime_support(
-        cache_config=config.cache,
+    """Run one thread export pass for a single destination."""
+    stats = await export_threads_to_targets_once(
+        config=config,
         runtime_paths=runtime_paths,
-        logger=logger,
-        background_task_owner=object(),
+        targets=(
+            ThreadExportTarget(
+                output_dir=output_dir or _default_thread_export_dir(runtime_paths),
+                required_member_user_id=required_member_user_id,
+                include_invited_rooms=include_invited_rooms,
+            ),
+        ),
+        room_filter=room_filter,
+        max_thread_roots=max_thread_roots,
+        prefer_cache=prefer_cache,
     )
-    try:
-        await support.event_cache.initialize()
-        for export_user, group_rooms in export_groups:
-            client = await login_agent_user(homeserver, export_user, runtime_paths)
-            try:
-                stats = await _export_threads_for_client(
-                    client=client,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    event_cache=support.event_cache,
-                    rooms=group_rooms,
-                    output_dir=resolved_output_dir,
-                    max_thread_roots=max_thread_roots,
-                    prefer_cache=prefer_cache,
-                    required_member_user_id=required_member_user_id,
-                )
-            finally:
-                await client.close()
-            rooms_exported += stats.rooms_exported
-            threads_seen += stats.threads_seen
-            threads_exported += stats.threads_exported
-            threads_unchanged += stats.threads_unchanged
-            truncated_rooms += stats.truncated_rooms
-            failures.extend(stats.failed_items)
-    finally:
-        await close_owned_runtime_support(support, logger=logger)
-
-    return ThreadExportStats(
-        output_dir=resolved_output_dir,
-        rooms_exported=rooms_exported,
-        threads_seen=threads_seen,
-        threads_exported=threads_exported,
-        threads_unchanged=threads_unchanged,
-        truncated_rooms=truncated_rooms,
-        failed_items=tuple(failures),
-    )
+    return stats[0]

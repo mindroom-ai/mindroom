@@ -284,6 +284,7 @@ By default it writes to `<storage>/thread_exports`.
 A thread file is only rewritten when its content changed, so `exported_at` reflects the last content-changing export.
 Each thread document includes the latest MindRoom thread summary as `thread.summary` when one exists.
 Each room directory also gets an `index.json` mapping every thread file to its message count, participants, latest summary, and last activity, sorted by most recent activity.
+Complete passes remove exported room and thread files that are no longer present or authorized; a `--room` pass only reconciles the selected room.
 With `--prefer-cache` thread bodies are served from the durable event cache and only fetched from the homeserver on miss or invalidation; use it alongside a running MindRoom that keeps the cache fresh.
 
 <!-- CODE:START -->

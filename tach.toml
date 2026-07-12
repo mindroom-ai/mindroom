@@ -3643,6 +3643,15 @@ from = ["mindroom.tool_system.plugin_identity"]
 
 [[interfaces]]
 expose = [
+    "ThreadExportStats",
+    "ThreadExportTarget",
+    "export_threads_once",
+    "export_threads_to_targets_once",
+]
+from = ["mindroom.thread_export"]
+
+[[interfaces]]
+expose = [
     "ResolvedWorkerTarget",
     "ResolvedWorkerKeyScope",
     "SerializedToolExecutionIdentity",

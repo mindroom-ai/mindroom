@@ -18,15 +18,21 @@ from mindroom.matrix.invited_rooms_store import invited_rooms_path
 from mindroom.matrix.state import MatrixAccount, MatrixRoom, MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 from mindroom.thread_export import (
-    ThreadExportStats,
+    ThreadExportTarget,
     _export_rooms,
     _export_threads_for_client,
+    _export_threads_for_targets_for_client,
     _safe_path_segment,
+    _thread_index_entry,
+    _ThreadExportAccumulator,
+    _ThreadExportRoom,
     export_threads_once,
+    export_threads_to_targets_once,
 )
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -333,16 +339,18 @@ async def test_room_index_not_rewritten_when_unchanged(tmp_path: Path) -> None:
         )
         index_path = tmp_path / "exports" / "lobby" / "index.json"
         first_mtime = index_path.stat().st_mtime_ns
-        await _export_threads_for_client(
-            client=Mock(),
-            config=config,
-            runtime_paths=runtime_paths,
-            event_cache=Mock(),
-            output_dir=tmp_path / "exports",
-            rooms=_export_rooms(runtime_paths, "lobby"),
-        )
+        with patch("mindroom.thread_export._write_room_index") as write_index:
+            await _export_threads_for_client(
+                client=Mock(),
+                config=config,
+                runtime_paths=runtime_paths,
+                event_cache=Mock(),
+                output_dir=tmp_path / "exports",
+                rooms=_export_rooms(runtime_paths, "lobby"),
+            )
 
     assert index_path.stat().st_mtime_ns == first_mtime
+    write_index.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -497,6 +505,153 @@ async def test_export_threads_rewrites_when_existing_file_corrupt(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_export_threads_rewrites_existing_file_with_invalid_utf8(tmp_path: Path) -> None:
+    """An invalid UTF-8 export should be treated as corrupt and rewritten."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    _write_matrix_state(tmp_path)
+    export_path = tmp_path / "exports" / "lobby" / f"{quote('$fresh:localhost', safe='')}.yaml"
+    export_path.parent.mkdir(parents=True)
+    export_path.write_bytes(b"\x80")
+    history = [
+        ResolvedVisibleMessage.synthetic(
+            sender="@alice:localhost",
+            body="Fresh content",
+            event_id="$fresh:localhost",
+        ),
+    ]
+
+    with (
+        patch(
+            "mindroom.thread_export.enumerate_room_thread_root_ids",
+            new=AsyncMock(return_value=(["$fresh:localhost"], False)),
+        ),
+        patch(
+            "mindroom.thread_export.refresh_thread_history_from_source",
+            new=AsyncMock(return_value=history),
+        ),
+    ):
+        stats = await _export_threads_for_client(
+            client=Mock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=Mock(),
+            output_dir=tmp_path / "exports",
+            rooms=_export_rooms(runtime_paths, "lobby"),
+        )
+
+    assert stats.failures == 0
+    assert yaml.safe_load(export_path.read_text(encoding="utf-8"))["messages"][0]["body"] == "Fresh content"
+
+
+def test_thread_index_entry_ignores_invalid_utf8(tmp_path: Path) -> None:
+    """One invalid UTF-8 YAML file should not abort a room index rebuild."""
+    invalid_file = tmp_path / "invalid.yaml"
+    invalid_file.write_bytes(b"\x80")
+
+    assert _thread_index_entry(invalid_file) is None
+
+
+@pytest.mark.asyncio
+async def test_multi_target_export_fetches_each_thread_once(tmp_path: Path) -> None:
+    """Multiple destinations should share enumeration and source history retrieval."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    _write_matrix_state(tmp_path)
+    history = [
+        ResolvedVisibleMessage.synthetic(
+            sender="@alice:localhost",
+            body="Shared source fetch",
+            event_id="$shared:localhost",
+        ),
+    ]
+    enumerate_threads = AsyncMock(return_value=(["$shared:localhost"], False))
+    fetch_thread = AsyncMock(return_value=history)
+    targets = (
+        ThreadExportTarget(output_dir=tmp_path / "first"),
+        ThreadExportTarget(output_dir=tmp_path / "second"),
+    )
+
+    with (
+        patch("mindroom.thread_export.enumerate_room_thread_root_ids", new=enumerate_threads),
+        patch("mindroom.thread_export.refresh_thread_history_from_source", new=fetch_thread),
+    ):
+        accumulators = await _export_threads_for_targets_for_client(
+            client=Mock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=Mock(),
+            rooms=_export_rooms(runtime_paths, "lobby"),
+            targets=targets,
+        )
+
+    enumerate_threads.assert_awaited_once()
+    fetch_thread.assert_awaited_once()
+    assert [accumulator.stats().threads_exported for accumulator in accumulators] == [1, 1]
+    assert all(len(list((target.output_dir / "lobby").glob("*.yaml"))) == 1 for target in targets)
+
+
+@pytest.mark.asyncio
+async def test_complete_room_export_removes_stale_thread_files(tmp_path: Path) -> None:
+    """A complete enumeration should remove vanished threads before rebuilding the index."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    _write_matrix_state(tmp_path)
+    room = _export_rooms(runtime_paths, "lobby")
+    histories = {
+        "$old:localhost": [
+            ResolvedVisibleMessage.synthetic(sender="@alice:localhost", body="Old", event_id="$old:localhost"),
+        ],
+        "$new:localhost": [
+            ResolvedVisibleMessage.synthetic(sender="@alice:localhost", body="New", event_id="$new:localhost"),
+        ],
+    }
+
+    async def fetch_history(
+        _client: object,
+        _room_id: str,
+        thread_id: str,
+        *_args: object,
+        **_kwargs: object,
+    ) -> object:
+        return histories[thread_id]
+
+    with patch(
+        "mindroom.thread_export.refresh_thread_history_from_source",
+        new=AsyncMock(side_effect=fetch_history),
+    ):
+        with patch(
+            "mindroom.thread_export.enumerate_room_thread_root_ids",
+            new=AsyncMock(return_value=(["$old:localhost"], False)),
+        ):
+            await _export_threads_for_client(
+                client=Mock(),
+                config=config,
+                runtime_paths=runtime_paths,
+                event_cache=Mock(),
+                output_dir=tmp_path / "exports",
+                rooms=room,
+            )
+        with patch(
+            "mindroom.thread_export.enumerate_room_thread_root_ids",
+            new=AsyncMock(return_value=(["$new:localhost"], False)),
+        ):
+            await _export_threads_for_client(
+                client=Mock(),
+                config=config,
+                runtime_paths=runtime_paths,
+                event_cache=Mock(),
+                output_dir=tmp_path / "exports",
+                rooms=room,
+            )
+
+    room_dir = tmp_path / "exports" / "lobby"
+    assert {path.name for path in room_dir.glob("*.yaml")} == {f"{quote('$new:localhost', safe='')}.yaml"}
+    index = json.loads((room_dir / "index.json").read_text(encoding="utf-8"))
+    assert [entry["thread_id"] for entry in index["threads"]] == ["$new:localhost"]
+
+
+@pytest.mark.asyncio
 async def test_member_filter_exports_only_rooms_with_member(tmp_path: Path) -> None:
     """required_member_user_id should skip rooms the user is not currently joined to."""
     config = _config(tmp_path)
@@ -516,6 +671,9 @@ async def test_member_filter_exports_only_rooms_with_member(tmp_path: Path) -> N
 
     client = Mock()
     client.joined_members = AsyncMock(side_effect=joined_members)
+    stale_dev_dir = tmp_path / "exports" / "dev"
+    stale_dev_dir.mkdir(parents=True)
+    (stale_dev_dir / "old.yaml").write_text("secret", encoding="utf-8")
     history = [
         ResolvedVisibleMessage.synthetic(
             sender="@alice:localhost",
@@ -559,6 +717,10 @@ async def test_member_filter_records_failure_when_membership_lookup_fails(tmp_pa
     _write_matrix_state(tmp_path)
     client = Mock()
     client.joined_members = AsyncMock(return_value=Mock())
+    for room_key in ("lobby", "dev"):
+        stale_room_dir = tmp_path / "exports" / room_key
+        stale_room_dir.mkdir(parents=True)
+        (stale_room_dir / "old.yaml").write_text("secret", encoding="utf-8")
 
     with patch(
         "mindroom.thread_export.enumerate_room_thread_root_ids",
@@ -578,7 +740,7 @@ async def test_member_filter_records_failure_when_membership_lookup_fails(tmp_pa
     assert stats.failures == 2
     assert all("Membership lookup failed" in failure.error for failure in stats.failed_items)
     enumerate_threads.assert_not_awaited()
-    assert not (tmp_path / "exports").exists()
+    assert not any((tmp_path / "exports").iterdir())
 
 
 @pytest.mark.asyncio
@@ -664,9 +826,27 @@ def _mock_runtime_support() -> Mock:
     return support
 
 
+def _successful_group_result(
+    *,
+    targets: Sequence[ThreadExportTarget],
+    rooms: Sequence[_ThreadExportRoom],
+    **_kwargs: object,
+) -> tuple[_ThreadExportAccumulator, ...]:
+    """Return one successful internal result per requested export target."""
+    return tuple(
+        _ThreadExportAccumulator(
+            target=target,
+            rooms_exported=1,
+            threads_exported=1,
+            retained_room_keys={room.key for room in rooms},
+        )
+        for target in targets
+    )
+
+
 @pytest.mark.asyncio
-async def test_export_threads_once_closes_client_and_support_when_export_fails(tmp_path: Path) -> None:
-    """Each group's Matrix client and the owned runtime support should close when an export fails."""
+async def test_export_threads_once_records_group_failure_and_continues_cleanup(tmp_path: Path) -> None:
+    """An unexpected group failure should close resources and return room failures."""
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     _write_matrix_state(tmp_path)
@@ -679,15 +859,16 @@ async def test_export_threads_once_closes_client_and_support_when_export_fails(t
         patch("mindroom.thread_export.build_owned_runtime_support", return_value=_mock_runtime_support()),
         patch("mindroom.thread_export.close_owned_runtime_support", new=AsyncMock()) as close_support,
         patch(
-            "mindroom.thread_export._export_threads_for_client",
+            "mindroom.thread_export._export_threads_for_targets_for_client",
             new=AsyncMock(side_effect=RuntimeError("export failed")),
         ),
-        pytest.raises(RuntimeError, match="export failed"),
     ):
-        await export_threads_once(config=config, runtime_paths=runtime_paths)
+        stats = await export_threads_once(config=config, runtime_paths=runtime_paths)
 
     client.close.assert_awaited_once()
     close_support.assert_awaited_once()
+    assert stats.failures == 2
+    assert all("Export group failed: export failed" in failure.error for failure in stats.failed_items)
 
 
 @pytest.mark.asyncio
@@ -705,10 +886,8 @@ async def test_export_threads_once_exports_invited_rooms_with_entity_account(tmp
         patch("mindroom.thread_export.build_owned_runtime_support", return_value=_mock_runtime_support()),
         patch("mindroom.thread_export.close_owned_runtime_support", new=AsyncMock()),
         patch(
-            "mindroom.thread_export._export_threads_for_client",
-            new=AsyncMock(
-                return_value=ThreadExportStats(output_dir=tmp_path, rooms_exported=1, threads_exported=1),
-            ),
+            "mindroom.thread_export._export_threads_for_targets_for_client",
+            new=AsyncMock(side_effect=_successful_group_result),
         ) as export_group,
     ):
         stats = await export_threads_once(config=config, runtime_paths=runtime_paths)
@@ -727,6 +906,41 @@ async def test_export_threads_once_exports_invited_rooms_with_entity_account(tmp
 
 
 @pytest.mark.asyncio
+async def test_export_threads_once_continues_after_one_account_login_failure(tmp_path: Path) -> None:
+    """A broken account group should not prevent later invited-room groups from exporting."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    _write_matrix_state(tmp_path, account_keys=(INTERNAL_USER_ACCOUNT_KEY, "agent_general"))
+    _write_invited_rooms(runtime_paths, "general", ["!user-room:localhost"])
+    client = Mock()
+    client.close = AsyncMock()
+    login = AsyncMock(side_effect=[RuntimeError("expired token"), client])
+
+    with (
+        patch("mindroom.thread_export.login_agent_user", new=login),
+        patch("mindroom.thread_export.build_owned_runtime_support", return_value=_mock_runtime_support()),
+        patch("mindroom.thread_export.close_owned_runtime_support", new=AsyncMock()),
+        patch(
+            "mindroom.thread_export._export_threads_for_targets_for_client",
+            new=AsyncMock(side_effect=_successful_group_result),
+        ) as export_group,
+    ):
+        stats = await export_threads_to_targets_once(
+            config=config,
+            runtime_paths=runtime_paths,
+            targets=(ThreadExportTarget(output_dir=tmp_path / "exports"),),
+        )
+
+    assert login.await_count == 2
+    export_group.assert_awaited_once()
+    assert [room.room_id for room in export_group.await_args.kwargs["rooms"]] == ["!user-room:localhost"]
+    assert stats[0].rooms_exported == 1
+    assert stats[0].failures == 2
+    assert all("Matrix login failed: expired token" in failure.error for failure in stats[0].failed_items)
+    client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_export_threads_once_dedups_invited_rooms_already_in_state(tmp_path: Path) -> None:
     """Invited rooms already tracked in matrix_state should not export twice."""
     config = _config(tmp_path)
@@ -741,8 +955,8 @@ async def test_export_threads_once_dedups_invited_rooms_already_in_state(tmp_pat
         patch("mindroom.thread_export.build_owned_runtime_support", return_value=_mock_runtime_support()),
         patch("mindroom.thread_export.close_owned_runtime_support", new=AsyncMock()),
         patch(
-            "mindroom.thread_export._export_threads_for_client",
-            new=AsyncMock(return_value=ThreadExportStats(output_dir=tmp_path)),
+            "mindroom.thread_export._export_threads_for_targets_for_client",
+            new=AsyncMock(side_effect=_successful_group_result),
         ) as export_group,
     ):
         await export_threads_once(config=config, runtime_paths=runtime_paths)
@@ -761,6 +975,9 @@ async def test_export_threads_once_skips_invited_rooms_when_disabled(tmp_path: P
     runtime_paths = runtime_paths_for(config)
     _write_matrix_state(tmp_path, account_keys=("agent_general",))
     _write_invited_rooms(runtime_paths, "general", ["!user-room:localhost"])
+    invited_export_dir = runtime_paths.storage_root / "thread_exports" / quote("!user-room:localhost", safe="")
+    invited_export_dir.mkdir(parents=True)
+    (invited_export_dir / "old.yaml").write_text("secret", encoding="utf-8")
     client = Mock()
     client.close = AsyncMock()
 
@@ -769,8 +986,8 @@ async def test_export_threads_once_skips_invited_rooms_when_disabled(tmp_path: P
         patch("mindroom.thread_export.build_owned_runtime_support", return_value=_mock_runtime_support()),
         patch("mindroom.thread_export.close_owned_runtime_support", new=AsyncMock()),
         patch(
-            "mindroom.thread_export._export_threads_for_client",
-            new=AsyncMock(return_value=ThreadExportStats(output_dir=tmp_path)),
+            "mindroom.thread_export._export_threads_for_targets_for_client",
+            new=AsyncMock(side_effect=_successful_group_result),
         ) as export_group,
     ):
         await export_threads_once(config=config, runtime_paths=runtime_paths, include_invited_rooms=False)
@@ -780,6 +997,7 @@ async def test_export_threads_once_skips_invited_rooms_when_disabled(tmp_path: P
         "!lobby:localhost",
         "!dev:localhost",
     ]
+    assert not invited_export_dir.exists()
 
 
 @pytest.mark.asyncio
@@ -797,8 +1015,8 @@ async def test_export_threads_once_room_filter_selects_invited_room(tmp_path: Pa
         patch("mindroom.thread_export.build_owned_runtime_support", return_value=_mock_runtime_support()),
         patch("mindroom.thread_export.close_owned_runtime_support", new=AsyncMock()),
         patch(
-            "mindroom.thread_export._export_threads_for_client",
-            new=AsyncMock(return_value=ThreadExportStats(output_dir=tmp_path)),
+            "mindroom.thread_export._export_threads_for_targets_for_client",
+            new=AsyncMock(side_effect=_successful_group_result),
         ) as export_group,
     ):
         await export_threads_once(
@@ -826,8 +1044,8 @@ async def test_export_threads_once_records_failure_for_invited_room_without_acco
         patch("mindroom.thread_export.build_owned_runtime_support", return_value=_mock_runtime_support()),
         patch("mindroom.thread_export.close_owned_runtime_support", new=AsyncMock()),
         patch(
-            "mindroom.thread_export._export_threads_for_client",
-            new=AsyncMock(return_value=ThreadExportStats(output_dir=tmp_path)),
+            "mindroom.thread_export._export_threads_for_targets_for_client",
+            new=AsyncMock(side_effect=_successful_group_result),
         ) as export_group,
     ):
         stats = await export_threads_once(config=config, runtime_paths=runtime_paths)
