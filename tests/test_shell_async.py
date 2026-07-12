@@ -850,8 +850,8 @@ async def test_local_shell_replaces_stale_agent_workspace_env(tmp_path: Path) ->
     assert result.splitlines() == [f"[cwd: {workspace}]", str(workspace.resolve())]
 
 
-def test_run_shell_command_description_notes_host_home_in_local_mode(tmp_path: Path) -> None:
-    """Local-mode tool description warns that `~` is not the workspace."""
+def test_run_shell_command_description_uses_portable_workspace_paths(tmp_path: Path) -> None:
+    """The shell description should give workspace guidance valid in every execution mode."""
     workspace = tmp_path / "workspace"
     runtime_paths = _make_runtime_paths(tmp_path, process_env={"HOME": "/home/host-user"})
     tool = get_tool_by_name(
@@ -864,26 +864,33 @@ def test_run_shell_command_description_notes_host_home_in_local_mode(tmp_path: P
 
     description = tool.async_functions["run_shell_command"].description
     assert description is not None
-    assert "point at the host home" in description
+    assert "Always use relative paths" in description
     assert "$MINDROOM_AGENT_WORKSPACE" in description
+    assert "worker-routed execution maps `~` to the workspace" in description
+    assert "local execution maps it to the host home" in description
 
 
-def test_run_shell_command_description_notes_workspace_home_in_worker_mode(tmp_path: Path) -> None:
-    """Worker-mode tool description says `~` points at the workspace."""
+def test_proxied_run_shell_command_description_does_not_claim_host_home(tmp_path: Path) -> None:
+    """The model-facing proxy description must not misidentify worker execution as local."""
     workspace = tmp_path / "workspace"
-    runtime_paths = _make_runtime_paths(tmp_path, process_env=dict(workspace_home_identity_env(workspace)))
+    runtime_paths = _make_runtime_paths(
+        tmp_path,
+        process_env={
+            "HOME": "/home/host-user",
+            "MINDROOM_SANDBOX_EXECUTION_MODE": "all",
+        },
+    )
     tool = get_tool_by_name(
         "shell",
         runtime_paths,
-        disable_sandbox_proxy=True,
         worker_target=None,
         tool_init_overrides={"base_dir": str(workspace)},
     )
 
     description = tool.async_functions["run_shell_command"].description
     assert description is not None
-    assert "`~` and `$HOME` point at the workspace too" in description
-    assert "host home" not in description
+    assert "worker-routed execution maps `~` to the workspace" in description
+    assert "`~` and `$HOME` point at the host home" not in description
 
 
 def test_run_shell_command_description_has_no_workspace_note_without_base_dir(tmp_path: Path) -> None:

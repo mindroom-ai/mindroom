@@ -80,6 +80,12 @@ _SHELL_ARGS_ERROR = (
     '\'args\' must be a shell command string or a flat list of strings. Send args like "ls -la" or ["git", "status"].'
 )
 _SHELL_COMMAND_LINE_CHARS = frozenset("$|&;<>*?~`!(){}[]\n\r")
+_WORKSPACE_CWD_NOTE = (
+    "The command runs in your agent workspace as its working directory "
+    "(echoed as a `[cwd: ...]` first line in the result). Always use relative paths or "
+    "`$MINDROOM_AGENT_WORKSPACE` for workspace files instead of `~`: worker-routed execution maps `~` "
+    "to the workspace, while local execution maps it to the host home."
+)
 
 # Module-level process registry shared across all MindRoomShellTools instances.
 # This ensures handles survive toolkit re-creation for local execution; when a
@@ -180,20 +186,6 @@ def _shell_subprocess_env(
         env["PATH"] = path_value
     env.update(vendor_telemetry_env_values())
     return env
-
-
-def _workspace_cwd_note(base_process_env: dict[str, str]) -> str:
-    """One mode-true sentence about where shell commands run, appended to the tool description."""
-    if _workspace_home_contract_env_from_process_env(base_process_env):
-        return (
-            "The command runs in your agent workspace as its working directory "
-            "(echoed as a `[cwd: ...]` first line in the result); `~` and `$HOME` point at the workspace too."
-        )
-    return (
-        "The command runs in your agent workspace as its working directory "
-        "(echoed as a `[cwd: ...]` first line in the result), but `~` and `$HOME` point at the host home, "
-        "not your workspace. For workspace files use relative paths or `$MINDROOM_AGENT_WORKSPACE`, never `~`."
-    )
 
 
 def _login_bash_command_index(args: list[str]) -> int | None:
@@ -378,7 +370,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             self._base_process_env = dict(runtime_paths.process_env)
             if run_shell_command_function is not None and self.base_dir is not None:
                 run_shell_command_function.description = (
-                    f"{run_shell_command_function.description or ''}\n\n{_workspace_cwd_note(self._base_process_env)}"
+                    f"{run_shell_command_function.description or ''}\n\n{_WORKSPACE_CWD_NOTE}"
                 ).strip()
             self._handle_namespace = _handle_namespace(runtime_paths=runtime_paths, base_dir=self.base_dir)
             self._shell_path_prepend = shell_path_prepend
