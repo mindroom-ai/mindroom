@@ -956,6 +956,7 @@ agents:
       - subagents
       - matrix_message
       - thread_tags
+      - thread_summary
     skills:
       - mindroom-docs
     instructions:
