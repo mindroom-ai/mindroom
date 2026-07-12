@@ -755,6 +755,34 @@ async def test_export_threads_once_dedups_invited_rooms_already_in_state(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_export_threads_once_skips_invited_rooms_when_disabled(tmp_path: Path) -> None:
+    """include_invited_rooms=False should export only matrix_state rooms."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    _write_matrix_state(tmp_path, account_keys=("agent_general",))
+    _write_invited_rooms(runtime_paths, "general", ["!user-room:localhost"])
+    client = Mock()
+    client.close = AsyncMock()
+
+    with (
+        patch("mindroom.thread_export.login_agent_user", new=AsyncMock(return_value=client)),
+        patch("mindroom.thread_export.build_owned_runtime_support", return_value=_mock_runtime_support()),
+        patch("mindroom.thread_export.close_owned_runtime_support", new=AsyncMock()),
+        patch(
+            "mindroom.thread_export._export_threads_for_client",
+            new=AsyncMock(return_value=ThreadExportStats(output_dir=tmp_path)),
+        ) as export_group,
+    ):
+        await export_threads_once(config=config, runtime_paths=runtime_paths, include_invited_rooms=False)
+
+    export_group.assert_awaited_once()
+    assert [room.room_id for room in export_group.await_args.kwargs["rooms"]] == [
+        "!lobby:localhost",
+        "!dev:localhost",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_export_threads_once_room_filter_selects_invited_room(tmp_path: Path) -> None:
     """A room-id filter matching only an invited room should export just that room."""
     config = _config(tmp_path)

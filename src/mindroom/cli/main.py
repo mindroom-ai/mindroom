@@ -352,6 +352,11 @@ def _threads_export_command(
         help="Serve thread bodies from the durable event cache and only fetch from the homeserver "
         "on miss or invalidation. Use alongside a running MindRoom that keeps the cache fresh.",
     ),
+    invited_rooms: bool = typer.Option(
+        True,
+        "--invited-rooms/--no-invited-rooms",
+        help="Include rooms joined through authorized invites (user-created rooms).",
+    ),
 ) -> None:
     """Export Matrix threads to YAML files for grep/ripgrep search."""
     asyncio.run(
@@ -364,6 +369,7 @@ def _threads_export_command(
             interval=interval,
             max_thread_roots=max_thread_roots,
             prefer_cache=prefer_cache,
+            include_invited_rooms=invited_rooms,
         ),
     )
 
@@ -407,6 +413,7 @@ async def _threads_export(
     interval: int,
     max_thread_roots: int,
     prefer_cache: bool,
+    include_invited_rooms: bool,
 ) -> None:
     """Run one thread export command."""
     from mindroom.thread_export import export_threads_once  # noqa: PLC0415
@@ -429,6 +436,7 @@ async def _threads_export(
                 room_filter=room,
                 max_thread_roots=max_thread_roots,
                 prefer_cache=prefer_cache,
+                include_invited_rooms=include_invited_rooms,
             )
         except (OSError, RuntimeError) as exc:
             _handle_thread_export_error(exc, runtime_paths, watch=watch)

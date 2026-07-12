@@ -558,10 +558,12 @@ async def export_threads_once(
     max_thread_roots: int = 2000,
     prefer_cache: bool = False,
     required_member_user_id: str | None = None,
+    include_invited_rooms: bool = True,
 ) -> ThreadExportStats:
     """Login using persisted Matrix credentials and run one export pass.
 
-    Rooms come from ``matrix_state.yaml`` plus every entity's persisted invited rooms.
+    Rooms come from ``matrix_state.yaml`` plus every entity's persisted invited rooms unless
+    ``include_invited_rooms`` is disabled.
     Invited rooms are exported with the invited entity's own account, because the primary export
     account is not necessarily a member of user-created rooms.
 
@@ -576,11 +578,15 @@ async def export_threads_once(
     homeserver = runtime_matrix_homeserver(runtime_paths=runtime_paths)
     resolved_output_dir = output_dir or _default_thread_export_dir(runtime_paths)
     state_rooms = _export_rooms(runtime_paths, room_filter)
-    invited_groups = _invited_export_rooms(
-        config,
-        runtime_paths,
-        room_filter,
-        known_room_ids={room.room_id for room in state_rooms},
+    invited_groups = (
+        _invited_export_rooms(
+            config,
+            runtime_paths,
+            room_filter,
+            known_room_ids={room.room_id for room in state_rooms},
+        )
+        if include_invited_rooms
+        else []
     )
     failures: list[_ThreadExportFailure] = []
     export_groups: list[tuple[AgentMatrixUser, list[_ThreadExportRoom]]] = []

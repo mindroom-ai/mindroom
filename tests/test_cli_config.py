@@ -2018,7 +2018,27 @@ class TestVersionAndHelp:
         assert export_kwargs["room_filter"] == "lob"
         assert export_kwargs["max_thread_roots"] == 11
         assert export_kwargs["prefer_cache"] is False
+        assert export_kwargs["include_invited_rooms"] is True
         assert export_kwargs["runtime_paths"].storage_root == storage_path.resolve()
+
+    def test_threads_export_forwards_no_invited_rooms_flag(self, tmp_path: Path) -> None:
+        """The --no-invited-rooms flag should reach the exporter."""
+        config_path = tmp_path / "config.yaml"
+        storage_path = tmp_path / "storage"
+        _write_minimal_runtime_config(config_path)
+
+        with patch(
+            "mindroom.thread_export.export_threads_once",
+            new=AsyncMock(return_value=ThreadExportStats(output_dir=tmp_path / "exports")),
+        ) as export_threads_once:
+            result = _invoke_with_runtime(
+                ["threads", "export", "--no-invited-rooms"],
+                config_path,
+                storage_path=storage_path,
+            )
+
+        assert result.exit_code == 0
+        assert export_threads_once.await_args.kwargs["include_invited_rooms"] is False
 
     def test_threads_export_forwards_prefer_cache_flag(self, tmp_path: Path) -> None:
         """The --prefer-cache flag should reach the exporter."""
@@ -2076,6 +2096,7 @@ class TestVersionAndHelp:
                 interval=7,
                 max_thread_roots=11,
                 prefer_cache=False,
+                include_invited_rooms=True,
             )
 
         assert exit_info.value.exit_code == 0

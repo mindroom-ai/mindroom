@@ -284,7 +284,7 @@ Export Matrix threads to local files.
 
 Export Matrix threads to YAML files for grep/ripgrep search.
 The command reads persisted Matrix accounts and rooms from `matrix_state.yaml`, so run MindRoom once before exporting.
-Rooms joined through authorized invites (user-created rooms) are exported too, each with the invited entity's own account.
+Rooms joined through authorized invites (user-created rooms) are exported too, each with the invited entity's own account, unless `--no-invited-rooms` is passed.
 By default it writes to `<storage>/thread_exports`.
 A thread file is only rewritten when its content changed, so `exported_at` reflects the last content-changing export.
 Each thread document includes the latest MindRoom thread summary as `thread.summary` when one exists.
@@ -309,27 +309,46 @@ With `--prefer-cache` thread bodies are served from the durable event cache and 
  Export Matrix threads to YAML files for grep/ripgrep search.
 
 ╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --config            -c      PATH     Use this config file path.              │
-│ --storage-path      -s      PATH     Base directory for persistent MindRoom  │
-│                                      data.                                   │
-│ --output            -o      PATH     Output directory. Defaults to           │
-│                                      <storage>/thread_exports.               │
-│ --room              -r      TEXT     Filter exported rooms by a substring of │
-│                                      the room key, alias, name, or Matrix    │
-│                                      room ID.                                │
-│ --watch                              Repeat the export forever on a fixed    │
-│                                      interval.                               │
-│ --interval                  INTEGER  Watch interval in seconds.              │
-│                                      [default: 300]                          │
-│ --max-thread-roots          INTEGER  Maximum thread roots to enumerate per   │
-│                                      room.                                   │
-│                                      [default: 2000]                         │
-│ --prefer-cache                       Serve thread bodies from the durable    │
-│                                      event cache and only fetch from the     │
-│                                      homeserver on miss or invalidation. Use │
-│                                      alongside a running MindRoom that keeps │
-│                                      the cache fresh.                        │
-│ --help              -h               Show this message and exit.             │
+│ --config            -c                        PATH     Use this config file  │
+│                                                        path.                 │
+│ --storage-path      -s                        PATH     Base directory for    │
+│                                                        persistent MindRoom   │
+│                                                        data.                 │
+│ --output            -o                        PATH     Output directory.     │
+│                                                        Defaults to           │
+│                                                        <storage>/thread_exp… │
+│ --room              -r                        TEXT     Filter exported rooms │
+│                                                        by a substring of the │
+│                                                        room key, alias,      │
+│                                                        name, or Matrix room  │
+│                                                        ID.                   │
+│ --watch                                                Repeat the export     │
+│                                                        forever on a fixed    │
+│                                                        interval.             │
+│ --interval                                    INTEGER  Watch interval in     │
+│                                                        seconds.              │
+│                                                        [default: 300]        │
+│ --max-thread-roots                            INTEGER  Maximum thread roots  │
+│                                                        to enumerate per      │
+│                                                        room.                 │
+│                                                        [default: 2000]       │
+│ --prefer-cache                                         Serve thread bodies   │
+│                                                        from the durable      │
+│                                                        event cache and only  │
+│                                                        fetch from the        │
+│                                                        homeserver on miss or │
+│                                                        invalidation. Use     │
+│                                                        alongside a running   │
+│                                                        MindRoom that keeps   │
+│                                                        the cache fresh.      │
+│ --invited-rooms         --no-invited-rooms             Include rooms joined  │
+│                                                        through authorized    │
+│                                                        invites (user-created │
+│                                                        rooms).               │
+│                                                        [default:             │
+│                                                        invited-rooms]        │
+│ --help              -h                                 Show this message and │
+│                                                        exit.                 │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 
 
