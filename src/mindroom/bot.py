@@ -1344,7 +1344,7 @@ class AgentBot:
         )
         client.add_event_callback(
             _create_task_wrapper(
-                self._call_manager.on_room_membership_event,
+                self._on_call_room_membership_event,
                 owner=self._runtime_view,
                 on_error=self._mark_callback_failed,
             ),
@@ -1358,6 +1358,17 @@ class AgentBot:
             ),
             AuthenticatedToDeviceEvent,
         )
+
+    async def _on_call_room_membership_event(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMemberEvent,
+    ) -> None:
+        """Apply call teardown before dropping persisted ad-hoc room ownership."""
+        call_manager = self._call_manager
+        if call_manager is not None:
+            await call_manager.on_room_membership_event(room, event)
+        self._room_lifecycle.forget_invited_room_after_own_leave(room, event)
 
     async def start(self) -> None:
         """Start the agent bot with user account setup (but don't join rooms yet)."""

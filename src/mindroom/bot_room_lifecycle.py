@@ -136,6 +136,15 @@ class BotRoomLifecycle:
             return
         save_invited_rooms(self.invited_rooms_file_path(), self.invited_rooms)
 
+    def forget_invited_room_after_own_leave(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
+        """Stop preserving an ad-hoc room after this bot was kicked, banned, or left."""
+        if event.state_key != self.deps.agent_user.user_id or event.membership not in {"leave", "ban"}:
+            return
+        if room.room_id not in self.invited_rooms:
+            return
+        self.invited_rooms.remove(room.room_id)
+        self.save_invited_rooms()
+
     async def join_configured_rooms(self) -> None:
         """Join all rooms this bot should preserve across restarts."""
         client = self._client()

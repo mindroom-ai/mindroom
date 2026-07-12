@@ -191,10 +191,27 @@ class CallManager:
 
     async def on_room_membership_event(self, room: nio.MatrixRoom, _event: nio.RoomMemberEvent) -> None:
         """Reconcile calls when a user's underlying room membership changes."""
-        if self._shutting_down or not self._is_configured_call_room(room):
+        if self._shutting_down:
+            return
+        if _event.state_key == self._client.user_id and _event.membership in {"leave", "ban"}:
+            await self._handle_own_room_leave(room.room_id)
+            return
+        if not self._is_configured_call_room(room):
             return
         self._observed_rooms[room.room_id] = room
         await self._reconcile(room)
+
+    async def _handle_own_room_leave(self, room_id: str) -> None:
+        """Tear down call state immediately when the bot no longer belongs to the room."""
+        self._observed_rooms.pop(room_id, None)
+        self._pending_keys.pop(room_id, None)
+        self._clear_logical_call(room_id)
+        expiry = self._expiry_handles.pop(room_id, None)
+        if expiry is not None:
+            expiry.cancel()
+        session = self._sessions.pop(room_id, None)
+        if session is not None:
+            await self._stop_session(session)
 
     async def on_to_device_event(self, event: nio.ToDeviceEvent) -> None:
         """Sync callback for decrypted call frame-key to-device events."""

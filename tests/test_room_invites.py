@@ -332,6 +332,55 @@ async def test_router_deduplicates_concurrent_invite_callbacks(
     assert bot._room_lifecycle.invited_rooms == {"!router-invited:localhost"}
 
 
+def test_agent_forgets_persisted_invited_room_after_being_kicked(
+    tmp_path: Path,
+) -> None:
+    """An ephemeral call room cannot be rejoined after its creator removes the agent."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "agent1": AgentConfig(
+                    display_name="Agent 1",
+                    role="Test agent",
+                    accept_invites=True,
+                ),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot = AgentBot(
+        agent_user=AgentMatrixUser(
+            agent_name="agent1",
+            user_id="@mindroom_agent1:localhost",
+            display_name="Agent 1",
+            password=TEST_PASSWORD,
+        ),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    room_id = "!agent-call:localhost"
+    bot._room_lifecycle.invited_rooms = {room_id}
+    bot._room_lifecycle.save_invited_rooms()
+    room = nio.MatrixRoom(room_id=room_id, own_user_id="@mindroom_agent1:localhost")
+    event = nio.RoomMemberEvent.from_dict(
+        {
+            "event_id": "$leave",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1,
+            "type": "m.room.member",
+            "state_key": "@mindroom_agent1:localhost",
+            "content": {"membership": "leave"},
+        },
+    )
+    assert isinstance(event, nio.RoomMemberEvent)
+
+    bot._room_lifecycle.forget_invited_room_after_own_leave(room, event)
+
+    assert bot._room_lifecycle.invited_rooms == set()
+    assert _invited_rooms_path(config, "agent1").read_text(encoding="utf-8") == "[]\n"
+
+
 @pytest.mark.asyncio
 async def test_router_duplicate_invite_retries_failed_welcome_delivery(
     monkeypatch: pytest.MonkeyPatch,

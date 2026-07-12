@@ -191,6 +191,25 @@ def test_call_manager_registers_call_and_room_membership_callbacks(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_call_membership_callback_tears_down_before_forgetting_invited_room(tmp_path: Path) -> None:
+    """A kick closes the media session before removing ad-hoc room ownership."""
+    bot = _agent_bot(tmp_path)
+    order: list[str] = []
+    call_manager = MagicMock()
+    call_manager.on_room_membership_event = AsyncMock(side_effect=lambda *_args: order.append("call"))
+    bot._call_manager = call_manager
+    bot._room_lifecycle.forget_invited_room_after_own_leave = MagicMock(
+        side_effect=lambda *_args: order.append("lifecycle"),
+    )
+    room = MagicMock(spec=nio.MatrixRoom)
+    event = MagicMock(spec=nio.RoomMemberEvent)
+
+    await bot._on_call_room_membership_event(room, event)
+
+    assert order == ["call", "lifecycle"]
+
+
+@pytest.mark.asyncio
 async def test_installed_runtime_cache_support_runs_fire_and_forget_sync_cache_writes(tmp_path: Path) -> None:
     """The shared test runtime helper must preserve the coordinator's synchronous queue contract."""
     bot = _agent_bot(tmp_path)

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.identity import MatrixID, managed_account_key, managed_account_user_id
+from mindroom.matrix.invited_rooms_store import invited_rooms_path, load_invited_rooms
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
     room_alias_identifier_candidates,
@@ -70,7 +71,12 @@ def configured_call_agent_name_for_room(
         runtime_paths,
         room_aliases=room_aliases,
     )
-    call_agents = sorted(set(routable_names).intersection(config.calls.agents))
+    call_agents = set(routable_names).intersection(config.calls.agents)
+    for agent_name in config.calls.agents:
+        invited_path = invited_rooms_path(runtime_paths.storage_root, agent_name)
+        if room_id in load_invited_rooms(invited_path):
+            call_agents.add(agent_name)
+    call_agents = sorted(call_agents)
     if len(call_agents) > 1:
         msg = f"calls.agents resolves multiple agents for live room {room_id}: {', '.join(call_agents)}"
         raise ValueError(msg)

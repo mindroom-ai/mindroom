@@ -7,14 +7,17 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.calls import CallsConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.entity_resolution import (
     DuplicateManagedEntityIdentityError,
     MissingManagedEntityAccountError,
     configured_bot_user_ids_for_room,
+    configured_call_agent_name_for_room,
     entity_identity_registry,
 )
+from mindroom.matrix.invited_rooms_store import invited_rooms_path, save_invited_rooms
 from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
@@ -98,6 +101,65 @@ def test_configured_bot_user_ids_for_room_uses_persisted_current_user_ids(tmp_pa
         "@actual_general:matrix.example",
         "@actual_team:matrix.example",
     }
+
+
+def test_configured_call_agent_includes_authorized_ad_hoc_invited_room(tmp_path: Path) -> None:
+    """A calls-enabled agent may answer in a room accepted through its invite policy."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General", role="General agent"),
+                "other": AgentConfig(display_name="Other", role="Other agent"),
+            },
+            calls=CallsConfig(enabled=True, agents=["general", "other"]),
+        ),
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={},
+        ),
+    )
+    runtime_paths = runtime_paths_for(config)
+    save_invited_rooms(
+        invited_rooms_path(runtime_paths.storage_root, "general"),
+        {"!agent-call:server"},
+    )
+
+    assert (
+        configured_call_agent_name_for_room(
+            config,
+            "!agent-call:server",
+            runtime_paths,
+        )
+        == "general"
+    )
+
+
+def test_configured_call_agent_rejects_ambiguous_invited_room(tmp_path: Path) -> None:
+    """One ad-hoc room cannot silently select between two calls-enabled invitees."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General", role="General agent"),
+                "other": AgentConfig(display_name="Other", role="Other agent"),
+            },
+            calls=CallsConfig(enabled=True, agents=["general", "other"]),
+        ),
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={},
+        ),
+    )
+    runtime_paths = runtime_paths_for(config)
+    for agent_name in ("general", "other"):
+        save_invited_rooms(
+            invited_rooms_path(runtime_paths.storage_root, agent_name),
+            {"!agent-call:server"},
+        )
+
+    with pytest.raises(ValueError, match="general, other"):
+        configured_call_agent_name_for_room(config, "!agent-call:server", runtime_paths)
 
 
 def test_entity_identity_registry_uses_only_persisted_current_ids(tmp_path: Path) -> None:

@@ -20,6 +20,7 @@ from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig
 from mindroom.config.models import ModelConfig
 from mindroom.config.voice import SpeechServiceConfig
+from mindroom.matrix.invited_rooms_store import invited_rooms_path, save_invited_rooms
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.matrix_rtc.call_manager import (
@@ -329,6 +330,54 @@ async def test_manager_joins_call_when_remote_member_appears(tmp_path: Path) -> 
     assert args[1] == CALL_MEMBER_EVENT_TYPE
     assert args[2]["device_id"] == BOT_DEVICE
     assert kwargs["state_key"] == membership_state_key(BOT_USER, BOT_DEVICE)
+
+
+@pytest.mark.asyncio
+async def test_manager_joins_call_in_authorized_ad_hoc_invited_room(tmp_path: Path) -> None:
+    """An accepted invite is sufficient room ownership for a calls-enabled agent."""
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    config = _config()
+    config.agents["helper"].rooms = []
+    runtime_paths = test_runtime_paths(tmp_path)
+    save_invited_rooms(
+        invited_rooms_path(runtime_paths.storage_root, "helper"),
+        {ROOM_ID},
+    )
+    manager = _manager(client, bridge, tmp_path, config)
+
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    assert bridge.connected_grant == GRANT
+
+
+@pytest.mark.asyncio
+async def test_manager_stops_call_when_agent_is_kicked_from_ephemeral_room(tmp_path: Path) -> None:
+    """Own membership removal tears down media without waiting for another call event."""
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    room = _room()
+    await manager.on_room_event(room, _member_unknown_event())
+    event = nio.RoomMemberEvent.from_dict(
+        {
+            "event_id": "$leave",
+            "sender": "@alice:example.org",
+            "origin_server_ts": int(time.time() * 1000),
+            "type": "m.room.member",
+            "state_key": BOT_USER,
+            "content": {"membership": "leave"},
+        },
+    )
+    assert isinstance(event, nio.RoomMemberEvent)
+
+    await manager.on_room_membership_event(room, event)
+
+    assert bridge.closed is True
+    assert manager._sessions == {}
+    assert manager._logical_calls == {}
 
 
 @pytest.mark.asyncio
