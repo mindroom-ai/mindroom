@@ -709,6 +709,36 @@ def _private_instance_state_root_path(
     return private_instance_scope_root_path(base_storage_path, worker_key) / _normalize_worker_dir_part(agent_name)
 
 
+def private_instance_state_root_for_requester(
+    base_storage_path: Path,
+    *,
+    requester_id: str,
+    agent_name: str,
+    worker_scope: WorkerScope,
+    runtime_paths: RuntimePaths,
+) -> Path | None:
+    """Return the private-instance state root one requester would own for an agent.
+
+    Instance directory names embed a one-way digest of the worker key, so ownership can only be
+    established by forward-computing the path a known requester would get and comparing it against
+    the directories that exist on disk.
+    """
+    identity = build_tool_execution_identity(
+        channel="matrix",
+        agent_name=agent_name,
+        runtime_paths=runtime_paths,
+        requester_id=requester_id,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_key = resolve_worker_key(worker_scope, identity, agent_name=agent_name)
+    if worker_key is None:
+        return None
+    return _private_instance_state_root_path(base_storage_path, worker_key=worker_key, agent_name=agent_name)
+
+
 def _is_resolved_agent_state_root(path: Path, agent_name: str) -> bool:
     resolved_path = path.expanduser().resolve()
     return resolved_path.parent.name == "agents" and resolved_path.name == _normalize_worker_dir_part(agent_name)
