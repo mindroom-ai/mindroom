@@ -793,12 +793,32 @@ async def save_edited_scheduled_task(
     )
 
 
+def _existing_task_parse_context(workflow: ScheduledWorkflow) -> str:
+    """Render the authoritative prior-state prompt block for edit re-parses."""
+    lines: list[str] = [f"- schedule_type: {workflow.schedule_type}"]
+    if workflow.execute_at is not None:
+        lines.append(f"- execute_at (UTC): {workflow.execute_at.isoformat()}")
+    if workflow.cron_schedule is not None:
+        lines.append(f"- cron_schedule: {workflow.cron_schedule.to_cron_string()}")
+    lines.append(f"- message: {workflow.message}")
+    lines.append(f"- description: {workflow.description}")
+    task_state = "\n".join(lines)
+    return (
+        "\nThis request EDITS an existing scheduled task. Authoritative current task state:\n"
+        f"{task_state}\n"
+        "Apply ONLY the changes the request asks for and carry every other field over from the "
+        "current task state. If the request does not ask to change the message, reuse the current "
+        "message text EXACTLY as shown above; never replace it with a paraphrase of the edit request.\n"
+    )
+
+
 async def _parse_workflow_schedule(
     request: str,
     config: Config,
     runtime_paths: RuntimePaths,
     available_responders: typing.Sequence[MatrixID],
     current_time: datetime | None = None,
+    existing_workflow: ScheduledWorkflow | None = None,
 ) -> ScheduledWorkflow | _WorkflowParseError:
     """Parse natural language into structured workflow using AI."""
     if current_time is None:
@@ -824,6 +844,7 @@ async def _parse_workflow_schedule(
         user_timezone=config.timezone,
         request=request,
         agent_list=agent_list,
+        existing_task_context=_existing_task_parse_context(existing_workflow) if existing_workflow else "",
     )
 
     model = model_loading.get_model_instance(config, runtime_paths, "default")
@@ -1251,8 +1272,15 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     if not available_responders:
         return (None, "❌ No agents or teams in this room are allowed to reply to you.")
 
-    # Parse the workflow request with available responders.
-    workflow_result = await _parse_workflow_schedule(full_text, config, runtime_paths, available_responders)
+    # Parse the workflow request with available responders; edits re-parse
+    # against the existing task's content as authoritative prior state.
+    workflow_result = await _parse_workflow_schedule(
+        full_text,
+        config,
+        runtime_paths,
+        available_responders,
+        existing_workflow=existing_task.workflow if existing_task else None,
+    )
 
     if isinstance(workflow_result, _WorkflowParseError):
         error_msg = f"❌ {workflow_result.error}"
