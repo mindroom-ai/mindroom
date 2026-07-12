@@ -82,7 +82,7 @@ def _load_plugin_oauth_providers(
     skip_broken_plugins: bool,
 ) -> list[OAuthProvider]:
     providers: list[OAuthProvider] = []
-    plugin_bases = plugin_imports._collect_plugin_bases(
+    plugin_bases, _unresolved_plugin_sources = plugin_imports._collect_plugin_bases(
         config.plugins,
         runtime_paths,
         skip_broken_plugins=skip_broken_plugins,

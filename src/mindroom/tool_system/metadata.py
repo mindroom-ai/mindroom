@@ -687,6 +687,7 @@ class _ResolvedToolState:
     tool_registry: dict[str, Callable[[], type[Toolkit]]]
     tool_metadata: dict[str, ToolMetadata]
     unavailable_tool_metadata: dict[str, ToolMetadata]
+    unresolved_plugin_tool_sources: frozenset[str] = frozenset()
 
 
 @functools.lru_cache(maxsize=8192)
@@ -735,7 +736,9 @@ def _execute_validation_plugin_module(
             scoped_plugin_registration_owner(validation_module_name),
         ):
             loader.exec_module(module)
-    except Exception as exc:
+    except BaseException as exc:
+        if not isinstance(exc, (Exception, SystemExit)):
+            raise
         msg = f"Plugin validation module execution failed for {module_path}: {exc}"
         raise ToolMetadataValidationError(msg) from exc
     finally:
@@ -824,7 +827,7 @@ def _compute_resolved_tool_state_for_runtime(
         )
         return _ResolvedToolState(builtin_registry, builtin_metadata, {})
 
-    plugin_bases = plugin_module._collect_plugin_bases(
+    plugin_bases, skipped_plugin_sources = plugin_module._collect_plugin_bases(
         plugin_entries,
         runtime_paths,
         skip_broken_plugins=tolerate_plugin_load_errors,
@@ -834,10 +837,12 @@ def _compute_resolved_tool_state_for_runtime(
 
     validation_registrations: dict[str, dict[str, ToolMetadata]] = {}
     unavailable_tool_metadata: dict[str, ToolMetadata] = {}
+    unresolved_plugin_tool_sources = set(skipped_plugin_sources)
     active_plugins: list[tuple[str, str]] = []
     for plugin_base, plugin_entry, _ in plugin_bases:
         candidate_registrations: dict[str, dict[str, ToolMetadata]] = {}
         candidate_active_plugins: list[tuple[str, str]] = []
+        tool_namespace_complete = plugin_base.tools_module_path is None
         try:
             if plugin_base.tools_module_path is None:
                 if plugin_base.hooks_module_path is not None:
@@ -848,17 +853,14 @@ def _compute_resolved_tool_state_for_runtime(
                         candidate_registrations,
                     )
             else:
-                candidate_active_plugins.append(
-                    (
-                        plugin_base.name,
-                        _execute_validation_plugin_module(
-                            plugin_base.name,
-                            plugin_base.root,
-                            plugin_base.tools_module_path,
-                            candidate_registrations,
-                        ),
-                    ),
+                tools_module_name = _execute_validation_plugin_module(
+                    plugin_base.name,
+                    plugin_base.root,
+                    plugin_base.tools_module_path,
+                    candidate_registrations,
                 )
+                candidate_active_plugins.append((plugin_base.name, tools_module_name))
+                tool_namespace_complete = True
                 if (
                     plugin_base.hooks_module_path is not None
                     and plugin_base.hooks_module_path != plugin_base.tools_module_path
@@ -873,6 +875,8 @@ def _compute_resolved_tool_state_for_runtime(
             if not tolerate_plugin_load_errors:
                 raise
             plugin_module._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
+            if not tool_namespace_complete:
+                unresolved_plugin_tool_sources.add(plugin_base.name)
             unavailable_tool_metadata.update(
                 _unavailable_tool_metadata_from_failed_plugin(plugin_base, candidate_registrations),
             )
@@ -894,7 +898,12 @@ def _compute_resolved_tool_state_for_runtime(
         desired_registry,
         desired_metadata,
     )
-    return _ResolvedToolState(desired_registry, desired_metadata, unavailable_tool_metadata)
+    return _ResolvedToolState(
+        desired_registry,
+        desired_metadata,
+        unavailable_tool_metadata,
+        frozenset(unresolved_plugin_tool_sources),
+    )
 
 
 def _unavailable_tool_metadata_without_resolved_tools(
@@ -969,22 +978,43 @@ def _declared_tool_metadata_from_broken_plugin_source(module_path: Path) -> dict
     except (OSError, SyntaxError, UnicodeError):
         return {}
 
+    module_constants = _module_level_string_constants(module_tree)
     metadata_by_name: dict[str, ToolMetadata] = {}
     for node in ast.walk(module_tree):
         if not isinstance(node, ast.Call):
             continue
         if not _is_register_tool_with_metadata_call(node.func):
             continue
-        tool_name = _literal_string_keyword(node, "name")
+        tool_name = _literal_string_keyword(node, "name", module_constants)
         if tool_name is None:
             continue
         metadata_by_name[tool_name] = ToolMetadata(
             name=tool_name,
-            display_name=_literal_string_keyword(node, "display_name") or tool_name,
-            description=_literal_string_keyword(node, "description") or "Unavailable plugin tool",
+            display_name=_literal_string_keyword(node, "display_name", module_constants) or tool_name,
+            description=_literal_string_keyword(node, "description", module_constants) or "Unavailable plugin tool",
             category=ToolCategory.INTEGRATIONS,
         )
     return metadata_by_name
+
+
+def _module_level_string_constants(module_tree: ast.Module) -> dict[str, str]:
+    """Map module-level names assigned one string literal, for name=SOME_CONSTANT registrations."""
+    constants: dict[str, str] = {}
+    for node in module_tree.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+            value = node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+            value = node.value
+        else:
+            continue
+        if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                constants[target.id] = value.value
+    return constants
 
 
 def _is_register_tool_with_metadata_call(node: ast.expr) -> bool:
@@ -995,12 +1025,18 @@ def _is_register_tool_with_metadata_call(node: ast.expr) -> bool:
     return False
 
 
-def _literal_string_keyword(node: ast.Call, keyword_name: str) -> str | None:
+def _literal_string_keyword(
+    node: ast.Call,
+    keyword_name: str,
+    module_constants: Mapping[str, str],
+) -> str | None:
     for keyword in node.keywords:
         if keyword.arg != keyword_name:
             continue
         if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
             return keyword.value.value
+        if isinstance(keyword.value, ast.Name):
+            return module_constants.get(keyword.value.id)
     return None
 
 
@@ -1044,6 +1080,21 @@ def resolved_tool_validation_snapshot_for_runtime(
         validation_metadata,
         unavailable_plugin_tool_names=frozenset(resolved_state.unavailable_tool_metadata),
     )
+
+
+def unresolved_plugin_tool_sources_for_runtime(
+    runtime_paths: RuntimePaths,
+    config: Config,
+    *,
+    tolerate_plugin_load_errors: bool = False,
+) -> frozenset[str]:
+    """Return plugin names or specs whose tool namespaces could not be resolved."""
+    resolved_state = _resolved_tool_state_for_runtime(
+        runtime_paths,
+        config,
+        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+    )
+    return resolved_state.unresolved_plugin_tool_sources
 
 
 def serialize_tool_validation_snapshot(

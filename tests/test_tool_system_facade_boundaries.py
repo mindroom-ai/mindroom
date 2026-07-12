@@ -58,6 +58,7 @@ EXPECTED_PUBLIC_CATALOG_SYMBOLS = [
     "safe_tool_init_override_fields",
     "sanitize_tool_init_overrides",
     "serialize_tool_validation_snapshot",
+    "unresolved_plugin_tool_sources_for_runtime",
     "validate_authored_tool_entry_overrides",
 ]
 

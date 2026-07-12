@@ -31,6 +31,7 @@ from mindroom.tool_system.metadata import (
     safe_tool_init_override_fields,
     sanitize_tool_init_overrides,
     serialize_tool_validation_snapshot,
+    unresolved_plugin_tool_sources_for_runtime,
     validate_authored_tool_entry_overrides,
 )
 
@@ -61,5 +62,6 @@ __all__ = [
     "safe_tool_init_override_fields",
     "sanitize_tool_init_overrides",
     "serialize_tool_validation_snapshot",
+    "unresolved_plugin_tool_sources_for_runtime",
     "validate_authored_tool_entry_overrides",
 ]

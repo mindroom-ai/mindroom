@@ -523,6 +523,8 @@ journalctl -u mindroom.service -f | grep -E 'Reloading plugins|Plugin reload com
 ```
 
 You can break and fix a plugin freely.
+A normal `mindroom run` startup skips broken plugins and disables tools known to belong to them rather than crash-looping.
+If a broken tools module prevents MindRoom from resolving its complete tool namespace, otherwise-unknown authored tool names are also disabled with a warning; `mindroom config validate` remains strict.
 A broken save that prevents reload, such as an import error or plugin validation error, can deactivate the affected plugin set, and the next valid save reloads it successfully.
 A hook that only raises at runtime is different: that failure is logged for that event, and the hook is tried again on the next matching event.
 There is no quarantine, failure threshold, or cooldown.
