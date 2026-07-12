@@ -77,7 +77,8 @@ def validate_workflow_spec(spec: dict[str, object]) -> dict[str, object]:
     participant_ids = _validate_participants(participants)
     workflow_steps = _required_mapping_list(normalized, "workflow", "Workflow step")
     step_ids = _validate_workflow_steps(workflow_steps, participant_ids)
-    _validate_workflow_limits(normalized, participants, workflow_steps)
+    _validate_workflow_size_limits(participants, workflow_steps)
+    _validate_workflow_permissions(normalized, workflow_steps)
     _validate_participant_tool_grants(normalized, participants)
     _validate_outputs(normalized, step_ids)
     return normalized
@@ -106,9 +107,11 @@ def collect_workflow_spec_errors(spec: dict[str, object]) -> list[str]:
 
     participants = _collect_value(errors, partial(_required_mapping_list, normalized, "participants", "Participant"))
     participant_ids: set[str] = set()
+    validated_participants: list[dict[str, object]] = []
     if participants is not None:
         for index, participant in enumerate(participants):
-            _collect_error(errors, partial(_validate_participant, participant, index, participant_ids))
+            if _collect_error(errors, partial(_validate_participant, participant, index, participant_ids)):
+                validated_participants.append(participant)
 
     workflow_steps = _collect_value(errors, partial(_required_mapping_list, normalized, "workflow", "Workflow step"))
     step_ids: set[str] = set()
@@ -116,18 +119,30 @@ def collect_workflow_spec_errors(spec: dict[str, object]) -> list[str]:
         for index, step in enumerate(workflow_steps):
             _collect_error(errors, partial(_validate_workflow_step, step, index, participant_ids, step_ids))
 
-    if participants is not None and workflow_steps is not None:
-        _collect_error(errors, partial(_validate_workflow_limits, normalized, participants, workflow_steps))
-        _collect_error(errors, partial(_validate_participant_tool_grants, normalized, participants))
+    _collect_error(
+        errors,
+        partial(_validate_workflow_size_limits, participants or [], workflow_steps or []),
+    )
+    permissions_valid = _collect_error(
+        errors,
+        partial(_validate_workflow_permissions, normalized, workflow_steps or []),
+    )
+    if permissions_valid and validated_participants:
+        _collect_error(
+            errors,
+            partial(_validate_participant_tool_grants, normalized, validated_participants),
+        )
     _collect_error(errors, partial(_validate_outputs, normalized, step_ids))
     return errors
 
 
-def _collect_error(errors: list[str], check: Callable[[], object]) -> None:
+def _collect_error(errors: list[str], check: Callable[[], object]) -> bool:
     try:
         check()
     except DynamicWorkflowError as exc:
         errors.append(str(exc))
+        return False
+    return True
 
 
 def _collect_value(errors: list[str], produce: Callable[[], _T]) -> _T | None:
@@ -418,22 +433,26 @@ def _validate_workflow_step(
         raise DynamicWorkflowError(msg)
     step["id"] = step_id
 
-    step_type = _step_type(step, context)
-    step["type"] = step_type
-    if step_type == "agent_step":
-        _reject_unsupported_fields(step, _AGENT_STEP_KEYS, context)
-        _validate_agent_step(step, context, participant_ids, step_ids)
-    elif step_type == "transform_step":
-        _reject_unsupported_fields(step, _TRANSFORM_STEP_KEYS, context)
-        _validate_template_choice(step, context, ("template", "text"), step_ids)
-    elif step_type == "report_step":
-        _reject_unsupported_fields(step, _REPORT_STEP_KEYS, context)
-        _validate_report_step(step, context, step_ids)
-    step_ids.add(step_id)
+    try:
+        step_type = _step_type(step, context)
+        step["type"] = step_type
+        if step_type == "agent_step":
+            _reject_unsupported_fields(step, _AGENT_STEP_KEYS, context)
+            _validate_agent_step(step, context, participant_ids, step_ids)
+        elif step_type == "transform_step":
+            _reject_unsupported_fields(step, _TRANSFORM_STEP_KEYS, context)
+            _validate_template_choice(step, context, ("template", "text"), step_ids)
+        elif step_type == "report_step":
+            _reject_unsupported_fields(step, _REPORT_STEP_KEYS, context)
+            _validate_report_step(step, context, step_ids)
+    finally:
+        # Later entries may reference this structurally valid id even when this
+        # step has its own validation error. Registering in ``finally`` keeps
+        # the current step out of its own prior-step reference set.
+        step_ids.add(step_id)
 
 
-def _validate_workflow_limits(
-    spec: dict[str, object],
+def _validate_workflow_size_limits(
     participants: list[dict[str, object]],
     workflow_steps: list[dict[str, object]],
 ) -> None:
@@ -444,6 +463,11 @@ def _validate_workflow_limits(
         msg = f"Workflow steps cannot exceed {_MAX_WORKFLOW_STEPS}."
         raise DynamicWorkflowError(msg)
 
+
+def _validate_workflow_permissions(
+    spec: dict[str, object],
+    workflow_steps: list[dict[str, object]],
+) -> None:
     permissions = _permissions_mapping(spec)
     unknown_permissions = sorted(set(permissions) - _PERMISSION_KEYS)
     if unknown_permissions:

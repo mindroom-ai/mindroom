@@ -585,6 +585,92 @@ def test_collect_errors_reports_participant_and_step_errors_together() -> None:
     ]
 
 
+def test_collect_errors_handles_invalid_participant_tools_without_crashing() -> None:
+    """Dependent grant validation skips participants that failed normalization."""
+    errors = collect_workflow_spec_errors(
+        _spec(
+            participants=[{"id": "writer", "tools": 123}],
+            workflow=[{"id": "write", "participant": "writer", "prompt": "Write."}],
+        ),
+    )
+
+    assert errors == [
+        "Participant at index 0 field 'tools' must be a list of non-empty strings.",
+    ]
+
+
+def test_collect_errors_reports_permissions_when_structure_is_missing() -> None:
+    """Permission validation does not depend on participant or workflow presence."""
+    errors = collect_workflow_spec_errors(
+        {
+            "schema_version": 1,
+            "id": "demo",
+            "name": "Demo",
+            "kind": "workflow",
+            "permissions": "invalid",
+        },
+    )
+
+    assert errors == [
+        "Workflow spec field 'participants' is missing.",
+        "Workflow spec field 'workflow' is missing.",
+        "Workflow spec field 'permissions' must be a mapping.",
+    ]
+
+
+def test_collect_errors_reports_grants_when_workflow_is_missing() -> None:
+    """Participant grants are validated independently from workflow steps."""
+    errors = collect_workflow_spec_errors(
+        {
+            "schema_version": 1,
+            "id": "demo",
+            "name": "Demo",
+            "kind": "workflow",
+            "participants": [{"id": "writer", "tools": ["shell"]}],
+        },
+    )
+
+    assert errors == [
+        "Workflow spec field 'workflow' is missing.",
+        "Participant 'writer' tool 'shell' is not granted by permissions.tools.",
+    ]
+
+
+def test_collect_errors_reports_grants_alongside_participant_limit() -> None:
+    """Participant count failures do not suppress independent grant errors."""
+    participants: list[dict[str, object]] = [{"id": f"writer_{index}"} for index in range(9)]
+    participants[0]["tools"] = ["shell"]
+
+    errors = collect_workflow_spec_errors(
+        _spec(
+            participants=participants,
+            workflow=[{"id": "write", "participant": "writer_0", "prompt": "Write."}],
+        ),
+    )
+
+    assert errors == [
+        "Workflow participants cannot exceed 8.",
+        "Participant 'writer_0' tool 'shell' is not granted by permissions.tools.",
+    ]
+
+
+def test_collect_errors_keeps_invalid_step_id_available_to_later_steps() -> None:
+    """A step's own error does not create false unknown-reference errors later."""
+    errors = collect_workflow_spec_errors(
+        _spec(
+            workflow=[
+                {"id": "draft", "participant": "writer"},
+                {"id": "publish", "type": "transform_step", "template": "{steps.draft}"},
+            ],
+            outputs=[{"id": "result", "type": "text", "from_step": "draft"}],
+        ),
+    )
+
+    assert errors == [
+        "Workflow step at index 0 must include one of: prompt, response_template, output_template, template.",
+    ]
+
+
 def test_collect_errors_does_not_mutate_the_input_spec() -> None:
     """Error collection normalizes a deep copy, leaving the input spec untouched."""
     spec = _spec()
