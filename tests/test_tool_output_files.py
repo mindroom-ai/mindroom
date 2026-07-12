@@ -31,10 +31,10 @@ from mindroom.tool_system.output_files import (
     DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     OUTPUT_PATH_ARGUMENT,
     ToolOutputFilePolicy,
-    _wrap_function_for_output_files,
     ensure_output_path_schema_optional,
     saved_tool_output_receipt,
     validate_output_path_syntax,
+    wrap_function_for_output_files,
     wrap_toolkit_for_output_files,
 )
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
@@ -238,7 +238,7 @@ def test_schema_handles_strict_or_additional_properties_false_function(tmp_path:
         },
         skip_entrypoint_processing=True,
     )
-    _wrap_function_for_output_files(function, _policy(tmp_path))
+    wrap_function_for_output_files(function, _policy(tmp_path))
 
     assert function.parameters["additionalProperties"] is False
     _assert_output_path_schema_is_optional(function)
@@ -258,7 +258,7 @@ def test_schema_handles_skip_entrypoint_processing_function(tmp_path: Path) -> N
         },
         skip_entrypoint_processing=True,
     )
-    _wrap_function_for_output_files(function, _policy(tmp_path))
+    wrap_function_for_output_files(function, _policy(tmp_path))
 
     result = FunctionCall(
         function=function,
@@ -285,7 +285,7 @@ def test_schema_handles_skip_entrypoint_processing_function_in_strict_mode(tmp_p
         },
         skip_entrypoint_processing=True,
     )
-    _wrap_function_for_output_files(function, _policy(tmp_path))
+    wrap_function_for_output_files(function, _policy(tmp_path))
 
     function = _processed_strict(function)
 
@@ -354,7 +354,7 @@ def test_function_with_existing_mindroom_output_path_is_skipped_with_warning(tmp
 
     function = Function(name="existing", entrypoint=existing)
     with patch("mindroom.tool_system.output_files.logger.warning") as warning:
-        _wrap_function_for_output_files(function, _policy(tmp_path))
+        wrap_function_for_output_files(function, _policy(tmp_path))
 
     warning.assert_called_once()
     result = FunctionCall(
