@@ -618,6 +618,15 @@ def test_collect_errors_reports_permissions_when_structure_is_missing() -> None:
     ]
 
 
+def test_collect_errors_skips_output_references_when_workflow_is_missing() -> None:
+    """Missing workflow structure does not create unknown-output cascades."""
+    spec = _spec(outputs=[{"id": "result", "type": "text", "from_step": "missing"}])
+    del spec["workflow"]
+    errors = collect_workflow_spec_errors(spec)
+
+    assert errors == ["Workflow spec field 'workflow' is missing."]
+
+
 def test_collect_errors_reports_grants_when_workflow_is_missing() -> None:
     """Participant grants are validated independently from workflow steps."""
     errors = collect_workflow_spec_errors(

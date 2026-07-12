@@ -122,7 +122,8 @@ def _validate_and_normalize_workflow_spec(
             errors,
             partial(_validate_participant_tool_grants, normalized, validated_participants),
         )
-    _collect_error(errors, partial(_validate_outputs, normalized, step_ids))
+    if workflow_steps is not None:
+        _collect_error(errors, partial(_validate_outputs, normalized, step_ids))
     return normalized, errors
 
 
