@@ -710,6 +710,83 @@ async def test_member_filter_exports_only_rooms_with_member(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_target_membership_and_invited_room_setting_are_both_enforced(tmp_path: Path) -> None:
+    """Every target should require membership, with invited rooms as an additional opt-in category."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    rooms = [
+        _ThreadExportRoom(
+            key="lobby",
+            room_id="!lobby:localhost",
+            alias="#lobby:localhost",
+            name="Lobby",
+        ),
+        _ThreadExportRoom(
+            key="dev",
+            room_id="!dev:localhost",
+            alias="#dev:localhost",
+            name="Dev",
+        ),
+        _ThreadExportRoom(
+            key="!invited:localhost",
+            room_id="!invited:localhost",
+            alias="",
+            name="",
+            invited=True,
+        ),
+    ]
+    members_by_room = {
+        "!lobby:localhost": ["@mindroom_code:localhost"],
+        "!dev:localhost": ["@mindroom_research:localhost"],
+        "!invited:localhost": [
+            "@mindroom_code:localhost",
+            "@mindroom_research:localhost",
+        ],
+    }
+
+    async def joined_members(room_id: str) -> nio.JoinedMembersResponse:
+        return nio.JoinedMembersResponse(
+            members=[nio.RoomMember(user_id, "", "") for user_id in members_by_room[room_id]],
+            room_id=room_id,
+        )
+
+    client = Mock()
+    client.joined_members = AsyncMock(side_effect=joined_members)
+    enumerate_threads = AsyncMock(return_value=([], False))
+    targets = (
+        ThreadExportTarget(
+            output_dir=tmp_path / "code",
+            required_member_user_id="@mindroom_code:localhost",
+            include_invited_rooms=True,
+        ),
+        ThreadExportTarget(
+            output_dir=tmp_path / "research",
+            required_member_user_id="@mindroom_research:localhost",
+            include_invited_rooms=False,
+        ),
+    )
+
+    with patch(
+        "mindroom.thread_export.enumerate_room_thread_root_ids",
+        new=enumerate_threads,
+    ):
+        accumulators = await _export_threads_for_targets_for_client(
+            client=client,
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=Mock(),
+            rooms=rooms,
+            targets=targets,
+        )
+
+    assert [accumulator.rooms_exported for accumulator in accumulators] == [2, 1]
+    assert accumulators[0].retained_room_keys == {"lobby", "!invited:localhost"}
+    assert accumulators[1].retained_room_keys == {"dev"}
+    assert client.joined_members.await_count == 3
+    assert enumerate_threads.await_count == 3
+
+
+@pytest.mark.asyncio
 async def test_member_filter_records_failure_when_membership_lookup_fails(tmp_path: Path) -> None:
     """A failed membership lookup should fail closed and surface as a room failure."""
     config = _config(tmp_path)
