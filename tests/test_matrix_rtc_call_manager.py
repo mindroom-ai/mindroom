@@ -118,6 +118,35 @@ class FakeKeyTransport:
         return targets
 
 
+class RecoveringKeyTransport(FakeKeyTransport):
+    """Starts unable to send and becomes usable after inbound Olm traffic."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.available = False
+        self.delivered = asyncio.Event()
+
+    async def send_key(
+        self,
+        *,
+        room_id: str,
+        key_base64: str,
+        key_index: int,
+        targets: list[CallMember],
+    ) -> list[CallMember]:
+        """Deliver only after the test models an established Olm session."""
+        await super().send_key(
+            room_id=room_id,
+            key_base64=key_base64,
+            key_index=key_index,
+            targets=targets,
+        )
+        if not self.available:
+            return []
+        self.delivered.set()
+        return targets
+
+
 def _client() -> AsyncMock:
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = BOT_USER
@@ -1063,6 +1092,36 @@ async def test_session_installs_inbound_keys_on_bridge() -> None:
 
     assert accepted is True
     assert bridge.frame_keys == [("@alice:example.org:ALICEDEV", b"A" * 16, 2)]
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_inbound_key_immediately_retries_undelivered_outbound_key() -> None:
+    """Inbound Olm traffic wakes outbound sharing after its retry budget ended."""
+    transport = RecoveringKeyTransport()
+    session = _session(_client(), FakeBridge(), transport, [1_000])
+    alice = _member("@alice:example.org", "ALICEDEV")
+    # Model a call whose bounded retry budget was already exhausted before the
+    # peer's first Olm-encrypted key established the bidirectional session.
+    session._key_retry_attempt = 3
+    await session.start([alice])
+    assert len(transport.sent) == 1
+
+    transport.available = True
+    accepted = session.on_key_received(
+        ReceivedFrameKey(
+            user_id=alice.user_id,
+            claimed_device_id=alice.device_id,
+            key_base64="QUFBQUFBQUFBQUFBQUFBQQ==",
+            key_index=2,
+            received_at_ms=1_500,
+        ),
+    )
+    await asyncio.wait_for(transport.delivered.wait(), timeout=1)
+
+    assert accepted is True
+    assert len(transport.sent) == 2
+    assert transport.sent[1]["targets"] == [alice]
     await session.stop()
 
 

@@ -133,6 +133,7 @@ class CallSession:
     _members: list[CallMember] = field(default_factory=list, init=False)
     _key_distribution_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _key_distribution_retry_scheduled: bool = field(default=False, init=False)
+    _key_distribution_wakeup_scheduled: bool = field(default=False, init=False)
     _key_retry_attempt: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
@@ -218,7 +219,31 @@ class CallSession:
             participant=inbound.participant_identity,
             key_index=inbound.key_index,
         )
+        # Decrypting this Olm event proves that a usable bidirectional session
+        # now exists with the sender. Wake outbound key distribution
+        # immediately instead of waiting for the old bounded retry timer (or a
+        # future membership change after that retry budget was exhausted).
+        if self.e2ee_enabled and self._created_ts is not None:
+            self._wake_key_distribution_after_inbound_key()
         return True
+
+    def _wake_key_distribution_after_inbound_key(self) -> None:
+        """Coalesce immediate outbound retries after authenticated key intake."""
+        if self._stopped or self._key_distribution_wakeup_scheduled:
+            return
+        self._key_distribution_wakeup_scheduled = True
+        self._spawn(self._redistribute_after_inbound_key())
+
+    async def _redistribute_after_inbound_key(self) -> None:
+        """Retry our key now that inbound Olm traffic established a session."""
+        try:
+            self._key_retry_attempt = 0
+            await self._distribute_keys()
+        except _MATRIX_NETWORK_ERRORS as error:
+            logger.warning("call_key_distribution_error", room_id=self.room_id, error=str(error))
+            self._schedule_key_distribution_retry()
+        finally:
+            self._key_distribution_wakeup_scheduled = False
 
     async def stop(self) -> None:
         """Leave the call through one cancellation-safe shared cleanup task."""
