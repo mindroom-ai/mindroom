@@ -1984,7 +1984,7 @@ visibility = [
     "mindroom.matrix.stale_stream_cleanup",
     "mindroom.response_runner",
     "mindroom.routing",
-    "mindroom.thread_export",
+    "mindroom.thread_export.selection",
 ]
 
 [[modules]]
@@ -2033,22 +2033,73 @@ visibility = [
     "mindroom.matrix.client",
     "mindroom.matrix.conversation_cache",
     "mindroom.matrix.thread_room_scan",
-    "mindroom.thread_export",
+    "mindroom.thread_export.execution",
 ]
 
 [[modules]]
 path = "mindroom.thread_export"
 depends_on = [
+    "mindroom.thread_export.models",
+    "mindroom.thread_export.service",
+]
+
+[[modules]]
+path = "mindroom.thread_export.models"
+depends_on = []
+visibility = [
+    "mindroom.thread_export",
+    "mindroom.thread_export.execution",
+    "mindroom.thread_export.selection",
+    "mindroom.thread_export.service",
+]
+
+[[modules]]
+path = "mindroom.thread_export.storage"
+depends_on = ["mindroom.durable_write"]
+visibility = [
+    "mindroom.thread_export.execution",
+    "mindroom.thread_export.service",
+]
+
+[[modules]]
+path = "mindroom.thread_export.selection"
+depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
-    "mindroom.logging_config",
-    "mindroom.matrix.client_thread_history",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.identity",
+    "mindroom.matrix.invited_rooms_store",
     "mindroom.matrix.state",
     "mindroom.matrix.users",
     "mindroom.matrix_identifiers",
+    "mindroom.thread_export.models",
+]
+visibility = [
+    "mindroom.thread_export.execution",
+    "mindroom.thread_export.service",
+]
+
+[[modules]]
+path = "mindroom.thread_export.execution"
+depends_on = [
+    "mindroom.matrix.client_thread_history",
+    "mindroom.thread_export.models",
+    "mindroom.thread_export.selection",
+    "mindroom.thread_export.storage",
+]
+visibility = ["mindroom.thread_export.service"]
+
+[[modules]]
+path = "mindroom.thread_export.service"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.logging_config",
+    "mindroom.matrix.users",
     "mindroom.runtime_support",
+    "mindroom.thread_export.execution",
+    "mindroom.thread_export.models",
+    "mindroom.thread_export.selection",
+    "mindroom.thread_export.storage",
 ]
 
 [[modules]]
