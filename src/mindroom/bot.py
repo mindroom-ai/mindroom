@@ -17,11 +17,7 @@ from mindroom.approval_inbound import (
     maybe_handle_tool_approval_reply,
     parse_approval_response_event,
 )
-from mindroom.bot_room_lifecycle import (
-    BotRoomLifecycle,
-    BotRoomLifecycleDeps,
-    own_room_membership_events_from_sync,
-)
+from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import (
@@ -1236,14 +1232,7 @@ class AgentBot:
             )
 
         if isinstance(_response, nio.SyncResponse):
-            client = self.client
-            assert client is not None
-            for room, event in own_room_membership_events_from_sync(
-                _response,
-                own_user_id=self.agent_user.user_id,
-                rooms=client.rooms,
-            ):
-                await self._on_call_room_membership_event(room, event)
+            await self._apply_own_room_membership_from_sync(_response)
             restored_token_first_sync_response = (
                 first_sync_response and self._sync_trust_state is SyncTrustState.PENDING
             )
@@ -1347,10 +1336,11 @@ class AgentBot:
             runtime_paths=self.runtime_paths,
             ssl_verify=constants.runtime_matrix_ssl_verify(self.runtime_paths),
             tool_support=self._tool_runtime_support,
+            get_invited_rooms_by_agent=self._invited_call_rooms_by_agent,
         )
         client.add_event_callback(
             _create_task_wrapper(
-                self._on_call_room_membership_event,
+                self._on_room_membership_event,
                 owner=self._runtime_view,
                 on_error=self._mark_callback_failed,
             ),
@@ -1375,13 +1365,42 @@ class AgentBot:
             AuthenticatedToDeviceEvent,
         )
 
-    async def _on_call_room_membership_event(
+    async def _apply_own_room_membership_from_sync(self, response: nio.SyncResponse) -> None:
+        """Apply this bot's authoritative joined/left room sections before other sync work."""
+        joined_room_ids = set(response.rooms.join)
+        left_room_ids = set(response.rooms.leave)
+        for room_id in left_room_ids:
+            self._room_lifecycle.forget_invited_room(room_id)
+        call_manager = self._call_manager
+        if call_manager is not None:
+            await call_manager.on_sync_room_membership(
+                joined_room_ids=joined_room_ids,
+                left_room_ids=left_room_ids,
+            )
+
+    def _invited_call_rooms_by_agent(self) -> dict[str, frozenset[str]]:
+        """Return live accepted-invite state for the configured call agents."""
+        orchestrator = self.orchestrator
+        agent_bots_value = orchestrator.agent_bots if orchestrator is not None else None
+        if not isinstance(agent_bots_value, dict):
+            return {self.agent_name: frozenset(self._room_lifecycle.invited_rooms)}
+        agent_bots = cast("dict[str, object]", agent_bots_value)
+
+        invited_rooms: dict[str, frozenset[str]] = {}
+        for agent_name in self.config.calls.agents:
+            bot = agent_bots.get(agent_name)
+            if isinstance(bot, AgentBot):
+                invited_rooms[agent_name] = frozenset(bot._room_lifecycle.invited_rooms)
+        return invited_rooms
+
+    async def _on_room_membership_event(
         self,
         room: nio.MatrixRoom,
         event: nio.RoomMemberEvent,
     ) -> None:
-        """Drop ad-hoc ownership and then apply serialized call teardown."""
-        self._room_lifecycle.forget_invited_room_after_own_leave(room, event)
+        """Apply invited-room cleanup before optional call reconciliation."""
+        if event.state_key == self.agent_user.user_id and event.membership in {"leave", "ban"}:
+            self._room_lifecycle.forget_invited_room(room.room_id)
         call_manager = self._call_manager
         if call_manager is not None:
             await call_manager.on_room_membership_event(room, event)

@@ -586,6 +586,7 @@ async def main() -> int:  # noqa: C901, PLR0915
                 runtime_paths=paths,
                 ssl_verify=True,
                 tool_support=LiveToolSupport(),  # type: ignore[arg-type]
+                get_invited_rooms_by_agent=dict,
             )
 
             room_obj = nio.MatrixRoom(room_id=room_id, own_user_id=bot.user_id)

@@ -14,6 +14,7 @@ import pytest
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
+from mindroom.config.calls import CallsConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
@@ -115,26 +116,17 @@ def _thread_root_event(
     return event
 
 
-def _sync_response_with_own_room_membership(
+def _sync_response_with_room_membership_section(
     room_id: str,
-    user_id: str,
     *,
     membership: str,
 ) -> nio.SyncResponse:
     room_section = "join" if membership == "join" else "leave"
-    event = {
-        "type": "m.room.member",
-        "event_id": f"$own-{membership}",
-        "sender": "@owner:localhost",
-        "origin_server_ts": 1,
-        "state_key": user_id,
-        "content": {"membership": membership},
-    }
     room_info = {
-        "state": {"events": [event] if membership == "join" else []},
+        "state": {"events": []},
         "timeline": {
-            "events": [] if membership == "join" else [event],
-            "limited": membership == "join",
+            "events": [],
+            "limited": False,
             "prev_batch": "s-before-membership",
         },
     }
@@ -240,6 +232,22 @@ def test_room_membership_cleanup_registers_without_call_runtime(tmp_path: Path) 
     client.add_to_device_callback.assert_not_called()
 
 
+def test_call_admission_reads_live_invites_from_managed_agents(tmp_path: Path) -> None:
+    """Call admission gets one live snapshot from each managed calls-enabled agent."""
+    bot = _agent_bot(tmp_path)
+    other = _agent_bot(tmp_path, agent_name="other")
+    bot.config.agents["other"] = AgentConfig(display_name="Other")
+    bot.config.calls = CallsConfig(enabled=True, agents=["code", "other"])
+    bot.orchestrator = MagicMock(agent_bots={"code": bot, "other": other})
+    bot._room_lifecycle.invited_rooms.add("!code-call:localhost")
+    other._room_lifecycle.invited_rooms.add("!other-call:localhost")
+
+    assert bot._invited_call_rooms_by_agent() == {
+        "code": frozenset({"!code-call:localhost"}),
+        "other": frozenset({"!other-call:localhost"}),
+    }
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend_available", [False, True])
 async def test_presence_uses_voice_backend_availability(
@@ -274,17 +282,15 @@ async def test_sync_leave_section_forgets_invited_room_before_call_teardown(
     bot = _agent_bot(tmp_path)
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     room_id = "!agent-call:localhost"
-    room = nio.MatrixRoom(room_id=room_id, own_user_id=bot.agent_user.user_id)
-    client.rooms[room_id] = room
     bot.client = client
     bot._room_lifecycle.invited_rooms = {room_id}
     bot._room_lifecycle.save_invited_rooms()
     call_manager = MagicMock()
 
-    async def assert_invite_was_forgotten(_room: nio.MatrixRoom, _event: nio.RoomMemberEvent) -> None:
+    async def assert_invite_was_forgotten(**_kwargs: object) -> None:
         assert bot._room_lifecycle.invited_rooms == set()
 
-    call_manager.on_room_membership_event = AsyncMock(side_effect=assert_invite_was_forgotten)
+    call_manager.on_sync_room_membership = AsyncMock(side_effect=assert_invite_was_forgotten)
     install_call_manager_mock(bot, call_manager)
     monkeypatch.setattr(
         bot,
@@ -293,34 +299,31 @@ async def test_sync_leave_section_forgets_invited_room_before_call_teardown(
     )
 
     await bot._on_sync_response(
-        _sync_response_with_own_room_membership(
+        _sync_response_with_room_membership_section(
             room_id,
-            bot.agent_user.user_id,
             membership="leave",
         ),
     )
 
     assert bot._room_lifecycle.invited_rooms == set()
-    call_manager.on_room_membership_event.assert_awaited_once()
-    handled_room, handled_event = call_manager.on_room_membership_event.await_args.args
-    assert handled_room is room
-    assert handled_event.event_id == "$own-leave"
+    call_manager.on_sync_room_membership.assert_awaited_once_with(
+        joined_room_ids=set(),
+        left_room_ids={room_id},
+    )
 
 
 @pytest.mark.asyncio
-async def test_sync_join_state_reaches_call_manager(
+async def test_sync_join_section_reaches_call_manager(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Own joins present only in sync state can clear departed call state."""
+    """A room in the sync join section can clear departed call state."""
     bot = _agent_bot(tmp_path)
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     room_id = "!configured-call:localhost"
-    room = nio.MatrixRoom(room_id=room_id, own_user_id=bot.agent_user.user_id)
-    client.rooms[room_id] = room
     bot.client = client
     call_manager = MagicMock()
-    call_manager.on_room_membership_event = AsyncMock()
+    call_manager.on_sync_room_membership = AsyncMock()
     install_call_manager_mock(bot, call_manager)
     monkeypatch.setattr(
         bot,
@@ -329,17 +332,16 @@ async def test_sync_join_state_reaches_call_manager(
     )
 
     await bot._on_sync_response(
-        _sync_response_with_own_room_membership(
+        _sync_response_with_room_membership_section(
             room_id,
-            bot.agent_user.user_id,
             membership="join",
         ),
     )
 
-    call_manager.on_room_membership_event.assert_awaited_once()
-    handled_room, handled_event = call_manager.on_room_membership_event.await_args.args
-    assert handled_room is room
-    assert handled_event.event_id == "$own-join"
+    call_manager.on_sync_room_membership.assert_awaited_once_with(
+        joined_room_ids={room_id},
+        left_room_ids=set(),
+    )
 
 
 @pytest.mark.asyncio

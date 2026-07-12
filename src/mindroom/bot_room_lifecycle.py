@@ -50,53 +50,6 @@ class _SendRoomResponse(Protocol):
         ...
 
 
-def own_room_membership_events_from_sync(
-    response: nio.SyncResponse,
-    *,
-    own_user_id: str,
-    rooms: Mapping[str, nio.MatrixRoom],
-) -> tuple[tuple[nio.MatrixRoom, nio.RoomMemberEvent], ...]:
-    """Return own membership events that matrix-nio does not dispatch to callbacks."""
-    membership_events: list[tuple[nio.MatrixRoom, nio.RoomMemberEvent]] = []
-    for room_id, room_info in response.rooms.leave.items():
-        room = rooms.get(room_id) or nio.MatrixRoom(room_id=room_id, own_user_id=own_user_id)
-        events = (*room_info.timeline.events, *room_info.state)
-        departure = next(
-            (
-                event
-                for event in events
-                if isinstance(event, nio.RoomMemberEvent)
-                and event.state_key == own_user_id
-                and event.membership in {"leave", "ban"}
-            ),
-            None,
-        )
-        if departure is not None:
-            membership_events.append((room, departure))
-
-    for room_id, room_info in response.rooms.join.items():
-        timeline_has_own_join = any(
-            isinstance(event, nio.RoomMemberEvent) and event.state_key == own_user_id and event.membership == "join"
-            for event in room_info.timeline.events
-        )
-        if timeline_has_own_join:
-            continue
-        joined = next(
-            (
-                event
-                for event in room_info.state
-                if isinstance(event, nio.RoomMemberEvent)
-                and event.state_key == own_user_id
-                and event.membership == "join"
-            ),
-            None,
-        )
-        if joined is not None:
-            room = rooms.get(room_id) or nio.MatrixRoom(room_id=room_id, own_user_id=own_user_id)
-            membership_events.append((room, joined))
-    return tuple(membership_events)
-
-
 @dataclass(frozen=True)
 class BotRoomLifecycleDeps:
     """Dependencies required for room membership and invite handling."""
@@ -183,13 +136,11 @@ class BotRoomLifecycle:
             return
         save_invited_rooms(self.invited_rooms_file_path(), self.invited_rooms)
 
-    def forget_invited_room_after_own_leave(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
-        """Stop preserving an ad-hoc room after this bot was kicked, banned, or left."""
-        if event.state_key != self.deps.agent_user.user_id or event.membership not in {"leave", "ban"}:
+    def forget_invited_room(self, room_id: str) -> None:
+        """Stop preserving an ad-hoc room after this bot leaves it."""
+        if room_id not in self.invited_rooms:
             return
-        if room.room_id not in self.invited_rooms:
-            return
-        self.invited_rooms.remove(room.room_id)
+        self.invited_rooms.remove(room_id)
         self.save_invited_rooms()
 
     async def join_configured_rooms(self) -> None:

@@ -362,20 +362,7 @@ def test_agent_forgets_persisted_invited_room_after_being_kicked(
     room_id = "!agent-call:localhost"
     bot._room_lifecycle.invited_rooms = {room_id}
     bot._room_lifecycle.save_invited_rooms()
-    room = nio.MatrixRoom(room_id=room_id, own_user_id="@mindroom_agent1:localhost")
-    event = nio.RoomMemberEvent.from_dict(
-        {
-            "event_id": "$leave",
-            "sender": "@alice:localhost",
-            "origin_server_ts": 1,
-            "type": "m.room.member",
-            "state_key": "@mindroom_agent1:localhost",
-            "content": {"membership": "leave"},
-        },
-    )
-    assert isinstance(event, nio.RoomMemberEvent)
-
-    bot._room_lifecycle.forget_invited_room_after_own_leave(room, event)
+    bot._room_lifecycle.forget_invited_room(room_id)
 
     assert bot._room_lifecycle.invited_rooms == set()
     assert _invited_rooms_path(config, "agent1").read_text(encoding="utf-8") == "[]\n"

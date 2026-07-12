@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import patch
 
 import pytest
 
@@ -18,12 +17,29 @@ from mindroom.entity_resolution import (
     configured_call_agent_name_for_room,
     entity_identity_registry,
 )
-from mindroom.matrix.invited_rooms_store import invited_rooms_path, load_invited_rooms, save_invited_rooms
 from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def _call_config(tmp_path: Path, **accept_invites_by_agent: bool) -> Config:
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    return bind_runtime_paths(
+        Config(
+            agents={
+                name: AgentConfig(display_name=name.title(), accept_invites=accept_invites)
+                for name, accept_invites in accept_invites_by_agent.items()
+            },
+            calls=CallsConfig(enabled=True, agents=list(accept_invites_by_agent)),
+        ),
+        runtime_paths=runtime_paths,
+    )
 
 
 def test_configured_bot_user_ids_for_room_includes_agents_teams_and_router(tmp_path: Path) -> None:
@@ -106,31 +122,14 @@ def test_configured_bot_user_ids_for_room_uses_persisted_current_user_ids(tmp_pa
 
 def test_configured_call_agent_includes_authorized_ad_hoc_invited_room(tmp_path: Path) -> None:
     """A calls-enabled agent may answer in a room accepted through its invite policy."""
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "general": AgentConfig(display_name="General", role="General agent", accept_invites=True),
-                "other": AgentConfig(display_name="Other", role="Other agent"),
-            },
-            calls=CallsConfig(enabled=True, agents=["general", "other"]),
-        ),
-        runtime_paths=resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path / "mindroom_data",
-            process_env={},
-        ),
-    )
+    config = _call_config(tmp_path, general=True, other=False)
     runtime_paths = runtime_paths_for(config)
-    save_invited_rooms(
-        invited_rooms_path(runtime_paths.storage_root, "general"),
-        {"!agent-call:server"},
-    )
-
     assert (
         configured_call_agent_name_for_room(
             config,
             "!agent-call:server",
             runtime_paths,
+            invited_rooms_by_agent={"general": {"!agent-call:server"}},
         )
         == "general"
     )
@@ -138,91 +137,63 @@ def test_configured_call_agent_includes_authorized_ad_hoc_invited_room(tmp_path:
 
 def test_configured_call_agent_rejects_ambiguous_invited_room(tmp_path: Path) -> None:
     """One ad-hoc room cannot silently select between two calls-enabled invitees."""
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "general": AgentConfig(display_name="General", role="General agent", accept_invites=True),
-                "other": AgentConfig(display_name="Other", role="Other agent", accept_invites=True),
-            },
-            calls=CallsConfig(enabled=True, agents=["general", "other"]),
-        ),
-        runtime_paths=resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path / "mindroom_data",
-            process_env={},
-        ),
-    )
+    config = _call_config(tmp_path, general=True, other=True)
     runtime_paths = runtime_paths_for(config)
-    for agent_name in ("general", "other"):
-        save_invited_rooms(
-            invited_rooms_path(runtime_paths.storage_root, agent_name),
-            {"!agent-call:server"},
-        )
-
     with pytest.raises(ValueError, match="general, other"):
-        configured_call_agent_name_for_room(config, "!agent-call:server", runtime_paths)
+        configured_call_agent_name_for_room(
+            config,
+            "!agent-call:server",
+            runtime_paths,
+            invited_rooms_by_agent={
+                "general": {"!agent-call:server"},
+                "other": {"!agent-call:server"},
+            },
+        )
 
 
 def test_configured_call_agent_ignores_stale_invites_when_acceptance_is_disabled(tmp_path: Path) -> None:
     """Disabling invite acceptance revokes persisted ad-hoc call-room ownership."""
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="General",
-                    role="General agent",
-                    accept_invites=False,
-                ),
-            },
-            calls=CallsConfig(enabled=True, agents=["general"]),
-        ),
-        runtime_paths=resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path / "mindroom_data",
-            process_env={},
-        ),
-    )
+    config = _call_config(tmp_path, general=False)
     runtime_paths = runtime_paths_for(config)
-    save_invited_rooms(
-        invited_rooms_path(runtime_paths.storage_root, "general"),
-        {"!agent-call:server"},
+    assert (
+        configured_call_agent_name_for_room(
+            config,
+            "!agent-call:server",
+            runtime_paths,
+            invited_rooms_by_agent={"general": {"!agent-call:server"}},
+        )
+        is None
     )
 
-    assert configured_call_agent_name_for_room(config, "!agent-call:server", runtime_paths) is None
 
-
-def test_configured_call_agent_caches_internal_invited_room_state(tmp_path: Path) -> None:
-    """Repeated live-room resolution does not reread unchanged internal state."""
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="General",
-                    role="General agent",
-                    accept_invites=True,
-                ),
-            },
-            calls=CallsConfig(enabled=True, agents=["general"]),
-        ),
-        runtime_paths=resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path / "mindroom_data",
-            process_env={},
-        ),
-    )
+def test_configured_call_agent_uses_live_invited_room_state(tmp_path: Path) -> None:
+    """Call ownership follows the invite lifecycle's current in-memory state."""
+    config = _call_config(tmp_path, general=True)
     runtime_paths = runtime_paths_for(config)
-    path = invited_rooms_path(runtime_paths.storage_root, "general")
-    path.parent.mkdir(parents=True)
-    path.write_text('["!agent-call:server"]\n', encoding="utf-8")
+    invited_rooms: set[str] = set()
+    invited_rooms_by_agent = {"general": invited_rooms}
 
-    with patch(
-        "mindroom.matrix.invited_rooms_store.load_invited_rooms",
-        wraps=load_invited_rooms,
-    ) as load:
-        for _ in range(2):
-            assert configured_call_agent_name_for_room(config, "!agent-call:server", runtime_paths) == "general"
+    assert (
+        configured_call_agent_name_for_room(
+            config,
+            "!agent-call:server",
+            runtime_paths,
+            invited_rooms_by_agent=invited_rooms_by_agent,
+        )
+        is None
+    )
 
-    load.assert_called_once_with(path)
+    invited_rooms.add("!agent-call:server")
+
+    assert (
+        configured_call_agent_name_for_room(
+            config,
+            "!agent-call:server",
+            runtime_paths,
+            invited_rooms_by_agent=invited_rooms_by_agent,
+        )
+        == "general"
+    )
 
 
 def test_entity_identity_registry_uses_only_persisted_current_ids(tmp_path: Path) -> None:

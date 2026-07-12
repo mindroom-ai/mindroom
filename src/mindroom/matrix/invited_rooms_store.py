@@ -17,8 +17,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_cached_invited_rooms: dict[Path, frozenset[str]] = {}
-
 
 def invited_rooms_path(storage_root: Path, agent_name: str) -> Path:
     """Return the storage path for one agent's persisted invited rooms."""
@@ -48,15 +46,6 @@ def load_invited_rooms(path: Path) -> set[str]:
     return set(room_ids)
 
 
-def load_cached_invited_rooms(path: Path) -> set[str]:
-    """Load invited rooms once, returning a mutable snapshot of cached internal state."""
-    cached = _cached_invited_rooms.get(path)
-    if cached is None:
-        cached = frozenset(load_invited_rooms(path))
-        _cached_invited_rooms[path] = cached
-    return set(cached)
-
-
 def save_invited_rooms(path: Path, room_ids: set[str]) -> None:
     """Persist invited rooms atomically for one eligible entity."""
     temp_path = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
@@ -67,7 +56,6 @@ def save_invited_rooms(path: Path, room_ids: set[str]) -> None:
             encoding="utf-8",
         )
         safe_replace(temp_path, path)
-        _cached_invited_rooms[path] = frozenset(room_ids)
     except OSError:
         logger.exception("failed_to_save_invited_rooms", path=str(path))
     finally:

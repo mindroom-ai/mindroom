@@ -20,7 +20,6 @@ from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig
 from mindroom.config.models import ModelConfig
 from mindroom.config.voice import SpeechServiceConfig
-from mindroom.matrix.invited_rooms_store import invited_rooms_path, save_invited_rooms
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.matrix_rtc.call_manager import (
@@ -236,6 +235,7 @@ def _manager(
     config: Config | None = None,
     tool_support: object = object(),
     clock_ms: Callable[[], int] = lambda: int(time.time() * 1000),
+    invited_rooms_by_agent: dict[str, set[str]] | None = None,
 ) -> CallManager:
     return CallManager(
         agent_name="helper",
@@ -245,6 +245,7 @@ def _manager(
         ssl_verify=True,
         bridge_factory=lambda _identity, _e2ee: bridge,
         tool_support=tool_support,  # type: ignore[arg-type]
+        get_invited_rooms_by_agent=lambda: invited_rooms_by_agent or {},
         clock_ms=clock_ms,
     )
 
@@ -340,12 +341,13 @@ async def test_manager_joins_call_in_authorized_ad_hoc_invited_room(tmp_path: Pa
     bridge = FakeBridge()
     config = _config()
     config.agents["helper"].rooms = []
-    runtime_paths = test_runtime_paths(tmp_path)
-    save_invited_rooms(
-        invited_rooms_path(runtime_paths.storage_root, "helper"),
-        {ROOM_ID},
+    manager = _manager(
+        client,
+        bridge,
+        tmp_path,
+        config,
+        invited_rooms_by_agent={"helper": {ROOM_ID}},
     )
-    manager = _manager(client, bridge, tmp_path, config)
 
     await manager.on_room_event(_room(), _member_unknown_event())
 
@@ -361,19 +363,8 @@ async def test_manager_stops_call_when_agent_is_kicked_from_ephemeral_room(tmp_p
     manager = _manager(client, bridge, tmp_path)
     room = _room()
     await manager.on_room_event(room, _member_unknown_event())
-    event = nio.RoomMemberEvent.from_dict(
-        {
-            "event_id": "$leave",
-            "sender": "@alice:example.org",
-            "origin_server_ts": int(time.time() * 1000),
-            "type": "m.room.member",
-            "state_key": BOT_USER,
-            "content": {"membership": "leave"},
-        },
-    )
-    assert isinstance(event, nio.RoomMemberEvent)
 
-    await manager.on_room_membership_event(room, event)
+    await manager.on_sync_room_membership(joined_room_ids=set(), left_room_ids={ROOM_ID})
 
     assert bridge.closed is True
     assert manager._sessions == {}
@@ -413,13 +404,17 @@ async def test_manager_does_not_retain_departed_ad_hoc_room(tmp_path: Path) -> N
     client = _client()
     config = _config()
     config.agents["helper"].rooms = []
-    runtime_paths = test_runtime_paths(tmp_path)
-    path = invited_rooms_path(runtime_paths.storage_root, "helper")
-    save_invited_rooms(path, {ROOM_ID})
-    manager = _manager(client, FakeBridge(), tmp_path, config)
+    invited_rooms = {ROOM_ID}
+    manager = _manager(
+        client,
+        FakeBridge(),
+        tmp_path,
+        config,
+        invited_rooms_by_agent={"helper": invited_rooms},
+    )
     room = _room()
     manager._observed_rooms[ROOM_ID] = room
-    save_invited_rooms(path, set())
+    invited_rooms.clear()
     event = nio.RoomMemberEvent.from_dict(
         {
             "event_id": "$leave",
@@ -468,25 +463,12 @@ async def test_manager_ignores_frame_keys_after_departing_configured_room(tmp_pa
 async def test_manager_clears_departure_guard_on_own_rejoin(tmp_path: Path) -> None:
     """A forwarded own join makes a configured call room eligible again."""
     client = _client()
-    client.room_get_state.return_value = nio.RoomGetStateResponse([], ROOM_ID)
     manager = _manager(client, FakeBridge(), tmp_path)
     manager._departed_rooms.add(ROOM_ID)
-    event = nio.RoomMemberEvent.from_dict(
-        {
-            "event_id": "$join",
-            "sender": BOT_USER,
-            "origin_server_ts": int(time.time() * 1000),
-            "type": "m.room.member",
-            "state_key": BOT_USER,
-            "content": {"membership": "join"},
-        },
-    )
-    assert isinstance(event, nio.RoomMemberEvent)
 
-    await manager.on_room_membership_event(_room(), event)
+    await manager.on_sync_room_membership(joined_room_ids={ROOM_ID}, left_room_ids=set())
 
     assert ROOM_ID not in manager._departed_rooms
-    client.room_get_state.assert_awaited_once_with(ROOM_ID)
 
 
 @pytest.mark.asyncio
@@ -647,6 +629,7 @@ def test_default_bridge_factory_tracks_configured_backend(tmp_path: Path) -> Non
         runtime_paths=test_runtime_paths(tmp_path),
         ssl_verify=True,
         tool_support=object(),  # type: ignore[arg-type]
+        get_invited_rooms_by_agent=dict,
     )
 
     bridge = manager._bridge_factory("@helper:example.org:BOTDEV", False)
@@ -858,6 +841,7 @@ async def test_manager_restarts_when_sole_requester_changes(
         ssl_verify=True,
         bridge_factory=lambda _identity, _e2ee: next(bridges),
         tool_support=object(),  # type: ignore[arg-type]
+        get_invited_rooms_by_agent=dict,
     )
     client.room_get_state.return_value = _state_response(_remote_member_event())
     await manager.on_room_event(_room(), _member_unknown_event())
@@ -1018,6 +1002,7 @@ def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None
         runtime_paths=runtime_paths,
         ssl_verify=True,
         tool_support=object(),
+        get_invited_rooms_by_agent=dict,
     )
     assert disabled is None
     not_listed = maybe_build_call_manager(
@@ -1027,6 +1012,7 @@ def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None
         runtime_paths=runtime_paths,
         ssl_verify=True,
         tool_support=object(),
+        get_invited_rooms_by_agent=dict,
     )
     assert not_listed is None
     enabled = maybe_build_call_manager(
@@ -1036,6 +1022,7 @@ def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None
         runtime_paths=runtime_paths,
         ssl_verify=True,
         tool_support=object(),
+        get_invited_rooms_by_agent=dict,
     )
     assert isinstance(enabled, CallManager)
 
@@ -1058,6 +1045,7 @@ def test_maybe_build_call_manager_survives_missing_livekit_package(
         runtime_paths=test_runtime_paths(tmp_path),
         ssl_verify=True,
         tool_support=object(),
+        get_invited_rooms_by_agent=dict,
     )
     assert manager is None
 

@@ -52,7 +52,8 @@ from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
 from mindroom.session_ids import create_session_id
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
+    from collections.abc import Set as AbstractSet
 
     from mindroom.config.main import Config
     from mindroom.config.voice import SpeechServiceConfig
@@ -123,6 +124,7 @@ def maybe_build_call_manager(
     runtime_paths: RuntimePaths,
     ssl_verify: bool,
     tool_support: ToolRuntimeSupport,
+    get_invited_rooms_by_agent: Callable[[], Mapping[str, AbstractSet[str]]],
 ) -> CallManager | None:
     """Build a call manager when this agent is configured for voice calls."""
     if not config.calls.enabled or agent_name not in config.calls.agents:
@@ -143,6 +145,7 @@ def maybe_build_call_manager(
         runtime_paths=runtime_paths,
         ssl_verify=ssl_verify,
         tool_support=tool_support,
+        get_invited_rooms_by_agent=get_invited_rooms_by_agent,
     )
 
 
@@ -159,6 +162,7 @@ class CallManager:
         ssl_verify: bool,
         bridge_factory: Callable[[str, bool], VoiceBridgeLike] | None = None,
         tool_support: ToolRuntimeSupport,
+        get_invited_rooms_by_agent: Callable[[], Mapping[str, AbstractSet[str]]],
         clock_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     ) -> None:
         self._agent_name = agent_name
@@ -170,6 +174,7 @@ class CallManager:
             _default_cascaded_bridge_factory if config.calls.backend == "cascaded" else _default_bridge_factory
         )
         self._tool_support = tool_support
+        self._get_invited_rooms_by_agent = get_invited_rooms_by_agent
         self._clock_ms = clock_ms
         self._key_transport = ToDeviceFrameKeyTransport(client)
         self._sessions: dict[str, CallSession] = {}
@@ -207,6 +212,23 @@ class CallManager:
             return
         self._observed_rooms[room.room_id] = room
         await self._reconcile(room)
+
+    async def on_sync_room_membership(
+        self,
+        *,
+        joined_room_ids: AbstractSet[str],
+        left_room_ids: AbstractSet[str],
+    ) -> None:
+        """Apply the bot's authoritative joined/left room sections from sync."""
+        if self._shutting_down:
+            return
+        self._departed_rooms.difference_update(joined_room_ids)
+        for room_id in left_room_ids:
+            room = self._observed_rooms.get(room_id) or self._client.rooms.get(room_id)
+            if room is not None and self._is_configured_call_room(room):
+                self._departed_rooms.add(room_id)
+            if self._has_tracked_call_state(room_id):
+                await self._handle_own_room_leave(room_id)
 
     async def _handle_own_room_leave(self, room_id: str) -> None:
         """Tear down call state immediately when the bot no longer belongs to the room."""
@@ -391,6 +413,7 @@ class CallManager:
                 room.room_id,
                 self._runtime_paths,
                 room_aliases=room_aliases,
+                invited_rooms_by_agent=self._get_invited_rooms_by_agent(),
             )
         except ValueError as error:
             logger.warning("call_room_ownership_ambiguous", room_id=room.room_id, error=str(error))
