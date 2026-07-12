@@ -39,6 +39,11 @@ _TRIGGER_RECORDS_VERSION = 1
 _ED25519_PUBLIC_KEY_BYTES = 32
 _EXTERNAL_TRIGGER_STATE_DIR = "external_triggers"
 _TRIGGER_RECORDS_FILENAME = "triggers.json"
+_OPENSSH_ED25519_KEY_TYPE = b"ssh-ed25519"
+# RFC 8410 SubjectPublicKeyInfo DER prefix for Ed25519: fixed 12 bytes before the raw key.
+_ED25519_SPKI_DER_PREFIX = bytes.fromhex("302a300506032b6570032100")
+_PEM_PUBLIC_KEY_HEADER = "-----BEGIN PUBLIC KEY-----"
+_PEM_PUBLIC_KEY_FOOTER = "-----END PUBLIC KEY-----"
 
 
 class ExternalTriggerStoreError(RuntimeError):
@@ -442,21 +447,88 @@ def _validate_trigger_id(trigger_id: str) -> str:
 
 
 def _normalize_public_key(public_key: str) -> tuple[str, bytes]:
-    """Validate and normalize one base64 Ed25519 public key."""
-    normalized = non_empty_stripped(public_key, field_name="public_key")
-    try:
-        public_key_bytes = base64.b64decode(normalized, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        msg = "public_key must be strict base64-encoded Ed25519 public key bytes"
-        raise ExternalTriggerStoreError(msg) from exc
-    if len(public_key_bytes) != _ED25519_PUBLIC_KEY_BYTES:
-        msg = "public_key must decode to 32 raw Ed25519 public key bytes"
+    """Normalize one Ed25519 public key to canonical base64 of its raw 32 bytes.
+
+    Accepts raw base64 key bytes, OpenSSH single-line format
+    (``ssh-ed25519 <base64-blob> [comment]``), and PEM SubjectPublicKeyInfo.
+    """
+    normalized_input = non_empty_stripped(public_key, field_name="public_key")
+    public_key_bytes = (
+        _public_key_bytes_from_pem(normalized_input)
+        or _public_key_bytes_from_openssh(normalized_input)
+        or _public_key_bytes_from_base64(normalized_input)
+    )
+    if public_key_bytes is None:
+        msg = (
+            "public_key must be an Ed25519 public key as raw base64 (32 key bytes), "
+            "OpenSSH single-line format ('ssh-ed25519 <base64> [comment]'), or PEM SubjectPublicKeyInfo"
+        )
         raise ExternalTriggerStoreError(msg)
-    return normalized, public_key_bytes
+    return base64.b64encode(public_key_bytes).decode("ascii"), public_key_bytes
+
+
+def _decode_strict_base64(value: str) -> bytes | None:
+    try:
+        return base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+
+
+def _public_key_bytes_from_base64(value: str) -> bytes | None:
+    decoded = _decode_strict_base64(value)
+    if decoded is None:
+        return None
+    if len(decoded) == _ED25519_PUBLIC_KEY_BYTES:
+        return decoded
+    # A bare OpenSSH blob (the base64 field without the "ssh-ed25519" prefix) is also base64.
+    return _public_key_bytes_from_openssh_blob(decoded)
+
+
+def _public_key_bytes_from_openssh(value: str) -> bytes | None:
+    parts = value.split()
+    if len(parts) < 2 or parts[0] != _OPENSSH_ED25519_KEY_TYPE.decode("ascii"):
+        return None
+    blob = _decode_strict_base64(parts[1])
+    if blob is None:
+        return None
+    return _public_key_bytes_from_openssh_blob(blob)
+
+
+def _public_key_bytes_from_openssh_blob(blob: bytes) -> bytes | None:
+    key_type, rest = _read_openssh_string(blob)
+    if key_type != _OPENSSH_ED25519_KEY_TYPE:
+        return None
+    key_bytes, remainder = _read_openssh_string(rest)
+    if key_bytes is None or remainder or len(key_bytes) != _ED25519_PUBLIC_KEY_BYTES:
+        return None
+    return key_bytes
+
+
+def _read_openssh_string(data: bytes) -> tuple[bytes | None, bytes]:
+    """Read one length-prefixed field from OpenSSH wire-format data."""
+    if len(data) < 4:
+        return None, b""
+    length = int.from_bytes(data[:4], "big")
+    if len(data) < 4 + length:
+        return None, b""
+    return data[4 : 4 + length], data[4 + length :]
+
+
+def _public_key_bytes_from_pem(value: str) -> bytes | None:
+    if _PEM_PUBLIC_KEY_HEADER not in value or _PEM_PUBLIC_KEY_FOOTER not in value:
+        return None
+    body = value.replace(_PEM_PUBLIC_KEY_HEADER, "").replace(_PEM_PUBLIC_KEY_FOOTER, "")
+    der = _decode_strict_base64("".join(body.split()))
+    if der is None or not der.startswith(_ED25519_SPKI_DER_PREFIX):
+        return None
+    key_bytes = der[len(_ED25519_SPKI_DER_PREFIX) :]
+    if len(key_bytes) != _ED25519_PUBLIC_KEY_BYTES:
+        return None
+    return key_bytes
 
 
 def public_key_fingerprint(public_key: str) -> str:
-    """Return the stable fingerprint for one base64 Ed25519 public key."""
+    """Return the stable fingerprint for one Ed25519 public key in any accepted format."""
     _normalized, public_key_bytes = _normalize_public_key(public_key)
     return _public_key_fingerprint_from_bytes(public_key_bytes)
 
