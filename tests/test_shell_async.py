@@ -486,7 +486,7 @@ async def test_run_shell_command_respects_base_dir(tmp_path: Path) -> None:
     assert entrypoint is not None
 
     result = await entrypoint(["pwd"])
-    assert result.strip() == str(tmp_path)
+    assert result.splitlines() == [f"[cwd: {tmp_path}]", str(tmp_path)]
 
 
 # ---------------------------------------------------------------------------
@@ -847,7 +847,52 @@ async def test_local_shell_replaces_stale_agent_workspace_env(tmp_path: Path) ->
     assert entrypoint is not None
 
     result = await entrypoint('printf %s "$MINDROOM_AGENT_WORKSPACE"')
-    assert result == str(workspace.resolve())
+    assert result.splitlines() == [f"[cwd: {workspace}]", str(workspace.resolve())]
+
+
+def test_run_shell_command_description_notes_host_home_in_local_mode(tmp_path: Path) -> None:
+    """Local-mode tool description warns that `~` is not the workspace."""
+    workspace = tmp_path / "workspace"
+    runtime_paths = _make_runtime_paths(tmp_path, process_env={"HOME": "/home/host-user"})
+    tool = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        disable_sandbox_proxy=True,
+        worker_target=None,
+        tool_init_overrides={"base_dir": str(workspace)},
+    )
+
+    description = tool.async_functions["run_shell_command"].description
+    assert description is not None
+    assert "point at the host home" in description
+    assert "$MINDROOM_AGENT_WORKSPACE" in description
+
+
+def test_run_shell_command_description_notes_workspace_home_in_worker_mode(tmp_path: Path) -> None:
+    """Worker-mode tool description says `~` points at the workspace."""
+    workspace = tmp_path / "workspace"
+    runtime_paths = _make_runtime_paths(tmp_path, process_env=dict(workspace_home_identity_env(workspace)))
+    tool = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        disable_sandbox_proxy=True,
+        worker_target=None,
+        tool_init_overrides={"base_dir": str(workspace)},
+    )
+
+    description = tool.async_functions["run_shell_command"].description
+    assert description is not None
+    assert "`~` and `$HOME` point at the workspace too" in description
+    assert "host home" not in description
+
+
+def test_run_shell_command_description_has_no_workspace_note_without_base_dir(tmp_path: Path) -> None:
+    """Without a workspace there is no cwd contract to describe."""
+    tool = _get_toolkit(tmp_path)
+
+    description = tool.async_functions["run_shell_command"].description
+    assert description is not None
+    assert "[cwd:" not in description
 
 
 @pytest.mark.asyncio

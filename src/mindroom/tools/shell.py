@@ -182,6 +182,20 @@ def _shell_subprocess_env(
     return env
 
 
+def _workspace_cwd_note(base_process_env: dict[str, str]) -> str:
+    """One mode-true sentence about where shell commands run, appended to the tool description."""
+    if _workspace_home_contract_env_from_process_env(base_process_env):
+        return (
+            "The command runs in your agent workspace as its working directory "
+            "(echoed as a `[cwd: ...]` first line in the result); `~` and `$HOME` point at the workspace too."
+        )
+    return (
+        "The command runs in your agent workspace as its working directory "
+        "(echoed as a `[cwd: ...]` first line in the result), but `~` and `$HOME` point at the host home, "
+        "not your workspace. For workspace files use relative paths or `$MINDROOM_AGENT_WORKSPACE`, never `~`."
+    )
+
+
 def _login_bash_command_index(args: list[str]) -> int | None:
     """Return the command index for `bash -lc ...` style invocations."""
     if not args or Path(args[0]).name != "bash":
@@ -362,6 +376,10 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 ),
             )
             self._base_process_env = dict(runtime_paths.process_env)
+            if run_shell_command_function is not None and self.base_dir is not None:
+                run_shell_command_function.description = (
+                    f"{run_shell_command_function.description or ''}\n\n{_workspace_cwd_note(self._base_process_env)}"
+                ).strip()
             self._handle_namespace = _handle_namespace(runtime_paths=runtime_paths, base_dir=self.base_dir)
             self._shell_path_prepend = shell_path_prepend
             # Sandbox tool subprocesses delegate execution to the runner's
@@ -405,7 +423,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             argv = _shell_subprocess_args(command_args, subprocess_env)
             cwd = str(self.base_dir) if self.base_dir else None
             if self._supervisor_socket is not None:
-                return await run_command_via_supervisor(
+                message = await run_command_via_supervisor(
                     self._supervisor_socket,
                     namespace=self._handle_namespace,
                     argv=argv,
@@ -414,16 +432,20 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     tail=tail,
                     timeout=timeout,
                 )
-            result = await run_command(
-                _process_registry,
-                namespace=self._handle_namespace,
-                argv=argv,
-                env=subprocess_env,
-                cwd=cwd,
-                tail=tail,
-                timeout=timeout,
-            )
-            return result.message
+            else:
+                result = await run_command(
+                    _process_registry,
+                    namespace=self._handle_namespace,
+                    argv=argv,
+                    env=subprocess_env,
+                    cwd=cwd,
+                    tail=tail,
+                    timeout=timeout,
+                )
+                message = result.message
+            if cwd is None:
+                return message
+            return f"[cwd: {cwd}]\n{message}"
 
         def check_shell_command(self, handle: str) -> str:
             """Poll the status of a backgrounded shell command.
