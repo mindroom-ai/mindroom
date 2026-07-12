@@ -103,8 +103,8 @@ class TestBuildAgentStatusMessage:
         assert "💼 General purpose assistant" in status
         assert "🔧" not in status  # No tools section
 
-    def test_only_calls_enabled_agents_advertise_voice_calls(self) -> None:
-        """Presence gives clients an exact per-agent voice-call capability signal."""
+    def test_only_runtime_ready_calls_agents_advertise_voice_calls(self) -> None:
+        """Presence gives clients an exact runtime-ready voice-call capability signal."""
         config = Config(
             agents={
                 "voice": AgentConfig(display_name="Voice"),
@@ -113,7 +113,12 @@ class TestBuildAgentStatusMessage:
             calls=CallsConfig(enabled=True, agents=["voice"]),
         )
 
-        assert "📞 Voice calls" in build_agent_status_message("voice", config).split(" | ")
+        assert "📞 Voice calls" in build_agent_status_message(
+            "voice",
+            config,
+            voice_calls_available=True,
+        ).split(" | ")
+        assert "📞 Voice calls" not in build_agent_status_message("voice", config).split(" | ")
         assert "📞 Voice calls" not in build_agent_status_message("text", config).split(" | ")
 
     def test_team_agent_status(self) -> None:

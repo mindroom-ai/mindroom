@@ -184,10 +184,23 @@ def test_call_manager_registers_call_and_room_membership_callbacks(tmp_path: Pat
 
     assert bot._call_manager is call_manager
     assert [call.args[1] for call in client.add_event_callback.call_args_list] == [
-        nio.UnknownEvent,
         nio.RoomMemberEvent,
+        nio.UnknownEvent,
     ]
     client.add_to_device_callback.assert_called_once_with(ANY, AuthenticatedToDeviceEvent)
+
+
+def test_room_membership_cleanup_registers_without_call_runtime(tmp_path: Path) -> None:
+    """Persisted ad-hoc ownership is cleaned even when voice dependencies are absent."""
+    bot = _agent_bot(tmp_path)
+    client = MagicMock(spec=nio.AsyncClient)
+
+    with patch("mindroom.bot.maybe_build_call_manager", return_value=None):
+        bot._register_call_manager_callbacks(client)
+
+    assert bot._call_manager is None
+    client.add_event_callback.assert_called_once_with(ANY, nio.RoomMemberEvent)
+    client.add_to_device_callback.assert_not_called()
 
 
 @pytest.mark.asyncio

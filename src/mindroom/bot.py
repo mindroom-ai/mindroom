@@ -986,7 +986,11 @@ class AgentBot:
         if self.client is None:
             return
 
-        status_msg = build_agent_status_message(self.agent_name, self.config)
+        status_msg = build_agent_status_message(
+            self.agent_name,
+            self.config,
+            voice_calls_available=self._call_manager is not None,
+        )
         await set_presence_status(self.client, status_msg)
 
     def mark_sync_loop_started(self) -> None:
@@ -1332,6 +1336,14 @@ class AgentBot:
             ssl_verify=constants.runtime_matrix_ssl_verify(self.runtime_paths),
             tool_support=self._tool_runtime_support,
         )
+        client.add_event_callback(
+            _create_task_wrapper(
+                self._on_call_room_membership_event,
+                owner=self._runtime_view,
+                on_error=self._mark_callback_failed,
+            ),
+            nio.RoomMemberEvent,
+        )
         if self._call_manager is None:
             return
         client.add_event_callback(
@@ -1341,14 +1353,6 @@ class AgentBot:
                 on_error=self._mark_callback_failed,
             ),
             nio.UnknownEvent,
-        )
-        client.add_event_callback(
-            _create_task_wrapper(
-                self._on_call_room_membership_event,
-                owner=self._runtime_view,
-                on_error=self._mark_callback_failed,
-            ),
-            nio.RoomMemberEvent,
         )
         client.add_to_device_callback(
             _create_task_wrapper(  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
@@ -1388,7 +1392,6 @@ class AgentBot:
             self._runtime_view.mark_runtime_started()
             self._restore_saved_sync_token()
             await self._set_avatar_if_available()
-            await self._set_presence_with_model_info()
             # Both load tracking state under advisory file locks; keep that
             # off the event loop so per-bot startup never stalls dispatch.
             await asyncio.to_thread(self._turn_store.warm)
@@ -1440,6 +1443,7 @@ class AgentBot:
                 nio.MegolmEvent,
             )
             self._register_call_manager_callbacks(client)
+            await self._set_presence_with_model_info()
             client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
             client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
 

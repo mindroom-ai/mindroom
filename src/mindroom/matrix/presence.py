@@ -52,12 +52,15 @@ async def set_presence_status(
 def build_agent_status_message(
     agent_name: str,
     config: Config,
+    *,
+    voice_calls_available: bool = False,
 ) -> str:
     """Build status message with model and role information for an agent.
 
     Args:
         agent_name: Name of the agent
         config: Application configuration
+        voice_calls_available: Whether this bot has a usable MatrixRTC call manager
 
     Returns:
         Status message string, limited to 250 characters
@@ -93,7 +96,7 @@ def build_agent_status_message(
         effective_tools = entity_view.available_tools
         if effective_tools:
             status_parts.append(f"🔧 {len(effective_tools)} tools available")
-        if config.calls.enabled and agent_name in config.calls.agents:
+        if voice_calls_available:
             status_parts.append(_VOICE_CALLS_STATUS)
 
     # Join all parts with separators
