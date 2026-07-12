@@ -36,7 +36,7 @@ from mindroom.constants import (
     VOICE_TRANSCRIPT_KEY,
     RuntimePaths,
 )
-from mindroom.delivery_gateway import SendTextRequest
+from mindroom.delivery_gateway import EditTextRequest, SendTextRequest
 from mindroom.dispatch_handoff import (
     DispatchEvent,
     DispatchHandoff,
@@ -63,6 +63,7 @@ from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import MessageEnvelope, build_hook_matrix_admin, hook_ingress_policy
 from mindroom.inbound_turn_normalizer import (
+    DispatchPayloadWithAttachmentsRequest,
     InboundTurnNormalizer,
     TextNormalizationRequest,
     VoiceNormalizationRequest,
@@ -1302,13 +1303,39 @@ class TurnController:
             history_scope=self.deps.turn_store.response_history_scope(ResponseAction(kind="individual")),
             conversation_target=response_target,
         )
+        # The selection is a synthetic turn with no Matrix message of its own, so
+        # the attachment context that ingress normally resolves per message must
+        # be rebuilt here from the conversation that asked the question.
+        try:
+            selection_payload = await self.deps.normalizer.build_dispatch_payload_with_attachments(
+                DispatchPayloadWithAttachmentsRequest(
+                    room_id=room.room_id,
+                    prompt=interactive.build_selection_prompt(selection),
+                    current_attachment_ids=[],
+                    thread_id=selection.thread_id,
+                    media_thread_id=response_target.resolved_thread_id,
+                    thread_history=thread_history,
+                ),
+            )
+        except Exception as error:
+            response_event_id = await self._finalize_dispatch_failure(
+                target=ack_target,
+                error=error,
+                existing_event_id=ack_event_id,
+            )
+            if response_event_id is not None:
+                self._mark_source_events_responded(
+                    replace(selection_handled_turn, response_event_id=response_event_id),
+                )
+            return
+        selection_attachment_ids = tuple(selection_payload.attachment_ids or ())
         selection_matrix_run_metadata = self.deps.turn_store.build_run_metadata(selection_handled_turn)
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         response_envelope = MessageEnvelope(
             source_event_id=source_event_id,
             target=response_target,
             body=f"The user selected: {selection.selected_value}",
-            attachment_ids=(),
+            attachment_ids=selection_attachment_ids,
             mentioned_agents=(),
             agent_name=self.deps.agent_name,
             origin=classify_turn_origin(
@@ -1324,11 +1351,13 @@ class TurnController:
 
         response_event_id = await self.deps.response_runner.generate_response(
             ResponseRequest(
-                prompt=interactive.build_selection_prompt(selection),
+                prompt=selection_payload.prompt,
+                model_prompt=selection_payload.model_prompt,
                 thread_history=thread_history,
                 existing_event_id=ack_event_id,
                 existing_event_is_placeholder=True,
                 user_id=user_id,
+                attachment_ids=selection_attachment_ids or None,
                 response_envelope=response_envelope,
                 matrix_run_metadata=selection_matrix_run_metadata,
             ),
@@ -1512,10 +1541,22 @@ class TurnController:
         *,
         target: MessageTarget,
         error: Exception,
+        existing_event_id: str | None = None,
     ) -> str | None:
         """Convert dispatch setup failures into a visible terminal message."""
         error_text = get_user_friendly_error_message(error, self.deps.agent_name)
         terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED}
+        if existing_event_id is not None:
+            edited = await self.deps.delivery_gateway.edit_text(
+                EditTextRequest(
+                    target=target,
+                    event_id=existing_event_id,
+                    new_text=error_text,
+                    extra_content=terminal_extra_content,
+                ),
+            )
+            if edited:
+                return existing_event_id
         return await self.deps.delivery_gateway.send_text(
             SendTextRequest(
                 target=target,

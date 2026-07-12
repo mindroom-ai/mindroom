@@ -378,6 +378,31 @@ def _get_toolkit(tmp_path: Path) -> Toolkit:
 
 
 @pytest.mark.asyncio
+async def test_toolkit_supervisor_result_includes_workspace_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    manager: _ShellSupervisorManager,
+) -> None:
+    """Supervisor-backed shell results should expose the same cwd contract as local results."""
+    monkeypatch.setenv(SHELL_SUPERVISOR_SOCKET_ENV, manager.ensure())
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tool = get_tool_by_name(
+        "shell",
+        _make_runtime_paths(tmp_path),
+        disable_sandbox_proxy=True,
+        worker_target=None,
+        tool_init_overrides={"base_dir": str(workspace)},
+    )
+    run_fn = tool.async_functions["run_shell_command"].entrypoint
+    assert run_fn is not None
+
+    result = await run_fn(["pwd"])
+
+    assert result.splitlines() == [f"[cwd: {workspace}]", str(workspace)]
+
+
+@pytest.mark.asyncio
 async def test_toolkit_routes_through_supervisor_across_instances(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

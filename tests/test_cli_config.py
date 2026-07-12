@@ -241,6 +241,7 @@ class TestConfigInit:
             "subagents",
             "matrix_message",
             "thread_tags",
+            "thread_summary",
         ]
         assert mind["skills"] == ["mindroom-docs"]
         assert "knowledge_bases" not in config

@@ -18,6 +18,7 @@ from mindroom.shell_execution import _MAX_OUTPUT_BYTES
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tools.shell import (
     _process_registry,
+    _shell_subprocess_env,
     _workspace_home_contract_env_from_process_env,
     shell_tools,
 )
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 
-def _make_runtime_paths(tmp_path: Path) -> RuntimePaths:
+def _make_runtime_paths(tmp_path: Path, *, process_env: dict[str, str] | None = None) -> RuntimePaths:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
@@ -41,7 +42,7 @@ def _make_runtime_paths(tmp_path: Path) -> RuntimePaths:
     return resolve_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
-        process_env={},
+        process_env={} if process_env is None else process_env,
     )
 
 
@@ -438,8 +439,15 @@ async def test_run_shell_command_truncates_oversized_single_stderr_line(tmp_path
 
 @pytest.mark.asyncio
 async def test_run_shell_command_returns_handle_on_timeout(tmp_path: Path) -> None:
-    """Command exceeding timeout should return a handle."""
-    tool = _get_toolkit(tmp_path)
+    """A workspace-prefixed timeout result should expose a usable handle identifier."""
+    runtime_paths = _make_runtime_paths(tmp_path)
+    tool = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        disable_sandbox_proxy=True,
+        worker_target=None,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+    )
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
     check_fn = tool.functions["check_shell_command"].entrypoint
     assert entrypoint is not None
@@ -447,6 +455,7 @@ async def test_run_shell_command_returns_handle_on_timeout(tmp_path: Path) -> No
 
     result = await entrypoint(["sleep", "300"], timeout=1)
 
+    assert result.startswith(f"[cwd: {tmp_path}]\n")
     assert "timed out" in result.lower()
     assert "Handle: shell:" in result
     assert "check_shell_command" in result
@@ -485,7 +494,7 @@ async def test_run_shell_command_respects_base_dir(tmp_path: Path) -> None:
     assert entrypoint is not None
 
     result = await entrypoint(["pwd"])
-    assert result.strip() == str(tmp_path)
+    assert result.splitlines() == [f"[cwd: {tmp_path}]", str(tmp_path)]
 
 
 # ---------------------------------------------------------------------------
@@ -774,6 +783,131 @@ def test_workspace_home_contract_env_requires_full_identity_fragment(tmp_path: P
     mismatched_env = dict(base_env)
     mismatched_env["XDG_DATA_HOME"] = str(tmp_path / "other-data")
     assert _workspace_home_contract_env_from_process_env(mismatched_env) == {}
+
+
+def test_shell_subprocess_env_exports_workspace_from_base_dir_without_home_contract(tmp_path: Path) -> None:
+    """Local execution keeps the host HOME but still exports the workspace env var."""
+    workspace = tmp_path / "workspace"
+
+    env = _shell_subprocess_env({}, base_process_env={"HOME": "/home/host-user"}, workspace_dir=workspace)
+
+    assert env["MINDROOM_AGENT_WORKSPACE"] == str(workspace.resolve())
+    assert env["HOME"] == "/home/host-user"
+
+
+def test_shell_subprocess_env_replaces_incomplete_workspace_contract(tmp_path: Path) -> None:
+    """An unvalidated process workspace must not override the local agent workspace."""
+    workspace = tmp_path / "workspace"
+    stale_workspace = tmp_path / "stale-workspace"
+    base_env = {
+        "HOME": "/home/host-user",
+        "MINDROOM_AGENT_WORKSPACE": str(stale_workspace),
+    }
+
+    env = _shell_subprocess_env(
+        {"MINDROOM_AGENT_WORKSPACE": str(stale_workspace)},
+        base_process_env=base_env,
+        workspace_dir=workspace,
+    )
+
+    assert env["MINDROOM_AGENT_WORKSPACE"] == str(workspace.resolve())
+    assert env["HOME"] == "/home/host-user"
+
+
+def test_shell_subprocess_env_prefers_worker_home_contract_over_base_dir(tmp_path: Path) -> None:
+    """The worker workspace HOME contract stays authoritative over the base_dir fallback."""
+    contract_workspace = tmp_path / "contract-workspace"
+    base_env = {
+        **workspace_home_identity_env(contract_workspace),
+        "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        "PIP_CACHE_DIR": str(tmp_path / "cache" / "pip"),
+        "UV_CACHE_DIR": str(tmp_path / "cache" / "uv"),
+        "PYTHONPYCACHEPREFIX": str(tmp_path / "cache" / "pycache"),
+        "VIRTUAL_ENV": str(tmp_path / "venv"),
+    }
+
+    env = _shell_subprocess_env({}, base_process_env=base_env, workspace_dir=tmp_path / "other-base-dir")
+
+    assert env["MINDROOM_AGENT_WORKSPACE"] == str(contract_workspace)
+    assert env["HOME"] == str(contract_workspace)
+
+
+@pytest.mark.asyncio
+async def test_local_shell_replaces_stale_agent_workspace_env(tmp_path: Path) -> None:
+    """Local shell execution should replace a stale process workspace with base_dir."""
+    workspace = tmp_path / "agent-workspace"
+    workspace.mkdir()
+    runtime_paths = _make_runtime_paths(
+        tmp_path,
+        process_env={
+            "HOME": str(tmp_path / "host-home"),
+            "MINDROOM_AGENT_WORKSPACE": str(tmp_path / "stale-workspace"),
+        },
+    )
+    tool = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        disable_sandbox_proxy=True,
+        worker_target=None,
+        tool_init_overrides={"base_dir": str(workspace)},
+    )
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = await entrypoint('printf %s "$MINDROOM_AGENT_WORKSPACE"')
+    assert result.splitlines() == [f"[cwd: {workspace}]", str(workspace.resolve())]
+
+
+def test_run_shell_command_description_uses_portable_workspace_paths(tmp_path: Path) -> None:
+    """The shell description should give workspace guidance valid in every execution mode."""
+    workspace = tmp_path / "workspace"
+    runtime_paths = _make_runtime_paths(tmp_path, process_env={"HOME": "/home/host-user"})
+    tool = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        disable_sandbox_proxy=True,
+        worker_target=None,
+        tool_init_overrides={"base_dir": str(workspace)},
+    )
+
+    description = tool.async_functions["run_shell_command"].description
+    assert description is not None
+    assert "Always use relative paths" in description
+    assert "$MINDROOM_AGENT_WORKSPACE" in description
+    assert "worker-routed execution maps `~` to the workspace" in description
+    assert "local execution maps it to the host home" in description
+
+
+def test_proxied_run_shell_command_description_does_not_claim_host_home(tmp_path: Path) -> None:
+    """The model-facing proxy description must not misidentify worker execution as local."""
+    workspace = tmp_path / "workspace"
+    runtime_paths = _make_runtime_paths(
+        tmp_path,
+        process_env={
+            "HOME": "/home/host-user",
+            "MINDROOM_SANDBOX_EXECUTION_MODE": "all",
+        },
+    )
+    tool = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        worker_target=None,
+        tool_init_overrides={"base_dir": str(workspace)},
+    )
+
+    description = tool.async_functions["run_shell_command"].description
+    assert description is not None
+    assert "worker-routed execution maps `~` to the workspace" in description
+    assert "`~` and `$HOME` point at the host home" not in description
+
+
+def test_run_shell_command_description_has_no_workspace_note_without_base_dir(tmp_path: Path) -> None:
+    """Without a workspace there is no cwd contract to describe."""
+    tool = _get_toolkit(tmp_path)
+
+    description = tool.async_functions["run_shell_command"].description
+    assert description is not None
+    assert "[cwd:" not in description
 
 
 @pytest.mark.asyncio
