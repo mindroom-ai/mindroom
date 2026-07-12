@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock, patch
+from urllib.parse import quote
 
 import pytest
 import yaml
@@ -145,6 +146,204 @@ async def test_export_threads_fetches_from_matrix_source_and_writes_yaml(tmp_pat
             "body": "Follow-up details",
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_export_threads_prefer_cache_uses_cache_first_fetch(tmp_path: Path) -> None:
+    """prefer_cache should read thread history through the cache-first fetch path."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    _write_matrix_state(tmp_path)
+
+    history = [
+        ResolvedVisibleMessage.synthetic(
+            sender="@alice:localhost",
+            body="Cached thread",
+            event_id="$cached:localhost",
+        ),
+    ]
+
+    with (
+        patch(
+            "mindroom.thread_export.enumerate_room_thread_root_ids",
+            new=AsyncMock(return_value=(["$cached:localhost"], False)),
+        ),
+        patch(
+            "mindroom.thread_export.fetch_thread_history",
+            new=AsyncMock(return_value=history),
+        ) as cache_fetch,
+        patch(
+            "mindroom.thread_export.refresh_thread_history_from_source",
+            new=AsyncMock(),
+        ) as source_fetch,
+    ):
+        stats = await _export_threads_for_client(
+            client=Mock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=Mock(),
+            output_dir=tmp_path / "exports",
+            room_filter="lobby",
+            prefer_cache=True,
+        )
+
+    assert stats.threads_exported == 1
+    assert stats.failures == 0
+    source_fetch.assert_not_awaited()
+    cache_fetch.assert_awaited_once()
+    assert cache_fetch.await_args.kwargs["caller_label"] == "thread_export"
+    assert len(list((tmp_path / "exports" / "lobby").glob("*.yaml"))) == 1
+
+
+@pytest.mark.asyncio
+async def test_export_threads_skips_rewrite_when_content_unchanged(tmp_path: Path) -> None:
+    """A second pass with identical thread content should leave the file untouched."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    _write_matrix_state(tmp_path)
+
+    history = [
+        ResolvedVisibleMessage.synthetic(
+            sender="@alice:localhost",
+            body="Stable content",
+            event_id="$stable:localhost",
+        ),
+    ]
+
+    with (
+        patch(
+            "mindroom.thread_export.enumerate_room_thread_root_ids",
+            new=AsyncMock(return_value=(["$stable:localhost"], False)),
+        ),
+        patch(
+            "mindroom.thread_export.refresh_thread_history_from_source",
+            new=AsyncMock(return_value=history),
+        ),
+    ):
+        first_stats = await _export_threads_for_client(
+            client=Mock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=Mock(),
+            output_dir=tmp_path / "exports",
+            room_filter="lobby",
+        )
+        exported_file = next((tmp_path / "exports" / "lobby").glob("*.yaml"))
+        first_bytes = exported_file.read_bytes()
+        second_stats = await _export_threads_for_client(
+            client=Mock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=Mock(),
+            output_dir=tmp_path / "exports",
+            room_filter="lobby",
+        )
+
+    assert first_stats.threads_unchanged == 0
+    assert second_stats.threads_exported == 1
+    assert second_stats.threads_unchanged == 1
+    assert exported_file.read_bytes() == first_bytes
+
+
+@pytest.mark.asyncio
+async def test_export_threads_rewrites_when_content_changed(tmp_path: Path) -> None:
+    """A pass with new thread messages should rewrite the existing file."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    _write_matrix_state(tmp_path)
+
+    first_history = [
+        ResolvedVisibleMessage.synthetic(
+            sender="@alice:localhost",
+            body="Original",
+            event_id="$original:localhost",
+        ),
+    ]
+    second_history = [
+        *first_history,
+        ResolvedVisibleMessage.synthetic(
+            sender="@alice:localhost",
+            body="Follow-up",
+            event_id="$followup:localhost",
+        ),
+    ]
+
+    with patch(
+        "mindroom.thread_export.enumerate_room_thread_root_ids",
+        new=AsyncMock(return_value=(["$original:localhost"], False)),
+    ):
+        with patch(
+            "mindroom.thread_export.refresh_thread_history_from_source",
+            new=AsyncMock(return_value=first_history),
+        ):
+            await _export_threads_for_client(
+                client=Mock(),
+                config=config,
+                runtime_paths=runtime_paths,
+                event_cache=Mock(),
+                output_dir=tmp_path / "exports",
+                room_filter="lobby",
+            )
+        with patch(
+            "mindroom.thread_export.refresh_thread_history_from_source",
+            new=AsyncMock(return_value=second_history),
+        ):
+            stats = await _export_threads_for_client(
+                client=Mock(),
+                config=config,
+                runtime_paths=runtime_paths,
+                event_cache=Mock(),
+                output_dir=tmp_path / "exports",
+                room_filter="lobby",
+            )
+
+    assert stats.threads_unchanged == 0
+    assert stats.threads_exported == 1
+    payload = yaml.safe_load(next((tmp_path / "exports" / "lobby").glob("*.yaml")).read_text(encoding="utf-8"))
+    assert [message["body"] for message in payload["messages"]] == ["Original", "Follow-up"]
+
+
+@pytest.mark.asyncio
+async def test_export_threads_rewrites_when_existing_file_corrupt(tmp_path: Path) -> None:
+    """A corrupt existing export file should be rewritten instead of raising."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    _write_matrix_state(tmp_path)
+
+    history = [
+        ResolvedVisibleMessage.synthetic(
+            sender="@alice:localhost",
+            body="Fresh content",
+            event_id="$fresh:localhost",
+        ),
+    ]
+    corrupt_path = tmp_path / "exports" / "lobby" / f"{quote('$fresh:localhost', safe='')}.yaml"
+    corrupt_path.parent.mkdir(parents=True)
+    corrupt_path.write_text("{not: [valid yaml", encoding="utf-8")
+
+    with (
+        patch(
+            "mindroom.thread_export.enumerate_room_thread_root_ids",
+            new=AsyncMock(return_value=(["$fresh:localhost"], False)),
+        ),
+        patch(
+            "mindroom.thread_export.refresh_thread_history_from_source",
+            new=AsyncMock(return_value=history),
+        ),
+    ):
+        stats = await _export_threads_for_client(
+            client=Mock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=Mock(),
+            output_dir=tmp_path / "exports",
+            room_filter="lobby",
+        )
+
+    assert stats.threads_exported == 1
+    assert stats.threads_unchanged == 0
+    payload = yaml.safe_load(corrupt_path.read_text(encoding="utf-8"))
+    assert payload["messages"][0]["body"] == "Fresh content"
 
 
 @pytest.mark.asyncio
