@@ -17,7 +17,11 @@ from mindroom.approval_inbound import (
     maybe_handle_tool_approval_reply,
     parse_approval_response_event,
 )
-from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps, own_room_departures_from_sync
+from mindroom.bot_room_lifecycle import (
+    BotRoomLifecycle,
+    BotRoomLifecycleDeps,
+    own_room_membership_events_from_sync,
+)
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import (
@@ -1234,7 +1238,7 @@ class AgentBot:
         if isinstance(_response, nio.SyncResponse):
             client = self.client
             assert client is not None
-            for room, event in own_room_departures_from_sync(
+            for room, event in own_room_membership_events_from_sync(
                 _response,
                 own_user_id=self.agent_user.user_id,
                 rooms=client.rooms,

@@ -767,14 +767,20 @@ class CallManager:
     @property
     def voice_backend_available(self) -> bool:
         """Return whether the configured voice backend has its runtime credentials."""
-        return self._resolve_voice_backend(room_id=None) is not None
+        return self._resolve_voice_backend(room_id=None, warn_if_unavailable=False) is not None
 
-    def _resolve_voice_backend(self, room_id: str | None) -> _ResolvedVoiceBackend | None:
+    def _resolve_voice_backend(
+        self,
+        room_id: str | None,
+        *,
+        warn_if_unavailable: bool = True,
+    ) -> _ResolvedVoiceBackend | None:
         """Resolve backend-specific credentials without affecting call lifecycle."""
         if self._config.calls.backend == "realtime":
             api_key = get_api_key_for_provider("openai", self._runtime_paths)
             if not api_key:
-                logger.warning("call_join_skipped_no_openai_key", room_id=room_id, agent=self._agent_name)
+                if warn_if_unavailable:
+                    logger.warning("call_join_skipped_no_openai_key", room_id=room_id, agent=self._agent_name)
                 return None
             return _ResolvedVoiceBackend(realtime_api_key=api_key)
 
@@ -783,8 +789,18 @@ class CallManager:
         if stt_config is None or tts_config is None:
             msg = "Cascaded call configuration requires STT and TTS"
             raise ValueError(msg)
-        stt = self._resolve_speech_service(stt_config, component="stt", room_id=room_id)
-        tts = self._resolve_speech_service(tts_config, component="tts", room_id=room_id)
+        stt = self._resolve_speech_service(
+            stt_config,
+            component="stt",
+            room_id=room_id,
+            warn_if_unavailable=warn_if_unavailable,
+        )
+        tts = self._resolve_speech_service(
+            tts_config,
+            component="tts",
+            room_id=room_id,
+            warn_if_unavailable=warn_if_unavailable,
+        )
         if stt is None or tts is None:
             return None
         return _ResolvedVoiceBackend(stt=stt, tts=tts)
@@ -838,6 +854,7 @@ class CallManager:
         *,
         component: str,
         room_id: str | None,
+        warn_if_unavailable: bool = True,
     ) -> SpeechServiceOptions | None:
         """Resolve one independently credentialed cloud or local speech service."""
         base_url = normalize_speech_base_url(service.host)
@@ -848,7 +865,7 @@ class CallManager:
             api_key = LOCAL_OPENAI_API_KEY_DEFAULT
         if api_key is None:
             api_key = get_api_key_for_provider(service.provider, self._runtime_paths)
-        if not api_key:
+        if not api_key and warn_if_unavailable:
             logger.warning(
                 "call_join_skipped_no_speech_key",
                 room_id=room_id,
@@ -856,6 +873,7 @@ class CallManager:
                 component=component,
                 provider=service.provider,
             )
+        if not api_key:
             return None
         return SpeechServiceOptions(
             provider=service.provider,

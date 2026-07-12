@@ -50,14 +50,14 @@ class _SendRoomResponse(Protocol):
         ...
 
 
-def own_room_departures_from_sync(
+def own_room_membership_events_from_sync(
     response: nio.SyncResponse,
     *,
     own_user_id: str,
     rooms: Mapping[str, nio.MatrixRoom],
 ) -> tuple[tuple[nio.MatrixRoom, nio.RoomMemberEvent], ...]:
-    """Return this bot's leave/ban events from Matrix sync leave sections."""
-    departures: list[tuple[nio.MatrixRoom, nio.RoomMemberEvent]] = []
+    """Return own membership events that matrix-nio does not dispatch to callbacks."""
+    membership_events: list[tuple[nio.MatrixRoom, nio.RoomMemberEvent]] = []
     for room_id, room_info in response.rooms.leave.items():
         room = rooms.get(room_id) or nio.MatrixRoom(room_id=room_id, own_user_id=own_user_id)
         events = (*room_info.timeline.events, *room_info.state)
@@ -72,8 +72,29 @@ def own_room_departures_from_sync(
             None,
         )
         if departure is not None:
-            departures.append((room, departure))
-    return tuple(departures)
+            membership_events.append((room, departure))
+
+    for room_id, room_info in response.rooms.join.items():
+        timeline_has_own_join = any(
+            isinstance(event, nio.RoomMemberEvent) and event.state_key == own_user_id and event.membership == "join"
+            for event in room_info.timeline.events
+        )
+        if timeline_has_own_join:
+            continue
+        joined = next(
+            (
+                event
+                for event in room_info.state
+                if isinstance(event, nio.RoomMemberEvent)
+                and event.state_key == own_user_id
+                and event.membership == "join"
+            ),
+            None,
+        )
+        if joined is not None:
+            room = rooms.get(room_id) or nio.MatrixRoom(room_id=room_id, own_user_id=own_user_id)
+            membership_events.append((room, joined))
+    return tuple(membership_events)
 
 
 @dataclass(frozen=True)

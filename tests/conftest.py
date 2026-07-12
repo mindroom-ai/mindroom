@@ -101,6 +101,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import CompactionConfig
     from mindroom.dispatch_handoff import DispatchEvent
     from mindroom.matrix.cache import ConversationEventCache
+    from mindroom.matrix_rtc.call_manager import CallManager
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -160,6 +161,7 @@ __all__ = [
     "drain_coalescing",
     "event_cache",
     "event_cache_factory",
+    "install_call_manager_mock",
     "install_edit_message_mock",
     "install_generate_response_mock",
     "install_runtime_cache_support",
@@ -839,6 +841,11 @@ def install_runtime_cache_support(bot: RuntimeBot) -> RuntimeBot:
         bot.startup_thread_prewarm_registry = StartupThreadPrewarmRegistry()
     sync_bot_runtime_state(bot)
     return bot
+
+
+def install_call_manager_mock(bot: RuntimeBot, call_manager: object | None) -> None:
+    """Install a call-manager fake through the shared test seam."""
+    bot._call_manager = cast("CallManager | None", call_manager)
 
 
 def normalize_console_output(text: str) -> str:

@@ -6,7 +6,7 @@ import asyncio
 import base64
 import time
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import httpx
@@ -462,6 +462,31 @@ async def test_manager_ignores_frame_keys_after_departing_configured_room(tmp_pa
 
     assert manager._pending_keys == {}
     client.room_get_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_manager_clears_departure_guard_on_own_rejoin(tmp_path: Path) -> None:
+    """A forwarded own join makes a configured call room eligible again."""
+    client = _client()
+    client.room_get_state.return_value = nio.RoomGetStateResponse([], ROOM_ID)
+    manager = _manager(client, FakeBridge(), tmp_path)
+    manager._departed_rooms.add(ROOM_ID)
+    event = nio.RoomMemberEvent.from_dict(
+        {
+            "event_id": "$join",
+            "sender": BOT_USER,
+            "origin_server_ts": int(time.time() * 1000),
+            "type": "m.room.member",
+            "state_key": BOT_USER,
+            "content": {"membership": "join"},
+        },
+    )
+    assert isinstance(event, nio.RoomMemberEvent)
+
+    await manager.on_room_membership_event(_room(), event)
+
+    assert ROOM_ID not in manager._departed_rooms
+    client.room_get_state.assert_awaited_once_with(ROOM_ID)
 
 
 @pytest.mark.asyncio
@@ -1048,7 +1073,16 @@ def test_voice_backend_availability_requires_runtime_credentials(
     )
     manager = _manager(_client(), FakeBridge(), tmp_path)
 
-    assert manager.voice_backend_available is False
+    with patch("mindroom.matrix_rtc.call_manager.logger.warning") as warning:
+        assert manager.voice_backend_available is False
+        warning.assert_not_called()
+
+        assert manager._resolve_voice_backend(ROOM_ID) is None
+        warning.assert_called_once_with(
+            "call_join_skipped_no_openai_key",
+            room_id=ROOM_ID,
+            agent="helper",
+        )
 
 
 def test_build_call_instructions_appends_voice_guidance() -> None:
