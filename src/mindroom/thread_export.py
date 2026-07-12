@@ -11,6 +11,7 @@ from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING
 from urllib.parse import quote
 
+import nio
 import yaml
 
 from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver
@@ -32,8 +33,6 @@ from mindroom.runtime_support import build_owned_runtime_support, close_owned_ru
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-    import nio
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -348,6 +347,58 @@ def _trusted_sender_ids_for_export(config: Config, runtime_paths: RuntimePaths) 
         return frozenset()
 
 
+async def _room_has_member(client: nio.AsyncClient, room_id: str, user_id: str) -> bool:
+    """Return whether one user is currently a joined member of a room."""
+    response = await client.joined_members(room_id)
+    if isinstance(response, nio.JoinedMembersResponse):
+        return any(member.user_id == user_id for member in response.members)
+    msg = f"Membership lookup failed: {response}"
+    raise RuntimeError(msg)
+
+
+async def _export_single_thread(
+    client: nio.AsyncClient,
+    room: _ThreadExportRoom,
+    thread_id: str,
+    *,
+    event_cache: ConversationEventCache,
+    trusted_sender_ids: frozenset[str],
+    output_dir: Path,
+    prefer_cache: bool,
+) -> bool:
+    """Export one thread to YAML; return whether the file was (re)written."""
+    if prefer_cache:
+        history = await fetch_thread_history(
+            client,
+            room.room_id,
+            thread_id,
+            event_cache,
+            trusted_sender_ids=trusted_sender_ids,
+            caller_label="thread_export",
+        )
+    else:
+        history = await refresh_thread_history_from_source(
+            client,
+            room.room_id,
+            thread_id,
+            event_cache,
+            allow_stale_fallback=False,
+            trusted_sender_ids=trusted_sender_ids,
+            caller_label="thread_export",
+        )
+    payload = _thread_payload(
+        room=room,
+        thread_id=thread_id,
+        messages=list(history),
+        exported_at=datetime.now(UTC),
+    )
+    export_path = _thread_export_path(output_dir, room, thread_id)
+    if _existing_payload_matches(export_path, payload):
+        return False
+    _write_yaml_atomic(export_path, payload)
+    return True
+
+
 async def _export_threads_for_client(
     *,
     client: nio.AsyncClient,
@@ -358,6 +409,7 @@ async def _export_threads_for_client(
     output_dir: Path | None = None,
     max_thread_roots: int = 2000,
     prefer_cache: bool = False,
+    required_member_user_id: str | None = None,
 ) -> ThreadExportStats:
     """Export Matrix-source thread histories to YAML files."""
     resolved_output_dir = output_dir or _default_thread_export_dir(runtime_paths)
@@ -371,6 +423,12 @@ async def _export_threads_for_client(
 
     for room in rooms:
         try:
+            if required_member_user_id is not None and not await _room_has_member(
+                client,
+                room.room_id,
+                required_member_user_id,
+            ):
+                continue
             thread_ids, truncated = await enumerate_room_thread_root_ids(
                 client,
                 room.room_id,
@@ -394,36 +452,15 @@ async def _export_threads_for_client(
 
         for thread_id in thread_ids:
             try:
-                if prefer_cache:
-                    history = await fetch_thread_history(
-                        client,
-                        room.room_id,
-                        thread_id,
-                        event_cache,
-                        trusted_sender_ids=trusted_sender_ids,
-                        caller_label="thread_export",
-                    )
-                else:
-                    history = await refresh_thread_history_from_source(
-                        client,
-                        room.room_id,
-                        thread_id,
-                        event_cache,
-                        allow_stale_fallback=False,
-                        trusted_sender_ids=trusted_sender_ids,
-                        caller_label="thread_export",
-                    )
-                payload = _thread_payload(
-                    room=room,
-                    thread_id=thread_id,
-                    messages=list(history),
-                    exported_at=datetime.now(UTC),
+                wrote_file = await _export_single_thread(
+                    client,
+                    room,
+                    thread_id,
+                    event_cache=event_cache,
+                    trusted_sender_ids=trusted_sender_ids,
+                    output_dir=resolved_output_dir,
+                    prefer_cache=prefer_cache,
                 )
-                export_path = _thread_export_path(resolved_output_dir, room, thread_id)
-                if _existing_payload_matches(export_path, payload):
-                    threads_unchanged += 1
-                else:
-                    _write_yaml_atomic(export_path, payload)
             except Exception as exc:
                 failures.append(
                     _ThreadExportFailure(
@@ -435,6 +472,8 @@ async def _export_threads_for_client(
                 )
                 continue
             threads_exported += 1
+            if not wrote_file:
+                threads_unchanged += 1
 
         try:
             _write_room_index(resolved_output_dir, room)
@@ -518,6 +557,7 @@ async def export_threads_once(
     room_filter: str | None = None,
     max_thread_roots: int = 2000,
     prefer_cache: bool = False,
+    required_member_user_id: str | None = None,
 ) -> ThreadExportStats:
     """Login using persisted Matrix credentials and run one export pass.
 
@@ -529,6 +569,9 @@ async def export_threads_once(
     fetched from the homeserver on miss or invalidation; a failing miss-refetch may then fall back to
     stale cached rows instead of failing the thread.
     Only use it while the runtime keeps the cache fresh (in-process or alongside a live ``mindroom run``).
+
+    With ``required_member_user_id`` only rooms where that user is currently joined are exported;
+    rooms whose membership lookup fails are skipped and recorded as failures (fail closed).
     """
     homeserver = runtime_matrix_homeserver(runtime_paths=runtime_paths)
     resolved_output_dir = output_dir or _default_thread_export_dir(runtime_paths)
@@ -599,6 +642,7 @@ async def export_threads_once(
                     output_dir=resolved_output_dir,
                     max_thread_roots=max_thread_roots,
                     prefer_cache=prefer_cache,
+                    required_member_user_id=required_member_user_id,
                 )
             finally:
                 await client.close()

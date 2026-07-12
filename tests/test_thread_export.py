@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import quote
 
+import nio
 import pytest
 import yaml
 
@@ -493,6 +494,91 @@ async def test_export_threads_rewrites_when_existing_file_corrupt(tmp_path: Path
     assert stats.threads_unchanged == 0
     payload = yaml.safe_load(corrupt_path.read_text(encoding="utf-8"))
     assert payload["messages"][0]["body"] == "Fresh content"
+
+
+@pytest.mark.asyncio
+async def test_member_filter_exports_only_rooms_with_member(tmp_path: Path) -> None:
+    """required_member_user_id should skip rooms the user is not currently joined to."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    _write_matrix_state(tmp_path)
+
+    members_by_room = {
+        "!lobby:localhost": ["@alice:localhost", "@mindroom_general:localhost"],
+        "!dev:localhost": ["@bob:localhost"],
+    }
+
+    async def joined_members(room_id: str) -> nio.JoinedMembersResponse:
+        return nio.JoinedMembersResponse(
+            members=[nio.RoomMember(user_id, "", "") for user_id in members_by_room[room_id]],
+            room_id=room_id,
+        )
+
+    client = Mock()
+    client.joined_members = AsyncMock(side_effect=joined_members)
+    history = [
+        ResolvedVisibleMessage.synthetic(
+            sender="@alice:localhost",
+            body="Members only",
+            event_id="$member:localhost",
+        ),
+    ]
+
+    with (
+        patch(
+            "mindroom.thread_export.enumerate_room_thread_root_ids",
+            new=AsyncMock(return_value=(["$member:localhost"], False)),
+        ) as enumerate_threads,
+        patch(
+            "mindroom.thread_export.refresh_thread_history_from_source",
+            new=AsyncMock(return_value=history),
+        ),
+    ):
+        stats = await _export_threads_for_client(
+            client=client,
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=Mock(),
+            output_dir=tmp_path / "exports",
+            rooms=_export_rooms(runtime_paths, None),
+            required_member_user_id="@alice:localhost",
+        )
+
+    assert stats.rooms_exported == 1
+    assert stats.failures == 0
+    enumerate_threads.assert_awaited_once_with(client, "!lobby:localhost", max_thread_roots=2000)
+    assert (tmp_path / "exports" / "lobby").is_dir()
+    assert not (tmp_path / "exports" / "dev").exists()
+
+
+@pytest.mark.asyncio
+async def test_member_filter_records_failure_when_membership_lookup_fails(tmp_path: Path) -> None:
+    """A failed membership lookup should fail closed and surface as a room failure."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    _write_matrix_state(tmp_path)
+    client = Mock()
+    client.joined_members = AsyncMock(return_value=Mock())
+
+    with patch(
+        "mindroom.thread_export.enumerate_room_thread_root_ids",
+        new=AsyncMock(),
+    ) as enumerate_threads:
+        stats = await _export_threads_for_client(
+            client=client,
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=Mock(),
+            output_dir=tmp_path / "exports",
+            rooms=_export_rooms(runtime_paths, None),
+            required_member_user_id="@alice:localhost",
+        )
+
+    assert stats.rooms_exported == 0
+    assert stats.failures == 2
+    assert all("Membership lookup failed" in failure.error for failure in stats.failed_items)
+    enumerate_threads.assert_not_awaited()
+    assert not (tmp_path / "exports").exists()
 
 
 @pytest.mark.asyncio
