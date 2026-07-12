@@ -687,7 +687,7 @@ class _ResolvedToolState:
     tool_registry: dict[str, Callable[[], type[Toolkit]]]
     tool_metadata: dict[str, ToolMetadata]
     unavailable_tool_metadata: dict[str, ToolMetadata]
-    failed_plugin_names: frozenset[str] = frozenset()
+    unresolved_plugin_tool_sources: frozenset[str] = frozenset()
 
 
 @functools.lru_cache(maxsize=8192)
@@ -736,7 +736,9 @@ def _execute_validation_plugin_module(
             scoped_plugin_registration_owner(validation_module_name),
         ):
             loader.exec_module(module)
-    except Exception as exc:
+    except BaseException as exc:
+        if not isinstance(exc, (Exception, SystemExit)):
+            raise
         msg = f"Plugin validation module execution failed for {module_path}: {exc}"
         raise ToolMetadataValidationError(msg) from exc
     finally:
@@ -825,7 +827,7 @@ def _compute_resolved_tool_state_for_runtime(
         )
         return _ResolvedToolState(builtin_registry, builtin_metadata, {})
 
-    plugin_bases, skipped_plugin_specs = plugin_module._collect_plugin_bases(
+    plugin_bases, skipped_plugin_sources = plugin_module._collect_plugin_bases(
         plugin_entries,
         runtime_paths,
         skip_broken_plugins=tolerate_plugin_load_errors,
@@ -835,13 +837,12 @@ def _compute_resolved_tool_state_for_runtime(
 
     validation_registrations: dict[str, dict[str, ToolMetadata]] = {}
     unavailable_tool_metadata: dict[str, ToolMetadata] = {}
-    # Entries skipped before their manifest resolved have no recoverable tool
-    # declarations at all, so they count as failed plugins by entry spec.
-    failed_plugin_names: set[str] = set(skipped_plugin_specs)
+    unresolved_plugin_tool_sources = set(skipped_plugin_sources)
     active_plugins: list[tuple[str, str]] = []
     for plugin_base, plugin_entry, _ in plugin_bases:
         candidate_registrations: dict[str, dict[str, ToolMetadata]] = {}
         candidate_active_plugins: list[tuple[str, str]] = []
+        tool_namespace_complete = plugin_base.tools_module_path is None
         try:
             if plugin_base.tools_module_path is None:
                 if plugin_base.hooks_module_path is not None:
@@ -852,17 +853,14 @@ def _compute_resolved_tool_state_for_runtime(
                         candidate_registrations,
                     )
             else:
-                candidate_active_plugins.append(
-                    (
-                        plugin_base.name,
-                        _execute_validation_plugin_module(
-                            plugin_base.name,
-                            plugin_base.root,
-                            plugin_base.tools_module_path,
-                            candidate_registrations,
-                        ),
-                    ),
+                tools_module_name = _execute_validation_plugin_module(
+                    plugin_base.name,
+                    plugin_base.root,
+                    plugin_base.tools_module_path,
+                    candidate_registrations,
                 )
+                candidate_active_plugins.append((plugin_base.name, tools_module_name))
+                tool_namespace_complete = True
                 if (
                     plugin_base.hooks_module_path is not None
                     and plugin_base.hooks_module_path != plugin_base.tools_module_path
@@ -877,7 +875,8 @@ def _compute_resolved_tool_state_for_runtime(
             if not tolerate_plugin_load_errors:
                 raise
             plugin_module._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
-            failed_plugin_names.add(plugin_base.name)
+            if not tool_namespace_complete:
+                unresolved_plugin_tool_sources.add(plugin_base.name)
             unavailable_tool_metadata.update(
                 _unavailable_tool_metadata_from_failed_plugin(plugin_base, candidate_registrations),
             )
@@ -903,7 +902,7 @@ def _compute_resolved_tool_state_for_runtime(
         desired_registry,
         desired_metadata,
         unavailable_tool_metadata,
-        frozenset(failed_plugin_names),
+        frozenset(unresolved_plugin_tool_sources),
     )
 
 
@@ -1083,19 +1082,19 @@ def resolved_tool_validation_snapshot_for_runtime(
     )
 
 
-def resolved_failed_plugin_names_for_runtime(
+def unresolved_plugin_tool_sources_for_runtime(
     runtime_paths: RuntimePaths,
     config: Config,
     *,
     tolerate_plugin_load_errors: bool = False,
 ) -> frozenset[str]:
-    """Return names of plugins that failed to load while resolving one runtime config."""
+    """Return plugin names or specs whose tool namespaces could not be resolved."""
     resolved_state = _resolved_tool_state_for_runtime(
         runtime_paths,
         config,
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
     )
-    return resolved_state.failed_plugin_names
+    return resolved_state.unresolved_plugin_tool_sources
 
 
 def serialize_tool_validation_snapshot(

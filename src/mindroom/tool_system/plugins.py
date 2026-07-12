@@ -136,7 +136,7 @@ def load_plugins(
             return []
         plugins: list[_Plugin] = []
         skill_roots: list[Path] = []
-        plugin_bases, _skipped_plugin_specs = plugin_imports._collect_plugin_bases(
+        plugin_bases, _unresolved_plugin_sources = plugin_imports._collect_plugin_bases(
             plugin_entries,
             runtime_paths,
             skip_broken_plugins=skip_broken_plugins,

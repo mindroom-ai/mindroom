@@ -1928,7 +1928,7 @@ def test_load_config_tolerates_broken_plugin_tool_named_by_module_constant(
             "models:\n"
             "  default:\n"
             "    provider: openai\n"
-            "    id: gpt-5.4\n"
+            "    id: gpt-5.5\n"
             "router:\n"
             "  model: default\n"
             "agents:\n"
@@ -1966,7 +1966,7 @@ def test_load_config_tolerates_broken_plugin_tool_named_by_module_constant(
         )
 
 
-def test_load_config_disables_unknown_tool_when_any_plugin_failed_to_load(
+def test_load_config_disables_unknown_tool_when_plugin_tool_namespace_is_unresolved(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1980,7 +1980,7 @@ def test_load_config_disables_unknown_tool_when_any_plugin_failed_to_load(
             "models:\n"
             "  default:\n"
             "    provider: openai\n"
-            "    id: gpt-5.4\n"
+            "    id: gpt-5.5\n"
             "router:\n"
             "  model: default\n"
             "agents:\n"
@@ -2014,12 +2014,12 @@ def test_load_config_disables_unknown_tool_when_any_plugin_failed_to_load(
         assert any(
             call.args
             == (
-                "Unknown tool may belong to a plugin that failed to load; "
+                "Unknown tool may belong to a plugin whose tool names could not be resolved; "
                 "disabling it for this run (verify the tool name is not a typo)",
             )
             and call.kwargs["tool_name"] == "dynamic_plugin_tool"
             and call.kwargs["config_path"] == "agents.assistant.tools[1]"
-            and call.kwargs["failed_plugins"] == ["broken_plugin"]
+            and call.kwargs["unresolved_plugin_sources"] == ["broken_plugin"]
             for call in mock_logger.warning.call_args_list
         )
 
@@ -2028,7 +2028,7 @@ def test_load_config_disables_unknown_tool_when_plugin_fails_before_manifest_res
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Plugins skipped before their manifest resolves must still count as failed plugins."""
+    """An unresolved plugin manifest must leave its possible tool namespace unresolved."""
     plugin_root = tmp_path / "plugins" / "broken"
     plugin_root.mkdir(parents=True)
 
@@ -2038,7 +2038,7 @@ def test_load_config_disables_unknown_tool_when_plugin_fails_before_manifest_res
             "models:\n"
             "  default:\n"
             "    provider: openai\n"
-            "    id: gpt-5.4\n"
+            "    id: gpt-5.5\n"
             "router:\n"
             "  model: default\n"
             "agents:\n"
@@ -2071,13 +2071,131 @@ def test_load_config_disables_unknown_tool_when_plugin_fails_before_manifest_res
         assert any(
             call.args
             == (
-                "Unknown tool may belong to a plugin that failed to load; "
+                "Unknown tool may belong to a plugin whose tool names could not be resolved; "
                 "disabling it for this run (verify the tool name is not a typo)",
             )
             and call.kwargs["tool_name"] == "manifestless_plugin_tool"
             and call.kwargs["config_path"] == "agents.assistant.tools[1]"
-            and call.kwargs["failed_plugins"] == ["./plugins/broken"]
+            and call.kwargs["unresolved_plugin_sources"] == ["./plugins/broken"]
             for call in mock_logger.warning.call_args_list
+        )
+
+
+def test_failed_hooks_only_plugin_does_not_hide_unknown_tool_typo(tmp_path: Path) -> None:
+    """A hooks-only failure cannot explain an unknown authored tool name."""
+    plugin_root = tmp_path / "plugins" / "broken"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "broken_hooks", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "hooks.py").write_text(
+        "from definitely_missing_plugin_dependency import broken\n",
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        (
+            "models:\n"
+            "  default:\n"
+            "    provider: openai\n"
+            "    id: gpt-5.5\n"
+            "router:\n"
+            "  model: default\n"
+            "agents:\n"
+            "  assistant:\n"
+            "    display_name: Assistant\n"
+            "    role: test\n"
+            "    tools:\n"
+            "      - typo_plugin_tool\n"
+            "plugins:\n"
+            "  - ./plugins/broken\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+
+    with pytest.raises(ConfigRuntimeValidationError, match="Unknown tool 'typo_plugin_tool'"):
+        load_config(runtime_paths, tolerate_plugin_load_errors=True)
+
+
+def test_load_config_treats_plugin_system_exit_as_load_error(tmp_path: Path) -> None:
+    """Plugin SystemExit should become strict validation failure or tolerant unavailability."""
+    plugin_root = tmp_path / "plugins" / "broken"
+    _write_pre_registration_broken_tool_plugin(plugin_root, tool_name="system_exit_tool")
+    tools_path = plugin_root / "tools.py"
+    tools_path.write_text(
+        tools_path.read_text(encoding="utf-8").replace(
+            "from definitely_missing_plugin_dependency import broken",
+            "raise SystemExit('plugin exit')",
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        (
+            "models:\n"
+            "  default:\n"
+            "    provider: openai\n"
+            "    id: gpt-5.5\n"
+            "router:\n"
+            "  model: default\n"
+            "agents:\n"
+            "  assistant:\n"
+            "    display_name: Assistant\n"
+            "    role: test\n"
+            "    tools: [system_exit_tool]\n"
+            "plugins:\n"
+            "  - ./plugins/broken\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+
+    with _preserved_plugin_loader_state():
+        with pytest.raises(ConfigRuntimeValidationError, match="plugin exit"):
+            load_config(runtime_paths)
+
+        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+
+    assert config.resolve_entity("assistant").available_tools == ["scheduler"]
+
+
+def test_load_config_propagates_plugin_keyboard_interrupt(tmp_path: Path) -> None:
+    """Operator interrupts during plugin validation should still terminate startup."""
+    plugin_root = tmp_path / "plugins" / "broken"
+    _write_pre_registration_broken_tool_plugin(plugin_root)
+    tools_path = plugin_root / "tools.py"
+    tools_path.write_text(
+        tools_path.read_text(encoding="utf-8").replace(
+            "from definitely_missing_plugin_dependency import broken",
+            "raise KeyboardInterrupt('stop')",
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+
+    with _preserved_plugin_loader_state(), pytest.raises(KeyboardInterrupt, match="stop"):
+        Config.validate_with_runtime(
+            {"plugins": ["./plugins/broken"]},
+            runtime_paths,
+            tolerate_plugin_load_errors=True,
         )
 
 

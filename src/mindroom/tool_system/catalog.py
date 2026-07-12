@@ -26,12 +26,12 @@ from mindroom.tool_system.metadata import (
     export_tools_metadata,
     get_tool_by_name,
     normalize_authored_tool_overrides,
-    resolved_failed_plugin_names_for_runtime,
     resolved_tool_metadata_for_runtime,
     resolved_tool_validation_snapshot_for_runtime,
     safe_tool_init_override_fields,
     sanitize_tool_init_overrides,
     serialize_tool_validation_snapshot,
+    unresolved_plugin_tool_sources_for_runtime,
     validate_authored_tool_entry_overrides,
 )
 
@@ -57,11 +57,11 @@ __all__ = [
     "export_tools_metadata",
     "get_tool_by_name",
     "normalize_authored_tool_overrides",
-    "resolved_failed_plugin_names_for_runtime",
     "resolved_tool_metadata_for_runtime",
     "resolved_tool_validation_snapshot_for_runtime",
     "safe_tool_init_override_fields",
     "sanitize_tool_init_overrides",
     "serialize_tool_validation_snapshot",
+    "unresolved_plugin_tool_sources_for_runtime",
     "validate_authored_tool_entry_overrides",
 ]

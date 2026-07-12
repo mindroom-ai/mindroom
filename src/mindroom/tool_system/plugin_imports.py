@@ -86,11 +86,11 @@ def _collect_plugin_bases(
 ) -> tuple[list[tuple[_PluginBase, PluginEntryConfig, int]], set[str]]:
     """Resolve plugin roots/manifests for one config snapshot.
 
-    Returns the resolved plugin bases plus the entry specs skipped because their
-    root or manifest could not be resolved (only populated with skip_broken_plugins).
+    Returns the resolved plugin bases plus unresolved entry specs whose tool
+    namespaces could not be inspected (only populated with skip_broken_plugins).
     """
     plugin_bases: list[tuple[_PluginBase, PluginEntryConfig, int]] = []
-    skipped_plugin_specs: set[str] = set()
+    unresolved_plugin_sources: set[str] = set()
     for plugin_order, plugin_entry in enumerate(plugin_entries):
         if not plugin_entry.enabled:
             continue
@@ -103,11 +103,11 @@ def _collect_plugin_bases(
             if not skip_broken_plugins:
                 raise
             _log_skipped_plugin_entry(plugin_entry.path, root, exc)
-            skipped_plugin_specs.add(plugin_entry.path)
+            unresolved_plugin_sources.add(plugin_entry.path)
             continue
 
         plugin_bases.append((plugin_base, plugin_entry, plugin_order))
-    return plugin_bases, skipped_plugin_specs
+    return plugin_bases, unresolved_plugin_sources
 
 
 def _log_skipped_plugin_entry(
