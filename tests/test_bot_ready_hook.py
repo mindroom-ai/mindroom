@@ -191,8 +191,8 @@ def test_call_manager_registers_call_and_room_membership_callbacks(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_call_membership_callback_tears_down_before_forgetting_invited_room(tmp_path: Path) -> None:
-    """A kick closes the media session before removing ad-hoc room ownership."""
+async def test_call_membership_callback_forgets_invited_room_before_teardown(tmp_path: Path) -> None:
+    """A kick closes ad-hoc admission before serialized media teardown."""
     bot = _agent_bot(tmp_path)
     order: list[str] = []
     call_manager = MagicMock()
@@ -206,7 +206,7 @@ async def test_call_membership_callback_tears_down_before_forgetting_invited_roo
 
     await bot._on_call_room_membership_event(room, event)
 
-    assert order == ["call", "lifecycle"]
+    assert order == ["lifecycle", "call"]
 
 
 @pytest.mark.asyncio

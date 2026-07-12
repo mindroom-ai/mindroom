@@ -42,6 +42,8 @@ Voice calls require the `matrix_calls` extra (`pip install "mindroom[matrix_call
 The realtime backend requires an `OPENAI_API_KEY` in your credentials and otherwise behaves as before.
 MindRoom enforces at most one calls-enabled agent per room.
 Calls only join rooms configured for that agent and only while the sole caller passes the normal room and per-agent reply permissions.
+Calls-enabled agents also join calls in ad-hoc rooms they accepted through their normal authorized-invite policy. This lets Matrix clients create a private, temporary voice room and invite one agent without adding that room to `config.yaml` first.
+Calls-enabled agents advertise `📞 Voice calls` in their Matrix presence status so clients can show the call action only where it will be answered.
 Requester-private agents are not currently supported for calls.
 
 ## Cascaded cloud example

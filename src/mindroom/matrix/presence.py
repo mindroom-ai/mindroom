@@ -14,6 +14,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_VOICE_CALLS_STATUS = "📞 Voice calls"
+
 
 async def set_presence_status(
     client: nio.AsyncClient,
@@ -91,6 +93,8 @@ def build_agent_status_message(
         effective_tools = entity_view.available_tools
         if effective_tools:
             status_parts.append(f"🔧 {len(effective_tools)} tools available")
+        if config.calls.enabled and agent_name in config.calls.agents:
+            status_parts.append(_VOICE_CALLS_STATUS)
 
     # Join all parts with separators
     return " | ".join(status_parts)

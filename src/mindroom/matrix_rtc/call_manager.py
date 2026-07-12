@@ -174,6 +174,7 @@ class CallManager:
         self._sessions: dict[str, CallSession] = {}
         self._pending_keys: dict[str, dict[tuple[str, str, int], ReceivedFrameKey]] = {}
         self._observed_rooms: dict[str, nio.MatrixRoom] = {}
+        self._departed_rooms: set[str] = set()
         self._locks: dict[str, asyncio.Lock] = {}
         self._retry_tasks: dict[str, asyncio.Task[None]] = {}
         self._retry_attempts: dict[str, int] = {}
@@ -189,13 +190,16 @@ class CallManager:
         self._observed_rooms[room.room_id] = room
         await self._reconcile(room)
 
-    async def on_room_membership_event(self, room: nio.MatrixRoom, _event: nio.RoomMemberEvent) -> None:
+    async def on_room_membership_event(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
         """Reconcile calls when a user's underlying room membership changes."""
         if self._shutting_down:
             return
-        if _event.state_key == self._client.user_id and _event.membership in {"leave", "ban"}:
+        if event.state_key == self._client.user_id and event.membership in {"leave", "ban"}:
+            self._departed_rooms.add(room.room_id)
             await self._handle_own_room_leave(room.room_id)
             return
+        if event.state_key == self._client.user_id and event.membership == "join":
+            self._departed_rooms.discard(room.room_id)
         if not self._is_configured_call_room(room):
             return
         self._observed_rooms[room.room_id] = room
@@ -203,15 +207,17 @@ class CallManager:
 
     async def _handle_own_room_leave(self, room_id: str) -> None:
         """Tear down call state immediately when the bot no longer belongs to the room."""
-        self._observed_rooms.pop(room_id, None)
-        self._pending_keys.pop(room_id, None)
-        self._clear_logical_call(room_id)
-        expiry = self._expiry_handles.pop(room_id, None)
-        if expiry is not None:
-            expiry.cancel()
-        session = self._sessions.pop(room_id, None)
-        if session is not None:
-            await self._stop_session(session)
+        lock = self._locks.setdefault(room_id, asyncio.Lock())
+        async with lock:
+            self._observed_rooms.pop(room_id, None)
+            self._pending_keys.pop(room_id, None)
+            self._clear_logical_call(room_id)
+            expiry = self._expiry_handles.pop(room_id, None)
+            if expiry is not None:
+                expiry.cancel()
+            session = self._sessions.pop(room_id, None)
+            if session is not None:
+                await self._stop_session(session)
 
     async def on_to_device_event(self, event: nio.ToDeviceEvent) -> None:
         """Sync callback for decrypted call frame-key to-device events."""
@@ -269,13 +275,13 @@ class CallManager:
             await self._stop_session(session, event="call_session_shutdown_failed")
 
     async def _reconcile(self, room: nio.MatrixRoom, *, retrying: bool = False) -> None:
-        if not self._is_configured_call_room(room):
+        if room.room_id in self._departed_rooms or not self._is_configured_call_room(room):
             return
         self._observed_rooms[room.room_id] = room
         room_id = room.room_id
         lock = self._locks.setdefault(room_id, asyncio.Lock())
         async with lock:
-            if self._shutting_down:
+            if self._shutting_down or room_id in self._departed_rooms:
                 return
             members = await self._fetch_remote_members(room_id)
             if members is None:

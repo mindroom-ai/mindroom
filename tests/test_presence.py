@@ -9,6 +9,7 @@ import nio
 import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.calls import CallsConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -101,6 +102,19 @@ class TestBuildAgentStatusMessage:
         assert "🤖 Model: ollama/llama3" in status
         assert "💼 General purpose assistant" in status
         assert "🔧" not in status  # No tools section
+
+    def test_only_calls_enabled_agents_advertise_voice_calls(self) -> None:
+        """Presence gives clients an exact per-agent voice-call capability signal."""
+        config = Config(
+            agents={
+                "voice": AgentConfig(display_name="Voice"),
+                "text": AgentConfig(display_name="Text"),
+            },
+            calls=CallsConfig(enabled=True, agents=["voice"]),
+        )
+
+        assert "📞 Voice calls" in build_agent_status_message("voice", config).split(" | ")
+        assert "📞 Voice calls" not in build_agent_status_message("text", config).split(" | ")
 
     def test_team_agent_status(self) -> None:
         """Test building status message for team agent."""

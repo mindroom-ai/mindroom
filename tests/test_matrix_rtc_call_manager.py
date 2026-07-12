@@ -378,6 +378,7 @@ async def test_manager_stops_call_when_agent_is_kicked_from_ephemeral_room(tmp_p
     assert bridge.closed is True
     assert manager._sessions == {}
     assert manager._logical_calls == {}
+    assert ROOM_ID in manager._departed_rooms
 
 
 @pytest.mark.asyncio

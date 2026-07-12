@@ -1364,11 +1364,11 @@ class AgentBot:
         room: nio.MatrixRoom,
         event: nio.RoomMemberEvent,
     ) -> None:
-        """Apply call teardown before dropping persisted ad-hoc room ownership."""
+        """Drop ad-hoc ownership and then apply serialized call teardown."""
+        self._room_lifecycle.forget_invited_room_after_own_leave(room, event)
         call_manager = self._call_manager
         if call_manager is not None:
             await call_manager.on_room_membership_event(room, event)
-        self._room_lifecycle.forget_invited_room_after_own_leave(room, event)
 
     async def start(self) -> None:
         """Start the agent bot with user account setup (but don't join rooms yet)."""
