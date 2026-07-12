@@ -64,37 +64,27 @@ class DynamicWorkflowError(ValueError):
 
 def validate_workflow_spec(spec: dict[str, object]) -> dict[str, object]:
     """Validate and normalize a declarative Dynamic Workflow spec."""
-    if not isinstance(spec, dict):
-        msg = "Workflow spec must be a mapping."
-        raise DynamicWorkflowError(msg)
-    normalized = copy.deepcopy(spec)
-    _reject_unsupported_fields(normalized, _SPEC_KEYS, "Workflow spec")
-    _validate_schema_version(normalized)
-    _validate_workflow_identity(normalized)
-
-    _validate_input_schema(normalized)
-    participants = _required_mapping_list(normalized, "participants", "Participant")
-    participant_ids = _validate_participants(participants)
-    workflow_steps = _required_mapping_list(normalized, "workflow", "Workflow step")
-    step_ids = _validate_workflow_steps(workflow_steps, participant_ids)
-    _validate_workflow_size_limits(participants, workflow_steps)
-    _validate_workflow_permissions(normalized, workflow_steps)
-    _validate_participant_tool_grants(normalized, participants)
-    _validate_outputs(normalized, step_ids)
+    normalized, errors = _validate_and_normalize_workflow_spec(spec)
+    if errors:
+        raise DynamicWorkflowError(errors[0])
+    assert normalized is not None
     return normalized
 
 
 def collect_workflow_spec_errors(spec: dict[str, object]) -> list[str]:
-    """Collect every detectable validation error for one workflow spec.
+    """Collect every detectable validation error for one workflow spec."""
+    _normalized, errors = _validate_and_normalize_workflow_spec(spec)
+    return errors
 
-    Mirrors ``validate_workflow_spec`` but keeps going after each failed
-    phase so one tool call can report the full repair list instead of one
-    error per call.
-    """
+
+def _validate_and_normalize_workflow_spec(
+    spec: object,
+) -> tuple[dict[str, object] | None, list[str]]:
+    """Run the single workflow validation pipeline and return its normalized result plus errors."""
     if not isinstance(spec, dict):
-        return ["Workflow spec must be a mapping."]
+        return None, ["Workflow spec must be a mapping."]
     errors: list[str] = []
-    normalized = copy.deepcopy(spec)
+    normalized = copy.deepcopy(cast("dict[str, object]", spec))
     errors.extend(
         f"Workflow spec contains unsupported field '{field_name}'."
         for field_name in sorted(set(normalized) - _SPEC_KEYS)
@@ -133,7 +123,7 @@ def collect_workflow_spec_errors(spec: dict[str, object]) -> list[str]:
             partial(_validate_participant_tool_grants, normalized, validated_participants),
         )
     _collect_error(errors, partial(_validate_outputs, normalized, step_ids))
-    return errors
+    return normalized, errors
 
 
 def _collect_error(errors: list[str], check: Callable[[], object]) -> bool:
@@ -151,13 +141,6 @@ def _collect_value(errors: list[str], produce: Callable[[], _T]) -> _T | None:
     except DynamicWorkflowError as exc:
         errors.append(str(exc))
         return None
-
-
-def _validate_workflow_identity(spec: dict[str, object]) -> None:
-    """Validate and normalize the id, name, and kind header fields."""
-    _validate_workflow_id_field(spec)
-    _validate_workflow_name_field(spec)
-    _validate_workflow_kind_field(spec)
 
 
 def _validate_workflow_id_field(spec: dict[str, object]) -> None:
@@ -347,13 +330,6 @@ def _enum_value_matches(value: object, enum_value: object) -> bool:
     return value == enum_value
 
 
-def _validate_participants(participants: list[dict[str, object]]) -> set[str]:
-    participant_ids: set[str] = set()
-    for index, participant in enumerate(participants):
-        _validate_participant(participant, index, participant_ids)
-    return participant_ids
-
-
 def _validate_participant(participant: dict[str, object], index: int, participant_ids: set[str]) -> None:
     """Validate one participant entry, registering its id in ``participant_ids``."""
     context = f"Participant at index {index}"
@@ -409,13 +385,6 @@ def _validate_participant_instructions(value: object, context: str) -> None:
         return
     msg = f"{context} field 'instructions' must be a string or list of strings."
     raise DynamicWorkflowError(msg)
-
-
-def _validate_workflow_steps(workflow_steps: list[dict[str, object]], participant_ids: set[str]) -> set[str]:
-    step_ids: set[str] = set()
-    for index, step in enumerate(workflow_steps):
-        _validate_workflow_step(step, index, participant_ids, step_ids)
-    return step_ids
 
 
 def _validate_workflow_step(
