@@ -186,7 +186,7 @@ class TestAgentBot(AgentBotTestBase):
         assert mock_login.called
         mock_init_persistence.assert_called_once_with(runtime_paths_for(config).storage_root)
         assert (
-            mock_client.add_event_callback.call_count == 14
+            mock_client.add_event_callback.call_count == 15
         )  # invite, message, redaction, reaction, audio, image/file/video, unknown-event, megolm callbacks
         registered_event_types = [call.args[1] for call in mock_client.add_event_callback.call_args_list]
         assert nio.MegolmEvent in registered_event_types  # undecryptable events must not vanish silently
@@ -287,7 +287,7 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._turn_policy.deps.matrix_id.full_id == actual_user_id
         assert bot._turn_controller.deps.matrix_id.full_id == actual_user_id
         mock_init_persistence.assert_called_once_with(runtime_paths_for(config).storage_root)
-        assert mock_client.add_event_callback.call_count == 14
+        assert mock_client.add_event_callback.call_count == 15
 
     @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
