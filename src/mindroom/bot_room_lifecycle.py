@@ -50,6 +50,32 @@ class _SendRoomResponse(Protocol):
         ...
 
 
+def own_room_departures_from_sync(
+    response: nio.SyncResponse,
+    *,
+    own_user_id: str,
+    rooms: Mapping[str, nio.MatrixRoom],
+) -> tuple[tuple[nio.MatrixRoom, nio.RoomMemberEvent], ...]:
+    """Return this bot's leave/ban events from Matrix sync leave sections."""
+    departures: list[tuple[nio.MatrixRoom, nio.RoomMemberEvent]] = []
+    for room_id, room_info in response.rooms.leave.items():
+        room = rooms.get(room_id) or nio.MatrixRoom(room_id=room_id, own_user_id=own_user_id)
+        events = (*room_info.timeline.events, *room_info.state)
+        departure = next(
+            (
+                event
+                for event in events
+                if isinstance(event, nio.RoomMemberEvent)
+                and event.state_key == own_user_id
+                and event.membership in {"leave", "ban"}
+            ),
+            None,
+        )
+        if departure is not None:
+            departures.append((room, departure))
+    return tuple(departures)
+
+
 @dataclass(frozen=True)
 class BotRoomLifecycleDeps:
     """Dependencies required for room membership and invite handling."""

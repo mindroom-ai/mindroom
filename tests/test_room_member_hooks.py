@@ -93,12 +93,14 @@ def _sync_response_with_state(
     response.__class__ = nio.SyncResponse
     response.next_batch = "s_next"
     response.rooms = SimpleNamespace(
+        invite={},
         join={
             room_id: SimpleNamespace(
                 state=events,
                 timeline=SimpleNamespace(events=timeline_events or [], limited=False),
             ),
         },
+        leave={},
     )
     return cast("nio.SyncResponse", response)
 

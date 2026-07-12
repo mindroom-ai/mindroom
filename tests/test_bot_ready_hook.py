@@ -27,6 +27,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
+from mindroom.matrix.sync_certification import SyncCacheWriteResult
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
@@ -111,6 +112,42 @@ def _thread_root_event(
     )
     assert isinstance(event, nio.RoomMessageText)
     return event
+
+
+def _sync_response_with_own_room_departure(
+    room_id: str,
+    user_id: str,
+) -> nio.SyncResponse:
+    response = nio.SyncResponse.from_dict(
+        {
+            "next_batch": "s-after-leave",
+            "rooms": {
+                "join": {},
+                "invite": {},
+                "leave": {
+                    room_id: {
+                        "state": {"events": []},
+                        "timeline": {
+                            "events": [
+                                {
+                                    "type": "m.room.member",
+                                    "event_id": "$own-leave",
+                                    "sender": "@owner:localhost",
+                                    "origin_server_ts": 1,
+                                    "state_key": user_id,
+                                    "content": {"membership": "leave"},
+                                },
+                            ],
+                            "limited": False,
+                            "prev_batch": "s-before-leave",
+                        },
+                    },
+                },
+            },
+        },
+    )
+    assert isinstance(response, nio.SyncResponse)
+    return response
 
 
 def _plugin(name: str, callbacks: list[object]) -> object:
@@ -245,6 +282,40 @@ async def test_call_membership_callback_forgets_invited_room_before_teardown(tmp
     await bot._on_call_room_membership_event(room, event)
 
     assert order == ["lifecycle", "call"]
+
+
+@pytest.mark.asyncio
+async def test_sync_leave_section_forgets_invited_room_before_call_teardown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Own departures delivered under rooms.leave reach the lifecycle cleanup path."""
+    bot = _agent_bot(tmp_path)
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    room_id = "!agent-call:localhost"
+    room = nio.MatrixRoom(room_id=room_id, own_user_id=bot.agent_user.user_id)
+    client.rooms[room_id] = room
+    bot.client = client
+    bot._room_lifecycle.invited_rooms = {room_id}
+    bot._room_lifecycle.save_invited_rooms()
+    call_manager = MagicMock()
+    call_manager.on_room_membership_event = AsyncMock()
+    bot._call_manager = call_manager
+    monkeypatch.setattr(
+        bot,
+        "_sync_cache_result_for_certification",
+        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+    )
+
+    await bot._on_sync_response(
+        _sync_response_with_own_room_departure(room_id, bot.agent_user.user_id),
+    )
+
+    assert bot._room_lifecycle.invited_rooms == set()
+    call_manager.on_room_membership_event.assert_awaited_once()
+    handled_room, handled_event = call_manager.on_room_membership_event.await_args.args
+    assert handled_room is room
+    assert handled_event.event_id == "$own-leave"
 
 
 @pytest.mark.asyncio
