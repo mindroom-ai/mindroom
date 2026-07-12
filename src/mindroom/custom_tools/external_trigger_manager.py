@@ -131,7 +131,10 @@ class ExternalTriggerManagerTools(Toolkit):
 
         Args:
             trigger_id: Route-safe trigger id for `/api/triggers/{trigger_id}`.
-            public_key: Base64 Ed25519 public key for request verification.
+            public_key: Ed25519 public key for request verification. Accepts raw base64 of the
+                32 key bytes, OpenSSH single-line format (`ssh-ed25519 <base64> [comment]`, e.g.
+                the contents of `id_ed25519.pub`), or PEM SubjectPublicKeyInfo
+                (`-----BEGIN PUBLIC KEY-----`). All formats are normalized to the raw 32-byte key.
             key_id: Expected signing key id header.
             description: Human-readable purpose.
             target_agent: Optional target agent/team; non-admin callers use the current one.
@@ -220,7 +223,17 @@ class ExternalTriggerManagerTools(Toolkit):
         return self._with_store(delete)
 
     def rotate_trigger_key(self, trigger_id: str, public_key: str, key_id: str = "default") -> str:
-        """Rotate a trigger public key without accepting or returning private key material."""
+        """Rotate a trigger public key without accepting or returning private key material.
+
+        Args:
+            trigger_id: The trigger whose signing key should be rotated.
+            public_key: New Ed25519 public key. Accepts raw base64 of the 32 key bytes, OpenSSH
+                single-line format (`ssh-ed25519 <base64> [comment]`, e.g. the contents of
+                `id_ed25519.pub`), or PEM SubjectPublicKeyInfo (`-----BEGIN PUBLIC KEY-----`).
+                All formats are normalized to the raw 32-byte key.
+            key_id: Expected signing key id header.
+
+        """
 
         def rotate(context: ToolRuntimeContext, store: ExternalTriggerStore) -> str:
             record = store.rotate_key(

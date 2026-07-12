@@ -2664,6 +2664,7 @@ visibility = [
 path = "mindroom.tool_system.skills"
 depends_on = [
     "mindroom.constants",
+    "mindroom.tool_system.output_files",
     "mindroom.tool_system.worker_routing",
 ]
 

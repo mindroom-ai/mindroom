@@ -735,7 +735,7 @@ def _wrap_entrypoint(
     return wrapper
 
 
-def _wrap_function_for_output_files(function: Function, policy: ToolOutputFilePolicy) -> Function:
+def wrap_function_for_output_files(function: Function, policy: ToolOutputFilePolicy) -> Function:
     """Expose and handle ``mindroom_output_path`` on one Agno function."""
     if function.entrypoint is None or getattr(function.entrypoint, _WRAPPED_ATTR, False):
         return function
@@ -769,5 +769,5 @@ def wrap_toolkit_for_output_files(
         if id(function) in seen_functions:
             continue
         seen_functions.add(id(function))
-        _wrap_function_for_output_files(function, policy)
+        wrap_function_for_output_files(function, policy)
     return toolkit

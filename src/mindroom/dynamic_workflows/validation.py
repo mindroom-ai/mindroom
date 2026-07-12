@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import copy
 import re
-from typing import TYPE_CHECKING, cast
+from functools import partial
+from typing import TYPE_CHECKING, TypeVar, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
+
+_T = TypeVar("_T")
 
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
 _SUPPORTED_SCHEMA_VERSION = 1
@@ -61,31 +64,102 @@ class DynamicWorkflowError(ValueError):
 
 def validate_workflow_spec(spec: dict[str, object]) -> dict[str, object]:
     """Validate and normalize a declarative Dynamic Workflow spec."""
+    normalized, errors = _validate_and_normalize_workflow_spec(spec)
+    if errors:
+        raise DynamicWorkflowError(errors[0])
+    assert normalized is not None
+    return normalized
+
+
+def collect_workflow_spec_errors(spec: dict[str, object]) -> list[str]:
+    """Collect every detectable validation error for one workflow spec."""
+    _normalized, errors = _validate_and_normalize_workflow_spec(spec)
+    return errors
+
+
+def _validate_and_normalize_workflow_spec(
+    spec: object,
+) -> tuple[dict[str, object] | None, list[str]]:
+    """Run the single workflow validation pipeline and return its normalized result plus errors."""
     if not isinstance(spec, dict):
-        msg = "Workflow spec must be a mapping."
-        raise DynamicWorkflowError(msg)
-    normalized = copy.deepcopy(spec)
-    _reject_unsupported_fields(normalized, _SPEC_KEYS, "Workflow spec")
-    _validate_schema_version(normalized)
-    workflow_id = _required_text(normalized, "id")
+        return None, ["Workflow spec must be a mapping."]
+    errors: list[str] = []
+    normalized = copy.deepcopy(cast("dict[str, object]", spec))
+    errors.extend(
+        f"Workflow spec contains unsupported field '{field_name}'."
+        for field_name in sorted(set(normalized) - _SPEC_KEYS)
+    )
+    _collect_error(errors, partial(_validate_schema_version, normalized))
+    _collect_error(errors, partial(_validate_workflow_id_field, normalized))
+    _collect_error(errors, partial(_validate_workflow_name_field, normalized))
+    _collect_error(errors, partial(_validate_workflow_kind_field, normalized))
+    _collect_error(errors, partial(_validate_input_schema, normalized))
+
+    participants = _collect_value(errors, partial(_required_mapping_list, normalized, "participants", "Participant"))
+    participant_ids: set[str] = set()
+    validated_participants: list[dict[str, object]] = []
+    if participants is not None:
+        for index, participant in enumerate(participants):
+            if _collect_error(errors, partial(_validate_participant, participant, index, participant_ids)):
+                validated_participants.append(participant)
+
+    workflow_steps = _collect_value(errors, partial(_required_mapping_list, normalized, "workflow", "Workflow step"))
+    step_ids: set[str] = set()
+    if workflow_steps is not None:
+        for index, step in enumerate(workflow_steps):
+            _collect_error(errors, partial(_validate_workflow_step, step, index, participant_ids, step_ids))
+
+    _collect_error(
+        errors,
+        partial(_validate_workflow_size_limits, participants or [], workflow_steps or []),
+    )
+    permissions_valid = _collect_error(
+        errors,
+        partial(_validate_workflow_permissions, normalized, workflow_steps or []),
+    )
+    if permissions_valid and validated_participants:
+        _collect_error(
+            errors,
+            partial(_validate_participant_tool_grants, normalized, validated_participants),
+        )
+    if workflow_steps is not None:
+        _collect_error(errors, partial(_validate_outputs, normalized, step_ids))
+    return normalized, errors
+
+
+def _collect_error(errors: list[str], check: Callable[[], object]) -> bool:
+    try:
+        check()
+    except DynamicWorkflowError as exc:
+        errors.append(str(exc))
+        return False
+    return True
+
+
+def _collect_value(errors: list[str], produce: Callable[[], _T]) -> _T | None:
+    try:
+        return produce()
+    except DynamicWorkflowError as exc:
+        errors.append(str(exc))
+        return None
+
+
+def _validate_workflow_id_field(spec: dict[str, object]) -> None:
+    workflow_id = _required_text(spec, "id")
     validate_id(workflow_id, "id")
-    normalized["id"] = workflow_id
-    normalized["name"] = _required_text(normalized, "name")
-    kind = _required_text(normalized, "kind")
+    spec["id"] = workflow_id
+
+
+def _validate_workflow_name_field(spec: dict[str, object]) -> None:
+    spec["name"] = _required_text(spec, "name")
+
+
+def _validate_workflow_kind_field(spec: dict[str, object]) -> None:
+    kind = _required_text(spec, "kind")
     if kind != "workflow":
         msg = "Workflow spec kind must be 'workflow'."
         raise DynamicWorkflowError(msg)
-    normalized["kind"] = kind
-
-    _validate_input_schema(normalized)
-    participants = _required_mapping_list(normalized, "participants", "Participant")
-    participant_ids = _validate_participants(participants)
-    workflow_steps = _required_mapping_list(normalized, "workflow", "Workflow step")
-    step_ids = _validate_workflow_steps(workflow_steps, participant_ids)
-    _validate_workflow_limits(normalized, participants, workflow_steps)
-    _validate_participant_tool_grants(normalized, participants)
-    _validate_outputs(normalized, step_ids)
-    return normalized
+    spec["kind"] = kind
 
 
 def validate_workflow_input(spec: dict[str, object], input_data: dict[str, object]) -> None:
@@ -257,29 +331,27 @@ def _enum_value_matches(value: object, enum_value: object) -> bool:
     return value == enum_value
 
 
-def _validate_participants(participants: list[dict[str, object]]) -> set[str]:
-    participant_ids: set[str] = set()
-    for index, participant in enumerate(participants):
-        context = f"Participant at index {index}"
-        participant_id = _required_text(participant, "id", context=context)
-        validate_id(participant_id, f"{context} id")
-        if participant_id in participant_ids:
-            msg = f"Duplicate participant id '{participant_id}'."
-            raise DynamicWorkflowError(msg)
-        participant["id"] = participant_id
-        participant_ids.add(participant_id)
-        participant_kind = (
-            _required_text(participant, "kind", context=context) if "kind" in participant else "ephemeral_agent"
-        )
-        if participant_kind not in _PARTICIPANT_KINDS:
-            msg = f"{context} has unsupported kind '{participant_kind}'."
-            raise DynamicWorkflowError(msg)
-        participant["kind"] = participant_kind
-        if participant_kind == "room_agent":
-            _validate_room_agent_participant(participant, context)
-        else:
-            _validate_ephemeral_agent_participant(participant, context)
-    return participant_ids
+def _validate_participant(participant: dict[str, object], index: int, participant_ids: set[str]) -> None:
+    """Validate one participant entry, registering its id in ``participant_ids``."""
+    context = f"Participant at index {index}"
+    participant_id = _required_text(participant, "id", context=context)
+    validate_id(participant_id, f"{context} id")
+    if participant_id in participant_ids:
+        msg = f"Duplicate participant id '{participant_id}'."
+        raise DynamicWorkflowError(msg)
+    participant["id"] = participant_id
+    participant_ids.add(participant_id)
+    participant_kind = (
+        _required_text(participant, "kind", context=context) if "kind" in participant else "ephemeral_agent"
+    )
+    if participant_kind not in _PARTICIPANT_KINDS:
+        msg = f"{context} has unsupported kind '{participant_kind}'."
+        raise DynamicWorkflowError(msg)
+    participant["kind"] = participant_kind
+    if participant_kind == "room_agent":
+        _validate_room_agent_participant(participant, context)
+    else:
+        _validate_ephemeral_agent_participant(participant, context)
 
 
 def _validate_room_agent_participant(participant: dict[str, object], context: str) -> None:
@@ -316,17 +388,22 @@ def _validate_participant_instructions(value: object, context: str) -> None:
     raise DynamicWorkflowError(msg)
 
 
-def _validate_workflow_steps(workflow_steps: list[dict[str, object]], participant_ids: set[str]) -> set[str]:
-    step_ids: set[str] = set()
-    for index, step in enumerate(workflow_steps):
-        context = f"Workflow step at index {index}"
-        step_id = _required_text(step, "id", context=context)
-        validate_id(step_id, f"{context} id")
-        if step_id in step_ids:
-            msg = f"Duplicate workflow step id '{step_id}'."
-            raise DynamicWorkflowError(msg)
-        step["id"] = step_id
+def _validate_workflow_step(
+    step: dict[str, object],
+    index: int,
+    participant_ids: set[str],
+    step_ids: set[str],
+) -> None:
+    """Validate one workflow step, registering its id in ``step_ids``."""
+    context = f"Workflow step at index {index}"
+    step_id = _required_text(step, "id", context=context)
+    validate_id(step_id, f"{context} id")
+    if step_id in step_ids:
+        msg = f"Duplicate workflow step id '{step_id}'."
+        raise DynamicWorkflowError(msg)
+    step["id"] = step_id
 
+    try:
         step_type = _step_type(step, context)
         step["type"] = step_type
         if step_type == "agent_step":
@@ -338,12 +415,14 @@ def _validate_workflow_steps(workflow_steps: list[dict[str, object]], participan
         elif step_type == "report_step":
             _reject_unsupported_fields(step, _REPORT_STEP_KEYS, context)
             _validate_report_step(step, context, step_ids)
+    finally:
+        # Later entries may reference this structurally valid id even when this
+        # step has its own validation error. Registering in ``finally`` keeps
+        # the current step out of its own prior-step reference set.
         step_ids.add(step_id)
-    return step_ids
 
 
-def _validate_workflow_limits(
-    spec: dict[str, object],
+def _validate_workflow_size_limits(
     participants: list[dict[str, object]],
     workflow_steps: list[dict[str, object]],
 ) -> None:
@@ -354,6 +433,11 @@ def _validate_workflow_limits(
         msg = f"Workflow steps cannot exceed {_MAX_WORKFLOW_STEPS}."
         raise DynamicWorkflowError(msg)
 
+
+def _validate_workflow_permissions(
+    spec: dict[str, object],
+    workflow_steps: list[dict[str, object]],
+) -> None:
     permissions = _permissions_mapping(spec)
     unknown_permissions = sorted(set(permissions) - _PERMISSION_KEYS)
     if unknown_permissions:
