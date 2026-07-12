@@ -5,18 +5,18 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
+from contextlib import suppress
 from datetime import UTC, datetime
-from pathlib import Path
-from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING
 from urllib.parse import quote
+from uuid import uuid4
 
 import yaml
 
-from mindroom.durable_write import fsync_directory, write_json_file_durable
-
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.thread_export.models import ThreadExportRoom
@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 _EXPORT_SCHEMA_VERSION = 1
 _ROOM_INDEX_FILENAME = "index.json"
 _THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
+_DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
 class _UnsafeThreadExportPathError(RuntimeError):
@@ -38,41 +39,127 @@ def _safe_path_segment(value: str) -> str:
     return encoded
 
 
-def _require_real_directory(path: Path, *, label: str, create: bool) -> Path:
-    """Return a real directory, rejecting a symlink at the controlled path component."""
-    if path.is_symlink():
-        msg = f"Refusing symlinked thread export {label}: {path}"
-        raise _UnsafeThreadExportPathError(msg)
+def _unsafe_directory(path: Path, label: str) -> _UnsafeThreadExportPathError:
+    """Return a normalized failure for an unsafe controlled directory component."""
+    return _UnsafeThreadExportPathError(f"Refusing symlinked thread export {label}: {path}")
+
+
+def _open_directory_at(
+    parent_fd: int,
+    name: str,
+    *,
+    path: Path,
+    label: str,
+    create: bool,
+) -> int | None:
+    """Open one directory relative to a pinned parent without following symlinks."""
     if create:
-        path.mkdir(parents=True, exist_ok=True)
-        if path.is_symlink():
-            msg = f"Refusing symlinked thread export {label}: {path}"
-            raise _UnsafeThreadExportPathError(msg)
-    if not path.is_dir():
-        msg = f"Thread export {label} is not a directory: {path}"
-        raise _UnsafeThreadExportPathError(msg)
-    return path
+        try:
+            os.mkdir(name, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise _unsafe_directory(path, label) from exc
+    try:
+        return os.open(name, _DIRECTORY_OPEN_FLAGS, dir_fd=parent_fd)
+    except FileNotFoundError:
+        if not create:
+            return None
+        raise
+    except OSError as exc:
+        raise _unsafe_directory(path, label) from exc
 
 
-def _existing_export_root(output_dir: Path) -> Path | None:
-    """Return an existing safe export root, or None when it does not exist."""
-    if not output_dir.exists() and not output_dir.is_symlink():
+def _open_export_root(output_dir: Path, *, create: bool) -> int | None:
+    """Open and pin the export root so later operations cannot be redirected."""
+    if create:
+        output_dir.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        parent_fd = os.open(output_dir.parent, _DIRECTORY_OPEN_FLAGS)
+    except FileNotFoundError:
+        if not create:
+            return None
+        raise
+    except OSError as exc:
+        raise _unsafe_directory(output_dir.parent, "root parent") from exc
+    try:
+        return _open_directory_at(
+            parent_fd,
+            output_dir.name,
+            path=output_dir,
+            label="root",
+            create=create,
+        )
+    finally:
+        os.close(parent_fd)
+
+
+def _open_room_directory(
+    root_fd: int,
+    output_dir: Path,
+    room: ThreadExportRoom,
+    *,
+    create: bool,
+) -> int | None:
+    """Open and pin one exporter-controlled room directory."""
+    room_name = _safe_path_segment(room.key)
+    return _open_directory_at(
+        root_fd,
+        room_name,
+        path=output_dir / room_name,
+        label="room directory",
+        create=create,
+    )
+
+
+def _fsync_directory_fd(directory_fd: int) -> None:
+    """Best-effort flush one already-pinned directory."""
+    with suppress(OSError):
+        os.fsync(directory_fd)
+
+
+def _read_text_at(directory_fd: int, filename: str) -> str | None:
+    """Read a regular file relative to a pinned directory without following symlinks."""
+    try:
+        file_fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+    except OSError:
         return None
-    return _require_real_directory(output_dir, label="root", create=False)
+    try:
+        if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+            return None
+        with os.fdopen(file_fd, encoding="utf-8") as file:
+            file_fd = -1
+            return file.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
 
 
-def _room_export_dir(output_dir: Path, room: ThreadExportRoom, *, create: bool = False) -> Path:
-    """Return a room directory after validating the exporter-controlled path components."""
-    if not create:
-        root = _existing_export_root(output_dir)
-        if root is None:
-            return output_dir / _safe_path_segment(room.key)
-    else:
-        root = _require_real_directory(output_dir, label="root", create=True)
-    room_dir = root / _safe_path_segment(room.key)
-    if not create and not room_dir.exists() and not room_dir.is_symlink():
-        return room_dir
-    return _require_real_directory(room_dir, label="room directory", create=create)
+def _atomic_write_at(directory_fd: int, filename: str, text: str) -> None:
+    """Durably replace one file relative to an already-pinned directory."""
+    temp_name = f".{filename}.{uuid4().hex}.tmp"
+    temp_fd = -1
+    try:
+        temp_fd = os.open(
+            temp_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory_fd,
+        )
+        with os.fdopen(temp_fd, mode="w", encoding="utf-8") as temp_file:
+            temp_fd = -1
+            temp_file.write(text)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        os.replace(temp_name, filename, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        _fsync_directory_fd(directory_fd)
+    finally:
+        if temp_fd >= 0:
+            os.close(temp_fd)
+        with suppress(FileNotFoundError):
+            os.unlink(temp_name, dir_fd=directory_fd)
 
 
 def _timestamp_iso(timestamp_ms: int) -> str | None:
@@ -144,45 +231,14 @@ def thread_payload(
     }
 
 
-def _write_yaml_atomic(path: Path, payload: dict[str, object]) -> None:
-    """Atomically write one YAML payload inside a validated room directory."""
-    if path.parent.is_symlink():
-        msg = f"Refusing symlinked thread export room directory: {path.parent}"
-        raise _UnsafeThreadExportPathError(msg)
-    temp_path: Path | None = None
-    try:
-        with NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temp_file:
-            temp_path = Path(temp_file.name)
-            yaml.safe_dump(payload, temp_file, default_flow_style=False, sort_keys=False, allow_unicode=True)
-            temp_file.flush()
-            os.fsync(temp_file.fileno())
-        temp_path.replace(path)
-        fsync_directory(path.parent)
-    finally:
-        if temp_path is not None and temp_path.exists():
-            temp_path.unlink()
-
-
-def _thread_export_path(output_dir: Path, room: ThreadExportRoom, thread_id: str) -> Path:
-    """Return a validated output path for one thread export."""
-    room_dir = _room_export_dir(output_dir, room, create=True)
-    return room_dir / f"{_safe_path_segment(thread_id)}.yaml"
-
-
-def _thread_index_entry(thread_file: Path) -> tuple[int, dict[str, object]] | None:
-    """Return one (last-activity, entry) index pair from an exported thread file."""
-    if thread_file.is_symlink():
+def _thread_index_entry_at(directory_fd: int, filename: str) -> tuple[int, dict[str, object]] | None:
+    """Return one index pair from a thread file below a pinned room directory."""
+    text = _read_text_at(directory_fd, filename)
+    if text is None:
         return None
     try:
-        payload = yaml.safe_load(thread_file.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        payload = yaml.safe_load(text)
+    except yaml.YAMLError:
         return None
     if not isinstance(payload, dict):
         return None
@@ -192,7 +248,7 @@ def _thread_index_entry(thread_file: Path) -> tuple[int, dict[str, object]] | No
         return None
     message_dicts = [message for message in messages if isinstance(message, dict)]
     entry: dict[str, object] = {
-        "file": thread_file.name,
+        "file": filename,
         "thread_id": thread.get("id"),
         "message_count": thread.get("message_count"),
         "participants": sorted(
@@ -213,12 +269,12 @@ def _thread_index_entry(thread_file: Path) -> tuple[int, dict[str, object]] | No
     return last_timestamp, entry
 
 
-def _room_index_payload(room_dir: Path, room: ThreadExportRoom) -> dict[str, object]:
+def _room_index_payload(room_fd: int, room: ThreadExportRoom) -> dict[str, object]:
     """Build one room index document from the exported thread files on disk."""
     indexed = [
         indexed_entry
-        for thread_file in sorted(room_dir.glob("*.yaml"))
-        if (indexed_entry := _thread_index_entry(thread_file)) is not None
+        for filename in sorted(name for name in os.listdir(room_fd) if name.endswith(".yaml"))
+        if (indexed_entry := _thread_index_entry_at(room_fd, filename)) is not None
     ]
     indexed.sort(key=lambda item: item[0], reverse=True)
     entries = [entry for _, entry in indexed]
@@ -237,42 +293,67 @@ def _room_index_payload(room_dir: Path, room: ThreadExportRoom) -> dict[str, obj
 
 def write_room_index(output_dir: Path, room: ThreadExportRoom) -> None:
     """Write one room's index.json when its content changed."""
-    room_dir = _room_export_dir(output_dir, room)
-    if not room_dir.exists():
+    root_fd = _open_export_root(output_dir, create=False)
+    if root_fd is None:
         return
-    index_path = room_dir / _ROOM_INDEX_FILENAME
-    payload = _room_index_payload(room_dir, room)
-    text = f"{json.dumps(payload, indent=2)}\n"
-    if index_path.is_symlink():
-        index_path.unlink()
-    elif index_path.exists() and index_path.read_text(encoding="utf-8") == text:
+    try:
+        room_fd = _open_room_directory(root_fd, output_dir, room, create=False)
+    finally:
+        os.close(root_fd)
+    if room_fd is None:
         return
-    write_json_file_durable(index_path, payload, indent=2, trailing_newline=True)
+    try:
+        payload = _room_index_payload(room_fd, room)
+        text = f"{json.dumps(payload, indent=2)}\n"
+        if _read_text_at(room_fd, _ROOM_INDEX_FILENAME) == text:
+            return
+        _atomic_write_at(room_fd, _ROOM_INDEX_FILENAME, text)
+    finally:
+        os.close(room_fd)
 
 
 def room_index_exists(output_dir: Path, room: ThreadExportRoom) -> bool:
     """Return whether a room has a regular index file inside a safe export directory."""
-    room_dir = _room_export_dir(output_dir, room)
-    if not room_dir.exists():
+    root_fd = _open_export_root(output_dir, create=False)
+    if root_fd is None:
         return False
-    index_path = room_dir / _ROOM_INDEX_FILENAME
-    return index_path.is_file() and not index_path.is_symlink()
+    try:
+        room_fd = _open_room_directory(root_fd, output_dir, room, create=False)
+    finally:
+        os.close(root_fd)
+    if room_fd is None:
+        return False
+    try:
+        try:
+            return stat.S_ISREG(os.stat(_ROOM_INDEX_FILENAME, dir_fd=room_fd, follow_symlinks=False).st_mode)
+        except FileNotFoundError:
+            return False
+    finally:
+        os.close(room_fd)
 
 
 def remove_room_export(output_dir: Path, room: ThreadExportRoom) -> bool:
     """Remove one room's exported data without following workspace symlinks."""
-    root = _existing_export_root(output_dir)
-    if root is None:
+    root_fd = _open_export_root(output_dir, create=False)
+    if root_fd is None:
         return False
-    room_dir = root / _safe_path_segment(room.key)
-    if not room_dir.exists() and not room_dir.is_symlink():
-        return False
-    if room_dir.is_symlink() or not room_dir.is_dir():
-        room_dir.unlink()
-    else:
-        shutil.rmtree(room_dir)
-    fsync_directory(root)
-    return True
+    room_name = _safe_path_segment(room.key)
+    try:
+        try:
+            mode = os.stat(room_name, dir_fd=root_fd, follow_symlinks=False).st_mode
+        except FileNotFoundError:
+            return False
+        if stat.S_ISDIR(mode):
+            if not shutil.rmtree.avoids_symlink_attacks:
+                msg = "Safe descriptor-relative directory removal is unavailable"
+                raise RuntimeError(msg)
+            shutil.rmtree(room_name, dir_fd=root_fd)
+        else:
+            os.unlink(room_name, dir_fd=root_fd)
+        _fsync_directory_fd(root_fd)
+        return True
+    finally:
+        os.close(root_fd)
 
 
 def remove_stale_thread_exports(
@@ -281,40 +362,68 @@ def remove_stale_thread_exports(
     thread_ids: Sequence[str],
 ) -> bool:
     """Remove thread files absent from a complete homeserver enumeration."""
-    root = _existing_export_root(output_dir)
-    if root is None:
+    root_fd = _open_export_root(output_dir, create=False)
+    if root_fd is None:
         return False
-    room_dir = _room_export_dir(root, room)
-    if not room_dir.exists():
+    try:
+        room_fd = _open_room_directory(root_fd, output_dir, room, create=False)
+    finally:
+        os.close(root_fd)
+    if room_fd is None:
         return False
-    expected_names = {f"{_safe_path_segment(thread_id)}.yaml" for thread_id in thread_ids}
-    stale_files = [thread_file for thread_file in room_dir.glob("*.yaml") if thread_file.name not in expected_names]
-    for thread_file in stale_files:
-        thread_file.unlink()
-    if stale_files:
-        fsync_directory(room_dir)
-    return bool(stale_files)
+    try:
+        expected_names = {f"{_safe_path_segment(thread_id)}.yaml" for thread_id in thread_ids}
+        stale_names = [
+            name
+            for name in os.listdir(room_fd)  # noqa: PTH208 - descriptor pinning prevents path races
+            if name.endswith(".yaml") and name not in expected_names
+        ]
+        removed = False
+        for filename in stale_names:
+            try:
+                mode = os.stat(filename, dir_fd=room_fd, follow_symlinks=False).st_mode
+            except FileNotFoundError:
+                continue
+            if stat.S_ISDIR(mode):
+                continue
+            os.unlink(filename, dir_fd=room_fd)
+            removed = True
+        if removed:
+            _fsync_directory_fd(room_fd)
+        return removed
+    finally:
+        os.close(room_fd)
 
 
 def reconcile_room_directories(output_dir: Path, retained_room_keys: set[str]) -> None:
     """Remove room directories outside the target's full-pass authorization scope."""
-    root = _existing_export_root(output_dir)
-    if root is None:
+    root_fd = _open_export_root(output_dir, create=False)
+    if root_fd is None:
         return
-    retained_names = {_safe_path_segment(room_key) for room_key in retained_room_keys}
-    removed = False
-    for candidate in root.iterdir():
-        if candidate.name in retained_names:
-            continue
-        if candidate.is_symlink():
-            candidate.unlink()
-        elif candidate.is_dir():
-            shutil.rmtree(candidate)
-        else:
-            continue
-        removed = True
-    if removed:
-        fsync_directory(root)
+    try:
+        retained_names = {_safe_path_segment(room_key) for room_key in retained_room_keys}
+        removed = False
+        for name in os.listdir(root_fd):  # noqa: PTH208 - descriptor pinning prevents path races
+            if name in retained_names:
+                continue
+            try:
+                mode = os.stat(name, dir_fd=root_fd, follow_symlinks=False).st_mode
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(mode):
+                os.unlink(name, dir_fd=root_fd)
+            elif stat.S_ISDIR(mode):
+                if not shutil.rmtree.avoids_symlink_attacks:
+                    msg = "Safe descriptor-relative directory removal is unavailable"
+                    raise RuntimeError(msg)
+                shutil.rmtree(name, dir_fd=root_fd)
+            else:
+                continue
+            removed = True
+        if removed:
+            _fsync_directory_fd(root_fd)
+    finally:
+        os.close(root_fd)
 
 
 def _payload_without_exported_at(payload: dict[str, object]) -> dict[str, object]:
@@ -326,13 +435,14 @@ def _payload_without_exported_at(payload: dict[str, object]) -> dict[str, object
     return normalized
 
 
-def _existing_payload_matches(path: Path, payload: dict[str, object]) -> bool:
+def _existing_payload_matches(room_fd: int, filename: str, payload: dict[str, object]) -> bool:
     """Return whether one regular export file already holds this payload, ignoring exported_at."""
-    if path.is_symlink() or not path.is_file():
+    text = _read_text_at(room_fd, filename)
+    if text is None:
         return False
     try:
-        existing = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        existing = yaml.safe_load(text)
+    except yaml.YAMLError:
         return False
     if not isinstance(existing, dict):
         return False
@@ -346,8 +456,28 @@ def write_thread_payload(
     payload: dict[str, object],
 ) -> bool:
     """Write one thread payload when changed and return whether bytes were replaced."""
-    export_path = _thread_export_path(output_dir, room, thread_id)
-    if _existing_payload_matches(export_path, payload):
-        return False
-    _write_yaml_atomic(export_path, payload)
-    return True
+    root_fd = _open_export_root(output_dir, create=True)
+    if root_fd is None:
+        msg = f"Failed to create thread export root: {output_dir}"
+        raise RuntimeError(msg)
+    try:
+        room_fd = _open_room_directory(root_fd, output_dir, room, create=True)
+    finally:
+        os.close(root_fd)
+    if room_fd is None:
+        msg = f"Failed to create thread export room directory: {room.key}"
+        raise RuntimeError(msg)
+    try:
+        filename = f"{_safe_path_segment(thread_id)}.yaml"
+        if _existing_payload_matches(room_fd, filename, payload):
+            return False
+        text = yaml.safe_dump(
+            payload,
+            default_flow_style=False,
+            sort_keys=False,
+            allow_unicode=True,
+        )
+        _atomic_write_at(room_fd, filename, text)
+        return True
+    finally:
+        os.close(room_fd)

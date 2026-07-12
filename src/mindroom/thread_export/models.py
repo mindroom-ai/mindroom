@@ -23,13 +23,28 @@ class ThreadExportRoom:
 
 
 @dataclass(frozen=True)
-class ThreadExportFailure:
+class _ThreadExportFailure:
     """One room or thread export failure."""
 
     room_key: str
     room_id: str
     thread_id: str | None
     error: str
+
+
+def failure_for_room(
+    room: ThreadExportRoom,
+    error: str,
+    *,
+    thread_id: str | None = None,
+) -> _ThreadExportFailure:
+    """Build one room- or thread-scoped export failure."""
+    return _ThreadExportFailure(
+        room_key=room.key,
+        room_id=room.room_id,
+        thread_id=thread_id,
+        error=error,
+    )
 
 
 @dataclass(frozen=True)
@@ -42,7 +57,7 @@ class ThreadExportStats:
     threads_exported: int = 0
     threads_unchanged: int = 0
     truncated_rooms: int = 0
-    failed_items: tuple[ThreadExportFailure, ...] = field(default_factory=tuple)
+    failed_items: tuple[_ThreadExportFailure, ...] = field(default_factory=tuple)
 
     @property
     def failures(self) -> int:
@@ -69,7 +84,7 @@ class ThreadExportAccumulator:
     threads_exported: int = 0
     threads_unchanged: int = 0
     truncated_rooms: int = 0
-    failed_items: list[ThreadExportFailure] = field(default_factory=list)
+    failed_items: list[_ThreadExportFailure] = field(default_factory=list)
     retained_room_keys: set[str] = field(default_factory=set)
 
     def stats(self) -> ThreadExportStats:
@@ -87,8 +102,18 @@ class ThreadExportAccumulator:
 
 @dataclass(frozen=True)
 class ThreadExportGroup:
-    """Rooms that must be read with one persisted Matrix account."""
+    """Rooms ready to be read with one persisted Matrix account."""
 
     rooms: tuple[ThreadExportRoom, ...]
-    user: AgentMatrixUser | None = None
-    error: str | None = None
+    user: AgentMatrixUser
+
+
+@dataclass(frozen=True)
+class ThreadExportGroupFailure:
+    """Rooms that could not be assigned a usable Matrix account."""
+
+    rooms: tuple[ThreadExportRoom, ...]
+    error: str
+
+
+type ThreadExportGroupResult = ThreadExportGroup | ThreadExportGroupFailure

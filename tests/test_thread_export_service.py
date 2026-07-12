@@ -233,3 +233,28 @@ async def test_export_threads_once_records_failure_for_invited_room_without_acco
     assert stats.failures == 1
     assert stats.failed_items[0].room_id == "!user-room:localhost"
     assert "general" in stats.failed_items[0].error
+
+
+@pytest.mark.asyncio
+async def test_failed_export_groups_do_not_create_runtime_support(tmp_path: Path) -> None:
+    """An account-assignment failure should not create a cache with no ready group to use it."""
+    config = thread_export_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    write_thread_export_matrix_state(tmp_path, account_keys=(INTERNAL_USER_ACCOUNT_KEY,))
+    write_invited_rooms(runtime_paths, "general", ["!user-room:localhost"])
+
+    with patch("mindroom.thread_export.service.build_owned_runtime_support") as build_support:
+        stats = await export_threads_to_targets_once(
+            config=config,
+            runtime_paths=runtime_paths,
+            targets=(
+                ThreadExportTarget(output_dir=tmp_path / "invited", include_invited_rooms=True),
+                ThreadExportTarget(output_dir=tmp_path / "configured", include_invited_rooms=False),
+            ),
+            room_filter="!user-room:localhost",
+        )
+
+    build_support.assert_not_called()
+    assert stats[0].failures == 1
+    assert stats[0].failed_items[0].room_id == "!user-room:localhost"
+    assert stats[1].failures == 0

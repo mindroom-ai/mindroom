@@ -8,26 +8,24 @@ from mindroom.constants import runtime_matrix_homeserver
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import login_agent_user
 from mindroom.runtime_support import build_owned_runtime_support, close_owned_runtime_support
-from mindroom.thread_export.execution import (
-    export_threads_for_targets_for_client,
-    reconcile_full_pass,
-    room_failure,
-    target_accepts_room,
-)
+from mindroom.thread_export.execution import export_threads_for_targets_for_client
 from mindroom.thread_export.models import (
     ThreadExportAccumulator,
     ThreadExportGroup,
+    ThreadExportGroupFailure,
     ThreadExportRoom,
     ThreadExportStats,
     ThreadExportTarget,
+    failure_for_room,
 )
+from mindroom.thread_export.policy import target_accepts_room, target_retains_unverified_room
 from mindroom.thread_export.selection import (
     build_export_groups,
     export_rooms,
     invited_export_rooms,
     select_export_account,
 )
-from mindroom.thread_export.storage import remove_room_export
+from mindroom.thread_export.storage import reconcile_room_directories, remove_room_export
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -69,11 +67,20 @@ def _record_group_failure(
             if not target_accepts_room(target, room):
                 remove_room_export(target.output_dir, room)
                 continue
-            if target.required_member_user_id is None:
+            if target_retains_unverified_room(target, room):
                 accumulator.retained_room_keys.add(room.key)
             else:
                 remove_room_export(target.output_dir, room)
-            accumulator.failed_items.append(room_failure(room, error))
+            accumulator.failed_items.append(failure_for_room(room, error))
+
+
+def _reconcile_full_pass(accumulators: Sequence[ThreadExportAccumulator]) -> None:
+    """Remove room directories that the completed full pass did not retain."""
+    for accumulator in accumulators:
+        reconcile_room_directories(
+            accumulator.target.output_dir,
+            accumulator.retained_room_keys,
+        )
 
 
 async def _run_export_group(
@@ -82,19 +89,13 @@ async def _run_export_group(
     homeserver: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache | None,
+    event_cache: ConversationEventCache,
     targets: Sequence[ThreadExportTarget],
     accumulators: Sequence[ThreadExportAccumulator],
     max_thread_roots: int,
     prefer_cache: bool,
 ) -> None:
     """Run one account group without preventing later groups after a failure."""
-    if group.error is not None:
-        _record_group_failure(accumulators, group.rooms, group.error)
-        return
-    if group.user is None or event_cache is None:
-        msg = "Export group is missing its Matrix user or event cache"
-        raise RuntimeError(msg)
     try:
         client = await login_agent_user(homeserver, group.user, runtime_paths)
     except Exception as exc:
@@ -171,41 +172,42 @@ async def export_threads_to_targets_once(
     if not export_groups:
         select_export_account(runtime_paths, homeserver)
         if room_filter is None:
-            reconcile_full_pass(accumulators)
+            _reconcile_full_pass(accumulators)
         return tuple(accumulator.stats() for accumulator in accumulators)
 
-    login_groups = [group for group in export_groups if group.user is not None]
-    support = (
-        build_owned_runtime_support(
+    ready_groups: list[ThreadExportGroup] = []
+    for group in export_groups:
+        if isinstance(group, ThreadExportGroupFailure):
+            _record_group_failure(accumulators, group.rooms, group.error)
+        else:
+            ready_groups.append(group)
+
+    if ready_groups:
+        support = build_owned_runtime_support(
             cache_config=config.cache,
             runtime_paths=runtime_paths,
             logger=logger,
             background_task_owner=object(),
         )
-        if login_groups
-        else None
-    )
-    try:
-        if support is not None:
+        try:
             await support.event_cache.initialize()
-        for group in export_groups:
-            await _run_export_group(
-                group,
-                homeserver=homeserver,
-                config=config,
-                runtime_paths=runtime_paths,
-                event_cache=support.event_cache if support is not None else None,
-                targets=resolved_targets,
-                accumulators=accumulators,
-                max_thread_roots=max_thread_roots,
-                prefer_cache=prefer_cache,
-            )
-    finally:
-        if support is not None:
+            for group in ready_groups:
+                await _run_export_group(
+                    group,
+                    homeserver=homeserver,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    event_cache=support.event_cache,
+                    targets=resolved_targets,
+                    accumulators=accumulators,
+                    max_thread_roots=max_thread_roots,
+                    prefer_cache=prefer_cache,
+                )
+        finally:
             await close_owned_runtime_support(support, logger=logger)
 
     if room_filter is None:
-        reconcile_full_pass(accumulators)
+        _reconcile_full_pass(accumulators)
     return tuple(accumulator.stats() for accumulator in accumulators)
 
 

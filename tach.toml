@@ -2049,13 +2049,22 @@ depends_on = []
 visibility = [
     "mindroom.thread_export",
     "mindroom.thread_export.execution",
+    "mindroom.thread_export.policy",
     "mindroom.thread_export.selection",
     "mindroom.thread_export.service",
 ]
 
 [[modules]]
 path = "mindroom.thread_export.storage"
-depends_on = ["mindroom.durable_write"]
+depends_on = []
+visibility = [
+    "mindroom.thread_export.execution",
+    "mindroom.thread_export.service",
+]
+
+[[modules]]
+path = "mindroom.thread_export.policy"
+depends_on = ["mindroom.thread_export.models"]
 visibility = [
     "mindroom.thread_export.execution",
     "mindroom.thread_export.service",
@@ -2084,6 +2093,7 @@ path = "mindroom.thread_export.execution"
 depends_on = [
     "mindroom.matrix.client_thread_history",
     "mindroom.thread_export.models",
+    "mindroom.thread_export.policy",
     "mindroom.thread_export.selection",
     "mindroom.thread_export.storage",
 ]
@@ -2098,6 +2108,7 @@ depends_on = [
     "mindroom.runtime_support",
     "mindroom.thread_export.execution",
     "mindroom.thread_export.models",
+    "mindroom.thread_export.policy",
     "mindroom.thread_export.selection",
     "mindroom.thread_export.storage",
 ]

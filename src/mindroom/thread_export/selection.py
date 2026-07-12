@@ -12,7 +12,12 @@ from mindroom.matrix.invited_rooms_store import invited_room_entity_names, invit
 from mindroom.matrix.state import MatrixRoom, matrix_state_for_runtime
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, INTERNAL_USER_AGENT_NAME, AgentMatrixUser
 from mindroom.matrix_identifiers import extract_server_name_from_homeserver
-from mindroom.thread_export.models import ThreadExportGroup, ThreadExportRoom
+from mindroom.thread_export.models import (
+    ThreadExportGroup,
+    ThreadExportGroupFailure,
+    ThreadExportGroupResult,
+    ThreadExportRoom,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -144,9 +149,9 @@ def build_export_groups(
     homeserver: str,
     state_rooms: Sequence[ThreadExportRoom],
     invited_groups: Sequence[tuple[str, list[ThreadExportRoom]]],
-) -> list[ThreadExportGroup]:
+) -> list[ThreadExportGroupResult]:
     """Build account-specific export groups, retaining missing-account failures."""
-    groups: list[ThreadExportGroup] = []
+    groups: list[ThreadExportGroupResult] = []
     if state_rooms:
         groups.append(
             ThreadExportGroup(
@@ -160,7 +165,7 @@ def build_export_groups(
         account = accounts.get(account_key)
         if account is None:
             groups.append(
-                ThreadExportGroup(
+                ThreadExportGroupFailure(
                     rooms=tuple(entity_rooms),
                     error=f"No persisted Matrix account for invited-room entity '{entity_name}'",
                 ),

@@ -14,13 +14,13 @@ from mindroom.matrix.client_thread_history import (
 )
 from mindroom.thread_export.models import (
     ThreadExportAccumulator,
-    ThreadExportFailure,
     ThreadExportRoom,
     ThreadExportTarget,
+    failure_for_room,
 )
+from mindroom.thread_export.policy import target_accepts_room
 from mindroom.thread_export.selection import trusted_sender_ids_for_export
 from mindroom.thread_export.storage import (
-    reconcile_room_directories,
     remove_room_export,
     remove_stale_thread_exports,
     room_index_exists,
@@ -83,21 +83,6 @@ async def _fetch_thread_payload(
     )
 
 
-def target_accepts_room(target: ThreadExportTarget, room: ThreadExportRoom) -> bool:
-    """Return whether one target includes the room's source category."""
-    return target.include_invited_rooms or not room.invited
-
-
-def room_failure(room: ThreadExportRoom, error: str, *, thread_id: str | None = None) -> ThreadExportFailure:
-    """Build one target-local room or thread failure."""
-    return ThreadExportFailure(
-        room_key=room.key,
-        room_id=room.room_id,
-        thread_id=thread_id,
-        error=error,
-    )
-
-
 async def _authorized_room_accumulators(
     client: nio.AsyncClient,
     room: ThreadExportRoom,
@@ -118,7 +103,7 @@ async def _authorized_room_accumulators(
     except Exception as exc:
         for accumulator in scoped:
             remove_room_export(accumulator.target.output_dir, room)
-            accumulator.failed_items.append(room_failure(room, str(exc)))
+            accumulator.failed_items.append(failure_for_room(room, str(exc)))
         return authorized
 
     for accumulator in scoped:
@@ -153,7 +138,7 @@ async def _write_thread_to_targets(
         )
     except Exception as exc:
         for accumulator in accumulators:
-            accumulator.failed_items.append(room_failure(room, str(exc), thread_id=thread_id))
+            accumulator.failed_items.append(failure_for_room(room, str(exc), thread_id=thread_id))
         return
 
     for accumulator in accumulators:
@@ -165,7 +150,7 @@ async def _write_thread_to_targets(
                 payload,
             )
         except Exception as exc:
-            accumulator.failed_items.append(room_failure(room, str(exc), thread_id=thread_id))
+            accumulator.failed_items.append(failure_for_room(room, str(exc), thread_id=thread_id))
             continue
         accumulator.threads_exported += 1
         if wrote_file:
@@ -194,7 +179,7 @@ def _finish_room_exports(
             if room_changed[id(accumulator)] or not room_index_exists(accumulator.target.output_dir, room):
                 write_room_index(accumulator.target.output_dir, room)
         except Exception as exc:
-            accumulator.failed_items.append(room_failure(room, f"Room reconciliation failed: {exc}"))
+            accumulator.failed_items.append(failure_for_room(room, f"Room reconciliation failed: {exc}"))
 
 
 async def export_threads_for_targets_for_client(
@@ -227,7 +212,7 @@ async def export_threads_for_targets_for_client(
             )
         except Exception as exc:
             for accumulator in authorized:
-                accumulator.failed_items.append(room_failure(room, str(exc)))
+                accumulator.failed_items.append(failure_for_room(room, str(exc)))
             continue
 
         for accumulator in authorized:
@@ -258,12 +243,3 @@ async def export_threads_for_targets_for_client(
         )
 
     return accumulators
-
-
-def reconcile_full_pass(accumulators: Sequence[ThreadExportAccumulator]) -> None:
-    """Remove room directories that the completed full pass did not retain."""
-    for accumulator in accumulators:
-        reconcile_room_directories(
-            accumulator.target.output_dir,
-            accumulator.retained_room_keys,
-        )

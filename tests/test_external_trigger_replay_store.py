@@ -13,7 +13,7 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom.constants import safe_replace
-from mindroom.durable_write import fsync_directory
+from mindroom.durable_write import _fsync_directory
 from mindroom.external_triggers.models import ExternalTriggerAcceptedResponse, ExternalTriggerPayload
 from mindroom.external_triggers.replay_store import (
     ExternalTriggerEventClaim,
@@ -433,6 +433,6 @@ def test_fsync_directory_ignores_unsupported_directory_fsync(
     monkeypatch.setattr("mindroom.durable_write.os.fsync", raise_unsupported)
     monkeypatch.setattr("mindroom.durable_write.os.close", closed_fds.append)
 
-    fsync_directory(tmp_path)
+    _fsync_directory(tmp_path)
 
     assert closed_fds == [123]
