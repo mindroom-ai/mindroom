@@ -17,6 +17,7 @@ from agno.media import Audio
 from mindroom import model_loading
 from mindroom.attachments import register_audio_attachment
 from mindroom.authorization import responder_candidate_entities_for_room
+from mindroom.config.voice import normalize_speech_base_url
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
@@ -32,6 +33,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import parse_current_matrix_user_id
 from mindroom.matrix.media import AudioMessageEvent, download_media_bytes, extract_media_caption, media_mime_type
 from mindroom.matrix.mentions import format_message_with_mentions, resolve_entity_name_for_mention_localpart
+from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -470,10 +472,16 @@ async def _transcribe_audio(
 
     """
     try:
-        stt_host = config.voice.stt.host
-        url = f"{stt_host}/v1/audio/transcriptions" if stt_host else "https://api.openai.com/v1/audio/transcriptions"
+        stt_base_url = normalize_speech_base_url(config.voice.stt.host)
+        url = (
+            f"{stt_base_url}/audio/transcriptions" if stt_base_url else "https://api.openai.com/v1/audio/transcriptions"
+        )
 
-        api_key = config.voice.stt.api_key or get_secret_from_env("OPENAI_API_KEY", runtime_paths)
+        api_key = config.voice.stt.api_key
+        if api_key is None and config.voice.stt.provider == "openai_compatible":
+            api_key = LOCAL_OPENAI_API_KEY_DEFAULT
+        if api_key is None:
+            api_key = get_secret_from_env("OPENAI_API_KEY", runtime_paths)
         if not api_key:
             logger.error("No OpenAI-compatible STT API key configured for voice transcription")
             return None
@@ -481,7 +489,8 @@ async def _transcribe_audio(
 
         filename, upload_mime_type = _stt_upload_filename_and_mime_type(mime_type)
         files = {"file": (filename, audio_data, upload_mime_type)}
-        form_data = {"model": config.voice.stt.model}
+        form_data: dict[str, object] = {"model": config.voice.stt.model}
+        form_data.update(config.voice.stt.extra_kwargs)
 
         async with httpx.AsyncClient() as http_client:
             response = await http_client.post(url, headers=headers, files=files, data=form_data)

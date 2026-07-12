@@ -80,6 +80,12 @@ _SHELL_ARGS_ERROR = (
     '\'args\' must be a shell command string or a flat list of strings. Send args like "ls -la" or ["git", "status"].'
 )
 _SHELL_COMMAND_LINE_CHARS = frozenset("$|&;<>*?~`!(){}[]\n\r")
+_WORKSPACE_CWD_NOTE = (
+    "The command runs in your agent workspace as its working directory "
+    "(echoed as a `[cwd: ...]` first line in the result). Always use relative paths or "
+    "`$MINDROOM_AGENT_WORKSPACE` for workspace files instead of `~`: worker-routed execution maps `~` "
+    "to the workspace, while local execution maps it to the host home."
+)
 
 # Module-level process registry shared across all MindRoomShellTools instances.
 # This ensures handles survive toolkit re-creation for local execution; when a
@@ -154,14 +160,21 @@ def _shell_subprocess_env(
     *,
     base_process_env: dict[str, str] | None = None,
     shell_path_prepend: str | None = None,
+    workspace_dir: Path | None = None,
 ) -> dict[str, str]:
     """Build the env passed to shell subprocesses."""
     env = {key: value for key, value in os.environ.items() if key in _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS}
     if base_process_env is not None:
         env.update({key: value for key, value in base_process_env.items() if key in _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS})
     env.update(runtime_env)
-    if base_process_env is not None:
-        env.update(_workspace_home_contract_env_from_process_env(base_process_env))
+    workspace_home_contract = (
+        _workspace_home_contract_env_from_process_env(base_process_env) if base_process_env is not None else {}
+    )
+    env.update(workspace_home_contract)
+    if workspace_dir is not None and not workspace_home_contract:
+        # Local (non-worker) execution keeps the host HOME, but the workspace
+        # env var is still promised to agents, so export it from base_dir.
+        env["MINDROOM_AGENT_WORKSPACE"] = str(workspace_dir.expanduser().resolve())
 
     path_value = subprocess_path_with_prepends(
         env.get("PATH"),
@@ -355,6 +368,10 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 ),
             )
             self._base_process_env = dict(runtime_paths.process_env)
+            if run_shell_command_function is not None and self.base_dir is not None:
+                run_shell_command_function.description = (
+                    f"{run_shell_command_function.description or ''}\n\n{_WORKSPACE_CWD_NOTE}"
+                ).strip()
             self._handle_namespace = _handle_namespace(runtime_paths=runtime_paths, base_dir=self.base_dir)
             self._shell_path_prepend = shell_path_prepend
             # Sandbox tool subprocesses delegate execution to the runner's
@@ -393,11 +410,12 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 self._runtime_env,
                 base_process_env=self._base_process_env,
                 shell_path_prepend=self._shell_path_prepend,
+                workspace_dir=self.base_dir,
             )
             argv = _shell_subprocess_args(command_args, subprocess_env)
             cwd = str(self.base_dir) if self.base_dir else None
             if self._supervisor_socket is not None:
-                return await run_command_via_supervisor(
+                message = await run_command_via_supervisor(
                     self._supervisor_socket,
                     namespace=self._handle_namespace,
                     argv=argv,
@@ -406,16 +424,20 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     tail=tail,
                     timeout=timeout,
                 )
-            result = await run_command(
-                _process_registry,
-                namespace=self._handle_namespace,
-                argv=argv,
-                env=subprocess_env,
-                cwd=cwd,
-                tail=tail,
-                timeout=timeout,
-            )
-            return result.message
+            else:
+                result = await run_command(
+                    _process_registry,
+                    namespace=self._handle_namespace,
+                    argv=argv,
+                    env=subprocess_env,
+                    cwd=cwd,
+                    tail=tail,
+                    timeout=timeout,
+                )
+                message = result.message
+            if cwd is None:
+                return message
+            return f"[cwd: {cwd}]\n{message}"
 
         def check_shell_command(self, handle: str) -> str:
             """Poll the status of a backgrounded shell command.
@@ -425,7 +447,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             a running process.
 
             Args:
-                handle: The handle string returned by ``run_shell_command``.
+                handle: The ``shell:...`` identifier from the ``Handle:`` line returned by ``run_shell_command``.
 
             Returns:
                 Output if the command finished, or a status summary if still running.
@@ -443,7 +465,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             """Kill a backgrounded shell command.
 
             Args:
-                handle: The handle string returned by ``run_shell_command``.
+                handle: The ``shell:...`` identifier from the ``Handle:`` line returned by ``run_shell_command``.
                 force: If True send SIGKILL immediately instead of SIGTERM.
 
             Returns:

@@ -150,7 +150,8 @@ Simply present your findings naturally, as if you already knew the information.
 OUTPUT_REDIRECT_PROMPT = (
     "To save a tool's full supported output to a file in your workspace instead of returning it, pass "
     "`mindroom_output_path: <relative-path>` and then inspect the saved file with file, coding, python, or shell tools. "
-    "In worker-routed shell and python tools, `~`, `$HOME`, and `$MINDROOM_AGENT_WORKSPACE` point at that workspace."
+    "In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, "
+    "`~` and `$HOME` point there too."
 )
 
 DATETIME_CONTEXT_TEMPLATE = """## Current Date and Time
@@ -324,7 +325,7 @@ WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE = """Parse this scheduling request into 
 Current time (UTC): {current_time}
 Current time in the user's timezone ({user_timezone}): {current_time_local}
 Request: "{request}"
-
+{existing_task_context}
 Your task is to:
 1. Determine if this is a one-time task or recurring (cron)
 2. Extract the schedule/timing
@@ -489,7 +490,7 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
             {"agent_list", "team_list", "transcription"},
         ),
         "WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE": frozenset(
-            {"current_time", "current_time_local", "user_timezone", "request", "agent_list"},
+            {"current_time", "current_time_local", "user_timezone", "request", "agent_list", "existing_task_context"},
         ),
     },
 )

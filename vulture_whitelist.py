@@ -144,6 +144,7 @@ _.validate_knowledge_base_ids_do_not_use_line_breaks  # unused method (src/mindr
 _.validate_name  # unused method (src/mindroom/config/matrix.py)
 _.validate_database_url_env  # unused method (src/mindroom/config/matrix.py)
 _.validate_path  # unused method (src/mindroom/config/plugin.py)
+_.normalize_optional_string  # unused method (src/mindroom/config/voice.py)
 _.add_metadata  # unused method (src/mindroom/hooks/context.py)
 _.add_instruction  # unused method (src/mindroom/hooks/context.py)
 readiness_check  # unused function (src/mindroom/api/main.py)
@@ -272,3 +273,8 @@ _.turn_count  # read in tests/test_matrix_rtc_transcript.py (src/mindroom/matrix
 AudioInput  # type-only SDK interface for the custom MatrixRTC audio stream
 _.on_attached  # LiveKit AgentInput callback (src/mindroom/matrix_rtc/voice_agent.py)
 _.on_detached  # LiveKit AgentInput callback (src/mindroom/matrix_rtc/voice_agent.py)
+_.validate_extra_kwargs  # Pydantic validator (src/mindroom/config/voice.py)
+_.validate_host  # Pydantic validator (src/mindroom/config/voice.py)
+_.validate_compatible_endpoint  # Pydantic validator (src/mindroom/config/voice.py)
+_.validate_cascaded_services  # Pydantic validator (src/mindroom/config/calls.py)
+_.chat  # LiveKit LLM adapter override (src/mindroom/matrix_rtc/voice_agent.py)

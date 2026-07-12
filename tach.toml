@@ -225,6 +225,7 @@ depends_on = [
 visibility = [
     "mindroom.api.openai_compat",
     "mindroom.custom_tools.delegate",
+    "mindroom.matrix_rtc.call_tools",
     "mindroom.response_runner",
     "mindroom.teams",
 ]
@@ -1005,6 +1006,7 @@ depends_on = [
 visibility = [
     "mindroom.ai",
     "mindroom.history.turn_recorder",
+    "mindroom.matrix_rtc.call_tools",
     "mindroom.response_runner",
     "mindroom.teams",
 ]
@@ -1014,6 +1016,7 @@ path = "mindroom.history.turn_recorder"
 depends_on = ["mindroom.history.interrupted_replay"]
 visibility = [
     "mindroom.ai",
+    "mindroom.matrix_rtc.call_tools",
     "mindroom.response_runner",
     "mindroom.teams",
 ]
@@ -2116,6 +2119,7 @@ depends_on = ["mindroom.matrix_rtc.call_manager"]
 path = "mindroom.matrix_rtc.call_manager"
 depends_on = [
     "mindroom.authorization",
+    "mindroom.config.voice",
     "mindroom.credentials_sync",
     "mindroom.entity_resolution",
     "mindroom.logging_config",
@@ -2127,12 +2131,21 @@ depends_on = [
     "mindroom.matrix_rtc.key_transport",
     "mindroom.matrix_rtc.transcript",
     "mindroom.matrix_rtc.voice_agent",
+    "mindroom.model_defaults",
+    "mindroom.session_ids",
 ]
 
 [[modules]]
 path = "mindroom.matrix_rtc.call_tools"
 depends_on = [
+    "mindroom.agent_run_context",
     "mindroom.agents",
+    "mindroom.ai",
+    "mindroom.history.interrupted_replay",
+    "mindroom.history.runtime",
+    "mindroom.history.turn_recorder",
+    "mindroom.history.types",
+    "mindroom.hooks",
     "mindroom.knowledge.utils",
     "mindroom.logging_config",
     "mindroom.message_target",
@@ -2651,6 +2664,7 @@ visibility = [
 path = "mindroom.tool_system.skills"
 depends_on = [
     "mindroom.constants",
+    "mindroom.tool_system.output_files",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -2691,10 +2705,12 @@ path = "mindroom.voice_handler"
 depends_on = [
     "mindroom.attachments",
     "mindroom.authorization",
+    "mindroom.config.voice",
     "mindroom.constants",
     "mindroom.credentials_sync",
     "mindroom.entity_resolution",
     "mindroom.logging_config",
+    "mindroom.model_defaults",
     "mindroom.model_loading",
     "mindroom.matrix.media",
     "mindroom.matrix.mentions",

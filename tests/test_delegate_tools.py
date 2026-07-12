@@ -509,7 +509,7 @@ class TestDelegateKnowledge:
 
     @pytest.mark.asyncio
     async def test_delegation_rebinds_runtime_context_for_child_agent(self, tmp_path: Path) -> None:
-        """Nested delegated runs should not inherit the parent agent/session runtime context."""
+        """Nested runs rebind identity while retaining the parent channel's tool policy."""
         config = _make_config(
             {
                 "leader": AgentConfig(
@@ -542,6 +542,7 @@ class TestDelegateKnowledge:
             execution_identity=execution_identity,
             delegation_depth=0,
         )
+        tool_function_filter = MagicMock(return_value=True)
         runtime_context = ToolRuntimeContext(
             agent_name="leader",
             target=MessageTarget(
@@ -558,9 +559,10 @@ class TestDelegateKnowledge:
             event_cache=make_event_cache_mock(),
             conversation_cache=make_conversation_cache_mock(),
             correlation_id="corr-parent",
+            tool_function_filter=tool_function_filter,
         )
 
-        async def fake_ai_response(ctx: object, **_kwargs: object) -> str:
+        async def fake_ai_response(ctx: object, **kwargs: object) -> str:
             context = get_tool_runtime_context()
             assert context is not None
             assert context.agent_name == "worker"
@@ -570,6 +572,8 @@ class TestDelegateKnowledge:
             assert context.correlation_id == "corr-parent"
             assert ctx.correlation_id == "corr-parent"
             assert context.active_model_name == "default"
+            assert context.tool_function_filter is tool_function_filter
+            assert kwargs["tool_function_filter"] is tool_function_filter
             return "done"
 
         with (

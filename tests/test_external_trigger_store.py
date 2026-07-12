@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from typing import TYPE_CHECKING
 
@@ -15,6 +17,7 @@ from mindroom.external_triggers.store import (
     ExternalTriggerStore,
     ExternalTriggerStoreError,
     ExternalTriggerTarget,
+    public_key_fingerprint,
 )
 from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.state import MatrixState
@@ -403,3 +406,78 @@ def test_non_owner_cannot_modify_trigger_but_admin_can(tmp_path: Path) -> None:
     updated = store.set_enabled(record.trigger_id, enabled=False, actor_user_id="@admin:example.org", config=config)
 
     assert updated.enabled is False
+
+
+def _openssh_public_key(raw_key: bytes, comment: str = "user@host") -> str:
+    blob = b"\x00\x00\x00\x0bssh-ed25519" + len(raw_key).to_bytes(4, "big") + raw_key
+    return f"ssh-ed25519 {base64.b64encode(blob).decode('ascii')} {comment}"
+
+
+def _pem_public_key(raw_key: bytes) -> str:
+    der = bytes.fromhex("302a300506032b6570032100") + raw_key
+    body = base64.encodebytes(der).decode("ascii")
+    return f"-----BEGIN PUBLIC KEY-----\n{body}-----END PUBLIC KEY-----\n"
+
+
+def test_public_key_fingerprint_accepts_all_ed25519_encodings() -> None:
+    """Raw base64, OpenSSH, bare OpenSSH blob, and PEM keys normalize to the same key bytes."""
+    raw_key = bytes(range(32))
+    raw_b64 = base64.b64encode(raw_key).decode("ascii")
+    openssh = _openssh_public_key(raw_key)
+    bare_blob = openssh.split()[1]
+    pem = _pem_public_key(raw_key)
+
+    fingerprints = {public_key_fingerprint(key) for key in (raw_b64, openssh, bare_blob, pem)}
+    assert len(fingerprints) == 1
+    assert fingerprints.pop() == f"sha256:{hashlib.sha256(raw_key).hexdigest()}"
+
+
+def test_create_record_normalizes_openssh_public_key(tmp_path: Path) -> None:
+    """OpenSSH-format keys are stored as canonical base64 of the raw 32 key bytes."""
+    raw_key = bytes(range(32))
+    store = ExternalTriggerStore(_runtime_paths(tmp_path))
+
+    record = store.create_record(
+        trigger_id="openssh",
+        owner_user_id=_OWNER,
+        created_by_agent_name="watcher",
+        created_in_room_id="!room:example.org",
+        created_in_thread_id=None,
+        target=_target(),
+        public_key=_openssh_public_key(raw_key),
+        config=_config(),
+    )
+
+    assert record.public_key == base64.b64encode(raw_key).decode("ascii")
+    assert record.public_key_fingerprint == f"sha256:{hashlib.sha256(raw_key).hexdigest()}"
+
+
+def test_rotate_key_accepts_pem_public_key(tmp_path: Path) -> None:
+    """PEM SubjectPublicKeyInfo keys are accepted and normalized on rotation."""
+    config = _config()
+    store = ExternalTriggerStore(_runtime_paths(tmp_path))
+    _create(store, config)
+    raw_key = bytes(reversed(range(32)))
+
+    rotated = store.rotate_key(
+        "campground",
+        public_key=_pem_public_key(raw_key),
+        key_id="rotated",
+        actor_user_id=_OWNER,
+        config=config,
+    )
+
+    assert rotated.public_key == base64.b64encode(raw_key).decode("ascii")
+    assert rotated.public_key_fingerprint == f"sha256:{hashlib.sha256(raw_key).hexdigest()}"
+
+
+def test_public_key_rejects_undecodable_material() -> None:
+    """Keys in no accepted encoding fail with a format-listing error."""
+    with pytest.raises(ExternalTriggerStoreError, match=r"raw base64 .* OpenSSH .* PEM"):
+        public_key_fingerprint("not a key")
+
+    with pytest.raises(ExternalTriggerStoreError, match=r"raw base64 .* OpenSSH .* PEM"):
+        public_key_fingerprint(base64.b64encode(b"too short").decode("ascii"))
+
+    with pytest.raises(ExternalTriggerStoreError, match=r"raw base64 .* OpenSSH .* PEM"):
+        public_key_fingerprint("ssh-rsa AAAAB3NzaC1yc2E= user@host")

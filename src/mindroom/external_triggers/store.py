@@ -12,6 +12,14 @@ import uuid
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Literal
 
+from cryptography.exceptions import UnsupportedAlgorithm
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    PublicFormat,
+    load_pem_public_key,
+    load_ssh_public_key,
+)
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mindroom import constants
@@ -442,21 +450,70 @@ def _validate_trigger_id(trigger_id: str) -> str:
 
 
 def _normalize_public_key(public_key: str) -> tuple[str, bytes]:
-    """Validate and normalize one base64 Ed25519 public key."""
-    normalized = non_empty_stripped(public_key, field_name="public_key")
-    try:
-        public_key_bytes = base64.b64decode(normalized, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        msg = "public_key must be strict base64-encoded Ed25519 public key bytes"
-        raise ExternalTriggerStoreError(msg) from exc
-    if len(public_key_bytes) != _ED25519_PUBLIC_KEY_BYTES:
-        msg = "public_key must decode to 32 raw Ed25519 public key bytes"
+    """Normalize one Ed25519 public key to canonical base64 of its raw 32 bytes.
+
+    Accepts raw base64 key bytes, OpenSSH single-line format
+    (``ssh-ed25519 <base64-blob> [comment]``), and PEM SubjectPublicKeyInfo.
+    """
+    normalized_input = non_empty_stripped(public_key, field_name="public_key")
+    public_key_bytes = (
+        _public_key_bytes_from_pem(normalized_input)
+        or _public_key_bytes_from_openssh(normalized_input)
+        or _public_key_bytes_from_base64(normalized_input)
+    )
+    if public_key_bytes is None:
+        msg = (
+            "public_key must be an Ed25519 public key as raw base64 (32 key bytes), "
+            "OpenSSH single-line format ('ssh-ed25519 <base64> [comment]'), or PEM SubjectPublicKeyInfo"
+        )
         raise ExternalTriggerStoreError(msg)
-    return normalized, public_key_bytes
+    return base64.b64encode(public_key_bytes).decode("ascii"), public_key_bytes
+
+
+def _decode_strict_base64(value: str) -> bytes | None:
+    try:
+        return base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+
+
+def _public_key_bytes_from_base64(value: str) -> bytes | None:
+    decoded = _decode_strict_base64(value)
+    return decoded if decoded is not None and len(decoded) == _ED25519_PUBLIC_KEY_BYTES else None
+
+
+def _public_key_bytes_from_openssh(value: str) -> bytes | None:
+    parts = value.split()
+    if len(parts) >= 2 and parts[0] == "ssh-ed25519":
+        encoded_key = value.encode("utf-8")
+    elif len(parts) == 1 and _decode_strict_base64(value) is not None:
+        # Accept the bare base64 blob printed as the second OpenSSH field.
+        encoded_key = f"ssh-ed25519 {value}".encode()
+    else:
+        return None
+    try:
+        key = load_ssh_public_key(encoded_key)
+    except (ValueError, UnsupportedAlgorithm):
+        return None
+    return _raw_ed25519_public_key_bytes(key)
+
+
+def _public_key_bytes_from_pem(value: str) -> bytes | None:
+    try:
+        key = load_pem_public_key(value.encode())
+    except (ValueError, UnsupportedAlgorithm):
+        return None
+    return _raw_ed25519_public_key_bytes(key)
+
+
+def _raw_ed25519_public_key_bytes(key: object) -> bytes | None:
+    if not isinstance(key, Ed25519PublicKey):
+        return None
+    return key.public_bytes(Encoding.Raw, PublicFormat.Raw)
 
 
 def public_key_fingerprint(public_key: str) -> str:
-    """Return the stable fingerprint for one base64 Ed25519 public key."""
+    """Return the stable fingerprint for one Ed25519 public key in any accepted format."""
     _normalized, public_key_bytes = _normalize_public_key(public_key)
     return _public_key_fingerprint_from_bytes(public_key_bytes)
 

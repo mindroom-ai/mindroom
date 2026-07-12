@@ -10,6 +10,8 @@ from agno.tools.function import Function
 from mindroom.knowledge_source_descriptions import KnowledgeSourceDescription, KnowledgeWithSourceDescriptions
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from agno.knowledge.knowledge import Knowledge
     from agno.run import RunContext
     from agno.run.agent import RunOutput
@@ -62,10 +64,27 @@ def _annotate_knowledge_search_tool(tools: list[Any], sources: tuple[KnowledgeSo
             tool.description = description
 
 
+def _filter_generated_functions(
+    tools: list[Any],
+    predicate: Callable[[Function], bool] | None,
+) -> list[Any]:
+    """Apply a channel policy to functions Agno adds after agent construction."""
+    if predicate is None:
+        return tools
+
+    filtered: list[Any] = []
+    for tool in tools:
+        function = tool if isinstance(tool, Function) else Function.from_callable(tool) if callable(tool) else None
+        if function is None or predicate(function):
+            filtered.append(tool)
+    return filtered
+
+
 class KnowledgeToolDescribingAgent(Agent):
     """Agent subclass that owns MindRoom's model-facing knowledge-search metadata."""
 
     knowledge_sources: tuple[KnowledgeSourceDescription, ...] = ()
+    tool_function_filter: Callable[[Function], bool] | None = None
 
     def get_tools(
         self,
@@ -77,7 +96,7 @@ class KnowledgeToolDescribingAgent(Agent):
         """Return Agno tools with MindRoom knowledge-source metadata attached."""
         tools = super().get_tools(run_response, run_context, session, user_id=user_id)
         _annotate_knowledge_search_tool(tools, self.knowledge_sources)
-        return tools
+        return _filter_generated_functions(tools, self.tool_function_filter)
 
     async def aget_tools(
         self,
@@ -96,4 +115,4 @@ class KnowledgeToolDescribingAgent(Agent):
             check_mcp_tools=check_mcp_tools,
         )
         _annotate_knowledge_search_tool(tools, self.knowledge_sources)
-        return tools
+        return _filter_generated_functions(tools, self.tool_function_filter)

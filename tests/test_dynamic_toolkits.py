@@ -892,6 +892,29 @@ def test_immutable_tool_schema_eagerly_materializes_every_deferred_tool(tmp_path
     assert ("code", "call-room") not in dynamic_toolkits_module._loaded_tools
 
 
+def test_eager_tool_filter_drops_fully_filtered_deferred_toolkit(tmp_path: Path) -> None:
+    """Voice-safe eager loading cannot advertise a toolkit with no callable functions."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"sleep": {"defer": True}}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent(
+        "code",
+        config,
+        _runtime_paths(tmp_path),
+        execution_identity=None,
+        session_id="call-room",
+        eager_deferred_tools=True,
+        tool_function_filter=lambda _function: False,
+    )
+
+    function_names = {name for toolkit in agent.tools for name in toolkit.get_functions()}
+    assert "sleep" not in function_names
+    assert "load_tool" not in function_names
+    assert not any(block.startswith("## Dynamic Tools") for block in agent.instructions)
+    assert not any("Dynamic tools currently loaded" in block for block in agent.instructions)
+
+
 @pytest.mark.parametrize(
     ("provider", "model_id"),
     [

@@ -69,6 +69,7 @@ if TYPE_CHECKING:
     from agno.models.base import Model
     from agno.skills import Skills
     from agno.team import Team
+    from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
 
     from mindroom.agent_knowledge_descriptions import KnowledgeSourceDescription
@@ -535,6 +536,21 @@ def _log_toolkits_without_unique_model_functions(
             seen_function_names.update(function_names)
 
 
+def _agent_tool_output_file_policy(
+    agent_runtime: ResolvedAgentRuntime,
+    runtime_paths: constants.RuntimePaths,
+    tool_output_auto_save_threshold_bytes: int,
+) -> ToolOutputFilePolicy | None:
+    """Resolve the shared output-file policy for one agent's in-process tools."""
+    if agent_runtime.tool_base_dir is None:
+        return None
+    return ToolOutputFilePolicy.from_runtime(
+        agent_runtime.tool_base_dir,
+        runtime_paths,
+        auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
+    )
+
+
 def _wrap_direct_agent_toolkit_for_output_files(
     toolkit: Toolkit,
     *,
@@ -543,14 +559,10 @@ def _wrap_direct_agent_toolkit_for_output_files(
     tool_output_auto_save_threshold_bytes: int,
 ) -> Toolkit:
     """Apply the central output-file wrapper to MindRoom-owned direct toolkits."""
-    policy = (
-        ToolOutputFilePolicy.from_runtime(
-            agent_runtime.tool_base_dir,
-            runtime_paths,
-            auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
-        )
-        if agent_runtime.tool_base_dir is not None
-        else None
+    policy = _agent_tool_output_file_policy(
+        agent_runtime,
+        runtime_paths,
+        tool_output_auto_save_threshold_bytes,
     )
     return wrap_toolkit_for_output_files(toolkit, policy)
 
@@ -1104,6 +1116,22 @@ def _prune_openai_incompatible_tools(
     return None
 
 
+def _prune_toolkit_functions(
+    toolkit: Toolkit,
+    tool_function_filter: Callable[[Function], bool] | None,
+) -> Toolkit | None:
+    """Apply a channel-specific function policy after normal toolkit construction."""
+    if tool_function_filter is None:
+        return toolkit
+    toolkit.functions = {
+        name: function for name, function in toolkit.functions.items() if tool_function_filter(function)
+    }
+    toolkit.async_functions = {
+        name: function for name, function in toolkit.async_functions.items() if tool_function_filter(function)
+    }
+    return toolkit if toolkit.functions or toolkit.async_functions else None
+
+
 @timed("system_prompt_assembly.agent_create.dynamic_tool_selection")
 def _resolve_agent_dynamic_tool_selection(
     *,
@@ -1185,12 +1213,14 @@ def _load_agent_skills(
     runtime_paths: constants.RuntimePaths,
     *,
     workspace_skills_root: Path | None = None,
+    output_file_policy: ToolOutputFilePolicy | None = None,
 ) -> Skills | None:
     return build_agent_skills(
         agent_name,
         config,
         runtime_paths,
         workspace_skills_root=workspace_skills_root,
+        output_file_policy=output_file_policy,
     )
 
 
@@ -1200,8 +1230,13 @@ def _initialize_agent_instance(**agent_kwargs: Any) -> Agent:  # noqa: ANN401
         "tuple[KnowledgeSourceDescription, ...]",
         agent_kwargs.pop("knowledge_sources", ()),
     )
+    tool_function_filter = cast(
+        "Callable[[Function], bool] | None",
+        agent_kwargs.pop("tool_function_filter", None),
+    )
     agent = Agent(**agent_kwargs)
     agent.knowledge_sources = knowledge_sources
+    agent.tool_function_filter = tool_function_filter
     return agent
 
 
@@ -1220,6 +1255,7 @@ def _assemble_agent_toolkits(
     hook_registry: HookRegistry | None,
     disable_runtime_capabilities: bool,
     disabled_tool_names: frozenset[str],
+    tool_function_filter: Callable[[Function], bool] | None,
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     dynamic_tool_continuation: bool,
@@ -1308,6 +1344,8 @@ def _assemble_agent_toolkits(
                     config=config,
                     execution_identity=execution_identity,
                 )
+            if toolkit:
+                toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
             if toolkit:
                 toolkit = prepend_tool_hook_bridge(toolkit, tool_hook_bridge)
                 tools.append(toolkit)
@@ -1557,6 +1595,7 @@ def create_agent(
     persist_runtime_state: bool = True,
     disable_runtime_capabilities: bool = False,
     disabled_tool_names: frozenset[str] = frozenset(),
+    tool_function_filter: Callable[[Function], bool] | None = None,
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     dynamic_tool_continuation: bool = False,
@@ -1587,6 +1626,8 @@ def create_agent(
         disable_runtime_capabilities: Whether to omit tools, skills, knowledge,
             and preloaded context files for a restricted in-process agent run.
         disabled_tool_names: Resolved tool names to omit from this instance.
+        tool_function_filter: Optional policy applied to each fully resolved
+            function after normal toolkit construction.
         delegation_depth: Current delegation nesting depth. Used to prevent
             infinite recursion when agents delegate to each other.
         refresh_scheduler: Optional runtime-owned shared knowledge refresh scheduler
@@ -1640,6 +1681,7 @@ def create_agent(
         hook_registry=hook_registry,
         disable_runtime_capabilities=disable_runtime_capabilities,
         disabled_tool_names=disabled_tool_names,
+        tool_function_filter=tool_function_filter,
         delegation_depth=delegation_depth,
         refresh_scheduler=refresh_scheduler,
         dynamic_tool_continuation=dynamic_tool_continuation,
@@ -1697,6 +1739,11 @@ def create_agent(
             config,
             runtime_paths,
             workspace_skills_root=workspace.root / "skills" if workspace is not None else None,
+            output_file_policy=_agent_tool_output_file_policy(
+                agent_runtime,
+                runtime_paths,
+                config.defaults.tool_output_auto_save_threshold_bytes,
+            ),
         )
     )
     instructions = _build_agent_instructions(
@@ -1754,6 +1801,7 @@ def create_agent(
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         knowledge=knowledge if knowledge_enabled else None,
         knowledge_sources=knowledge_sources,
+        tool_function_filter=tool_function_filter,
         search_knowledge=knowledge_enabled,
         add_history_to_context=persist_runtime_state,
         add_session_summary_to_context=persist_runtime_state,

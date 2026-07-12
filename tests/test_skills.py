@@ -16,6 +16,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.message_target import MessageTarget
+from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, ToolRuntimeContext
 from mindroom.tool_system.skills import build_agent_skills
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
@@ -696,3 +697,69 @@ def test_skill_with_empty_scripts_dir_loads(tmp_path: Path) -> None:
         credential_keys=set(),
     )
     assert _skill_names(skills) == ["empty-scripts"]
+
+
+def test_skill_tools_accept_mindroom_output_path(tmp_path: Path) -> None:
+    """Skill access tools honor the shared output-path redirect like other tools."""
+    skill_path = _write_skill(tmp_path / "skills", "demo", "Demo skill")
+    references_dir = skill_path.parent / "references"
+    references_dir.mkdir()
+    (references_dir / "guide.md").write_text("# Guide", encoding="utf-8")
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+
+    skills = build_agent_skills(
+        "code",
+        _base_config(["demo"]),
+        _runtime_paths(tmp_path),
+        skill_roots=[tmp_path / "skills"],
+        env_vars={},
+        credential_keys=set(),
+        output_file_policy=ToolOutputFilePolicy(workspace_root=workspace_root),
+    )
+    assert skills is not None
+    tools = {tool.name: tool for tool in skills.get_tools()}
+    assert set(tools) == {"get_skill_instructions", "get_skill_reference", "get_skill_script"}
+
+    for tool in tools.values():
+        tool.process_entrypoint()
+        assert "mindroom_output_path" in tool.parameters["properties"]
+
+    instructions_tool = tools["get_skill_instructions"]
+    assert instructions_tool.entrypoint is not None
+    inline_result = json.loads(instructions_tool.entrypoint("demo"))
+    assert inline_result["skill_name"] == "demo"
+
+    redirected = instructions_tool.entrypoint("demo", mindroom_output_path="out/instructions.json")
+    receipt = redirected["mindroom_tool_output"]
+    assert receipt["status"] == "saved_to_file"
+    assert (workspace_root / "out" / "instructions.json").exists()
+
+    reference_tool = tools["get_skill_reference"]
+    assert reference_tool.entrypoint is not None
+    redirected_reference = reference_tool.entrypoint(
+        "demo",
+        "guide.md",
+        mindroom_output_path="out/reference.txt",
+    )
+    assert redirected_reference["mindroom_tool_output"]["status"] == "saved_to_file"
+    saved_reference = (workspace_root / "out" / "reference.txt").read_text(encoding="utf-8")
+    assert "# Guide" in saved_reference
+
+
+def test_skill_tools_without_policy_stay_unwrapped(tmp_path: Path) -> None:
+    """Without an output-file policy skill tools keep their original entrypoints."""
+    _write_skill(tmp_path / "skills", "demo", "Demo skill")
+
+    skills = build_agent_skills(
+        "code",
+        _base_config(["demo"]),
+        _runtime_paths(tmp_path),
+        skill_roots=[tmp_path / "skills"],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert skills is not None
+    instructions_tool = next(tool for tool in skills.get_tools() if tool.name == "get_skill_instructions")
+    assert instructions_tool.entrypoint is not None
+    assert json.loads(instructions_tool.entrypoint("demo"))["skill_name"] == "demo"

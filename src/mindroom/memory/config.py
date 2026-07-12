@@ -18,6 +18,51 @@ logger = get_logger(__name__)
 _MEMORY_COLLECTION_PREFIX = "mindroom_memories"
 
 
+def _chroma_similarity_from_distance(distance: float | None, space: str) -> float | None:
+    """Convert one Chroma distance to the similarity score mem0 expects."""
+    if distance is None:
+        return None
+    if space == "l2":
+        # Chroma's l2 is squared L2; for unit-normalized embeddings d = 2 * (1 - cos).
+        return 1.0 - distance / 2.0
+    # Chroma's cosine distance = 1 - cos and ip distance = 1 - dot.
+    return 1.0 - distance
+
+
+def _install_chroma_similarity_scores(vector_store: object) -> None:
+    """Make mem0's Chroma adapter report similarities instead of raw distances.
+
+    mem0 2.x treats ``OutputData.score`` as a similarity everywhere (the search
+    gate drops hits with ``score < threshold``, ranking sorts descending, and
+    add-time dedup checks ``score >= 0.95``), but its Chroma adapter fills
+    ``score`` with the raw Chroma distance. That inversion silently drops the
+    closest matches, so near-verbatim memory queries return nothing.
+    Rewriting the scores at the store boundary makes mem0's threshold and
+    ranking semantics correct for Chroma-backed memory.
+    """
+    # Imported at first use to keep chromadb out of module import time.
+    from mem0.vector_stores.chroma import ChromaDB, OutputData  # noqa: PLC0415
+
+    if not isinstance(vector_store, ChromaDB):
+        return
+    original_search = vector_store.search
+    collection_metadata = vector_store.collection.metadata or {}
+    space = str(collection_metadata.get("hnsw:space", "l2"))
+
+    def search_with_similarity_scores(
+        query: str,
+        vectors: list[list[float]],
+        top_k: int = 5,
+        filters: dict[str, Any] | None = None,
+    ) -> list[OutputData]:
+        hits = original_search(query=query, vectors=vectors, top_k=top_k, filters=filters)
+        for hit in hits:
+            hit.score = _chroma_similarity_from_distance(hit.score, space)
+        return hits
+
+    vector_store.search = search_with_similarity_scores  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
+
+
 def _memory_collection_name(config: Config) -> str:
     """Return a stable Chroma collection name for the active embedder settings."""
     embedder = config.memory.embedder
@@ -161,6 +206,7 @@ async def create_memory_instance(
     # Create AsyncMemory instance with dictionary config directly
     # Mem0 expects a dict for configuration, not config objects
     memory = AsyncMemory.from_config(config_dict)
+    _install_chroma_similarity_scores(memory.vector_store)
 
     logger.info("created_memory_instance", path=config_dict["vector_store"]["config"]["path"])
     return memory

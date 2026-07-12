@@ -21,10 +21,12 @@ from agno.skills.loaders import SkillLoader
 from mindroom.constants import runtime_env_values
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_function_for_output_files
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 if TYPE_CHECKING:
     from agno.skills.skill import Skill
+    from agno.tools.function import Function
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -99,9 +101,22 @@ class _MindroomSkillsLoader(SkillLoader):
 class _MindroomSkills(Skills):
     """MindRoom-specific Skills wrapper for workspace script policy."""
 
-    def __init__(self, *, loaders: list[SkillLoader]) -> None:
+    def __init__(
+        self,
+        *,
+        loaders: list[SkillLoader],
+        output_file_policy: ToolOutputFilePolicy | None = None,
+    ) -> None:
         self._script_execution_blocked_skill_names: set[str] = set()
+        self._output_file_policy = output_file_policy
         super().__init__(loaders=loaders)
+
+    def get_tools(self) -> list[Function]:
+        """Return skill access tools with MindRoom's reserved output-path argument."""
+        tools = super().get_tools()
+        if self._output_file_policy is None:
+            return tools
+        return [wrap_function_for_output_files(tool, self._output_file_policy) for tool in tools]
 
     def _load_skills(self) -> None:
         """Load skills while tracking which final skills came from workspace loaders."""
@@ -162,6 +177,7 @@ def build_agent_skills(
     workspace_skills_root: Path | None = None,
     env_vars: Mapping[str, str] | None = None,
     credential_keys: set[str] | None = None,
+    output_file_policy: ToolOutputFilePolicy | None = None,
 ) -> Skills | None:
     """Build an Agno Skills object for a specific agent."""
     agent_config = config.get_agent(agent_name)
@@ -200,7 +216,7 @@ def build_agent_skills(
     else:
         loaders = [loader for loader in (workspace_loader, configured_loader) if loader is not None]
 
-    skills = _MindroomSkills(loaders=loaders)
+    skills = _MindroomSkills(loaders=loaders, output_file_policy=output_file_policy)
     if agent_config.skills or skills.get_skill_names():
         return skills
     return None

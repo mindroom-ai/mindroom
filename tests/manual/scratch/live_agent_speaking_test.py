@@ -6,7 +6,7 @@ The complete voice-call loop with the REAL code path and a REAL OpenAI key:
   1. A synthetic or existing caller starts an Element Call in a fresh private
      room and connects to the deployed LiveKit SFU with a microphone track.
   2. The real CallManager (real nio client, real build_call_tools with a
-     calculator toolkit, real gpt-realtime agent) joins the call.
+     calculator toolkit, selected realtime or cascaded backend) joins the call.
   3. The caller hears the agent's spoken greeting (audio-energy check).
   4. The caller speaks a question (OpenAI TTS audio pushed into its mic
      track) asking the agent to multiply 15 by 23 with its calculator tool.
@@ -25,6 +25,8 @@ Reuse existing accounts:
   OPENAI_API_KEY=sk-... \
   SSL_CERT_FILE=$(python -c 'import certifi;print(certifi.where())') \
   .venv/bin/python tests/manual/scratch/live_agent_speaking_test.py
+
+Set ``MINDROOM_CALL_BACKEND=cascaded`` to exercise the cascaded backend; the default is realtime.
 """
 
 from __future__ import annotations
@@ -60,6 +62,7 @@ from mindroom.config.calls import CallsConfig  # noqa: E402
 from mindroom.config.main import Config  # noqa: E402
 from mindroom.config.memory import MemoryConfig  # noqa: E402
 from mindroom.config.models import ModelConfig  # noqa: E402
+from mindroom.config.voice import SpeechServiceConfig  # noqa: E402
 from mindroom.constants import resolve_runtime_paths  # noqa: E402
 from mindroom.credentials_sync import sync_env_to_credentials  # noqa: E402
 from mindroom.matrix.state import MatrixState  # noqa: E402
@@ -71,15 +74,18 @@ from mindroom.matrix_rtc.events import (  # noqa: E402
 )
 from mindroom.matrix_rtc.focus import OpenIDToken, request_sfu_grant  # noqa: E402
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV  # noqa: E402
-from mindroom.tool_system.runtime_context import ToolRuntimeContext  # noqa: E402
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context  # noqa: E402
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity  # noqa: E402
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from mindroom.message_target import MessageTarget
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 HOMESERVER = "https://mindroom.chat"
 SERVICE_URL = "https://mindroom.chat/livekit/jwt"
+CALL_BACKEND = os.environ.get("MINDROOM_CALL_BACKEND", "realtime").strip()
 SUFFIX = uuid.uuid4().hex[:8]
 SSL_CTX = ssl.create_default_context(cafile=certifi.where())
 AGENT = "assistant"
@@ -100,6 +106,10 @@ FRAME_MS = 20
 FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS // 1000
 VOICED_RMS = 250.0
 
+if CALL_BACKEND not in {"realtime", "cascaded"}:
+    msg = f"Unsupported MINDROOM_CALL_BACKEND: {CALL_BACKEND}"
+    raise ValueError(msg)
+
 
 @dataclass(frozen=True)
 class AccountCredentials:
@@ -114,6 +124,29 @@ def log(m: str) -> None:
     """Print one unbuffered progress line."""
     sys.stdout.write(m + "\n")
     sys.stdout.flush()
+
+
+def call_config(openai_key: str) -> CallsConfig:
+    """Build the selected real call backend for this live harness."""
+    if CALL_BACKEND == "realtime":
+        return CallsConfig(enabled=True, agents=[AGENT], livekit_service_url=SERVICE_URL)
+    return CallsConfig(
+        enabled=True,
+        agents=[AGENT],
+        livekit_service_url=SERVICE_URL,
+        backend="cascaded",
+        stt=SpeechServiceConfig(
+            provider="openai",
+            model="gpt-4o-transcribe",
+            api_key=openai_key,
+        ),
+        tts=SpeechServiceConfig(
+            provider="openai",
+            model="tts-1",
+            api_key=openai_key,
+            extra_kwargs={"voice": "alloy"},
+        ),
+    )
 
 
 async def register(localpart: str, registration_token: str) -> AccountCredentials:
@@ -406,6 +439,7 @@ async def main() -> int:  # noqa: C901, PLR0915
     caller, bot = await load_accounts()
     log(f"  caller={caller.user_id} bot={bot.user_id}")
 
+    log(f"== backend: {CALL_BACKEND} ==")
     log("== TTS: synthesizing the caller's question ==")
     question_pcm = await tts_pcm(QUESTION, openai_key)
     log(f"  {len(question_pcm) // 2 / SAMPLE_RATE:.1f}s of question audio ready")
@@ -486,7 +520,7 @@ async def main() -> int:  # noqa: C901, PLR0915
                 },
                 models={"default": ModelConfig(provider="openai", id="gpt-5.5")},
                 memory=MemoryConfig(backend="none"),
-                calls=CallsConfig(enabled=True, agents=[AGENT], livekit_service_url=SERVICE_URL),
+                calls=call_config(openai_key),
             )
 
             bot_client = nio.AsyncClient(HOMESERVER, bot.user_id, device_id=bot.device_id, ssl=SSL_CTX)
@@ -534,6 +568,16 @@ async def main() -> int:  # noqa: C901, PLR0915
                         resolved_thread_id=target.resolved_thread_id,
                         session_id=target.session_id,
                     )
+
+                async def run_in_context(
+                    self,
+                    *,
+                    tool_context: ToolRuntimeContext | None,
+                    operation: Callable[[], Awaitable[str]],
+                ) -> str:
+                    """Mirror the production tool-support context binding."""
+                    with tool_runtime_context(tool_context):
+                        return await operation()
 
             manager = cm.CallManager(
                 agent_name=AGENT,

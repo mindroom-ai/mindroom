@@ -2,23 +2,39 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import nullcontext
+from threading import Event
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from agno.knowledge.knowledge import Knowledge
+from agno.run.base import RunStatus
 from agno.tools.function import Function
 
+from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
-from mindroom.matrix_rtc.call_tools import _wrap_agno_function, build_call_tools
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.knowledge import KnowledgeAvailability, KnowledgeAvailabilityDetail
+from mindroom.matrix_rtc.call_tools import (
+    _CallAgentRunState,
+    _CallResponseTracker,
+    _wrap_agno_function,
+    build_call_tools,
+)
+from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.message_target import MessageTarget
+    from mindroom.response_turn import ResponseTurnContext
 
 AGENT = "helper"
 REQUESTER = "@alice:example.org"
@@ -57,6 +73,29 @@ def _context() -> SimpleNamespace:
         room_id="!room:example.org",
         hook_registry=object(),
         orchestrator=None,
+    )
+
+
+def _runtime_context(
+    *,
+    config: Config,
+    runtime_paths: object,
+    target: MessageTarget,
+    hook_registry: object | None = None,
+    orchestrator: object | None = None,
+) -> ToolRuntimeContext:
+    """Build the real typed call context expected by production code."""
+    return ToolRuntimeContext(
+        agent_name=AGENT,
+        target=target,
+        requester_id=REQUESTER,
+        client=MagicMock(),
+        config=config,
+        runtime_paths=runtime_paths,  # type: ignore[arg-type]
+        event_cache=MagicMock(),
+        conversation_cache=MagicMock(),
+        hook_registry=hook_registry or MagicMock(),  # type: ignore[arg-type]
+        orchestrator=orchestrator,  # type: ignore[arg-type]
     )
 
 
@@ -221,8 +260,11 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The bridge materializes the chat agent's toolkits and system prompt."""
+    bound_filters: list[object] = []
 
     def add(a: int, b: int) -> int:
+        runtime_context = get_tool_runtime_context()
+        bound_filters.append(runtime_context.tool_function_filter if runtime_context is not None else None)
         return a + b
 
     fake_agent = FakeAgnoAgent([_function(add)])
@@ -232,6 +274,8 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     knowledge = object()
     hook_registry = object()
     refresh_scheduler = object()
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
 
     def fake_create_agent(*args: object, **kwargs: object) -> FakeAgnoAgent:
         create_calls.append(args)
@@ -255,12 +299,14 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
             *,
             user_id: str | None,
             agent_name: str | None = None,
-        ) -> SimpleNamespace:
+        ) -> ToolRuntimeContext:
             assert user_id == REQUESTER
             assert agent_name == AGENT
             seen_targets.append(target)
-            return SimpleNamespace(
-                room_id="!room:example.org",
+            return _runtime_context(
+                config=config,
+                runtime_paths=runtime_paths,
+                target=target,
                 hook_registry=hook_registry,
                 orchestrator=SimpleNamespace(knowledge_refresh_scheduler=refresh_scheduler),
             )
@@ -279,8 +325,8 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
 
     tooling = await build_call_tools(
         agent_name=AGENT,
-        config=_config(),
-        runtime_paths=test_runtime_paths(tmp_path),
+        config=config,
+        runtime_paths=runtime_paths,
         tool_support=StrictToolSupport(),  # type: ignore[arg-type]
         room_id="!room:example.org",
         requester_id=REQUESTER,
@@ -291,12 +337,475 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     assert create_kwargs["hook_registry"] is hook_registry
     assert create_kwargs["knowledge"] is knowledge
     assert create_kwargs["refresh_scheduler"] is refresh_scheduler
+    assert create_kwargs["tool_function_filter"] is not None
     assert create_calls
     assert create_calls[0][3] is not None
     assert len(seen_targets) == 2
     assert seen_targets[0] is seen_targets[1]
     assert seen_targets[0].session_id == "!room:example.org"
     assert fake_agent.tool_user_ids == [REQUESTER]
+    assert await tooling.tools[0]({"a": 2, "b": 3}) == "5"
+    assert bound_filters[0] is create_kwargs["tool_function_filter"]
+
+
+@pytest.mark.asyncio
+async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_functions(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cascaded transcripts reuse ai_response with full identity and a function-level call policy."""
+    config = _config()
+    config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="policy_approval", action="require_approval")],
+    )
+    knowledge = object()
+    refresh_scheduler = object()
+    execution_identity = SimpleNamespace()
+    calls: list[tuple[ResponseTurnContext, dict[str, object]]] = []
+    persisted_interruptions: list[dict[str, object]] = []
+    completed_tools = [
+        ToolTraceEntry(type="tool_call_completed", tool_name="weather"),
+        ToolTraceEntry(type="tool_call_completed", tool_name="weather"),
+    ]
+    contexts: list[ToolRuntimeContext] = []
+    recorded_tool_uses: list[list[str]] = []
+    runtime_paths = test_runtime_paths(tmp_path)
+
+    class StrictToolSupport:
+        def build_context(
+            self,
+            target: MessageTarget,
+            **_kwargs: object,
+        ) -> ToolRuntimeContext:
+            context = ToolRuntimeContext(
+                agent_name=AGENT,
+                target=target,
+                requester_id=REQUESTER,
+                client=MagicMock(),
+                config=config,
+                runtime_paths=runtime_paths,
+                event_cache=MagicMock(),
+                conversation_cache=MagicMock(),
+                hook_registry=MagicMock(),
+                orchestrator=SimpleNamespace(knowledge_refresh_scheduler=refresh_scheduler),  # type: ignore[arg-type]
+            )
+            contexts.append(context)
+            return context
+
+        def build_execution_identity(self, **_kwargs: object) -> SimpleNamespace:
+            return execution_identity
+
+        async def run_in_context(
+            self,
+            *,
+            tool_context: ToolRuntimeContext,
+            operation: Callable[[], Awaitable[str]],
+        ) -> str:
+            assert tool_context.tool_function_filter is not None
+            return await operation()
+
+    async def fake_ai_response(turn: ResponseTurnContext, **kwargs: object) -> str:
+        calls.append((turn, kwargs))
+        run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
+        run_id_callback("call-run-1")
+        recorder = kwargs["turn_recorder"]
+        recorder.record_completed(  # type: ignore[union-attr]
+            run_metadata={"model": "same-chat-model"},
+            assistant_text="It is sunny.",
+            completed_tools=completed_tools,
+        )
+        return "It is sunny."
+
+    create_agent_mock = MagicMock()
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", create_agent_mock)
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access",
+        lambda *_args, **_kwargs: SimpleNamespace(knowledge=knowledge, unavailable=()),
+    )
+    monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.open_resolved_scope_session_context",
+        lambda **_kwargs: nullcontext(SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.persist_interrupted_replay",
+        lambda **kwargs: persisted_interruptions.append(kwargs),
+    )
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=StrictToolSupport(),  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+        session_id="!room:example.org:call:one",
+        enable_responder=True,
+        voice_instructions="Speak briefly.",
+    )
+
+    assert tooling.tools == ()
+    assert tooling.instructions == ""
+    assert tooling.responder is not None
+    response = await tooling.responder("What is the weather?", recorded_tool_uses.append)
+
+    assert response.text == "It is sunny."
+    assert response.tool_names == ("weather",)
+    assert response.turn_id is not None
+    assert recorded_tool_uses == [["weather"]]
+    create_agent_mock.assert_not_called()
+    turn, kwargs = calls[0]
+    assert turn.entity_label == AGENT
+    assert turn.requester_id == REQUESTER
+    assert turn.session_id == "!room:example.org:call:one"
+    assert turn.system_enrichment_items[0].text == "Speak briefly."
+    assert kwargs["config"] is config
+    assert kwargs["knowledge"] is knowledge
+    assert kwargs["execution_identity"] is execution_identity
+    assert kwargs["refresh_scheduler"] is refresh_scheduler
+    assert kwargs["include_interactive_questions"] is False
+    assert kwargs["show_tool_calls"] is False
+    assert kwargs["eager_deferred_tools"] is True
+    assert tooling.finalize_spoken_response is not None
+    finalize = tooling.finalize_spoken_response(response.turn_id, "It is", True)
+    assert finalize is not None
+    await finalize
+    assert persisted_interruptions == [
+        {
+            "scope_context": SimpleNamespace(),
+            "session_id": "!room:example.org:call:one",
+            "run_id": "call-run-1",
+            "user_message": "What is the weather?",
+            "partial_text": "It is",
+            "completed_tools": tuple(completed_tools),
+            "interrupted_tools": (),
+            "run_metadata": {"model": "same-chat-model"},
+            "is_team": False,
+            "original_status": RunStatus.cancelled,
+        },
+    ]
+
+    async def cancel_before_playout(_turn: ResponseTurnContext, **cancel_kwargs: object) -> str:
+        run_id_callback = cast("Callable[[str], None]", cancel_kwargs["run_id_callback"])
+        run_id_callback("call-run-2")
+        recorder = cancel_kwargs["turn_recorder"]
+        recorder.record_interrupted(  # type: ignore[union-attr]
+            run_metadata={"model": "same-chat-model"},
+            assistant_text="generated but never spoken",
+            completed_tools=(ToolTraceEntry(type="tool_call_completed", tool_name="calendar"),),
+            interrupted_tools=(),
+        )
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("mindroom.ai.ai_response", cancel_before_playout)
+    with pytest.raises(asyncio.CancelledError):
+        await tooling.responder("Never speak this", recorded_tool_uses.append)
+    assert persisted_interruptions[-1]["run_id"] == "call-run-2"
+    assert persisted_interruptions[-1]["user_message"] == "Never speak this"
+    assert persisted_interruptions[-1]["partial_text"] == ""
+    assert persisted_interruptions[-1]["original_status"] is RunStatus.cancelled
+    assert recorded_tool_uses[-1] == ["calendar"]
+
+    async def return_error_without_run_id(_turn: ResponseTurnContext, **error_kwargs: object) -> str:
+        recorder = error_kwargs["turn_recorder"]
+        recorder.record_interrupted(  # type: ignore[union-attr]
+            run_metadata={"model": "same-chat-model"},
+            assistant_text="provider failed",
+            completed_tools=(),
+            interrupted_tools=(),
+            original_status=RunStatus.error,
+        )
+        return "provider failed"
+
+    monkeypatch.setattr("mindroom.ai.ai_response", return_error_without_run_id)
+    error_response = await tooling.responder("Trigger an error", recorded_tool_uses.append)
+    assert error_response.turn_id is not None
+    persist_error = tooling.finalize_spoken_response(error_response.turn_id, "provider failed", False)
+    assert persist_error is not None
+    await persist_error
+    assert str(persisted_interruptions[-1]["run_id"]).startswith("!room:example.org:call:one:turn:")
+    assert persisted_interruptions[-1]["partial_text"] == "provider failed"
+    assert persisted_interruptions[-1]["original_status"] is RunStatus.error
+
+    tool_filter = cast("Callable[[Function], bool]", kwargs["tool_function_filter"])
+    safe = _function(lambda: "safe", {"type": "object", "properties": {}}, name="safe")
+    confirm = _function(lambda: "confirm", {"type": "object", "properties": {}}, name="confirm")
+    confirm.requires_confirmation = True
+    policy = _function(
+        lambda: "policy",
+        {"type": "object", "properties": {}},
+        name="policy_approval",
+    )
+    workflow = _function(
+        lambda: "workflow",
+        {"type": "object", "properties": {}},
+        name="run_workflow",
+    )
+    spawn = _function(lambda: "spawn", {"type": "object", "properties": {}}, name="sessions_spawn")
+    send = _function(lambda: "send", {"type": "object", "properties": {}}, name="sessions_send")
+    assert tool_filter(safe) is True
+    assert tool_filter(confirm) is False
+    assert tool_filter(policy) is False
+    assert tool_filter(workflow) is False
+    assert tool_filter(spawn) is False
+    assert tool_filter(send) is False
+    assert contexts[0].tool_function_filter is None
+
+
+def test_call_response_tracker_keeps_fifo_without_retaining_settled_tokens(tmp_path: Path) -> None:
+    """Explicit settlement must not leave an ever-growing fallback-order index."""
+    tracker = _CallResponseTracker(
+        agent_name=AGENT,
+        config=_config(),
+        runtime_paths=test_runtime_paths(tmp_path),
+        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
+    )
+    state = _CallAgentRunState(
+        session_id="call-session",
+        run_id="run",
+        user_message="hello",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata={},
+        outcome="completed",
+        original_status=None,
+    )
+    first = tracker.register(state)
+    second = tracker.register(state)
+
+    assert tracker.finalize(None, "done", False) is None
+    assert tuple(tracker.pending) == (second,)
+    assert tracker.finalize(second, "done", False) is None
+    for _ in range(1_000):
+        token = tracker.register(state)
+        assert tracker.finalize(token, "done", False) is None
+
+    assert tracker.pending == {}
+    assert first not in tracker.pending
+
+
+@pytest.mark.asyncio
+async def test_call_response_tracker_failed_settlement_does_not_abort_next_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """History-write failure stays on the event task instead of failing the next response."""
+    tracker = _CallResponseTracker(
+        agent_name=AGENT,
+        config=_config(),
+        runtime_paths=test_runtime_paths(tmp_path),
+        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
+    )
+    state = _CallAgentRunState(
+        session_id="call-session",
+        run_id="failed-run",
+        user_message="hello",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata={},
+        outcome="completed",
+        original_status=None,
+    )
+    started = Event()
+    release = Event()
+
+    def fail_persistence(*_args: object) -> None:
+        started.set()
+        assert release.wait(timeout=5)
+        msg = "history unavailable"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(tracker, "_persist", fail_persistence)
+    token = tracker.register(state)
+    settlement = tracker.finalize(token, "partial", True)
+    assert settlement is not None
+    assert await asyncio.to_thread(started.wait, 5)
+    next_turn = asyncio.create_task(tracker.wait_for_settlements())
+    try:
+        await asyncio.sleep(0)
+        assert not next_turn.done()
+    finally:
+        release.set()
+
+    await next_turn
+    with pytest.raises(RuntimeError, match="history unavailable"):
+        await settlement
+
+
+@pytest.mark.asyncio
+async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call can use a knowledge index that becomes ready after the call joins."""
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
+    first_scheduler = object()
+    second_scheduler = object()
+    orchestrator = SimpleNamespace(knowledge_refresh_scheduler=first_scheduler)
+    execution_identity = SimpleNamespace()
+    ready_knowledge = object()
+    resolver_calls: list[dict[str, object]] = []
+    ai_calls: list[tuple[ResponseTurnContext, dict[str, object]]] = []
+    resolutions = iter(
+        (
+            SimpleNamespace(
+                knowledge=None,
+                unavailable={
+                    "docs": KnowledgeAvailabilityDetail(
+                        availability=KnowledgeAvailability.INITIALIZING,
+                        search_available=False,
+                    ),
+                },
+            ),
+            SimpleNamespace(knowledge=ready_knowledge, unavailable={}),
+        ),
+    )
+
+    class ToolSupport:
+        def build_context(self, target: MessageTarget, **_kwargs: object) -> ToolRuntimeContext:
+            return _runtime_context(
+                config=config,
+                runtime_paths=runtime_paths,
+                target=target,
+                orchestrator=orchestrator,
+            )
+
+        def build_execution_identity(self, **_kwargs: object) -> SimpleNamespace:
+            return execution_identity
+
+        async def run_in_context(
+            self,
+            *,
+            tool_context: ToolRuntimeContext,
+            operation: Callable[[], Awaitable[str]],
+        ) -> str:
+            assert tool_context.tool_function_filter is not None
+            return await operation()
+
+    def resolve_knowledge(*_args: object, **kwargs: object) -> SimpleNamespace:
+        resolver_calls.append(kwargs)
+        return next(resolutions)
+
+    async def fake_ai_response(turn: ResponseTurnContext, **kwargs: object) -> str:
+        ai_calls.append((turn, kwargs))
+        return f"answer-{len(ai_calls)}"
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access", resolve_knowledge)
+    monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=ToolSupport(),  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+        enable_responder=True,
+        voice_instructions="Speak briefly.",
+    )
+    assert resolver_calls == []
+    assert tooling.responder is not None
+    assert tooling.finalize_spoken_response is not None
+
+    first = await tooling.responder("first turn", None)
+    assert tooling.finalize_spoken_response(first.turn_id, first.text, False) is None
+    orchestrator.knowledge_refresh_scheduler = second_scheduler
+    second = await tooling.responder("second turn", None)
+    assert tooling.finalize_spoken_response(second.turn_id, second.text, False) is None
+
+    assert [call["refresh_scheduler"] for call in resolver_calls] == [first_scheduler, second_scheduler]
+    assert all(call["execution_identity"] is execution_identity for call in resolver_calls)
+    assert ai_calls[0][1]["knowledge"] is None
+    assert ai_calls[1][1]["knowledge"] is ready_knowledge
+    assert [item.key for item in ai_calls[0][0].system_enrichment_items] == [
+        "voice_call",
+        "knowledge_availability",
+    ]
+    assert [item.key for item in ai_calls[1][0].system_enrichment_items] == ["voice_call"]
+
+
+@pytest.mark.asyncio
+async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The next Agno run cannot race a whole-session interrupted-history rewrite."""
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
+    started = Event()
+    release = Event()
+    ai_prompts: list[str] = []
+    persisted: list[str] = []
+
+    class ToolSupport:
+        def build_context(self, target: MessageTarget, **_kwargs: object) -> ToolRuntimeContext:
+            return _runtime_context(config=config, runtime_paths=runtime_paths, target=target)
+
+        def build_execution_identity(self, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace()
+
+        async def run_in_context(
+            self,
+            *,
+            tool_context: ToolRuntimeContext,
+            operation: Callable[[], Awaitable[str]],
+        ) -> str:
+            assert tool_context.tool_function_filter is not None
+            return await operation()
+
+    async def fake_ai_response(_turn: ResponseTurnContext, **kwargs: object) -> str:
+        prompt = cast("str", kwargs["prompt"])
+        ai_prompts.append(prompt)
+        recorder = kwargs["turn_recorder"]
+        recorder.record_completed(  # type: ignore[union-attr]
+            run_metadata={},
+            assistant_text=f"answer to {prompt}",
+            completed_tools=(),
+        )
+        return f"answer to {prompt}"
+
+    def persist_interrupted(**kwargs: object) -> None:
+        started.set()
+        assert release.wait(timeout=5)
+        persisted.append(cast("str", kwargs["run_id"]))
+
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access",
+        lambda *_args, **_kwargs: SimpleNamespace(knowledge=None, unavailable={}),
+    )
+    monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.open_resolved_scope_session_context",
+        lambda **_kwargs: nullcontext(SimpleNamespace()),
+    )
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.persist_interrupted_replay", persist_interrupted)
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=ToolSupport(),  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+        enable_responder=True,
+    )
+    assert tooling.responder is not None
+    assert tooling.finalize_spoken_response is not None
+
+    first = await tooling.responder("first", None)
+    settlement = tooling.finalize_spoken_response(first.turn_id, "partial", True)
+    assert settlement is not None
+    assert await asyncio.to_thread(started.wait, 5)
+    second_task = asyncio.create_task(tooling.responder("second", None))
+    try:
+        await asyncio.sleep(0.05)
+        assert ai_prompts == ["first"]
+        assert not second_task.done()
+    finally:
+        release.set()
+    await settlement
+    second = await second_task
+    assert tooling.finalize_spoken_response(second.turn_id, second.text, False) is None
+    assert ai_prompts == ["first", "second"]
+    assert len(persisted) == 1
 
 
 @pytest.mark.asyncio
@@ -315,15 +824,21 @@ async def test_build_call_tools_includes_async_only_toolkit_functions(
         "mindroom.matrix_rtc.call_tools.create_agent",
         lambda *_args, **_kwargs: FakeAgnoAgent([function]),
     )
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
     tool_support = SimpleNamespace(
-        build_context=lambda *_a, **_k: _context(),
+        build_context=lambda target, **_kwargs: _runtime_context(
+            config=config,
+            runtime_paths=runtime_paths,
+            target=target,
+        ),
         build_execution_identity=lambda **_k: SimpleNamespace(),
     )
 
     tooling = await build_call_tools(
         agent_name=AGENT,
-        config=_config(),
-        runtime_paths=test_runtime_paths(tmp_path),
+        config=config,
+        runtime_paths=runtime_paths,
         tool_support=tool_support,  # type: ignore[arg-type]
         room_id="!room:example.org",
         requester_id=REQUESTER,
@@ -354,21 +869,80 @@ async def test_build_call_tools_includes_agno_added_knowledge_and_skill_function
         "mindroom.matrix_rtc.call_tools._wrap_agno_function",
         lambda function, **_kwargs: function.name,
     )
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
     tool_support = SimpleNamespace(
-        build_context=lambda *_args, **_kwargs: _context(),
+        build_context=lambda target, **_kwargs: _runtime_context(
+            config=config,
+            runtime_paths=runtime_paths,
+            target=target,
+        ),
         build_execution_identity=lambda **_kwargs: SimpleNamespace(),
     )
 
     tooling = await build_call_tools(
         agent_name=AGENT,
-        config=_config(),
-        runtime_paths=test_runtime_paths(tmp_path),
+        config=config,
+        runtime_paths=runtime_paths,
         tool_support=tool_support,  # type: ignore[arg-type]
         room_id="!room:example.org",
         requester_id=REQUESTER,
     )
 
     assert tooling.tools == ("search_knowledge_base", "get_skill_instructions")
+
+
+@pytest.mark.asyncio
+async def test_build_call_tools_hides_agno_added_knowledge_function_needing_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Call approval policy reaches knowledge functions Agno adds after agent construction."""
+    knowledge = Knowledge(name="docs")
+
+    def create_knowledge_agent(*_args: object, **kwargs: object) -> KnowledgeToolDescribingAgent:
+        agent = KnowledgeToolDescribingAgent(name="Helper", id=AGENT, knowledge=knowledge, search_knowledge=True)
+        agent.tool_function_filter = cast("Callable[[Function], bool]", kwargs["tool_function_filter"])
+        monkeypatch.setattr(
+            agent,
+            "aget_system_message",
+            AsyncMock(return_value=SimpleNamespace(content="THE CHAT SYSTEM PROMPT")),
+        )
+        return agent
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", create_knowledge_agent)
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access",
+        lambda *_args, **_kwargs: SimpleNamespace(knowledge=knowledge),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools._wrap_agno_function",
+        lambda function, **_kwargs: function.name,
+    )
+    config = _config()
+    config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="search_knowledge_base", action="require_approval")],
+    )
+    runtime_paths = test_runtime_paths(tmp_path)
+    tool_support = SimpleNamespace(
+        build_context=lambda target, **_kwargs: _runtime_context(
+            config=config,
+            runtime_paths=runtime_paths,
+            target=target,
+        ),
+        build_execution_identity=lambda **_kwargs: SimpleNamespace(),
+    )
+
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=tool_support,  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+    )
+
+    assert tooling.tools == ()
 
 
 @pytest.mark.asyncio
@@ -401,15 +975,20 @@ async def test_build_call_tools_hides_functions_needing_text_chat(
         "mindroom.matrix_rtc.call_tools._wrap_agno_function",
         lambda function, **_kwargs: function.name,
     )
+    runtime_paths = test_runtime_paths(tmp_path)
     tool_support = SimpleNamespace(
-        build_context=lambda *_a, **_k: _context(),
+        build_context=lambda target, **_kwargs: _runtime_context(
+            config=config,
+            runtime_paths=runtime_paths,
+            target=target,
+        ),
         build_execution_identity=lambda **_k: SimpleNamespace(),
     )
 
     tooling = await build_call_tools(
         agent_name=AGENT,
         config=config,
-        runtime_paths=test_runtime_paths(tmp_path),
+        runtime_paths=runtime_paths,
         tool_support=tool_support,  # type: ignore[arg-type]
         room_id="!room:example.org",
         requester_id=REQUESTER,

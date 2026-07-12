@@ -293,7 +293,7 @@ voice:
   visible_router_echo: true  # Post transcript as visible router message
   stt:
     provider: openai
-    model: whisper-1
+    model: gpt-4o-transcribe
     # api_key: null  # Optional API key for STT service
     # host: null  # Optional host URL for self-hosted STT
   intelligence:

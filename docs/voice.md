@@ -32,8 +32,8 @@ voice:
   visible_router_echo: true
   stt:
     provider: openai
-    model: whisper-1
-    # Optional: custom endpoint (without /v1 suffix)
+    model: gpt-4o-transcribe
+    # Optional: custom service root or /v1 base URL
     # host: http://localhost:8080
   intelligence:
     model: default  # Model used for command recognition
@@ -49,14 +49,14 @@ With `voice.visible_router_echo: true`, the router also posts the normalized tra
 
 MindRoom uses the OpenAI-compatible transcription API. Any service that implements the `/v1/audio/transcriptions` endpoint will work.
 
-### OpenAI Whisper (Cloud)
+### OpenAI Transcription (Cloud)
 
 ```yaml
 voice:
   enabled: true
   stt:
     provider: openai
-    model: whisper-1
+    model: gpt-4o-transcribe
 ```
 
 Requires `OPENAI_API_KEY` environment variable.
@@ -67,12 +67,12 @@ Requires `OPENAI_API_KEY` environment variable.
 voice:
   enabled: true
   stt:
-    provider: openai
+    provider: openai_compatible
     model: whisper-1
     host: http://localhost:8080
 ```
 
-Note: Do not include `/v1` in the host URL - MindRoom appends `/v1/audio/transcriptions` automatically.
+The host may be either the service root or its `/v1` base URL.
 
 Use with [faster-whisper-server](https://github.com/fedirz/faster-whisper-server) or similar OpenAI-compatible STT servers.
 
@@ -84,13 +84,14 @@ For self-hosted solutions that require authentication:
 voice:
   enabled: true
   stt:
-    provider: openai
+    provider: openai_compatible
     model: whisper-1
     host: http://localhost:8080
     api_key: your-custom-api-key
 ```
 
-If `api_key` is not set, MindRoom falls back to the `OPENAI_API_KEY` environment variable.
+If a custom endpoint has no `api_key`, MindRoom sends a non-secret placeholder rather than requiring a cloud key.
+Cloud OpenAI transcription falls back to the `OPENAI_API_KEY` environment variable.
 
 ## Command Recognition
 
@@ -204,7 +205,7 @@ Reply-permission checks still use the original human sender, not a later router 
 
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_API_KEY` | For OpenAI Whisper API (used as fallback if no `api_key` configured) |
+| `OPENAI_API_KEY` | For OpenAI transcription (used as fallback if no `api_key` is configured) |
 
 ## Text-to-Speech Tools
 
