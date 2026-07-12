@@ -447,7 +447,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             a running process.
 
             Args:
-                handle: The handle string returned by ``run_shell_command``.
+                handle: The ``shell:...`` identifier from the ``Handle:`` line returned by ``run_shell_command``.
 
             Returns:
                 Output if the command finished, or a status summary if still running.
@@ -465,7 +465,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             """Kill a backgrounded shell command.
 
             Args:
-                handle: The handle string returned by ``run_shell_command``.
+                handle: The ``shell:...`` identifier from the ``Handle:`` line returned by ``run_shell_command``.
                 force: If True send SIGKILL immediately instead of SIGTERM.
 
             Returns:

@@ -439,8 +439,15 @@ async def test_run_shell_command_truncates_oversized_single_stderr_line(tmp_path
 
 @pytest.mark.asyncio
 async def test_run_shell_command_returns_handle_on_timeout(tmp_path: Path) -> None:
-    """Command exceeding timeout should return a handle."""
-    tool = _get_toolkit(tmp_path)
+    """A workspace-prefixed timeout result should expose a usable handle identifier."""
+    runtime_paths = _make_runtime_paths(tmp_path)
+    tool = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        disable_sandbox_proxy=True,
+        worker_target=None,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+    )
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
     check_fn = tool.functions["check_shell_command"].entrypoint
     assert entrypoint is not None
@@ -448,6 +455,7 @@ async def test_run_shell_command_returns_handle_on_timeout(tmp_path: Path) -> No
 
     result = await entrypoint(["sleep", "300"], timeout=1)
 
+    assert result.startswith(f"[cwd: {tmp_path}]\n")
     assert "timed out" in result.lower()
     assert "Handle: shell:" in result
     assert "check_shell_command" in result
