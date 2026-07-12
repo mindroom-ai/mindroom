@@ -14,76 +14,33 @@
 **AI agents that live in your chat rooms.**
 
 MindRoom is an open-source multi-agent runtime built on [Matrix](https://matrix.org/) that works with nearly any [cloud or local AI model](docs/configuration/models.md).
-You define agents in a YAML file or in the web dashboard; MindRoom gives each one a Matrix account, and you talk to them in threads in the [MindRoom chat client](https://github.com/mindroom-ai/mindroom-cinny) — or any other Matrix client you already use.
-Because Matrix bridges to other platforms, the same agents also work in Slack, Telegram, Discord, WhatsApp, IRC, and email — with the same persistent memory everywhere.
+Each agent is a real Matrix user, so people, specialist agents, and teams collaborate in shared rooms and threads instead of being funneled through one assistant.
+Agents can keep shared team context or requester-private memory, files, and knowledge, while execution workers can stay isolated from the primary process's secrets.
+Use the [MindRoom chat client](https://github.com/mindroom-ai/mindroom-cinny), any other Matrix client, or bridges to Slack, Telegram, Discord, WhatsApp, IRC, and email.
 Self-host the whole stack, or run only the MindRoom backend locally and pair it with hosted Matrix at [mindroom.chat](https://mindroom.chat).
 
 https://github.com/user-attachments/assets/1f121c89-5418-4f42-bdfe-fb9de0fecd03
 
 ## Features
 
-- **Multi-agent orchestration** — define specialist agents and teams in `config.yaml`; a built-in router picks the responder when you don't @-mention one, and mentioning several agents makes them collaborate in a thread.
-- **Persistent memory** — agents remember people, preferences, and context across conversations and platforms (Mem0 + ChromaDB, stored on your disk).
-- **100+ tool integrations** — Gmail, GitHub, Google Drive, Home Assistant, shell, Python, web search, and more, plus native Matrix tools and a per-thread `todo` planner, with sandboxed execution and per-tool approval rules.
-- **Knowledge bases (RAG)** — point an agent at a folder of files; MindRoom indexes it and can watch it for changes.
-- **Scheduling & automation** — cron or natural-language scheduled tasks (`!schedule`), background work with human escalation.
-- **Model routing** — a different model per agent, room, or thread (`!model`); route sensitive rooms to local Ollama and everything else to a cloud model.
-- **Voice** — transcription of Matrix voice messages, and text-to-speech tools via OpenAI, Groq, ElevenLabs, and Cartesia.
-- **Streaming responses** — agents type into the room with progressive edits, visible tool traces, and cancellation.
-- **Plugins & hooks** — drop-in [plugins](docs/plugins.md) add custom tools, skills, and OAuth providers, and a typed [event-hook system](docs/hooks.md) (per-hook timeouts, fault isolation) lets them observe and transform messages; reload plugins at runtime with `!reload-plugins`.
-- **Hot reload & restart-safe** — `config.yaml` and plugin changes apply live without bringing down the stack, and conversations resume seamlessly after a restart: session history and turn state are durable on disk, so agents pick up where they left off without double-replying.
-- **Web dashboard** — create and configure agents, teams, models, tools, credentials, and knowledge bases by clicking instead of editing YAML; chat stays in your Matrix client.
-- **Enterprise deployment** — the same runtime scales from a laptop to multi-tenant Kubernetes with Helm charts, isolated execution workers, and egress approval for locked-down environments.
+- **Matrix-native collaboration** — every agent and team has a Matrix identity; people and agents work together in rooms and threads, with built-in routing when nobody is mentioned and ad hoc collaboration when several agents are.
+- **Durable, private state** — sessions and turn state survive restarts, while optional [private agents](docs/configuration/agents.md#private-instances) give each requester isolated files, memory, knowledge, and execution scope from one shared agent definition.
+- **Tools, knowledge, and automation** — 100+ integrations cover Gmail, GitHub, Google Drive, Home Assistant, shell, Python, web search, and more; agents can also search watched folders, run scheduled tasks, and escalate background work to a person.
+- **Cloud and local models** — choose a model per agent, room, or thread (`!model`), including local Ollama and OpenAI-compatible endpoints alongside hosted providers.
+- **Security boundaries** — run code-execution tools in isolated container workers without the primary process's secrets, then add per-tool approvals, egress approval, requester-scoped credentials, and Matrix end-to-end encryption.
+- **Live, restart-safe operation** — stream progressive responses and visible tool traces with cancellation; hot-reload config and plugins; resume interrupted conversations after a restart without double replies.
+- **Open interfaces and extensions** — use any Matrix client, connect other chat systems through bridges, expose agents through an [OpenAI-compatible API](docs/openai-api.md), and add tools, skills, OAuth providers, or typed event hooks through plugins.
+- **From laptop to Kubernetes** — configure agents through YAML or the web dashboard, self-host the full stack, or deploy isolated workers and multi-tenant instances with Helm.
 
 What it looks like:
 
 ```text
-You: @research @analyst @writer Create a competitive analysis report
-Research: I'll gather data on our top 5 competitors...
-Analyst: I'll identify strategic patterns and opportunities...
-Writer: I'll compile everything into an executive summary...
+Alice (from a bridged Slack room): @research @analyst Compare our top competitors
+Research: [searches sources and streams findings into the thread]
+Analyst: [uses those findings and posts a recommendation in the same thread]
+Bob (from a Matrix client): @writer Turn this thread into an executive summary
+Writer: [continues with the shared conversation context]
 ```
-
-<details>
-<summary><b>Why we built this</b></summary>
-
-Every AI app is a silo:
-
-- ChatGPT knows your coding style... but can't join your team's Slack
-- Claude understands your writing... but can't access your email
-- GitHub Copilot helps with code... but can't see your project specs
-- You teach each AI from scratch, over and over
-
-Your human team collaborates across Slack, Discord, Telegram, and email every day — your AI should too.
-MindRoom agents live in one place (Matrix) and follow you everywhere via bridges, with their memory intact.
-
-Federation even lets agents cross organization boundaries:
-
-```text
-Your client asks in their Discord:
-Client: Can our architect AI review this with your team?
-You: Sure! @assistant please collaborate with them
-
-Your Assistant: [Joins from your Matrix server]
-Client's Architect AI: [Joins from their server]
-Together: [They review architecture, sharing context from both organizations]
-```
-
-Two AI agents from different companies collaborating — impossible with app-bound assistants.
-
-</details>
-
-## How It Compares to OpenClaw and Hermes
-
-[OpenClaw](https://github.com/openclaw/openclaw) and [Hermes Agent](https://github.com/nousresearch/hermes-agent) are self-hosted assistants that pipe an agent into chat apps you already use.
-MindRoom plays in the same space but makes different architectural bets:
-
-- **Multi-agent and multi-user by default.** Both are personal-first: one owner talking to their assistant. In MindRoom every agent is a real Matrix user, so you run a fleet of specialists and teams, share them with family, a project, or a whole company, and scope access per user and per room.
-- **An AI-native interface on an open protocol.** With WhatsApp, Signal, or Telegram as the front end, you rent UX from platforms that were never designed for agents and can cut bots off at any time. MindRoom's home is Matrix, with a [Cinny fork](https://github.com/mindroom-ai/mindroom-cinny) tuned for AI: collapsible tool-call traces, model metadata on every response, streaming with in-place edits, response cancellation, and first-class threads. Bridges to those apps are additive, not the foundation.
-- **Sandboxing with real secrets isolation.** Execution tools (shell, Python, coding) can run in isolated container workers with no access to the primary process's secrets — your agent uses credentialed tools (Gmail, GitHub, ...) while the code it executes can never read those credentials. Per-tool [approval rules](docs/configuration/index.md) and [egress approval](docs/deployment/approved-egress.md) add human-in-the-loop control.
-- **Batteries included.** 100+ built-in tool integrations with typed configuration, OAuth flows, and automatic dependency installation — plus OpenClaw-compatible skills on top.
-
-Coming from OpenClaw? MindRoom [imports OpenClaw workspaces](docs/openclaw.md) (`SOUL.md`, `MEMORY.md`, skills) and ships an `openclaw_compat` tool preset.
 
 ## Quick Start
 
@@ -197,7 +154,8 @@ Plain replies that never reach threaded context still stay plain replies.
 
 ## Configuration
 
-Everything lives in `config.yaml`: agents, teams, models, rooms, knowledge bases, voice, memory, and authorization.
+Runtime configuration lives in `config.yaml`: agents, teams, models, rooms, knowledge bases, voice, memory, and authorization.
+Large configurations can be split across files with [YAML includes](docs/configuration/index.md#splitting-the-configuration-into-multiple-files), while secrets stay in `.env` or the credential store.
 The web dashboard edits the same file, so you can point-and-click instead of writing YAML.
 Either way, changes are hot-reloaded and take effect without a restart.
 
@@ -252,7 +210,7 @@ Teams, cultures, per-room models, context compaction, history controls, and memo
 
 ## Deployment
 
-- **Own homeserver** — set `MATRIX_HOMESERVER` and run against any Synapse, Conduit, or Dendrite instance.
+- **Own homeserver** — set `MATRIX_HOMESERVER` and run against a compatible Matrix homeserver.
 - **Local stack** — `mindroom local-stack-setup` bootstraps a local Synapse + Cinny via Docker.
 - **Hosted Matrix** — run only the backend locally against hosted Matrix at [mindroom.chat](https://mindroom.chat), pairing via [chat.mindroom.chat](https://chat.mindroom.chat) ([guide](docs/deployment/hosted-matrix.md)).
 - **Docker** — single-container runtime ([guide](docs/deployment/docker.md)).
@@ -262,32 +220,34 @@ Teams, cultures, per-room models, context compaction, history controls, and memo
 
 ## Why Matrix?
 
-Matrix is an open, federated messaging protocol with a decade of production use, including large government and healthcare deployments.
+Matrix is an open, federated messaging protocol with a decade of production use.
 By building on it, MindRoom inherits instead of reimplements:
 
 - End-to-end encryption (Olm/Megolm)
 - Federation — your agent can join rooms on other homeservers, including other organizations'
 - Mature clients on every platform (Element, Cinny, FluffyChat)
-- 50+ maintained bridges to Slack, Telegram, Discord, WhatsApp, IRC, email, and more
+- Bridges to Slack, Telegram, Discord, WhatsApp, IRC, email, and more
 
-<details>
-<summary><b>Matrix adoption at a glance</b></summary>
+## How It Compares to OpenClaw and Hermes
 
-- **10+ years** of development by the Matrix.org Foundation, with **€10M+** invested and **100+ core contributors**
-- **35+ million users** globally
-- **German healthcare**: 150,000+ organizations on TI-Messenger
-- **French government**: 5.5 million civil servants on Tchap
-- **Defense**: NATO, U.S. Space Force, and other defense organizations
-- Built for European privacy standards (GDPR)
+[OpenClaw](https://github.com/openclaw/openclaw) and [Hermes Agent](https://github.com/nousresearch/hermes-agent) are capable self-hosted agent runtimes with broad model, tool, and messaging support.
+MindRoom makes a different architectural choice: Matrix rooms, threads, identities, and permissions are its native collaboration model rather than external delivery channels.
 
-</details>
+- **Agents are participants.** Every agent is a Matrix user that people and other agents can mention, invite, authorize, and collaborate with in shared threads.
+- **Multi-user does not mean shared state.** A shared agent definition can materialize requester-private workspaces, memory, knowledge, and execution scope.
+- **The protocol stays open.** Federation connects organizations, any Matrix client can be the interface, and bridges are additive rather than the foundation.
+- **Execution and credentials are separate.** Isolated workers can use narrowly scoped credential leases without receiving the primary runtime's secrets, with tool and network approvals layered on top.
 
-## Architecture
+Coming from OpenClaw?
+MindRoom [imports OpenClaw workspaces](docs/openclaw.md) (`SOUL.md`, `MEMORY.md`, skills) and ships an `openclaw_compat` tool preset.
 
-- **Matrix**: any homeserver (Synapse, Conduit, Dendrite, ...)
+## Stack and Interfaces
+
+- **Matrix**: a compatible homeserver and any Matrix client, with the MindRoom client providing an AI-focused experience
 - **Agents**: Python, built on [Agno](https://agno.dev/) and [mindroom-nio](https://github.com/mindroom-ai/mindroom-nio)
-- **AI models**: Anthropic, OpenAI, Google, Ollama, Bedrock, or any OpenAI-compatible endpoint
-- **Memory**: Mem0 + ChromaDB vector storage, persistent on disk
+- **AI models**: nearly any cloud or local model, including OpenAI-compatible endpoints
+- **Memory**: `mem0`, markdown files, or stateless operation, selectable globally or per agent
+- **API**: an OpenAI-compatible endpoint that exposes MindRoom agents as selectable models
 - **UI**: web dashboard for administration; the [MindRoom chat client](https://github.com/mindroom-ai/mindroom-cinny) (or any Matrix client) for chat
 
 See [docs/architecture](docs/architecture) for internals.
