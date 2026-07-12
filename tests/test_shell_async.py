@@ -439,8 +439,15 @@ async def test_run_shell_command_truncates_oversized_single_stderr_line(tmp_path
 
 @pytest.mark.asyncio
 async def test_run_shell_command_returns_handle_on_timeout(tmp_path: Path) -> None:
-    """Command exceeding timeout should return a handle."""
-    tool = _get_toolkit(tmp_path)
+    """A workspace-prefixed timeout result should expose a usable handle identifier."""
+    runtime_paths = _make_runtime_paths(tmp_path)
+    tool = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        disable_sandbox_proxy=True,
+        worker_target=None,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+    )
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
     check_fn = tool.functions["check_shell_command"].entrypoint
     assert entrypoint is not None
@@ -448,6 +455,7 @@ async def test_run_shell_command_returns_handle_on_timeout(tmp_path: Path) -> No
 
     result = await entrypoint(["sleep", "300"], timeout=1)
 
+    assert result.startswith(f"[cwd: {tmp_path}]\n")
     assert "timed out" in result.lower()
     assert "Handle: shell:" in result
     assert "check_shell_command" in result
@@ -486,7 +494,7 @@ async def test_run_shell_command_respects_base_dir(tmp_path: Path) -> None:
     assert entrypoint is not None
 
     result = await entrypoint(["pwd"])
-    assert result.strip() == str(tmp_path)
+    assert result.splitlines() == [f"[cwd: {tmp_path}]", str(tmp_path)]
 
 
 # ---------------------------------------------------------------------------
@@ -847,7 +855,59 @@ async def test_local_shell_replaces_stale_agent_workspace_env(tmp_path: Path) ->
     assert entrypoint is not None
 
     result = await entrypoint('printf %s "$MINDROOM_AGENT_WORKSPACE"')
-    assert result == str(workspace.resolve())
+    assert result.splitlines() == [f"[cwd: {workspace}]", str(workspace.resolve())]
+
+
+def test_run_shell_command_description_uses_portable_workspace_paths(tmp_path: Path) -> None:
+    """The shell description should give workspace guidance valid in every execution mode."""
+    workspace = tmp_path / "workspace"
+    runtime_paths = _make_runtime_paths(tmp_path, process_env={"HOME": "/home/host-user"})
+    tool = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        disable_sandbox_proxy=True,
+        worker_target=None,
+        tool_init_overrides={"base_dir": str(workspace)},
+    )
+
+    description = tool.async_functions["run_shell_command"].description
+    assert description is not None
+    assert "Always use relative paths" in description
+    assert "$MINDROOM_AGENT_WORKSPACE" in description
+    assert "worker-routed execution maps `~` to the workspace" in description
+    assert "local execution maps it to the host home" in description
+
+
+def test_proxied_run_shell_command_description_does_not_claim_host_home(tmp_path: Path) -> None:
+    """The model-facing proxy description must not misidentify worker execution as local."""
+    workspace = tmp_path / "workspace"
+    runtime_paths = _make_runtime_paths(
+        tmp_path,
+        process_env={
+            "HOME": "/home/host-user",
+            "MINDROOM_SANDBOX_EXECUTION_MODE": "all",
+        },
+    )
+    tool = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        worker_target=None,
+        tool_init_overrides={"base_dir": str(workspace)},
+    )
+
+    description = tool.async_functions["run_shell_command"].description
+    assert description is not None
+    assert "worker-routed execution maps `~` to the workspace" in description
+    assert "`~` and `$HOME` point at the host home" not in description
+
+
+def test_run_shell_command_description_has_no_workspace_note_without_base_dir(tmp_path: Path) -> None:
+    """Without a workspace there is no cwd contract to describe."""
+    tool = _get_toolkit(tmp_path)
+
+    description = tool.async_functions["run_shell_command"].description
+    assert description is not None
+    assert "[cwd:" not in description
 
 
 @pytest.mark.asyncio
