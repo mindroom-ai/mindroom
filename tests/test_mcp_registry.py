@@ -4,14 +4,13 @@ from __future__ import annotations
 
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
 
 import pytest
 
 import mindroom.tools  # noqa: F401
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import resolve_runtime_paths
-from mindroom.mcp.errors import MCPConnectionError, MCPTimeoutError
+from mindroom.mcp.errors import MCPTimeoutError
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import (
     _MCP_TOOL_NAMES,
@@ -22,7 +21,7 @@ from mindroom.mcp.registry import (
     validate_mcp_agent_overrides,
 )
 from mindroom.mcp.toolkit import bind_mcp_server_manager
-from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog, MCPServerState
+from mindroom.mcp.types import MCPServerState
 from mindroom.tool_system.declarations import SetupType, ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
@@ -122,38 +121,6 @@ def _oauth_config(tmp_path: Path) -> Config:
     )
 
 
-def _catalog(function_name: str, catalog_hash: str) -> MCPServerCatalog:
-    return MCPServerCatalog(
-        server_id="demo",
-        tool_name="mcp_demo",
-        tool_prefix="demo",
-        tools=(
-            MCPDiscoveredTool(
-                remote_name=function_name.removeprefix("demo_"),
-                function_name=function_name,
-                description=function_name,
-                input_schema={"type": "object", "properties": {}},
-                output_schema=None,
-            ),
-        ),
-        instructions=None,
-        catalog_hash=catalog_hash,
-    )
-
-
-def _set_manager_server_state(
-    manager: MCPServerManager,
-    server_config: MCPServerConfig,
-    *,
-    generation: int,
-    catalog: MCPServerCatalog | None = None,
-) -> None:
-    state = MCPServerState(server_id="demo", config=server_config)
-    state.catalog = catalog
-    manager._states["demo"] = state
-    manager._server_generations["demo"] = generation
-
-
 def test_sync_mcp_tool_registry_registers_dynamic_tool(tmp_path: Path) -> None:
     """Register a dynamic tool entry for each enabled MCP server."""
     config = _config(tmp_path)
@@ -166,131 +133,23 @@ def test_sync_mcp_tool_registry_registers_dynamic_tool(tmp_path: Path) -> None:
 
 def test_resolved_mcp_tool_state_ignores_unsynced_bound_manager(tmp_path: Path) -> None:
     """Metadata resolution should stay best-effort when a manager is bound but has no catalog yet."""
+
+    class FakeManager:
+        def has_server(self, _server_id: str) -> bool:
+            return False
+
+        def get_catalog(self, server_id: str) -> object:
+            msg = f"Unknown MCP server '{server_id}'"
+            raise KeyError(msg)
+
     config = _config(tmp_path)
-    bind_mcp_server_manager(MCPServerManager(_runtime_paths(tmp_path)))
+    bind_mcp_server_manager(FakeManager())
 
     registry, metadata = resolved_mcp_tool_state(config)
 
     assert "mcp_demo" in registry
     assert "mcp_demo" in metadata
     assert metadata["mcp_demo"].function_names == ()
-
-
-def test_resolved_mcp_metadata_does_not_mix_stale_config_with_current_catalog(tmp_path: Path) -> None:
-    """A stale config snapshot must not advertise functions from the current same-id server."""
-    config_a = _config(tmp_path)
-    server_a = config_a.mcp_servers["demo"]
-    server_b = server_a.model_copy(update={"command": "server-b"})
-    manager = MCPServerManager(_runtime_paths(tmp_path))
-    _set_manager_server_state(manager, server_b, generation=2, catalog=_catalog("demo_b", "b"))
-    bind_mcp_server_manager(manager)
-
-    _registry, metadata = resolved_mcp_tool_state(config_a)
-
-    assert metadata["mcp_demo"].function_names == ()
-
-
-def test_stale_mcp_factory_rejects_current_same_id_server(tmp_path: Path) -> None:
-    """An A-generation factory must not instantiate against B's same-id manager state."""
-    config_a = _config(tmp_path)
-    server_a = config_a.mcp_servers["demo"]
-    server_b = server_a.model_copy(update={"command": "server-b"})
-    manager = MCPServerManager(_runtime_paths(tmp_path))
-    _set_manager_server_state(manager, server_a, generation=1, catalog=_catalog("demo_a", "a"))
-    bind_mcp_server_manager(manager)
-    registry, _metadata = resolved_mcp_tool_state(config_a)
-
-    _set_manager_server_state(manager, server_b, generation=2, catalog=_catalog("demo_b", "b"))
-
-    with pytest.raises(MCPConnectionError, match="changed after this tool snapshot"):
-        registry["mcp_demo"]()()
-
-
-@pytest.mark.asyncio
-async def test_existing_mcp_toolkit_rejects_call_after_same_id_server_change(tmp_path: Path) -> None:
-    """An already-built A toolkit must reject before dispatching a call through manager B."""
-    config_a = _config(tmp_path)
-    server_a = config_a.mcp_servers["demo"]
-    server_b = server_a.model_copy(update={"command": "server-b"})
-    manager = MCPServerManager(_runtime_paths(tmp_path))
-    _set_manager_server_state(manager, server_a, generation=1, catalog=_catalog("demo_a", "a"))
-    bind_mcp_server_manager(manager)
-    registry, _metadata = resolved_mcp_tool_state(config_a)
-    toolkit = registry["mcp_demo"]()()
-    call_tool = AsyncMock()
-    manager.call_tool = call_tool
-
-    _set_manager_server_state(manager, server_b, generation=2, catalog=_catalog("demo_b", "b"))
-
-    with pytest.raises(MCPConnectionError, match="changed after this tool snapshot"):
-        await toolkit.async_functions["demo_a"].entrypoint()
-    call_tool.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_mcp_factory_and_toolkit_reject_replaced_catalog_surface(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A same-config catalog replacement must invalidate factories and built toolkits."""
-    config = _config(tmp_path)
-    server_config = config.mcp_servers["demo"]
-    manager = MCPServerManager(_runtime_paths(tmp_path))
-    _set_manager_server_state(manager, server_config, generation=1, catalog=_catalog("demo_a", "a"))
-    bind_mcp_server_manager(manager)
-    registry, _metadata = resolved_mcp_tool_state(config)
-    toolkit = registry["mcp_demo"]()()
-    monkeypatch.setattr(manager, "_connect_and_discover", AsyncMock(return_value=_catalog("demo_b", "b")))
-
-    changed = await manager._refresh_server_catalog(manager._states["demo"], notify=False)
-    call_tool = AsyncMock()
-    monkeypatch.setattr(manager, "call_tool", call_tool)
-
-    assert changed is True
-    with pytest.raises(MCPConnectionError, match="changed after this tool snapshot"):
-        registry["mcp_demo"]()()
-    with pytest.raises(MCPConnectionError, match="changed after this tool snapshot"):
-        await toolkit.async_functions["demo_a"].entrypoint()
-    call_tool.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_existing_oauth_mcp_toolkit_rejects_request_after_server_change(tmp_path: Path) -> None:
-    """OAuth bridge catalog requests must reject a stale same-id server binding."""
-    config_a = _oauth_config(tmp_path)
-    server_a = config_a.mcp_servers["demo"]
-    server_b = server_a.model_copy(update={"url": "https://mcp-b.example.test/mcp"})
-    manager = MCPServerManager(_runtime_paths(tmp_path))
-    _set_manager_server_state(manager, server_a, generation=1)
-    bind_mcp_server_manager(manager)
-    registry, _metadata = resolved_mcp_tool_state(config_a)
-    toolkit = registry["mcp_demo"]()()
-    get_request_catalog = AsyncMock()
-    manager.get_request_catalog = get_request_catalog
-
-    _set_manager_server_state(manager, server_b, generation=2)
-
-    with pytest.raises(MCPConnectionError, match="changed after this tool snapshot"):
-        await toolkit.async_functions["demo_list_tools"].entrypoint()
-    get_request_catalog.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_removed_and_readded_mcp_server_invalidates_same_config_binding(tmp_path: Path) -> None:
-    """Removing and readding an identical server must not revive an old snapshot binding."""
-    config = _oauth_config(tmp_path)
-    server_config = config.mcp_servers["demo"]
-    manager = MCPServerManager(_runtime_paths(tmp_path))
-    _set_manager_server_state(manager, server_config, generation=1)
-    bind_mcp_server_manager(manager)
-    registry, _metadata = resolved_mcp_tool_state(config)
-
-    await manager._remove_server("demo")
-    await manager.sync_servers(config)
-
-    assert manager._server_generations["demo"] == 3
-    with pytest.raises(MCPConnectionError, match="changed after this tool snapshot"):
-        registry["mcp_demo"]()()
 
 
 def test_sync_mcp_tool_registry_is_idempotent(tmp_path: Path) -> None:

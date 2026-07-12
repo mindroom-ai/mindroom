@@ -3,21 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import json
 import os
 import sys
-import threading
 from contextlib import contextmanager
 from pathlib import Path
-from types import ModuleType
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
-import yaml
 
-import mindroom.oauth.registry as oauth_registry_module
 import mindroom.tool_system.metadata as metadata_module
 import mindroom.tool_system.plugin_imports as plugin_module
 import mindroom.tool_system.plugins as plugins_module
@@ -25,24 +20,9 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
-from mindroom.mcp import registry as mcp_registry
 from mindroom.oauth.registry import clear_oauth_provider_cache, load_oauth_providers
-from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
-from mindroom.tool_system.plugins import (
-    _load_plugins as load_plugins,
-)
-from mindroom.tool_system.plugins import (
-    _PluginRuntimeMismatchError as PluginRuntimeMismatchError,
-)
-from mindroom.tool_system.plugins import (
-    capture_plugin_runtime_snapshot,
-    deactivate_plugins,
-    get_configured_plugin_roots,
-    prepare_active_plugin_tool_state_for_config,
-    reload_plugins,
-    resolve_snapshot_hook_registry,
-)
+from mindroom.tool_system.plugins import get_configured_plugin_roots, load_plugins, reload_plugins
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
@@ -257,8 +237,6 @@ def _preserved_plugin_loader_state(*, module_prefixes: tuple[str, ...] = ()) -> 
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_modules = set(sys.modules)
-    original_active_plugin_runtime = plugins_module._ACTIVE_PLUGIN_RUNTIME
-    original_mcp_tool_names = mcp_registry._MCP_TOOL_NAMES.copy()
 
     try:
         yield
@@ -271,9 +249,6 @@ def _preserved_plugin_loader_state(*, module_prefixes: tuple[str, ...] = ()) -> 
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
         plugin_module._MODULE_IMPORT_CACHE.clear()
         plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
-        plugins_module._ACTIVE_PLUGIN_RUNTIME = original_active_plugin_runtime
-        mcp_registry._MCP_TOOL_NAMES.clear()
-        mcp_registry._MCP_TOOL_NAMES.update(original_mcp_tool_names)
         set_plugin_skill_roots(original_plugin_roots)
         for module_name in set(sys.modules) - original_modules:
             if module_name.startswith("mindroom_plugin_") or any(
@@ -1953,7 +1928,7 @@ def test_load_config_tolerates_broken_plugin_tool_named_by_module_constant(
             "models:\n"
             "  default:\n"
             "    provider: openai\n"
-            "    id: gpt-5.5\n"
+            "    id: gpt-5.4\n"
             "router:\n"
             "  model: default\n"
             "agents:\n"
@@ -1991,7 +1966,7 @@ def test_load_config_tolerates_broken_plugin_tool_named_by_module_constant(
         )
 
 
-def test_load_config_disables_unknown_tool_when_plugin_tool_namespace_is_unresolved(
+def test_load_config_disables_unknown_tool_when_any_plugin_failed_to_load(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2005,7 +1980,7 @@ def test_load_config_disables_unknown_tool_when_plugin_tool_namespace_is_unresol
             "models:\n"
             "  default:\n"
             "    provider: openai\n"
-            "    id: gpt-5.5\n"
+            "    id: gpt-5.4\n"
             "router:\n"
             "  model: default\n"
             "agents:\n"
@@ -2039,21 +2014,21 @@ def test_load_config_disables_unknown_tool_when_plugin_tool_namespace_is_unresol
         assert any(
             call.args
             == (
-                "Unknown tool may belong to a plugin whose tool names could not be fully resolved; "
+                "Unknown tool may belong to a plugin that failed to load; "
                 "disabling it for this run (verify the tool name is not a typo)",
             )
             and call.kwargs["tool_name"] == "dynamic_plugin_tool"
             and call.kwargs["config_path"] == "agents.assistant.tools[1]"
-            and call.kwargs["unresolved_plugin_sources"] == ["broken_plugin"]
+            and call.kwargs["failed_plugins"] == ["broken_plugin"]
             for call in mock_logger.warning.call_args_list
         )
 
 
-def test_load_config_disables_unknown_tool_when_plugin_manifest_is_unresolved(
+def test_load_config_disables_unknown_tool_when_plugin_fails_before_manifest_resolution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A plugin skipped before manifest resolution may own an otherwise unknown tool."""
+    """Plugins skipped before their manifest resolves must still count as failed plugins."""
     plugin_root = tmp_path / "plugins" / "broken"
     plugin_root.mkdir(parents=True)
 
@@ -2063,7 +2038,7 @@ def test_load_config_disables_unknown_tool_when_plugin_manifest_is_unresolved(
             "models:\n"
             "  default:\n"
             "    provider: openai\n"
-            "    id: gpt-5.5\n"
+            "    id: gpt-5.4\n"
             "router:\n"
             "  model: default\n"
             "agents:\n"
@@ -2096,159 +2071,13 @@ def test_load_config_disables_unknown_tool_when_plugin_manifest_is_unresolved(
         assert any(
             call.args
             == (
-                "Unknown tool may belong to a plugin whose tool names could not be fully resolved; "
+                "Unknown tool may belong to a plugin that failed to load; "
                 "disabling it for this run (verify the tool name is not a typo)",
             )
             and call.kwargs["tool_name"] == "manifestless_plugin_tool"
             and call.kwargs["config_path"] == "agents.assistant.tools[1]"
-            and call.kwargs["unresolved_plugin_sources"] == ["./plugins/broken"]
+            and call.kwargs["failed_plugins"] == ["./plugins/broken"]
             for call in mock_logger.warning.call_args_list
-        )
-
-
-def test_load_config_treats_plugin_system_exit_as_a_load_error(tmp_path: Path) -> None:
-    """Plugin SystemExit should become strict validation failure or tolerant unavailability."""
-    plugin_root = tmp_path / "plugins" / "broken"
-    _write_pre_registration_broken_tool_plugin(plugin_root, tool_name="system_exit_tool")
-    tools_path = plugin_root / "tools.py"
-    tools_path.write_text(
-        tools_path.read_text(encoding="utf-8").replace(
-            "from definitely_missing_plugin_dependency import broken",
-            "raise SystemExit('plugin exit')",
-        ),
-        encoding="utf-8",
-    )
-
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        (
-            "models:\n"
-            "  default:\n"
-            "    provider: openai\n"
-            "    id: gpt-5.5\n"
-            "router:\n"
-            "  model: default\n"
-            "agents:\n"
-            "  assistant:\n"
-            "    display_name: Assistant\n"
-            "    role: test\n"
-            "    tools: [system_exit_tool]\n"
-            "plugins:\n"
-            "  - ./plugins/broken\n"
-        ),
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
-
-    with _preserved_plugin_loader_state():
-        with pytest.raises(ConfigRuntimeValidationError, match="plugin exit"):
-            load_config(runtime_paths)
-
-        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
-
-    assert config.resolve_entity("assistant").available_tools == ["scheduler"]
-
-
-def test_load_config_propagates_plugin_keyboard_interrupt(tmp_path: Path) -> None:
-    """Operator interrupts during plugin validation should still terminate startup."""
-    plugin_root = tmp_path / "plugins" / "broken"
-    _write_pre_registration_broken_tool_plugin(plugin_root)
-    tools_path = plugin_root / "tools.py"
-    tools_path.write_text(
-        tools_path.read_text(encoding="utf-8").replace(
-            "from definitely_missing_plugin_dependency import broken",
-            "raise KeyboardInterrupt('stop')",
-        ),
-        encoding="utf-8",
-    )
-    runtime_paths = _minimal_runtime_paths(tmp_path)
-
-    with _preserved_plugin_loader_state(), pytest.raises(KeyboardInterrupt, match="stop"):
-        Config.validate_with_runtime(
-            {"plugins": ["./plugins/broken"]},
-            runtime_paths,
-            tolerate_plugin_load_errors=True,
-        )
-
-
-@pytest.mark.parametrize("with_tools_module", [False, True], ids=["hooks-only", "dedicated-hooks"])
-@pytest.mark.parametrize("hooks_failure", ["import", "missing"])
-def test_failed_plugin_hooks_do_not_hide_unknown_tool_typos(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    with_tools_module: bool,
-    hooks_failure: str,
-) -> None:
-    """A complete or empty tool namespace must not excuse unknown authored tool names."""
-    plugin_root = tmp_path / "plugins" / "broken-hooks"
-    manifest = {"name": "broken-hooks", "hooks_module": "hooks.py", "skills": []}
-    tools = ["definite_typo"]
-    if with_tools_module:
-        _write_working_tool_plugin(
-            plugin_root,
-            plugin_name="broken-hooks",
-            tool_name="known_plugin_tool",
-        )
-        manifest["tools_module"] = "tools.py"
-        tools.insert(0, "known_plugin_tool")
-    else:
-        plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
-    if hooks_failure == "import":
-        (plugin_root / "hooks.py").write_text("raise ImportError('hooks down')\n", encoding="utf-8")
-
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        yaml.safe_dump(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.5"}},
-                "router": {"model": "default"},
-                "agents": {
-                    "assistant": {
-                        "display_name": "Assistant",
-                        "role": "test",
-                        "tools": tools,
-                    },
-                },
-                "plugins": ["./plugins/broken-hooks"],
-            },
-            sort_keys=False,
-        ),
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
-    mock_logger = MagicMock()
-    monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
-
-    with (
-        _preserved_plugin_loader_state(),
-        pytest.raises(
-            ConfigRuntimeValidationError,
-            match="Unknown tool 'definite_typo'",
-        ),
-    ):
-        load_config(runtime_paths, tolerate_plugin_load_errors=True)
-
-    if with_tools_module:
-        mock_logger.warning.assert_any_call(
-            "Plugin tool unavailable because plugin failed to load",
-            config_path="agents.assistant.tools[0]",
-            tool_name="known_plugin_tool",
         )
 
 
@@ -2695,10 +2524,7 @@ def test_load_plugins_rejects_duplicate_manifest_names_before_materialization(tm
     second_root.mkdir(parents=True)
     manifest = {"name": "shared-plugin", "tools_module": "tools.py", "skills": []}
     (first_root / "mindroom.plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
-    (second_root / "mindroom.plugin.json").write_text(
-        json.dumps({**manifest, "tools_module": "missing.py"}),
-        encoding="utf-8",
-    )
+    (second_root / "mindroom.plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
     first_import_marker = tmp_path / "first-imported"
     second_import_marker = tmp_path / "second-imported"
     (first_root / "tools.py").write_text(
@@ -2928,757 +2754,6 @@ async def test_reload_plugins_invalidates_helper_modules_under_plugin_root(tmp_p
                 sys.modules.pop(module_name, None)
 
 
-def test_reload_plugins_refreshes_config_tool_availability(tmp_path: Path) -> None:
-    """Plugin reloads should publish recovered and degraded tool availability with the registry."""
-    plugin_root = tmp_path / "plugins" / "dynamic"
-    _write_dynamic_named_broken_tool_plugin(plugin_root, tool_name="dynamic_plugin_tool")
-    tools_path = plugin_root / "tools.py"
-    broken_source = tools_path.read_text(encoding="utf-8")
-    working_source = broken_source.replace("from definitely_missing_plugin_dependency import broken\n", "")
-
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        yaml.safe_dump(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.5"}},
-                "router": {"model": "default"},
-                "agents": {
-                    "assistant": {
-                        "display_name": "Assistant",
-                        "role": "test",
-                        "tools": ["dynamic_plugin_tool"],
-                    },
-                },
-                "plugins": ["./plugins/dynamic"],
-            },
-            sort_keys=False,
-        ),
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
-
-    with _preserved_plugin_loader_state():
-        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
-        assert config.resolve_entity("assistant").available_tools == ["scheduler"]
-
-        tools_path.write_text(working_source, encoding="utf-8")
-        recovered = reload_plugins(config, runtime_paths)
-
-        assert recovered.active_plugin_names == ("broken_plugin",)
-        assert config.resolve_entity("assistant").available_tools == ["dynamic_plugin_tool", "scheduler"]
-        assert get_tool_by_name("dynamic_plugin_tool", runtime_paths, worker_target=None).name == "broken"
-
-        tools_path.write_text(broken_source, encoding="utf-8")
-        degraded = reload_plugins(config, runtime_paths, skip_broken_plugins=True)
-
-        assert degraded.active_plugin_names == ()
-        assert config.resolve_entity("assistant").available_tools == ["scheduler"]
-
-
-def test_degraded_reload_replaces_healthy_tolerant_tool_state(tmp_path: Path) -> None:
-    """A healthy cached tolerant snapshot must not survive a degraded reload."""
-    plugin_root = tmp_path / "plugins" / "dynamic"
-    _write_dynamic_named_broken_tool_plugin(plugin_root, tool_name="dynamic_plugin_tool")
-    tools_path = plugin_root / "tools.py"
-    broken_source = tools_path.read_text(encoding="utf-8")
-    tools_path.write_text(
-        broken_source.replace("from definitely_missing_plugin_dependency import broken\n", ""),
-        encoding="utf-8",
-    )
-
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        yaml.safe_dump(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.5"}},
-                "router": {"model": "default"},
-                "agents": {
-                    "assistant": {
-                        "display_name": "Assistant",
-                        "role": "test",
-                        "tools": ["dynamic_plugin_tool"],
-                    },
-                },
-                "plugins": ["./plugins/dynamic"],
-            },
-            sort_keys=False,
-        ),
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={"MATRIX_HOMESERVER": "http://localhost:8008", "MINDROOM_NAMESPACE": ""},
-    )
-
-    with _preserved_plugin_loader_state():
-        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
-        reload_plugins(config, runtime_paths)
-        assert config.resolve_entity("assistant").available_tools == ["dynamic_plugin_tool", "scheduler"]
-
-        tools_path.write_text(broken_source, encoding="utf-8")
-        reload_plugins(config, runtime_paths, skip_broken_plugins=True)
-
-        assert config.resolve_entity("assistant").available_tools == ["scheduler"]
-        validation_snapshot = metadata_module.resolved_tool_validation_snapshot_for_runtime(
-            runtime_paths,
-            config,
-            tolerate_plugin_load_errors=True,
-        )
-        assert validation_snapshot["dynamic_plugin_tool"].unavailable_due_to_plugin_load_error is True
-
-
-def test_reload_prepares_availability_without_reexecuting_plugin_source(tmp_path: Path) -> None:
-    """One reload candidate must execute its plugin module exactly once."""
-    plugin_root = tmp_path / "plugins" / "counted"
-    _write_working_tool_plugin(plugin_root, plugin_name="counted", tool_name="counted_tool")
-    tools_path = plugin_root / "tools.py"
-    import_count_path = plugin_root / "import-count.txt"
-    tools_path.write_text(
-        "from pathlib import Path\n"
-        f"_count_path = Path({str(import_count_path)!r})\n"
-        "_count = int(_count_path.read_text(encoding='utf-8')) if _count_path.exists() else 0\n"
-        "_count_path.write_text(str(_count + 1), encoding='utf-8')\n" + tools_path.read_text(encoding="utf-8"),
-        encoding="utf-8",
-    )
-    runtime_paths = _minimal_runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
-        {"plugins": ["./plugins/counted"]},
-        runtime_paths,
-        tolerate_plugin_load_errors=True,
-    )
-    import_count_path.write_text("0", encoding="utf-8")
-
-    with _preserved_plugin_loader_state():
-        reload_plugins(config, runtime_paths)
-
-        assert import_count_path.read_text(encoding="utf-8") == "1"
-
-
-def test_strict_reload_publishes_renamed_tool_state(tmp_path: Path) -> None:
-    """A strict reload must replace both registry and cached metadata with its candidate."""
-    plugin_root = tmp_path / "plugins" / "renamed"
-    _write_working_tool_plugin(plugin_root, plugin_name="renamed", tool_name="old_tool")
-    tools_path = plugin_root / "tools.py"
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        yaml.safe_dump(
-            {
-                "agents": {
-                    "assistant": {
-                        "display_name": "Assistant",
-                        "role": "test",
-                        "tools": ["old_tool"],
-                    },
-                },
-                "plugins": ["./plugins/renamed"],
-            },
-            sort_keys=False,
-        ),
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={"MATRIX_HOMESERVER": "http://localhost:8008", "MINDROOM_NAMESPACE": ""},
-    )
-
-    with _preserved_plugin_loader_state():
-        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
-        reload_plugins(config, runtime_paths)
-        tools_path.write_text(
-            tools_path.read_text(encoding="utf-8").replace("name='old_tool'", "name='new_tool'"),
-            encoding="utf-8",
-        )
-
-        reload_plugins(config, runtime_paths)
-
-        assert config.resolve_entity("assistant").available_tools == ["scheduler"]
-        assert get_tool_by_name("new_tool", runtime_paths, worker_target=None).name == "working"
-        resolved_metadata = metadata_module.resolved_tool_metadata_for_runtime(runtime_paths, config)
-        assert "new_tool" in resolved_metadata
-        assert "old_tool" not in resolved_metadata
-
-
-def test_plugin_reload_preserves_mcp_tools_and_transfers_name_ownership(tmp_path: Path) -> None:
-    """Plugin commits must preserve MCP tools and release disabled MCP names to plugins."""
-    runtime_paths = _minimal_runtime_paths(tmp_path)
-    enabled_mcp = Config(
-        mcp_servers={"demo": {"transport": "stdio", "command": "python"}},
-    )
-    plugin_root = tmp_path / "plugins" / "mcp-name"
-    _write_working_tool_plugin(plugin_root, plugin_name="mcp_name", tool_name="mcp_demo")
-    plugin_owned = Config(
-        plugins=["./plugins/mcp-name"],
-        mcp_servers={
-            "demo": {
-                "transport": "stdio",
-                "command": "python",
-                "enabled": False,
-            },
-        },
-    )
-
-    with _preserved_plugin_loader_state():
-        mcp_registry.sync_mcp_tool_registry(enabled_mcp)
-        assert "mcp_demo" in TOOL_REGISTRY
-
-        reload_plugins(enabled_mcp, runtime_paths)
-        assert "mcp_demo" in TOOL_REGISTRY
-        assert mcp_registry.registered_mcp_tool_names() == {"mcp_demo"}
-
-        deactivate_plugins(enabled_mcp, runtime_paths)
-        assert "mcp_demo" in TOOL_REGISTRY
-        assert mcp_registry.registered_mcp_tool_names() == {"mcp_demo"}
-
-        reload_plugins(plugin_owned, runtime_paths)
-        assert mcp_registry.registered_mcp_tool_names() == set()
-        assert get_tool_by_name("mcp_demo", runtime_paths, worker_target=None).name == "working"
-
-        mcp_registry.sync_mcp_tool_registry(plugin_owned)
-        assert get_tool_by_name("mcp_demo", runtime_paths, worker_target=None).name == "working"
-
-        enabled_collision = Config(
-            plugins=["./plugins/mcp-name"],
-            mcp_servers={"demo": {"transport": "stdio", "command": "python"}},
-        )
-        with pytest.raises(ConfigRuntimeValidationError, match="conflicts with an existing registered tool"):
-            prepare_active_plugin_tool_state_for_config(
-                enabled_collision,
-            )
-
-
-def test_active_plugin_runtime_is_reused_until_explicit_reload(tmp_path: Path) -> None:
-    """Implicit consumers must not retry a degraded plugin behind the published snapshot."""
-    plugin_root = tmp_path / "plugins" / "fail-once"
-    _write_working_tool_plugin(plugin_root, plugin_name="fail_once", tool_name="fail_once_tool")
-    tools_path = plugin_root / "tools.py"
-    import_count_path = plugin_root / "import-count.txt"
-    tools_path.write_text(
-        tools_path.read_text(encoding="utf-8")
-        + "\nif '__validation__' not in __name__:\n"
-        + "    from pathlib import Path\n"
-        + f"    _count_path = Path({str(import_count_path)!r})\n"
-        + "    _count = int(_count_path.read_text(encoding='utf-8')) if _count_path.exists() else 0\n"
-        + "    _count_path.write_text(str(_count + 1), encoding='utf-8')\n"
-        + "    if _count == 0:\n"
-        + "        raise ImportError('fail once')\n",
-        encoding="utf-8",
-    )
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        yaml.safe_dump(
-            {
-                "agents": {
-                    "assistant": {
-                        "display_name": "Assistant",
-                        "role": "test",
-                        "tools": ["fail_once_tool"],
-                    },
-                },
-                "plugins": ["./plugins/fail-once"],
-            },
-            sort_keys=False,
-        ),
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
-
-    with _preserved_plugin_loader_state():
-        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
-        degraded = reload_plugins(config, runtime_paths, skip_broken_plugins=True)
-
-        assert degraded.active_plugin_names == ()
-        assert import_count_path.read_text(encoding="utf-8") == "1"
-        assert config.resolve_entity("assistant").available_tools == ["scheduler"]
-
-        request_runtime_paths = RuntimePaths(
-            config_path=runtime_paths.config_path,
-            config_dir=runtime_paths.config_dir,
-            env_path=runtime_paths.env_path,
-            storage_root=runtime_paths.storage_root,
-            control_state_root=runtime_paths.control_state_root,
-            process_env={"REQUEST_SECRET": "one"},
-            env_file_values={"REQUEST_SECRET": "two"},
-        )
-        assert capture_plugin_runtime_snapshot(config, request_runtime_paths).hook_registry is degraded.hook_registry
-        ensure_tool_registry_loaded(request_runtime_paths, config)
-        ensure_tool_registry_loaded(runtime_paths, config)
-        assert import_count_path.read_text(encoding="utf-8") == "1"
-
-        recovered = reload_plugins(config, runtime_paths)
-        assert recovered.active_plugin_names == ("fail_once",)
-        assert import_count_path.read_text(encoding="utf-8") == "2"
-        assert config.resolve_entity("assistant").available_tools == ["fail_once_tool", "scheduler"]
-
-
-@pytest.mark.asyncio
-async def test_plugin_runtime_snapshot_survives_degraded_same_config_reload(tmp_path: Path) -> None:
-    """In-flight agent builds keep one healthy hook, tool, and availability generation."""
-    plugin_root = tmp_path / "plugins" / "snapshot"
-    _write_working_tool_plugin(plugin_root, plugin_name="snapshot_plugin", tool_name="snapshot_tool")
-    tools_path = plugin_root / "tools.py"
-    tools_path.write_text(
-        tools_path.read_text(encoding="utf-8").replace(
-            "super().__init__(name='working', tools=[])",
-            "super().__init__(name='working', tools=[])\n        self.generation_marker = 'healthy'",
-        )
-        + "\nfrom mindroom.hooks import hook\n"
-        + "@hook('message:received')\n"
-        + "async def snapshot_hook(_context):\n"
-        + "    return 'healthy'\n",
-        encoding="utf-8",
-    )
-    runtime_paths = _minimal_runtime_paths(tmp_path)
-    config = Config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "test",
-                "tools": ["snapshot_tool"],
-            },
-        },
-        plugins=["./plugins/snapshot"],
-    )
-
-    with _preserved_plugin_loader_state():
-        reload_plugins(config, runtime_paths)
-        healthy_snapshot = capture_plugin_runtime_snapshot(config, runtime_paths)
-        tools_path.write_text(
-            tools_path.read_text(encoding="utf-8") + "\nraise ImportError('degraded reload')\n",
-            encoding="utf-8",
-        )
-
-        degraded = reload_plugins(config, runtime_paths, skip_broken_plugins=True)
-
-        assert degraded.active_plugin_names == ()
-        assert "snapshot_tool" not in config.resolve_entity("assistant").available_tools
-        assert "snapshot_tool" in healthy_snapshot.runtime_config.resolve_entity("assistant").available_tools
-        tool_class = healthy_snapshot.tool_registry["snapshot_tool"]()
-        assert tool_class().generation_marker == "healthy"
-        snapshot_hook = healthy_snapshot.hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED)[0]
-        assert await snapshot_hook.callback(None) == "healthy"
-
-
-def test_failed_plugin_worker_import_is_rolled_back_for_retry(tmp_path: Path) -> None:
-    """A failed plugin must remove helpers imported by a joined worker thread before retry."""
-    plugin_root = tmp_path / "plugins" / "worker-helper-failure"
-    plugin_root.mkdir(parents=True)
-    import_count_path = tmp_path / "worker-helper-import-count.txt"
-    (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "worker-helper-failure", "hooks_module": "hooks.py", "skills": []}),
-        encoding="utf-8",
-    )
-    (plugin_root / "helper.py").write_text(
-        "from pathlib import Path\n"
-        f"_COUNT_PATH = Path({str(import_count_path)!r})\n"
-        "_COUNT = int(_COUNT_PATH.read_text(encoding='utf-8')) if _COUNT_PATH.exists() else 0\n"
-        "_COUNT_PATH.write_text(str(_COUNT + 1), encoding='utf-8')\n",
-        encoding="utf-8",
-    )
-    (plugin_root / "hooks.py").write_text(
-        "import importlib\n"
-        "import threading\n"
-        "_thread = threading.Thread(target=lambda: importlib.import_module(f'{__package__}.helper'))\n"
-        "_thread.start()\n"
-        "_thread.join(timeout=1)\n"
-        "if _thread.is_alive():\n"
-        "    raise RuntimeError('worker import deadlocked')\n"
-        "raise RuntimeError('reject after helper import')\n",
-        encoding="utf-8",
-    )
-    runtime_paths = _minimal_runtime_paths(tmp_path)
-    config = Config(plugins=["./plugins/worker-helper-failure"])
-
-    with _preserved_plugin_loader_state():
-        first = reload_plugins(config, runtime_paths, skip_broken_plugins=True)
-        second = reload_plugins(config, runtime_paths, skip_broken_plugins=True)
-
-        assert first.active_plugin_names == ()
-        assert second.active_plugin_names == ()
-        assert import_count_path.read_text(encoding="utf-8") == "2"
-        assert not any(
-            module_name.startswith("mindroom_plugin_worker_helper_failure_") and module_name.endswith(".helper")
-            for module_name in sys.modules
-        )
-
-
-def test_failed_oauth_worker_import_cleans_helper_under_warm_package_root(tmp_path: Path) -> None:
-    """OAuth reload rollback must clean new worker-imported helpers under an existing package root."""
-    plugin_root = tmp_path / "plugins" / "oauth-worker-helper"
-    plugin_root.mkdir(parents=True)
-    import_count_path = tmp_path / "oauth-worker-helper-count.txt"
-    (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "oauth-worker-helper", "oauth_module": "oauth.py", "skills": []}),
-        encoding="utf-8",
-    )
-    (plugin_root / "helper.py").write_text(
-        "from pathlib import Path\n"
-        f"_COUNT_PATH = Path({str(import_count_path)!r})\n"
-        "_COUNT = int(_COUNT_PATH.read_text(encoding='utf-8')) if _COUNT_PATH.exists() else 0\n"
-        "_COUNT_PATH.write_text(str(_COUNT + 1), encoding='utf-8')\n",
-        encoding="utf-8",
-    )
-    oauth_path = plugin_root / "oauth.py"
-    oauth_path.write_text(
-        "def register_oauth_providers(settings, runtime_paths):\n    del settings, runtime_paths\n    return []\n",
-        encoding="utf-8",
-    )
-    runtime_paths = _minimal_runtime_paths(tmp_path)
-    config = Config(plugins=["./plugins/oauth-worker-helper"])
-
-    with _preserved_plugin_loader_state():
-        clear_oauth_provider_cache()
-        load_oauth_providers(config, runtime_paths)
-        previous_mtime_ns = oauth_path.stat().st_mtime_ns
-        oauth_path.write_text(
-            "import importlib\n"
-            "import threading\n"
-            "_thread = threading.Thread(target=lambda: importlib.import_module(f'{__package__}.helper'))\n"
-            "_thread.start()\n"
-            "_thread.join(timeout=1)\n"
-            "if _thread.is_alive():\n"
-            "    raise RuntimeError('worker import deadlocked')\n"
-            "raise RuntimeError('reject OAuth module after helper import')\n",
-            encoding="utf-8",
-        )
-        os.utime(oauth_path, ns=(previous_mtime_ns + 1_000_000_000, previous_mtime_ns + 1_000_000_000))
-
-        clear_oauth_provider_cache()
-        load_oauth_providers(config, runtime_paths)
-        clear_oauth_provider_cache()
-        load_oauth_providers(config, runtime_paths)
-
-        assert import_count_path.read_text(encoding="utf-8") == "2"
-        assert not any(
-            module_name.startswith("mindroom_plugin_oauth_worker_helper_") and module_name.endswith(".helper")
-            for module_name in sys.modules
-        )
-        clear_oauth_provider_cache()
-
-
-def test_oauth_provider_load_cannot_repopulate_cache_after_plugin_invalidation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An OAuth load begun before a plugin commit must not republish its stale cache."""
-    runtime_paths = _minimal_runtime_paths(tmp_path)
-    config = Config()
-    load_started = threading.Event()
-    release_load = threading.Event()
-    load_errors: list[BaseException] = []
-
-    def delayed_plugin_providers(*_args: object, **_kwargs: object) -> list[object]:
-        load_started.set()
-        assert release_load.wait(timeout=2)
-        return []
-
-    def load_providers() -> None:
-        try:
-            load_oauth_providers(config, runtime_paths)
-        except BaseException as exc:  # pragma: no cover - asserted below
-            load_errors.append(exc)
-
-    monkeypatch.setattr(oauth_registry_module, "_load_plugin_oauth_providers", delayed_plugin_providers)
-    clear_oauth_provider_cache()
-    load_thread = threading.Thread(target=load_providers)
-    load_thread.start()
-    assert load_started.wait(timeout=2)
-    clear_oauth_provider_cache()
-    release_load.set()
-    load_thread.join(timeout=2)
-
-    assert not load_thread.is_alive()
-    assert load_errors == []
-    assert oauth_registry_module._provider_cache is None
-
-
-def test_explicit_hooks_still_bootstrap_plugin_tools_in_fresh_process(tmp_path: Path) -> None:
-    """An explicit hook registry must not bypass first-use plugin tool activation."""
-    plugin_root = tmp_path / "plugins" / "explicit-hooks"
-    _write_working_tool_plugin(plugin_root, plugin_name="explicit_hooks", tool_name="explicit_hook_tool")
-    runtime_paths = _minimal_runtime_paths(tmp_path)
-    config = Config(plugins=["./plugins/explicit-hooks"])
-    explicit_hooks = HookRegistry.empty()
-
-    with _preserved_plugin_loader_state():
-        snapshot = capture_plugin_runtime_snapshot(config, runtime_paths)
-        assert resolve_snapshot_hook_registry(snapshot, explicit_hooks) is explicit_hooks
-        assert get_tool_by_name("explicit_hook_tool", runtime_paths, worker_target=None).name == "working"
-
-
-def test_standalone_explicit_hooks_are_preserved_without_configured_plugins(tmp_path: Path) -> None:
-    """Callers may still inject standalone hooks when no plugin generation owns them."""
-    runtime_paths = _minimal_runtime_paths(tmp_path)
-    config = Config()
-    explicit_hooks = HookRegistry.empty()
-
-    with _preserved_plugin_loader_state():
-        snapshot = capture_plugin_runtime_snapshot(config, runtime_paths)
-        assert resolve_snapshot_hook_registry(snapshot, explicit_hooks) is explicit_hooks
-
-
-def test_stale_plugin_generation_cannot_replace_active_registry(tmp_path: Path) -> None:
-    """Implicit callers from an old config must not flip the process-global plugin generation."""
-    _write_working_tool_plugin(tmp_path / "plugins" / "a", plugin_name="plugin_a", tool_name="tool_a")
-    _write_working_tool_plugin(tmp_path / "plugins" / "b", plugin_name="plugin_b", tool_name="tool_b")
-    runtime_paths = _minimal_runtime_paths(tmp_path)
-    config_a = Config(plugins=["./plugins/a"])
-    config_b = Config(plugins=[{"path": "./plugins/b", "settings": {"mode": "b"}}])
-
-    with _preserved_plugin_loader_state():
-        reload_plugins(config_a, runtime_paths)
-        reload_plugins(config_b, runtime_paths)
-
-        with pytest.raises(PluginRuntimeMismatchError, match="explicit plugin reload"):
-            ensure_tool_registry_loaded(runtime_paths, config_a)
-        with pytest.raises(PluginRuntimeMismatchError, match="explicit plugin reload"):
-            ensure_tool_registry_loaded(
-                runtime_paths,
-                Config(plugins=[{"path": "./plugins/b", "settings": {"mode": "changed"}}]),
-            )
-
-        assert "tool_a" not in TOOL_REGISTRY
-        assert get_tool_by_name("tool_b", runtime_paths, worker_target=None).name == "working"
-
-
-@pytest.mark.asyncio
-async def test_plugin_import_time_tasks_are_rejected_and_cancelled(tmp_path: Path) -> None:
-    """Staged plugins may not run background tasks before their snapshot is committed."""
-    plugin_root = tmp_path / "plugins" / "task-at-import"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "task-at-import", "tools_module": "tools.py", "skills": []}),
-        encoding="utf-8",
-    )
-    (plugin_root / "tools.py").write_text(
-        "import asyncio\n_IMPORT_TASK = asyncio.create_task(asyncio.Event().wait(), name='plugin-import-task')\n",
-        encoding="utf-8",
-    )
-    runtime_paths = _minimal_runtime_paths(tmp_path)
-
-    with _preserved_plugin_loader_state():
-        config = Config.validate_with_runtime(
-            {"plugins": ["./plugins/task-at-import"]},
-            runtime_paths,
-            tolerate_plugin_load_errors=True,
-        )
-        await asyncio.sleep(0)
-        assert not any(task.get_name() == "plugin-import-task" for task in asyncio.all_tasks())
-
-        with pytest.raises(plugin_module.PluginValidationError, match="created background tasks during import"):
-            reload_plugins(config, runtime_paths)
-        degraded = reload_plugins(config, runtime_paths, skip_broken_plugins=True)
-        await asyncio.sleep(0)
-
-        assert degraded.active_plugin_names == ()
-        assert not any(task.get_name() == "plugin-import-task" for task in asyncio.all_tasks())
-
-
-@pytest.mark.asyncio
-async def test_python_plugin_resolution_task_rejection_is_repeatable(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Rejected package resolution must remove its imported parent so unchanged retries stay degraded."""
-    package_root = tmp_path / "task_parent_pkg"
-    plugin_root = package_root / "child"
-    plugin_root.mkdir(parents=True)
-    import_count_path = tmp_path / "parent-import-count.txt"
-    (package_root / "__init__.py").write_text(
-        "import asyncio\n"
-        "from pathlib import Path\n"
-        f"_COUNT_PATH = Path({str(import_count_path)!r})\n"
-        "_COUNT = int(_COUNT_PATH.read_text(encoding='utf-8')) if _COUNT_PATH.exists() else 0\n"
-        "_COUNT_PATH.write_text(str(_COUNT + 1), encoding='utf-8')\n"
-        "_TASK = asyncio.create_task(asyncio.Event().wait(), name='find-spec-import-task')\n",
-        encoding="utf-8",
-    )
-    (plugin_root / "__init__.py").write_text("", encoding="utf-8")
-    (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "task-parent-child", "hooks_module": "hooks.py", "skills": []}),
-        encoding="utf-8",
-    )
-    (plugin_root / "hooks.py").write_text("VALUE = 1\n", encoding="utf-8")
-    monkeypatch.syspath_prepend(str(tmp_path))
-    runtime_paths = _minimal_runtime_paths(tmp_path)
-    config = Config(plugins=["python:task_parent_pkg.child"])
-
-    with _preserved_plugin_loader_state(module_prefixes=("task_parent_pkg",)):
-        first = reload_plugins(config, runtime_paths, skip_broken_plugins=True)
-        await asyncio.sleep(0)
-        second = reload_plugins(config, runtime_paths, skip_broken_plugins=True)
-        await asyncio.sleep(0)
-
-        assert first.active_plugin_names == ()
-        assert second.active_plugin_names == ()
-        assert import_count_path.read_text(encoding="utf-8") == "2"
-        assert "task_parent_pkg" not in sys.modules
-        assert not any(task.get_name() == "find-spec-import-task" for task in asyncio.all_tasks())
-
-
-@pytest.mark.asyncio
-async def test_validation_dependency_task_is_rolled_back_before_runtime_retry(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Validation and runtime rejection must both re-import and roll back task-starting dependencies."""
-    dependency_count_path = tmp_path / "dependency-import-count.txt"
-    dependency_name = "validation_task_dependency"
-    (tmp_path / f"{dependency_name}.py").write_text(
-        "import asyncio\n"
-        "from pathlib import Path\n"
-        f"_COUNT_PATH = Path({str(dependency_count_path)!r})\n"
-        "_COUNT = int(_COUNT_PATH.read_text(encoding='utf-8')) if _COUNT_PATH.exists() else 0\n"
-        "_COUNT_PATH.write_text(str(_COUNT + 1), encoding='utf-8')\n"
-        "_TASK = asyncio.create_task(asyncio.Event().wait(), name='validation-dependency-task')\n",
-        encoding="utf-8",
-    )
-    plugin_root = tmp_path / "plugins" / "dependency-task"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "dependency-task", "tools_module": "tools.py", "skills": []}),
-        encoding="utf-8",
-    )
-    (plugin_root / "tools.py").write_text(
-        f"import importlib\nimportlib.import_module({dependency_name!r})\n",
-        encoding="utf-8",
-    )
-    monkeypatch.syspath_prepend(str(tmp_path))
-    runtime_paths = _minimal_runtime_paths(tmp_path)
-
-    with _preserved_plugin_loader_state(module_prefixes=(dependency_name,)):
-        config = Config.validate_with_runtime(
-            {"plugins": ["./plugins/dependency-task"]},
-            runtime_paths,
-            tolerate_plugin_load_errors=True,
-        )
-        await asyncio.sleep(0)
-        degraded = reload_plugins(config, runtime_paths, skip_broken_plugins=True)
-        await asyncio.sleep(0)
-
-        assert degraded.active_plugin_names == ()
-        assert dependency_count_path.read_text(encoding="utf-8") == "2"
-        assert dependency_name not in sys.modules
-        assert not any(task.get_name() == "validation-dependency-task" for task in asyncio.all_tasks())
-
-
-def test_plugin_import_can_join_worker_thread_that_imports_helper(tmp_path: Path) -> None:
-    """Plugin imports must not hold CPython's global import lock across worker-thread joins."""
-    plugin_root = tmp_path / "plugins" / "thread-import"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "thread-import", "hooks_module": "hooks.py", "skills": []}),
-        encoding="utf-8",
-    )
-    (plugin_root / "helper.py").write_text("VALUE = 'loaded'\n", encoding="utf-8")
-    (plugin_root / "hooks.py").write_text(
-        "import importlib\n"
-        "import threading\n"
-        "_values = []\n"
-        "def _load_helper():\n"
-        "    _values.append(importlib.import_module(f'{__package__}.helper').VALUE)\n"
-        "_thread = threading.Thread(target=_load_helper)\n"
-        "_thread.start()\n"
-        "_thread.join(timeout=1)\n"
-        "if _thread.is_alive():\n"
-        "    raise RuntimeError('worker import deadlocked')\n"
-        "if _values != ['loaded']:\n"
-        "    raise RuntimeError('worker import did not complete')\n",
-        encoding="utf-8",
-    )
-    runtime_paths = _minimal_runtime_paths(tmp_path)
-    config = Config(plugins=["./plugins/thread-import"])
-
-    with _preserved_plugin_loader_state():
-        result = reload_plugins(config, runtime_paths)
-
-        assert result.active_plugin_names == ("thread-import",)
-
-
-def test_failed_plugin_import_preserves_module_imported_by_other_thread(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Rollback must not delete an unrelated import completed by another thread."""
-    dependency_name = "unrelated_concurrent_dependency"
-    coordination_name = "plugin_import_coordination"
-    (tmp_path / f"{dependency_name}.py").write_text("VALUE = 'kept'\n", encoding="utf-8")
-    monkeypatch.syspath_prepend(str(tmp_path))
-    coordination = ModuleType(coordination_name)
-    coordination.plugin_started = threading.Event()
-    coordination.unrelated_imported = threading.Event()
-    monkeypatch.setitem(sys.modules, coordination_name, coordination)
-
-    plugin_root = tmp_path / "plugins" / "failed-concurrent"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "failed-concurrent", "hooks_module": "hooks.py", "skills": []}),
-        encoding="utf-8",
-    )
-    (plugin_root / "hooks.py").write_text(
-        f"import {coordination_name} as coordination\n"
-        "coordination.plugin_started.set()\n"
-        "if not coordination.unrelated_imported.wait(timeout=2):\n"
-        "    raise RuntimeError('unrelated import did not complete')\n"
-        "raise RuntimeError('reject plugin after concurrent import')\n",
-        encoding="utf-8",
-    )
-    runtime_paths = _minimal_runtime_paths(tmp_path)
-    config = Config(plugins=["./plugins/failed-concurrent"])
-
-    def import_unrelated_module() -> None:
-        assert coordination.plugin_started.wait(timeout=2)
-        importlib.import_module(dependency_name)
-        coordination.unrelated_imported.set()
-
-    import_thread = threading.Thread(target=import_unrelated_module)
-    with _preserved_plugin_loader_state(module_prefixes=(dependency_name,)):
-        import_thread.start()
-        with pytest.raises(plugin_module.PluginValidationError, match="reject plugin after concurrent import"):
-            reload_plugins(config, runtime_paths)
-        import_thread.join(timeout=2)
-
-        assert not import_thread.is_alive()
-        assert sys.modules[dependency_name].VALUE == "kept"
-
-
-@pytest.mark.asyncio
-async def test_oauth_plugin_import_time_task_is_rejected(tmp_path: Path) -> None:
-    """OAuth modules use the same side-effect-free import boundary as tools and hooks."""
-    plugin_root = tmp_path / "plugins" / "oauth-task"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "oauth-task", "oauth_module": "oauth.py", "skills": []}),
-        encoding="utf-8",
-    )
-    (plugin_root / "oauth.py").write_text(
-        "import asyncio\n"
-        "_TASK = asyncio.create_task(asyncio.Event().wait(), name='oauth-import-task')\n"
-        "def register_oauth_providers(settings, runtime_paths):\n"
-        "    del settings, runtime_paths\n"
-        "    return []\n",
-        encoding="utf-8",
-    )
-    runtime_paths = _minimal_runtime_paths(tmp_path)
-    config = Config(plugins=["./plugins/oauth-task"])
-
-    with _preserved_plugin_loader_state():
-        clear_oauth_provider_cache()
-        with pytest.raises(plugin_module.PluginValidationError, match="created background tasks during import"):
-            load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
-        await asyncio.sleep(0)
-
-        assert not any(task.get_name() == "oauth-import-task" for task in asyncio.all_tasks())
-
-
 def test_reload_plugins_invalidates_cached_oauth_providers(tmp_path: Path) -> None:
     """Plugin reloads should refresh OAuth providers loaded through the registry."""
     plugin_root = tmp_path / "plugins" / "oauth-reload"
@@ -3811,17 +2886,16 @@ async def test_reload_plugins_cancels_module_global_tasks_once(tmp_path: Path) -
         encoding="utf-8",
     )
     (plugin_root / "helper.py").write_text("MARKER = True\n", encoding="utf-8")
-    hooks_path = plugin_root / "hooks.py"
-    hooks_source = (
+    (plugin_root / "hooks.py").write_text(
         "from . import helper\n"
         "from mindroom.hooks import hook\n"
         "\n"
         "@hook('message:received')\n"
         "async def audit(ctx):\n"
         "    del ctx\n"
-        "    return helper.MARKER\n"
+        "    return helper.MARKER\n",
+        encoding="utf-8",
     )
-    hooks_path.write_text(hooks_source, encoding="utf-8")
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["./plugins/task-reload"]), config_path)
@@ -3834,24 +2908,15 @@ async def test_reload_plugins_cancels_module_global_tasks_once(tmp_path: Path) -
     extra_task = asyncio.create_task(asyncio.Event().wait())
     try:
         reload_plugins(config, runtime_paths)
-        resolved_hooks_path = hooks_path.resolve()
-        hooks_module = plugin_module._MODULE_IMPORT_CACHE[resolved_hooks_path].module
+        hooks_path = (plugin_root / "hooks.py").resolve()
+        hooks_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path].module
         helper_module = sys.modules[
-            f"{plugin_module._MODULE_IMPORT_CACHE[resolved_hooks_path].module_name.rsplit('.', 1)[0]}.helper"
+            f"{plugin_module._MODULE_IMPORT_CACHE[hooks_path].module_name.rsplit('.', 1)[0]}.helper"
         ]
         hooks_module._AUTO_POKE_TASK = shared_task
         hooks_module._snooze_tasks = {"shared": shared_task, "extra": extra_task}
         helper_module._AUTO_POKE_TASK = shared_task
 
-        hooks_path.unlink()
-        with pytest.raises(plugin_module.PluginValidationError, match="Plugin hooks module not found"):
-            reload_plugins(config, runtime_paths)
-        await asyncio.sleep(0)
-
-        assert not shared_task.done()
-        assert not extra_task.done()
-
-        hooks_path.write_text(hooks_source, encoding="utf-8")
         result = reload_plugins(config, runtime_paths)
         await asyncio.sleep(0)
 

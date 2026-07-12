@@ -193,11 +193,7 @@ class TestDynamicConfigUpdate:
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
-            patch("mindroom.orchestrator.prepare_plugin_reload", return_value=MagicMock()),
-            patch(
-                "mindroom.orchestrator.apply_prepared_plugin_reload",
-                return_value=MagicMock(hook_registry=orchestrator.hook_registry),
-            ),
+            patch("mindroom.orchestrator.load_plugins", return_value=[]),
             patch.object(
                 orchestrator,
                 "_restart_changed_entities",

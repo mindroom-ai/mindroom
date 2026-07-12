@@ -19,10 +19,10 @@ from mindroom.tool_system.catalog import (
     ToolMetadata,
     ToolStatus,
 )
-from mindroom.tool_system.registry_state import TOOL_REGISTRY, locked_tool_registry_state, reconcile_dynamic_tool_state
+from mindroom.tool_system.registry_state import TOOL_REGISTRY, reconcile_dynamic_tool_state
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable
 
     from agno.tools import Toolkit
 
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.mcp.config import MCPServerConfig
-    from mindroom.mcp.manager import MCPServerBinding, MCPServerManager
+    from mindroom.mcp.manager import MCPServerManager
     from mindroom.mcp.types import MCPServerCatalog
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -57,32 +57,23 @@ def mcp_server_id_from_tool_name(tool_name: str) -> str | None:
     """Return the server id for an MCP registry tool name."""
     if not tool_name.startswith(_MCP_TOOL_PREFIX):
         return None
-    with locked_tool_registry_state():
-        factory = TOOL_REGISTRY.get(tool_name)
-        if tool_name not in _MCP_TOOL_NAMES and not getattr(factory, _MCP_TOOL_FACTORY_MARKER, False):
-            return None
+    factory = TOOL_REGISTRY.get(tool_name)
+    if tool_name not in _MCP_TOOL_NAMES and not getattr(factory, _MCP_TOOL_FACTORY_MARKER, False):
+        return None
     server_id = tool_name.removeprefix(_MCP_TOOL_PREFIX)
     return server_id or None
 
 
-def registered_mcp_tool_names() -> set[str]:
+def _registered_mcp_tool_names() -> set[str]:
     """Return tool names that are actually owned by the dynamic MCP registry."""
-    with locked_tool_registry_state():
-        return {
-            *_MCP_TOOL_NAMES,
-            *(
-                tool_name
-                for tool_name, factory in TOOL_REGISTRY.items()
-                if getattr(factory, _MCP_TOOL_FACTORY_MARKER, False)
-            ),
-        }
-
-
-def publish_registered_mcp_tool_names(tool_names: Iterable[str]) -> None:
-    """Replace MCP ownership after an atomic registry snapshot commit."""
-    with locked_tool_registry_state():
-        _MCP_TOOL_NAMES.clear()
-        _MCP_TOOL_NAMES.update(tool_names)
+    return {
+        *_MCP_TOOL_NAMES,
+        *(
+            tool_name
+            for tool_name, factory in TOOL_REGISTRY.items()
+            if getattr(factory, _MCP_TOOL_FACTORY_MARKER, False)
+        ),
+    }
 
 
 def _tool_override_fields() -> list[ConfigField]:
@@ -132,30 +123,21 @@ def validate_mcp_agent_overrides(tool_name: str, overrides: dict[str, object]) -
         raise ValueError(msg)
 
 
-def _tool_metadata(
-    server_id: str,
-    server_config: MCPServerConfig,
-    server_binding: MCPServerBinding | None,
-) -> ToolMetadata:
+def _tool_metadata(server_id: str, server_config: MCPServerConfig) -> ToolMetadata:
     tool_name = mcp_tool_name(server_id)
     transport_label = server_config.transport.replace("-", " ")
     is_oauth = server_config.auth is not None
-    active_manager = require_mcp_server_manager()
-    manager = (
-        server_binding.manager if server_binding is not None and server_binding.is_current(active_manager) else None
-    )
-    stale_binding = server_binding is not None and manager is None
+    manager = require_mcp_server_manager()
     catalog = None
     if not is_oauth and manager is not None and manager.has_server(server_id):
         try:
             catalog = manager.get_catalog(server_id)
         except MCPError:
             catalog = None
-    auth_provider = mcp_oauth_provider_id(server_id, server_config.auth) if server_config.auth is not None else None
+    auth_provider = None
     function_names: tuple[str, ...]
-    if stale_binding:
-        function_names = ()
-    elif is_oauth:
+    if is_oauth:
+        auth_provider = mcp_oauth_provider_id(server_id, server_config.auth)
         function_names = mcp_oauth_bridge_function_names(server_id, server_config)
     else:
         function_names = tuple(tool.function_name for tool in catalog.tools) if catalog is not None else ()
@@ -194,11 +176,7 @@ def _available_catalog(
         return None
 
 
-def _tool_factory(
-    server_id: str,
-    server_config: MCPServerConfig,
-    server_binding: MCPServerBinding | None,
-) -> Callable[[], type[Toolkit]]:
+def _tool_factory(server_id: str, server_config: MCPServerConfig) -> Callable[[], type[Toolkit]]:
     def factory() -> type[Toolkit]:
         class BoundMindRoomMCPToolkit(MindRoomMCPToolkit):
             def __init__(
@@ -210,11 +188,7 @@ def _tool_factory(
                 credentials_manager: CredentialsManager | None = None,
                 worker_target: ResolvedWorkerTarget | None = None,
             ) -> None:
-                active_manager = require_mcp_server_manager()
-                effective_binding = server_binding
-                if effective_binding is None and active_manager is not None:
-                    effective_binding = active_manager.capture_server_binding(server_id, server_config)
-                manager = effective_binding.require_current(active_manager) if effective_binding is not None else None
+                manager = require_mcp_server_manager()
                 is_oauth = server_config.auth is not None
                 super().__init__(
                     server_id=server_id,
@@ -226,7 +200,6 @@ def _tool_factory(
                     ),
                     tool_name=mcp_tool_name(server_id),
                     server_config=server_config,
-                    server_binding=effective_binding,
                     include_tools=include_tools,
                     exclude_tools=exclude_tools,
                     call_timeout_seconds=call_timeout_seconds,
@@ -252,19 +225,19 @@ def _desired_server_entries(config: Config | None) -> dict[str, MCPServerConfig]
 
 def sync_mcp_tool_registry(config: Config | None) -> None:
     """Reconcile the dynamic registry entries for configured MCP servers."""
-    with locked_tool_registry_state():
-        desired_registry, desired_metadata = resolved_mcp_tool_state(config)
-        desired_tool_names = reconcile_dynamic_tool_state(
-            TOOL_REGISTRY,
-            TOOL_METADATA,
-            desired_registry,
-            desired_metadata,
-            owned_tool_names=registered_mcp_tool_names(),
-            collision_error=lambda tool_name: ValueError(
-                f"MCP tool '{tool_name}' conflicts with an existing registered tool",
-            ),
-        )
-        publish_registered_mcp_tool_names(desired_tool_names)
+    desired_registry, desired_metadata = resolved_mcp_tool_state(config)
+    desired_tool_names = reconcile_dynamic_tool_state(
+        TOOL_REGISTRY,
+        TOOL_METADATA,
+        desired_registry,
+        desired_metadata,
+        owned_tool_names=_registered_mcp_tool_names(),
+        collision_error=lambda tool_name: ValueError(
+            f"MCP tool '{tool_name}' conflicts with an existing registered tool",
+        ),
+    )
+    _MCP_TOOL_NAMES.clear()
+    _MCP_TOOL_NAMES.update(desired_tool_names)
 
 
 def resolved_mcp_tool_state(
@@ -273,10 +246,8 @@ def resolved_mcp_tool_state(
     """Return the MCP tool registry entries implied by one config without mutating globals."""
     registry: dict[str, Callable[[], type[Toolkit]]] = {}
     metadata: dict[str, ToolMetadata] = {}
-    manager = require_mcp_server_manager()
     for server_id, server_config in _desired_server_entries(config).items():
         tool_name = mcp_tool_name(server_id)
-        server_binding = manager.capture_server_binding(server_id, server_config) if manager is not None else None
-        registry[tool_name] = _tool_factory(server_id, server_config, server_binding)
-        metadata[tool_name] = _tool_metadata(server_id, server_config, server_binding)
+        registry[tool_name] = _tool_factory(server_id, server_config)
+        metadata[tool_name] = _tool_metadata(server_id, server_config)
     return registry, metadata

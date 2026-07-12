@@ -1062,15 +1062,16 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
         mock_bot.rooms = []
         mock_create_bot.return_value = mock_bot
 
-        # Use a real config because initialization publishes its typed plugin/tool snapshot.
-        config = Config(
-            agents={
-                "test_agent": {
-                    "display_name": "Test Agent",
-                    "role": "Test agent",
-                },
-            },
-        )
+        # Create config with one agent
+        config = MagicMock(spec=Config)
+        config.agents = {"test_agent": MagicMock()}
+        config.teams = {}
+        config.mcp_servers = {}
+        config.plugins = []
+        config.cache = MagicMock()
+        config.cache.resolve_db_path.return_value = tmp_path / "event_cache.db"
+        config.mindroom_user = None
+        config.get_all_configured_rooms.return_value = []
         mock_load_config.return_value = config
 
         # Create orchestrator

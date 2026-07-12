@@ -1538,16 +1538,6 @@ def _reset_runtime_paths() -> Generator[None, None, None]:
 
 
 @pytest.fixture(autouse=True)
-def _reset_active_plugin_runtime() -> Generator[None, None, None]:
-    """Keep the process-global active plugin generation isolated per test."""
-    from mindroom.tool_system import plugins as plugins_module  # noqa: PLC0415
-
-    original_runtime = plugins_module._ACTIVE_PLUGIN_RUNTIME
-    yield
-    plugins_module._ACTIVE_PLUGIN_RUNTIME = original_runtime
-
-
-@pytest.fixture(autouse=True)
 def _reset_model_media_capabilities() -> Generator[None, None, None]:
     """Keep process-local learned media support isolated per test."""
     reset_model_media_capability_cache()

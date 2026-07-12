@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -25,11 +25,6 @@ from mindroom.config.models import (
 )
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
-
-    from mindroom.tool_system.declarations import ToolMetadata
 
 CultureMode = Literal["automatic", "agentic", "manual"]
 _PrivateWorkerScope = Literal["user", "user_agent"]
@@ -293,31 +288,21 @@ class AgentConfig(BaseModel):
         """Return authored tool names without inline override details."""
         return [entry.name for entry in self.tools]
 
-    def get_tool_overrides(
-        self,
-        tool_name: str,
-        *,
-        tool_metadata: Mapping[str, ToolMetadata] | None = None,
-    ) -> dict[str, object] | None:
+    def get_tool_overrides(self, tool_name: str) -> dict[str, object] | None:
         """Return normalized per-agent runtime overrides for one configured tool."""
         # why-lazy: config.agent is imported by config.main; the tool catalog loads hook/runtime helpers.
         from mindroom.tool_system.catalog import TOOL_METADATA, normalize_authored_tool_overrides  # noqa: PLC0415
 
-        metadata_by_name = TOOL_METADATA if tool_metadata is None else tool_metadata
         for entry in self.tools:
             if entry.name == tool_name and entry.overrides:
-                metadata = metadata_by_name.get(tool_name)
+                metadata = TOOL_METADATA.get(tool_name)
                 allowed_fields = {field.name for field in metadata.agent_override_fields or []} if metadata else set()
                 if not allowed_fields:
                     return None
                 overrides = {name: value for name, value in entry.overrides.items() if name in allowed_fields}
                 if not overrides:
                     return None
-                normalized = normalize_authored_tool_overrides(
-                    tool_name,
-                    overrides,
-                    tool_metadata=metadata_by_name,
-                )
+                normalized = normalize_authored_tool_overrides(tool_name, overrides)
                 return normalized or None
         return None
 

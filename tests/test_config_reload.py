@@ -19,7 +19,7 @@ import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig
 from mindroom.config.calls import CallsConfig
-from mindroom.config.main import Config, load_config
+from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.file_watcher import _tree_snapshot
@@ -27,12 +27,7 @@ from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.orchestration.config_updates import (
-    ConfigUpdatePlan,
-    _get_changed_agents,
-    build_config_update_plan,
-    plugin_change_paths,
-)
+from mindroom.orchestration.config_updates import ConfigUpdatePlan, _get_changed_agents, build_config_update_plan
 from mindroom.orchestration.plugin_watch import (
     _collect_plugin_root_changes,
     _drop_unconfigured_plugin_root_snapshots,
@@ -41,8 +36,7 @@ from mindroom.orchestration.plugin_watch import (
 from mindroom.orchestration.runtime import log_startup_phase_finished, log_startup_phase_started
 from mindroom.orchestrator import _MultiAgentOrchestrator, _watch_skills_task
 from mindroom.startup_errors import PermanentStartupError
-from mindroom.tool_system.plugins import PluginReloadResult, capture_plugin_runtime_snapshot
-from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
+from mindroom.tool_system.plugins import PluginReloadResult
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from tests.conftest import (
     TEST_PASSWORD,
@@ -70,122 +64,6 @@ def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
     bot.client = mock_client
     bot.event_cache = make_event_cache_mock()
     bot.event_cache_write_coordinator = make_event_cache_write_coordinator_mock()
-
-
-def test_plugin_change_paths_detects_hook_order_changes() -> None:
-    """Reordering plugins must force a reload because equal-priority hook order changes."""
-    current_config = Config(plugins=["./plugins/a", "./plugins/b"])
-    new_config = Config(plugins=["./plugins/b", "./plugins/a"])
-
-    assert plugin_change_paths(current_config, new_config) == ("./plugins/a", "./plugins/b")
-
-
-@pytest.mark.asyncio
-async def test_initial_plugin_activation_publishes_exact_loaded_tool_state(tmp_path: Path) -> None:
-    """Startup must filter a tool when real materialization diverges from validation."""
-    plugin_root = tmp_path / "plugins" / "runtime-failure"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "runtime-failure", "tools_module": "tools.py", "skills": []}),
-        encoding="utf-8",
-    )
-    import_count_path = plugin_root / "import-count.txt"
-    (plugin_root / "tools.py").write_text(
-        "if '__validation__' not in __name__:\n"
-        "    from pathlib import Path\n"
-        f"    _count_path = Path({str(import_count_path)!r})\n"
-        "    _count = int(_count_path.read_text(encoding='utf-8')) if _count_path.exists() else 0\n"
-        "    _count_path.write_text(str(_count + 1), encoding='utf-8')\n"
-        "    if _count == 0:\n"
-        "        raise ImportError('runtime-only failure')\n"
-        "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\n"
-        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
-        "class RuntimeOnlyTool(Toolkit):\n"
-        "    def __init__(self) -> None:\n"
-        "        super().__init__(name='runtime-only', tools=[])\n"
-        "@register_tool_with_metadata(\n"
-        "    name='runtime_only_tool',\n"
-        "    display_name='Runtime Only Tool',\n"
-        "    description='Fails only during real plugin materialization',\n"
-        "    category=ToolCategory.DEVELOPMENT,\n"
-        ")\n"
-        "def runtime_only_tools():\n"
-        "    return RuntimeOnlyTool\n",
-        encoding="utf-8",
-    )
-    runtime_paths = test_runtime_paths(tmp_path)
-    runtime_paths.config_path.write_text(
-        yaml.safe_dump(
-            {
-                "agents": {
-                    "assistant": {
-                        "display_name": "Assistant",
-                        "role": "test",
-                        "tools": ["runtime_only_tool"],
-                    },
-                },
-                "plugins": ["./plugins/runtime-failure"],
-            },
-            sort_keys=False,
-        ),
-        encoding="utf-8",
-    )
-
-    previous_registry = capture_tool_registry_snapshot()
-    previous_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    previous_plugin_roots = _get_plugin_skill_roots()
-    try:
-        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
-        assert config.resolve_entity("assistant").available_tools == ["runtime_only_tool", "scheduler"]
-        orchestrator = _MultiAgentOrchestrator(runtime_paths)
-
-        hook_registry = orchestrator._build_hook_registry(config)
-
-        assert hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED) == ()
-        assert config.resolve_entity("assistant").available_tools == ["scheduler"]
-        assert import_count_path.read_text(encoding="utf-8") == "1"
-
-        reloaded_config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
-        assert reloaded_config.resolve_entity("assistant").available_tools == ["runtime_only_tool", "scheduler"]
-        reloaded_config.timezone = "UTC"
-        orchestrator.config = config
-        orchestrator.hook_registry = hook_registry
-        orchestrator.running = True
-        plan = ConfigUpdatePlan(
-            new_config=reloaded_config,
-            changed_mcp_servers=set(),
-            configured_entities={ROUTER_AGENT_NAME, "assistant"},
-            entities_to_restart=set(),
-            new_entities=set(),
-            removed_entities=set(),
-            mindroom_user_changed=False,
-            matrix_room_access_changed=False,
-            matrix_space_changed=False,
-            authorization_changed=False,
-        )
-
-        with (
-            patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
-            patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
-            patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
-            patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-            patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
-            patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
-            patch.object(orchestrator, "_update_unchanged_bots", new=AsyncMock()),
-            patch.object(orchestrator, "_finalize_config_reload", new=AsyncMock()),
-        ):
-            updated = await orchestrator._apply_config_update_plan(config, plan, ())
-
-        assert updated is False
-        assert reloaded_config.resolve_entity("assistant").available_tools == ["scheduler"]
-        assert capture_plugin_runtime_snapshot(reloaded_config, runtime_paths).hook_registry is hook_registry
-        assert import_count_path.read_text(encoding="utf-8") == "1"
-    finally:
-        restore_tool_registry_snapshot(previous_registry)
-        plugin_module._PLUGIN_CACHE.clear()
-        plugin_module._PLUGIN_CACHE.update(previous_plugin_cache)
-        set_plugin_skill_roots(previous_plugin_roots)
 
 
 def test_startup_phase_logging_helpers_emit_structured_timing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1055,27 +933,11 @@ async def test_reload_plugins_now_deactivates_all_plugins_when_degraded_reload_s
     first_root = tmp_path / "plugins" / "first"
     first_root.mkdir(parents=True)
     (first_root / "mindroom.plugin.json").write_text(
-        '{"name": "first", "tools_module": "hooks.py", "hooks_module": "hooks.py", "skills": ["skills"]}',
+        '{"name": "first", "hooks_module": "hooks.py", "skills": ["skills"]}',
         encoding="utf-8",
     )
     (first_root / "hooks.py").write_text(
-        "from agno.tools import Toolkit\n"
         "from mindroom.hooks import hook\n"
-        "from mindroom.tool_system.declarations import ToolCategory\n"
-        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
-        "\n"
-        "class FirstTool(Toolkit):\n"
-        "    def __init__(self) -> None:\n"
-        "        super().__init__(name='first', tools=[])\n"
-        "\n"
-        "@register_tool_with_metadata(\n"
-        "    name='first_plugin_tool',\n"
-        "    display_name='First Plugin Tool',\n"
-        "    description='Tool removed by unrecoverable reload',\n"
-        "    category=ToolCategory.DEVELOPMENT,\n"
-        ")\n"
-        "def first_plugin_tools():\n"
-        "    return FirstTool\n"
         "\n"
         "@hook('message:received')\n"
         "async def audit(ctx):\n"
@@ -1107,19 +969,7 @@ async def test_reload_plugins_now_deactivates_all_plugins_when_degraded_reload_s
         encoding="utf-8",
     )
 
-    config = _runtime_bound_config(
-        Config(
-            agents={
-                "assistant": {
-                    "display_name": "Assistant",
-                    "role": "test",
-                    "tools": ["first_plugin_tool"],
-                },
-            },
-            plugins=["./plugins/first", "./plugins/second"],
-        ),
-        tmp_path,
-    )
+    config = _runtime_bound_config(Config(plugins=["./plugins/first", "./plugins/second"]), tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
     orchestrator.config = config
     orchestrator.running = True
@@ -1136,7 +986,6 @@ async def test_reload_plugins_now_deactivates_all_plugins_when_degraded_reload_s
             "second",
         ]
         assert _get_plugin_skill_roots() == [first_root / "skills"]
-        assert config.resolve_entity("assistant").available_tools == ["first_plugin_tool", "scheduler"]
 
         second_manifest_path.write_text(
             '{"name": "first", "hooks_module": "hooks.py", "skills": []}',
@@ -1148,7 +997,6 @@ async def test_reload_plugins_now_deactivates_all_plugins_when_degraded_reload_s
 
         assert orchestrator.hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED) == ()
         assert _get_plugin_skill_roots() == []
-        assert config.resolve_entity("assistant").available_tools == ["scheduler"]
     finally:
         plugin_module._PLUGIN_CACHE.clear()
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
@@ -1253,37 +1101,6 @@ async def test_initialize_keeps_config_unpublished_when_entity_account_preparati
         await orchestrator.initialize()
 
     assert orchestrator.config is None
-
-
-@pytest.mark.asyncio
-async def test_initialize_syncs_mcp_manager(tmp_path: Path) -> None:
-    """Primary startup should delegate MCP synchronization to its owning seam."""
-    config = _runtime_bound_config(Config(), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    router_user = AgentMatrixUser(
-        agent_name=ROUTER_AGENT_NAME,
-        user_id="@actual_router:localhost",
-        display_name="RouterAgent",
-        password=TEST_PASSWORD,
-    )
-
-    with (
-        patch("mindroom.orchestrator.load_config", return_value=config),
-        patch.object(orchestrator, "_build_hook_registry", return_value=HookRegistry.empty()),
-        patch.object(orchestrator, "_prepare_user_account", new=AsyncMock()),
-        patch.object(
-            orchestrator,
-            "_prepare_entity_accounts",
-            new=AsyncMock(return_value={ROUTER_AGENT_NAME: router_user}),
-        ),
-        patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())) as sync_mcp,
-        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
-        patch.object(orchestrator, "_configure_approval_store_transport"),
-        patch.object(orchestrator, "_create_managed_bot"),
-    ):
-        await orchestrator.initialize()
-
-    sync_mcp.assert_awaited_once_with(config)
 
 
 @pytest.mark.asyncio

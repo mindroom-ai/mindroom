@@ -29,6 +29,7 @@ from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.tool_approval import ToolCallWorkflowOrigin
+from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_execution_identity_from_runtime_context,
@@ -40,8 +41,6 @@ from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.dynamic_workflows.runner import AsyncParticipantExecutor, ParticipantExecutor
-    from mindroom.tool_system.declarations import ToolMetadata
-    from mindroom.tool_system.plugins import PluginRuntimeSnapshot
 
 # Agent-infrastructure toolkits that are built outside the tool registry and presume
 # a durable agent runtime; they can never be granted to workflow participants.
@@ -538,15 +537,6 @@ async def _aexecute_room_agent_participant(
     *,
     run_scope: str = "manual",
 ) -> object:
-    # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
-    from mindroom.agents import capture_agent_plugin_runtime, create_agent  # noqa: PLC0415
-
-    plugin_runtime_snapshot = capture_agent_plugin_runtime(context.config, context.runtime_paths)
-    context = replace(
-        context,
-        config=plugin_runtime_snapshot.runtime_config,
-        hook_registry=plugin_runtime_snapshot.hook_registry,
-    )
     agent_name = _validate_room_agent_reference_for_context(context, participant)
     participant_id = _required_participant_text(participant, "id")
     runtime_model = context.config.resolve_runtime_model(
@@ -564,13 +554,16 @@ async def _aexecute_room_agent_participant(
         target=replace(context.target, session_id=session_id),
     )
     execution_identity = build_execution_identity_from_runtime_context(participant_context)
+    # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
+    from mindroom.agents import create_agent  # noqa: PLC0415
+
     agent = create_agent(
         agent_name,
         context.config,
         context.runtime_paths,
         execution_identity=execution_identity,
         session_id=session_id,
-        plugin_runtime_snapshot=plugin_runtime_snapshot,
+        hook_registry=context.hook_registry,
         knowledge=None,
         active_model_name=active_model_name,
         include_interactive_questions=False,
@@ -656,12 +649,7 @@ async def _aexecute_ephemeral_agent_participant(
     run_scope: str,
     workflow_id: str,
 ) -> object:
-    # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
-    from mindroom.agents import capture_agent_plugin_runtime  # noqa: PLC0415
-
-    plugin_runtime_snapshot = capture_agent_plugin_runtime(context.config, context.runtime_paths)
-    context = replace(context, config=plugin_runtime_snapshot.runtime_config)
-    toolkits_by_name = _resolve_participant_toolkits(context, participant, plugin_runtime_snapshot)
+    toolkits_by_name = _resolve_participant_toolkits(context, participant)
     participant_id = _required_participant_text(participant, "id")
     model_name = _resolve_participant_model_name(
         context,
@@ -672,7 +660,7 @@ async def _aexecute_ephemeral_agent_participant(
     model = model_loading.get_model_instance(context.config, context.runtime_paths, model_name, execution_identity)
     run_config = _participant_run_config(context, toolkits_by_name)
     bridge = build_tool_hook_bridge(
-        plugin_runtime_snapshot.hook_registry,
+        context.hook_registry,
         agent_name=context.agent_name,
         config=run_config,
         runtime_paths=context.runtime_paths,
@@ -692,7 +680,6 @@ async def _aexecute_ephemeral_agent_participant(
         context,
         config=run_config,
         active_model_name=model_name,
-        hook_registry=plugin_runtime_snapshot.hook_registry,
         target=replace(
             context.target,
             session_id=_participant_session_id(context, participant_id, run_scope=run_scope),
@@ -701,22 +688,13 @@ async def _aexecute_ephemeral_agent_participant(
     return await _arun_agent(participant_context, agent, prompt)
 
 
-def _resolve_participant_toolkits(
-    context: ToolRuntimeContext,
-    participant: dict[str, object],
-    plugin_runtime_snapshot: PluginRuntimeSnapshot | None = None,
-) -> dict[str, Toolkit]:
+def _resolve_participant_toolkits(context: ToolRuntimeContext, participant: dict[str, object]) -> dict[str, Toolkit]:
     """Resolve participant tool grants to toolkit instances with the caller's tool routing."""
     tool_names = _participant_tool_names(participant)
     if not tool_names:
         return {}
-    if plugin_runtime_snapshot is None:
-        # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
-        from mindroom.agents import capture_agent_plugin_runtime  # noqa: PLC0415
-
-        plugin_runtime_snapshot = capture_agent_plugin_runtime(context.config, context.runtime_paths)
-    context = replace(context, config=plugin_runtime_snapshot.runtime_config)
-    _reject_unavailable_workflow_tools(tool_names, plugin_runtime_snapshot.tool_metadata)
+    ensure_tool_registry_loaded(context.runtime_paths, context.config)
+    _reject_unavailable_workflow_tools(tool_names)
     # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
     from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools  # noqa: PLC0415
 
@@ -727,7 +705,6 @@ def _resolve_participant_toolkits(
         context.runtime_paths,
         list(tool_names),
         tool_registry_preloaded=True,
-        tool_metadata=plugin_runtime_snapshot.tool_metadata,
     )
     entity_view = context.config.resolve_entity(context.agent_name)
     authored_overrides = {entry.name: entry.tool_config_overrides for entry in entity_view.tool_configs}
@@ -739,15 +716,10 @@ def _resolve_participant_toolkits(
             config=context.config,
             runtime_paths=context.runtime_paths,
             worker_tools=worker_tools,
-            runtime_overrides=entity_view.tool_runtime_overrides(
-                tool_name,
-                tool_metadata=plugin_runtime_snapshot.tool_metadata,
-            ),
+            runtime_overrides=entity_view.tool_runtime_overrides(tool_name),
             tool_config_overrides=authored_overrides.get(tool_name),
             execution_identity=execution_identity,
             session_id=context.session_id,
-            tool_registry=plugin_runtime_snapshot.tool_registry,
-            tool_metadata=plugin_runtime_snapshot.tool_metadata,
         )
         if toolkit is None:
             msg = f"Dynamic Workflow participant tool '{tool_name}' is not available in this runtime."
@@ -771,15 +743,12 @@ def _participant_tool_names(participant: dict[str, object]) -> list[str]:
     return tool_names
 
 
-def _reject_unavailable_workflow_tools(
-    tool_names: list[str],
-    tool_metadata: Mapping[str, ToolMetadata],
-) -> None:
+def _reject_unavailable_workflow_tools(tool_names: list[str]) -> None:
     for tool_name in tool_names:
         if tool_name in _WORKFLOW_RESTRICTED_TOOLS:
             msg = f"Dynamic Workflow participants cannot use agent-infrastructure tool '{tool_name}'."
             raise DynamicWorkflowError(msg)
-        if tool_name not in tool_metadata:
+        if tool_name not in TOOL_METADATA:
             msg = f"Dynamic Workflow participant tool '{tool_name}' is not a registered tool."
             raise DynamicWorkflowError(msg)
 
@@ -936,11 +905,8 @@ def _validate_workflow_tool_policy_for_context(context: ToolRuntimeContext, spec
     tool_names = _spec_tool_names(spec)
     if not tool_names:
         return
-    # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
-    from mindroom.agents import capture_agent_plugin_runtime  # noqa: PLC0415
-
-    plugin_runtime_snapshot = capture_agent_plugin_runtime(context.config, context.runtime_paths)
-    _reject_unavailable_workflow_tools(tool_names, plugin_runtime_snapshot.tool_metadata)
+    ensure_tool_registry_loaded(context.runtime_paths, context.config)
+    _reject_unavailable_workflow_tools(tool_names)
 
 
 def _spec_tool_names(spec: dict[str, object]) -> list[str]:

@@ -34,15 +34,13 @@ class _ProviderCacheEntry:
 
 
 _provider_cache: _ProviderCacheEntry | None = None
-_provider_cache_generation = 0
 
 
 def clear_oauth_provider_cache() -> None:
     """Drop cached OAuth provider registries after plugin runtime changes."""
-    global _provider_cache, _provider_cache_generation
+    global _provider_cache
     with _provider_cache_lock:
         _provider_cache = None
-        _provider_cache_generation += 1
 
 
 def _builtin_oauth_providers() -> tuple[OAuthProvider, ...]:
@@ -84,11 +82,12 @@ def _load_plugin_oauth_providers(
     skip_broken_plugins: bool,
 ) -> list[OAuthProvider]:
     providers: list[OAuthProvider] = []
-    plugin_bases, _skipped_plugin_sources = plugin_imports._collect_plugin_bases(
+    plugin_bases, _skipped_plugin_specs = plugin_imports._collect_plugin_bases(
         config.plugins,
         runtime_paths,
         skip_broken_plugins=skip_broken_plugins,
     )
+    plugin_imports._reject_duplicate_plugin_manifest_names(plugin_bases)
     for plugin_base, plugin_entry, _plugin_order in plugin_bases:
         if plugin_base.oauth_module_path is None:
             continue
@@ -195,7 +194,6 @@ def _load_oauth_provider_registry(
     with _provider_cache_lock:
         if _provider_cache is not None and _provider_cache.key == cache_key:
             return _provider_cache.providers
-        cache_generation = _provider_cache_generation
     plugin_providers = _load_plugin_oauth_providers(
         config,
         runtime_paths,
@@ -205,8 +203,7 @@ def _load_oauth_provider_registry(
     providers = (*_builtin_oauth_providers(), *mcp_providers, *plugin_providers)
     registry = _provider_registry(providers)
     with _provider_cache_lock:
-        if cache_generation == _provider_cache_generation:
-            _provider_cache = _ProviderCacheEntry(cache_key, registry)
+        _provider_cache = _ProviderCacheEntry(cache_key, registry)
     logger.debug("Loaded OAuth providers", providers=sorted(registry))
     return registry
 

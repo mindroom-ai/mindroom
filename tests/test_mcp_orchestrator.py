@@ -15,16 +15,10 @@ from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.external_triggers.store import ExternalTriggerTarget, TriggerDeliverySnapshot
-from mindroom.mcp import registry as mcp_registry
-from mindroom.mcp.manager import MCPServerBinding, MCPServerManager
-from mindroom.mcp.registry import sync_mcp_tool_registry
-from mindroom.mcp.toolkit import bind_mcp_server_manager
-from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog
+from mindroom.mcp.manager import MCPServerManager
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
 from mindroom.orchestration.runtime import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY
-from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -574,9 +568,7 @@ async def test_handle_mcp_catalog_change_restarts_dependent_entities(tmp_path: P
             new=AsyncMock(return_value=EntityStartResults(retryable_entities=["code"])),
         ) as mock_create_and_start,
         patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
-        patch(
-            "mindroom.orchestrator.clear_serialized_worker_validation_snapshot_cache",
-        ) as mock_clear_snapshot_cache,
+        patch("mindroom.orchestrator.clear_worker_validation_snapshot_cache") as mock_clear_snapshot_cache,
     ):
         await orchestrator._handle_mcp_catalog_change("demo")
 
@@ -587,87 +579,6 @@ async def test_handle_mcp_catalog_change_restarts_dependent_entities(tmp_path: P
     assert {args.args[0] for args in mock_cancel.await_args_list} == {"code", "dev_team"}
     mock_schedule_retry.assert_awaited_once_with("code")
     mock_clear_snapshot_cache.assert_called_once_with()
-
-
-@pytest.mark.asyncio
-async def test_sync_mcp_manager_removes_global_tool_without_agents(tmp_path: Path) -> None:
-    """Manager sync must reconcile global MCP entries even when no agent surface triggers validation."""
-    runtime_paths = _runtime_paths(tmp_path)
-    enabled_config = Config(mcp_servers={"demo": {"transport": "stdio", "command": "npx"}})
-    disabled_config = Config(mcp_servers={"demo": {"transport": "stdio", "command": "npx", "enabled": False}})
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    manager = MagicMock(spec=MCPServerManager)
-    manager.sync_servers = AsyncMock(return_value=set())
-    manager.has_server.return_value = False
-    orchestrator._mcp_manager = manager
-    registry_snapshot = capture_tool_registry_snapshot()
-    original_mcp_tool_names = mcp_registry._MCP_TOOL_NAMES.copy()
-    try:
-        sync_mcp_tool_registry(enabled_config)
-        assert "mcp_demo" in TOOL_REGISTRY
-
-        await orchestrator._sync_mcp_manager(disabled_config)
-
-        assert "mcp_demo" not in TOOL_REGISTRY
-        assert "mcp_demo" not in TOOL_METADATA
-    finally:
-        bind_mcp_server_manager(None)
-        restore_tool_registry_snapshot(registry_snapshot)
-        mcp_registry._MCP_TOOL_NAMES.clear()
-        mcp_registry._MCP_TOOL_NAMES.update(original_mcp_tool_names)
-
-
-@pytest.mark.asyncio
-async def test_catalog_change_refreshes_global_metadata_without_dependents(tmp_path: Path) -> None:
-    """A catalog callback must update MCP function metadata before returning for no dependents."""
-    runtime_paths = _runtime_paths(tmp_path)
-    config = Config(mcp_servers={"demo": {"transport": "stdio", "command": "npx"}})
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    manager = MagicMock(spec=MCPServerManager)
-    manager.has_server.return_value = True
-    manager.server_binding_is_current.return_value = True
-    manager.capture_server_binding.side_effect = lambda server_id, server_config: MCPServerBinding(
-        manager=manager,
-        server_id=server_id,
-        server_config=server_config,
-        generation=1,
-    )
-    old_catalog = MCPServerCatalog(
-        server_id="demo",
-        tool_name="mcp_demo",
-        tool_prefix="demo",
-        tools=(MCPDiscoveredTool("old", "old", None, {}, None),),
-        instructions=None,
-        catalog_hash="old",
-    )
-    new_catalog = MCPServerCatalog(
-        server_id="demo",
-        tool_name="mcp_demo",
-        tool_prefix="demo",
-        tools=(MCPDiscoveredTool("new", "new", None, {}, None),),
-        instructions=None,
-        catalog_hash="new",
-    )
-    manager.get_catalog.return_value = old_catalog
-    orchestrator._mcp_manager = manager
-    orchestrator.config = config
-    orchestrator.running = True
-    registry_snapshot = capture_tool_registry_snapshot()
-    original_mcp_tool_names = mcp_registry._MCP_TOOL_NAMES.copy()
-    try:
-        bind_mcp_server_manager(manager)
-        sync_mcp_tool_registry(config)
-        assert TOOL_METADATA["mcp_demo"].function_names == ("old",)
-
-        manager.get_catalog.return_value = new_catalog
-        await orchestrator._handle_mcp_catalog_change("demo")
-
-        assert TOOL_METADATA["mcp_demo"].function_names == ("new",)
-    finally:
-        bind_mcp_server_manager(None)
-        restore_tool_registry_snapshot(registry_snapshot)
-        mcp_registry._MCP_TOOL_NAMES.clear()
-        mcp_registry._MCP_TOOL_NAMES.update(original_mcp_tool_names)
 
 
 @pytest.mark.asyncio

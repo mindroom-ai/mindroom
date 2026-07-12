@@ -54,7 +54,6 @@ from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
 from mindroom.tool_approval import ToolCallWorkflowOrigin, _shutdown_approval_store
 from mindroom.tool_system import tool_hooks
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
-from mindroom.tool_system.plugins import publish_active_plugin_runtime
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
@@ -2837,7 +2836,6 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
     bot.event_cache = MagicMock()
     bot.hook_registry = HookRegistry.from_plugins(plugins)
     bot.orchestrator = MagicMock(knowledge_managers={}, knowledge_refresh_scheduler=None)
-    publish_active_plugin_runtime(config, bot.runtime_paths, bot.hook_registry)
 
     try:
         with patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")):

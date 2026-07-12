@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -32,10 +32,9 @@ from tests.identity_helpers import entity_ids
 from tests.test_team_media_fallback import _build_test_config, _make_test_agent, _make_test_team
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator
     from contextlib import AbstractContextManager
 
-    from agno.agent import Agent
     from agno.team import Team as AgnoTeam
 
 
@@ -325,47 +324,6 @@ def test_materialize_exact_team_members_defaults_to_no_continuation() -> None:
         )
 
     assert mock_create.call_args.kwargs["dynamic_tool_continuation"] is False
-
-
-def test_materialize_exact_team_members_share_one_plugin_runtime_snapshot() -> None:
-    """Every member in one team materialization must use the same plugin generation."""
-    config = _build_test_config()
-    fake_agent = _make_test_agent("GeneralAgent")
-    plugin_runtime_snapshot = MagicMock()
-
-    def materialize_twice(
-        requested_agent_names: list[str],
-        *,
-        materializable_agent_names: set[str] | None,
-        build_member: object,
-    ) -> ResolvedExactTeamMembers:
-        del materializable_agent_names
-        builder = cast("Callable[[str], Agent]", build_member)
-        agents = [builder("general"), builder("general")]
-        return ResolvedExactTeamMembers(
-            requested_agent_names=requested_agent_names,
-            agents=agents,
-            display_names=["GeneralAgent", "GeneralAgent"],
-            materialized_agent_names={"general"},
-            failed_agent_names=[],
-        )
-
-    with (
-        patch("mindroom.teams.capture_agent_plugin_runtime", return_value=plugin_runtime_snapshot) as capture_runtime,
-        patch("mindroom.teams.create_agent", return_value=fake_agent) as mock_create,
-        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
-        patch("mindroom.teams.materialize_exact_requested_team_members", side_effect=materialize_twice),
-    ):
-        materialize_exact_team_members(
-            ["general"],
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            execution_identity=None,
-        )
-
-    capture_runtime.assert_called_once()
-    assert mock_create.call_count == 2
-    assert all(call.kwargs["plugin_runtime_snapshot"] is plugin_runtime_snapshot for call in mock_create.call_args_list)
 
 
 def test_team_members_are_built_with_dynamic_tool_continuation() -> None:

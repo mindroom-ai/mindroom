@@ -11,10 +11,9 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_system.catalog import TOOL_METADATA, validate_authored_tool_entry_overrides
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
 
     from mindroom.config.main import Config
-    from mindroom.tool_system.declarations import ToolMetadata
 
 
 logger = get_logger(__name__)
@@ -143,10 +142,8 @@ def _sanitize_loaded_tools_with_current_initials(
 def _normalize_effective_tool_config_overrides(
     tool_name: str,
     overrides: dict[str, object],
-    *,
-    tool_metadata: Mapping[str, ToolMetadata] | None = None,
 ) -> dict[str, object]:
-    return validate_authored_tool_entry_overrides(tool_name, overrides, tool_metadata=tool_metadata)
+    return validate_authored_tool_entry_overrides(tool_name, overrides)
 
 
 def has_deferred_tools(config: Config, agent_name: str) -> bool:
@@ -279,7 +276,6 @@ def visible_tool_surface(
     loaded_tools: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
     delegation_depth: int = 0,
     enable_dynamic_tools_manager: bool | None = None,
-    tool_metadata: Mapping[str, ToolMetadata] | None = None,
 ) -> VisibleToolSurface:
     """Return the canonical provider-visible runtime tool surface for one agent/session."""
     if loaded_tools is None:
@@ -303,7 +299,6 @@ def visible_tool_surface(
             tool_config_overrides=_normalize_effective_tool_config_overrides(
                 entry.name,
                 dict(entry.tool_config_overrides),
-                tool_metadata=tool_metadata,
             ),
             defer=entry.defer,
             initial=entry.initial,
@@ -514,14 +509,12 @@ def deferred_tool_catalog_entries(
     agent_name: str,
     config: Config,
     loaded_tools: list[str],
-    tool_metadata: Mapping[str, ToolMetadata] | None = None,
 ) -> list[DeferredToolCatalogEntry]:
     """Return model-visible catalog metadata for one agent's authored deferred tools."""
-    metadata_by_name = TOOL_METADATA if tool_metadata is None else tool_metadata
     loaded = set(loaded_tools)
     entries: list[DeferredToolCatalogEntry] = []
     for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs:
-        metadata = metadata_by_name.get(entry.name)
+        metadata = TOOL_METADATA.get(entry.name)
         entries.append(
             DeferredToolCatalogEntry(
                 name=entry.name,
@@ -542,7 +535,6 @@ def resolve_dynamic_tool_selection(
     config: Config,
     session_id: str | None,
     delegation_depth: int = 0,
-    tool_metadata: Mapping[str, ToolMetadata] | None = None,
 ) -> VisibleToolSurface:
     """Return the current loaded tools and final runtime tool selection for one session."""
     return visible_tool_surface(
@@ -550,5 +542,4 @@ def resolve_dynamic_tool_selection(
         config=config,
         session_id=session_id,
         delegation_depth=delegation_depth,
-        tool_metadata=tool_metadata,
     )

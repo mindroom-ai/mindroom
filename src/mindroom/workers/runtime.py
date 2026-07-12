@@ -28,7 +28,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     "PrimaryWorkerManagerLease",
-    "clear_serialized_worker_validation_snapshot_cache",
     "clear_worker_validation_snapshot_cache",
     "get_primary_worker_manager",
     "lease_primary_worker_manager",
@@ -116,17 +115,12 @@ def _worker_validation_snapshot_cache_key(
     )
 
 
-def clear_serialized_worker_validation_snapshot_cache() -> None:
-    """Clear cached serialized worker validation snapshots."""
-    with _WORKER_VALIDATION_SNAPSHOT_CACHE_LOCK:
-        _WORKER_VALIDATION_SNAPSHOT_CACHE.clear()
-
-
 def clear_worker_validation_snapshot_cache() -> None:
-    """Clear worker snapshots and per-config resolved tool state."""
+    """Clear cached worker validation snapshots and per-config resolved tool state."""
     from mindroom.tool_system.catalog import clear_resolved_tool_state_cache  # noqa: PLC0415
 
-    clear_serialized_worker_validation_snapshot_cache()
+    with _WORKER_VALIDATION_SNAPSHOT_CACHE_LOCK:
+        _WORKER_VALIDATION_SNAPSHOT_CACHE.clear()
     clear_resolved_tool_state_cache()
 
 
