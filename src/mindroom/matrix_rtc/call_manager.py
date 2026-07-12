@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 import aiohttp
 import httpx
@@ -175,7 +176,7 @@ class CallManager:
         self._pending_keys: dict[str, dict[tuple[str, str, int], ReceivedFrameKey]] = {}
         self._observed_rooms: dict[str, nio.MatrixRoom] = {}
         self._departed_rooms: set[str] = set()
-        self._locks: dict[str, asyncio.Lock] = {}
+        self._locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._retry_tasks: dict[str, asyncio.Task[None]] = {}
         self._retry_attempts: dict[str, int] = {}
         self._logical_calls: dict[str, _LogicalCallState] = {}
@@ -195,8 +196,10 @@ class CallManager:
         if self._shutting_down:
             return
         if event.state_key == self._client.user_id and event.membership in {"leave", "ban"}:
-            self._departed_rooms.add(room.room_id)
-            await self._handle_own_room_leave(room.room_id)
+            if self._is_configured_call_room(room):
+                self._departed_rooms.add(room.room_id)
+            if self._has_tracked_call_state(room.room_id):
+                await self._handle_own_room_leave(room.room_id)
             return
         if event.state_key == self._client.user_id and event.membership == "join":
             self._departed_rooms.discard(room.room_id)
@@ -232,9 +235,13 @@ class CallManager:
         if parsed is None:
             return
         room_id, received = parsed
-        if not self._is_configured_call_room_id(room_id) or not self._is_authorized_call_member(
-            received.user_id,
-            room_id,
+        if (
+            room_id in self._departed_rooms
+            or not self._is_configured_call_room_id(room_id)
+            or not self._is_authorized_call_member(
+                received.user_id,
+                room_id,
+            )
         ):
             return
         session = self._sessions.get(room_id)
@@ -262,6 +269,9 @@ class CallManager:
         self._background_tasks.clear()
         self._retry_attempts.clear()
         self._logical_calls.clear()
+        self._observed_rooms.clear()
+        self._departed_rooms.clear()
+        self._locks.clear()
         for handle in self._expiry_handles.values():
             handle.cancel()
         self._expiry_handles.clear()
@@ -391,6 +401,21 @@ class CallManager:
         """Return whether this agent is configured to join calls in ``room_id``."""
         room = self._observed_rooms.get(room_id) or self._client.rooms.get(room_id)
         return room is not None and self._is_configured_call_room(room)
+
+    def _has_tracked_call_state(self, room_id: str) -> bool:
+        """Return whether this manager has call state to tear down for ``room_id``."""
+        return any(
+            room_id in state
+            for state in (
+                self._observed_rooms,
+                self._sessions,
+                self._pending_keys,
+                self._retry_tasks,
+                self._retry_attempts,
+                self._logical_calls,
+                self._expiry_handles,
+            )
+        )
 
     def _queue_pending_key(self, room_id: str, received: ReceivedFrameKey) -> None:
         """Retain a bounded, deduplicated key set while a session is starting."""
@@ -739,7 +764,12 @@ class CallManager:
         self._logical_calls.pop(room_id, None)
         self._clear_reconcile_retry(room_id)
 
-    def _resolve_voice_backend(self, room_id: str) -> _ResolvedVoiceBackend | None:
+    @property
+    def voice_backend_available(self) -> bool:
+        """Return whether the configured voice backend has its runtime credentials."""
+        return self._resolve_voice_backend(room_id=None) is not None
+
+    def _resolve_voice_backend(self, room_id: str | None) -> _ResolvedVoiceBackend | None:
         """Resolve backend-specific credentials without affecting call lifecycle."""
         if self._config.calls.backend == "realtime":
             api_key = get_api_key_for_provider("openai", self._runtime_paths)
@@ -807,7 +837,7 @@ class CallManager:
         service: SpeechServiceConfig,
         *,
         component: str,
-        room_id: str,
+        room_id: str | None,
     ) -> SpeechServiceOptions | None:
         """Resolve one independently credentialed cloud or local speech service."""
         base_url = normalize_speech_base_url(service.host)

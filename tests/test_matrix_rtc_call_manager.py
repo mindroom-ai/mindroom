@@ -379,6 +379,89 @@ async def test_manager_stops_call_when_agent_is_kicked_from_ephemeral_room(tmp_p
     assert manager._sessions == {}
     assert manager._logical_calls == {}
     assert ROOM_ID in manager._departed_rooms
+    assert ROOM_ID not in manager._observed_rooms
+    assert ROOM_ID not in manager._locks
+
+
+@pytest.mark.asyncio
+async def test_manager_ignores_own_departure_from_unmanaged_room(tmp_path: Path) -> None:
+    """Ordinary room churn cannot create call-manager departure or lock state."""
+    client = _client()
+    manager = _manager(client, FakeBridge(), tmp_path)
+    room = _room(room_id="!text:example.org")
+    event = nio.RoomMemberEvent.from_dict(
+        {
+            "event_id": "$leave",
+            "sender": "@alice:example.org",
+            "origin_server_ts": int(time.time() * 1000),
+            "type": "m.room.member",
+            "state_key": BOT_USER,
+            "content": {"membership": "leave"},
+        },
+    )
+    assert isinstance(event, nio.RoomMemberEvent)
+
+    await manager.on_room_membership_event(room, event)
+
+    assert manager._departed_rooms == set()
+    assert dict(manager._locks) == {}
+
+
+@pytest.mark.asyncio
+async def test_manager_does_not_retain_departed_ad_hoc_room(tmp_path: Path) -> None:
+    """Forgotten invite ownership permits teardown without retaining the room ID."""
+    client = _client()
+    config = _config()
+    config.agents["helper"].rooms = []
+    runtime_paths = test_runtime_paths(tmp_path)
+    path = invited_rooms_path(runtime_paths.storage_root, "helper")
+    save_invited_rooms(path, {ROOM_ID})
+    manager = _manager(client, FakeBridge(), tmp_path, config)
+    room = _room()
+    manager._observed_rooms[ROOM_ID] = room
+    save_invited_rooms(path, set())
+    event = nio.RoomMemberEvent.from_dict(
+        {
+            "event_id": "$leave",
+            "sender": "@alice:example.org",
+            "origin_server_ts": int(time.time() * 1000),
+            "type": "m.room.member",
+            "state_key": BOT_USER,
+            "content": {"membership": "leave"},
+        },
+    )
+    assert isinstance(event, nio.RoomMemberEvent)
+
+    await manager.on_room_membership_event(room, event)
+
+    assert manager._observed_rooms == {}
+    assert manager._departed_rooms == set()
+    assert dict(manager._locks) == {}
+
+
+@pytest.mark.asyncio
+async def test_manager_ignores_frame_keys_after_departing_configured_room(tmp_path: Path) -> None:
+    """Late to-device keys cannot repopulate state after the bot leaves."""
+    client = _client()
+    client.rooms = {ROOM_ID: _room(encrypted=True)}
+    manager = _manager(client, FakeBridge(), tmp_path)
+    event = nio.RoomMemberEvent.from_dict(
+        {
+            "event_id": "$leave",
+            "sender": "@alice:example.org",
+            "origin_server_ts": int(time.time() * 1000),
+            "type": "m.room.member",
+            "state_key": BOT_USER,
+            "content": {"membership": "leave"},
+        },
+    )
+    assert isinstance(event, nio.RoomMemberEvent)
+    await manager.on_room_membership_event(client.rooms[ROOM_ID], event)
+
+    await manager.on_to_device_event(_frame_key_event())
+
+    assert manager._pending_keys == {}
+    client.room_get_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -952,6 +1035,20 @@ def test_maybe_build_call_manager_survives_missing_livekit_package(
         tool_support=object(),
     )
     assert manager is None
+
+
+def test_voice_backend_availability_requires_runtime_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Presence readiness is false when the realtime backend cannot authenticate."""
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_manager.get_api_key_for_provider",
+        lambda _provider, _paths: None,
+    )
+    manager = _manager(_client(), FakeBridge(), tmp_path)
+
+    assert manager.voice_backend_available is False
 
 
 def test_build_call_instructions_appends_voice_guidance() -> None:

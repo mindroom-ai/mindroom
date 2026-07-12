@@ -204,6 +204,31 @@ def test_room_membership_cleanup_registers_without_call_runtime(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("backend_available", [False, True])
+async def test_presence_uses_voice_backend_availability(
+    tmp_path: Path,
+    backend_available: bool,
+) -> None:
+    """Presence advertises calls only when the constructed manager can answer them."""
+    bot = _agent_bot(tmp_path)
+    bot.client = AsyncMock()
+    bot._call_manager = MagicMock(voice_backend_available=backend_available)
+
+    with (
+        patch("mindroom.bot.build_agent_status_message", return_value="status") as build_status,
+        patch("mindroom.bot.set_presence_status", new_callable=AsyncMock) as set_presence,
+    ):
+        await bot._set_presence_with_model_info()
+
+    build_status.assert_called_once_with(
+        bot.agent_name,
+        bot.config,
+        voice_calls_available=backend_available,
+    )
+    set_presence.assert_awaited_once_with(bot.client, "status")
+
+
+@pytest.mark.asyncio
 async def test_call_membership_callback_forgets_invited_room_before_teardown(tmp_path: Path) -> None:
     """A kick closes ad-hoc admission before serialized media teardown."""
     bot = _agent_bot(tmp_path)

@@ -989,7 +989,7 @@ class AgentBot:
         status_msg = build_agent_status_message(
             self.agent_name,
             self.config,
-            voice_calls_available=self._call_manager is not None,
+            voice_calls_available=(self._call_manager is not None and self._call_manager.voice_backend_available),
         )
         await set_presence_status(self.client, status_msg)
 
