@@ -16,7 +16,6 @@ from mindroom.thread_export.models import (
     ThreadExportAccumulator,
     ThreadExportFailure,
     ThreadExportRoom,
-    ThreadExportStats,
     ThreadExportTarget,
 )
 from mindroom.thread_export.selection import trusted_sender_ids_for_export
@@ -32,16 +31,10 @@ from mindroom.thread_export.storage import (
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from pathlib import Path
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.cache import ConversationEventCache
-
-
-def default_thread_export_dir(runtime_paths: RuntimePaths) -> Path:
-    """Return the default thread export output directory."""
-    return runtime_paths.storage_root / "thread_exports"
 
 
 async def _joined_member_ids(client: nio.AsyncClient, room_id: str) -> frozenset[str]:
@@ -265,36 +258,6 @@ async def export_threads_for_targets_for_client(
         )
 
     return accumulators
-
-
-async def _export_threads_for_client(
-    *,
-    client: nio.AsyncClient,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache,
-    rooms: Sequence[ThreadExportRoom],
-    output_dir: Path | None = None,
-    max_thread_roots: int = 2000,
-    prefer_cache: bool = False,
-    required_member_user_id: str | None = None,
-) -> ThreadExportStats:
-    """Export Matrix-source thread histories to one YAML destination."""
-    target = ThreadExportTarget(
-        output_dir=output_dir or default_thread_export_dir(runtime_paths),
-        required_member_user_id=required_member_user_id,
-    )
-    accumulators = await export_threads_for_targets_for_client(
-        client=client,
-        config=config,
-        runtime_paths=runtime_paths,
-        event_cache=event_cache,
-        rooms=rooms,
-        targets=(target,),
-        max_thread_roots=max_thread_roots,
-        prefer_cache=prefer_cache,
-    )
-    return accumulators[0].stats()
 
 
 def reconcile_full_pass(accumulators: Sequence[ThreadExportAccumulator]) -> None:

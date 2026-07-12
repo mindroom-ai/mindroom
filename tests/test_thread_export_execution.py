@@ -13,7 +13,6 @@ import yaml
 
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.thread_export import ThreadExportTarget
-from mindroom.thread_export.execution import _export_threads_for_client
 from mindroom.thread_export.execution import (
     export_threads_for_targets_for_client as _export_threads_for_targets_for_client,
 )
@@ -30,7 +29,44 @@ from tests.thread_export_helpers import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
+
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+    from mindroom.matrix.cache import ConversationEventCache
+    from mindroom.thread_export import ThreadExportStats
+
+
+async def _export_threads_for_client(
+    *,
+    client: nio.AsyncClient,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    event_cache: ConversationEventCache,
+    rooms: Sequence[_ThreadExportRoom],
+    output_dir: Path,
+    max_thread_roots: int = 2000,
+    prefer_cache: bool = False,
+    required_member_user_id: str | None = None,
+) -> ThreadExportStats:
+    """Adapt the multi-target execution seam for single-target test cases."""
+    accumulators = await _export_threads_for_targets_for_client(
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths,
+        event_cache=event_cache,
+        rooms=rooms,
+        targets=(
+            ThreadExportTarget(
+                output_dir=output_dir,
+                required_member_user_id=required_member_user_id,
+            ),
+        ),
+        max_thread_roots=max_thread_roots,
+        prefer_cache=prefer_cache,
+    )
+    return accumulators[0].stats()
 
 
 @pytest.mark.asyncio

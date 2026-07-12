@@ -9,7 +9,6 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.users import login_agent_user
 from mindroom.runtime_support import build_owned_runtime_support, close_owned_runtime_support
 from mindroom.thread_export.execution import (
-    default_thread_export_dir,
     export_threads_for_targets_for_client,
     reconcile_full_pass,
     room_failure,
@@ -40,6 +39,11 @@ if TYPE_CHECKING:
 
 
 logger = get_logger(__name__)
+
+
+def _default_thread_export_dir(runtime_paths: RuntimePaths) -> Path:
+    """Return the default thread export output directory."""
+    return runtime_paths.storage_root / "thread_exports"
 
 
 def _merge_accumulator(target: ThreadExportAccumulator, update: ThreadExportAccumulator) -> None:
@@ -222,7 +226,7 @@ async def export_threads_once(
         runtime_paths=runtime_paths,
         targets=(
             ThreadExportTarget(
-                output_dir=output_dir or default_thread_export_dir(runtime_paths),
+                output_dir=output_dir or _default_thread_export_dir(runtime_paths),
                 required_member_user_id=required_member_user_id,
                 include_invited_rooms=include_invited_rooms,
             ),

@@ -271,7 +271,6 @@ _.resolve_worker_target  # plugin-facing API method (src/mindroom/tool_system/ru
 private_instance_state_root_for_requester  # plugin-facing API function (src/mindroom/tool_system/worker_routing.py)
 ThreadExportTarget  # plugin-facing API class (src/mindroom/thread_export/models.py)
 export_threads_to_targets_once  # plugin-facing API function (src/mindroom/thread_export/service.py)
-_export_threads_for_client  # focused test seam (src/mindroom/thread_export/execution.py)
 _._naive_execute_at_is_utc  # unused method (src/mindroom/scheduling.py)
 _.turn_count  # read in tests/test_matrix_rtc_transcript.py (src/mindroom/matrix_rtc/transcript.py)
 AudioInput  # type-only SDK interface for the custom MatrixRTC audio stream
