@@ -346,6 +346,17 @@ def _threads_export_command(
         "--max-thread-roots",
         help="Maximum thread roots to enumerate per room.",
     ),
+    prefer_cache: bool = typer.Option(
+        False,
+        "--prefer-cache",
+        help="Serve thread bodies from the durable event cache and only fetch from the homeserver "
+        "on miss or invalidation. Use alongside a running MindRoom that keeps the cache fresh.",
+    ),
+    invited_rooms: bool = typer.Option(
+        True,
+        "--invited-rooms/--no-invited-rooms",
+        help="Include rooms joined through authorized invites (user-created rooms).",
+    ),
 ) -> None:
     """Export Matrix threads to YAML files for grep/ripgrep search."""
     asyncio.run(
@@ -357,15 +368,18 @@ def _threads_export_command(
             watch=watch,
             interval=interval,
             max_thread_roots=max_thread_roots,
+            prefer_cache=prefer_cache,
+            include_invited_rooms=invited_rooms,
         ),
     )
 
 
 def _print_thread_export_stats(stats: ThreadExportStats) -> None:
     """Print one export-pass summary."""
+    unchanged_note = f" ({stats.threads_unchanged} unchanged)" if stats.threads_unchanged else ""
     console.print(
         f"Exported {stats.threads_exported}/{stats.threads_seen} threads "
-        f"from {stats.rooms_exported} room(s) to {stats.output_dir}",
+        f"from {stats.rooms_exported} room(s) to {stats.output_dir}{unchanged_note}",
     )
     if stats.truncated_rooms:
         console.print(f"[yellow]Warning:[/yellow] {stats.truncated_rooms} room(s) hit the thread enumeration limit")
@@ -398,6 +412,8 @@ async def _threads_export(
     watch: bool,
     interval: int,
     max_thread_roots: int,
+    prefer_cache: bool,
+    include_invited_rooms: bool,
 ) -> None:
     """Run one thread export command."""
     from mindroom.thread_export import export_threads_once  # noqa: PLC0415
@@ -419,6 +435,8 @@ async def _threads_export(
                 output_dir=output,
                 room_filter=room,
                 max_thread_roots=max_thread_roots,
+                prefer_cache=prefer_cache,
+                include_invited_rooms=include_invited_rooms,
             )
         except (OSError, RuntimeError) as exc:
             _handle_thread_export_error(exc, runtime_paths, watch=watch)
