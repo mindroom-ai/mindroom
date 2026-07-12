@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -13,7 +14,7 @@ from urllib.parse import quote
 import yaml
 
 from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver
-from mindroom.durable_write import fsync_directory
+from mindroom.durable_write import fsync_directory, write_json_file_durable
 from mindroom.entity_resolution import MissingManagedEntityAccountError
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_thread_history import (
@@ -43,6 +44,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _EXPORT_SCHEMA_VERSION = 1
+_ROOM_INDEX_FILENAME = "index.json"
+_THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
 
 
 @dataclass(frozen=True)
@@ -126,6 +129,16 @@ def _message_payload(message: ResolvedVisibleMessage) -> dict[str, object]:
     return payload
 
 
+def _latest_thread_summary(messages: list[ResolvedVisibleMessage]) -> str | None:
+    """Return the latest thread-summary notice text, when one exists."""
+    for message in reversed(messages):
+        meta = message.content.get(_THREAD_SUMMARY_CONTENT_KEY)
+        if isinstance(meta, dict):
+            summary = meta.get("summary")
+            return summary if isinstance(summary, str) and summary else message.body
+    return None
+
+
 def _thread_payload(
     *,
     room: _ThreadExportRoom,
@@ -134,6 +147,14 @@ def _thread_payload(
     exported_at: datetime,
 ) -> dict[str, object]:
     """Build one YAML document for a Matrix thread."""
+    thread_block: dict[str, object] = {
+        "id": thread_id,
+        "source": "matrix",
+    }
+    if summary := _latest_thread_summary(messages):
+        thread_block["summary"] = summary
+    thread_block["exported_at"] = exported_at.isoformat()
+    thread_block["message_count"] = len(messages)
     return {
         "version": _EXPORT_SCHEMA_VERSION,
         "room": {
@@ -142,12 +163,7 @@ def _thread_payload(
             "name": room.name,
             "alias": room.alias,
         },
-        "thread": {
-            "id": thread_id,
-            "source": "matrix",
-            "exported_at": exported_at.isoformat(),
-            "message_count": len(messages),
-        },
+        "thread": thread_block,
         "messages": [_message_payload(message) for message in messages],
     }
 
@@ -179,6 +195,76 @@ def _write_yaml_atomic(path: Path, payload: dict[str, object]) -> None:
 def _thread_export_path(output_dir: Path, room: _ThreadExportRoom, thread_id: str) -> Path:
     """Return output path for one thread export."""
     return output_dir / _safe_path_segment(room.key) / f"{_safe_path_segment(thread_id)}.yaml"
+
+
+def _thread_index_entry(thread_file: Path) -> tuple[int, dict[str, object]] | None:
+    """Return one (last-activity, entry) index pair from an exported thread file."""
+    try:
+        payload = yaml.safe_load(thread_file.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    thread = payload.get("thread")
+    messages = payload.get("messages")
+    if not isinstance(thread, dict) or not isinstance(messages, list):
+        return None
+    message_dicts = [message for message in messages if isinstance(message, dict)]
+    entry: dict[str, object] = {
+        "file": thread_file.name,
+        "thread_id": thread.get("id"),
+        "message_count": thread.get("message_count"),
+        "participants": sorted(
+            {sender for message in message_dicts if isinstance(sender := message.get("sender"), str)},
+        ),
+    }
+    summary = thread.get("summary")
+    if isinstance(summary, str):
+        entry["summary"] = summary
+    last_timestamp = 0
+    if message_dicts:
+        last_message = message_dicts[-1]
+        if isinstance(raw_timestamp := last_message.get("timestamp"), int):
+            last_timestamp = raw_timestamp
+            entry["last_timestamp"] = raw_timestamp
+        if isinstance(timestamp_iso := last_message.get("timestamp_iso"), str):
+            entry["last_timestamp_iso"] = timestamp_iso
+    return last_timestamp, entry
+
+
+def _room_index_payload(room_dir: Path, room: _ThreadExportRoom) -> dict[str, object]:
+    """Build one room index document from the exported thread files on disk."""
+    indexed = [
+        indexed_entry
+        for thread_file in sorted(room_dir.glob("*.yaml"))
+        if (indexed_entry := _thread_index_entry(thread_file)) is not None
+    ]
+    indexed.sort(key=lambda item: item[0], reverse=True)
+    entries = [entry for _, entry in indexed]
+    return {
+        "version": _EXPORT_SCHEMA_VERSION,
+        "room": {
+            "key": room.key,
+            "id": room.room_id,
+            "name": room.name,
+            "alias": room.alias,
+        },
+        "thread_count": len(entries),
+        "threads": entries,
+    }
+
+
+def _write_room_index(output_dir: Path, room: _ThreadExportRoom) -> None:
+    """Write one room's index.json when its content changed."""
+    room_dir = output_dir / _safe_path_segment(room.key)
+    if not room_dir.is_dir():
+        return
+    index_path = room_dir / _ROOM_INDEX_FILENAME
+    payload = _room_index_payload(room_dir, room)
+    text = f"{json.dumps(payload, indent=2)}\n"
+    if index_path.exists() and index_path.read_text(encoding="utf-8") == text:
+        return
+    write_json_file_durable(index_path, payload, indent=2, trailing_newline=True)
 
 
 def _payload_without_exported_at(payload: dict[str, object]) -> dict[str, object]:
@@ -349,6 +435,18 @@ async def _export_threads_for_client(
                 )
                 continue
             threads_exported += 1
+
+        try:
+            _write_room_index(resolved_output_dir, room)
+        except Exception as exc:
+            failures.append(
+                _ThreadExportFailure(
+                    room_key=room.key,
+                    room_id=room.room_id,
+                    thread_id=None,
+                    error=f"Room index write failed: {exc}",
+                ),
+            )
 
     return ThreadExportStats(
         output_dir=resolved_output_dir,

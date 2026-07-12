@@ -217,6 +217,134 @@ async def test_export_threads_prefer_cache_uses_cache_first_fetch(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_export_writes_room_index_with_summary_and_participants(tmp_path: Path) -> None:
+    """Each exported room should get an index.json mapping thread files to their metadata."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    _write_matrix_state(tmp_path)
+
+    histories = {
+        "$t1:localhost": [
+            ResolvedVisibleMessage.synthetic(
+                sender="@alice:localhost",
+                body="Root decision",
+                timestamp=1_700_000_000_000,
+                event_id="$t1:localhost",
+            ),
+            ResolvedVisibleMessage.synthetic(
+                sender="@mindroom_general:localhost",
+                body="Deploy pipeline fix",
+                timestamp=1_700_000_002_000,
+                event_id="$t1-summary:localhost",
+                thread_id="$t1:localhost",
+                content={
+                    "msgtype": "m.notice",
+                    "io.mindroom.thread_summary": {"version": 1, "summary": "Deploy pipeline fix"},
+                },
+            ),
+        ],
+        "$t2:localhost": [
+            ResolvedVisibleMessage.synthetic(
+                sender="@bob:localhost",
+                body="Newer thread",
+                timestamp=1_700_000_005_000,
+                event_id="$t2:localhost",
+            ),
+        ],
+    }
+
+    async def fetch_side_effect(*args: object, **_kwargs: object) -> list[ResolvedVisibleMessage]:
+        return histories[str(args[2])]
+
+    with (
+        patch(
+            "mindroom.thread_export.enumerate_room_thread_root_ids",
+            new=AsyncMock(return_value=(list(histories), False)),
+        ),
+        patch(
+            "mindroom.thread_export.refresh_thread_history_from_source",
+            new=AsyncMock(side_effect=fetch_side_effect),
+        ),
+    ):
+        stats = await _export_threads_for_client(
+            client=Mock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=Mock(),
+            output_dir=tmp_path / "exports",
+            rooms=_export_rooms(runtime_paths, "lobby"),
+        )
+
+    assert stats.failures == 0
+    thread_one = yaml.safe_load(
+        (tmp_path / "exports" / "lobby" / f"{quote('$t1:localhost', safe='')}.yaml").read_text(encoding="utf-8"),
+    )
+    assert thread_one["thread"]["summary"] == "Deploy pipeline fix"
+
+    index = json.loads((tmp_path / "exports" / "lobby" / "index.json").read_text(encoding="utf-8"))
+    assert index["room"]["key"] == "lobby"
+    assert index["thread_count"] == 2
+    newest, older = index["threads"]
+    assert newest["thread_id"] == "$t2:localhost"
+    assert newest["participants"] == ["@bob:localhost"]
+    assert newest["last_timestamp"] == 1_700_000_005_000
+    assert "summary" not in newest
+    assert older["thread_id"] == "$t1:localhost"
+    assert older["file"] == f"{quote('$t1:localhost', safe='')}.yaml"
+    assert older["message_count"] == 2
+    assert older["participants"] == ["@alice:localhost", "@mindroom_general:localhost"]
+    assert older["summary"] == "Deploy pipeline fix"
+
+
+@pytest.mark.asyncio
+async def test_room_index_not_rewritten_when_unchanged(tmp_path: Path) -> None:
+    """A second pass with identical content should leave index.json untouched."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    _write_matrix_state(tmp_path)
+
+    history = [
+        ResolvedVisibleMessage.synthetic(
+            sender="@alice:localhost",
+            body="Stable content",
+            timestamp=1_700_000_000_000,
+            event_id="$stable:localhost",
+        ),
+    ]
+
+    with (
+        patch(
+            "mindroom.thread_export.enumerate_room_thread_root_ids",
+            new=AsyncMock(return_value=(["$stable:localhost"], False)),
+        ),
+        patch(
+            "mindroom.thread_export.refresh_thread_history_from_source",
+            new=AsyncMock(return_value=history),
+        ),
+    ):
+        await _export_threads_for_client(
+            client=Mock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=Mock(),
+            output_dir=tmp_path / "exports",
+            rooms=_export_rooms(runtime_paths, "lobby"),
+        )
+        index_path = tmp_path / "exports" / "lobby" / "index.json"
+        first_mtime = index_path.stat().st_mtime_ns
+        await _export_threads_for_client(
+            client=Mock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=Mock(),
+            output_dir=tmp_path / "exports",
+            rooms=_export_rooms(runtime_paths, "lobby"),
+        )
+
+    assert index_path.stat().st_mtime_ns == first_mtime
+
+
+@pytest.mark.asyncio
 async def test_export_threads_skips_rewrite_when_content_unchanged(tmp_path: Path) -> None:
     """A second pass with identical thread content should leave the file untouched."""
     config = _config(tmp_path)
