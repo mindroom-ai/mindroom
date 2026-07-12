@@ -207,6 +207,7 @@ def test_build_edited_scheduled_workflow_preserves_metadata_and_strips_text() ->
     """Patch-style edits should preserve ownership/thread metadata while normalizing text."""
     existing = ScheduledWorkflow(
         schedule_type="cron",
+        is_conditional=True,
         cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
         message="original message",
         description="Original description",
@@ -227,6 +228,7 @@ def test_build_edited_scheduled_workflow_preserves_metadata_and_strips_text() ->
 
     assert updated == ScheduledWorkflow(
         schedule_type="cron",
+        is_conditional=True,
         cron_schedule=CronSchedule(minute="30", hour="8", day="*", month="*", weekday="1-5"),
         execute_at=None,
         message="updated message",
