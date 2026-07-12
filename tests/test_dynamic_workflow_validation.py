@@ -6,6 +6,7 @@ import pytest
 
 from mindroom.dynamic_workflows.validation import (
     DynamicWorkflowError,
+    collect_workflow_spec_errors,
     validate_workflow_input,
     validate_workflow_spec,
     workflow_runtime_seconds,
@@ -537,3 +538,56 @@ def test_input_ignores_undeclared_fields() -> None:
     """Undeclared input fields are ignored."""
     spec = _inputs_spec({"topic": {"type": "string"}})
     validate_workflow_input(spec, {"topic": "ok", "extra": object()})
+
+
+def test_collect_errors_returns_empty_for_valid_spec() -> None:
+    """A valid spec collects no errors."""
+    assert collect_workflow_spec_errors(_spec()) == []
+
+
+def test_collect_errors_rejects_non_mapping_spec() -> None:
+    """Non-mapping specs produce the single mapping error."""
+    assert collect_workflow_spec_errors(["not", "a", "mapping"]) == ["Workflow spec must be a mapping."]  # type: ignore[arg-type]
+
+
+def test_collect_errors_reports_all_top_level_problems_at_once() -> None:
+    """Every independently detectable top-level error is reported in one pass."""
+    errors = collect_workflow_spec_errors(
+        {
+            "steps": [],
+            "extra": 1,
+            "schema_version": 2,
+            "id": "x",
+            "name": "X",
+        },
+    )
+    assert errors == [
+        "Workflow spec contains unsupported field 'extra'.",
+        "Workflow spec contains unsupported field 'steps'.",
+        "Workflow spec field 'schema_version' must be 1.",
+        "Workflow spec field 'kind' is missing.",
+        "Workflow spec field 'participants' is missing.",
+        "Workflow spec field 'workflow' is missing.",
+    ]
+
+
+def test_collect_errors_reports_participant_and_step_errors_together() -> None:
+    """Participant and step errors surface in the same pass."""
+    errors = collect_workflow_spec_errors(
+        _spec(
+            participants=[{"id": "p", "agent": "someone"}],
+            workflow=[{"id": "s1", "participant": "ghost", "prompt": "Go."}],
+        ),
+    )
+    assert errors == [
+        "Participant at index 0 contains unsupported field 'agent'.",
+        "Workflow step at index 0 references unknown participant 'ghost'.",
+    ]
+
+
+def test_collect_errors_does_not_mutate_the_input_spec() -> None:
+    """Error collection normalizes a deep copy, leaving the input spec untouched."""
+    spec = _spec()
+    collect_workflow_spec_errors(spec)
+    assert "permissions" not in spec
+    assert "tools" not in spec["participants"][0]
