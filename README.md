@@ -137,6 +137,7 @@ Matrix E2EE support is installed by default.
 
 The menu bar app runs the local MindRoom service without keeping a terminal open.
 It bundles `uv`, uses `~/.mindroom` for config and state, and manages the `mindroom service` launchd service.
+The signed universal app supports both Apple silicon and Intel Macs.
 
 ```bash
 brew install --cask mindroom-ai/tap/mindroom
