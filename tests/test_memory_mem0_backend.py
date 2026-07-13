@@ -20,6 +20,12 @@ from mindroom.memory import (
     store_conversation_memory,
     update_agent_memory,
 )
+
+
+async def _search_memory_results(*args: object, **kwargs: object) -> list:
+    outcome = await search_agent_memories(*args, **kwargs)
+    assert outcome.degraded_reason is None
+    return outcome.results
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     _private_instance_state_root_path,
@@ -171,7 +177,7 @@ async def test_private_agent_explicit_mem0_uses_private_instance_storage(
             runtime_paths_for(config),
             execution_identity=execution_identity,
         )
-        search_results = await search_agent_memories(
+        search_results = await _search_memory_results(
             "Private note",
             "general",
             storage_path,
@@ -329,7 +335,7 @@ async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_use
                 config,
                 runtime_paths_for(config),
             )
-            alice_results = await search_agent_memories(
+            alice_results = await _search_memory_results(
                 "Alice-authored shared team",
                 "general",
                 storage_path,
@@ -339,7 +345,7 @@ async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_use
             )
 
         with tool_execution_identity(bob_identity):
-            bob_results = await search_agent_memories(
+            bob_results = await _search_memory_results(
                 "Alice-authored shared team",
                 "general",
                 storage_path,
@@ -496,7 +502,7 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
             runtime_paths_for(config),
         )
 
-        general_results = await search_agent_memories(
+        general_results = await _search_memory_results(
             "shared note",
             "general",
             storage_path,
@@ -504,7 +510,7 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
             runtime_paths_for(config),
             limit=10,
         )
-        calculator_results = await search_agent_memories(
+        calculator_results = await _search_memory_results(
             "shared note",
             "calculator",
             storage_path,
@@ -546,7 +552,7 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
             runtime_paths_for(config),
         )
 
-        general_updated = await search_agent_memories(
+        general_updated = await _search_memory_results(
             "updated team",
             "general",
             storage_path,
@@ -554,7 +560,7 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
             runtime_paths_for(config),
             limit=10,
         )
-        calculator_updated = await search_agent_memories(
+        calculator_updated = await _search_memory_results(
             "updated team",
             "calculator",
             storage_path,
@@ -573,7 +579,7 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
             runtime_paths_for(config),
         )
 
-        general_deleted = await search_agent_memories(
+        general_deleted = await _search_memory_results(
             "team",
             "general",
             storage_path,
@@ -581,7 +587,7 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
             runtime_paths_for(config),
             limit=10,
         )
-        calculator_deleted = await search_agent_memories(
+        calculator_deleted = await _search_memory_results(
             "team",
             "calculator",
             storage_path,

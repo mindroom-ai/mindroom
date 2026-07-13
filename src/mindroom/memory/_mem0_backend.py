@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, cast
 
+from mindroom.embedder_health import describe_embedder_error, get_embedder_failure, is_embedder_provider_error
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 
@@ -23,6 +24,7 @@ from ._shared import (
     MEM0_REPLICA_KEY,
     MemoryNotFoundError,
     MemoryResult,
+    MemorySearchOutcome,
     ScopedMemoryCrud,
     ScopedMemoryWriter,
     new_memory_id,
@@ -326,8 +328,13 @@ class Mem0MemoryBackend:
         *,
         limit: int,
         execution_identity: ToolExecutionIdentity | None = None,
-    ) -> list[MemoryResult]:
-        """Search mem0 memories visible to an agent."""
+    ) -> MemorySearchOutcome:
+        """Search mem0 memories visible to an agent.
+
+        Propagated embedding-provider errors classify into a degraded outcome
+        instead of raising; when Mem0 swallows one internally and returns
+        nothing, the current recorded embedder health fills the gap.
+        """
         resolved_storage_path = _primary_mem0_storage_path(
             agent_name,
             storage_path,
@@ -340,19 +347,28 @@ class Mem0MemoryBackend:
             config,
             self.create_memory,
         )
-        results = await _search_mem0_agent_scope(memory, query, agent_name, limit)
-        existing_memories = {result.get("memory", "") for result in results}
+        try:
+            results = await _search_mem0_agent_scope(memory, query, agent_name, limit)
+            existing_memories = {result.get("memory", "") for result in results}
 
-        for team_id in get_team_ids_for_agent(agent_name, config):
-            team_memories = await _search_mem0_team_scope(memory, query, team_id, limit)
-            for memory_result in team_memories:
-                if memory_result.get("memory", "") not in existing_memories:
-                    results.append(memory_result)
-                    existing_memories.add(memory_result.get("memory", ""))
-            logger.debug("Team memories found", team_id=team_id, count=len(team_memories))
+            for team_id in get_team_ids_for_agent(agent_name, config):
+                team_memories = await _search_mem0_team_scope(memory, query, team_id, limit)
+                for memory_result in team_memories:
+                    if memory_result.get("memory", "") not in existing_memories:
+                        results.append(memory_result)
+                        existing_memories.add(memory_result.get("memory", ""))
+                logger.debug("Team memories found", team_id=team_id, count=len(team_memories))
+        except Exception as exc:
+            if not is_embedder_provider_error(exc):
+                raise
+            degraded_reason = describe_embedder_error(exc)
+            logger.warning("Mem0 memory search degraded by embedder failure", agent=agent_name, error=degraded_reason)
+            return MemorySearchOutcome(results=[], degraded_reason=degraded_reason)
 
         logger.debug("Total memories found", count=len(results), agent=agent_name)
-        return results[:limit]
+        if not results and (recorded_failure := get_embedder_failure()) is not None:
+            return MemorySearchOutcome(results=[], degraded_reason=recorded_failure)
+        return MemorySearchOutcome(results=results[:limit])
 
     async def list_all(
         self,

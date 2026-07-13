@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
+from mindroom.embedder_health import is_embedder_auth_failure_detail
 from mindroom.logging_config import get_logger
 from mindroom.memory import (
     add_agent_memory,
@@ -26,9 +27,45 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.memory import MemorySearchOutcome
+    from mindroom.memory._shared import MemoryResult
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
+
+_EMBEDDER_CREDENTIAL_ADVICE = (
+    "Update the embedder credential: set memory.embedder.api_key in config, "
+    "store an 'embedder' credential, or set EMBEDDER_API_KEY."
+)
+
+
+def _memory_result_lines(results: list[MemoryResult]) -> list[str]:
+    lines = [f"Found {len(results)} memory(ies):"]
+    for i, mem in enumerate(results, 1):
+        mid = mem.get("id", "?")
+        metadata = mem.get("metadata")
+        search_mode = metadata.get("search_mode") if isinstance(metadata, dict) else None
+        mode_label = f" [{search_mode}]" if search_mode in {"keyword", "semantic"} else ""
+        lines.append(f"{i}. [id={mid}]{mode_label} {mem.get('memory', '')}")
+    return lines
+
+
+def _degraded_search_text(outcome: MemorySearchOutcome) -> str:
+    if is_embedder_auth_failure_detail(outcome.degraded_reason):
+        failure_line = f"Semantic search unavailable: {outcome.degraded_reason}."
+        advice = _EMBEDDER_CREDENTIAL_ADVICE
+    else:
+        failure_line = f"Semantic memory search unavailable: {outcome.degraded_reason}"
+        advice = None
+    if outcome.results:
+        failure_line = f"{failure_line} Showing keyword matches only."
+    lines = [failure_line]
+    if advice is not None:
+        lines.append(advice)
+    if outcome.results:
+        lines.append("")
+        lines.extend(_memory_result_lines(outcome.results))
+    return "\n".join(lines)
 
 
 class MemoryTools(Toolkit):
@@ -103,7 +140,7 @@ class MemoryTools(Toolkit):
 
         """
         try:
-            results = await search_agent_memories(
+            outcome = await search_agent_memories(
                 query,
                 self._agent_name,
                 self._storage_path,
@@ -112,17 +149,11 @@ class MemoryTools(Toolkit):
                 limit=limit,
                 execution_identity=self._execution_identity,
             )
-            if not results:
+            if outcome.degraded_reason is not None:
+                return _degraded_search_text(outcome)
+            if not outcome.results:
                 return "No relevant memories found."
-
-            lines = [f"Found {len(results)} memory(ies):"]
-            for i, mem in enumerate(results, 1):
-                mid = mem.get("id", "?")
-                metadata = mem.get("metadata")
-                search_mode = metadata.get("search_mode") if isinstance(metadata, dict) else None
-                mode_label = f" [{search_mode}]" if search_mode in {"keyword", "semantic"} else ""
-                lines.append(f"{i}. [id={mid}]{mode_label} {mem.get('memory', '')}")
-            return "\n".join(lines)
+            return "\n".join(_memory_result_lines(outcome.results))
         except Exception as e:
             logger.exception("Failed to search memories via tool", agent=self._agent_name, error=str(e))
             return f"Failed to search memories: {e}"

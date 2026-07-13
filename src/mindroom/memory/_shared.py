@@ -70,6 +70,20 @@ class ScopedMemoryCrud(ScopedMemoryWriter, Protocol):
         """Search memories for one scoped user ID."""
 
 
+@dataclass(frozen=True)
+class MemorySearchOutcome:
+    """One memory search's results plus its semantic-degradation state.
+
+    ``degraded_reason`` carries the safe classified failure detail when the
+    semantic path was unavailable (results then hold keyword fallback matches,
+    if any); it stays ``None`` for a healthy search, including a healthy empty
+    one.
+    """
+
+    results: list[MemoryResult]
+    degraded_reason: str | None = None
+
+
 class MemoryNotFoundError(ValueError):
     """Raised when a memory ID does not exist in the caller's allowed scope."""
 

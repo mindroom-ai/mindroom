@@ -406,7 +406,10 @@ depends_on = ["mindroom.config.agent"]
 
 [[modules]]
 path = "mindroom.custom_tools.memory"
-depends_on = ["mindroom.memory"]
+depends_on = [
+    "mindroom.embedder_health",
+    "mindroom.memory",
+]
 
 [[modules]]
 path = "mindroom.custom_tools.delegate"
@@ -1470,6 +1473,7 @@ depends_on = [
     "mindroom.memory._backend",
     "mindroom.memory._file_backend",
     "mindroom.memory._prompting",
+    "mindroom.memory._shared",
     "mindroom.timing",
 ]
 visibility = ["mindroom.memory", "mindroom.memory.auto_flush"]
@@ -1503,6 +1507,7 @@ visibility = ["mindroom.memory._backend"]
 path = "mindroom.memory._file_backend"
 depends_on = [
     "mindroom.constants",
+    "mindroom.embedder_health",
     "mindroom.logging_config",
     "mindroom.memory._policy",
     "mindroom.memory._shared",
@@ -1524,6 +1529,7 @@ visibility = ["mindroom.memory._file_backend"]
 [[modules]]
 path = "mindroom.memory._mem0_backend"
 depends_on = [
+    "mindroom.embedder_health",
     "mindroom.logging_config",
     "mindroom.memory._policy",
     "mindroom.memory._prompting",

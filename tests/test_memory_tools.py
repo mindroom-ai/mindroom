@@ -12,7 +12,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.memory import MemoryTools
-from mindroom.memory import search_agent_memories
+from mindroom.memory import MemorySearchOutcome, search_agent_memories
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, runtime_paths_for
@@ -135,14 +135,16 @@ class TestMemoryTools:
         )
 
         result = await tools.add_memory("Tool memory stays canonical")
-        memories = await search_agent_memories(
-            "Tool memory",
-            "general",
-            storage_path,
-            config,
-            runtime_paths_for(config),
-            limit=5,
-        )
+        memories = (
+            await search_agent_memories(
+                "Tool memory",
+                "general",
+                storage_path,
+                config,
+                runtime_paths_for(config),
+                limit=5,
+            )
+        ).results
 
         assert result == "Memorized: Tool memory stays canonical"
         assert any(memory.get("memory") == "Tool memory stays canonical" for memory in memories)
@@ -160,7 +162,7 @@ class TestMemoryTools:
         with patch(
             "mindroom.custom_tools.memory.search_agent_memories",
             new_callable=AsyncMock,
-            return_value=mock_results,
+            return_value=MemorySearchOutcome(results=mock_results),
         ) as mock_search:
             result = await tools.search_memories("preferences", limit=3)
 
@@ -207,7 +209,7 @@ class TestMemoryTools:
         with patch(
             "mindroom.custom_tools.memory.search_agent_memories",
             new_callable=AsyncMock,
-            return_value=mock_results,
+            return_value=MemorySearchOutcome(results=mock_results),
         ):
             result = await tools.search_memories("preferences")
 
@@ -220,11 +222,68 @@ class TestMemoryTools:
         with patch(
             "mindroom.custom_tools.memory.search_agent_memories",
             new_callable=AsyncMock,
-            return_value=[],
+            return_value=MemorySearchOutcome(results=[]),
         ):
             result = await tools.search_memories("nonexistent")
 
             assert result == "No relevant memories found."
+
+    @pytest.mark.asyncio
+    async def test_search_memories_auth_degraded_without_matches(self, tools: MemoryTools) -> None:
+        """A confirmed auth failure with no fallback matches reports the exact failure line plus advice."""
+        outcome = MemorySearchOutcome(results=[], degraded_reason="embedder authentication failed (HTTP 401)")
+
+        with patch(
+            "mindroom.custom_tools.memory.search_agent_memories",
+            new_callable=AsyncMock,
+            return_value=outcome,
+        ):
+            result = await tools.search_memories("anything")
+
+        lines = result.splitlines()
+        assert lines[0] == "Semantic search unavailable: embedder authentication failed (HTTP 401)."
+        assert "memory.embedder.api_key" in result
+        assert "'embedder' credential" in result
+        assert "EMBEDDER_API_KEY" in result
+
+    @pytest.mark.asyncio
+    async def test_search_memories_auth_degraded_with_keyword_matches(self, tools: MemoryTools) -> None:
+        """Keyword fallback matches keep flowing under the failure line."""
+        outcome = MemorySearchOutcome(
+            results=[{"id": "k1", "memory": "Keyword hit", "metadata": {"search_mode": "keyword"}}],
+            degraded_reason="embedder authentication failed (HTTP 401)",
+        )
+
+        with patch(
+            "mindroom.custom_tools.memory.search_agent_memories",
+            new_callable=AsyncMock,
+            return_value=outcome,
+        ):
+            result = await tools.search_memories("anything")
+
+        lines = result.splitlines()
+        assert lines[0] == (
+            "Semantic search unavailable: embedder authentication failed (HTTP 401). Showing keyword matches only."
+        )
+        assert "EMBEDDER_API_KEY" in result
+        assert "Found 1 memory(ies):" in result
+        assert "[id=k1] [keyword] Keyword hit" in result
+
+    @pytest.mark.asyncio
+    async def test_search_memories_non_auth_degraded_has_no_credential_advice(self, tools: MemoryTools) -> None:
+        """Non-credential causes surface the safe detail without credential advice."""
+        outcome = MemorySearchOutcome(results=[], degraded_reason="embedder endpoint unreachable")
+
+        with patch(
+            "mindroom.custom_tools.memory.search_agent_memories",
+            new_callable=AsyncMock,
+            return_value=outcome,
+        ):
+            result = await tools.search_memories("anything")
+
+        assert result == "Semantic memory search unavailable: embedder endpoint unreachable"
+        assert "EMBEDDER_API_KEY" not in result
+        assert "credential" not in result
 
     @pytest.mark.asyncio
     async def test_search_memories_error(self, tools: MemoryTools) -> None:

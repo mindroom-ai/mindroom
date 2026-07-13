@@ -88,7 +88,7 @@ async def search_agent_memories(
     config: Config,
     limit: int = 3,
 ):
-    return await public_search_agent_memories(
+    outcome = await public_search_agent_memories(
         query,
         agent_name,
         storage_path,
@@ -97,6 +97,8 @@ async def search_agent_memories(
         limit,
         get_tool_execution_identity(),
     )
+    assert outcome.degraded_reason is None
+    return outcome.results
 
 
 async def list_all_agent_memories(
@@ -748,10 +750,19 @@ async def test_file_backend_semantic_search_falls_back_to_keyword_on_index_error
         "mindroom.memory._file_backend.search_semantic_file_memories",
         side_effect=RuntimeError("embedder offline"),
     ):
-        results = await search_agent_memories("Keyword fallback", "general", storage_path, config, limit=5)
+        outcome = await public_search_agent_memories(
+            "Keyword fallback",
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            5,
+            get_tool_execution_identity(),
+        )
 
-    assert any(result.get("memory") == "Keyword fallback memory" for result in results)
-    assert all((result.get("metadata") or {}).get("search_mode") == "keyword" for result in results)
+    assert outcome.degraded_reason == "RuntimeError: embedder offline"
+    assert any(result.get("memory") == "Keyword fallback memory" for result in outcome.results)
+    assert all((result.get("metadata") or {}).get("search_mode") == "keyword" for result in outcome.results)
 
 
 @pytest.mark.asyncio

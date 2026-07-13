@@ -283,4 +283,4 @@ async def test_file_memory_keyword_search_runs_off_event_loop(
     await _assert_loop_heartbeats_while_pending(search_task)
 
     gate.set()
-    assert await search_task == []
+    assert (await search_task).results == []

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, ClassVar, cast
 from zoneinfo import ZoneInfo
 
 from mindroom.constants import resolve_config_relative_path
+from mindroom.embedder_health import describe_embedder_error
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 
@@ -37,6 +38,7 @@ from ._shared import (
     FileMemoryResolution,
     MemoryNotFoundError,
     MemoryResult,
+    MemorySearchOutcome,
     new_memory_id,
 )
 
@@ -861,12 +863,13 @@ class FileMemoryBackend:
         *,
         limit: int,
         execution_identity: ToolExecutionIdentity | None = None,
-    ) -> list[MemoryResult]:
+    ) -> MemorySearchOutcome:
         """Search file-backed memories visible to an agent.
 
         Keyword scans read and score every memory file in the scope, so all
         file-reading paths run in worker threads (#1260); only the semantic
-        index query stays natively async.
+        index query stays natively async. A semantic-path failure falls back
+        to keyword matches and surfaces its classified cause in the outcome.
         """
         agent_resolution = await asyncio.to_thread(
             resolve_file_memory_resolution,
@@ -889,6 +892,7 @@ class FileMemoryBackend:
                 _tag_keyword_mode(result)
             return results
 
+        degraded_reason: str | None = None
         search_config = config.resolve_entity(agent_name).memory_search
         if search_config.mode == "semantic":
             scope_user_id = agent_scope_user_id(agent_name)
@@ -909,7 +913,8 @@ class FileMemoryBackend:
                     agent=agent_name,
                 )
                 results = await asyncio.to_thread(keyword_results)
-            except Exception:
+            except Exception as exc:
+                degraded_reason = describe_embedder_error(exc)
                 logger.exception(
                     "File-memory semantic search failed; falling back to keyword search",
                     agent=agent_name,
@@ -918,7 +923,7 @@ class FileMemoryBackend:
         else:
             results = await asyncio.to_thread(keyword_results)
 
-        return await asyncio.to_thread(
+        merged = await asyncio.to_thread(
             _merge_team_scope_results,
             results,
             query=query,
@@ -929,6 +934,7 @@ class FileMemoryBackend:
             limit=limit,
             execution_identity=execution_identity,
         )
+        return MemorySearchOutcome(results=merged, degraded_reason=degraded_reason)
 
     async def list_all(
         self,

@@ -6,11 +6,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
+from openai import AuthenticationError
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.embedder_health import record_embedder_health
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory import add_agent_memory as public_add_agent_memory
 from mindroom.memory import build_memory_prompt_parts as public_build_memory_prompt_parts
@@ -56,7 +59,7 @@ async def search_agent_memories(
     config: Config,
     limit: int = 3,
 ) -> list[MemoryResult]:
-    return await public_search_agent_memories(
+    outcome = await public_search_agent_memories(
         query,
         agent_name,
         storage_path,
@@ -64,6 +67,8 @@ async def search_agent_memories(
         runtime_paths_for(config),
         limit,
     )
+    assert outcome.degraded_reason is None
+    return outcome.results
 
 
 async def list_all_agent_memories(
@@ -290,6 +295,75 @@ class TestMemoryFacade:
         with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
             results = await search_agent_memories("query", "agent", storage_path, config)
             assert results == []
+
+    @pytest.mark.asyncio
+    async def test_mem0_search_classifies_propagated_auth_error(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
+        response = httpx.Response(401, request=request, json={"error": {"message": "bad key"}})
+        mock_memory.search.side_effect = AuthenticationError("Error code: 401", response=response, body=None)
+
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
+            outcome = await public_search_agent_memories(
+                "query",
+                "agent",
+                storage_path,
+                config,
+                runtime_paths_for(config),
+            )
+
+        assert outcome.results == []
+        assert outcome.degraded_reason == "embedder authentication failed (HTTP 401)"
+
+    @pytest.mark.asyncio
+    async def test_mem0_search_consults_health_when_failure_is_swallowed(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Mem0 swallowing an embedder failure into an empty result still surfaces degradation."""
+        mock_memory.search.return_value = {"results": []}
+        record_embedder_health("embedder authentication failed (HTTP 401)")
+        try:
+            with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
+                outcome = await public_search_agent_memories(
+                    "query",
+                    "agent",
+                    storage_path,
+                    config,
+                    runtime_paths_for(config),
+                )
+        finally:
+            record_embedder_health(None)
+
+        assert outcome.results == []
+        assert outcome.degraded_reason == "embedder authentication failed (HTTP 401)"
+
+    @pytest.mark.asyncio
+    async def test_mem0_search_non_provider_error_raises(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        mock_memory.search.side_effect = RuntimeError("sqlite corrupt")
+
+        with (
+            patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory),
+            pytest.raises(RuntimeError, match="sqlite corrupt"),
+        ):
+            await public_search_agent_memories(
+                "query",
+                "agent",
+                storage_path,
+                config,
+                runtime_paths_for(config),
+            )
 
     @pytest.mark.asyncio
     async def test_get_agent_memory_allows_agent_scope(

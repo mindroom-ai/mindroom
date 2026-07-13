@@ -59,6 +59,15 @@ def is_embedder_auth_failure_detail(detail: str | None) -> bool:
     return detail in {EMBEDDER_AUTH_FAILED_DETAIL, EMBEDDER_PERMISSION_DENIED_DETAIL}
 
 
+def is_embedder_provider_error(exc: BaseException) -> bool:
+    """Return whether an exception came from the embedding provider SDK."""
+    # Deferred so slim entry points never pay the openai SDK import; when a
+    # provider call raised, the SDK is already loaded.
+    from openai import OpenAIError  # noqa: PLC0415
+
+    return isinstance(exc, OpenAIError)
+
+
 def describe_embedder_error(exc: BaseException) -> str:
     """Return a compact failure description safe for logs, metadata, and tool text.
 
