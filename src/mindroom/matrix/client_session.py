@@ -49,13 +49,6 @@ class _MindRoomAsyncClient(nio.AsyncClient):
             encrypted_content[STREAM_STATUS_KEY] = stream_status
         return encrypted_message_type, encrypted_content
 
-    def _handle_olm_events(self, response: nio.SyncResponse) -> None:
-        """Preserve an explicit zero OTK count so nio replenishes a drained pool."""
-        super()._handle_olm_events(response)
-        count = response.device_key_count.signed_curve25519
-        if self.olm is not None and count is not None:
-            self.olm.uploaded_key_count = count
-
     def _handle_decrypt_to_device(self, to_device_event: nio.ToDeviceEvent) -> nio.ToDeviceEvent | None:
         decrypted = super()._handle_decrypt_to_device(to_device_event)
         if not isinstance(to_device_event, nio.OlmEvent) or not isinstance(decrypted, nio.UnknownToDeviceEvent):
