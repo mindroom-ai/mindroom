@@ -89,6 +89,8 @@ from mindroom.tool_system.worker_routing import unsupported_shared_only_integrat
 from mindroom.workspaces import validate_workspace_template_dir
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
     from mindroom.tool_system.catalog import ToolValidationInfo
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -767,38 +769,30 @@ class Config(BaseModel):
             raise ValueError(msg)
         return self
 
-    @model_validator(mode="after")
-    def validate_reserved_knowledge_base_ids(self) -> Config:
-        """Reject top-level knowledge base IDs that collide with synthetic private IDs."""
+    @classmethod
+    def _validate_knowledge_base_ids(cls, base_ids: Collection[str]) -> None:
+        """Apply authored knowledge-base ID constraints to any config entry point."""
         reserved_ids = sorted(
-            base_id for base_id in self.knowledge_bases if base_id.startswith(self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
+            base_id for base_id in base_ids if base_id.startswith(cls.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
         )
         if reserved_ids:
             formatted = ", ".join(reserved_ids)
             msg = (
                 "knowledge_bases keys must not use the reserved private prefix "
-                f"'{self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX}'; invalid keys: {formatted}"
+                f"'{cls.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX}'; invalid keys: {formatted}"
             )
             raise ValueError(msg)
-        return self
 
-    @model_validator(mode="after")
-    def validate_knowledge_base_ids_do_not_use_line_breaks(self) -> Config:
-        """Reject knowledge base IDs that would create multi-line source-list labels."""
-        invalid_ids = sorted(base_id for base_id in self.knowledge_bases if "\n" in base_id or "\r" in base_id)
+        invalid_ids = sorted(base_id for base_id in base_ids if "\n" in base_id or "\r" in base_id)
         if invalid_ids:
             formatted = ", ".join(invalid_ids)
             msg = f"knowledge_bases keys must not contain line breaks; invalid keys: {formatted}"
             raise ValueError(msg)
-        return self
 
-    @model_validator(mode="after")
-    def validate_knowledge_base_ids_are_path_safe(self) -> Config:
-        """Reject knowledge base IDs that would create nested or overlapping alias paths."""
         invalid_ids = sorted(
             base_id
-            for base_id in self.knowledge_bases
-            if not base_id or base_id in {".", ".."} or "/" in base_id or "\\" in base_id
+            for base_id in base_ids
+            if not base_id.strip() or base_id in {".", ".."} or "/" in base_id or "\\" in base_id
         )
         if invalid_ids:
             formatted = ", ".join(invalid_ids)
@@ -807,6 +801,11 @@ class Config(BaseModel):
                 f"or dot segments; invalid keys: {formatted}"
             )
             raise ValueError(msg)
+
+    @model_validator(mode="after")
+    def validate_knowledge_base_ids(self) -> Config:
+        """Reject reserved, multiline, empty, and path-unsafe knowledge base IDs."""
+        self._validate_knowledge_base_ids(self.knowledge_bases)
         return self
 
     @model_validator(mode="after")
@@ -1083,6 +1082,7 @@ class Config(BaseModel):
         base_config: KnowledgeBaseConfig,
     ) -> Config:
         """Return an effective config with one non-authored knowledge base."""
+        self._validate_knowledge_base_ids([base_id])
         if base_id in self.knowledge_bases and base_id not in self._runtime_knowledge_base_overlays:
             msg = f"Runtime knowledge base '{base_id}' conflicts with an authored knowledge base"
             raise ValueError(msg)

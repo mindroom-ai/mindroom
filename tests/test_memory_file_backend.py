@@ -12,6 +12,7 @@ import pytest
 import mindroom.memory._semantic_file_search as semantic_file_search
 import mindroom.memory.functions as memory_functions
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.knowledge.availability import KnowledgeAvailability
@@ -274,6 +275,22 @@ def test_semantic_memory_index_is_a_runtime_config_overlay(storage_path: Path, c
     assert knowledge_config.knowledge_bases[base_id].path == str(root.resolve())
     assert knowledge_config.runtime_knowledge_base_overlay(base_id) is knowledge_config.knowledge_bases[base_id]
     assert base_id not in knowledge_config.authored_model_dump().get("knowledge_bases", {})
+
+
+@pytest.mark.parametrize(
+    "base_id",
+    ["", " ", ".", "..", "group/research", "group\\research", "foo\nbar", "foo\rbar", "__agent_private__:mind"],
+)
+def test_runtime_knowledge_base_overlay_rejects_unsafe_ids(
+    storage_path: Path,
+    config: Config,
+    base_id: str,
+) -> None:
+    """Runtime overlays must enforce the same ID constraints as authored bases."""
+    runtime_base = KnowledgeBaseConfig(path=str(storage_path / "workspace"))
+
+    with pytest.raises(ValueError, match="knowledge_bases keys"):
+        config.with_runtime_knowledge_base_overlay(base_id, runtime_base)
 
 
 @pytest.mark.asyncio
