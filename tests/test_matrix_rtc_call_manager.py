@@ -1272,6 +1272,65 @@ async def test_rejoining_device_must_send_a_new_inbound_key(
 
 
 @pytest.mark.asyncio
+async def test_rejoining_device_gets_a_fresh_inbound_key_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout from an earlier roster cannot report a newly rejoined device."""
+    timeout_s = 15.0
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session._E2EE_READY_TIMEOUT_S", timeout_s)
+    real_sleep = asyncio.sleep
+    timeout_waiters: list[asyncio.Future[None]] = []
+
+    async def controlled_sleep(delay: float) -> None:
+        if delay != timeout_s:
+            await real_sleep(delay)
+            return
+        waiter = asyncio.get_running_loop().create_future()
+        timeout_waiters.append(waiter)
+        await waiter
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", controlled_sleep)
+    notices: list[str] = []
+
+    async def on_failure(message: str) -> None:
+        notices.append(message)
+
+    alice = _member("@alice:example.org", "ALICEDEV")
+    session = _session(_client(), FakeBridge(), FakeKeyTransport(), [1_000])
+    session.deps.on_failure = on_failure
+    await session.start([alice])
+    while len(timeout_waiters) < 1:
+        await real_sleep(0)
+    assert session.on_key_received(
+        ReceivedFrameKey(
+            user_id=alice.user_id,
+            claimed_device_id=alice.device_id,
+            key_base64="QUFBQUFBQUFBQUFBQUFBQQ==",
+            key_index=2,
+            received_at_ms=1_500,
+        ),
+    )
+
+    await session.on_members_changed([])
+    await session.on_members_changed([alice])
+    while len(timeout_waiters) < 2:
+        await real_sleep(0)
+
+    timeout_waiters[0].set_result(None)
+    await real_sleep(0)
+    assert notices == []
+
+    timeout_waiters[1].set_result(None)
+    for _ in range(20):
+        if notices:
+            break
+        await real_sleep(0)
+    assert len(notices) == 1
+    assert "ALICEDEV" in notices[0]
+    await session.stop()
+
+
+@pytest.mark.asyncio
 async def test_session_reports_when_agents_encryption_key_cannot_be_delivered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

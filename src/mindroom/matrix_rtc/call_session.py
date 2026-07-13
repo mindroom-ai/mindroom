@@ -139,6 +139,7 @@ class CallSession:
     _key_distribution_wakeup_scheduled: bool = field(default=False, init=False)
     _key_retry_attempt: int = field(default=0, init=False)
     _devices_with_received_key: set[str] = field(default_factory=set, init=False)
+    _inbound_key_roster_generation: int = field(default=0, init=False)
     _undelivered_key_device_ids: frozenset[str] = field(default_factory=frozenset, init=False)
     _reported_failure_codes: set[str] = field(default_factory=set, init=False)
 
@@ -159,6 +160,8 @@ class CallSession:
     async def start(self, members: list[CallMember]) -> None:
         """Join the call: connect media, publish membership, distribute keys."""
         self._members = members
+        self._inbound_key_roster_generation += 1
+        roster_generation = self._inbound_key_roster_generation
         self._sync_bridge_participants()
         try:
             grant = await self.deps.fetch_grant()
@@ -172,7 +175,9 @@ class CallSession:
             await self._publish_membership(initial=True)
             if self.e2ee_enabled:
                 await self._distribute_keys()
-                self._spawn(self._report_missing_inbound_key_after_timeout())
+                self._spawn(
+                    self._report_missing_inbound_key_after_timeout(roster_generation),
+                )
             self._spawn(self._membership_refresh_loop())
             try:
                 await self.deps.bridge.start_agent(self.deps.agent_options)
@@ -190,6 +195,8 @@ class CallSession:
         """React to remote membership changes (key rotation/sharing)."""
         if self._stopped:
             return
+        self._inbound_key_roster_generation += 1
+        roster_generation = self._inbound_key_roster_generation
         active_device_ids = {member.device_id for member in members}
         self._devices_with_received_key.intersection_update(active_device_ids)
         self._members = members
@@ -200,7 +207,9 @@ class CallSession:
         self._key_retry_attempt = 0
         await self._distribute_keys()
         if self._missing_inbound_key_device_ids():
-            self._spawn(self._report_missing_inbound_key_after_timeout())
+            self._spawn(
+                self._report_missing_inbound_key_after_timeout(roster_generation),
+            )
 
     def on_key_received(self, received: ReceivedFrameKey) -> bool:
         """Install a current participant's frame key and report roster admission."""
@@ -361,10 +370,10 @@ class CallSession:
                 logger.warning("call_key_distribution_error", room_id=self.room_id, error=str(error))
                 self._schedule_key_distribution_retry()
 
-    async def _report_missing_inbound_key_after_timeout(self) -> None:
+    async def _report_missing_inbound_key_after_timeout(self, roster_generation: int) -> None:
         """Explain the otherwise-silent case where the agent cannot decrypt the caller."""
         await asyncio.sleep(_E2EE_READY_TIMEOUT_S)
-        if self._stopped:
+        if self._stopped or roster_generation != self._inbound_key_roster_generation:
             return
         missing_device_ids = self._missing_inbound_key_device_ids()
         if not missing_device_ids:
