@@ -861,3 +861,103 @@ async def test_export_threads_counts_only_enumerated_rooms(tmp_path: Path) -> No
     assert stats.rooms_exported == 1
     assert stats.failures == 1
     assert stats.failed_items[0].room_key == "lobby"
+
+
+@pytest.mark.asyncio
+async def test_prefer_cache_bulk_backfills_untrusted_threads(tmp_path: Path) -> None:
+    """Many untrusted threads should trigger one bulk warm-up and fail scan-proven-missing roots."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    _write_matrix_state(tmp_path)
+    thread_ids = [f"$t{index}:localhost" for index in range(11)] + ["$missing:localhost"]
+    history = [
+        ResolvedVisibleMessage.synthetic(
+            sender="@alice:localhost",
+            body="cached",
+            event_id="$t0:localhost",
+        ),
+    ]
+    bulk_stats = Mock(missing_root_ids=frozenset({"$missing:localhost"}))
+
+    with (
+        patch(
+            "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
+            new=AsyncMock(return_value=(thread_ids, False)),
+        ),
+        patch(
+            "mindroom.thread_export.execution.untrusted_cached_thread_ids",
+            new=AsyncMock(return_value=tuple(thread_ids)),
+        ),
+        patch(
+            "mindroom.thread_export.execution.bulk_refresh_room_thread_histories",
+            new=AsyncMock(return_value=bulk_stats),
+        ) as bulk_refresh,
+        patch(
+            "mindroom.thread_export.execution.fetch_thread_history",
+            new=AsyncMock(return_value=history),
+        ) as cache_fetch,
+    ):
+        stats = await _export_threads_for_client(
+            client=Mock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=Mock(),
+            rooms=_export_rooms(runtime_paths, "lobby"),
+            output_dir=tmp_path / "exports",
+            prefer_cache=True,
+        )
+
+    bulk_refresh.assert_awaited_once()
+    assert set(bulk_refresh.await_args.kwargs["thread_root_ids"]) == set(thread_ids)
+    assert cache_fetch.await_count == 11
+    assert stats.failures == 1
+    assert stats.failed_items[0].thread_id == "$missing:localhost"
+    assert "bulk room scan" in stats.failed_items[0].error
+
+
+@pytest.mark.asyncio
+async def test_prefer_cache_skips_bulk_when_cache_is_trusted(tmp_path: Path) -> None:
+    """Rooms whose threads would all serve from cache should not pay for a bulk room scan."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    _write_matrix_state(tmp_path)
+    thread_ids = ["$t0:localhost", "$t1:localhost", "$t2:localhost"]
+    history = [
+        ResolvedVisibleMessage.synthetic(
+            sender="@alice:localhost",
+            body="cached",
+            event_id="$t0:localhost",
+        ),
+    ]
+
+    with (
+        patch(
+            "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
+            new=AsyncMock(return_value=(thread_ids, False)),
+        ),
+        patch(
+            "mindroom.thread_export.execution.untrusted_cached_thread_ids",
+            new=AsyncMock(return_value=()),
+        ),
+        patch(
+            "mindroom.thread_export.execution.bulk_refresh_room_thread_histories",
+            new=AsyncMock(),
+        ) as bulk_refresh,
+        patch(
+            "mindroom.thread_export.execution.fetch_thread_history",
+            new=AsyncMock(return_value=history),
+        ) as cache_fetch,
+    ):
+        stats = await _export_threads_for_client(
+            client=Mock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=Mock(),
+            rooms=_export_rooms(runtime_paths, "lobby"),
+            output_dir=tmp_path / "exports",
+            prefer_cache=True,
+        )
+
+    bulk_refresh.assert_not_awaited()
+    assert cache_fetch.await_count == 3
+    assert stats.failures == 0

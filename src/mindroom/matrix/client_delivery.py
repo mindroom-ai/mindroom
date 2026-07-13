@@ -580,7 +580,10 @@ def build_edit_event_content(
     edit_content = build_matrix_edit_content(event_id, replacement_content)
     edit_content.update(
         {
-            "msgtype": "m.text",
+            # Keep the fallback event's notification semantics aligned with
+            # the replacement. In-progress streams use m.notice; terminal
+            # updates return to m.text.
+            "msgtype": replacement_content.get("msgtype", "m.text"),
             "body": f"* {new_text}",
             "format": "org.matrix.custom.html",
             "formatted_body": new_content.get("formatted_body", new_text),

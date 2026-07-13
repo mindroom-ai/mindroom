@@ -471,6 +471,46 @@ async def test_prepare_edit_message_upload_failure_falls_back_to_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_prepare_nonterminal_streaming_edit_double_fallback_preserves_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The last-resort inline edit must keep nonterminal notice semantics."""
+
+    def fail_rich_preview(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "mindroom.matrix.large_messages._build_nonterminal_streaming_edit_preview",
+        fail_rich_preview,
+    )
+    client = _UploadClient(RuntimeError("upload failed"))
+    text = "streaming fallback " + ("y" * 50000)
+    relates_to = {"rel_type": "m.replace", "event_id": "$abc"}
+    edit_content = {
+        "body": "* " + text,
+        "m.new_content": {
+            "body": text,
+            "msgtype": "m.notice",
+            STREAM_STATUS_KEY: STREAM_STATUS_STREAMING,
+        },
+        "m.relates_to": relates_to,
+        "msgtype": "m.notice",
+        STREAM_STATUS_KEY: STREAM_STATUS_STREAMING,
+    }
+
+    result = await prepare_large_message(client, "!room:server", edit_content)
+
+    assert result["msgtype"] == "m.notice"
+    assert result[STREAM_STATUS_KEY] == STREAM_STATUS_STREAMING
+    assert result["m.relates_to"] == relates_to
+    inner = result["m.new_content"]
+    assert inner["msgtype"] == "m.notice"
+    assert inner[STREAM_STATUS_KEY] == STREAM_STATUS_STREAMING
+    assert _SIDECAR_UPLOAD_FALLBACK_TEXT in inner["body"]
+    assert _calculate_event_size(result) <= _MATRIX_EVENT_HARD_LIMIT
+
+
+@pytest.mark.asyncio
 async def test_prepare_large_message_valid_sidecar_keeps_file_preview() -> None:
     """Successful JSON sidecar uploads should keep the existing m.file preview behavior."""
     client = _UploadClient(nio.UploadResponse("mxc://server/sidecar"))

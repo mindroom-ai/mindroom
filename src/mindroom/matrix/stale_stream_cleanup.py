@@ -762,10 +762,10 @@ async def _collect_room_history_events(
     bot_user_id: str,
     now_ms: int,
     scan_policy: _CleanupScanPolicy,
-) -> tuple[dict[str, _MessageState], list[nio.RoomMessageText]]:
-    """Return room history text events plus tracked stop reactions."""
+) -> tuple[dict[str, _MessageState], list[nio.RoomMessageText | nio.RoomMessageNotice]]:
+    """Return visible room-message events plus tracked stop reactions."""
     message_states: dict[str, _MessageState] = {}
-    message_events: list[nio.RoomMessageText] = []
+    message_events: list[nio.RoomMessageText | nio.RoomMessageNotice] = []
     from_token: str | None = None
     lookback_pages_scanned = 0
 
@@ -789,7 +789,7 @@ async def _collect_room_history_events(
 
         for event in response.chunk:
             try:
-                if isinstance(event, nio.RoomMessageText):
+                if isinstance(event, (nio.RoomMessageText, nio.RoomMessageNotice)):
                     message_events.append(event)
                 elif isinstance(event, nio.Event):
                     _record_stop_reaction(
@@ -865,7 +865,7 @@ def _merge_resolved_message_state(
 
 
 async def _scanned_message_data_by_event_id(
-    message_events: list[nio.RoomMessageText],
+    message_events: list[nio.RoomMessageText | nio.RoomMessageNotice],
 ) -> dict[str, ResolvedVisibleMessage]:
     """Return raw scanned room-history messages keyed by exact event ID."""
     event_infos = {
@@ -1203,7 +1203,7 @@ async def _fetch_message_data_for_event_id(
         return None
 
     event_info = EventInfo.from_event(event_source)
-    if isinstance(event, nio.RoomMessageText):
+    if isinstance(event, (nio.RoomMessageText, nio.RoomMessageNotice)):
         if event_info.is_edit:
             edited_body, edited_content = await extract_edit_body(
                 event_source,
