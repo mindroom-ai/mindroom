@@ -13,8 +13,3 @@ from mindroom.thread_export.models import ThreadExportRoom, ThreadExportTarget
 def target_accepts_room(target: ThreadExportTarget, room: ThreadExportRoom) -> bool:
     """Return whether one target includes the room's source category."""
     return target.include_invited_rooms or not room.invited
-
-
-def target_retains_unverified_room(target: ThreadExportTarget, room: ThreadExportRoom) -> bool:
-    """Return whether existing exports stay when source authorization cannot be verified."""
-    return target_accepts_room(target, room)

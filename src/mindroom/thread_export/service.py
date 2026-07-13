@@ -18,7 +18,7 @@ from mindroom.thread_export.models import (
     ThreadExportTarget,
     failure_for_room,
 )
-from mindroom.thread_export.policy import target_accepts_room, target_retains_unverified_room
+from mindroom.thread_export.policy import target_accepts_room
 from mindroom.thread_export.selection import (
     build_export_groups,
     export_rooms,
@@ -60,17 +60,14 @@ def _record_group_failure(
     rooms: Sequence[ThreadExportRoom],
     error: str,
 ) -> None:
-    """Record one account-level failure without leaking scoped room exports."""
+    """Record an account-level failure without retracting rooms whose authorization is unknown."""
     for room in rooms:
         for accumulator in accumulators:
             target = accumulator.target
             if not target_accepts_room(target, room):
                 remove_room_export(target.output_dir, room)
                 continue
-            if target_retains_unverified_room(target, room):
-                accumulator.retained_room_keys.add(room.key)
-            else:
-                remove_room_export(target.output_dir, room)
+            accumulator.retained_room_keys.add(room.key)
             accumulator.failed_items.append(failure_for_room(room, error))
 
 
@@ -143,8 +140,9 @@ async def export_threads_to_targets_once(
     Only use it while the runtime keeps the cache fresh (in-process or alongside a live ``mindroom run``).
 
     Each source thread is fetched once per room and fanned out to every authorized target.
-    Scoped targets retain only rooms where their required member is currently joined; failed
-    membership checks remove any prior room export before recording a failure.
+    Scoped targets export only rooms where their required member is currently joined.
+    A failed membership check leaves prior exports untouched, records a failure, and writes nothing new.
+    A successful check that proves the member absent removes the prior room export.
     """
     resolved_targets = tuple(targets)
     if not resolved_targets:

@@ -21,7 +21,7 @@ from mindroom.thread_export.models import (
     ThreadExportTarget,
     failure_for_room,
 )
-from mindroom.thread_export.policy import target_accepts_room, target_retains_unverified_room
+from mindroom.thread_export.policy import target_accepts_room
 from mindroom.thread_export.selection import trusted_sender_ids_for_export
 from mindroom.thread_export.storage import (
     remove_room_export,
@@ -154,10 +154,7 @@ async def _authorized_room_accumulators(
         # driven by a definitive "not a member" answer, never by a lookup error. A boot-time 429
         # burst on joined_members once deleted every previously exported room before this guard.
         for accumulator in scoped:
-            if target_retains_unverified_room(accumulator.target, room):
-                accumulator.retained_room_keys.add(room.key)
-            else:
-                remove_room_export(accumulator.target.output_dir, room)
+            accumulator.retained_room_keys.add(room.key)
             accumulator.failed_items.append(failure_for_room(room, str(exc)))
         return authorized
 

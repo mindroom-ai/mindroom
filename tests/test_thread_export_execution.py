@@ -770,19 +770,26 @@ async def test_member_filter_lookup_failure_keeps_exports_and_records_failure(tm
         "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
         new=AsyncMock(),
     ) as enumerate_threads:
-        stats = await _export_threads_for_client(
+        accumulators = await _export_threads_for_targets_for_client(
             client=client,
             config=config,
             runtime_paths=runtime_paths,
             event_cache=Mock(),
-            output_dir=tmp_path / "exports",
             rooms=_export_rooms(runtime_paths, None),
-            required_member_user_id="@alice:localhost",
+            targets=(
+                ThreadExportTarget(
+                    output_dir=tmp_path / "exports",
+                    required_member_user_id="@alice:localhost",
+                ),
+            ),
         )
 
+    accumulator = accumulators[0]
+    stats = accumulator.stats()
     assert stats.rooms_exported == 0
     assert stats.failures == 2
     assert all("Membership lookup failed" in failure.error for failure in stats.failed_items)
+    assert accumulator.retained_room_keys == {"lobby", "dev"}
     enumerate_threads.assert_not_awaited()
     for room_key in ("lobby", "dev"):
         assert (tmp_path / "exports" / room_key / "old.yaml").read_text(encoding="utf-8") == "secret"
