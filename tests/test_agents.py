@@ -236,6 +236,7 @@ def _patch_published_knowledge(
                 state=SimpleNamespace(last_refresh_at=None, last_published_at=None),
             ),
             availability=KnowledgeAvailability.READY,
+            state=None,
         )
 
     monkeypatch.setattr("mindroom.knowledge.utils.get_published_index", _get_published_index)

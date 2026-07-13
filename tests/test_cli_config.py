@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -46,6 +46,9 @@ from mindroom.model_defaults import (
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.thread_export import ThreadExportStats
 from tests.conftest import load_config_yaml, normalize_console_output
+
+if TYPE_CHECKING:
+    from mindroom.config.main import Config
 
 runner = CliRunner()
 
@@ -2467,6 +2470,11 @@ def _patch_homeserver_fail(monkeypatch: pytest.MonkeyPatch) -> None:
 class TestDoctor:
     """Tests for `mindroom doctor`."""
 
+    @pytest.fixture(autouse=True)
+    def _healthy_embedder_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Keep the real-embedding probe off the network; specific tests override it."""
+        monkeypatch.setattr("mindroom.cli.doctor.probe_embedder", lambda *_args: None)
+
     def test_all_checks_pass(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor reports all green when everything is fine."""
         cfg = tmp_path / "config.yaml"
@@ -2632,7 +2640,7 @@ class TestDoctor:
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
         assert "ANTHROPIC_API_KEY not set" in result.output
-        assert "3 warnings" in result.output
+        assert "2 warnings" in result.output
 
     def test_homeserver_unreachable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor reports failure when Matrix homeserver is unreachable."""
@@ -3163,7 +3171,7 @@ class TestDoctor:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Doctor validates custom OpenAI embedder hosts using /embeddings."""
+        """Doctor validates custom OpenAI embedder hosts with one probe round-trip."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
@@ -3181,18 +3189,17 @@ class TestDoctor:
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
 
-        called_urls: list[str] = []
+        probed_hosts: list[str | None] = []
 
-        def _mock_post(url: str, **_kwargs: object) -> httpx.Response:
-            called_urls.append(str(url))
-            return httpx.Response(200, json={"data": [{"embedding": [0.1, 0.2, 0.3]}]})
+        def _mock_probe(config: Config, _runtime_paths: object) -> None:
+            probed_hosts.append(config.memory.embedder.config.host)
 
-        monkeypatch.setattr("mindroom.cli.doctor.httpx.post", _mock_post)
+        monkeypatch.setattr("mindroom.cli.doctor.probe_embedder", _mock_probe)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert "embeddings endpoint reachable" in result.output
-        assert any(url.endswith("/embeddings") for url in called_urls)
+        assert "embedding round-trip succeeded" in result.output
+        assert probed_hosts == ["http://llama.local/v1"]
 
     def test_memory_openai_embedder_local_host_error_has_hint(
         self,
@@ -3216,12 +3223,10 @@ class TestDoctor:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
-
-        def _mock_post(*_args: object, **_kwargs: object) -> httpx.Response:
-            msg = "[Errno 65] No route to host"
-            raise httpx.ConnectError(msg)
-
-        monkeypatch.setattr("mindroom.cli.doctor.httpx.post", _mock_post)
+        monkeypatch.setattr(
+            "mindroom.cli.doctor.probe_embedder",
+            lambda *_args: "embedder endpoint unreachable",
+        )
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0

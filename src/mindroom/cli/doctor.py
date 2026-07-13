@@ -251,6 +251,7 @@ def _with_local_network_hint(detail: str, base_url: str | None) -> str:
         "connection refused",
         "name or service not known",
         "nodename nor servname provided",
+        EMBEDDER_UNREACHABLE_DETAIL,
     )
     if not any(signal in lowered for signal in route_signals):
         return detail

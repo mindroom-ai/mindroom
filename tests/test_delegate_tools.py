@@ -372,6 +372,7 @@ class TestDelegateKnowledge:
                 ),
                 index=None,
                 availability=KnowledgeAvailability.INITIALIZING,
+                state=None,
             )
 
         config = Config(
