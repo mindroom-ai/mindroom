@@ -349,3 +349,68 @@ async def test_reload_without_embedder_change_keeps_recorded_failure(
     )
 
     assert get_embedder_failure() == embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
+
+
+@pytest.mark.asyncio
+async def test_reload_enabling_embedder_use_probes_without_embedder_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Turning on the first semantic consumer probes even with an identical embedder block."""
+    probes: list[str] = []
+
+    async def fake_check(_config: Config, _runtime_paths: RuntimePaths, *, reason: str) -> None:
+        probes.append(reason)
+
+    monkeypatch.setattr(embedder_health, "check_embedder_health", fake_check)
+
+    handle_embedder_config_reload(
+        _config(memory="none"),
+        _config(memory={"backend": "mem0"}),
+        _runtime_paths(tmp_path),
+    )
+    await wait_for_background_tasks(timeout=5)
+
+    assert probes == ["config_reload"]
+
+
+@pytest.mark.asyncio
+async def test_reload_disabling_embedder_use_clears_health_without_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disabling the last semantic consumer clears stale health instead of pinning it forever."""
+    record_embedder_health(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
+
+    async def fake_check(_config: Config, _runtime_paths: RuntimePaths, *, reason: str) -> None:
+        msg = f"no probe expected: {reason}"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(embedder_health, "check_embedder_health", fake_check)
+
+    handle_embedder_config_reload(
+        _config(memory={"backend": "mem0"}),
+        _config(memory="none"),
+        _runtime_paths(tmp_path),
+    )
+
+    assert get_embedder_failure() is None
+
+
+@pytest.mark.asyncio
+async def test_stale_probe_result_is_discarded_after_generation_bump(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe finishing after a reload bump cannot overwrite the newer health state."""
+
+    def slow_probe(_config: Config, _runtime_paths: RuntimePaths) -> str:
+        # A reload lands while this probe is still in flight.
+        embedder_health._reset_embedder_health_generation()
+        return embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
+
+    monkeypatch.setattr(embedder_health, "probe_embedder", slow_probe)
+
+    await check_embedder_health(_config(memory={"backend": "mem0"}), _runtime_paths(tmp_path), reason="startup")
+
+    assert get_embedder_failure() is None

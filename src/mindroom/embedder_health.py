@@ -31,6 +31,9 @@ _PROBE_TEXT = "mindroom embedder health check"
 
 _failure_lock = Lock()
 _current_failure: str | None = None
+# Bumped when a reload changes the active embedder or its use, so a slow
+# probe holding a pre-reload config snapshot cannot overwrite newer health.
+_health_generation = 0
 
 
 class EmbedderRequestError(RuntimeError):
@@ -53,6 +56,29 @@ def get_embedder_failure() -> str | None:
     """Return the last recorded embedder failure, or None when healthy."""
     with _failure_lock:
         return _current_failure
+
+
+def _health_generation_snapshot() -> int:
+    with _failure_lock:
+        return _health_generation
+
+
+def _record_embedder_health_for_generation(generation: int, error: str | None) -> bool:
+    """Record a probe outcome unless the config generation moved on."""
+    global _current_failure
+    with _failure_lock:
+        if _health_generation != generation:
+            return False
+        _current_failure = error
+        return True
+
+
+def _reset_embedder_health_generation() -> None:
+    """Clear recorded health and invalidate every in-flight probe."""
+    global _current_failure, _health_generation
+    with _failure_lock:
+        _health_generation += 1
+        _current_failure = None
 
 
 def is_embedder_auth_failure_detail(detail: str | None) -> bool:
@@ -119,19 +145,20 @@ def describe_embedder_error(exc: BaseException) -> str:
 
 def embedder_in_use(config: Config) -> bool:
     """Return whether the active config can send keyed embedder requests."""
-    if config.memory.embedder.provider != "openai":
-        return False
+    return config.memory.embedder.provider == "openai" and semantic_embedder_configured(config)
+
+
+def semantic_embedder_configured(config: Config) -> bool:
+    """Return whether any memory backend or knowledge base needs the shared embedder."""
     if any(base.mode == "semantic" for base in config.knowledge_bases.values()):
         return True
     if _memory_backend_uses_embedder(config.memory.backend, config.memory.search.mode):
         return True
-    return any(
-        _memory_backend_uses_embedder(
-            config.resolve_entity(agent_name).memory_backend,
-            config.resolve_entity(agent_name).memory_search.mode,
-        )
-        for agent_name in config.agents
-    )
+    for agent_name in config.agents:
+        entity = config.resolve_entity(agent_name)
+        if _memory_backend_uses_embedder(entity.memory_backend, entity.memory_search.mode):
+            return True
+    return False
 
 
 def _memory_backend_uses_embedder(backend: str, search_mode: str) -> bool:
@@ -162,17 +189,29 @@ async def check_embedder_health(config: Config, runtime_paths: RuntimePaths, *, 
     """
     if not embedder_in_use(config):
         return
+    generation = _health_generation_snapshot()
     error = await asyncio.to_thread(probe_embedder, config, runtime_paths)
-    record_embedder_health(error)
+    if not _record_embedder_health_for_generation(generation, error):
+        logger.info("embedder_health_probe_discarded_stale", reason=reason)
+        return
     if error is not None:
         logger.error("embedder_health_check_failed", reason=reason, error=error)
 
 
 def handle_embedder_config_reload(current_config: Config, new_config: Config, runtime_paths: RuntimePaths) -> None:
-    """Reset recorded health and re-probe when a reload changed the embedder."""
-    if current_config.memory.embedder == new_config.memory.embedder:
+    """Reset recorded health and re-probe when a reload changed embedder use.
+
+    A reload that only enables or disables the last semantic consumer changes
+    what the recorded health describes even when the embedder block itself is
+    identical, so both signals reset the generation.
+    """
+    if current_config.memory.embedder == new_config.memory.embedder and embedder_in_use(
+        current_config,
+    ) == embedder_in_use(new_config):
         return
-    record_embedder_health(None)
+    _reset_embedder_health_generation()
+    if not embedder_in_use(new_config):
+        return
     create_background_task(
         check_embedder_health(new_config, runtime_paths, reason="config_reload"),
         name="embedder_reload_health_check",
