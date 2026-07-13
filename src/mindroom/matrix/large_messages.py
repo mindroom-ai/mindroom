@@ -462,9 +462,10 @@ def _build_text_fallback_content(
 ) -> dict[str, Any]:
     """Build a text preview when the full-content sidecar is unavailable."""
     preview_limit = max(0, size_limit - _LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES)
+    preview_msgtype = "m.notice" if source_content.get("msgtype") == "m.notice" else "m.text"
     while True:
         preview_content: dict[str, Any] = {
-            "msgtype": "m.text",
+            "msgtype": preview_msgtype,
             "body": _create_preview(
                 preview_text,
                 preview_limit,
