@@ -175,9 +175,11 @@ async def test_placeholder_progressive_edits_and_final_tool_trace(config: Config
 
     placeholder, first_text, tool_started, tool_completed, more_text, final = gateway.ops
     assert placeholder.content["body"] == _PROGRESS_PLACEHOLDER
+    assert placeholder.content["msgtype"] == "m.notice"
     assert placeholder.content[STREAM_STATUS_KEY] == STREAM_STATUS_PENDING
 
     assert first_text.display_text == "Hello"
+    assert first_text.content["msgtype"] == "m.notice"
     assert first_text.content[STREAM_STATUS_KEY] == STREAM_STATUS_STREAMING
 
     assert tool_started.display_text.startswith("Hello")
@@ -192,7 +194,9 @@ async def test_placeholder_progressive_edits_and_final_tool_trace(config: Config
     assert completed_trace[0]["tool_name"] == "search_web"
 
     assert more_text.display_text.endswith("Done.")
+    assert more_text.content["msgtype"] == "m.notice"
     assert final.display_text == more_text.display_text
+    assert final.content["msgtype"] == "m.text"
     assert final.content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
     assert final.content[_TOOL_TRACE_KEY]["events"] == completed_trace
 
@@ -312,7 +316,9 @@ async def test_cancellation_mid_stream_appends_cancelled_note(config: Config) ->
 
     partial, cancelled = gateway.ops
     assert partial.content["body"] == "Partial answer"
+    assert partial.content["msgtype"] == "m.notice"
     assert cancelled.display_text == f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}"
+    assert cancelled.content["msgtype"] == "m.text"
     assert cancelled.content[STREAM_STATUS_KEY] == STREAM_STATUS_CANCELLED
 
     transport_outcome = exc_info.value.transport_outcome

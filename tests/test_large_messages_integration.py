@@ -428,7 +428,8 @@ async def test_streaming_multiple_edits_with_growth(monkeypatch: pytest.MonkeyPa
     assert len(client.messages_sent) == len(sizes)
 
     nonterminal_large_edit = client.messages_sent[-2][2]
-    assert nonterminal_large_edit["m.new_content"]["msgtype"] == "m.text"
+    assert nonterminal_large_edit["msgtype"] == "m.notice"
+    assert nonterminal_large_edit["m.new_content"]["msgtype"] == "m.notice"
     assert nonterminal_large_edit["m.new_content"][STREAM_STATUS_KEY] == STREAM_STATUS_STREAMING
     assert nonterminal_large_edit["m.new_content"]["format"] == "org.matrix.custom.html"
     assert "Streaming preview truncated" in nonterminal_large_edit["m.new_content"]["formatted_body"]

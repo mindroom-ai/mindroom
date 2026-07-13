@@ -1,6 +1,6 @@
 # MindRoom Client Chart
 
-This chart deploys only the MindRoom web client (`ghcr.io/mindroom-ai/mindroom-cinny`) behind unprivileged nginx.
+This chart deploys only MindRoom Chat (`ghcr.io/mindroom-ai/mindroom-chat`) behind unprivileged nginx.
 It is for clusters that already provide a Matrix homeserver, ingress, and TLS.
 
 Use the instance chart in `cluster/k8s/instance` when you want a complete MindRoom instance with its own Matrix homeserver.

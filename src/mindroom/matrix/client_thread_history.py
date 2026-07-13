@@ -33,6 +33,7 @@ Cache-trust rules (each encodes a shipped regression fix; do not weaken them):
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -999,13 +1000,12 @@ async def _fetch_thread_history_via_room_messages_with_events(
 def _record_scanned_room_message_source(
     event: nio.Event,
     *,
-    thread_id: str,
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
     scanned_message_sources: dict[str, dict[str, Any]],
-) -> bool:
-    """Record one scanned room-message source and return whether the thread root was found."""
+) -> str | None:
+    """Record one scanned room-message source and return the recorded event ID."""
     if not _is_room_message_event(event):
-        return False
+        return None
 
     event_info = EventInfo.from_event(event.source)
     if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and record_latest_thread_edit(
@@ -1013,50 +1013,12 @@ def _record_scanned_room_message_source(
         event_info=event_info,
         latest_edits_by_original_event_id=latest_edits_by_original_event_id,
     ):
-        return False
+        return None
     if event_info.is_edit:
-        return False
+        return None
 
     scanned_message_sources[event.event_id] = _event_source_for_cache(event)
-    return event.event_id == thread_id
-
-
-async def _resolve_scanned_thread_message_sources(
-    *,
-    room_id: str,
-    thread_id: str,
-    scanned_message_sources: dict[str, dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    """Filter scanned room messages down to events that belong to one thread."""
-    event_infos = {
-        event_id: EventInfo.from_event(event_source) for event_id, event_source in scanned_message_sources.items()
-    }
-    relevant_message_sources = {
-        thread_id: scanned_message_sources[thread_id],
-    }
-    ordered_event_ids = ordered_event_ids_from_scanned_event_sources(scanned_message_sources.values())
-    resolved_thread_ids = await resolve_thread_ids_for_event_infos(
-        room_id,
-        event_infos=event_infos,
-        ordered_event_ids=ordered_event_ids,
-    )
-
-    for event_id in ordered_event_ids:
-        if event_id == thread_id or event_id in relevant_message_sources:
-            continue
-        if resolved_thread_ids.get(event_id) != thread_id:
-            continue
-        relevant_message_sources[event_id] = scanned_message_sources[event_id]
-
-    ordered_relevant_sources = sort_thread_event_sources_root_first(
-        list(relevant_message_sources.values()),
-        thread_id=thread_id,
-    )
-    return {
-        event_id: event_source
-        for event_source in ordered_relevant_sources
-        if isinstance((event_id := _event_id_from_source(event_source)), str)
-    }
+    return event.event_id
 
 
 async def fetch_thread_event_sources_via_room_messages(
@@ -1064,15 +1026,113 @@ async def fetch_thread_event_sources_via_room_messages(
     room_id: str,
     thread_id: str,
 ) -> _ThreadEventSourceScanResult:
-    """Fetch thread event sources by scanning room history pages."""
+    """Fetch one thread's event sources by scanning room history pages."""
+    scan_result = await _bulk_scan_thread_event_sources(client, room_id, thread_root_ids=(thread_id,))
+    if thread_id in scan_result.missing_root_ids:
+        msg = f"thread root {thread_id} not found during room scan"
+        logger.warning(
+            "Thread room scan ended without finding root",
+            room_id=room_id,
+            thread_id=thread_id,
+            room_scan_pages=scan_result.page_count,
+            scanned_event_count=scan_result.scanned_event_count,
+        )
+        raise ThreadRoomScanRootNotFoundError(msg)
+    return _ThreadEventSourceScanResult(
+        event_sources=scan_result.thread_event_sources[thread_id],
+        page_count=scan_result.page_count,
+        scanned_event_count=scan_result.scanned_event_count,
+    )
+
+
+@dataclass(frozen=True)
+class _BulkThreadScanResult:
+    """Per-thread event sources recovered by one backward room scan."""
+
+    thread_event_sources: dict[str, list[dict[str, Any]]]
+    missing_root_ids: frozenset[str]
+    page_count: int
+    scanned_event_count: int
+
+
+@dataclass(frozen=True)
+class BulkThreadRefreshStats:
+    """Summary for one bulk thread-cache refresh pass over a room."""
+
+    requested_threads: int
+    stored_threads: int
+    missing_root_ids: frozenset[str]
+    room_scan_pages: int
+    scanned_event_count: int
+
+
+async def _group_scanned_sources_by_thread(
+    *,
+    room_id: str,
+    thread_root_ids: Collection[str],
+    scanned_message_sources: dict[str, dict[str, Any]],
+    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Bucket one room scan's event sources per requested thread with one canonical resolution."""
+    grouped: dict[str, dict[str, dict[str, Any]]] = {
+        root_id: {root_id: scanned_message_sources[root_id]}
+        for root_id in thread_root_ids
+        if root_id in scanned_message_sources
+    }
+    if not grouped:
+        return {}
+    event_infos = {
+        event_id: EventInfo.from_event(event_source) for event_id, event_source in scanned_message_sources.items()
+    }
+    ordered_event_ids = ordered_event_ids_from_scanned_event_sources(scanned_message_sources.values())
+    resolved_thread_ids = await resolve_thread_ids_for_event_infos(
+        room_id,
+        event_infos=event_infos,
+        ordered_event_ids=ordered_event_ids,
+    )
+    for event_id in ordered_event_ids:
+        root_id = resolved_thread_ids.get(event_id)
+        if root_id is None or root_id == event_id:
+            continue
+        bucket = grouped.get(root_id)
+        if bucket is None or event_id in bucket:
+            continue
+        bucket[event_id] = scanned_message_sources[event_id]
+
+    edits_by_root: dict[str, list[dict[str, Any]]] = {}
+    for original_event_id, (edit_event, edit_thread_id) in latest_edits_by_original_event_id.items():
+        target_roots = {
+            root_id
+            for root_id in (original_event_id, resolved_thread_ids.get(original_event_id), edit_thread_id)
+            if root_id in grouped
+        }
+        for root_id in target_roots:
+            edits_by_root.setdefault(root_id, []).append(_event_source_for_cache(edit_event))
+
+    return {
+        root_id: sort_thread_event_sources_root_first(
+            [*bucket.values(), *edits_by_root.get(root_id, [])],
+            thread_id=root_id,
+        )
+        for root_id, bucket in grouped.items()
+    }
+
+
+async def _bulk_scan_thread_event_sources(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    thread_root_ids: Collection[str],
+) -> _BulkThreadScanResult:
+    """Walk room history backward once and recover every requested thread's event sources."""
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
     scanned_message_sources: dict[str, dict[str, Any]] = {}
-    from_token = None
-    root_message_found = False
+    remaining_root_ids = set(thread_root_ids)
+    from_token: str | None = None
     page_count = 0
     scanned_event_count = 0
 
-    while True:
+    while remaining_root_ids:
         response = await client.room_messages(
             room_id,
             start=from_token,
@@ -1080,59 +1140,106 @@ async def fetch_thread_event_sources_via_room_messages(
             message_filter={"types": list(_ROOM_HISTORY_MESSAGE_TYPES)},
             direction=nio.MessageDirection.back,
         )
-
         if not isinstance(response, nio.RoomMessagesResponse):
-            msg = f"room scan failed for {thread_id}: {response}"
-            logger.error("Failed to fetch thread history", room_id=room_id, thread_id=thread_id, error=str(response))
+            msg = f"bulk room scan failed for {room_id}: {response}"
+            logger.error("Failed bulk thread history scan", room_id=room_id, error=str(response))
             raise RuntimeError(msg)  # noqa: TRY004
-
         if not response.chunk:
             break
         page_count += 1
-
         for event in response.chunk:
             if not isinstance(event, nio.Event):
                 continue
             scanned_event_count += 1
-            if _record_scanned_room_message_source(
+            recorded_event_id = _record_scanned_room_message_source(
                 event,
-                thread_id=thread_id,
                 latest_edits_by_original_event_id=latest_edits_by_original_event_id,
                 scanned_message_sources=scanned_message_sources,
-            ):
-                root_message_found = True
-
-        if root_message_found or not response.end:
+            )
+            if recorded_event_id is not None:
+                remaining_root_ids.discard(recorded_event_id)
+        if not response.end:
             break
         from_token = response.end
 
-    if not root_message_found:
-        msg = f"thread root {thread_id} not found during room scan"
-        logger.warning(
-            "Thread room scan ended without finding root",
-            room_id=room_id,
-            thread_id=thread_id,
-            room_scan_pages=page_count,
-            scanned_event_count=len(scanned_message_sources),
-        )
-        raise ThreadRoomScanRootNotFoundError(msg)
-
-    relevant_message_sources = await _resolve_scanned_thread_message_sources(
+    thread_event_sources = await _group_scanned_sources_by_thread(
         room_id=room_id,
-        thread_id=thread_id,
+        thread_root_ids=thread_root_ids,
         scanned_message_sources=scanned_message_sources,
+        latest_edits_by_original_event_id=latest_edits_by_original_event_id,
     )
-    relevant_event_ids = set(relevant_message_sources)
-    event_sources = list(relevant_message_sources.values())
-    event_sources.extend(
-        _event_source_for_cache(edit_event)
-        for original_event_id, (edit_event, edit_thread_id) in latest_edits_by_original_event_id.items()
-        if original_event_id in relevant_event_ids or edit_thread_id == thread_id
-    )
-    return _ThreadEventSourceScanResult(
-        event_sources=sort_thread_event_sources_root_first(event_sources, thread_id=thread_id),
+    return _BulkThreadScanResult(
+        thread_event_sources=thread_event_sources,
+        missing_root_ids=frozenset(remaining_root_ids),
         page_count=page_count,
         scanned_event_count=scanned_event_count,
+    )
+
+
+async def bulk_refresh_room_thread_histories(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_cache: ConversationEventCache,
+    *,
+    thread_root_ids: Collection[str],
+    caller_label: str = "unknown",
+) -> BulkThreadRefreshStats:
+    """Warm the durable thread cache for many threads with one backward room scan.
+
+    The per-thread refresh walks room history until it sees that one thread's root, so bulk
+    backfills of dormant rooms degrade to O(threads x history) homeserver work. This performs one
+    O(history) walk, buckets every scanned event with the same canonical resolution rules as the
+    per-thread path, and stores each requested thread through the same guarded
+    ``replace_thread_if_not_newer`` path. Threads whose root never appeared in the scan are
+    reported in ``missing_root_ids`` and never stored.
+    """
+    fetch_started_at = time.time()
+    scan_result = await _bulk_scan_thread_event_sources(client, room_id, thread_root_ids=thread_root_ids)
+    stored_threads = 0
+    for thread_id, event_sources in scan_result.thread_event_sources.items():
+        if not _thread_history_fetch_is_cacheable(event_sources, thread_id=thread_id):
+            continue
+        if await _store_thread_history_cache(
+            event_cache,
+            room_id=room_id,
+            thread_id=thread_id,
+            event_sources=event_sources,
+            fetch_started_at=fetch_started_at,
+        ):
+            stored_threads += 1
+    stats = BulkThreadRefreshStats(
+        requested_threads=len(set(thread_root_ids)),
+        stored_threads=stored_threads,
+        missing_root_ids=scan_result.missing_root_ids,
+        room_scan_pages=scan_result.page_count,
+        scanned_event_count=scan_result.scanned_event_count,
+    )
+    logger.info(
+        "Bulk thread cache refresh completed",
+        room_id=room_id,
+        caller_label=caller_label,
+        requested_threads=stats.requested_threads,
+        stored_threads=stats.stored_threads,
+        missing_roots=len(stats.missing_root_ids),
+        room_scan_pages=stats.room_scan_pages,
+        scanned_event_count=stats.scanned_event_count,
+    )
+    return stats
+
+
+async def untrusted_cached_thread_ids(
+    event_cache: ConversationEventCache,
+    room_id: str,
+    thread_ids: Collection[str],
+) -> tuple[str, ...]:
+    """Return the given threads whose durable snapshots would not be served from cache."""
+    cache_states = await asyncio.gather(
+        *(event_cache.get_thread_cache_state(room_id, thread_id) for thread_id in thread_ids),
+    )
+    return tuple(
+        thread_id
+        for thread_id, cache_state in zip(thread_ids, cache_states, strict=True)
+        if thread_cache_rejection_reason(cache_state) is not None
     )
 
 
@@ -1290,8 +1397,10 @@ async def enumerate_room_thread_root_ids(
 
 
 __all__ = [
+    "BulkThreadRefreshStats",
     "RoomThreadsPageError",
     "ThreadRoomScanRootNotFoundError",
+    "bulk_refresh_room_thread_histories",
     "enumerate_room_thread_root_ids",
     "fetch_dispatch_thread_history",
     "fetch_dispatch_thread_snapshot",
@@ -1299,4 +1408,5 @@ __all__ = [
     "fetch_thread_history",
     "get_room_threads_page",
     "refresh_thread_history_from_source",
+    "untrusted_cached_thread_ids",
 ]
