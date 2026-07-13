@@ -27,7 +27,7 @@ from mindroom.matrix.client_delivery import build_threaded_edit_content as _buil
 from mindroom.matrix.client_thread_history import (
     _event_source_for_cache,
     _fetch_thread_history_via_room_messages_with_events,
-    _resolve_scanned_thread_message_sources,
+    _group_scanned_sources_by_thread,
     _resolve_thread_history_from_event_sources_timed,
 )
 from mindroom.matrix.conversation_cache import MatrixConversationCache
@@ -1263,9 +1263,10 @@ class TestThreadHistory:
     @pytest.mark.asyncio
     async def test_room_scan_does_not_promote_plain_reply_to_non_thread_root(self) -> None:
         """Cold room scans must not treat arbitrary room replies as threaded."""
-        resolved = await _resolve_scanned_thread_message_sources(
+        grouped = await _group_scanned_sources_by_thread(
             room_id="!room:localhost",
-            thread_id="$room_root",
+            thread_root_ids=("$room_root",),
+            latest_edits_by_original_event_id={},
             scanned_message_sources={
                 "$room_root": {
                     "event_id": "$room_root",
@@ -1286,14 +1287,15 @@ class TestThreadHistory:
             },
         )
 
-        assert list(resolved) == ["$room_root"]
+        assert [source["event_id"] for source in grouped["$room_root"]] == ["$room_root"]
 
     @pytest.mark.asyncio
     async def test_room_scan_revisits_inherited_replies_until_fixpoint(self) -> None:
         """Cold room scans should retain descendants even when they sort before their threaded parent."""
-        resolved = await _resolve_scanned_thread_message_sources(
+        grouped = await _group_scanned_sources_by_thread(
             room_id="!room:localhost",
-            thread_id="$root",
+            thread_root_ids=("$root",),
+            latest_edits_by_original_event_id={},
             scanned_message_sources={
                 "$root": {
                     "event_id": "$root",
@@ -1324,14 +1326,15 @@ class TestThreadHistory:
             },
         )
 
-        assert set(resolved) == {"$root", "$z-parent", "$a-child"}
+        assert {source["event_id"] for source in grouped["$root"]} == {"$root", "$z-parent", "$a-child"}
 
     @pytest.mark.asyncio
     async def test_room_scan_promotes_transitive_plain_reply_chain(self) -> None:
         """Cold room scans should keep a plain-reply chain inside the same thread transitively."""
-        resolved = await _resolve_scanned_thread_message_sources(
+        grouped = await _group_scanned_sources_by_thread(
             room_id="!room:localhost",
-            thread_id="$root",
+            thread_root_ids=("$root",),
+            latest_edits_by_original_event_id={},
             scanned_message_sources={
                 "$root": {
                     "event_id": "$root",
@@ -1372,7 +1375,7 @@ class TestThreadHistory:
             },
         )
 
-        assert list(resolved) == ["$root", "$thread_reply", "$plain1", "$plain2"]
+        assert [source["event_id"] for source in grouped["$root"]] == ["$root", "$thread_reply", "$plain1", "$plain2"]
 
     def test_ordered_event_ids_from_scanned_event_sources_preserves_input_order_on_timestamp_ties(self) -> None:
         """Scanned-source ordering should preserve first-seen order before falling back to event IDs."""

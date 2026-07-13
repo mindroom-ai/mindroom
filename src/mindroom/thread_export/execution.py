@@ -42,11 +42,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# The bulk scan stops as soon as every requested root has been seen, so its cost is roughly one
-# walk to the deepest requested root while the per-thread path pays one walk per thread. Two or
-# more untrusted threads therefore already favor the bulk path; a single one is a wash.
-_BULK_BACKFILL_MIN_THREADS = 2
-
 
 async def _bulk_backfill_untrusted_threads(
     client: nio.AsyncClient,
@@ -55,8 +50,10 @@ async def _bulk_backfill_untrusted_threads(
     *,
     event_cache: ConversationEventCache,
 ) -> frozenset[str]:
-    """Warm the thread cache with one room scan when many threads would miss.
+    """Warm the thread cache with one room scan covering every thread that would miss it.
 
+    The scan stops as soon as every requested root has been seen, so its cost is roughly one walk
+    to the deepest requested root while the per-thread path pays one walk per thread.
     Returns the thread roots the scan proved absent so callers can fail them without paying one
     full per-thread history walk each. Any bulk failure falls back to the per-thread path.
     """
@@ -69,7 +66,7 @@ async def _bulk_backfill_untrusted_threads(
             error=str(exc),
         )
         return frozenset()
-    if len(untrusted) < _BULK_BACKFILL_MIN_THREADS:
+    if not untrusted:
         return frozenset()
     try:
         stats = await bulk_refresh_room_thread_histories(

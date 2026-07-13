@@ -1021,118 +1021,27 @@ def _record_scanned_room_message_source(
     return event.event_id
 
 
-async def _resolve_scanned_thread_message_sources(
-    *,
-    room_id: str,
-    thread_id: str,
-    scanned_message_sources: dict[str, dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    """Filter scanned room messages down to events that belong to one thread."""
-    event_infos = {
-        event_id: EventInfo.from_event(event_source) for event_id, event_source in scanned_message_sources.items()
-    }
-    relevant_message_sources = {
-        thread_id: scanned_message_sources[thread_id],
-    }
-    ordered_event_ids = ordered_event_ids_from_scanned_event_sources(scanned_message_sources.values())
-    resolved_thread_ids = await resolve_thread_ids_for_event_infos(
-        room_id,
-        event_infos=event_infos,
-        ordered_event_ids=ordered_event_ids,
-    )
-
-    for event_id in ordered_event_ids:
-        if event_id == thread_id or event_id in relevant_message_sources:
-            continue
-        if resolved_thread_ids.get(event_id) != thread_id:
-            continue
-        relevant_message_sources[event_id] = scanned_message_sources[event_id]
-
-    ordered_relevant_sources = sort_thread_event_sources_root_first(
-        list(relevant_message_sources.values()),
-        thread_id=thread_id,
-    )
-    return {
-        event_id: event_source
-        for event_source in ordered_relevant_sources
-        if isinstance((event_id := _event_id_from_source(event_source)), str)
-    }
-
-
 async def fetch_thread_event_sources_via_room_messages(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
 ) -> _ThreadEventSourceScanResult:
-    """Fetch thread event sources by scanning room history pages."""
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
-    scanned_message_sources: dict[str, dict[str, Any]] = {}
-    from_token = None
-    root_message_found = False
-    page_count = 0
-    scanned_event_count = 0
-
-    while True:
-        response = await client.room_messages(
-            room_id,
-            start=from_token,
-            limit=100,
-            message_filter={"types": list(_ROOM_HISTORY_MESSAGE_TYPES)},
-            direction=nio.MessageDirection.back,
-        )
-
-        if not isinstance(response, nio.RoomMessagesResponse):
-            msg = f"room scan failed for {thread_id}: {response}"
-            logger.error("Failed to fetch thread history", room_id=room_id, thread_id=thread_id, error=str(response))
-            raise RuntimeError(msg)  # noqa: TRY004
-
-        if not response.chunk:
-            break
-        page_count += 1
-
-        for event in response.chunk:
-            if not isinstance(event, nio.Event):
-                continue
-            scanned_event_count += 1
-            recorded_event_id = _record_scanned_room_message_source(
-                event,
-                latest_edits_by_original_event_id=latest_edits_by_original_event_id,
-                scanned_message_sources=scanned_message_sources,
-            )
-            if recorded_event_id == thread_id:
-                root_message_found = True
-
-        if root_message_found or not response.end:
-            break
-        from_token = response.end
-
-    if not root_message_found:
+    """Fetch one thread's event sources by scanning room history pages."""
+    scan_result = await _bulk_scan_thread_event_sources(client, room_id, thread_root_ids=(thread_id,))
+    if thread_id in scan_result.missing_root_ids:
         msg = f"thread root {thread_id} not found during room scan"
         logger.warning(
             "Thread room scan ended without finding root",
             room_id=room_id,
             thread_id=thread_id,
-            room_scan_pages=page_count,
-            scanned_event_count=len(scanned_message_sources),
+            room_scan_pages=scan_result.page_count,
+            scanned_event_count=scan_result.scanned_event_count,
         )
         raise ThreadRoomScanRootNotFoundError(msg)
-
-    relevant_message_sources = await _resolve_scanned_thread_message_sources(
-        room_id=room_id,
-        thread_id=thread_id,
-        scanned_message_sources=scanned_message_sources,
-    )
-    relevant_event_ids = set(relevant_message_sources)
-    event_sources = list(relevant_message_sources.values())
-    event_sources.extend(
-        _event_source_for_cache(edit_event)
-        for original_event_id, (edit_event, edit_thread_id) in latest_edits_by_original_event_id.items()
-        if original_event_id in relevant_event_ids or edit_thread_id == thread_id
-    )
     return _ThreadEventSourceScanResult(
-        event_sources=sort_thread_event_sources_root_first(event_sources, thread_id=thread_id),
-        page_count=page_count,
-        scanned_event_count=scanned_event_count,
+        event_sources=scan_result.thread_event_sources[thread_id],
+        page_count=scan_result.page_count,
+        scanned_event_count=scan_result.scanned_event_count,
     )
 
 
