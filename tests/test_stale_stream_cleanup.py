@@ -29,19 +29,16 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.stale_stream_cleanup import (
     InterruptedThread,
+    StaleStreamCleanupActor,
+    StaleStreamRecoveryResult,
     auto_resume_interrupted_threads,
     cleanup_stale_streaming_messages,
-    resume_pending_interrupted_threads,
+    cleanup_stale_streaming_room,
+    recover_stale_streaming_messages,
 )
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_projection import latest_visible_thread_event_id_by_thread
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.pending_resume_store import (
-    PendingResumeRecord,
-    _upsert_pending_resume_record,
-    load_pending_resume_records,
-    pending_resume_ledger_path,
-)
 from mindroom.streaming import build_restart_interrupted_body
 from mindroom.tool_system.events import _TOOL_TRACE_KEY
 from tests.conftest import (
@@ -55,7 +52,7 @@ from tests.conftest import (
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator
 
 BOT_USER_ID = "@actual_test_agent:localhost"
 OTHER_BOT_USER_ID = "@actual_other:localhost"
@@ -2665,8 +2662,139 @@ async def test_auto_resume_cap_uses_timestamps_not_room_iteration_order(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_runs_cleanup_and_resume_after_sync_loops(tmp_path: Path) -> None:
-    """Startup should clean stale streams and queue resumes in post-sync maintenance."""
+async def test_recovery_scans_unique_rooms_and_resumes_before_slow_rooms_finish(tmp_path: Path) -> None:
+    """One shared room scan should serve every bot and stream completed-room resumes."""
+    config = _make_config(tmp_path)
+    config.defaults.auto_resume_after_restart = True
+    router_user_id = "@actual_router:localhost"
+    router_client = make_matrix_client_mock(user_id=router_user_id)
+    agent_client = make_matrix_client_mock(user_id=BOT_USER_ID)
+    actors = {
+        router_user_id: StaleStreamCleanupActor(router_client, MagicMock()),
+        BOT_USER_ID: StaleStreamCleanupActor(agent_client, MagicMock()),
+    }
+    slow_room_started = asyncio.Event()
+    release_slow_room = asyncio.Event()
+    resume_sent = asyncio.Event()
+    scanned_rooms: dict[str, tuple[object, set[str]]] = {}
+
+    async def joined_rooms(client: object) -> list[str]:
+        if client is router_client:
+            return ["!shared:example.com", "!fast:example.com"]
+        assert client is agent_client
+        return ["!shared:example.com", "!slow:example.com"]
+
+    async def cleanup_room(scan_client: object, **kwargs: object) -> tuple[int, list[InterruptedThread]]:
+        room_id = cast("str", kwargs["room_id"])
+        room_actors = cast("dict[str, StaleStreamCleanupActor]", kwargs["actors"])
+        scanned_rooms[room_id] = (scan_client, set(room_actors))
+        if room_id == "!slow:example.com":
+            slow_room_started.set()
+            await release_slow_room.wait()
+            return 0, []
+        if room_id == "!fast:example.com":
+            return 1, [
+                InterruptedThread(
+                    room_id=room_id,
+                    thread_id="$thread",
+                    target_event_id="$target",
+                    partial_text="Partial",
+                    agent_name="test_agent",
+                ),
+            ]
+        return 0, []
+
+    async def auto_resume(*_args: object, **_kwargs: object) -> int:
+        resume_sent.set()
+        return 1
+
+    with (
+        patch("mindroom.matrix.stale_stream_cleanup.get_joined_rooms", side_effect=joined_rooms),
+        patch("mindroom.matrix.stale_stream_cleanup.cleanup_stale_streaming_room", side_effect=cleanup_room),
+        patch("mindroom.matrix.stale_stream_cleanup.auto_resume_interrupted_threads", side_effect=auto_resume),
+    ):
+        recovery_task = asyncio.create_task(
+            recover_stale_streaming_messages(
+                actors,
+                resume_client=router_client,
+                resume_conversation_cache=actors[router_user_id].conversation_cache,
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                startup_cutoff_ms=NOW_MS,
+            ),
+        )
+        await asyncio.wait_for(slow_room_started.wait(), timeout=1.0)
+        await asyncio.wait_for(resume_sent.wait(), timeout=1.0)
+        assert not recovery_task.done()
+        release_slow_room.set()
+        result = await asyncio.wait_for(recovery_task, timeout=1.0)
+
+    assert result == StaleStreamRecoveryResult(room_count=3, cleaned_count=1, resumed_count=1)
+    assert set(scanned_rooms) == {"!shared:example.com", "!fast:example.com", "!slow:example.com"}
+    assert scanned_rooms["!shared:example.com"] == (router_client, {router_user_id, BOT_USER_ID})
+    assert scanned_rooms["!fast:example.com"] == (router_client, {router_user_id})
+    assert scanned_rooms["!slow:example.com"] == (agent_client, {BOT_USER_ID})
+
+
+@pytest.mark.asyncio
+async def test_shared_room_cleanup_routes_edits_through_each_message_owner(tmp_path: Path) -> None:
+    """A shared history scan must use each bot's own client for Matrix edits."""
+    config = _make_config(tmp_path)
+    first_client = make_matrix_client_mock(user_id=BOT_USER_ID)
+    second_client = make_matrix_client_mock(user_id=OTHER_BOT_USER_ID)
+    actors = {
+        BOT_USER_ID: StaleStreamCleanupActor(first_client, MagicMock()),
+        OTHER_BOT_USER_ID: StaleStreamCleanupActor(second_client, MagicMock()),
+    }
+    scanned_state = stale_stream_cleanup_module._ScannedRoomMessageStates(
+        message_states={
+            "$first": stale_stream_cleanup_module._MessageState(
+                latest_body="First partial",
+                latest_timestamp=NOW_MS - STALE_AGE_MS,
+                latest_event_id="$first",
+                stream_status="streaming",
+                bot_user_id=BOT_USER_ID,
+            ),
+            "$second": stale_stream_cleanup_module._MessageState(
+                latest_body="Second partial",
+                latest_timestamp=NOW_MS - STALE_AGE_MS + 1,
+                latest_event_id="$second",
+                stream_status="streaming",
+                bot_user_id=OTHER_BOT_USER_ID,
+            ),
+        },
+        auto_resume_target_event_ids=set(),
+    )
+
+    with (
+        patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=NOW_MS / 1000),
+        patch(
+            "mindroom.matrix.stale_stream_cleanup._scan_room_message_states",
+            new=AsyncMock(return_value=scanned_state),
+        ),
+        patch(
+            "mindroom.matrix.stale_stream_cleanup._cleanup_candidate_message",
+            new=AsyncMock(return_value=(True, None)),
+        ) as cleanup_candidate,
+    ):
+        cleaned_count, interrupted = await cleanup_stale_streaming_room(
+            first_client,
+            room_id=ROOM_ID,
+            actors=actors,
+            bot_user_ids=set(actors),
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            startup_cutoff_ms=NOW_MS,
+        )
+
+    assert cleaned_count == 2
+    assert interrupted == []
+    assert [call.args[0] for call in cleanup_candidate.await_args_list] == [first_client, second_client]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_runs_recovery_before_room_setup_after_sync_loops(tmp_path: Path) -> None:
+    """Startup should recover stale streams immediately after starting sync loops."""
     config = _make_config(tmp_path)
     config.defaults.auto_resume_after_restart = True
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
@@ -2682,7 +2810,7 @@ async def test_orchestrator_runs_cleanup_and_resume_after_sync_loops(tmp_path: P
     orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
 
     call_order: list[str] = []
-    resume_finished = asyncio.Event()
+    recovery_finished = asyncio.Event()
 
     async def _wait_for_homeserver(*_args: object, **_kwargs: object) -> None:
         call_order.append("wait")
@@ -2690,22 +2818,10 @@ async def test_orchestrator_runs_cleanup_and_resume_after_sync_loops(tmp_path: P
     async def _setup_rooms(_: list[object]) -> None:
         call_order.append("setup")
 
-    async def _cleanup(_: list[object], __: Config, startup_cutoff_ms: int | None = None) -> list[InterruptedThread]:
-        assert startup_cutoff_ms is not None
-        call_order.append("cleanup")
-        return [
-            InterruptedThread(
-                room_id=ROOM_ID,
-                thread_id="$thread-root",
-                target_event_id="$target",
-                partial_text="Half finished",
-                agent_name="test_agent",
-            ),
-        ]
-
-    async def _resume(_: list[InterruptedThread], __: Config) -> None:
-        call_order.append("resume")
-        resume_finished.set()
+    async def _recover(_: list[object], __: Config, startup_cutoff_ms: int) -> None:
+        assert startup_cutoff_ms > 0
+        call_order.append("recover")
+        recovery_finished.set()
 
     ready = asyncio.Event()
 
@@ -2718,8 +2834,7 @@ async def test_orchestrator_runs_cleanup_and_resume_after_sync_loops(tmp_path: P
     with (
         patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
         patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
-        patch.object(orchestrator, "_cleanup_stale_streams_after_restart", side_effect=_cleanup),
-        patch.object(orchestrator, "_auto_resume_after_restart", side_effect=_resume),
+        patch.object(orchestrator, "_recover_stale_streams_after_restart", side_effect=_recover),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         patch.object(orchestrator, "_start_sync_task", side_effect=_start_sync_task),
         patch("mindroom.orchestrator.set_runtime_ready", side_effect=_mark_ready),
@@ -2727,7 +2842,7 @@ async def test_orchestrator_runs_cleanup_and_resume_after_sync_loops(tmp_path: P
         runtime_task = asyncio.create_task(orchestrator.start())
         try:
             await asyncio.wait_for(ready.wait(), timeout=1.0)
-            await asyncio.wait_for(resume_finished.wait(), timeout=1.0)
+            await asyncio.wait_for(recovery_finished.wait(), timeout=1.0)
             await orchestrator.stop()
             await asyncio.wait_for(runtime_task, timeout=1.0)
         finally:
@@ -2736,12 +2851,12 @@ async def test_orchestrator_runs_cleanup_and_resume_after_sync_loops(tmp_path: P
                 with suppress(asyncio.CancelledError):
                     await runtime_task
 
-    assert call_order == ["wait", "sync", "setup", "cleanup", "resume"]
+    assert call_order == ["wait", "sync", "recover", "setup"]
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_auto_resume_uses_router_client(tmp_path: Path) -> None:
-    """Auto-resume should post visible relays from the router, not the internal user."""
+async def test_orchestrator_recovery_uses_router_for_resume_and_all_started_bots(tmp_path: Path) -> None:
+    """Recovery should scan every started bot but post relays through the router."""
     config = _make_config(tmp_path)
     config.defaults.auto_resume_after_restart = True
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
@@ -2752,32 +2867,31 @@ async def test_orchestrator_auto_resume_uses_router_client(tmp_path: Path) -> No
     router_bot.agent_name = ROUTER_AGENT_NAME
     router_bot.client = router_client
     router_bot.agent_user = MagicMock(user_id="@mindroom_router:example.com")
-    orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
-
-    interrupted = [
-        InterruptedThread(
-            room_id=ROOM_ID,
-            thread_id="$thread-root",
-            target_event_id="$target",
-            partial_text="Half finished",
-            agent_name="test_agent",
-        ),
-    ]
+    router_bot._conversation_cache = MagicMock()
+    agent_client = AsyncMock(spec=nio.AsyncClient)
+    agent_bot = MagicMock()
+    agent_bot.agent_name = "test_agent"
+    agent_bot.client = agent_client
+    agent_bot.agent_user = MagicMock(user_id=BOT_USER_ID)
+    agent_bot._conversation_cache = MagicMock()
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot, "test_agent": agent_bot}
 
     with patch(
-        "mindroom.orchestrator.auto_resume_interrupted_threads",
-        new=AsyncMock(
-            return_value=1,
-        ),
-    ) as mock_auto_resume:
-        await orchestrator._auto_resume_after_restart(interrupted, config)
+        "mindroom.orchestrator.recover_stale_streaming_messages",
+        new=AsyncMock(return_value=StaleStreamRecoveryResult(room_count=2, cleaned_count=1, resumed_count=1)),
+    ) as mock_recover:
+        await orchestrator._recover_stale_streams_after_restart([router_bot, agent_bot], config, NOW_MS)
 
-    mock_auto_resume.assert_awaited_once()
-    assert mock_auto_resume.await_args.args[0] is router_client
-    assert mock_auto_resume.await_args.args[1] == interrupted
-    assert mock_auto_resume.await_args.kwargs["config"] == config
-    assert mock_auto_resume.await_args.kwargs["runtime_paths"] == runtime_paths_for(config)
-    assert mock_auto_resume.await_args.kwargs["max_resumes"] == 10
+    mock_recover.assert_awaited_once()
+    actors = mock_recover.await_args.args[0]
+    assert set(actors) == {"@mindroom_router:example.com", BOT_USER_ID}
+    assert actors[BOT_USER_ID].client is agent_client
+    assert mock_recover.await_args.kwargs["resume_client"] is router_client
+    assert mock_recover.await_args.kwargs["resume_conversation_cache"] is router_bot._conversation_cache
+    assert mock_recover.await_args.kwargs["config"] == config
+    assert mock_recover.await_args.kwargs["runtime_paths"] == runtime_paths_for(config)
+    assert mock_recover.await_args.kwargs["startup_cutoff_ms"] == NOW_MS
+    assert mock_recover.await_args.kwargs["max_resumes"] == 10
 
 
 @pytest.mark.asyncio
@@ -2955,195 +3069,3 @@ def test_bot_module_does_not_import_stale_stream_cleanup() -> None:
         "bot.py must not import or call cleanup_stale_streaming_messages; "
         "the orchestrator handles this to preserve interrupted_threads for auto-resume"
     )
-
-
-def _pending_record(
-    *,
-    agent_name: str = "test_agent",
-    thread_id: str = "$thread",
-    target_event_id: str = "$target",
-    requester_user_id: str | None = USER_ID,
-    created_at_ms: int = NOW_MS - 60_000,
-) -> PendingResumeRecord:
-    return PendingResumeRecord(
-        agent_name=agent_name,
-        room_id=ROOM_ID,
-        thread_id=thread_id,
-        target_event_id=target_event_id,
-        requester_user_id=requester_user_id,
-        created_at_ms=created_at_ms,
-    )
-
-
-def _pending_resume_cache(history: ThreadHistoryResult) -> AsyncMock:
-    conversation_cache = AsyncMock()
-    conversation_cache.get_strict_thread_history = AsyncMock(return_value=history)
-    conversation_cache.notify_outbound_message = Mock()
-    return conversation_cache
-
-
-async def _run_pending_resume_replay(
-    config: Config,
-    conversation_cache: AsyncMock | None,
-    *,
-    records: list[PendingResumeRecord],
-    startup_cutoff_ms: int = NOW_MS,
-    now_ms: int = NOW_MS,
-    max_resumes: int | None = None,
-    send_side_effect: Callable[..., object] | None = None,
-) -> tuple[int, AsyncMock]:
-    runtime_paths = runtime_paths_for(config)
-    ledger_path = pending_resume_ledger_path(runtime_paths)
-    for record in records:
-        _upsert_pending_resume_record(ledger_path, record)
-    client = AsyncMock(spec=nio.AsyncClient)
-    with (
-        patch("mindroom.matrix.stale_stream_cleanup.asyncio.sleep", new=AsyncMock()),
-        patch(
-            "mindroom.matrix.stale_stream_cleanup.send_message_result",
-            new=AsyncMock(
-                side_effect=(
-                    send_side_effect if send_side_effect is not None else delivered_matrix_side_effect("$resume")
-                ),
-            ),
-        ) as mock_send,
-        patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=now_ms / 1000),
-    ):
-        resumed_count = await resume_pending_interrupted_threads(
-            client,
-            config=config,
-            runtime_paths=runtime_paths,
-            conversation_cache=conversation_cache,
-            startup_cutoff_ms=startup_cutoff_ms,
-            max_resumes=max_resumes,
-        )
-    return resumed_count, mock_send
-
-
-def _ledger_keys(config: Config) -> set[str]:
-    return set(load_pending_resume_records(pending_resume_ledger_path(runtime_paths_for(config))))
-
-
-@pytest.mark.asyncio
-async def test_pending_resume_replay_settles_verified_outcomes(tmp_path: Path) -> None:
-    """Replay sends resumable targets, consumes settled ones, and retains retryable records."""
-    config = _make_config(tmp_path)
-    active = _pending_record(thread_id="$thread-active", target_event_id="$target-active", created_at_ms=100)
-    interrupted = _pending_record(
-        thread_id="$thread-interrupted",
-        target_event_id="$target-interrupted",
-        created_at_ms=200,
-    )
-    completed = _pending_record(thread_id="$thread-completed", target_event_id="$target-completed")
-    superseded = _pending_record(thread_id="$thread-human", target_event_id="$target-human")
-    missing = _pending_record(thread_id="$thread-missing", target_event_id="$target-missing")
-    retry = _pending_record(thread_id="$thread-retry", target_event_id="$target-retry")
-    failed = _pending_record(thread_id="$thread-failed", target_event_id="$target-failed")
-    removed = _pending_record(agent_name="removed_agent", thread_id="$thread-removed")
-    expired = _pending_record(thread_id="$thread-expired", created_at_ms=NOW_MS - OLD_STALE_AGE_MS)
-    current = _pending_record(thread_id="$thread-current", created_at_ms=NOW_MS + 1)
-    records = [active, interrupted, completed, superseded, missing, retry, failed, removed, expired, current]
-    cache = _pending_resume_cache(_authoritative_history())
-
-    def history_for_thread(_: str, thread_id: str, **__: object) -> ThreadHistoryResult:
-        suffix = thread_id.removeprefix("$thread-")
-        if suffix == "retry":
-            msg = "history failed"
-            raise RuntimeError(msg)
-        if suffix == "missing":
-            return _authoritative_history(_history_message("$other"))
-        status = STREAM_STATUS_INTERRUPTED if suffix == "interrupted" else "streaming"
-        if suffix == "completed":
-            status = "completed"
-        body = build_restart_interrupted_body("Partial") if suffix == "interrupted" else "Partial"
-        messages = [
-            ResolvedVisibleMessage.synthetic(
-                sender=BOT_USER_ID,
-                body=body,
-                event_id=f"$target-{suffix}",
-                timestamp=NOW_MS - 60_000,
-                content={STREAM_STATUS_KEY: status},
-            ),
-        ]
-        if suffix == "human":
-            messages.append(_history_message("$newer", sender=USER_ID, timestamp=NOW_MS - 30_000))
-        return _authoritative_history(*messages)
-
-    cache.get_strict_thread_history.side_effect = history_for_thread
-
-    def deliver_by_thread(_client: object, _room_id: str, content: dict[str, dict[str, str]]) -> object | None:
-        thread_id = content["m.relates_to"]["event_id"]
-        return None if thread_id == failed.thread_id else delivered_matrix_event("$resume")
-
-    resumed_count, mock_send = await _run_pending_resume_replay(
-        config,
-        cache,
-        records=records,
-        send_side_effect=deliver_by_thread,
-    )
-
-    assert resumed_count == 2
-    sent_threads = {call.args[2]["m.relates_to"]["event_id"] for call in mock_send.await_args_list}
-    assert sent_threads == {active.thread_id, interrupted.thread_id, failed.thread_id}
-    assert _ledger_keys(config) == {retry.key, failed.key, current.key}
-
-
-@pytest.mark.asyncio
-async def test_pending_resume_replay_cap_leaves_unattempted_records(tmp_path: Path) -> None:
-    """The send cap preserves older candidates for a later startup."""
-    config = _make_config(tmp_path)
-    older = _pending_record(thread_id="$thread-old", target_event_id="$target-old", created_at_ms=100)
-    newer = _pending_record(thread_id="$thread-new", target_event_id="$target-new", created_at_ms=200)
-    cache = _pending_resume_cache(_authoritative_history())
-
-    def history_for_thread(_: str, thread_id: str, **__: object) -> ThreadHistoryResult:
-        suffix = thread_id.removeprefix("$thread-")
-        return _authoritative_history(
-            _history_message(
-                f"$target-{suffix}",
-                timestamp=100 if suffix == "old" else 200,
-                content={STREAM_STATUS_KEY: "streaming"},
-            ),
-        )
-
-    cache.get_strict_thread_history.side_effect = history_for_thread
-    resumed_count, mock_send = await _run_pending_resume_replay(
-        config,
-        cache,
-        records=[older, newer],
-        max_resumes=1,
-    )
-
-    assert resumed_count == 1
-    assert mock_send.await_args.args[2]["m.relates_to"]["event_id"] == newer.thread_id
-    assert _ledger_keys(config) == {older.key}
-
-
-@pytest.mark.asyncio
-async def test_pending_resume_replay_preserves_concurrent_replacement(tmp_path: Path) -> None:
-    """Settling a pre-startup record cannot delete a current-process replacement."""
-    config = _make_config(tmp_path)
-    ledger_path = pending_resume_ledger_path(runtime_paths_for(config))
-    interrupted = _pending_record(target_event_id="$old")
-    replacement = _pending_record(target_event_id="$current", created_at_ms=NOW_MS + 1)
-    history = _authoritative_history(
-        _history_message(
-            interrupted.target_event_id,
-            timestamp=interrupted.created_at_ms,
-            content={STREAM_STATUS_KEY: "streaming"},
-        ),
-    )
-
-    def replace_during_send(*_args: object, **_kwargs: object) -> object:
-        _upsert_pending_resume_record(ledger_path, replacement)
-        return delivered_matrix_event("$resume")
-
-    resumed_count, _mock_send = await _run_pending_resume_replay(
-        config,
-        _pending_resume_cache(history),
-        records=[interrupted],
-        send_side_effect=replace_during_send,
-    )
-
-    assert resumed_count == 1
-    assert load_pending_resume_records(ledger_path) == {replacement.key: replacement}

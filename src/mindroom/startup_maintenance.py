@@ -18,15 +18,12 @@ from mindroom.orchestration.runtime import (
 if TYPE_CHECKING:
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
-    from mindroom.matrix.stale_stream_cleanup import InterruptedThread
 
 logger = get_logger(__name__)
 
 type _StartupBot = AgentBot | TeamBot
 type _SetupRooms = Callable[[list[_StartupBot]], Awaitable[None]]
-type _ReplayPendingResumes = Callable[[Config, int], Awaitable[None]]
-type _CleanupStaleStreams = Callable[[list[_StartupBot], Config, int], Awaitable[list[InterruptedThread]]]
-type _AutoResume = Callable[[list[InterruptedThread], Config], Awaitable[None]]
+type _RecoverStaleStreams = Callable[[list[_StartupBot], Config, int], Awaitable[None]]
 type _SyncRuntimeSupport = Callable[[Config], Awaitable[None]]
 type _MarkRuntimeSupportReady = Callable[[], Awaitable[None]]
 type _RunningBots = Callable[[], list[_StartupBot]]
@@ -36,10 +33,8 @@ type _RunningBots = Callable[[], list[_StartupBot]]
 class StartupMaintenanceController:
     """Own detached post-sync startup maintenance task lifecycle."""
 
-    replay_pending_resumes: _ReplayPendingResumes
+    recover_stale_streams: _RecoverStaleStreams
     setup_rooms_and_memberships: _SetupRooms
-    cleanup_stale_streams: _CleanupStaleStreams
-    auto_resume: _AutoResume
     sync_runtime_support: _SyncRuntimeSupport
     mark_runtime_support_ready: _MarkRuntimeSupportReady
     task: asyncio.Task[None] | None = field(default=None, init=False)
@@ -77,28 +72,15 @@ class StartupMaintenanceController:
         self.start(bots, config, startup_cutoff_ms=self.startup_cutoff_ms)
 
     async def _run(self, bots: list[_StartupBot], config: Config, startup_cutoff_ms: int) -> None:
-        # Interrupted turns must resume within seconds of the bots coming
-        # online, so persisted resume intents replay before the multi-minute
-        # room and stale-stream sweeps below.
         await self._run_phase(
-            "startup_maintenance.pending_resume_replay",
-            lambda: self.replay_pending_resumes(config, startup_cutoff_ms),
-            failure_message="Startup pending auto-resume replay failed",
+            "startup_maintenance.stale_stream_recovery",
+            lambda: self.recover_stale_streams(bots, config, startup_cutoff_ms),
+            failure_message="Startup stale stream recovery failed",
         )
         await self._run_phase(
             "startup_maintenance.rooms_and_memberships",
             lambda: self.setup_rooms_and_memberships(bots),
             failure_message="Startup room and membership maintenance failed",
-        )
-
-        async def cleanup_and_resume() -> None:
-            interrupted_threads = await self.cleanup_stale_streams(bots, config, startup_cutoff_ms)
-            await self.auto_resume(interrupted_threads, config)
-
-        await self._run_phase(
-            "startup_maintenance.stale_stream_cleanup",
-            cleanup_and_resume,
-            failure_message="Startup stale stream maintenance failed",
         )
         runtime_support_ready = await self._run_phase(
             "startup_maintenance.runtime_support",

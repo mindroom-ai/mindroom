@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.message_target import MessageTarget
-    from mindroom.pending_resume_store import PendingResumeRecord, PendingResumeTracker
     from mindroom.stop import StopManager
     from mindroom.timing import DispatchPipelineTiming
 
@@ -43,7 +42,6 @@ class ResponseAttemptDeps:
     config: Config
     notify_outbound_event: Callable[[str, dict[str, object]], None]
     notify_outbound_redaction: Callable[[str, str], None]
-    pending_resume: PendingResumeTracker
 
 
 @dataclass(frozen=True)
@@ -145,13 +143,6 @@ class ResponseAttemptRunner:
                 initial_message_id = await self._send_thinking_message(request)
 
             message_id = request.existing_event_id or initial_message_id
-            pending_resume_record: PendingResumeRecord | None = None
-            if message_id is not None:
-                pending_resume_record = self.deps.pending_resume.note_started(
-                    message_id,
-                    target=request.target,
-                    requester_user_id=request.user_id,
-                )
             task: asyncio.Task[None] = asyncio.create_task(request.response_function(message_id))
             tracked_message_id = message_id or f"__pending_response__:{id(task)}"
             show_stop_button = False
@@ -174,13 +165,10 @@ class ResponseAttemptRunner:
                         notify_outbound_event=self.deps.notify_outbound_event,
                     )
 
-            resume_pending = False
             try:
                 await task
             except asyncio.CancelledError as exc:
-                cancel_source = classify_cancel_source(exc)
-                resume_pending = cancel_source != "user_stop"
-                failure_reason = cancel_failure_reason(cancel_source)
+                failure_reason = cancel_failure_reason(classify_cancel_source(exc))
                 if request.on_cancelled is not None:
                     request.on_cancelled(failure_reason)
                 await self._forward_cancel_to_attempt_task(task, exc)
@@ -196,8 +184,6 @@ class ResponseAttemptRunner:
                 self.deps.logger.exception("Error during response generation", error=str(error))
                 raise
             finally:
-                if message_id is not None:
-                    self.deps.pending_resume.note_settled(pending_resume_record, resumable=resume_pending)
                 tracked = self.deps.stop_manager.tracked_messages.get(tracked_message_id)
                 button_already_removed = tracked is None or tracked.reaction_event_id is None
                 self.deps.stop_manager.clear_message(

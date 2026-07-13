@@ -14,7 +14,6 @@ from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.message_target import MessageTarget
-from mindroom.pending_resume_store import PendingResumeTracker
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 
 
@@ -86,7 +85,6 @@ def _runner(
     delivery_gateway: _DeliveryGateway | None = None,
     stop_manager: _StopManager | None = None,
     show_stop_button: bool = False,
-    pending_resume: PendingResumeTracker | None = None,
 ) -> tuple[ResponseAttemptRunner, _DeliveryGateway, _StopManager]:
     resolved_delivery_gateway = delivery_gateway or _DeliveryGateway()
     resolved_stop_manager = stop_manager or _StopManager()
@@ -101,7 +99,6 @@ def _runner(
                 config=Config(),
                 notify_outbound_event=MagicMock(),
                 notify_outbound_redaction=MagicMock(),
-                pending_resume=pending_resume or MagicMock(spec=PendingResumeTracker),
             ),
         ),
         resolved_delivery_gateway,
@@ -310,11 +307,11 @@ async def test_timed_out_attempt_task_failure_is_logged_when_it_finishes(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("cancel_args", "expected_reason", "log_method", "log_message", "expected_resumable"),
+    ("cancel_args", "expected_reason", "log_method", "log_message"),
     [
-        ((USER_STOP_CANCEL_MSG,), "cancelled_by_user", "info", "Response cancelled by user", False),
-        ((SYNC_RESTART_CANCEL_MSG,), "sync_restart_cancelled", "info", "Response interrupted by sync restart", True),
-        ((), "interrupted", "warning", "Response interrupted — traceback for diagnosis", True),
+        ((USER_STOP_CANCEL_MSG,), "cancelled_by_user", "info", "Response cancelled by user"),
+        ((SYNC_RESTART_CANCEL_MSG,), "sync_restart_cancelled", "info", "Response interrupted by sync restart"),
+        ((), "interrupted", "warning", "Response interrupted — traceback for diagnosis"),
     ],
 )
 async def test_response_attempt_cancellation_records_reason_logs_provenance_and_clears_tracking(
@@ -322,13 +319,10 @@ async def test_response_attempt_cancellation_records_reason_logs_provenance_and_
     expected_reason: str,
     log_method: str,
     log_message: str,
-    expected_resumable: bool,
 ) -> None:
     """Cancelled attempts should classify provenance and always clear tracking."""
     target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
-    pending_resume = MagicMock(spec=PendingResumeTracker)
-    record = pending_resume.note_started.return_value
-    runner, delivery_gateway, stop_manager = _runner(pending_resume=pending_resume)
+    runner, delivery_gateway, stop_manager = _runner()
     cancellation_reasons: list[str] = []
 
     async def response_function(_message_id: str | None) -> None:
@@ -346,7 +340,6 @@ async def test_response_attempt_cancellation_records_reason_logs_provenance_and_
     assert message_id == "$existing"
     assert delivery_gateway.sent_requests == []
     assert cancellation_reasons == [expected_reason]
-    pending_resume.note_settled.assert_called_once_with(record, resumable=expected_resumable)
     assert stop_manager.cleared_messages == [("$existing", False)]
     getattr(runner.deps.logger, log_method).assert_called_once()
     log_call = getattr(runner.deps.logger, log_method).call_args

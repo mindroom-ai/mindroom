@@ -20,28 +20,16 @@ async def test_startup_maintenance_runs_phases_in_order_and_passes_cutoff() -> N
     call_order: list[str] = []
     bots = [MagicMock()]
     config = MagicMock()
-    interrupted_threads = [MagicMock()]
 
-    async def replay_pending_resumes(replay_config: object, startup_cutoff_ms: int) -> None:
-        assert replay_config is config
+    async def recover_stale(started_bots: list[object], recovery_config: object, startup_cutoff_ms: int) -> None:
+        assert started_bots == bots
+        assert recovery_config is config
         assert startup_cutoff_ms == 123456
-        call_order.append("pending_replay")
+        call_order.append("recover")
 
     async def setup_rooms(started_bots: list[object]) -> None:
         assert started_bots == bots
         call_order.append("setup")
-
-    async def cleanup_stale(started_bots: list[object], cleanup_config: object, startup_cutoff_ms: int) -> list[object]:
-        assert started_bots == bots
-        assert cleanup_config is config
-        assert startup_cutoff_ms == 123456
-        call_order.append("cleanup")
-        return interrupted_threads
-
-    async def auto_resume(cleaned_threads: list[object], resume_config: object) -> None:
-        assert cleaned_threads == interrupted_threads
-        assert resume_config is config
-        call_order.append("resume")
 
     async def sync_runtime_support(sync_config: object) -> None:
         assert sync_config is config
@@ -51,10 +39,8 @@ async def test_startup_maintenance_runs_phases_in_order_and_passes_cutoff() -> N
         call_order.append("approval_ready")
 
     controller = StartupMaintenanceController(
-        replay_pending_resumes=replay_pending_resumes,
+        recover_stale_streams=recover_stale,
         setup_rooms_and_memberships=setup_rooms,
-        cleanup_stale_streams=cleanup_stale,
-        auto_resume=auto_resume,
         sync_runtime_support=sync_runtime_support,
         mark_runtime_support_ready=mark_runtime_support_ready,
     )
@@ -62,30 +48,23 @@ async def test_startup_maintenance_runs_phases_in_order_and_passes_cutoff() -> N
     controller.start(bots, config, startup_cutoff_ms=123456)
     await _wait_for_controller(controller)
 
-    assert call_order == ["pending_replay", "setup", "cleanup", "resume", "support", "approval_ready"]
+    assert call_order == ["recover", "setup", "support", "approval_ready"]
 
 
 @pytest.mark.asyncio
-async def test_startup_maintenance_continues_after_failed_replay_and_room_setup() -> None:
-    """Later phases still run after pending-resume replay and room setup fail."""
+async def test_startup_maintenance_continues_after_failed_recovery_and_room_setup() -> None:
+    """Later phases still run after stale recovery and room setup fail."""
     call_order: list[str] = []
 
-    async def replay_pending_resumes(_: object, __: int) -> None:
-        call_order.append("pending_replay")
-        msg = "pending replay failed"
+    async def recover_stale(_: list[object], __: object, ___: int) -> None:
+        call_order.append("recover")
+        msg = "recovery failed"
         raise RuntimeError(msg)
 
     async def setup_rooms(_: list[object]) -> None:
         call_order.append("setup")
         msg = "room setup failed"
         raise RuntimeError(msg)
-
-    async def cleanup_stale(_: list[object], __: object, ___: int) -> list[object]:
-        call_order.append("cleanup")
-        return []
-
-    async def auto_resume(_: list[object], __: object) -> None:
-        call_order.append("resume")
 
     async def sync_runtime_support(_: object) -> None:
         call_order.append("support")
@@ -94,10 +73,8 @@ async def test_startup_maintenance_continues_after_failed_replay_and_room_setup(
         call_order.append("approval_ready")
 
     controller = StartupMaintenanceController(
-        replay_pending_resumes=replay_pending_resumes,
+        recover_stale_streams=recover_stale,
         setup_rooms_and_memberships=setup_rooms,
-        cleanup_stale_streams=cleanup_stale,
-        auto_resume=auto_resume,
         sync_runtime_support=sync_runtime_support,
         mark_runtime_support_ready=mark_runtime_support_ready,
     )
@@ -105,7 +82,7 @@ async def test_startup_maintenance_continues_after_failed_replay_and_room_setup(
     controller.start([MagicMock()], MagicMock(), startup_cutoff_ms=123456)
     await _wait_for_controller(controller)
 
-    assert call_order == ["pending_replay", "setup", "cleanup", "resume", "support", "approval_ready"]
+    assert call_order == ["recover", "setup", "support", "approval_ready"]
 
 
 @pytest.mark.asyncio
@@ -119,10 +96,8 @@ async def test_startup_maintenance_cancel_reports_unfinished_and_replays_with_ru
         await release.wait()
 
     controller = StartupMaintenanceController(
-        replay_pending_resumes=AsyncMock(),
+        recover_stale_streams=AsyncMock(),
         setup_rooms_and_memberships=setup_rooms,
-        cleanup_stale_streams=AsyncMock(return_value=[]),
-        auto_resume=AsyncMock(),
         sync_runtime_support=AsyncMock(),
         mark_runtime_support_ready=AsyncMock(),
     )
@@ -154,10 +129,8 @@ async def test_startup_maintenance_cancel_reports_unfinished_and_replays_with_ru
 async def test_startup_maintenance_cancel_completed_task_returns_false() -> None:
     """Canceling completed maintenance does not request replay."""
     controller = StartupMaintenanceController(
-        replay_pending_resumes=AsyncMock(),
+        recover_stale_streams=AsyncMock(),
         setup_rooms_and_memberships=AsyncMock(),
-        cleanup_stale_streams=AsyncMock(return_value=[]),
-        auto_resume=AsyncMock(),
         sync_runtime_support=AsyncMock(),
         mark_runtime_support_ready=AsyncMock(),
     )
@@ -184,10 +157,8 @@ async def test_startup_maintenance_runtime_support_failure_skips_approval_ready_
         raise RuntimeError(msg)
 
     controller = StartupMaintenanceController(
-        replay_pending_resumes=AsyncMock(),
+        recover_stale_streams=AsyncMock(),
         setup_rooms_and_memberships=AsyncMock(),
-        cleanup_stale_streams=AsyncMock(return_value=[]),
-        auto_resume=AsyncMock(),
         sync_runtime_support=sync_runtime_support,
         mark_runtime_support_ready=mark_runtime_support_ready,
     )
