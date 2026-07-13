@@ -158,6 +158,10 @@ first_find_match() {
 require_architectures() {
     local binary="$1"
     shift
+    if [[ ! -f "$binary" ]]; then
+        echo "Required universal binary not found: $binary" >&2
+        exit 1
+    fi
     local architectures
     architectures=" $(lipo -archs "$binary") "
     for architecture in "$@"; do

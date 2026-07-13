@@ -35,6 +35,7 @@ def test_release_builds_universal_macos_app(release_workflow: str, macos_build_s
     assert "UV_BINARY: ${{ runner.temp }}/uv-universal" in release_workflow
     assert "macos/build-macos-app.sh --universal --dmg" in release_workflow
     assert "--arch arm64 --arch x86_64" in macos_build_script
+    assert "Required universal binary not found: $binary" in macos_build_script
     assert 'require_architectures "$binary" arm64 x86_64' in macos_build_script
 
 
