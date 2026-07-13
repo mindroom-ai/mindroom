@@ -121,6 +121,14 @@ class MindRoomOpenAIEmbedder(OpenAIEmbedder):
         usage = response.usage
         return embedding, usage.model_dump() if usage else None
 
+    def get_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
+        """Request a synchronous batch for adapters that support batch embedding."""
+        try:
+            response = self.client.embeddings.create(**self._request_params(texts))
+        except Exception as exc:
+            raise _classified_request_error(exc, self.health_recorder) from None
+        return _validated_embeddings(response, len(texts), self.health_recorder)
+
     async def async_get_embedding(self, text: str) -> list[float]:
         """Request a single embedding asynchronously; raise a classified error on failure."""
         try:

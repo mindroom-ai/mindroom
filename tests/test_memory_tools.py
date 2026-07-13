@@ -5,7 +5,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
+from openai import AuthenticationError
 
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
@@ -19,6 +21,12 @@ from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def _auth_error_with_secret(secret: str) -> AuthenticationError:
+    request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
+    response = httpx.Response(401, request=request, json={"error": {"message": f"rejected {secret}"}})
+    return AuthenticationError(f"rejected {secret}", response=response, body=None)
 
 
 class TestMemoryTools:
@@ -115,6 +123,20 @@ class TestMemoryTools:
 
             assert "Failed to store memory" in result
             assert "DB down" in result
+
+    @pytest.mark.asyncio
+    async def test_add_memory_redacts_provider_error(self, tools: MemoryTools) -> None:
+        """A rejected embedder key never reaches Matrix-visible tool output."""
+        secret = "sk-secret-add"  # noqa: S105
+        with patch(
+            "mindroom.custom_tools.memory.add_agent_memory",
+            new_callable=AsyncMock,
+            side_effect=_auth_error_with_secret(secret),
+        ):
+            result = await tools.add_memory("something")
+
+        assert result == "Failed to store memory: embedder authentication failed (HTTP 401)"
+        assert secret not in result
 
     @pytest.mark.asyncio
     async def test_add_memory_uses_same_agent_file_memory_root_as_prompt_reads(
@@ -328,6 +350,20 @@ class TestMemoryTools:
 
             assert "Failed to search memories" in result
             assert "Search failed" in result
+
+    @pytest.mark.asyncio
+    async def test_update_memory_redacts_provider_error(self, tools: MemoryTools) -> None:
+        """Update failures use the same credential-safe provider detail."""
+        secret = "sk-secret-update"  # noqa: S105
+        with patch(
+            "mindroom.custom_tools.memory.update_agent_memory",
+            new_callable=AsyncMock,
+            side_effect=_auth_error_with_secret(secret),
+        ):
+            result = await tools.update_memory("memory-id", "new content")
+
+        assert result == "Failed to update memory: embedder authentication failed (HTTP 401)"
+        assert secret not in result
 
     def test_toolkit_name(self, tools: MemoryTools) -> None:
         """Test that the toolkit is registered with the correct name."""

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
-from mindroom.embedder_health import is_embedder_auth_failure_detail
+from mindroom.embedder_health import classified_embedder_error, is_embedder_auth_failure_detail
 from mindroom.logging_config import get_logger
 from mindroom.memory import (
     add_agent_memory,
@@ -60,6 +60,15 @@ def _degraded_search_text(outcome: MemorySearchOutcome) -> str:
         lines.append("")
         lines.extend(_memory_result_lines(outcome.results))
     return "\n".join(lines)
+
+
+def _memory_tool_failure(exc: Exception, *, action: str, **context: object) -> str:
+    """Log and render provider failures without exposing raw response text."""
+    if (detail := classified_embedder_error(exc)) is not None:
+        logger.warning(f"Failed to {action} memory via tool", error=detail, **context)
+        return detail
+    logger.exception(f"Failed to {action} memory via tool", error_type=type(exc).__name__, **context)
+    return str(exc)
 
 
 class MemoryTools(Toolkit):
@@ -115,8 +124,8 @@ class MemoryTools(Toolkit):
                 execution_identity=self._execution_identity,
             )
         except Exception as e:
-            logger.exception("Failed to add memory via tool", agent=self._agent_name, error=str(e))
-            return f"Failed to store memory: {e}"
+            detail = _memory_tool_failure(e, action="add", agent=self._agent_name)
+            return f"Failed to store memory: {detail}"
         else:
             return f"Memorized: {content}"
 
@@ -149,8 +158,8 @@ class MemoryTools(Toolkit):
                 return "No relevant memories found."
             return "\n".join(_memory_result_lines(outcome.results))
         except Exception as e:
-            logger.exception("Failed to search memories via tool", agent=self._agent_name, error=str(e))
-            return f"Failed to search memories: {e}"
+            detail = _memory_tool_failure(e, action="search", agent=self._agent_name)
+            return f"Failed to search memories: {detail}"
 
     async def list_memories(self, limit: int = 50) -> str:
         """List all your stored memories.
@@ -182,8 +191,8 @@ class MemoryTools(Toolkit):
                 lines.append(f"{i}. [id={mid}] {mem.get('memory', '')}")
             return "\n".join(lines)
         except Exception as e:
-            logger.exception("Failed to list memories via tool", agent=self._agent_name, error=str(e))
-            return f"Failed to list memories: {e}"
+            detail = _memory_tool_failure(e, action="list", agent=self._agent_name)
+            return f"Failed to list memories: {detail}"
 
     async def get_memory(self, memory_id: str) -> str:
         """Retrieve a single memory by its ID.
@@ -210,8 +219,8 @@ class MemoryTools(Toolkit):
                 return f"No memory found with id={memory_id}"
             return f"[id={result.get('id', memory_id)}] {result.get('memory', '')}"
         except Exception as e:
-            logger.exception("Failed to get memory via tool", agent=self._agent_name, memory_id=memory_id, error=str(e))
-            return f"Failed to get memory: {e}"
+            detail = _memory_tool_failure(e, action="get", agent=self._agent_name, memory_id=memory_id)
+            return f"Failed to get memory: {detail}"
 
     async def update_memory(self, memory_id: str, new_content: str) -> str:
         """Update the content of a specific memory by its ID.
@@ -237,13 +246,8 @@ class MemoryTools(Toolkit):
                 execution_identity=self._execution_identity,
             )
         except Exception as e:
-            logger.exception(
-                "Failed to update memory via tool",
-                agent=self._agent_name,
-                memory_id=memory_id,
-                error=str(e),
-            )
-            return f"Failed to update memory: {e}"
+            detail = _memory_tool_failure(e, action="update", agent=self._agent_name, memory_id=memory_id)
+            return f"Failed to update memory: {detail}"
         else:
             return f"Updated memory [id={memory_id}]: {new_content}"
 
@@ -270,12 +274,7 @@ class MemoryTools(Toolkit):
                 execution_identity=self._execution_identity,
             )
         except Exception as e:
-            logger.exception(
-                "Failed to delete memory via tool",
-                agent=self._agent_name,
-                memory_id=memory_id,
-                error=str(e),
-            )
-            return f"Failed to delete memory: {e}"
+            detail = _memory_tool_failure(e, action="delete", agent=self._agent_name, memory_id=memory_id)
+            return f"Failed to delete memory: {detail}"
         else:
             return f"Deleted memory [id={memory_id}]"

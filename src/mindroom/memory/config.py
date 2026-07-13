@@ -1,21 +1,56 @@
 """Memory configuration and setup."""
 
+from __future__ import annotations
+
 import hashlib
-from pathlib import Path
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from mem0 import AsyncMemory
 
-from mindroom.config.main import Config
-from mindroom.constants import RuntimePaths
 from mindroom.credentials_sync import get_api_key_for_provider, get_embedder_api_key, get_ollama_host
 from mindroom.embeddings import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT
 from mindroom.timing import timed
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+
 logger = get_logger(__name__)
 _MEMORY_COLLECTION_PREFIX = "mindroom_memories"
+
+
+class _StrictOpenAIEmbedder(Protocol):
+    def get_embedding(self, text: str) -> list[float]: ...
+
+    def get_embeddings_batch(self, texts: list[str]) -> list[list[float]]: ...
+
+
+@dataclass
+class _Mem0StrictOpenAIEmbedder:
+    """Adapt MindRoom's strict OpenAI embedder to Mem0's embedding interface."""
+
+    embedder: _StrictOpenAIEmbedder
+
+    def embed(
+        self,
+        text: str,
+        memory_action: Literal["add", "search", "update"] | None = None,
+    ) -> list[float]:
+        del memory_action
+        return self.embedder.get_embedding(text.replace("\n", " "))
+
+    def embed_batch(
+        self,
+        texts: list[str],
+        memory_action: Literal["add", "search", "update"] = "add",
+    ) -> list[list[float]]:
+        del memory_action
+        return self.embedder.get_embeddings_batch([text.replace("\n", " ") for text in texts])
 
 
 def _chroma_similarity_from_distance(distance: float | None, space: str) -> float | None:
@@ -207,6 +242,13 @@ async def create_memory_instance(
     # Create AsyncMemory instance with dictionary config directly
     # Mem0 expects a dict for configuration, not config objects
     memory = AsyncMemory.from_config(config_dict)
+    if config.memory.embedder.provider == "openai":
+        # Mem0's own OpenAI embedder indexes response.data[0] without validation
+        # and can expose raw provider errors. Reuse MindRoom's strict boundary.
+        from mindroom.embedding_factory import create_configured_embedder  # noqa: PLC0415
+
+        strict_embedder = cast("_StrictOpenAIEmbedder", create_configured_embedder(config, runtime_paths))
+        cast("Any", memory).embedding_model = _Mem0StrictOpenAIEmbedder(strict_embedder)
     _install_chroma_similarity_scores(memory.vector_store)
 
     logger.info("created_memory_instance", path=config_dict["vector_store"]["config"]["path"])

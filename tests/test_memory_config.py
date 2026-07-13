@@ -17,9 +17,16 @@ from mindroom.config.models import EmbedderConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
+from mindroom.embedder_health import EmbedderRequestError
 from mindroom.embedding_factory import create_configured_embedder
-from mindroom.memory.config import _get_memory_config, _memory_collection_name, create_memory_instance
+from mindroom.memory.config import (
+    _get_memory_config,
+    _Mem0StrictOpenAIEmbedder,
+    _memory_collection_name,
+    create_memory_instance,
+)
 from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT
+from mindroom.openai_embedder import MindRoomOpenAIEmbedder
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.path_globs import matches_root_glob
 from tests.conftest import orchestrator_runtime_paths
@@ -532,6 +539,41 @@ class TestMemoryConfig:
         assert result is expected_memory
         mock_ensure_sentence_transformers_dependencies.assert_called_once_with(_runtime_paths(tmp_path))
         mock_from_config.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_create_memory_instance_replaces_mem0_openai_embedder_with_strict_adapter(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Malformed OpenAI successes cross Mem0 as classified strict failures."""
+        config = Config(
+            memory=MemoryConfig(
+                embedder=_MemoryEmbedderConfig(
+                    provider="openai",
+                    config=EmbedderConfig(model="text-embedding-3-small", api_key="sk-test"),
+                ),
+                llm=None,
+            ),
+            router=RouterConfig(model="default"),
+        )
+        client = MagicMock()
+        client.embeddings.create.return_value = SimpleNamespace(data=[], usage=None)
+        strict_embedder = MindRoomOpenAIEmbedder(
+            id="text-embedding-3-small",
+            api_key="sk-test",
+            openai_client=client,
+        )
+        memory = SimpleNamespace(vector_store=object(), embedding_model=object())
+
+        with (
+            patch("mindroom.memory.config.AsyncMemory.from_config", return_value=memory),
+            patch("mindroom.embedding_factory.create_configured_embedder", return_value=strict_embedder),
+        ):
+            result = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
+
+        assert isinstance(result.embedding_model, _Mem0StrictOpenAIEmbedder)
+        with pytest.raises(EmbedderRequestError, match="embedder returned 0 embeddings for 1 inputs"):
+            result.embedding_model.embed("query", "search")
 
     def test_memory_auto_flush_batch_config_is_parameterized(self) -> None:
         """Auto-flush batch/extractor limits should be configurable."""

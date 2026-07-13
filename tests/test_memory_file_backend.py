@@ -809,7 +809,7 @@ async def test_file_backend_semantic_search_falls_back_to_keyword_on_index_error
             get_tool_execution_identity(),
         )
 
-    assert outcome.degraded_reason == "embedder request failed (RuntimeError)"
+    assert outcome.degraded_reason == "semantic memory search failed (RuntimeError)"
     assert any(result.get("memory") == "Keyword fallback memory" for result in outcome.results)
     assert all((result.get("metadata") or {}).get("search_mode") == "keyword" for result in outcome.results)
 
@@ -872,7 +872,7 @@ async def test_prompt_parts_carry_degradation_notice_with_keyword_matches(
         )
 
     assert "Semantic memory search is unavailable this turn" in prompt_parts.turn_context
-    assert "embedder request failed (RuntimeError)" in prompt_parts.turn_context
+    assert "semantic memory search failed (RuntimeError)" in prompt_parts.turn_context
     assert "Keyword fallback memory" in prompt_parts.turn_context
 
 

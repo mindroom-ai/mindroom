@@ -4177,16 +4177,11 @@ async def test_partial_refresh_error_includes_first_classified_file_error(
 
 
 @pytest.mark.asyncio
-async def test_swallowed_insert_failure_captures_recorded_embedder_health(
+async def test_vectorless_file_does_not_inherit_process_global_embedder_health(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A vectorless file whose failure agno swallowed still gets the classified cause.
-
-    In production agno's insert path catches the embedder exception internally
-    and returns normally, so the per-file except never fires; the strict
-    embedder's health record is the only surviving trace of the real cause.
-    """
+    """A vectorless file is not blamed for a stale failure from another request."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "broken.md").write_text("cannot embed", encoding="utf-8")
@@ -4201,8 +4196,8 @@ async def test_swallowed_insert_failure_captures_recorded_embedder_health(
             upsert: bool,
             reader: object | None = None,
         ) -> None:
-            # Mirror agno: the embedder raised (recording health), agno caught
-            # it, and insert returned normally without adding vectors.
+            # Simulate an unrelated request recording health while this insert
+            # returns without vectors.
             del path, metadata, upsert, reader
             record_embedder_health("embedder authentication failed (HTTP 401)")
 
@@ -4214,9 +4209,7 @@ async def test_swallowed_insert_failure_captures_recorded_embedder_health(
     finally:
         record_embedder_health(None)
 
-    assert manager._last_refresh_error == (
-        "Indexed 0 of 1 managed knowledge files (first error: embedder authentication failed (HTTP 401))"
-    )
+    assert manager._last_refresh_error == "Indexed 0 of 1 managed knowledge files"
 
 
 def test_refresh_failure_counter_increments_and_resets_preserving_last_good(tmp_path: Path) -> None:

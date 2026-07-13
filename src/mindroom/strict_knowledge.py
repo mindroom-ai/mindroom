@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from agno.knowledge.content import Content, ContentStatus
 from agno.knowledge.knowledge import Knowledge
 
 if TYPE_CHECKING:
@@ -55,3 +56,20 @@ class StrictSearchKnowledge(Knowledge):
             return await self.vector_db.async_search(query=query, limit=limit, filters=filters)
         except NotImplementedError:
             return self.vector_db.search(query=query, limit=limit, filters=filters)
+
+
+@dataclass
+class StrictInsertKnowledge(Knowledge):
+    """Knowledge whose vector insertion path propagates failures."""
+
+    def _handle_vector_db_insert(self, content: Content, read_documents: list[Document], upsert: bool) -> None:
+        """Mirror Agno's insertion path without its catch-log-and-return behavior."""
+        if self.vector_db is None:
+            msg = "No vector database configured"
+            raise RuntimeError(msg)
+        if self.vector_db.upsert_available() and upsert:
+            self.vector_db.upsert(content.content_hash, read_documents, content.metadata)
+        else:
+            self.vector_db.insert(content.content_hash, documents=read_documents, filters=content.metadata)
+        content.status = ContentStatus.COMPLETED
+        self._update_content(content)

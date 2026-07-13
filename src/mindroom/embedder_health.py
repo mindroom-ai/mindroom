@@ -139,6 +139,13 @@ def is_embedder_provider_error(exc: BaseException) -> bool:
     return isinstance(exc, OpenAIError)
 
 
+def classified_embedder_error(exc: BaseException) -> str | None:
+    """Return a safe detail only when the exception is known to be embedder-related."""
+    if isinstance(exc, EmbedderRequestError) or is_embedder_provider_error(exc):
+        return describe_embedder_error(exc)
+    return None
+
+
 def describe_embedder_error(exc: BaseException) -> str:
     """Return a compact failure description safe for logs, metadata, and tool text.
 

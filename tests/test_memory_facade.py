@@ -326,6 +326,59 @@ class TestMemoryFacade:
             record_embedder_health(None)
 
     @pytest.mark.asyncio
+    async def test_mem0_search_classifies_provider_failure_during_initialization(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Provider failure while constructing Mem0 degrades instead of aborting the turn."""
+        request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
+        response = httpx.Response(401, request=request, json={"error": {"message": "bad key"}})
+        error = AuthenticationError("Error code: 401", response=response, body=None)
+
+        with patch("mindroom.memory._backend.create_memory_instance", side_effect=error):
+            outcome = await public_search_agent_memories(
+                "query",
+                "agent",
+                storage_path,
+                config,
+                runtime_paths_for(config),
+            )
+
+        assert outcome.results == []
+        assert outcome.degraded_reason == "embedder authentication failed (HTTP 401)"
+        record_embedder_health(None)
+
+    @pytest.mark.asyncio
+    async def test_mem0_team_scope_failure_preserves_agent_scope_results(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """A later team outage keeps already-retrieved personal memories."""
+        config.teams = {"helpers": MockTeamConfig(agents=["agent", "calculator"])}
+        request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
+        response = httpx.Response(401, request=request, json={"error": {"message": "bad key"}})
+        mock_memory.search.side_effect = [
+            {"results": [{"id": "personal", "memory": "available personal memory"}]},
+            AuthenticationError("Error code: 401", response=response, body=None),
+        ]
+
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
+            outcome = await public_search_agent_memories(
+                "query",
+                "agent",
+                storage_path,
+                config,
+                runtime_paths_for(config),
+            )
+
+        assert [result["id"] for result in outcome.results] == ["personal"]
+        assert outcome.degraded_reason == "embedder authentication failed (HTTP 401)"
+        record_embedder_health(None)
+
+    @pytest.mark.asyncio
     async def test_mem0_search_success_clears_recorded_failure(
         self,
         mock_memory: AsyncMock,

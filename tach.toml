@@ -216,6 +216,7 @@ visibility = [
 path = "mindroom.strict_knowledge"
 depends_on = []
 visibility = [
+    "mindroom.knowledge.manager",
     "mindroom.knowledge.registry",
     "mindroom.knowledge_source_descriptions",
 ]
@@ -1506,6 +1507,7 @@ depends_on = [
     "mindroom.config.main",
     "mindroom.constants",
     "mindroom.credentials",
+    "mindroom.embedding_factory",
     "mindroom.embeddings",
     "mindroom.logging_config",
     "mindroom.timing",
@@ -3045,6 +3047,7 @@ depends_on = [
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.indexing_config",
     "mindroom.knowledge.redaction",
+    "mindroom.strict_knowledge",
 ]
 
 [[modules]]

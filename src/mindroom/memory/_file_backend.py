@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, ClassVar, cast
 from zoneinfo import ZoneInfo
 
 from mindroom.constants import resolve_config_relative_path
-from mindroom.embedder_health import describe_embedder_error
+from mindroom.embedder_health import classified_embedder_error
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 
@@ -918,7 +918,7 @@ class FileMemoryBackend:
                 )
                 results = await asyncio.to_thread(keyword_results)
             except Exception as exc:
-                degraded_reason = describe_embedder_error(exc)
+                degraded_reason = classified_embedder_error(exc) or f"semantic memory search failed ({type(exc).__name__})"
                 logger.exception(
                     "File-memory semantic search failed; falling back to keyword search",
                     agent=agent_name,

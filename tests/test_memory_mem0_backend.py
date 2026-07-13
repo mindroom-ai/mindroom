@@ -6,7 +6,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+import httpx
 import pytest
+from openai import AuthenticationError
+from structlog.testing import capture_logs
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
@@ -129,6 +132,42 @@ async def test_store_conversation_memory_uses_explicit_execution_identity_for_de
             {"type": "conversation", "session_id": "session-alice", "agent": "general"},
         ),
     ]
+
+
+@pytest.mark.asyncio
+async def test_store_conversation_memory_redacts_embedder_provider_error(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Automatic Mem0 writes never log the rejected key from a provider body."""
+    config.memory.backend = "mem0"
+    secret = "sk-secret-automatic-store"  # noqa: S105
+    request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
+    response = httpx.Response(401, request=request, json={"error": {"message": f"rejected {secret}"}})
+    error = AuthenticationError(f"rejected {secret}", response=response, body=None)
+
+    class FailingMemory:
+        async def add(self, *_args: object, **_kwargs: object) -> None:
+            raise error
+
+    async def create_failing_memory(*_args: object, **_kwargs: object) -> FailingMemory:
+        return FailingMemory()
+
+    with (
+        patch("mindroom.memory._backend.create_memory_instance", side_effect=create_failing_memory),
+        capture_logs() as logs,
+    ):
+        await store_conversation_memory(
+            "Remember this",
+            "general",
+            storage_path,
+            "session",
+            config,
+            runtime_paths_for(config),
+        )
+
+    assert secret not in str(logs)
+    assert "embedder authentication failed (HTTP 401)" in str(logs)
 
 
 @pytest.mark.asyncio
