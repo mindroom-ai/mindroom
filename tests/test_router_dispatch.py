@@ -764,6 +764,55 @@ class TestAgentBot(AgentBotTestBase):
             ORIGINAL_SENDER_KEY: "@user:localhost",
             SCHEDULED_HISTORY_LIMIT_KEY: 4,
         }
+        assert call["scheduled_prompt"] == event.body
+
+    @pytest.mark.asyncio
+    async def test_scheduled_router_handoff_carries_the_task_in_its_body(self, tmp_path: Path) -> None:
+        """The selected responder must receive the scheduled task as its current prompt."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+        config = _runtime_bound_config(
+            Config(
+                agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
+                authorization={"default_room_access": True},
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        _set_turn_store_tracker(bot, MagicMock())
+        send_response = AsyncMock(return_value="$handoff")
+        install_send_response_mock(bot, send_response)
+        bot._turn_controller._responder_candidates_for_room = AsyncMock(
+            return_value=[entity_ids(config, runtime_paths_for(config))["general"]],
+        )
+
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$scheduled",
+                "sender": "@mindroom_router:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {"msgtype": "m.text", "body": "⏰ [Automated Task]\nPoll the queue"},
+            },
+        )
+
+        await bot._turn_controller._execute_router_relay(
+            room=room,
+            event=event,
+            thread_history=[],
+            requester_user_id="@user:localhost",
+            scheduled_prompt=event.body,
+        )
+
+        call = send_response.await_args.kwargs
+        assert call["response_text"] == "@general ⏰ [Automated Task]\nPoll the queue"
+        assert call["target"].reply_to_event_id == "$scheduled"
 
     @pytest.mark.asyncio
     async def test_router_dispatch_parity_text_and_image_skip_under_same_conditions(self, tmp_path: Path) -> None:

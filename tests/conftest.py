@@ -47,6 +47,7 @@ from mindroom.config.main import Config, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.conversation_resolver import DispatchContextResult, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
+from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history.runtime import (
@@ -1093,7 +1094,7 @@ def make_turn_context(
     matrix_run_metadata: dict[str, Any] | None = None,
     active_event_ids: frozenset[str] = frozenset(),
     system_enrichment_items: tuple[EnrichmentItem, ...] = (),
-    scheduled_history_limit: int | None = None,
+    scheduled_history_budget: ScheduledHistoryBudget | None = None,
 ) -> ResponseTurnContext:
     """Build one response-turn context with test defaults."""
     return ResponseTurnContext(
@@ -1108,7 +1109,7 @@ def make_turn_context(
         matrix_run_metadata=matrix_run_metadata,
         active_event_ids=active_event_ids,
         system_enrichment_items=system_enrichment_items,
-        scheduled_history_limit=scheduled_history_limit,
+        scheduled_history_budget=scheduled_history_budget,
     )
 
 

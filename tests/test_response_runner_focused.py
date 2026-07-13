@@ -21,6 +21,7 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway
+from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.logging_config import get_logger
@@ -275,7 +276,7 @@ async def test_scheduled_history_limit_keeps_refreshed_history_for_payload_and_s
         user_id="@user:localhost",
         response_envelope=envelope,
         payload_preparation=_preparation(target, envelope),
-        scheduled_history_limit=2,
+        scheduled_history_budget=ScheduledHistoryBudget(limit=2, source_event_id="$event1"),
     )
     post_effects = AsyncMock()
 

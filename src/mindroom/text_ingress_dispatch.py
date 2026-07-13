@@ -339,8 +339,8 @@ def _attachment_parts(
         extra_content[VOICE_TRANSCRIPT_KEY] = True
     if media_events and ORIGINAL_SENDER_KEY not in extra_content:
         extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
-    if prepared.dispatch.scheduled_history_limit is not None:
-        extra_content[SCHEDULED_HISTORY_LIMIT_KEY] = prepared.dispatch.scheduled_history_limit
+    if prepared.dispatch.scheduled_history_budget is not None:
+        extra_content[SCHEDULED_HISTORY_LIMIT_KEY] = prepared.dispatch.scheduled_history_budget.limit
     return message_attachment_ids, trusted_attachment_ids, extra_content
 
 
@@ -459,6 +459,8 @@ async def _execute_route_plan(
             history_scope=None,
             conversation_target=prepared.dispatch.target,
         )
+    if prepared.dispatch.scheduled_history_budget is not None:
+        routing_kwargs["scheduled_prompt"] = prepared.event.body
     await controller._execute_router_relay(
         room,
         route_event,

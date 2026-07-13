@@ -32,7 +32,11 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
-from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+from mindroom.dispatch_source import (
+    SCHEDULED_SOURCE_KIND,
+    TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    ScheduledHistoryBudget,
+)
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import HookContextSupport, HookRegistry, HookRegistryState
 from mindroom.inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
@@ -602,7 +606,10 @@ async def test_scheduled_fire_history_limit_reaches_response_request(config: Con
 
     assert len(harness.runner.requests) == 1
     request = harness.runner.requests[0]
-    assert request.scheduled_history_limit == 3
+    assert request.scheduled_history_budget == ScheduledHistoryBudget(
+        limit=3,
+        source_event_id="$scheduled:localhost",
+    )
     assert request.response_envelope.origin.intent is TurnIntent.SCHEDULED_FIRE
 
 
@@ -622,6 +629,7 @@ async def test_scheduled_router_handoff_history_limit_reaches_response_request(
                 constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
                 constants.ORIGINAL_SENDER_KEY: _SENDER,
                 constants.SCHEDULED_HISTORY_LIMIT_KEY: 2,
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$scheduled:localhost"}},
             },
             "event_id": "$scheduled-router-handoff:localhost",
             "sender": _entity_user_id(config, ROUTER_AGENT_NAME),
@@ -635,7 +643,10 @@ async def test_scheduled_router_handoff_history_limit_reaches_response_request(
 
     assert len(harness.runner.requests) == 1
     request = harness.runner.requests[0]
-    assert request.scheduled_history_limit == 2
+    assert request.scheduled_history_budget == ScheduledHistoryBudget(
+        limit=2,
+        source_event_id="$scheduled:localhost",
+    )
     assert request.response_envelope.origin.intent is TurnIntent.ROUTER_HANDOFF
 
 
@@ -649,7 +660,7 @@ async def test_scheduled_fire_without_annotation_keeps_full_history(config: Conf
     await harness.deliver(room, event)
 
     assert len(harness.runner.requests) == 1
-    assert harness.runner.requests[0].scheduled_history_limit is None
+    assert harness.runner.requests[0].scheduled_history_budget is None
 
 
 @pytest.mark.asyncio
@@ -677,7 +688,7 @@ async def test_user_message_cannot_spoof_scheduled_history_limit(config: Config,
 
     assert len(harness.runner.requests) == 1
     request = harness.runner.requests[0]
-    assert request.scheduled_history_limit is None
+    assert request.scheduled_history_budget is None
     assert request.response_envelope.origin.intent is not TurnIntent.SCHEDULED_FIRE
 
 

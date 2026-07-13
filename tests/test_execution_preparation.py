@@ -18,6 +18,7 @@ from mindroom.attachments import _attachment_id_for_event, register_local_attach
 from mindroom.config.main import Config, ResolvedRuntimeModel
 from mindroom.config.models import CompactionConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, RuntimePaths, resolve_runtime_paths
+from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.execution_preparation import (
     _build_thread_history_messages,
     _build_unseen_context_messages,
@@ -295,7 +296,10 @@ async def test_scheduled_history_limit_shares_budget_between_inline_and_persiste
         return _prepared_scope_with_persisted_replay()
 
     prepared = await _prepare_execution_context_common(
-        make_turn_context(reply_to_event_id="$current", scheduled_history_limit=3),
+        make_turn_context(
+            reply_to_event_id="$current",
+            scheduled_history_budget=ScheduledHistoryBudget(limit=3, source_event_id="$current"),
+        ),
         scope_context=None,
         prompt="Current request",
         thread_history=[
@@ -329,7 +333,10 @@ async def test_scheduled_history_limit_does_not_count_current_event_as_history()
         return _prepared_scope_with_persisted_replay()
 
     prepared = await _prepare_execution_context_common(
-        make_turn_context(reply_to_event_id="$current", scheduled_history_limit=2),
+        make_turn_context(
+            reply_to_event_id="$current",
+            scheduled_history_budget=ScheduledHistoryBudget(limit=2, source_event_id="$current"),
+        ),
         scope_context=None,
         prompt="Current request",
         thread_history=[
@@ -364,7 +371,10 @@ async def test_scheduled_history_limit_zero_yields_prompt_only_context() -> None
         return _prepared_scope_with_persisted_replay()
 
     prepared = await _prepare_execution_context_common(
-        make_turn_context(reply_to_event_id="$current", scheduled_history_limit=0),
+        make_turn_context(
+            reply_to_event_id="$current",
+            scheduled_history_budget=ScheduledHistoryBudget(limit=0, source_event_id="$current"),
+        ),
         scope_context=None,
         prompt="Current request",
         thread_history=[
@@ -387,6 +397,62 @@ async def test_scheduled_history_limit_zero_yields_prompt_only_context() -> None
     assert prepared.context_messages == ()
     assert len(prepared.messages) == 1
     assert "Current request" in str(prepared.messages[0].content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("history_limit", "expected_context"),
+    [
+        pytest.param(0, [], id="prompt-only"),
+        pytest.param(2, ["older context", "recent context"], id="two-prior-messages"),
+    ],
+)
+async def test_routed_scheduled_history_budget_exempts_the_prompt_source(
+    history_limit: int,
+    expected_context: list[str],
+) -> None:
+    """A routed scheduled prompt stays current and does not consume its own history budget."""
+
+    async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
+        return _prepared_scope_with_persisted_replay()
+
+    relayed_prompt = "@general ⏰ [Automated Task]\nPoll the deployment queue"
+    prepared = await _prepare_execution_context_common(
+        make_turn_context(
+            reply_to_event_id="$handoff",
+            scheduled_history_budget=ScheduledHistoryBudget(
+                limit=history_limit,
+                source_event_id="$scheduled",
+            ),
+        ),
+        scope_context=None,
+        prompt=relayed_prompt,
+        thread_history=[
+            make_visible_message(sender="@alice:localhost", body="older context", event_id="$older"),
+            make_visible_message(sender="@alice:localhost", body="recent context", event_id="$recent"),
+            make_visible_message(
+                sender="@mindroom_router:localhost",
+                body="⏰ [Automated Task]\nPoll the deployment queue",
+                event_id="$scheduled",
+            ),
+            make_visible_message(
+                sender="@mindroom_router:localhost",
+                body=relayed_prompt,
+                event_id="$handoff",
+            ),
+        ],
+        response_sender_id="@mindroom_general:localhost",
+        current_sender_id="@alice:localhost",
+        config=_config(),
+        prepare_scope_history_fn=prepare_scope_history,
+        estimate_static_tokens_fn=lambda text: len(text.split()),
+        render_messages_text_fn=render_prepared_messages_text,
+        fallback_static_token_budget=100,
+    )
+
+    assert [str(message.content).split(": ", 1)[-1] for message in prepared.context_messages] == expected_context
+    assert "Poll the deployment queue" in str(prepared.messages[-1].content)
+    assert all("Automated Task" not in str(message.content) for message in prepared.context_messages)
 
 
 @pytest.mark.asyncio

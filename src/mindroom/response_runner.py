@@ -95,6 +95,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
+    from mindroom.dispatch_source import ScheduledHistoryBudget
     from mindroom.history.types import HistoryScope
     from mindroom.hooks import EnrichmentItem, MessageEnvelope
     from mindroom.knowledge import KnowledgeAccessSupport
@@ -261,7 +262,7 @@ class ResponseRequest:
     matrix_run_metadata: Mapping[str, Any] | None = None
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     requires_model_history_refresh: bool = False
-    scheduled_history_limit: int | None = None
+    scheduled_history_budget: ScheduledHistoryBudget | None = None
     payload_preparation: ResponsePayloadPreparation | None = None
     current_timestamp_ms: float | None = None
     current_prompt_is_structured: bool = False
@@ -912,7 +913,7 @@ class ResponseRunner:
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
             active_event_ids=frozenset(active_event_ids),
             system_enrichment_items=tuple(system_enrichment_items),
-            scheduled_history_limit=request.scheduled_history_limit,
+            scheduled_history_budget=request.scheduled_history_budget,
         )
 
     def _notify_sync_restart_cancelled(
@@ -1460,7 +1461,7 @@ class ResponseRunner:
             matrix_run_metadata=matrix_run_metadata,
             active_event_ids=frozenset(active_event_ids),
             system_enrichment_items=tuple(request.system_enrichment_items),
-            scheduled_history_limit=request.scheduled_history_limit,
+            scheduled_history_budget=request.scheduled_history_budget,
         )
         team_turn_recorder = self._build_turn_recorder(
             user_message=request.prompt,

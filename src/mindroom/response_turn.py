@@ -45,6 +45,7 @@ if TYPE_CHECKING:
 
     from agno.models.response import ToolExecution
 
+    from mindroom.dispatch_source import ScheduledHistoryBudget
     from mindroom.history.runtime import ScopeSessionContext
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.hooks import EnrichmentItem
@@ -210,9 +211,9 @@ class ResponseTurnContext:
     matrix_run_metadata: dict[str, Any] | None
     active_event_ids: frozenset[str] = frozenset()
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
-    # Set only for scheduled fires that carry a history limit; caps persisted
-    # session replay for this one turn without touching authored history config.
-    scheduled_history_limit: int | None = None
+    # Set only for scheduled fires that carry a history limit; identifies the
+    # prompt-owning event while capping this turn without changing authored config.
+    scheduled_history_budget: ScheduledHistoryBudget | None = None
 
 
 @dataclass(frozen=True)

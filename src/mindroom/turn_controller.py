@@ -56,6 +56,7 @@ from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
+    ScheduledHistoryBudget,
     scheduled_history_limit_from_content,
     source_kind_allows_internal_relay_detection,
 )
@@ -162,17 +163,27 @@ def _room_level_context_event(event: TextDispatchEvent) -> TextDispatchEvent:
     )
 
 
-def _scheduled_history_limit_for_dispatch(
+def _scheduled_history_budget_for_dispatch(
     event: DispatchEvent,
     origin_intent: TurnIntent,
-) -> int | None:
-    """Return the per-turn history limit from trusted scheduled dispatch metadata."""
+) -> ScheduledHistoryBudget | None:
+    """Return the trusted history budget and prompt source for one scheduled dispatch."""
     if origin_intent not in {TurnIntent.SCHEDULED_FIRE, TurnIntent.ROUTER_HANDOFF}:
         return None
     content = event.source.get("content") if isinstance(event.source, dict) else None
     if not isinstance(content, dict):
         return None
-    return scheduled_history_limit_from_content(content)
+    history_limit = scheduled_history_limit_from_content(content)
+    if history_limit is None:
+        return None
+    source_event_id = (
+        event.event_id
+        if origin_intent is TurnIntent.SCHEDULED_FIRE
+        else EventInfo.from_event(event.source).reply_to_event_id
+    )
+    if source_event_id is None:
+        return None
+    return ScheduledHistoryBudget(limit=history_limit, source_event_id=source_event_id)
 
 
 def _queued_notice_dispatch_metadata(
@@ -1199,7 +1210,7 @@ class TurnController:
                 correlation_id=correlation_id,
                 envelope=envelope,
                 current_prompt_is_structured=current_prompt_is_structured,
-                scheduled_history_limit=_scheduled_history_limit_for_dispatch(event, origin.intent),
+                scheduled_history_budget=_scheduled_history_budget_for_dispatch(event, origin.intent),
             ),
             replay_guard=replay_guard,
         )
@@ -1423,6 +1434,7 @@ class TurnController:
         extra_content: dict[str, Any] | None = None,
         media_events: list[MediaDispatchEvent] | None = None,
         handled_turn: TurnRecord | None = None,
+        scheduled_prompt: str | None = None,
     ) -> None:
         """Run one explicit router relay from the turn controller."""
         assert self.deps.agent_name == ROUTER_AGENT_NAME
@@ -1460,7 +1472,11 @@ class TurnController:
             with bound_log_context(room_id=room.room_id, thread_id=thread_id):
                 self.deps.logger.warning("Router failed to determine entity")
         else:
-            response_text = f"@{suggested_entity} could you help with this?"
+            response_text = (
+                f"@{suggested_entity} {scheduled_prompt}"
+                if scheduled_prompt is not None
+                else f"@{suggested_entity} could you help with this?"
+            )
 
         target_thread_mode = (
             self.deps.runtime.config.get_entity_thread_mode(
@@ -1734,7 +1750,7 @@ class TurnController:
                             correlation_id=dispatch.correlation_id,
                             matrix_run_metadata=matrix_run_metadata,
                             requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
-                            scheduled_history_limit=dispatch.scheduled_history_limit,
+                            scheduled_history_budget=dispatch.scheduled_history_budget,
                             payload_preparation=payload_preparation,
                             current_timestamp_ms=current_timestamp_ms,
                             current_prompt_is_structured=dispatch.current_prompt_is_structured,
@@ -1758,7 +1774,7 @@ class TurnController:
                             correlation_id=dispatch.correlation_id,
                             matrix_run_metadata=matrix_run_metadata,
                             requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
-                            scheduled_history_limit=dispatch.scheduled_history_limit,
+                            scheduled_history_budget=dispatch.scheduled_history_budget,
                             payload_preparation=payload_preparation,
                             current_timestamp_ms=current_timestamp_ms,
                             current_prompt_is_structured=dispatch.current_prompt_is_structured,

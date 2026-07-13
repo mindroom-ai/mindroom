@@ -535,26 +535,28 @@ def _thread_history_before_current_event(
     return tuple(preceding_messages)
 
 
-def _thread_history_with_scheduled_limit(
+def _thread_history_with_scheduled_budget(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     *,
     current_event_id: str | None,
+    source_event_id: str,
     history_limit: int,
 ) -> Sequence[ResolvedVisibleMessage] | None:
-    """Keep the current event plus at most the newest limited history messages."""
+    """Keep the current prompt event plus at most the newest prior history messages."""
     if not thread_history:
         return thread_history
 
+    prompt_event_ids = {source_event_id}
+    if current_event_id is not None:
+        prompt_event_ids.add(current_event_id)
     history_indices = [
-        index
-        for index, message in enumerate(thread_history)
-        if current_event_id is None or message.event_id != current_event_id
+        index for index, message in enumerate(thread_history) if message.event_id not in prompt_event_ids
     ]
     selected_indices = set(history_indices[-history_limit:]) if history_limit > 0 else set()
     return tuple(
         message
         for index, message in enumerate(thread_history)
-        if index in selected_indices or (current_event_id is not None and message.event_id == current_event_id)
+        if index in selected_indices or message.event_id == current_event_id
     )
 
 
@@ -710,11 +712,13 @@ async def _prepare_execution_context_common(
     reply_to_event_id = ctx.reply_to_event_id
     active_event_ids = ctx.active_event_ids
     seen_event_ids = _scope_seen_event_ids(scope_context)
-    if ctx.scheduled_history_limit is not None:
-        thread_history = _thread_history_with_scheduled_limit(
+    scheduled_history_budget = ctx.scheduled_history_budget
+    if scheduled_history_budget is not None:
+        thread_history = _thread_history_with_scheduled_budget(
             thread_history,
             current_event_id=reply_to_event_id,
-            history_limit=ctx.scheduled_history_limit,
+            source_event_id=scheduled_history_budget.source_event_id,
+            history_limit=scheduled_history_budget.limit,
         )
 
     provisional_messages = _messages_with_current_prompt(
@@ -772,11 +776,11 @@ async def _prepare_execution_context_common(
         static_prompt_tokens=final_static_tokens,
         pipeline_timing=pipeline_timing,
     )
-    if ctx.scheduled_history_limit is not None:
+    if scheduled_history_budget is not None:
         inline_history_messages = max(0, len(final_messages) - 1)
         prepared_history = _prepared_history_with_scheduled_limit(
             prepared_history,
-            max(0, ctx.scheduled_history_limit - inline_history_messages),
+            max(0, scheduled_history_budget.limit - inline_history_messages),
         )
     if pipeline_timing is not None:
         pipeline_timing.mark("prompt_assembly_start")

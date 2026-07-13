@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.authorization import is_sender_allowed_for_agent_reply, responder_candidate_entities_for_room
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
-from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import (
     EVENT_MESSAGE_ENRICH,
@@ -82,7 +82,7 @@ class PreparedDispatch:
     correlation_id: str
     envelope: MessageEnvelope
     current_prompt_is_structured: bool = False
-    scheduled_history_limit: int | None = None
+    scheduled_history_budget: ScheduledHistoryBudget | None = None
 
     def __post_init__(self) -> None:
         """Require the prepared envelope and dispatch target to describe the same delivery."""

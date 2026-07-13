@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any, Protocol, cast, runtime_checkable
 
 from mindroom.constants import SCHEDULED_HISTORY_LIMIT_KEY, SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
@@ -68,6 +69,14 @@ _INTERNAL_RELAY_DETECTION_SOURCE_KINDS: frozenset[str] = frozenset(
         TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     },
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledHistoryBudget:
+    """Trusted per-turn history budget and the scheduled event that owns the prompt."""
+
+    limit: int
+    source_event_id: str
 
 
 @runtime_checkable
