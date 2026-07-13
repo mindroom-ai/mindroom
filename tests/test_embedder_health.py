@@ -16,6 +16,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.embedder_health import (
+    capture_embedder_health_recorder,
     check_embedder_health,
     describe_embedder_error,
     embedder_in_use,
@@ -424,7 +425,11 @@ async def test_stale_probe_result_is_discarded_after_generation_bump(
 ) -> None:
     """A probe finishing after a reload bump cannot overwrite the newer health state."""
 
-    def slow_probe(_config: Config, _runtime_paths: RuntimePaths) -> str:
+    def slow_probe(
+        _config: Config,
+        _runtime_paths: RuntimePaths,
+        _recorder: embedder_health.EmbedderHealthRecorder,
+    ) -> str:
         # A reload lands while this probe is still in flight.
         embedder_health._reset_embedder_health_generation()
         return embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
@@ -433,4 +438,64 @@ async def test_stale_probe_result_is_discarded_after_generation_bump(
 
     await check_embedder_health(_config(memory={"backend": "mem0"}), _runtime_paths(tmp_path), reason="startup")
 
+    assert get_embedder_failure() is None
+
+
+def test_stale_embedder_failure_cannot_replace_new_generation_health() -> None:
+    """An old embedder cannot report failure after credentials reload."""
+    recorder = capture_embedder_health_recorder()
+    embedder_health._reset_embedder_health_generation()
+    record_embedder_health(None)
+
+    assert not recorder.record(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
+    assert get_embedder_failure() is None
+
+
+def test_stale_embedder_success_cannot_clear_new_generation_failure() -> None:
+    """An old embedder cannot clear a failure from replacement credentials."""
+    recorder = capture_embedder_health_recorder()
+    embedder_health._reset_embedder_health_generation()
+    record_embedder_health(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
+
+    assert not recorder.record(None)
+    assert get_embedder_failure() == embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
+
+
+@pytest.mark.asyncio
+async def test_probe_captures_health_generation_before_thread_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reload between scheduling and worker execution invalidates all probe writes."""
+    captured_recorders: list[embedder_health.EmbedderHealthRecorder] = []
+
+    def fake_probe(
+        _config: Config,
+        _runtime_paths: RuntimePaths,
+        recorder: embedder_health.EmbedderHealthRecorder,
+    ) -> str:
+        captured_recorders.append(recorder)
+        recorder.record(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
+        return embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
+
+    async def fake_to_thread(function: object, *args: object) -> object:
+        embedder_health._reset_embedder_health_generation()
+        return function(*args)  # type: ignore[operator]
+
+    monkeypatch.setattr(embedder_health, "probe_embedder", fake_probe)
+    monkeypatch.setattr(embedder_health.asyncio, "to_thread", fake_to_thread)
+
+    await check_embedder_health(_config(memory={"backend": "mem0"}), _runtime_paths(tmp_path), reason="reload")
+
+    assert captured_recorders
+    assert get_embedder_failure() is None
+
+
+def test_current_generation_embedder_records_failure_and_recovery() -> None:
+    """The active generation still records both degraded and healthy outcomes."""
+    recorder = capture_embedder_health_recorder()
+
+    assert recorder.record(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
+    assert get_embedder_failure() == embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
+    assert recorder.record(None)
     assert get_embedder_failure() is None

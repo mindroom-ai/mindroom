@@ -24,9 +24,10 @@ from agno.utils.log import log_info
 
 from mindroom.embedder_health import (
     EMBEDDER_EMPTY_VECTOR_DETAIL,
+    EmbedderHealthRecorder,
     EmbedderRequestError,
+    capture_embedder_health_recorder,
     describe_embedder_error,
-    record_embedder_health,
 )
 from mindroom.model_defaults import OPENAI_EMBEDDING_DIMENSIONS
 
@@ -34,14 +35,18 @@ if TYPE_CHECKING:
     from openai.types.create_embedding_response import CreateEmbeddingResponse
 
 
-def _classified_request_error(exc: Exception) -> EmbedderRequestError:
+def _classified_request_error(exc: Exception, health_recorder: EmbedderHealthRecorder) -> EmbedderRequestError:
     """Record and return the classified failure for one provider exception."""
     detail = describe_embedder_error(exc)
-    record_embedder_health(detail)
+    health_recorder.record(detail)
     return EmbedderRequestError(detail)
 
 
-def _validated_embeddings(response: CreateEmbeddingResponse, expected_count: int) -> list[list[float]]:
+def _validated_embeddings(
+    response: CreateEmbeddingResponse,
+    expected_count: int,
+    health_recorder: EmbedderHealthRecorder,
+) -> list[list[float]]:
     """Validate one non-empty vector per requested input and record health.
 
     OpenAI-compatible servers can return HTTP 200 with empty ``data``, empty
@@ -51,12 +56,12 @@ def _validated_embeddings(response: CreateEmbeddingResponse, expected_count: int
     embeddings = [data.embedding for data in response.data]
     if len(embeddings) != expected_count:
         detail = f"embedder returned {len(embeddings)} embeddings for {expected_count} inputs"
-        record_embedder_health(detail)
+        health_recorder.record(detail)
         raise EmbedderRequestError(detail)
     if any(not embedding for embedding in embeddings):
-        record_embedder_health(EMBEDDER_EMPTY_VECTOR_DETAIL)
+        health_recorder.record(EMBEDDER_EMPTY_VECTOR_DETAIL)
         raise EmbedderRequestError(EMBEDDER_EMPTY_VECTOR_DETAIL)
-    record_embedder_health(None)
+    health_recorder.record(None)
     return embeddings
 
 
@@ -65,6 +70,7 @@ class MindRoomOpenAIEmbedder(OpenAIEmbedder):
     """Avoid forcing OpenAI defaults onto arbitrary OpenAI-compatible hosts."""
 
     _dimensions_explicit: bool = field(init=False, default=False, repr=False)
+    health_recorder: EmbedderHealthRecorder = field(default_factory=capture_embedder_health_recorder, repr=False)
 
     def __post_init__(self) -> None:
         """Track whether dimensions came from explicit config."""
@@ -102,16 +108,16 @@ class MindRoomOpenAIEmbedder(OpenAIEmbedder):
         try:
             response = self.response(text)
         except Exception as exc:
-            raise _classified_request_error(exc) from None
-        return _validated_embeddings(response, 1)[0]
+            raise _classified_request_error(exc, self.health_recorder) from None
+        return _validated_embeddings(response, 1, self.health_recorder)[0]
 
     def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]:
         """Request one embedding and its usage payload; raise a classified error on failure."""
         try:
             response = self.response(text)
         except Exception as exc:
-            raise _classified_request_error(exc) from None
-        embedding = _validated_embeddings(response, 1)[0]
+            raise _classified_request_error(exc, self.health_recorder) from None
+        embedding = _validated_embeddings(response, 1, self.health_recorder)[0]
         usage = response.usage
         return embedding, usage.model_dump() if usage else None
 
@@ -120,16 +126,16 @@ class MindRoomOpenAIEmbedder(OpenAIEmbedder):
         try:
             response: CreateEmbeddingResponse = await self.aclient.embeddings.create(**self._request_params(text))
         except Exception as exc:
-            raise _classified_request_error(exc) from None
-        return _validated_embeddings(response, 1)[0]
+            raise _classified_request_error(exc, self.health_recorder) from None
+        return _validated_embeddings(response, 1, self.health_recorder)[0]
 
     async def async_get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]:
         """Request one embedding and its usage payload asynchronously; raise a classified error on failure."""
         try:
             response = await self.aclient.embeddings.create(**self._request_params(text))
         except Exception as exc:
-            raise _classified_request_error(exc) from None
-        embedding = _validated_embeddings(response, 1)[0]
+            raise _classified_request_error(exc, self.health_recorder) from None
+        embedding = _validated_embeddings(response, 1, self.health_recorder)[0]
         usage = response.usage
         return embedding, usage.model_dump() if usage else None
 
@@ -154,8 +160,8 @@ class MindRoomOpenAIEmbedder(OpenAIEmbedder):
                     **self._request_params(batch_texts),
                 )
             except Exception as exc:
-                raise _classified_request_error(exc) from None
-            batch_embeddings = _validated_embeddings(response, len(batch_texts))
+                raise _classified_request_error(exc, self.health_recorder) from None
+            batch_embeddings = _validated_embeddings(response, len(batch_texts), self.health_recorder)
             all_embeddings.extend(batch_embeddings)
             usage_dict = response.usage.model_dump() if response.usage else None
             all_usage.extend([usage_dict] * len(batch_embeddings))

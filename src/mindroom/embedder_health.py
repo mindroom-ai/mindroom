@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import dataclass
 from threading import Lock
 from typing import TYPE_CHECKING
 
@@ -38,6 +39,17 @@ _current_failure: str | None = None
 _health_generation = 0
 
 
+@dataclass(frozen=True)
+class EmbedderHealthRecorder:
+    """Generation-bound writer for embedding request outcomes."""
+
+    generation: int
+
+    def record(self, error: str | None) -> bool:
+        """Record an outcome only while this recorder is current."""
+        return _record_embedder_health_for_generation(self.generation, error)
+
+
 class EmbedderRequestError(RuntimeError):
     """Embedder failure carrying only the classified, credential-safe detail.
 
@@ -63,6 +75,11 @@ def get_embedder_failure() -> str | None:
 def _health_generation_snapshot() -> int:
     with _failure_lock:
         return _health_generation
+
+
+def capture_embedder_health_recorder() -> EmbedderHealthRecorder:
+    """Capture a writer that cannot mutate health after a config reload."""
+    return EmbedderHealthRecorder(_health_generation_snapshot())
 
 
 def _record_embedder_health_for_generation(generation: int, error: str | None) -> bool:
@@ -187,14 +204,21 @@ def _bound_probe_client_timeout(embedder: Embedder) -> None:
         }
 
 
-def probe_embedder(config: Config, runtime_paths: RuntimePaths) -> str | None:
+def probe_embedder(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    health_recorder: EmbedderHealthRecorder | None = None,
+) -> str | None:
     """Run one strict embedding round-trip; return None when healthy."""
     # Deferred to break the import cycle with the embedding factory and keep
     # provider SDKs out of module import time.
     from mindroom.embedding_factory import create_configured_embedder  # noqa: PLC0415
 
     try:
-        embedder = create_configured_embedder(config, runtime_paths)
+        if health_recorder is None:
+            embedder = create_configured_embedder(config, runtime_paths)
+        else:
+            embedder = create_configured_embedder(config, runtime_paths, health_recorder=health_recorder)
         _bound_probe_client_timeout(embedder)
         vector = embedder.get_embedding(_PROBE_TEXT)
     except Exception as exc:
@@ -212,9 +236,9 @@ async def check_embedder_health(config: Config, runtime_paths: RuntimePaths, *, 
     """
     if not embedder_in_use(config):
         return
-    generation = _health_generation_snapshot()
-    error = await asyncio.to_thread(probe_embedder, config, runtime_paths)
-    if not _record_embedder_health_for_generation(generation, error):
+    health_recorder = capture_embedder_health_recorder()
+    error = await asyncio.to_thread(probe_embedder, config, runtime_paths, health_recorder)
+    if not health_recorder.record(error):
         logger.info("embedder_health_probe_discarded_stale", reason=reason)
         return
     if error is not None:

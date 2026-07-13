@@ -13,9 +13,15 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.embedder_health import EmbedderHealthRecorder
 
 
-def create_configured_embedder(config: Config, runtime_paths: RuntimePaths) -> Embedder:
+def create_configured_embedder(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    health_recorder: EmbedderHealthRecorder | None = None,
+) -> Embedder:
     """Create the configured embedding provider used for semantic indexes."""
     provider = config.memory.embedder.provider
     embedder_config = config.memory.embedder.config
@@ -25,11 +31,20 @@ def create_configured_embedder(config: Config, runtime_paths: RuntimePaths) -> E
         # provider's SDK loads (#1436).
         from mindroom.openai_embedder import MindRoomOpenAIEmbedder  # noqa: PLC0415
 
+        api_key = get_embedder_api_key(runtime_paths, explicit_api_key=embedder_config.api_key)
+        if health_recorder is None:
+            return MindRoomOpenAIEmbedder(
+                id=embedder_config.model,
+                api_key=api_key,
+                base_url=embedder_config.host,
+                dimensions=embedder_config.dimensions,
+            )
         return MindRoomOpenAIEmbedder(
             id=embedder_config.model,
-            api_key=get_embedder_api_key(runtime_paths, explicit_api_key=embedder_config.api_key),
+            api_key=api_key,
             base_url=embedder_config.host,
             dimensions=embedder_config.dimensions,
+            health_recorder=health_recorder,
         )
 
     if provider == "ollama":
