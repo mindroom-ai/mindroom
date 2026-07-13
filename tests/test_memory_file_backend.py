@@ -848,6 +848,35 @@ async def test_file_backend_cold_failed_index_degrades_instead_of_healthy_fallba
 
 
 @pytest.mark.asyncio
+async def test_prompt_parts_carry_degradation_notice_with_keyword_matches(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Automatic prompt assembly keeps both the notice and the keyword fallback context."""
+    config.memory.backend = "file"
+    config.memory.search.mode = "semantic"
+    config.agents["general"].memory_backend = "file"
+
+    await add_agent_memory("Keyword fallback memory", "general", storage_path, config)
+
+    with patch(
+        "mindroom.memory._file_backend.search_semantic_file_memories",
+        side_effect=RuntimeError("embedder offline"),
+    ):
+        prompt_parts = await public_build_memory_prompt_parts(
+            "Keyword fallback",
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+        )
+
+    assert "Semantic memory search is unavailable this turn" in prompt_parts.turn_context
+    assert "embedder request failed (RuntimeError)" in prompt_parts.turn_context
+    assert "Keyword fallback memory" in prompt_parts.turn_context
+
+
+@pytest.mark.asyncio
 async def test_file_backend_add_schedules_semantic_refresh_when_semantic_search_enabled(
     storage_path: Path,
     config: Config,

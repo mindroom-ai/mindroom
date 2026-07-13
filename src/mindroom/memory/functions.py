@@ -227,7 +227,17 @@ async def build_memory_prompt_parts(
     if agent_entrypoint:
         session_preamble = f"{config.get_prompt('FILE_MEMORY_ENTRYPOINT_HEADER')}\n{agent_entrypoint}"
 
-    turn_context = (
+    # The automatic per-turn path must not silently drop the degradation
+    # signal: a broken embedder would otherwise look like an agent with no
+    # relevant memories, the original ISSUE-237 failure shape.
+    degradation_notice = ""
+    if search_outcome.degraded_reason is not None:
+        degradation_notice = (
+            f"Semantic memory search is unavailable this turn ({search_outcome.degraded_reason}); "
+            "stored memories may be missing or keyword-only. Do not claim to have checked stored memories."
+        )
+
+    memory_context = (
         format_memories_as_context(
             agent_memories,
             backend.context_label,
@@ -236,6 +246,7 @@ async def build_memory_prompt_parts(
         if agent_memories
         else ""
     )
+    turn_context = "\n\n".join(part for part in (degradation_notice, memory_context) if part)
     return MemoryPromptParts(
         session_preamble=session_preamble,
         turn_context=turn_context,

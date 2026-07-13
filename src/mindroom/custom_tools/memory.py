@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _EMBEDDER_CREDENTIAL_ADVICE = (
-    "Update the embedder credential: set memory.embedder.api_key in config, "
+    "Update the embedder credential: set memory.embedder.config.api_key in config, "
     "store an 'embedder' credential, or set EMBEDDER_API_KEY."
 )
 
@@ -50,17 +50,12 @@ def _memory_result_lines(results: list[MemoryResult]) -> list[str]:
 
 
 def _degraded_search_text(outcome: MemorySearchOutcome) -> str:
-    if is_embedder_auth_failure_detail(outcome.degraded_reason):
-        failure_line = f"Semantic search unavailable: {outcome.degraded_reason}."
-        advice = _EMBEDDER_CREDENTIAL_ADVICE
-    else:
-        failure_line = f"Semantic memory search unavailable: {outcome.degraded_reason}"
-        advice = None
+    failure_line = f"Semantic memory search unavailable: {outcome.degraded_reason}."
     if outcome.results:
         failure_line = f"{failure_line} Showing keyword matches only."
     lines = [failure_line]
-    if advice is not None:
-        lines.append(advice)
+    if is_embedder_auth_failure_detail(outcome.degraded_reason):
+        lines.append(_EMBEDDER_CREDENTIAL_ADVICE)
     if outcome.results:
         lines.append("")
         lines.extend(_memory_result_lines(outcome.results))

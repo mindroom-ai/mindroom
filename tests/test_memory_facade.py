@@ -548,6 +548,28 @@ class TestMemoryFacade:
         assert prompt_parts == MemoryPromptParts()
 
     @pytest.mark.asyncio
+    async def test_build_memory_prompt_parts_surfaces_degradation_without_matches(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """The automatic per-turn path carries the degradation notice, not silence."""
+        request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
+        response = httpx.Response(401, request=request, json={"error": {"message": "bad key"}})
+        mock_memory.search.side_effect = AuthenticationError("Error code: 401", response=response, body=None)
+
+        try:
+            with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
+                prompt_parts = await build_memory_prompt_parts("Original prompt", "agent", storage_path, config)
+        finally:
+            record_embedder_health(None)
+
+        assert "Semantic memory search is unavailable this turn" in prompt_parts.turn_context
+        assert "embedder authentication failed (HTTP 401)" in prompt_parts.turn_context
+        assert "Do not claim to have checked stored memories." in prompt_parts.turn_context
+
+    @pytest.mark.asyncio
     async def test_disabled_backend_build_memory_prompt_parts_skips_mem0(
         self,
         storage_path: Path,
