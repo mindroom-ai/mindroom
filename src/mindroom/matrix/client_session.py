@@ -5,11 +5,11 @@ from __future__ import annotations
 import ssl as ssl_module
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import nio
 
-from mindroom.constants import RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
+from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.startup_errors import PermanentStartupError
@@ -34,7 +34,20 @@ class PermanentMatrixStartupError(PermanentStartupError):
 
 
 class _MindRoomAsyncClient(nio.AsyncClient):
-    """Matrix client preserving authenticated provenance for custom Olm events."""
+    """Matrix client for MindRoom-specific encrypted event behavior."""
+
+    def encrypt(
+        self,
+        room_id: str,
+        message_type: str,
+        content: dict[Any, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        """Expose only the coarse stream state needed for encrypted push routing."""
+        encrypted_message_type, encrypted_content = super().encrypt(room_id, message_type, content)
+        stream_status = content.get(STREAM_STATUS_KEY)
+        if isinstance(stream_status, str):
+            encrypted_content[STREAM_STATUS_KEY] = stream_status
+        return encrypted_message_type, encrypted_content
 
     def _handle_decrypt_to_device(self, to_device_event: nio.ToDeviceEvent) -> nio.ToDeviceEvent | None:
         decrypted = super()._handle_decrypt_to_device(to_device_event)

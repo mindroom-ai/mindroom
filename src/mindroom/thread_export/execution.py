@@ -7,10 +7,13 @@ from typing import TYPE_CHECKING
 
 import nio
 
+from mindroom.logging_config import get_logger
 from mindroom.matrix.client_thread_history import (
+    bulk_refresh_room_thread_histories,
     enumerate_room_thread_root_ids,
     fetch_thread_history,
     refresh_thread_history_from_source,
+    untrusted_cached_thread_ids,
 )
 from mindroom.thread_export.models import (
     ThreadExportAccumulator,
@@ -35,6 +38,52 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.cache import ConversationEventCache
+
+
+logger = get_logger(__name__)
+
+
+async def _bulk_backfill_untrusted_threads(
+    client: nio.AsyncClient,
+    room: ThreadExportRoom,
+    thread_ids: Sequence[str],
+    *,
+    event_cache: ConversationEventCache,
+) -> frozenset[str]:
+    """Warm the thread cache with one room scan covering every thread that would miss it.
+
+    The scan stops as soon as every requested root has been seen, so its cost is roughly one walk
+    to the deepest requested root while the per-thread path pays one walk per thread.
+    Returns the thread roots the scan proved absent so callers can fail them without paying one
+    full per-thread history walk each. Any bulk failure falls back to the per-thread path.
+    """
+    try:
+        untrusted = await untrusted_cached_thread_ids(event_cache, room.room_id, thread_ids)
+    except Exception as exc:
+        logger.warning(
+            "Untrusted-thread probe failed; using per-thread fetches",
+            room_id=room.room_id,
+            error=str(exc),
+        )
+        return frozenset()
+    if not untrusted:
+        return frozenset()
+    try:
+        stats = await bulk_refresh_room_thread_histories(
+            client,
+            room.room_id,
+            event_cache,
+            thread_root_ids=untrusted,
+            caller_label="thread_export_bulk",
+        )
+    except Exception as exc:
+        logger.warning(
+            "Bulk thread cache refresh failed; using per-thread fetches",
+            room_id=room.room_id,
+            error=str(exc),
+        )
+        return frozenset()
+    return stats.missing_root_ids
 
 
 async def _joined_member_ids(client: nio.AsyncClient, room_id: str) -> frozenset[str]:
@@ -220,26 +269,68 @@ async def export_threads_for_targets_for_client(
             accumulator.threads_seen += len(thread_ids)
             if truncated:
                 accumulator.truncated_rooms += 1
-        room_changed = {id(accumulator): False for accumulator in authorized}
+        await _export_enumerated_room_threads(
+            client=client,
+            room=room,
+            thread_ids=thread_ids,
+            truncated=truncated,
+            event_cache=event_cache,
+            trusted_sender_ids=trusted_sender_ids,
+            prefer_cache=prefer_cache,
+            authorized=authorized,
+        )
 
-        for thread_id in thread_ids:
-            await _write_thread_to_targets(
-                client=client,
-                room=room,
-                thread_id=thread_id,
-                event_cache=event_cache,
-                trusted_sender_ids=trusted_sender_ids,
-                prefer_cache=prefer_cache,
-                accumulators=authorized,
-                room_changed=room_changed,
-            )
+    return accumulators
 
-        _finish_room_exports(
+
+async def _export_enumerated_room_threads(
+    *,
+    client: nio.AsyncClient,
+    room: ThreadExportRoom,
+    thread_ids: Sequence[str],
+    truncated: bool,
+    event_cache: ConversationEventCache,
+    trusted_sender_ids: frozenset[str],
+    prefer_cache: bool,
+    authorized: Sequence[ThreadExportAccumulator],
+) -> None:
+    """Export one enumerated room's threads to every authorized accumulator."""
+    room_changed = {id(accumulator): False for accumulator in authorized}
+    missing_root_ids: frozenset[str] = frozenset()
+    if prefer_cache and thread_ids:
+        missing_root_ids = await _bulk_backfill_untrusted_threads(
+            client,
             room,
             thread_ids,
-            truncated=truncated,
+            event_cache=event_cache,
+        )
+
+    for thread_id in thread_ids:
+        if thread_id in missing_root_ids:
+            for accumulator in authorized:
+                accumulator.failed_items.append(
+                    failure_for_room(
+                        room,
+                        "thread root not found during bulk room scan",
+                        thread_id=thread_id,
+                    ),
+                )
+            continue
+        await _write_thread_to_targets(
+            client=client,
+            room=room,
+            thread_id=thread_id,
+            event_cache=event_cache,
+            trusted_sender_ids=trusted_sender_ids,
+            prefer_cache=prefer_cache,
             accumulators=authorized,
             room_changed=room_changed,
         )
 
-    return accumulators
+    _finish_room_exports(
+        room,
+        thread_ids,
+        truncated=truncated,
+        accumulators=authorized,
+        room_changed=room_changed,
+    )

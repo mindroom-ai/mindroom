@@ -130,6 +130,42 @@ def _make_message_event(
     return cast("nio.RoomMessageText", event)
 
 
+def _make_notice_event(
+    *,
+    event_id: str,
+    body: str,
+    timestamp_ms: int,
+    sender: str = BOT_USER_ID,
+    room_id: str = ROOM_ID,
+    relates_to: dict[str, object] | None = None,
+    extra_content: dict[str, object] | None = None,
+    new_content: dict[str, object] | None = None,
+) -> nio.RoomMessageNotice:
+    content: dict[str, object] = {
+        "body": body,
+        "msgtype": "m.notice",
+    }
+    if relates_to is not None:
+        content["m.relates_to"] = relates_to
+    if extra_content is not None:
+        content.update(extra_content)
+    if new_content is not None:
+        content["m.new_content"] = new_content
+
+    event = nio.RoomMessageNotice.from_dict(
+        {
+            "content": content,
+            "event_id": event_id,
+            "sender": sender,
+            "origin_server_ts": timestamp_ms,
+            "type": "m.room.message",
+            "room_id": room_id,
+        },
+    )
+    event.source = event.__dict__["source"]
+    return cast("nio.RoomMessageNotice", event)
+
+
 def _make_reaction_event(
     *,
     event_id: str,
@@ -2301,11 +2337,23 @@ async def test_cleanup_sets_terminal_stream_status(tmp_path: Path) -> None:
     client2 = AsyncMock(spec=nio.AsyncClient)
     client2.rooms = _joined_room_cache()
     client2.room_messages.return_value = _room_messages_response(
-        _make_message_event(
+        _make_notice_event(
             event_id="$msg-pending",
             body="Still typing",
-            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 1_000),
             extra_content={STREAM_STATUS_KEY: "pending", "io.mindroom.tool_trace": {"version": 2}},
+        ),
+        _make_notice_event(
+            event_id="$msg-streaming-edit",
+            body="* Still typing an answer",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to={"rel_type": "m.replace", "event_id": "$msg-pending"},
+            new_content={
+                "body": "Still typing an answer",
+                "msgtype": "m.notice",
+                STREAM_STATUS_KEY: "streaming",
+                "io.mindroom.tool_trace": {"version": 2},
+            },
         ),
     )
     client2.room_get_event_relations = MagicMock(return_value=_aiter())

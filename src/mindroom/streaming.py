@@ -381,6 +381,11 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
         tool_trace=tool_trace if snapshot.show_tool_calls else None,
         extra_content=extra_content,
     )
+    if snapshot.stream_status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
+        # Matrix suppresses m.notice before evaluating mention rules. Streaming
+        # updates may already contain mentions, so using m.text here would make
+        # every progressive edit eligible for a push notification.
+        content["msgtype"] = "m.notice"
     canonical_visible_body = content["body"]
     if snapshot.warmup_suffix_lines:
         content[STREAM_VISIBLE_BODY_KEY] = canonical_visible_body

@@ -3478,14 +3478,17 @@ from = ["mindroom.matrix.client_visible_messages"]
 [[interfaces]]
 expose = [
     "fetch_thread_event_sources_via_room_messages",
+    "BulkThreadRefreshStats",
     "RoomThreadsPageError",
     "ThreadRoomScanRootNotFoundError",
+    "bulk_refresh_room_thread_histories",
     "enumerate_room_thread_root_ids",
     "fetch_dispatch_thread_history",
     "fetch_dispatch_thread_snapshot",
     "fetch_thread_history",
     "get_room_threads_page",
     "refresh_thread_history_from_source",
+    "untrusted_cached_thread_ids",
 ]
 from = ["mindroom.matrix.client_thread_history"]
 
