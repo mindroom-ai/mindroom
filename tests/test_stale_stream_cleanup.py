@@ -28,13 +28,20 @@ from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.stale_stream_cleanup import (
-    InterruptedThread,
     StaleStreamCleanupActor,
-    StaleStreamRecoveryResult,
-    auto_resume_interrupted_threads,
-    cleanup_stale_streaming_messages,
-    cleanup_stale_streaming_room,
     recover_stale_streaming_messages,
+)
+from mindroom.matrix.stale_stream_cleanup import (
+    _auto_resume_interrupted_threads as auto_resume_interrupted_threads,
+)
+from mindroom.matrix.stale_stream_cleanup import (
+    _cleanup_stale_streaming_room as cleanup_stale_streaming_room,
+)
+from mindroom.matrix.stale_stream_cleanup import (
+    _InterruptedThread as InterruptedThread,
+)
+from mindroom.matrix.stale_stream_cleanup import (
+    _StaleStreamRecoveryResult as StaleStreamRecoveryResult,
 )
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_projection import latest_visible_thread_event_id_by_thread
@@ -249,16 +256,12 @@ async def _run_cleanup(
     startup_cutoff_ms: int | None = None,
 ) -> tuple[int, list[InterruptedThread]]:
     client.user_id = BOT_USER_ID
-    with (
-        patch(
-            "mindroom.matrix.stale_stream_cleanup.get_joined_rooms",
-            new=AsyncMock(return_value=joined_rooms),
-        ),
-        patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=now_ms / 1000),
-    ):
-        return await cleanup_stale_streaming_messages(
+    assert joined_rooms == [ROOM_ID]
+    with patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=now_ms / 1000):
+        return await cleanup_stale_streaming_room(
             client,
-            bot_user_id=BOT_USER_ID,
+            room_id=ROOM_ID,
+            actors={BOT_USER_ID: StaleStreamCleanupActor(client, None)},
             bot_user_ids={BOT_USER_ID} if bot_user_ids is None else bot_user_ids,
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -2758,8 +2761,8 @@ async def test_recovery_scans_unique_rooms_and_resumes_before_slow_rooms_finish(
 
     with (
         patch("mindroom.matrix.stale_stream_cleanup.get_joined_rooms", side_effect=joined_rooms),
-        patch("mindroom.matrix.stale_stream_cleanup.cleanup_stale_streaming_room", side_effect=cleanup_room),
-        patch("mindroom.matrix.stale_stream_cleanup.auto_resume_interrupted_threads", side_effect=auto_resume),
+        patch("mindroom.matrix.stale_stream_cleanup._cleanup_stale_streaming_room", side_effect=cleanup_room),
+        patch("mindroom.matrix.stale_stream_cleanup._auto_resume_interrupted_threads", side_effect=auto_resume),
     ):
         recovery_task = asyncio.create_task(
             recover_stale_streaming_messages(
@@ -3105,15 +3108,14 @@ async def test_requester_resolution_respects_max_depth(tmp_path: Path) -> None:
 
 
 def test_bot_module_does_not_import_stale_stream_cleanup() -> None:
-    """bot.py must not import cleanup_stale_streaming_messages (ISSUE-024b).
+    """bot.py must not own restart recovery (ISSUE-024b).
 
-    The per-bot cleanup was racing with the orchestrator-level cleanup:
+    Per-bot cleanup raced with orchestrator-level recovery:
     bot.start() cleaned stale messages first and discarded interrupted threads,
-    so the orchestrator cleanup found nothing left and auto-resume never ran.
-    Only the orchestrator should call cleanup to preserve interrupted_threads.
+    so orchestrator recovery found nothing left and auto-resume never ran.
+    Only the orchestrator should start the shared recovery path.
     """
     bot_source = Path(importlib.import_module("mindroom.bot").__file__).read_text()
-    assert "cleanup_stale_streaming_messages" not in bot_source, (
-        "bot.py must not import or call cleanup_stale_streaming_messages; "
-        "the orchestrator handles this to preserve interrupted_threads for auto-resume"
+    assert "recover_stale_streaming_messages" not in bot_source, (
+        "bot.py must not import or call recover_stale_streaming_messages; the orchestrator owns restart recovery"
     )
