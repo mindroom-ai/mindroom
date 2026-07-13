@@ -494,7 +494,13 @@ class EmbedderConfig(BaseModel):
     """Configuration for memory embedder."""
 
     model: str = Field(default=OPENAI_EMBEDDING_SMALL, description="Model name for embeddings")
-    api_key: str | None = Field(default=None, description="API key (usually from environment variable)")
+    api_key: str | None = Field(
+        default=None,
+        description=(
+            "Explicit embedder API key. Highest priority, above the dedicated 'embedder' credential "
+            "service (EMBEDDER_API_KEY) and the shared openai provider key fallback"
+        ),
+    )
     host: str | None = Field(default=None, description="Host URL for self-hosted models (Ollama, llama.cpp, etc.)")
     dimensions: int | None = Field(
         default=None,

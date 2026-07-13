@@ -11,8 +11,10 @@ from mindroom import constants as constants_mod
 from mindroom import credentials_sync as credentials_sync_mod
 from mindroom.credentials import CredentialsManager
 from mindroom.credentials_sync import (
+    _EMBEDDER_CREDENTIAL_SERVICE,
     _ENV_TO_SERVICE_MAP,
     get_api_key_for_provider,
+    get_embedder_api_key,
     get_ollama_host,
     get_secret_from_env,
     sync_env_to_credentials,
@@ -864,6 +866,147 @@ class TestCredentialsSync:
         }
 
         assert expected_services == _ENV_TO_SERVICE_MAP
+
+    def test_sync_env_seeds_embedder_credential(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """EMBEDDER_API_KEY should seed the dedicated embedder credential service."""
+        monkeypatch.setenv("EMBEDDER_API_KEY", "sk-embedder-key")
+
+        sync_env_to_credentials(
+            runtime_paths=_runtime_paths(
+                temp_credentials_dir.parent,
+                shared_credentials_dir=temp_credentials_dir,
+            ),
+        )
+
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        assert cm.load_credentials(_EMBEDDER_CREDENTIAL_SERVICE) == {
+            "api_key": "sk-embedder-key",
+            "_source": "env",
+        }
+
+    def test_sync_env_seeds_embedder_credential_from_file(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """EMBEDDER_API_KEY_FILE should follow the NAME_FILE secret convention."""
+        key_file = temp_credentials_dir.parent / "embedder.key"
+        key_file.write_text("sk-embedder-file-key\n", encoding="utf-8")
+        monkeypatch.delenv("EMBEDDER_API_KEY", raising=False)
+        monkeypatch.setenv("EMBEDDER_API_KEY_FILE", str(key_file))
+
+        sync_env_to_credentials(
+            runtime_paths=_runtime_paths(
+                temp_credentials_dir.parent,
+                shared_credentials_dir=temp_credentials_dir,
+            ),
+        )
+
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        assert cm.get_api_key(_EMBEDDER_CREDENTIAL_SERVICE) == "sk-embedder-file-key"
+
+    def test_sync_env_does_not_overwrite_ui_embedder_credential(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """UI-managed embedder credentials must not be overwritten by env sync."""
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        cm.save_credentials(_EMBEDDER_CREDENTIAL_SERVICE, {"api_key": "ui-embedder-key", "_source": "ui"})
+        monkeypatch.setenv("EMBEDDER_API_KEY", "env-embedder-key")
+
+        sync_env_to_credentials(
+            runtime_paths=_runtime_paths(
+                temp_credentials_dir.parent,
+                shared_credentials_dir=temp_credentials_dir,
+            ),
+        )
+
+        assert cm.get_api_key(_EMBEDDER_CREDENTIAL_SERVICE) == "ui-embedder-key"
+
+    def test_sync_env_skips_embedder_when_env_missing(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Missing EMBEDDER_API_KEY should not create the embedder credential."""
+        monkeypatch.delenv("EMBEDDER_API_KEY", raising=False)
+        monkeypatch.delenv("EMBEDDER_API_KEY_FILE", raising=False)
+
+        sync_env_to_credentials(
+            runtime_paths=_runtime_paths(
+                temp_credentials_dir.parent,
+                shared_credentials_dir=temp_credentials_dir,
+            ),
+        )
+
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        assert cm.load_credentials(_EMBEDDER_CREDENTIAL_SERVICE) is None
+
+    def test_get_embedder_api_key_explicit_wins(self, credentials_manager: CredentialsManager) -> None:
+        """An explicit config key must beat both credential services."""
+        credentials_manager.save_credentials(_EMBEDDER_CREDENTIAL_SERVICE, {"api_key": "embedder-key"})
+        credentials_manager.save_credentials("openai", {"api_key": "openai-key"})
+        runtime_paths = _runtime_paths(
+            credentials_manager.storage_root,
+            shared_credentials_dir=credentials_manager.base_path,
+        )
+
+        assert get_embedder_api_key(runtime_paths, explicit_api_key="explicit-key") == "explicit-key"
+
+    def test_get_embedder_api_key_embedder_service_beats_openai(
+        self,
+        credentials_manager: CredentialsManager,
+    ) -> None:
+        """The dedicated embedder credential must beat the shared openai key."""
+        credentials_manager.save_credentials(_EMBEDDER_CREDENTIAL_SERVICE, {"api_key": "embedder-key"})
+        credentials_manager.save_credentials("openai", {"api_key": "openai-key"})
+        runtime_paths = _runtime_paths(
+            credentials_manager.storage_root,
+            shared_credentials_dir=credentials_manager.base_path,
+        )
+
+        assert get_embedder_api_key(runtime_paths) == "embedder-key"
+
+    def test_get_embedder_api_key_falls_back_to_openai(self, credentials_manager: CredentialsManager) -> None:
+        """Without a dedicated credential the shared openai key keeps working."""
+        credentials_manager.save_credentials("openai", {"api_key": "openai-key"})
+        runtime_paths = _runtime_paths(
+            credentials_manager.storage_root,
+            shared_credentials_dir=credentials_manager.base_path,
+        )
+
+        assert get_embedder_api_key(runtime_paths) == "openai-key"
+
+    def test_get_embedder_api_key_returns_none_when_nothing_configured(
+        self,
+        credentials_manager: CredentialsManager,
+    ) -> None:
+        """Keyless local endpoints keep working when no key exists anywhere."""
+        runtime_paths = _runtime_paths(
+            credentials_manager.storage_root,
+            shared_credentials_dir=credentials_manager.base_path,
+        )
+
+        assert get_embedder_api_key(runtime_paths) is None
+
+    def test_get_embedder_api_key_treats_blank_values_as_absent(
+        self,
+        credentials_manager: CredentialsManager,
+    ) -> None:
+        """Blank explicit and blank embedder-service values must not shadow real keys."""
+        credentials_manager.save_credentials(_EMBEDDER_CREDENTIAL_SERVICE, {"api_key": "   "})
+        credentials_manager.save_credentials("openai", {"api_key": "openai-key"})
+        runtime_paths = _runtime_paths(
+            credentials_manager.storage_root,
+            shared_credentials_dir=credentials_manager.base_path,
+        )
+
+        assert get_embedder_api_key(runtime_paths, explicit_api_key="  ") == "openai-key"
 
     def test_sync_idempotent(self, temp_credentials_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test that running sync multiple times doesn't cause issues."""

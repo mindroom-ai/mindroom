@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
+from mindroom.credentials_sync import get_embedder_api_key, get_ollama_host
 from mindroom.embeddings import create_sentence_transformers_embedder
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 
@@ -27,7 +27,7 @@ def create_configured_embedder(config: Config, runtime_paths: RuntimePaths) -> E
 
         return MindRoomOpenAIEmbedder(
             id=embedder_config.model,
-            api_key=get_api_key_for_provider("openai", runtime_paths=runtime_paths),
+            api_key=get_embedder_api_key(runtime_paths, explicit_api_key=embedder_config.api_key),
             base_url=embedder_config.host,
             dimensions=embedder_config.dimensions,
         )

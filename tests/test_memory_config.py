@@ -14,6 +14,7 @@ from mindroom.config.memory import MemoryConfig, _MemoryEmbedderConfig, _MemoryL
 from mindroom.config.models import EmbedderConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.embedding_factory import create_configured_embedder
 from mindroom.memory.config import _get_memory_config, _memory_collection_name, create_memory_instance
 from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT
 from mindroom.orchestrator import _MultiAgentOrchestrator
@@ -215,6 +216,69 @@ class TestMemoryConfig:
         result = _get_memory_config(tmp_path / "memory", config, runtime_paths)
 
         assert result["embedder"]["config"]["api_key"] == "shared-openai-key"
+
+    def test_get_memory_config_prefers_dedicated_embedder_credential(self, tmp_path: Path) -> None:
+        """The dedicated embedder credential should beat the shared openai key for Mem0."""
+        runtime_paths = _runtime_paths(tmp_path)
+        creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
+        creds_manager.save_credentials("openai", {"api_key": "shared-openai-key"})
+        creds_manager.save_credentials("embedder", {"api_key": "dedicated-embedder-key"})
+        config = Config(
+            memory={
+                "embedder": {
+                    "provider": "openai",
+                    "config": {"model": "text-embedding-3-small"},
+                },
+            },
+            router=RouterConfig(model="default"),
+        )
+
+        result = _get_memory_config(tmp_path / "memory", config, runtime_paths)
+
+        assert result["embedder"]["config"]["api_key"] == "dedicated-embedder-key"
+        assert "dedicated-embedder-key" not in result["vector_store"]["config"]["collection_name"]
+
+    def test_get_memory_config_explicit_embedder_api_key_wins(self, tmp_path: Path) -> None:
+        """An explicit memory.embedder.config.api_key should beat every credential service."""
+        runtime_paths = _runtime_paths(tmp_path)
+        creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
+        creds_manager.save_credentials("openai", {"api_key": "shared-openai-key"})
+        creds_manager.save_credentials("embedder", {"api_key": "dedicated-embedder-key"})
+        config = Config(
+            memory={
+                "embedder": {
+                    "provider": "openai",
+                    "config": {"model": "text-embedding-3-small", "api_key": "explicit-config-key"},
+                },
+            },
+            router=RouterConfig(model="default"),
+        )
+
+        result = _get_memory_config(tmp_path / "memory", config, runtime_paths)
+
+        assert result["embedder"]["config"]["api_key"] == "explicit-config-key"
+
+    def test_mem0_and_knowledge_embedders_resolve_the_same_key(self, tmp_path: Path) -> None:
+        """Both embedder construction paths must authenticate with the same resolved key."""
+        runtime_paths = _runtime_paths(tmp_path)
+        creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
+        creds_manager.save_credentials("openai", {"api_key": "shared-openai-key"})
+        creds_manager.save_credentials("embedder", {"api_key": "dedicated-embedder-key"})
+        config = Config(
+            memory={
+                "embedder": {
+                    "provider": "openai",
+                    "config": {"model": "text-embedding-3-small"},
+                },
+            },
+            router=RouterConfig(model="default"),
+        )
+
+        mem0_key = _get_memory_config(tmp_path / "memory", config, runtime_paths)["embedder"]["config"]["api_key"]
+        knowledge_embedder = create_configured_embedder(config, runtime_paths)
+
+        assert mem0_key == "dedicated-embedder-key"
+        assert knowledge_embedder.api_key == mem0_key
 
     def test_get_memory_config_openai_embedder_maps_provider_settings(self, tmp_path: Path) -> None:
         """OpenAI Mem0 embedder config should keep the provider-specific field names."""

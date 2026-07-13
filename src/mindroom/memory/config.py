@@ -8,7 +8,7 @@ from mem0 import AsyncMemory
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
-from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
+from mindroom.credentials_sync import get_api_key_for_provider, get_embedder_api_key, get_ollama_host
 from mindroom.embeddings import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT
@@ -111,7 +111,10 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
 
     # Add provider-specific configuration
     if embedder_provider == "openai":
-        api_key = get_api_key_for_provider("openai", runtime_paths=runtime_paths)
+        api_key = get_embedder_api_key(
+            runtime_paths,
+            explicit_api_key=app_config.memory.embedder.config.api_key,
+        )
         if api_key:
             embedder_provider_config["api_key"] = api_key
         # Support custom OpenAI-compatible base URL (e.g., llama.cpp)

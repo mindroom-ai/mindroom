@@ -29,6 +29,11 @@ logger = get_logger(__name__)
 # Reverse view: env-var → provider (derived from the canonical mapping).
 _ENV_TO_SERVICE_MAP = {v: k for k, v in PROVIDER_ENV_KEYS.items()}
 
+# Dedicated credential service for the semantic-search embedder. Deliberately
+# not part of PROVIDER_ENV_KEYS: that map means "model provider" and feeds
+# model loading, while the embedder is a separate authentication concern.
+_EMBEDDER_CREDENTIAL_SERVICE = "embedder"
+
 
 @dataclass(frozen=True)
 class _CredentialSeedDeclaration:
@@ -71,6 +76,21 @@ def _sync_github_private_credentials(runtime_paths: RuntimePaths) -> bool:
         },
         runtime_paths=runtime_paths,
         env_var="GITHUB_TOKEN",
+    )
+
+
+def _sync_embedder_credentials(runtime_paths: RuntimePaths) -> bool:
+    """Seed/update the dedicated embedder credential from EMBEDDER_API_KEY."""
+    embedder_api_key = get_secret_from_env("EMBEDDER_API_KEY", runtime_paths=runtime_paths)
+    if not embedder_api_key:
+        logger.debug("No value found for EMBEDDER_API_KEY or EMBEDDER_API_KEY_FILE")
+        return False
+
+    return _sync_service_credentials(
+        service=_EMBEDDER_CREDENTIAL_SERVICE,
+        credentials={"api_key": embedder_api_key},
+        runtime_paths=runtime_paths,
+        env_var="EMBEDDER_API_KEY",
     )
 
 
@@ -342,6 +362,9 @@ def sync_env_to_credentials(runtime_paths: RuntimePaths) -> None:
     if _sync_github_private_credentials(runtime_paths=runtime_paths):
         synced_count += 1
 
+    if _sync_embedder_credentials(runtime_paths=runtime_paths):
+        synced_count += 1
+
     synced_count += _sync_declared_credential_seeds(runtime_paths=runtime_paths)
 
     if synced_count > 0:
@@ -375,6 +398,27 @@ def get_api_key_for_provider(provider: str, runtime_paths: RuntimePaths) -> str 
         provider = "google"
 
     return creds_manager.get_api_key(provider)
+
+
+def get_embedder_api_key(runtime_paths: RuntimePaths, *, explicit_api_key: str | None = None) -> str | None:
+    """Resolve the API key for the OpenAI-compatible semantic-search embedder.
+
+    Resolution order:
+    1. The explicit ``memory.embedder.config.api_key`` value from config.
+    2. The dedicated ``embedder`` credential service (seeded from
+       ``EMBEDDER_API_KEY`` / ``EMBEDDER_API_KEY_FILE``).
+    3. The shared ``openai`` provider key (backward-compat fallback).
+    4. ``None``, so keyless local OpenAI-compatible endpoints keep working.
+
+    Blank values are treated as absent so they never shadow a real key.
+    """
+    if explicit_api_key and explicit_api_key.strip():
+        return explicit_api_key
+    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
+    embedder_api_key = creds_manager.get_api_key(_EMBEDDER_CREDENTIAL_SERVICE)
+    if embedder_api_key and embedder_api_key.strip():
+        return embedder_api_key
+    return get_api_key_for_provider("openai", runtime_paths=runtime_paths)
 
 
 def get_ollama_host(runtime_paths: RuntimePaths) -> str | None:
