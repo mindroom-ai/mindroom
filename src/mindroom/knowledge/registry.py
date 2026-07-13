@@ -13,7 +13,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, ParamSpec, Protocol, TypeVar, cast
 
-from agno.knowledge.knowledge import Knowledge
 from agno.vectordb.chroma import ChromaDb
 
 from mindroom.embedding_factory import create_configured_embedder
@@ -37,6 +36,8 @@ from mindroom.strict_knowledge import StrictSearchKnowledge
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from agno.knowledge.knowledge import Knowledge
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths

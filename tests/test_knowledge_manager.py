@@ -199,7 +199,7 @@ def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr("mindroom.knowledge.manager.create_configured_embedder", lambda *_args, **_kwargs: object())
     monkeypatch.setattr("mindroom.knowledge.indexing_config.ChromaDb", _VectorDb)
     monkeypatch.setattr("mindroom.knowledge.registry.ChromaDb", _VectorDb)
-    monkeypatch.setattr("mindroom.knowledge.registry.Knowledge", _Knowledge)
+    monkeypatch.setattr("mindroom.knowledge.registry.StrictSearchKnowledge", _Knowledge)
     monkeypatch.setattr("mindroom.knowledge.registry.create_configured_embedder", lambda *_args, **_kwargs: object())
     knowledge_registry._published_indexes.clear()
     knowledge_utils._refresh_scheduled_at.clear()

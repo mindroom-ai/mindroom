@@ -11,7 +11,6 @@ import pytest
 from openai import APIConnectionError, APIStatusError, AuthenticationError, PermissionDeniedError
 
 from mindroom import embedder_health
-from mindroom.openai_embedder import MindRoomOpenAIEmbedder
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
@@ -26,6 +25,7 @@ from mindroom.embedder_health import (
     probe_embedder,
     record_embedder_health,
 )
+from mindroom.openai_embedder import MindRoomOpenAIEmbedder
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

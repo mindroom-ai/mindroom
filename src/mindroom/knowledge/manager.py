@@ -1052,32 +1052,12 @@ class KnowledgeManager:
             knowledge=target_knowledge,
         )
         if not has_vectors:
-            if source_size == 0:
-                if indexed_files is not None and indexed_signatures is not None:
-                    indexed_files.add(relative_path)
-                    indexed_signatures[relative_path] = (source_mtime_ns, source_size, source_digest)
-                else:
-                    async with self._state_lock:
-                        self._indexed_files.add(relative_path)
-                        self._indexed_signatures[relative_path] = (source_mtime_ns, source_size, source_digest)
-                logger.info("Scanned empty knowledge file with no vectors", base_id=self.base_id, path=relative_path)
-                return True
-
-            # agno's insert path catches embedder failures internally and
-            # returns normally, so a rejected credential surfaces here as a
-            # vectorless file; the strict embedder recorded the classified
-            # failure before agno swallowed it.
-            if self._last_file_index_error is None and (recorded_failure := get_embedder_failure()) is not None:
-                self._last_file_index_error = recorded_failure
-            logger.warning("Indexing produced no vectors for file", base_id=self.base_id, path=relative_path)
-            if indexed_files is not None and indexed_signatures is not None:
-                indexed_files.discard(relative_path)
-                indexed_signatures.pop(relative_path, None)
-            else:
-                async with self._state_lock:
-                    self._indexed_files.discard(relative_path)
-                    self._indexed_signatures.pop(relative_path, None)
-            return False
+            return await self._handle_vectorless_file(
+                relative_path,
+                (source_mtime_ns, source_size, source_digest),
+                indexed_files=indexed_files,
+                indexed_signatures=indexed_signatures,
+            )
 
         if indexed_files is not None and indexed_signatures is not None:
             indexed_files.add(relative_path)
@@ -1088,6 +1068,43 @@ class KnowledgeManager:
                 self._indexed_signatures[relative_path] = (source_mtime_ns, source_size, source_digest)
         logger.info("Indexed knowledge file", base_id=self.base_id, path=relative_path)
         return True
+
+    async def _handle_vectorless_file(
+        self,
+        relative_path: str,
+        signature: _FileSignature,
+        *,
+        indexed_files: set[str] | None,
+        indexed_signatures: dict[str, _FileSignature | None] | None,
+    ) -> bool:
+        """Record one insert that produced no vectors; success only for empty sources."""
+        source_size = signature[1]
+        if source_size == 0:
+            if indexed_files is not None and indexed_signatures is not None:
+                indexed_files.add(relative_path)
+                indexed_signatures[relative_path] = signature
+            else:
+                async with self._state_lock:
+                    self._indexed_files.add(relative_path)
+                    self._indexed_signatures[relative_path] = signature
+            logger.info("Scanned empty knowledge file with no vectors", base_id=self.base_id, path=relative_path)
+            return True
+
+        # agno's insert path catches embedder failures internally and returns
+        # normally, so a rejected credential surfaces here as a vectorless
+        # file; the strict embedder recorded the classified failure before
+        # agno swallowed it.
+        if self._last_file_index_error is None and (recorded_failure := get_embedder_failure()) is not None:
+            self._last_file_index_error = recorded_failure
+        logger.warning("Indexing produced no vectors for file", base_id=self.base_id, path=relative_path)
+        if indexed_files is not None and indexed_signatures is not None:
+            indexed_files.discard(relative_path)
+            indexed_signatures.pop(relative_path, None)
+        else:
+            async with self._state_lock:
+                self._indexed_files.discard(relative_path)
+                self._indexed_signatures.pop(relative_path, None)
+        return False
 
     async def _reindex_files_locked(
         self,
