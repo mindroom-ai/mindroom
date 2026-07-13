@@ -10,6 +10,7 @@ import pytest
 
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 from mindroom.thread_export import ThreadExportTarget, export_threads_once, export_threads_to_targets_once
+from mindroom.thread_export.models import ThreadExportGroupFailure, ThreadExportRoom
 from tests.conftest import runtime_paths_for
 from tests.thread_export_helpers import (
     mock_runtime_support,
@@ -258,3 +259,48 @@ async def test_failed_export_groups_do_not_create_runtime_support(tmp_path: Path
     assert stats[0].failures == 1
     assert stats[0].failed_items[0].room_id == "!user-room:localhost"
     assert stats[1].failures == 0
+
+
+@pytest.mark.asyncio
+async def test_full_pass_retains_scoped_exports_when_account_group_cannot_run(tmp_path: Path) -> None:
+    """An account-group failure must not let full-pass reconciliation retract scoped exports."""
+    config = thread_export_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    write_thread_export_matrix_state(tmp_path)
+    rooms = (
+        ThreadExportRoom(
+            key="lobby",
+            room_id="!lobby:localhost",
+            alias="#lobby:localhost",
+            name="Lobby",
+        ),
+        ThreadExportRoom(
+            key="dev",
+            room_id="!dev:localhost",
+            alias="#dev:localhost",
+            name="Dev",
+        ),
+    )
+    output_dir = tmp_path / "exports"
+    for room in rooms:
+        room_dir = output_dir / room.key
+        room_dir.mkdir(parents=True)
+        (room_dir / "old.yaml").write_text("secret", encoding="utf-8")
+
+    group_failure = ThreadExportGroupFailure(rooms=rooms, error="No usable Matrix account")
+    with patch("mindroom.thread_export.service.build_export_groups", return_value=[group_failure]):
+        stats = await export_threads_to_targets_once(
+            config=config,
+            runtime_paths=runtime_paths,
+            targets=(
+                ThreadExportTarget(
+                    output_dir=output_dir,
+                    required_member_user_id="@alice:localhost",
+                ),
+            ),
+        )
+
+    assert stats[0].failures == 2
+    assert all("No usable Matrix account" in failure.error for failure in stats[0].failed_items)
+    for room in rooms:
+        assert (output_dir / room.key / "old.yaml").read_text(encoding="utf-8") == "secret"
