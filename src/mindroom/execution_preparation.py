@@ -36,6 +36,7 @@ from mindroom.history.runtime import (
     resolve_agent_preparation_inputs,
 )
 from mindroom.history.storage import read_scope_seen_event_ids
+from mindroom.history.types import ResolvedReplayPlan
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.prompt_message_tags import render_msg_tag
@@ -52,7 +53,7 @@ if TYPE_CHECKING:
 
     from mindroom.attachments import AttachmentRecord
     from mindroom.config.main import Config, ResolvedRuntimeModel
-    from mindroom.history.types import CompactionLifecycle, PreparedHistoryState, ResolvedReplayPlan
+    from mindroom.history.types import CompactionLifecycle, PreparedHistoryState
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.timing import DispatchPipelineTiming
@@ -534,6 +535,31 @@ def _thread_history_before_current_event(
     return tuple(preceding_messages)
 
 
+def _thread_history_with_scheduled_budget(
+    thread_history: Sequence[ResolvedVisibleMessage] | None,
+    *,
+    current_event_id: str | None,
+    source_event_id: str,
+    history_limit: int,
+) -> Sequence[ResolvedVisibleMessage] | None:
+    """Keep the current prompt event plus at most the newest prior history messages."""
+    if not thread_history:
+        return thread_history
+
+    prompt_event_ids = {source_event_id}
+    if current_event_id is not None:
+        prompt_event_ids.add(current_event_id)
+    history_indices = [
+        index for index, message in enumerate(thread_history) if message.event_id not in prompt_event_ids
+    ]
+    selected_indices = set(history_indices[-history_limit:]) if history_limit > 0 else set()
+    return tuple(
+        message
+        for index, message in enumerate(thread_history)
+        if index in selected_indices or message.event_id == current_event_id
+    )
+
+
 def _sanitize_thread_history_for_replay(
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
@@ -621,6 +647,32 @@ def _scope_seen_event_ids(scope_context: ScopeSessionContext | None) -> set[str]
     return read_scope_seen_event_ids(scope_context.session, scope_context.scope)
 
 
+def _prepared_history_with_scheduled_limit(
+    prepared_history: PreparedHistoryState,
+    max_persisted_messages: int,
+) -> PreparedHistoryState:
+    """Intersect persisted replay with the scheduled turn's remaining message budget."""
+    if max_persisted_messages <= 0:
+        return replace(
+            prepared_history,
+            replay_plan=ResolvedReplayPlan(mode="disabled", estimated_tokens=0, add_history_to_context=False),
+            replays_persisted_history=False,
+        )
+    plan = prepared_history.replay_plan
+    if plan is None or not plan.add_history_to_context:
+        return prepared_history
+    if plan.num_history_messages is not None and plan.num_history_messages <= max_persisted_messages:
+        return prepared_history
+    return replace(
+        prepared_history,
+        replay_plan=replace(
+            plan,
+            mode="limited",
+            num_history_messages=max_persisted_messages,
+        ),
+    )
+
+
 @timed("system_prompt_assembly.history_prepare.finalize")
 def _finalize_prepared_history(
     *,
@@ -660,6 +712,14 @@ async def _prepare_execution_context_common(
     reply_to_event_id = ctx.reply_to_event_id
     active_event_ids = ctx.active_event_ids
     seen_event_ids = _scope_seen_event_ids(scope_context)
+    scheduled_history_budget = ctx.scheduled_history_budget
+    if scheduled_history_budget is not None:
+        thread_history = _thread_history_with_scheduled_budget(
+            thread_history,
+            current_event_id=reply_to_event_id,
+            source_event_id=scheduled_history_budget.source_event_id,
+            history_limit=scheduled_history_budget.limit,
+        )
 
     provisional_messages = _messages_with_current_prompt(
         prompt,
@@ -716,6 +776,12 @@ async def _prepare_execution_context_common(
         static_prompt_tokens=final_static_tokens,
         pipeline_timing=pipeline_timing,
     )
+    if scheduled_history_budget is not None:
+        inline_history_messages = max(0, len(final_messages) - 1)
+        prepared_history = _prepared_history_with_scheduled_limit(
+            prepared_history,
+            max(0, scheduled_history_budget.limit - inline_history_messages),
+        )
     if pipeline_timing is not None:
         pipeline_timing.mark("prompt_assembly_start")
     if not prepared_history.replays_persisted_history and thread_history:

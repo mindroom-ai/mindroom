@@ -18,12 +18,14 @@ from mindroom.attachments import _attachment_id_for_event, register_local_attach
 from mindroom.config.main import Config, ResolvedRuntimeModel
 from mindroom.config.models import CompactionConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, RuntimePaths, resolve_runtime_paths
+from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.execution_preparation import (
     _build_thread_history_messages,
     _build_unseen_context_messages,
     _fallback_static_token_budget,
     _messages_with_current_prompt,
     _prepare_execution_context_common,
+    _prepared_history_with_scheduled_limit,
     _ThreadAttachmentContext,
     prepare_agent_execution_context,
     render_prepared_messages_text,
@@ -31,7 +33,13 @@ from mindroom.execution_preparation import (
 from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.prompt_tokens import estimate_agent_static_tokens
 from mindroom.history.runtime import PreparedScopeHistory, _HistoryPreparationInputs
-from mindroom.history.types import HistoryPolicy, HistoryScope, PreparedHistoryState, ResolvedHistorySettings
+from mindroom.history.types import (
+    HistoryPolicy,
+    HistoryScope,
+    PreparedHistoryState,
+    ResolvedHistorySettings,
+    ResolvedReplayPlan,
+)
 from mindroom.tool_schema_cache import clear_tool_schema_cache
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import FakeModel, bind_runtime_paths, make_turn_context, make_visible_message
@@ -202,6 +210,249 @@ async def test_prepare_execution_context_skips_fallback_replay_when_persisted_hi
 
     assert prepared.prepared_history.replays_persisted_history is True
     assert prepared.context_messages[0].content == "@alice:localhost: older context"
+
+
+def test_scheduled_limit_zero_disables_replay_plan() -> None:
+    """A zero limit disables persisted replay entirely for the scheduled turn."""
+    prepared = PreparedHistoryState(
+        replay_plan=ResolvedReplayPlan(
+            mode="configured",
+            estimated_tokens=500,
+            add_history_to_context=True,
+            num_history_runs=3,
+        ),
+        replays_persisted_history=True,
+    )
+
+    capped = _prepared_history_with_scheduled_limit(prepared, 0)
+
+    assert capped.replays_persisted_history is False
+    assert capped.replay_plan == ResolvedReplayPlan(mode="disabled", estimated_tokens=0, add_history_to_context=False)
+
+
+def test_scheduled_limit_caps_larger_plans_only() -> None:
+    """A positive limit adds a message cap unless one is already tighter."""
+    runs_plan = PreparedHistoryState(
+        replay_plan=ResolvedReplayPlan(
+            mode="configured",
+            estimated_tokens=500,
+            add_history_to_context=True,
+            num_history_runs=3,
+        ),
+        replays_persisted_history=True,
+    )
+    capped = _prepared_history_with_scheduled_limit(runs_plan, 2)
+    assert capped.replays_persisted_history is True
+    assert capped.replay_plan is not None
+    assert capped.replay_plan.mode == "limited"
+    assert capped.replay_plan.num_history_runs == 3
+    assert capped.replay_plan.num_history_messages == 2
+
+    tighter_plan = PreparedHistoryState(
+        replay_plan=ResolvedReplayPlan(
+            mode="limited",
+            estimated_tokens=100,
+            add_history_to_context=True,
+            num_history_messages=1,
+        ),
+        replays_persisted_history=True,
+    )
+    assert _prepared_history_with_scheduled_limit(tighter_plan, 2) is tighter_plan
+
+    disabled_plan = PreparedHistoryState(
+        replay_plan=ResolvedReplayPlan(mode="disabled", estimated_tokens=0, add_history_to_context=False),
+        replays_persisted_history=False,
+    )
+    assert _prepared_history_with_scheduled_limit(disabled_plan, 2) is disabled_plan
+
+    no_plan = PreparedHistoryState()
+    assert _prepared_history_with_scheduled_limit(no_plan, 2) is no_plan
+
+
+def test_scheduled_limit_does_not_widen_a_run_limited_plan() -> None:
+    """A message cap must compose with, rather than replace, an existing run cap."""
+    runs_plan = PreparedHistoryState(
+        replay_plan=ResolvedReplayPlan(
+            mode="limited",
+            estimated_tokens=100,
+            add_history_to_context=True,
+            num_history_runs=1,
+        ),
+        replays_persisted_history=True,
+    )
+
+    capped = _prepared_history_with_scheduled_limit(runs_plan, 5)
+
+    assert capped.replay_plan is not None
+    assert capped.replay_plan.num_history_runs == 1
+    assert capped.replay_plan.num_history_messages == 5
+
+
+@pytest.mark.asyncio
+async def test_scheduled_history_limit_shares_budget_between_inline_and_persisted_history() -> None:
+    """Inline context consumes the scheduled budget before persisted replay is capped."""
+
+    async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
+        return _prepared_scope_with_persisted_replay()
+
+    prepared = await _prepare_execution_context_common(
+        make_turn_context(
+            reply_to_event_id="$current",
+            scheduled_history_budget=ScheduledHistoryBudget(limit=3, source_event_id="$current"),
+        ),
+        scope_context=None,
+        prompt="Current request",
+        thread_history=[
+            make_visible_message(sender="@alice:localhost", body="older context", event_id="$older"),
+            make_visible_message(sender="@alice:localhost", body="Current request", event_id="$current"),
+        ],
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        config=_config(),
+        prepare_scope_history_fn=prepare_scope_history,
+        estimate_static_tokens_fn=lambda text: len(text.split()),
+        render_messages_text_fn=render_prepared_messages_text,
+        fallback_static_token_budget=100,
+    )
+
+    replay_plan = prepared.prepared_history.replay_plan
+    assert replay_plan is not None
+    assert replay_plan.mode == "limited"
+    assert replay_plan.num_history_runs == 1
+    assert replay_plan.num_history_messages == 2
+    assert prepared.prepared_history.replays_persisted_history is True
+    assert len(prepared.context_messages) == 1
+    assert len(prepared.context_messages) + replay_plan.num_history_messages == 3
+
+
+@pytest.mark.asyncio
+async def test_scheduled_history_limit_does_not_count_current_event_as_history() -> None:
+    """The fired task stays visible without consuming one of the prior-message slots."""
+
+    async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
+        return _prepared_scope_with_persisted_replay()
+
+    prepared = await _prepare_execution_context_common(
+        make_turn_context(
+            reply_to_event_id="$current",
+            scheduled_history_budget=ScheduledHistoryBudget(limit=2, source_event_id="$current"),
+        ),
+        scope_context=None,
+        prompt="Current request",
+        thread_history=[
+            make_visible_message(sender="@alice:localhost", body="oldest context", event_id="$oldest"),
+            make_visible_message(sender="@alice:localhost", body="recent context", event_id="$recent"),
+            make_visible_message(sender="@alice:localhost", body="newest context", event_id="$newest"),
+            make_visible_message(sender="@alice:localhost", body="Current request", event_id="$current"),
+        ],
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        config=_config(),
+        prepare_scope_history_fn=prepare_scope_history,
+        estimate_static_tokens_fn=lambda text: len(text.split()),
+        render_messages_text_fn=render_prepared_messages_text,
+        fallback_static_token_budget=100,
+    )
+
+    assert [str(message.content) for message in prepared.context_messages] == [
+        "@alice:localhost: recent context",
+        "@alice:localhost: newest context",
+    ]
+    replay_plan = prepared.prepared_history.replay_plan
+    assert replay_plan is not None
+    assert replay_plan.add_history_to_context is False
+
+
+@pytest.mark.asyncio
+async def test_scheduled_history_limit_zero_yields_prompt_only_context() -> None:
+    """With history_limit=0 the scheduled turn sees no persisted replay and no thread fallback."""
+
+    async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
+        return _prepared_scope_with_persisted_replay()
+
+    prepared = await _prepare_execution_context_common(
+        make_turn_context(
+            reply_to_event_id="$current",
+            scheduled_history_budget=ScheduledHistoryBudget(limit=0, source_event_id="$current"),
+        ),
+        scope_context=None,
+        prompt="Current request",
+        thread_history=[
+            make_visible_message(sender="@alice:localhost", body="older context", event_id="$older"),
+            make_visible_message(sender="@alice:localhost", body="Current request", event_id="$current"),
+        ],
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        config=_config(),
+        prepare_scope_history_fn=prepare_scope_history,
+        estimate_static_tokens_fn=lambda text: len(text.split()),
+        render_messages_text_fn=render_prepared_messages_text,
+        fallback_static_token_budget=100,
+    )
+
+    assert prepared.prepared_history.replays_persisted_history is False
+    replay_plan = prepared.prepared_history.replay_plan
+    assert replay_plan is not None
+    assert replay_plan.add_history_to_context is False
+    assert prepared.context_messages == ()
+    assert len(prepared.messages) == 1
+    assert "Current request" in str(prepared.messages[0].content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("history_limit", "expected_context"),
+    [
+        pytest.param(0, [], id="prompt-only"),
+        pytest.param(2, ["older context", "recent context"], id="two-prior-messages"),
+    ],
+)
+async def test_routed_scheduled_history_budget_exempts_the_prompt_source(
+    history_limit: int,
+    expected_context: list[str],
+) -> None:
+    """A routed scheduled prompt stays current and does not consume its own history budget."""
+
+    async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
+        return _prepared_scope_with_persisted_replay()
+
+    relayed_prompt = "@general ⏰ [Automated Task]\nPoll the deployment queue"
+    prepared = await _prepare_execution_context_common(
+        make_turn_context(
+            reply_to_event_id="$handoff",
+            scheduled_history_budget=ScheduledHistoryBudget(
+                limit=history_limit,
+                source_event_id="$scheduled",
+            ),
+        ),
+        scope_context=None,
+        prompt=relayed_prompt,
+        thread_history=[
+            make_visible_message(sender="@alice:localhost", body="older context", event_id="$older"),
+            make_visible_message(sender="@alice:localhost", body="recent context", event_id="$recent"),
+            make_visible_message(
+                sender="@mindroom_router:localhost",
+                body="⏰ [Automated Task]\nPoll the deployment queue",
+                event_id="$scheduled",
+            ),
+            make_visible_message(
+                sender="@mindroom_router:localhost",
+                body=relayed_prompt,
+                event_id="$handoff",
+            ),
+        ],
+        response_sender_id="@mindroom_general:localhost",
+        current_sender_id="@alice:localhost",
+        config=_config(),
+        prepare_scope_history_fn=prepare_scope_history,
+        estimate_static_tokens_fn=lambda text: len(text.split()),
+        render_messages_text_fn=render_prepared_messages_text,
+        fallback_static_token_budget=100,
+    )
+
+    assert [str(message.content).split(": ", 1)[-1] for message in prepared.context_messages] == expected_context
+    assert "Poll the deployment queue" in str(prepared.messages[-1].content)
+    assert all("Automated Task" not in str(message.content) for message in prepared.context_messages)
 
 
 @pytest.mark.asyncio

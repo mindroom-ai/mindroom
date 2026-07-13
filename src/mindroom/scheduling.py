@@ -105,6 +105,11 @@ class ScheduledWorkflow(BaseModel):
     cron_schedule: CronSchedule | None = None
     message: str
     description: str
+    history_limit: int | None = Field(
+        default=None,
+        ge=0,
+        description="Max recent thread messages the responding agent sees when the task fires; 0 means no history",
+    )
     created_by: str | None = None
     thread_id: str | None = None
     room_id: str | None = None
@@ -151,6 +156,7 @@ class ScheduledTaskReadModel:
     cron_description: str | None
     description: str
     message: str
+    history_limit: int | None
     thread_id: str | None
     new_thread: bool
     created_by: str | None
@@ -220,6 +226,7 @@ def build_scheduled_task_read_model(
         cron_description=cron_description,
         description=workflow.description,
         message=workflow.message,
+        history_limit=workflow.history_limit,
         thread_id=workflow.thread_id,
         new_thread=workflow.new_thread,
         created_by=workflow.created_by,
@@ -289,6 +296,7 @@ def build_edited_scheduled_workflow(  # noqa: C901
         cron_schedule=cron_schedule,
         message=message_value,
         description=description_value or message_value,
+        history_limit=existing_workflow.history_limit,
         created_by=existing_workflow.created_by,
         thread_id=existing_workflow.thread_id,
         room_id=room_id,
@@ -804,6 +812,7 @@ def _existing_task_parse_context(workflow: ScheduledWorkflow) -> str:
             "cron_schedule": workflow.cron_schedule.to_cron_string() if workflow.cron_schedule is not None else None,
             "message": workflow.message,
             "description": workflow.description,
+            "history_limit": workflow.history_limit,
         },
         ensure_ascii=False,
         indent=2,
@@ -1212,6 +1221,13 @@ def _extract_mentioned_agents_from_text(
     return mentioned_agents
 
 
+def _history_limit_display(history_limit: int) -> str:
+    """Render one scheduled-task history limit for chat surfaces."""
+    if history_limit == 0:
+        return "none"
+    return f"last {history_limit} message{'s' if history_limit != 1 else ''}"
+
+
 async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     runtime: SchedulingRuntime,
     room_id: str,
@@ -1222,13 +1238,21 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     mentioned_agents: list[MatrixID] | None = None,
     task_id: str | None = None,
     existing_task: ScheduledTaskRecord | None = None,
+    history_limit: int | None = None,
 ) -> tuple[str | None, str]:
     """Schedule a workflow from natural language request.
+
+    An explicit ``history_limit`` overrides whatever the natural-language parse produced.
 
     Returns:
         Tuple of (task_id, response_message)
 
     """
+    if history_limit is not None and (
+        isinstance(history_limit, bool) or not isinstance(history_limit, int) or history_limit < 0
+    ):
+        return (None, "❌ history_limit must be a non-negative integer.")
+
     client = runtime.client
     config = runtime.config
     runtime_paths = runtime.runtime_paths
@@ -1329,6 +1353,8 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     workflow_result.thread_id = None if new_thread else thread_id
     workflow_result.room_id = room_id
     workflow_result.new_thread = new_thread
+    if history_limit is not None:
+        workflow_result.history_limit = history_limit
 
     # Create task ID for new tasks (or reuse existing ID when editing)
     task_id = task_id or (existing_task.task_id if existing_task else str(uuid.uuid4())[:8])
@@ -1384,6 +1410,8 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
 
     success_msg += f"\n**Task:** {workflow_result.description}\n"
     success_msg += f"**Will post:** {workflow_result.message}\n"
+    if workflow_result.history_limit is not None:
+        success_msg += f"**History:** {_history_limit_display(workflow_result.history_limit)}\n"
     if new_thread:
         success_msg += "**Delivery:** New room-level thread root\n"
     success_msg += f"\n**Task ID:** `{task_id}`"
@@ -1398,6 +1426,7 @@ async def edit_scheduled_task(
     full_text: str,
     scheduled_by: str,
     thread_id: str | None = None,
+    history_limit: int | None = None,
 ) -> str:
     """Edit an existing scheduled task by replacing its workflow details."""
     client = runtime.client
@@ -1419,6 +1448,7 @@ async def edit_scheduled_task(
         new_thread=target_new_thread,
         task_id=task_id,
         existing_task=existing_task,
+        history_limit=history_limit,
     )
 
     if edited_task_id is None:
@@ -1483,7 +1513,10 @@ async def list_scheduled_tasks(  # noqa: C901, PLR0912
             msg_preview = workflow.message[:_MESSAGE_PREVIEW_LENGTH] + (
                 "..." if len(workflow.message) > _MESSAGE_PREVIEW_LENGTH else ""
             )
-            lines.append(f'• `{record.task_id}` - {time_str}\n  {workflow.description}\n  Message: "{msg_preview}"')
+            task_line = f'• `{record.task_id}` - {time_str}\n  {workflow.description}\n  Message: "{msg_preview}"'
+            if workflow.history_limit is not None:
+                task_line += f"\n  History: {_history_limit_display(workflow.history_limit)}"
+            lines.append(task_line)
 
     if tasks:
         lines = ["**Scheduled Tasks:**"]

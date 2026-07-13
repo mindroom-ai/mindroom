@@ -44,10 +44,8 @@ from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.identity import managed_account_user_id
 from mindroom.matrix.rooms import ensure_all_rooms_exist, ensure_root_space, ensure_user_in_rooms
 from mindroom.matrix.stale_stream_cleanup import (
-    MAX_AUTO_RESUME_AFTER_RESTART_THREADS,
-    InterruptedThread,
-    auto_resume_interrupted_threads,
-    cleanup_stale_streaming_messages,
+    StaleStreamCleanupActor,
+    recover_stale_streaming_messages,
 )
 from mindroom.matrix.state import load_rooms, resolve_room_aliases
 from mindroom.matrix.users import (
@@ -261,16 +259,15 @@ class _MultiAgentOrchestrator:
             event_cache_provider=lambda: self._runtime_support.event_cache,
         )
         self._startup_maintenance = StartupMaintenanceController(
+            recover_stale_streams=lambda bots, config, startup_cutoff_ms, scanned_room_ids: (
+                self._recover_stale_streams_after_restart(
+                    bots,
+                    config,
+                    startup_cutoff_ms,
+                    scanned_room_ids,
+                )
+            ),
             setup_rooms_and_memberships=self._setup_startup_rooms_and_memberships,
-            cleanup_stale_streams=lambda bots, config, startup_cutoff_ms: self._cleanup_stale_streams_after_restart(
-                bots,
-                config,
-                startup_cutoff_ms,
-            ),
-            auto_resume=lambda interrupted_threads, config: self._auto_resume_after_restart(
-                interrupted_threads,
-                config,
-            ),
             sync_runtime_support=lambda config: self._sync_runtime_support_services(config, start_watcher=True),
             mark_runtime_support_ready=lambda: self._approval_transport.mark_startup_runtime_support_ready(),
         )
@@ -997,71 +994,41 @@ class _MultiAgentOrchestrator:
             return
         logger.info("All agent bots started successfully")
 
-    async def _cleanup_stale_streams_after_restart(
+    async def _recover_stale_streams_after_restart(
         self,
         bots: list[AgentBot | TeamBot],
         config: Config,
-        startup_cutoff_ms: int | None = None,
-    ) -> list[InterruptedThread]:
-        """Cleanup stale streams for started bots after restart."""
-        bot_user_ids = {bot.agent_user.user_id for bot in bots if bot.client is not None and bot.agent_user.user_id}
-        if not bot_user_ids:
-            return []
-
-        cleaned_count = 0
-        interrupted_threads: list[InterruptedThread] = []
+        startup_cutoff_ms: int,
+        scanned_room_ids: set[str],
+    ) -> None:
+        """Recover interrupted responses from one concurrent room scan."""
+        actors: dict[str, StaleStreamCleanupActor] = {}
         for bot in bots:
             if bot.client is None or not bot.agent_user.user_id:
                 continue
-            try:
-                bot_cleaned_count, bot_interrupted_threads = await cleanup_stale_streaming_messages(
-                    bot.client,
-                    bot_user_id=bot.agent_user.user_id,
-                    bot_user_ids=bot_user_ids,
-                    config=config,
-                    runtime_paths=self.runtime_paths,
-                    conversation_cache=bot._conversation_cache,
-                    startup_cutoff_ms=startup_cutoff_ms,
-                )
-                cleaned_count += bot_cleaned_count
-                interrupted_threads.extend(bot_interrupted_threads)
-            except Exception as exc:
-                logger.warning(
-                    "Could not cleanup stale streaming messages (non-critical)",
-                    agent_name=bot.agent_name,
-                    error=str(exc),
-                )
-
-        if cleaned_count > 0:
-            logger.info("Cleaned stale streaming messages", count=cleaned_count)
-        return interrupted_threads
-
-    async def _auto_resume_after_restart(
-        self,
-        interrupted_threads: list[InterruptedThread],
-        config: Config,
-    ) -> None:
-        """Queue visible Matrix resume relays from the router."""
-        if not config.defaults.auto_resume_after_restart or not interrupted_threads:
+            actors[bot.agent_user.user_id] = StaleStreamCleanupActor(
+                client=bot.client,
+                conversation_cache=bot._conversation_cache,
+            )
+        if not actors:
             return
         router_bot = self._router_bot()
-        if router_bot is None or router_bot.client is None:
-            logger.warning("Auto-resume after restart skipped because the router client is unavailable")
-            return
 
-        try:
-            resumed_count = await auto_resume_interrupted_threads(
-                router_bot.client,
-                interrupted_threads,
-                config=config,
-                runtime_paths=self.runtime_paths,
-                conversation_cache=router_bot._conversation_cache,
-                max_resumes=MAX_AUTO_RESUME_AFTER_RESTART_THREADS,
-            )
-            if resumed_count > 0:
-                logger.info("Queued auto-resume messages after restart", count=resumed_count)
-        except Exception as exc:
-            logger.warning("Could not auto-resume interrupted threads (non-critical)", error=str(exc))
+        result = await recover_stale_streaming_messages(
+            actors,
+            resume_client=router_bot.client if router_bot is not None else None,
+            resume_conversation_cache=router_bot._conversation_cache if router_bot is not None else None,
+            config=config,
+            runtime_paths=self.runtime_paths,
+            startup_cutoff_ms=startup_cutoff_ms,
+            scanned_room_ids=scanned_room_ids,
+        )
+        logger.info(
+            "Completed stale stream recovery",
+            room_count=result.room_count,
+            cleaned_count=result.cleaned_count,
+            resumed_count=result.resumed_count,
+        )
 
     def _resolve_bot_room_aliases(self, bots: list[AgentBot | TeamBot], config: Config) -> None:
         """Resolve currently known room aliases into each bot's configured room IDs."""

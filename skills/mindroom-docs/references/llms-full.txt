@@ -56,7 +56,7 @@ See [Getting Started](https://docs.mindroom.chat/getting-started/) for the full 
 ### Preferred alternative: NixOS LXC container (agent-controlled machine)
 
 Use this when you want to give a MindRoom agent full freedom over its own virtual machine while you, from the host, control precisely what it can see.
-A standalone NixOS flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, Cinny, Element, Caddy) plus Docker and secrets wiring, so the agent can rebuild and manage the persistent virtual machine it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
+A standalone NixOS flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, MindRoom Chat, Element, Caddy) plus Docker and secrets wiring, so the agent can rebuild and manage the persistent virtual machine it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
 It is slightly harder to set up by hand, but asking a coding agent such as Codex or Claude Code to do it is trivial: the repo ships machine-oriented instructions in `AGENTS.md`.
 See [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) for the full setup.
 
@@ -81,7 +81,7 @@ Open:
 - MindRoom client: http://localhost:8080
 - Matrix homeserver: http://localhost:8008
 
-The stack uses published `mindroom`, `mindroom-cinny`, and `mindroom-tuwunel` images by default.
+The stack uses published `mindroom`, `mindroom-chat`, and `mindroom-tuwunel` images by default.
 
 If you access the stack from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting it.
 
@@ -135,7 +135,7 @@ OPENAI_API_KEY=your_api_key
 mindroom run
 ```
 
-For local development with a host-installed backend plus Dockerized Synapse + Cinny (Linux/macOS), you can bootstrap the local stack with:
+For local development with a host-installed backend plus Dockerized Synapse + MindRoom Chat (Linux/macOS), you can bootstrap the local stack with:
 
 ```bash
 mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
@@ -340,7 +340,7 @@ For a detailed architecture and credential model, see:
 ## Preferred alternative: NixOS LXC container (agent-controlled machine)
 
 Use this when you want to give a MindRoom agent full freedom over its own virtual machine while you, from the host, control precisely what it can see.
-The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, Cinny, Element, Caddy) plus Docker and `ragenix`-based secrets wiring.
+The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, MindRoom Chat, Element, Caddy) plus Docker and `ragenix`-based secrets wiring.
 Because the whole virtual machine is declared in the flake, the agent can rebuild and manage the persistent system it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
 It is slightly harder to set up by hand, but asking a coding agent such as Codex or Claude Code to do it is trivial: the repo ships machine-oriented instructions in `AGENTS.md`.
 It requires a Linux host running [Incus](https://linuxcontainers.org/incus/docs/main/installing/).
@@ -386,7 +386,7 @@ Open:
 - MindRoom client: http://localhost:8080
 - Matrix homeserver: http://localhost:8008
 
-The stack uses published `mindroom`, `mindroom-cinny`, and `mindroom-tuwunel` images by default.
+The stack uses published `mindroom`, `mindroom-chat`, and `mindroom-tuwunel` images by default.
 
 If you access the stack from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting it.
 
@@ -475,7 +475,7 @@ OPENAI_API_KEY=your_openai_key
 # MINDROOM_API_KEY=your-secret-key
 ```
 
-#### Optional: Bootstrap local Synapse + Cinny with Docker (Linux/macOS)
+#### Optional: Bootstrap local Synapse + MindRoom Chat with Docker (Linux/macOS)
 
 If you want a local Matrix + client setup without running the full `mindroom-stack` app, use the helper command:
 
@@ -489,7 +489,7 @@ If you're running from source in this repo, use:
 uv run mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
 ```
 
-This starts Synapse from the `mindroom-stack` compose files, starts a MindRoom Cinny container, waits for both services to be healthy, and by default writes local Matrix settings to `.env` next to your active `config.yaml`.
+This starts Synapse from the `mindroom-stack` compose files, starts a MindRoom Chat container, waits for both services to be healthy, and by default writes local Matrix settings to `.env` next to your active `config.yaml`.
 
 > [!NOTE]
 > MindRoom automatically creates Matrix user accounts for each agent. Your Matrix homeserver must allow open registration, or you need to configure it to allow registration from localhost. If registration fails, check your homeserver's registration settings.
@@ -8236,6 +8236,8 @@ get_upcoming_bookings(email="alex@example.com")
 `scheduler` exposes `schedule()`, `edit_schedule()`, `list_schedules()`, and `cancel_schedule()`.
 It reuses the same backend as `!schedule`, `!edit_schedule`, `!list_schedules`, and `!cancel_schedule`.
 By default `schedule()` posts back into the current room or thread scope, while `new_thread=True` schedules a future room-level root message.
+The optional `history_limit` argument caps how many recent messages the scheduled responder sees each time the task fires.
+Use `history_limit=0` for no prior conversation context, or a positive integer to keep that many recent messages.
 Scheduled tasks are stored in Matrix room state and persist across restarts.
 The scheduler validates mentioned agents and teams against the current room or thread before it saves a task.
 If no Matrix room context is available, the tool returns an unavailable error instead of creating a task.
@@ -8256,8 +8258,9 @@ agents:
 ```python
 schedule("tomorrow at 9am @ops check the deployment")
 schedule("every weekday at 8am post the on-call handoff summary", new_thread=True)
+schedule("every hour @ops check deployment health", history_limit=0)
 list_schedules()
-edit_schedule("a1b2c3d4", "tomorrow at 10am @ops check the deployment")
+edit_schedule("a1b2c3d4", "tomorrow at 10am @ops check the deployment", history_limit=5)
 cancel_schedule("a1b2c3d4")
 ```
 
@@ -8265,6 +8268,8 @@ cancel_schedule("a1b2c3d4")
 
 - `scheduler` needs no dashboard setup and is included in `defaults.tools` by default unless you explicitly disable that inheritance.
 - Editing preserves the original schedule type, so switching between one-time and recurring schedules requires cancelling the old task and creating a new one.
+- Editing preserves an existing history limit unless the edit request or explicit tool argument changes it.
+- Use natural-language edit phrases such as `restore full history` to remove a history limit through chat, or pass `history_limit` through the tool when the agent should set a concrete cap.
 - Conditional phrases such as `if` and `when` are converted into recurring polling schedules rather than real event subscriptions.
 - Use [Scheduling](https://docs.mindroom.chat/scheduling/) for the full command syntax, timezone behavior, persistence details, and command-line aliases.
 
@@ -13387,6 +13392,15 @@ Include `@agent_name` or `@team_name` in your schedule to target specific respon
 
 The scheduler validates that mentioned agents and teams are available in the room before creating the task.
 
+Add `with no history`, `without context`, or `context-free` when each scheduled run should see no prior conversation messages.
+
+Add a phrase such as `with only the last 5 messages of context` to cap each scheduled run to recent context.
+
+```
+!schedule Every hour, @ops check deployment health with no history
+!schedule Daily at 9am, @research summarize AI news with only the last 5 messages
+```
+
 Schedules use the timezone from `config.yaml` (defaults to UTC).
 
 See [Scheduling](https://docs.mindroom.chat/scheduling/) for full details.
@@ -13417,6 +13431,8 @@ Use `!list_schedules` to find task IDs.
 ### `!edit_schedule`
 
 Replace an existing scheduled task with new timing and content.
+Omitted fields stay unchanged, including any existing history limit.
+Use `restore full history` or `use unlimited history` to remove a history limit.
 
 ```
 !edit_schedule <task-id> <new-task-description>
@@ -13425,6 +13441,11 @@ Replace an existing scheduled task with new timing and content.
 The task description is re-parsed to update timing and content.
 
 Schedule type cannot be changed (one-time to recurring or vice versa) -- cancel and recreate instead.
+
+```
+!edit_schedule task42 keep the same schedule but restore full history
+!edit_schedule task42 every weekday at 8am check build status with no history
+```
 
 **Aliases:** `!editschedule`, `!edit-schedule`
 
@@ -13920,6 +13941,26 @@ Use `!help schedule` for detailed inline help on scheduling commands.
 Include `@agent_name` or `@team_name` in your schedule to have specific responders answer.
 
 The scheduler validates that mentioned agents and teams are available in the room before creating the task.
+
+## History Limits
+
+Scheduled tasks normally use the responder's configured conversation history policy.
+Add a context phrase when you want each run to see less of the current room or thread.
+Use `with no history`, `without context`, or `context-free` when the scheduled responder should see no prior room or thread messages; the system prompt and fired task message remain available.
+Use phrases such as `with only the last 5 messages of context` or `include the last 5 messages` to cap each scheduled run to recent context.
+
+```
+!schedule Every hour, @ops check deployment health with no history
+!schedule Daily at 9am, @research summarize AI news with only the last 5 messages
+```
+
+For edits, omitted fields stay unchanged, including any existing history limit.
+Use `restore full history` or `use unlimited history` in an edit to remove a history limit.
+
+```
+!edit_schedule task42 keep the same schedule but restore full history
+!edit_schedule task42 every weekday at 8am check build status with no history
+```
 
 ## Timezone
 
@@ -15198,7 +15239,7 @@ If you want worker-routed execution tools like `coding`, `docker`, `file`, `pyth
 ### NixOS LXC container (preferred alternative, agent-controlled machine)
 
 Use this when you want to give a MindRoom agent full freedom over its own virtual machine while you, from the host, control precisely what it can see.
-The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, Cinny, Element, Caddy) plus Docker and `ragenix`-based secrets wiring, so the agent can rebuild and manage the persistent system it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
+The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, MindRoom Chat, Element, Caddy) plus Docker and `ragenix`-based secrets wiring, so the agent can rebuild and manage the persistent system it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
 It is slightly harder to set up by hand, but asking a coding agent such as Codex or Claude Code to do it is trivial: the repo ships machine-oriented instructions in `AGENTS.md`.
 It requires a Linux host running [Incus](https://linuxcontainers.org/incus/docs/main/installing/); see the repo README for the full setup.
 
@@ -15221,7 +15262,7 @@ docker compose up -d
 ```
 
 The stack exposes MindRoom at `http://localhost:8765`, the MindRoom client at `http://localhost:8080`, and Matrix at `http://localhost:8008`.
-The stack uses published `mindroom`, `mindroom-cinny`, and `mindroom-tuwunel` images by default.
+The stack uses published `mindroom`, `mindroom-chat`, and `mindroom-tuwunel` images by default.
 If you access it from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting it.
 
 ### Direct (Development)
@@ -15232,7 +15273,7 @@ mindroom run --storage-path ./mindroom_data
 
 The config file path is set via `MINDROOM_CONFIG_PATH` and otherwise defaults to `./config.yaml`, then `~/.mindroom/config.yaml`.
 
-If you want local Matrix + Cinny with a host-installed MindRoom runtime (Linux/macOS), use:
+If you want local Matrix + MindRoom Chat with a host-installed MindRoom runtime (Linux/macOS), use:
 
 ```bash
 mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
@@ -16094,7 +16135,7 @@ The local Matrix stack includes:
 - **PostgreSQL**: Database backend
 - **Redis**: Caching layer
 
-If you're running the backend on the host (not in Docker), you can use `mindroom local-stack-setup` to start Synapse + MindRoom Cinny and persist local Matrix env vars automatically:
+If you're running the backend on the host (not in Docker), you can use `mindroom local-stack-setup` to start Synapse + MindRoom Chat and persist local Matrix env vars automatically:
 
 ```bash
 mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
@@ -17325,7 +17366,7 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ doctor              Check your environment for common issues.                          │
 │ connect             Pair this local MindRoom install with the hosted provisioning      │
 │                     service.                                                           │
-│ local-stack-setup   Start local Synapse + MindRoom Cinny using Docker only.            │
+│ local-stack-setup   Start local Synapse + MindRoom Chat using Docker only.             │
 │ config              Manage MindRoom configuration files.                               │
 │ avatars             Generate and sync managed avatar assets.                           │
 │ threads             Export Matrix threads to local files.                              │
@@ -17993,7 +18034,7 @@ mindroom connect \
 
 ## local-stack-setup
 
-Start local Synapse and the MindRoom Cinny client container for development.
+Start local Synapse and the MindRoom Chat client container for development.
 
 By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, and `MATRIX_SSL_VERIFY=false` into `.env` next to your active `config.yaml` so `mindroom run` works without inline env exports.
 
@@ -18012,7 +18053,7 @@ By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, a
 
  Usage: root local-stack-setup [OPTIONS]
 
- Start local Synapse + MindRoom Cinny using Docker only.
+ Start local Synapse + MindRoom Chat using Docker only.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --synapse-dir                                 PATH                 Directory           │
@@ -18024,8 +18065,9 @@ By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, a
 │                                                                    [default:           │
 │                                                                    local/matrix]       │
 │ --homeserver-url                              TEXT                 Homeserver URL that │
-│                                                                    Cinny and MindRoom  │
-│                                                                    should use.         │
+│                                                                    MindRoom Chat and   │
+│                                                                    MindRoom should     │
+│                                                                    use.                │
 │                                                                    [default:           │
 │                                                                    http://localhost:8… │
 │ --server-name                                 TEXT                 Matrix server name  │
@@ -18034,15 +18076,18 @@ By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, a
 │                                                                    --homeserver-url    │
 │                                                                    hostname).          │
 │ --cinny-port                                  INTEGER RANGE        Local host port for │
-│                                               [1<=x<=65535]        the MindRoom Cinny  │
+│                                               [1<=x<=65535]        the MindRoom Chat   │
 │                                                                    container.          │
 │                                                                    [default: 8080]     │
 │ --cinny-image                                 TEXT                 Docker image for    │
-│                                                                    MindRoom Cinny.     │
+│                                                                    MindRoom Chat.      │
 │                                                                    [default:           │
 │                                                                    ghcr.io/mindroom-a… │
 │ --cinny-container-n…                          TEXT                 Container name for  │
-│                                                                    MindRoom Cinny.     │
+│                                                                    MindRoom Chat       │
+│                                                                    (legacy default     │
+│                                                                    retained for        │
+│                                                                    compatibility).     │
 │                                                                    [default:           │
 │                                                                    mindroom-cinny-loc… │
 │ --skip-synapse                                                     Skip starting       │

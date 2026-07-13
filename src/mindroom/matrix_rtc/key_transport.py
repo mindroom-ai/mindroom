@@ -124,6 +124,13 @@ class ToDeviceFrameKeyTransport:
                 )
                 continue
             delivered.append(target)
+            logger.info(
+                "call_key_sent",
+                room_id=room_id,
+                user_id=target.user_id,
+                device_id=target.device_id,
+                key_index=key_index,
+            )
         return delivered
 
     def parse_incoming(

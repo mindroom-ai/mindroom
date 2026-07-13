@@ -754,8 +754,8 @@ async def test_target_membership_and_invited_room_setting_are_both_enforced(tmp_
 
 
 @pytest.mark.asyncio
-async def test_member_filter_records_failure_when_membership_lookup_fails(tmp_path: Path) -> None:
-    """A failed membership lookup should fail closed and surface as a room failure."""
+async def test_member_filter_lookup_failure_keeps_exports_and_records_failure(tmp_path: Path) -> None:
+    """A failed membership lookup must keep existing exports: unknown is not revoked."""
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     _write_matrix_state(tmp_path)
@@ -770,21 +770,29 @@ async def test_member_filter_records_failure_when_membership_lookup_fails(tmp_pa
         "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
         new=AsyncMock(),
     ) as enumerate_threads:
-        stats = await _export_threads_for_client(
+        accumulators = await _export_threads_for_targets_for_client(
             client=client,
             config=config,
             runtime_paths=runtime_paths,
             event_cache=Mock(),
-            output_dir=tmp_path / "exports",
             rooms=_export_rooms(runtime_paths, None),
-            required_member_user_id="@alice:localhost",
+            targets=(
+                ThreadExportTarget(
+                    output_dir=tmp_path / "exports",
+                    required_member_user_id="@alice:localhost",
+                ),
+            ),
         )
 
+    accumulator = accumulators[0]
+    stats = accumulator.stats()
     assert stats.rooms_exported == 0
     assert stats.failures == 2
     assert all("Membership lookup failed" in failure.error for failure in stats.failed_items)
+    assert accumulator.retained_room_keys == {"lobby", "dev"}
     enumerate_threads.assert_not_awaited()
-    assert not any((tmp_path / "exports").iterdir())
+    for room_key in ("lobby", "dev"):
+        assert (tmp_path / "exports" / room_key / "old.yaml").read_text(encoding="utf-8") == "secret"
 
 
 @pytest.mark.asyncio

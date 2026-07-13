@@ -1454,11 +1454,15 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
+            patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()),
             patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
             patch.object(orchestrator, "_sync_runtime_support_services", side_effect=_sync_runtime_support_services),
             patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
         ):
-            await _run_orchestrator_start_until_ready(orchestrator)
+            await _run_orchestrator_start_until_ready(
+                orchestrator,
+                wait_for_startup_maintenance=True,
+            )
 
         assert call_order == ["wait_for_homeserver", "setup_rooms", "support_services"]
         bot.try_start.assert_awaited_once()
@@ -1483,6 +1487,7 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock()),
+            patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
             patch.object(
                 orchestrator,
@@ -1491,7 +1496,10 @@ class TestMultiAgentOrchestrator:
             ) as sync_runtime_support_services,
             patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
         ):
-            await _run_orchestrator_start_until_ready(orchestrator)
+            await _run_orchestrator_start_until_ready(
+                orchestrator,
+                wait_for_startup_maintenance=True,
+            )
 
         sync_runtime_support_services.assert_awaited_once()
 
@@ -1547,6 +1555,7 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
+            patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()),
             patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
             patch(
                 "mindroom.approval_transport.expire_orphaned_approval_cards_on_startup",
@@ -1556,7 +1565,10 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             patch("mindroom.orchestrator.sync_forever_with_restart", side_effect=_sync_forever_with_restart),
         ):
-            await _run_orchestrator_start_until_ready(orchestrator)
+            await _run_orchestrator_start_until_ready(
+                orchestrator,
+                wait_for_startup_maintenance=True,
+            )
             await asyncio.wait_for(startup_discarded.wait(), timeout=1.0)
 
         assert call_order == [

@@ -141,6 +141,8 @@ get_upcoming_bookings(email="alex@example.com")
 `scheduler` exposes `schedule()`, `edit_schedule()`, `list_schedules()`, and `cancel_schedule()`.
 It reuses the same backend as `!schedule`, `!edit_schedule`, `!list_schedules`, and `!cancel_schedule`.
 By default `schedule()` posts back into the current room or thread scope, while `new_thread=True` schedules a future room-level root message.
+The optional `history_limit` argument caps how many recent messages the scheduled responder sees each time the task fires.
+Use `history_limit=0` for no prior conversation context, or a positive integer to keep that many recent messages.
 Scheduled tasks are stored in Matrix room state and persist across restarts.
 The scheduler validates mentioned agents and teams against the current room or thread before it saves a task.
 If no Matrix room context is available, the tool returns an unavailable error instead of creating a task.
@@ -161,8 +163,9 @@ agents:
 ```python
 schedule("tomorrow at 9am @ops check the deployment")
 schedule("every weekday at 8am post the on-call handoff summary", new_thread=True)
+schedule("every hour @ops check deployment health", history_limit=0)
 list_schedules()
-edit_schedule("a1b2c3d4", "tomorrow at 10am @ops check the deployment")
+edit_schedule("a1b2c3d4", "tomorrow at 10am @ops check the deployment", history_limit=5)
 cancel_schedule("a1b2c3d4")
 ```
 
@@ -170,6 +173,8 @@ cancel_schedule("a1b2c3d4")
 
 - `scheduler` needs no dashboard setup and is included in `defaults.tools` by default unless you explicitly disable that inheritance.
 - Editing preserves the original schedule type, so switching between one-time and recurring schedules requires cancelling the old task and creating a new one.
+- Editing preserves an existing history limit unless the edit request or explicit tool argument changes it.
+- Use natural-language edit phrases such as `restore full history` to remove a history limit through chat, or pass `history_limit` through the tool when the agent should set a concrete cap.
 - Conditional phrases such as `if` and `when` are converted into recurring polling schedules rather than real event subscriptions.
 - Use [Scheduling](../scheduling.md) for the full command syntax, timezone behavior, persistence details, and command-line aliases.
 

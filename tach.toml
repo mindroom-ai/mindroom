@@ -913,6 +913,7 @@ depends_on = [
     "mindroom.history.prompt_tokens",
     "mindroom.history.runtime",
     "mindroom.history.storage",
+    "mindroom.history.types",
     "mindroom.matrix.client_visible_messages",
     "mindroom.prompt_message_tags",
     "mindroom.streaming",

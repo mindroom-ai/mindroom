@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
-from mindroom.matrix.client_delivery import send_message_result
+from mindroom.matrix.client_delivery import build_edit_event_content, send_message_result
 
 
 def _mock_client(*, encrypted: bool = False) -> AsyncMock:
@@ -38,3 +38,20 @@ async def test_send_message_result_ignores_unverified_devices_in_encrypted_room(
     await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
 
     assert client.room_send.await_args.kwargs["ignore_unverified_devices"] is True
+
+
+def test_edit_fallback_preserves_replacement_message_type() -> None:
+    """A notice replacement must also be a notice to suppress edit mention pushes."""
+    content = build_edit_event_content(
+        event_id="$original:localhost",
+        new_content={
+            "body": "Streaming answer",
+            "msgtype": "m.notice",
+            "m.mentions": {"user_ids": ["@user:localhost"]},
+        },
+        new_text="Streaming answer",
+    )
+
+    assert content["msgtype"] == "m.notice"
+    assert content["m.new_content"]["msgtype"] == "m.notice"
+    assert content["m.mentions"] == {"user_ids": ["@user:localhost"]}

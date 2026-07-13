@@ -229,7 +229,7 @@ def _build_nonterminal_streaming_edit_preview(
             original_size=original_size,
         )
         modified_content: dict[str, Any] = {
-            "msgtype": "m.text",
+            "msgtype": source_content.get("msgtype", "m.text"),
             "body": f"* {preview}",
             "format": "org.matrix.custom.html",
             "formatted_body": formatted_preview,
@@ -462,9 +462,10 @@ def _build_text_fallback_content(
 ) -> dict[str, Any]:
     """Build a text preview when the full-content sidecar is unavailable."""
     preview_limit = max(0, size_limit - _LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES)
+    preview_msgtype = "m.notice" if source_content.get("msgtype") == "m.notice" else "m.text"
     while True:
         preview_content: dict[str, Any] = {
-            "msgtype": "m.text",
+            "msgtype": preview_msgtype,
             "body": _create_preview(
                 preview_text,
                 preview_limit,
@@ -598,7 +599,7 @@ async def prepare_large_message(
 
     if is_edit and "m.new_content" in content:
         modified_content = {
-            "msgtype": "m.text",
+            "msgtype": source_content.get("msgtype", "m.text"),
             "body": f"* {modified_content['body']}",
             "m.new_content": modified_content,
             "m.relates_to": content.get("m.relates_to", {}),

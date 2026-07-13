@@ -2,7 +2,7 @@
 
 import pytest
 
-from mindroom.constants import VISIBLE_ROUTER_VOICE_ECHO_KEY
+from mindroom.constants import SCHEDULED_HISTORY_LIMIT_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.dispatch_source import (
     EXTERNAL_TRIGGER_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
@@ -14,11 +14,28 @@ from mindroom.dispatch_source import (
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
     is_visible_router_voice_echo_content,
+    scheduled_history_limit_from_content,
     source_kind_allows_internal_relay_detection,
     source_kind_allows_self_authored_ingress,
     source_kind_allows_trusted_original_sender,
     source_kind_bypasses_coalescing,
 )
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        pytest.param({SCHEDULED_HISTORY_LIMIT_KEY: 5}, 5, id="positive"),
+        pytest.param({SCHEDULED_HISTORY_LIMIT_KEY: 0}, 0, id="zero"),
+        pytest.param({SCHEDULED_HISTORY_LIMIT_KEY: -1}, None, id="negative"),
+        pytest.param({SCHEDULED_HISTORY_LIMIT_KEY: True}, None, id="bool"),
+        pytest.param({SCHEDULED_HISTORY_LIMIT_KEY: "5"}, None, id="string"),
+        pytest.param({}, None, id="absent"),
+    ],
+)
+def test_scheduled_history_limit_from_content(content: dict[str, object], expected: int | None) -> None:
+    """Only non-negative integer annotations count as a scheduled-turn history limit."""
+    assert scheduled_history_limit_from_content(content) == expected
 
 
 @pytest.mark.parametrize(

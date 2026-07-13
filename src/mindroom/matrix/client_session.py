@@ -5,12 +5,13 @@ from __future__ import annotations
 import ssl as ssl_module
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import nio
 
-from mindroom.constants import RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
+from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
+from mindroom.matrix.event_types import CALL_ENCRYPTION_KEYS_EVENT_TYPE
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.startup_errors import PermanentStartupError
 
@@ -29,23 +30,55 @@ _PERMANENT_MATRIX_STARTUP_ERROR_CODES = frozenset(
 )
 
 
+def _log_call_key_olm_rejection(
+    event: nio.UnknownToDeviceEvent,
+    reason: str,
+    **details: object,
+) -> None:
+    """Log why an otherwise decrypted call-key event failed provenance checks."""
+    if event.type != CALL_ENCRYPTION_KEYS_EVENT_TYPE:
+        return
+    logger.warning(
+        "call_key_olm_rejected",
+        sender=event.sender,
+        reason=reason,
+        **details,
+    )
+
+
 class PermanentMatrixStartupError(PermanentStartupError):
     """Raised for Matrix startup failures that should not be retried."""
 
 
 class _MindRoomAsyncClient(nio.AsyncClient):
-    """Matrix client preserving authenticated provenance for custom Olm events."""
+    """Matrix client for MindRoom-specific encrypted event behavior."""
+
+    def encrypt(
+        self,
+        room_id: str,
+        message_type: str,
+        content: dict[Any, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        """Expose only the coarse stream state needed for encrypted push routing."""
+        encrypted_message_type, encrypted_content = super().encrypt(room_id, message_type, content)
+        stream_status = content.get(STREAM_STATUS_KEY)
+        if isinstance(stream_status, str):
+            encrypted_content[STREAM_STATUS_KEY] = stream_status
+        return encrypted_message_type, encrypted_content
+
+    def _handle_olm_events(self, response: nio.SyncResponse) -> None:
+        """Preserve an explicit zero OTK count so nio replenishes a drained pool."""
+        super()._handle_olm_events(response)
+        count = response.device_key_count.signed_curve25519
+        if self.olm is not None and count is not None:
+            self.olm.uploaded_key_count = count
 
     def _handle_decrypt_to_device(self, to_device_event: nio.ToDeviceEvent) -> nio.ToDeviceEvent | None:
         decrypted = super()._handle_decrypt_to_device(to_device_event)
         if not isinstance(to_device_event, nio.OlmEvent) or not isinstance(decrypted, nio.UnknownToDeviceEvent):
             return decrypted
-        sender_device = decrypted.source.get("sender_device")
-        sender_keys = decrypted.source.get("keys")
-        if not isinstance(sender_device, str) or not isinstance(sender_keys, dict) or self.olm is None:
-            return decrypted
-        sender_ed25519 = sender_keys.get("ed25519")
-        if not isinstance(sender_ed25519, str):
+        if self.olm is None:
+            _log_call_key_olm_rejection(decrypted, "missing_olm_machine")
             return decrypted
         matching_devices = [
             device
@@ -53,10 +86,46 @@ class _MindRoomAsyncClient(nio.AsyncClient):
             if device.curve25519 == to_device_event.sender_key
         ]
         if len(matching_devices) != 1:
+            _log_call_key_olm_rejection(
+                decrypted,
+                "curve25519_device_match_count",
+                matching_device_count=len(matching_devices),
+            )
             return decrypted
         device = matching_devices[0]
-        if device.id != sender_device or device.ed25519 != sender_ed25519:
+
+        # The Olm envelope authenticates possession of ``sender_key`` and nio
+        # verifies that the sender in the decrypted payload matches the
+        # envelope sender. Matrix clients do not all include nio's optional
+        # ``sender_device``/``keys`` fields in custom Olm payloads, so map the
+        # authenticated curve25519 key to the uniquely matching device from
+        # the signed device-key store. If redundant identity fields are
+        # present, continue to enforce them as consistency checks.
+        sender_device = decrypted.source.get("sender_device")
+        sender_keys = decrypted.source.get("keys")
+        sender_ed25519 = sender_keys.get("ed25519") if isinstance(sender_keys, dict) else None
+        if sender_device is not None and sender_device != device.id:
+            _log_call_key_olm_rejection(
+                decrypted,
+                "signed_sender_identity_mismatch",
+                sender_device=sender_device,
+                matched_device_id=device.id,
+            )
             return decrypted
+        if sender_keys is not None and sender_ed25519 != device.ed25519:
+            _log_call_key_olm_rejection(
+                decrypted,
+                "signed_sender_identity_mismatch",
+                sender_ed25519=sender_ed25519,
+                matched_ed25519=device.ed25519,
+            )
+            return decrypted
+        if decrypted.type == CALL_ENCRYPTION_KEYS_EVENT_TYPE:
+            logger.info(
+                "call_key_olm_authenticated",
+                sender=decrypted.sender,
+                sender_device=device.id,
+            )
         return AuthenticatedToDeviceEvent(
             source=decrypted.source,
             sender=decrypted.sender,

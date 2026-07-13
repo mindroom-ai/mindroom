@@ -73,6 +73,26 @@ Include `@agent_name` or `@team_name` in your schedule to have specific responde
 
 The scheduler validates that mentioned agents and teams are available in the room before creating the task.
 
+## History Limits
+
+Scheduled tasks normally use the responder's configured conversation history policy.
+Add a context phrase when you want each run to see less of the current room or thread.
+Use `with no history`, `without context`, or `context-free` when the scheduled responder should see no prior room or thread messages; the system prompt and fired task message remain available.
+Use phrases such as `with only the last 5 messages of context` or `include the last 5 messages` to cap each scheduled run to recent context.
+
+```
+!schedule Every hour, @ops check deployment health with no history
+!schedule Daily at 9am, @research summarize AI news with only the last 5 messages
+```
+
+For edits, omitted fields stay unchanged, including any existing history limit.
+Use `restore full history` or `use unlimited history` in an edit to remove a history limit.
+
+```
+!edit_schedule task42 keep the same schedule but restore full history
+!edit_schedule task42 every weekday at 8am check build status with no history
+```
+
 ## Timezone
 
 Schedules use the timezone from `config.yaml` (defaults to UTC):

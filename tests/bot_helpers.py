@@ -167,7 +167,11 @@ def _assert_ready_voice_text_fallback(ready_event: ReadyPendingEvent | None) -> 
     assert ready_event.pending_event.event.source["content"][VOICE_RAW_AUDIO_FALLBACK_KEY] is True
 
 
-async def _run_orchestrator_start_until_ready(orchestrator: _MultiAgentOrchestrator) -> None:
+async def _run_orchestrator_start_until_ready(
+    orchestrator: _MultiAgentOrchestrator,
+    *,
+    wait_for_startup_maintenance: bool = False,
+) -> None:
     """Run start() until readiness, then explicitly shut the runtime down."""
     ready = asyncio.Event()
 
@@ -178,6 +182,10 @@ async def _run_orchestrator_start_until_ready(orchestrator: _MultiAgentOrchestra
         runtime_task = asyncio.create_task(orchestrator.start())
         try:
             await asyncio.wait_for(ready.wait(), timeout=1.0)
+            if wait_for_startup_maintenance:
+                maintenance_task = orchestrator._startup_maintenance.task
+                assert maintenance_task is not None
+                await maintenance_task
             await orchestrator.stop()
             await asyncio.wait_for(runtime_task, timeout=1.0)
         finally:

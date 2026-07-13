@@ -85,12 +85,15 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
     ):
         result = await tools.schedule("tomorrow at 3pm check deployment")
         new_thread_result = await tools.schedule("tomorrow at 4pm check deployment", new_thread=True)
+        limited_result = await tools.schedule("every 25 minutes poll the queue", history_limit=0)
 
     assert result == "✅ Scheduled"
     assert new_thread_result == "✅ Scheduled"
-    assert mock_schedule.await_count == 2
+    assert limited_result == "✅ Scheduled"
+    assert mock_schedule.await_count == 3
     first_call = mock_schedule.await_args_list[0].kwargs
     second_call = mock_schedule.await_args_list[1].kwargs
+    third_call = mock_schedule.await_args_list[2].kwargs
     expected_runtime = SchedulingRuntime(
         client=context.client,
         config=context.config,
@@ -107,6 +110,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "scheduled_by": context.requester_id,
         "full_text": "tomorrow at 3pm check deployment",
         "new_thread": False,
+        "history_limit": None,
     }
     assert second_call == {
         "runtime": expected_runtime,
@@ -115,6 +119,16 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "scheduled_by": context.requester_id,
         "full_text": "tomorrow at 4pm check deployment",
         "new_thread": True,
+        "history_limit": None,
+    }
+    assert third_call == {
+        "runtime": expected_runtime,
+        "room_id": context.room_id,
+        "thread_id": context.resolved_thread_id,
+        "scheduled_by": context.requester_id,
+        "full_text": "every 25 minutes poll the queue",
+        "new_thread": False,
+        "history_limit": 0,
     }
 
 
@@ -159,23 +173,37 @@ async def test_edit_schedule_tool_calls_backend() -> None:
         tool_runtime_context(context),
     ):
         result = await tools.edit_schedule("task123", "tomorrow at 9am check deployment")
+        limited_result = await tools.edit_schedule("task123", "keep the same schedule", history_limit=5)
 
     assert "Updated" in result
-    mock_edit.assert_awaited_once_with(
-        runtime=SchedulingRuntime(
-            client=context.client,
-            config=context.config,
-            runtime_paths=context.runtime_paths,
-            room=context.room,
-            conversation_cache=context.conversation_cache,
-            event_cache=context.event_cache,
-        ),
-        room_id=context.room_id,
-        task_id="task123",
-        full_text="tomorrow at 9am check deployment",
-        scheduled_by=context.requester_id,
-        thread_id=context.resolved_thread_id,
+    assert "Updated" in limited_result
+    expected_runtime = SchedulingRuntime(
+        client=context.client,
+        config=context.config,
+        runtime_paths=context.runtime_paths,
+        room=context.room,
+        conversation_cache=context.conversation_cache,
+        event_cache=context.event_cache,
     )
+    assert mock_edit.await_count == 2
+    assert mock_edit.await_args_list[0].kwargs == {
+        "runtime": expected_runtime,
+        "room_id": context.room_id,
+        "task_id": "task123",
+        "full_text": "tomorrow at 9am check deployment",
+        "scheduled_by": context.requester_id,
+        "thread_id": context.resolved_thread_id,
+        "history_limit": None,
+    }
+    assert mock_edit.await_args_list[1].kwargs == {
+        "runtime": expected_runtime,
+        "room_id": context.room_id,
+        "task_id": "task123",
+        "full_text": "keep the same schedule",
+        "scheduled_by": context.requester_id,
+        "thread_id": context.resolved_thread_id,
+        "history_limit": 5,
+    }
 
 
 @pytest.mark.asyncio
