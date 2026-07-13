@@ -535,6 +535,29 @@ def _thread_history_before_current_event(
     return tuple(preceding_messages)
 
 
+def _thread_history_with_scheduled_limit(
+    thread_history: Sequence[ResolvedVisibleMessage] | None,
+    *,
+    current_event_id: str | None,
+    history_limit: int,
+) -> Sequence[ResolvedVisibleMessage] | None:
+    """Keep the current event plus at most the newest limited history messages."""
+    if not thread_history:
+        return thread_history
+
+    history_indices = [
+        index
+        for index, message in enumerate(thread_history)
+        if current_event_id is None or message.event_id != current_event_id
+    ]
+    selected_indices = set(history_indices[-history_limit:]) if history_limit > 0 else set()
+    return tuple(
+        message
+        for index, message in enumerate(thread_history)
+        if index in selected_indices or (current_event_id is not None and message.event_id == current_event_id)
+    )
+
+
 def _sanitize_thread_history_for_replay(
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
@@ -624,10 +647,10 @@ def _scope_seen_event_ids(scope_context: ScopeSessionContext | None) -> set[str]
 
 def _prepared_history_with_scheduled_limit(
     prepared_history: PreparedHistoryState,
-    scheduled_history_limit: int,
+    max_persisted_messages: int,
 ) -> PreparedHistoryState:
-    """Intersect one scheduled turn's persisted-replay plan with its history limit."""
-    if scheduled_history_limit <= 0:
+    """Intersect persisted replay with the scheduled turn's remaining message budget."""
+    if max_persisted_messages <= 0:
         return replace(
             prepared_history,
             replay_plan=ResolvedReplayPlan(mode="disabled", estimated_tokens=0, add_history_to_context=False),
@@ -636,14 +659,14 @@ def _prepared_history_with_scheduled_limit(
     plan = prepared_history.replay_plan
     if plan is None or not plan.add_history_to_context:
         return prepared_history
-    if plan.num_history_messages is not None and plan.num_history_messages <= scheduled_history_limit:
+    if plan.num_history_messages is not None and plan.num_history_messages <= max_persisted_messages:
         return prepared_history
     return replace(
         prepared_history,
         replay_plan=replace(
             plan,
             mode="limited",
-            num_history_messages=scheduled_history_limit,
+            num_history_messages=max_persisted_messages,
         ),
     )
 
@@ -687,6 +710,12 @@ async def _prepare_execution_context_common(
     reply_to_event_id = ctx.reply_to_event_id
     active_event_ids = ctx.active_event_ids
     seen_event_ids = _scope_seen_event_ids(scope_context)
+    if ctx.scheduled_history_limit is not None:
+        thread_history = _thread_history_with_scheduled_limit(
+            thread_history,
+            current_event_id=reply_to_event_id,
+            history_limit=ctx.scheduled_history_limit,
+        )
 
     provisional_messages = _messages_with_current_prompt(
         prompt,
@@ -744,7 +773,11 @@ async def _prepare_execution_context_common(
         pipeline_timing=pipeline_timing,
     )
     if ctx.scheduled_history_limit is not None:
-        prepared_history = _prepared_history_with_scheduled_limit(prepared_history, ctx.scheduled_history_limit)
+        inline_history_messages = max(0, len(final_messages) - 1)
+        prepared_history = _prepared_history_with_scheduled_limit(
+            prepared_history,
+            max(0, ctx.scheduled_history_limit - inline_history_messages),
+        )
     if pipeline_timing is not None:
         pipeline_timing.mark("prompt_assembly_start")
     if not prepared_history.replays_persisted_history and thread_history:

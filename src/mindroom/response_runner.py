@@ -244,31 +244,6 @@ def prepare_memory_and_model_context(
     return prompt, thread_history, model_prompt_content, model_thread_history
 
 
-def _limit_thread_history_for_scheduled_turn(
-    thread_history: Sequence[ResolvedVisibleMessage],
-    scheduled_history_limit: int,
-) -> Sequence[ResolvedVisibleMessage]:
-    """Return the newest ``scheduled_history_limit`` messages for one scheduled turn."""
-    if scheduled_history_limit <= 0:
-        return ()
-    return tuple(thread_history[-scheduled_history_limit:])
-
-
-def _request_with_scheduled_history_limit(request: ResponseRequest) -> ResponseRequest:
-    """Cap the model-facing thread history when this turn is a limited scheduled fire."""
-    if request.scheduled_history_limit is None:
-        return request
-    uncapped_thread_history = request.memory_and_summary_thread_history
-    return replace(
-        request,
-        uncapped_thread_history=uncapped_thread_history,
-        thread_history=_limit_thread_history_for_scheduled_turn(
-            uncapped_thread_history,
-            request.scheduled_history_limit,
-        ),
-    )
-
-
 @dataclass(frozen=True)
 class ResponseRequest:
     """Typed carrier for one response lifecycle request."""
@@ -276,7 +251,6 @@ class ResponseRequest:
     thread_history: Sequence[ResolvedVisibleMessage]
     prompt: str
     response_envelope: MessageEnvelope
-    uncapped_thread_history: Sequence[ResolvedVisibleMessage] | None = None
     model_prompt: str | None = None
     existing_event_id: str | None = None
     existing_event_is_placeholder: bool = False
@@ -312,13 +286,6 @@ class ResponseRequest:
     def thread_id(self) -> str | None:
         """Return the canonical resolved response thread root."""
         return self.response_envelope.target.resolved_thread_id
-
-    @property
-    def memory_and_summary_thread_history(self) -> Sequence[ResolvedVisibleMessage]:
-        """Return uncapped history for persistence and summary heuristics."""
-        if self.uncapped_thread_history is not None:
-            return self.uncapped_thread_history
-        return self.thread_history
 
 
 class PostLockRequestPreparationError(RuntimeError):
@@ -890,7 +857,6 @@ class ResponseRunner:
         """Refresh thread history and rebuild any history-derived payload once locked."""
         try:
             request = await self._refresh_model_history_after_lock(request)
-            request = _request_with_scheduled_history_limit(request)
             if request.payload_preparation is None:
                 return request
             return await self.deps.request_preparer.prepare(request)
@@ -1381,7 +1347,7 @@ class ResponseRunner:
         request = prepared_request
         team_request = replace(team_request, request=request)
         requester_user_id = request.user_id or ""
-        _memory_prompt, _ignored_memory_history, prepared_prompt, model_thread_history = (
+        _memory_prompt, _memory_thread_history, prepared_prompt, model_thread_history = (
             prepare_memory_and_model_context(
                 request.prompt,
                 request.thread_history,
@@ -1390,7 +1356,6 @@ class ResponseRunner:
                 model_prompt=request.model_prompt,
             )
         )
-        _memory_thread_history = request.memory_and_summary_thread_history
         model_name = select_model_for_team(
             self.deps.agent_name,
             request.room_id,
@@ -1825,9 +1790,7 @@ class ResponseRunner:
                 interactive_target=resolved_target,
                 thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
                 thread_summary_thread_id=resolved_target.resolved_thread_id,
-                thread_summary_message_count_hint=thread_summary_message_count_hint(
-                    request.memory_and_summary_thread_history,
-                ),
+                thread_summary_message_count_hint=thread_summary_message_count_hint(request.thread_history),
                 thread_summary_entity_name=self.deps.agent_name,
                 memory_prompt=_memory_prompt,
                 memory_thread_history=_memory_thread_history,
@@ -2546,7 +2509,7 @@ class ResponseRunner:
         if prepared_request is None:
             return None
         request = prepared_request
-        memory_prompt, _ignored_memory_history, model_prompt_text, model_thread_history = (
+        memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
             prepare_memory_and_model_context(
                 request.prompt,
                 request.thread_history,
@@ -2555,7 +2518,6 @@ class ResponseRunner:
                 model_prompt=request.model_prompt,
             )
         )
-        memory_thread_history = request.memory_and_summary_thread_history
         normalized_request = replace(
             request,
             prompt=memory_prompt,
@@ -2665,9 +2627,7 @@ class ResponseRunner:
                 interactive_target=resolved_target,
                 thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
                 thread_summary_thread_id=resolved_target.resolved_thread_id,
-                thread_summary_message_count_hint=thread_summary_message_count_hint(
-                    request.memory_and_summary_thread_history,
-                ),
+                thread_summary_message_count_hint=thread_summary_message_count_hint(request.thread_history),
                 thread_summary_entity_name=self.deps.agent_name,
                 memory_prompt=memory_prompt,
                 memory_thread_history=memory_thread_history,

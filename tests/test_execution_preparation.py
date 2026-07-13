@@ -288,18 +288,19 @@ def test_scheduled_limit_does_not_widen_a_run_limited_plan() -> None:
 
 
 @pytest.mark.asyncio
-async def test_scheduled_history_limit_caps_persisted_replay_plan() -> None:
-    """A scheduled turn adds its message cap to the persisted-replay plan."""
+async def test_scheduled_history_limit_shares_budget_between_inline_and_persisted_history() -> None:
+    """Inline context consumes the scheduled budget before persisted replay is capped."""
 
     async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
         return _prepared_scope_with_persisted_replay()
 
     prepared = await _prepare_execution_context_common(
-        make_turn_context(reply_to_event_id="$current", scheduled_history_limit=1),
+        make_turn_context(reply_to_event_id="$current", scheduled_history_limit=3),
         scope_context=None,
         prompt="Current request",
         thread_history=[
             make_visible_message(sender="@alice:localhost", body="older context", event_id="$older"),
+            make_visible_message(sender="@alice:localhost", body="Current request", event_id="$current"),
         ],
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
@@ -314,8 +315,45 @@ async def test_scheduled_history_limit_caps_persisted_replay_plan() -> None:
     assert replay_plan is not None
     assert replay_plan.mode == "limited"
     assert replay_plan.num_history_runs == 1
-    assert replay_plan.num_history_messages == 1
+    assert replay_plan.num_history_messages == 2
     assert prepared.prepared_history.replays_persisted_history is True
+    assert len(prepared.context_messages) == 1
+    assert len(prepared.context_messages) + replay_plan.num_history_messages == 3
+
+
+@pytest.mark.asyncio
+async def test_scheduled_history_limit_does_not_count_current_event_as_history() -> None:
+    """The fired task stays visible without consuming one of the prior-message slots."""
+
+    async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
+        return _prepared_scope_with_persisted_replay()
+
+    prepared = await _prepare_execution_context_common(
+        make_turn_context(reply_to_event_id="$current", scheduled_history_limit=2),
+        scope_context=None,
+        prompt="Current request",
+        thread_history=[
+            make_visible_message(sender="@alice:localhost", body="oldest context", event_id="$oldest"),
+            make_visible_message(sender="@alice:localhost", body="recent context", event_id="$recent"),
+            make_visible_message(sender="@alice:localhost", body="newest context", event_id="$newest"),
+            make_visible_message(sender="@alice:localhost", body="Current request", event_id="$current"),
+        ],
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        config=_config(),
+        prepare_scope_history_fn=prepare_scope_history,
+        estimate_static_tokens_fn=lambda text: len(text.split()),
+        render_messages_text_fn=render_prepared_messages_text,
+        fallback_static_token_budget=100,
+    )
+
+    assert [str(message.content) for message in prepared.context_messages] == [
+        "@alice:localhost: recent context",
+        "@alice:localhost: newest context",
+    ]
+    replay_plan = prepared.prepared_history.replay_plan
+    assert replay_plan is not None
+    assert replay_plan.add_history_to_context is False
 
 
 @pytest.mark.asyncio
@@ -329,9 +367,10 @@ async def test_scheduled_history_limit_zero_yields_prompt_only_context() -> None
         make_turn_context(reply_to_event_id="$current", scheduled_history_limit=0),
         scope_context=None,
         prompt="Current request",
-        # The runner caps model-facing thread history before payload assembly,
-        # so a zero-limit scheduled turn arrives here with no thread history.
-        thread_history=[],
+        thread_history=[
+            make_visible_message(sender="@alice:localhost", body="older context", event_id="$older"),
+            make_visible_message(sender="@alice:localhost", body="Current request", event_id="$current"),
+        ],
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
         config=_config(),

@@ -241,8 +241,8 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
 
 
 @pytest.mark.asyncio
-async def test_scheduled_history_limit_caps_refreshed_history_before_payload_prepare(tmp_path: Path) -> None:
-    """A limited scheduled fire caps model context without truncating memory or summary inputs."""
+async def test_scheduled_history_limit_keeps_refreshed_history_for_payload_and_side_effects(tmp_path: Path) -> None:
+    """The runner keeps full history until execution preparation builds model context."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     refreshed = ThreadHistoryResult(
@@ -253,11 +253,9 @@ async def test_scheduled_history_limit_caps_refreshed_history_before_payload_pre
         is_full_history=True,
     )
     prepared_histories: list[object] = []
-    uncapped_histories: list[object] = []
 
     async def spy_prepare(request: ResponseRequest) -> ResponseRequest:
         prepared_histories.append(request.thread_history)
-        uncapped_histories.append(request.uncapped_thread_history)
         return replace(request, payload_preparation=None, requires_model_history_refresh=False)
 
     async def fake_run_cancellable_response(**kwargs: object) -> str:
@@ -298,10 +296,7 @@ async def test_scheduled_history_limit_caps_refreshed_history_before_payload_pre
         assert await coordinator.generate_response(request) == "$response"
 
     assert len(prepared_histories) == 1
-    capped_history = prepared_histories[0]
-    assert isinstance(capped_history, tuple)
-    assert [message.event_id for message in capped_history] == ["$m2", "$m3"]
-    assert uncapped_histories == [refreshed]
+    assert prepared_histories == [refreshed]
     outcome = post_effects.await_args.args[1]
     assert isinstance(outcome, ResponseOutcome)
     assert outcome.memory_thread_history is refreshed
