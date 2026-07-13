@@ -973,6 +973,47 @@ class TestCredentialsSync:
 
         assert get_embedder_api_key(runtime_paths) == "embedder-key"
 
+    def test_get_embedder_api_key_configured_service_is_a_strict_binding(
+        self,
+        credentials_manager: CredentialsManager,
+    ) -> None:
+        """A named service wins over legacy services and never leaks into their fallback chain."""
+        credentials_manager.save_credentials("embedding-production", {"api_key": "named-key"})
+        credentials_manager.save_credentials(_EMBEDDER_CREDENTIAL_SERVICE, {"api_key": "embedder-key"})
+        credentials_manager.save_credentials("openai", {"api_key": "openai-key"})
+        runtime_paths = _runtime_paths(
+            credentials_manager.storage_root,
+            shared_credentials_dir=credentials_manager.base_path,
+        )
+
+        assert get_embedder_api_key(runtime_paths, credentials_service="embedding-production") == "named-key"
+
+        credentials_manager.delete_credentials("embedding-production")
+        assert (
+            get_embedder_api_key(runtime_paths, credentials_service="embedding-production")
+            == _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
+        )
+
+    def test_get_embedder_api_key_explicit_key_wins_over_configured_service(
+        self,
+        credentials_manager: CredentialsManager,
+    ) -> None:
+        """Inline config remains the highest-priority backwards-compatible override."""
+        credentials_manager.save_credentials("embedding-production", {"api_key": "named-key"})
+        runtime_paths = _runtime_paths(
+            credentials_manager.storage_root,
+            shared_credentials_dir=credentials_manager.base_path,
+        )
+
+        assert (
+            get_embedder_api_key(
+                runtime_paths,
+                explicit_api_key="inline-key",
+                credentials_service="embedding-production",
+            )
+            == "inline-key"
+        )
+
     def test_get_embedder_api_key_falls_back_to_openai(self, credentials_manager: CredentialsManager) -> None:
         """Without a dedicated credential the shared openai key keeps working."""
         credentials_manager.save_credentials("openai", {"api_key": "openai-key"})

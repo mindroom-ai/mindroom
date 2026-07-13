@@ -49,11 +49,12 @@ memory:
     provider: openai
     config:
       model: text-embedding-3-small
+      credentials_service: embedder # Optional strict credential binding
       dimensions: null             # Optional: embedding dimension override (e.g., 256)
 ```
 
-The `openai` embedder resolves its API key in this order: explicit `memory.embedder.config.api_key`, then the dedicated `embedder` credential (seeded from `EMBEDDER_API_KEY` or `EMBEDDER_API_KEY_FILE`), then the shared `openai` provider key.
-Use the dedicated credential when your embedding endpoint needs a different key than your chat models.
+The `openai` embedder resolves its API key in this order: explicit `memory.embedder.config.api_key`; then the service named by `memory.embedder.config.credentials_service`; or, when no service is named, the legacy dedicated `embedder` credential (seeded from `EMBEDDER_API_KEY` or `EMBEDDER_API_KEY_FILE`) followed by the shared `openai` provider key.
+An explicit `credentials_service` is a strict binding: if that service has no key, MindRoom does not silently borrow another OpenAI key. Use it when your embedding endpoint needs a different key than chat, voice, or another OpenAI-compatible model.
 When none of these are set, MindRoom sends a non-secret placeholder key so keyless local OpenAI-compatible endpoints keep working, while a keyed endpoint rejects the placeholder with a loud classified auth failure.
 When the embedder rejects its credential, semantic search degrades loudly instead of returning fake-empty results: memory tool output and the per-turn prompt carry the classified cause, and `/api/health` reports an `embedder` block until a request succeeds again.
 

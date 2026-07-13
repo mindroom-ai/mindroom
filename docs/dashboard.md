@@ -86,6 +86,7 @@ Configure global memory defaults:
 - **Backend** - Global default backend (`mem0`, `file`, or `none`)
 - **Provider** - Ollama (local), OpenAI, or Sentence Transformers
 - **Model** - Provider-specific embedding models
+- **Credential service** - Strictly bind an OpenAI-compatible embedder to a dedicated stored key
 - **Host URL** - For Ollama provider
 - **File backend settings** - Path and file memory tuning options
 - **Auto-flush settings** - Background extraction and flush controls for file-backed memory

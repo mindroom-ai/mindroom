@@ -237,6 +237,23 @@ export function MemoryConfig() {
     });
   };
 
+  const handleCredentialsServiceChange = (credentialsService: string) => {
+    const config = { ...localConfig.embedder.config };
+    const normalizedService = credentialsService.trim();
+    if (normalizedService) {
+      config.credentials_service = normalizedService;
+    } else {
+      delete config.credentials_service;
+    }
+    applyMemoryConfig({
+      ...localConfig,
+      embedder: {
+        ...localConfig.embedder,
+        config,
+      },
+    });
+  };
+
   const handleFilePathChange = (path: string) => {
     applyMemoryConfig({
       ...localConfig,
@@ -466,6 +483,23 @@ export function MemoryConfig() {
               className="transition-colors hover:border-ring focus:border-ring"
             />
           </FieldGroup>
+
+          {localConfig.embedder.provider === "openai" && (
+            <FieldGroup
+              label="Credential Service"
+              helperText="Bind this embedder to a credential service. Leave empty for the legacy embedder-to-openai fallback."
+              htmlFor="credentials-service"
+            >
+              <Input
+                id="credentials-service"
+                type="text"
+                value={localConfig.embedder.config.credentials_service || ""}
+                onChange={(e) => handleCredentialsServiceChange(e.target.value)}
+                placeholder="embedder"
+                className="transition-colors hover:border-ring focus:border-ring"
+              />
+            </FieldGroup>
+          )}
 
           {shouldShowHostField(localConfig.embedder.provider) && (
             <FieldGroup
@@ -952,17 +986,6 @@ export function MemoryConfig() {
           )}
         </div>
 
-        {localConfig.backend !== "file" &&
-          localConfig.embedder.provider === "openai" &&
-          !localConfig.embedder.config.host && (
-            <div className="p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800/30 rounded-lg shadow-sm">
-              <p className="text-sm text-yellow-800 dark:text-yellow-300">
-                <strong>Note:</strong> You&apos;ll need to set the
-                OPENAI_API_KEY environment variable for this provider to work.
-              </p>
-            </div>
-          )}
-
         <div className="p-4 bg-muted/50 rounded-lg shadow-sm border border-border">
           <h3 className="text-sm font-medium mb-3">Current Configuration</h3>
           <div className="space-y-2 text-sm">
@@ -972,6 +995,16 @@ export function MemoryConfig() {
                 {localConfig.backend || "mem0"}
               </span>
             </div>
+            {localConfig.embedder.config.credentials_service && (
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">
+                  Credential Service:
+                </span>
+                <span className="font-mono text-foreground">
+                  {localConfig.embedder.config.credentials_service}
+                </span>
+              </div>
+            )}
             <div className="flex justify-between">
               <span className="text-muted-foreground">Provider:</span>
               <span className="font-mono text-foreground">

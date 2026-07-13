@@ -6074,10 +6074,11 @@ def test_cached_handle_rebuilds_after_dashboard_embedder_credential_rotation(
     assert first.index is not second.index
     assert second.index is not third.index
     assert constructed_keys == ["old-key", "new-key", "fallback-key"]
-    assert first.index.embedder_signature is not None
-    assert second.index.embedder_signature is not None
-    assert "old-key" not in first.index.embedder_signature
-    assert "new-key" not in second.index.embedder_signature
+    assert first.index.embedder_client_signature is not None
+    assert second.index.embedder_client_signature is not None
+    assert first.index.embedder_client_signature != second.index.embedder_client_signature
+    assert "old-key" not in first.index.embedder_client_signature
+    assert "new-key" not in second.index.embedder_client_signature
 
 
 def test_cached_handle_rebuilds_after_explicit_embedder_key_reload(

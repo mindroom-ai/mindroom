@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, ClassVar, cast
 from zoneinfo import ZoneInfo
 
 from mindroom.constants import resolve_config_relative_path
-from mindroom.embedder_health import classified_embedder_error
+from mindroom.embedding_errors import classified_embedder_error
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 

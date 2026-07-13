@@ -14,7 +14,8 @@ from openai import AuthenticationError
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.embedder_health import EmbedderRequestError, capture_embedder_health_recorder, get_embedder_failure
+from mindroom.embedder_health import capture_embedder_health_recorder, get_embedder_failure
+from mindroom.embedding_errors import EmbedderRequestError
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory import add_agent_memory as public_add_agent_memory
 from mindroom.memory import build_memory_prompt_parts as public_build_memory_prompt_parts

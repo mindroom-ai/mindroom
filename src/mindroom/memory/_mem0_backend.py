@@ -8,10 +8,9 @@ from typing import TYPE_CHECKING, ClassVar, Protocol, TypeVar, cast, runtime_che
 
 from mindroom.embedder_health import (
     EmbedderHealthRecorder,
-    EmbedderRequestError,
     capture_embedder_health_recorder,
-    classified_embedder_error,
 )
+from mindroom.embedding_errors import EmbedderRequestError, classified_embedder_error
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 

@@ -12,7 +12,7 @@ from mindroom.api import credentials_oauth_flows
 from mindroom.api.main import initialize_api_app
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
 from mindroom.embedder_health import capture_embedder_health_recorder, get_embedder_failure
 
@@ -54,6 +54,22 @@ def _oauth_state_test_app(tmp_path: Path) -> FastAPI:
     app = FastAPI()
     initialize_api_app(app, resolve_runtime_paths(storage_path=tmp_path / "mindroom_data"))
     return app
+
+
+def _active_embedder_runtime(
+    credentials_manager: CredentialsManager,
+    *,
+    credentials_service: str | None = None,
+) -> tuple[Config, RuntimePaths]:
+    """Return config/runtime paths that resolve credentials from the test store."""
+    embedder_config: dict[str, str] = {"model": "text-embedding-3-small"}
+    if credentials_service is not None:
+        embedder_config["credentials_service"] = credentials_service
+    config = Config(
+        memory={"backend": "mem0", "embedder": {"provider": "openai", "config": embedder_config}},
+        router=RouterConfig(model="default"),
+    )
+    return config, resolve_runtime_paths(storage_path=credentials_manager.storage_root)
 
 
 class TestCredentialsAPI:
@@ -127,15 +143,29 @@ class TestCredentialsAPI:
         # Verify the key was saved
         assert mock_credentials_manager.get_api_key("openai") == "sk-test123"
 
-    def test_set_embedder_api_key_invalidates_inflight_health_writers(self, test_client: TestClient) -> None:
+    def test_set_embedder_api_key_invalidates_inflight_health_writers(
+        self,
+        test_client: TestClient,
+        mock_credentials_manager: CredentialsManager,
+    ) -> None:
         """A dashboard key rotation starts a new health generation."""
         old_recorder = capture_embedder_health_recorder()
         old_recorder.record("embedder authentication failed (HTTP 401)")
 
-        response = test_client.post(
-            "/api/credentials/embedder/api-key",
-            json={"service": "embedder", "api_key": "new-key", "key_name": "api_key"},
-        )
+        with (
+            patch(
+                "mindroom.api.credentials.loaded_runtime_config_for_credentials_request",
+                return_value=_active_embedder_runtime(mock_credentials_manager),
+            ),
+            patch(
+                "mindroom.embedder_health.create_background_task",
+                side_effect=lambda coroutine, **_kwargs: coroutine.close(),
+            ),
+        ):
+            response = test_client.post(
+                "/api/credentials/embedder/api-key",
+                json={"service": "embedder", "api_key": "new-key", "key_name": "api_key"},
+            )
 
         assert response.status_code == 200
         assert get_embedder_failure() is None
@@ -151,10 +181,14 @@ class TestCredentialsAPI:
         recorder = capture_embedder_health_recorder()
         recorder.record("embedder authentication failed (HTTP 401)")
 
-        response = test_client.post(
-            "/api/credentials/embedder/api-key",
-            json={"service": "embedder", "api_key": "same-key", "key_name": "api_key"},
-        )
+        with patch(
+            "mindroom.api.credentials.loaded_runtime_config_for_credentials_request",
+            return_value=_active_embedder_runtime(mock_credentials_manager),
+        ):
+            response = test_client.post(
+                "/api/credentials/embedder/api-key",
+                json={"service": "embedder", "api_key": "same-key", "key_name": "api_key"},
+            )
 
         assert response.status_code == 200
         assert get_embedder_failure() == "embedder authentication failed (HTTP 401)"
@@ -171,14 +205,58 @@ class TestCredentialsAPI:
         recorder = capture_embedder_health_recorder()
         recorder.record("embedder authentication failed (HTTP 401)")
 
-        response = test_client.post(
-            "/api/credentials/openai/api-key",
-            json={"service": "openai", "api_key": "new-openai-key", "key_name": "api_key"},
-        )
+        with patch(
+            "mindroom.api.credentials.loaded_runtime_config_for_credentials_request",
+            return_value=_active_embedder_runtime(mock_credentials_manager),
+        ):
+            response = test_client.post(
+                "/api/credentials/openai/api-key",
+                json={"service": "openai", "api_key": "new-openai-key", "key_name": "api_key"},
+            )
 
         assert response.status_code == 200
         assert get_embedder_failure() == "embedder authentication failed (HTTP 401)"
         assert recorder.record(None)
+
+    def test_named_embedder_service_controls_rotation_invalidation(
+        self,
+        test_client: TestClient,
+        mock_credentials_manager: CredentialsManager,
+    ) -> None:
+        """Invalidation follows the configured binding without hardcoded service names."""
+        mock_credentials_manager.save_credentials("embedding-production", {"api_key": "old-key"})
+        recorder = capture_embedder_health_recorder()
+        recorder.record("embedder authentication failed (HTTP 401)")
+        runtime_config = _active_embedder_runtime(
+            mock_credentials_manager,
+            credentials_service="embedding-production",
+        )
+
+        with (
+            patch(
+                "mindroom.api.credentials.loaded_runtime_config_for_credentials_request",
+                return_value=runtime_config,
+            ),
+            patch(
+                "mindroom.embedder_health.create_background_task",
+                side_effect=lambda coroutine, **_kwargs: coroutine.close(),
+            ),
+        ):
+            unrelated_response = test_client.post(
+                "/api/credentials/openai/api-key",
+                json={"service": "openai", "api_key": "unrelated-key", "key_name": "api_key"},
+            )
+            assert unrelated_response.status_code == 200
+            assert recorder.record("embedder authentication failed (HTTP 401)")
+
+            bound_response = test_client.post(
+                "/api/credentials/embedding-production/api-key",
+                json={"service": "embedding-production", "api_key": "new-key", "key_name": "api_key"},
+            )
+
+        assert bound_response.status_code == 200
+        assert get_embedder_failure() is None
+        assert not recorder.record("embedder authentication failed (HTTP 401)")
 
     def test_effective_embedder_key_change_schedules_immediate_probe(
         self,

@@ -14,7 +14,8 @@ from structlog.testing import capture_logs
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.embedder_health import EmbedderRequestError, capture_embedder_health_recorder, get_embedder_failure
+from mindroom.embedder_health import capture_embedder_health_recorder, get_embedder_failure
+from mindroom.embedding_errors import EmbedderRequestError
 from mindroom.memory import (
     add_agent_memory,
     delete_agent_memory,

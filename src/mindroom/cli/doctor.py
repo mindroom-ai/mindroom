@@ -18,7 +18,8 @@ from google.auth.exceptions import DefaultCredentialsError, RefreshError
 from mindroom import constants
 from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_path
 from mindroom.credentials_sync import sync_env_to_credentials
-from mindroom.embedder_health import EMBEDDER_UNREACHABLE_DETAIL, probe_embedder, semantic_embedder_configured
+from mindroom.embedder_health import probe_embedder, semantic_embedder_configured
+from mindroom.embedding_errors import EMBEDDER_UNREACHABLE_DETAIL
 from mindroom.embeddings import create_sentence_transformers_embedder
 from mindroom.google_adc import load_google_application_credentials
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions

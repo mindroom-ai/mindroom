@@ -22,11 +22,10 @@ from typing import TYPE_CHECKING, Any
 from agno.knowledge.embedder.openai import OpenAIEmbedder
 from agno.utils.log import log_info
 
-from mindroom.embedder_health import (
+from mindroom.embedder_health import EmbedderHealthRecorder, capture_embedder_health_recorder
+from mindroom.embedding_errors import (
     EMBEDDER_EMPTY_VECTOR_DETAIL,
-    EmbedderHealthRecorder,
     EmbedderRequestError,
-    capture_embedder_health_recorder,
     describe_embedder_error,
 )
 from mindroom.model_defaults import OPENAI_EMBEDDING_DIMENSIONS

@@ -14,9 +14,9 @@ from mindroom.embedder_health import (
     capture_embedder_health_recorder,
     check_embedder_health,
     embedder_in_use,
-    extract_classified_embedder_detail,
     get_embedder_failure,
 )
+from mindroom.embedding_errors import extract_classified_embedder_detail
 from mindroom.knowledge.refresh_runner import (
     is_refresh_active,
     mark_refresh_active,

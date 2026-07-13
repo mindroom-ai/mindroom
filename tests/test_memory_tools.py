@@ -13,7 +13,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.custom_tools.memory import _EMBEDDER_CREDENTIAL_ADVICE, MemoryTools
+from mindroom.custom_tools.memory import MemoryTools
 from mindroom.memory import MemorySearchOutcome, search_agent_memories
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
@@ -354,13 +354,47 @@ class TestMemoryTools:
         )
         assert "keyword matches only" not in result
 
-    def test_credential_advice_names_the_real_config_path(self) -> None:
-        """The advised YAML path must parse into EmbedderConfig.api_key."""
-        assert "memory.embedder.config.api_key" in _EMBEDDER_CREDENTIAL_ADVICE
+    @pytest.mark.asyncio
+    async def test_credential_advice_names_the_configured_service(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Auth guidance should identify the strict credential binding that can recover the embedder."""
+        runtime_paths = runtime_paths_for(config)
         config = Config.model_validate(
-            {"memory": {"embedder": {"provider": "openai", "config": {"api_key": "sk-advised"}}}},
+            {
+                **config.model_dump(),
+                "memory": {
+                    **config.memory.model_dump(),
+                    "embedder": {
+                        "provider": "openai",
+                        "config": {
+                            "model": "text-embedding-3-small",
+                            "credentials_service": "embedding-production",
+                        },
+                    },
+                },
+            },
         )
-        assert config.memory.embedder.config.api_key == "sk-advised"
+        tools = MemoryTools(
+            agent_name="test_agent",
+            storage_path=storage_path,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+        outcome = MemorySearchOutcome(results=[], degraded_reason="embedder authentication failed (HTTP 401)")
+
+        with patch(
+            "mindroom.custom_tools.memory.search_agent_memories",
+            new_callable=AsyncMock,
+            return_value=outcome,
+        ):
+            result = await tools.search_memories("anything")
+
+        assert "memory.embedder.config.api_key" in result
+        assert "'embedding-production' credential service" in result
+        assert "EMBEDDER_API_KEY" not in result
 
     @pytest.mark.asyncio
     async def test_search_memories_error(self, tools: MemoryTools) -> None:

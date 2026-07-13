@@ -438,6 +438,7 @@ memory:
     provider: openai               # Default: openai (openai, ollama, huggingface, sentence_transformers)
     config:
       model: text-embedding-3-small  # Default embedding model
+      credentials_service: null     # Optional: strict named credential binding (e.g. embedder)
       api_key: null                # Optional: explicit embedder key (highest priority; see docs/memory.md)
       host: null                   # Optional: For self-hosted
       dimensions: null             # Optional: Embedding dimension override (e.g., 256)

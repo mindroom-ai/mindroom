@@ -17,8 +17,8 @@ from mindroom.config.models import EmbedderConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
-from mindroom.embedder_health import EmbedderRequestError
-from mindroom.embedding_factory import create_configured_embedder
+from mindroom.embedding_errors import EmbedderRequestError
+from mindroom.embedding_factory import create_configured_embedder, resolve_embedder_settings
 from mindroom.memory.config import (
     _get_memory_config,
     _Mem0StrictOpenAIEmbedder,
@@ -289,6 +289,35 @@ class TestMemoryConfig:
 
         assert mem0_key == "dedicated-embedder-key"
         assert knowledge_embedder.api_key == mem0_key
+
+    def test_mem0_and_knowledge_embedders_share_named_credential_binding(self, tmp_path: Path) -> None:
+        """Every semantic consumer should use the same explicitly bound credential service."""
+        runtime_paths = _runtime_paths(tmp_path)
+        creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
+        creds_manager.save_credentials("openai", {"api_key": "shared-openai-key"})
+        creds_manager.save_credentials("embedder", {"api_key": "legacy-embedder-key"})
+        creds_manager.save_credentials("embedding-production", {"api_key": "named-key"})
+        config = Config(
+            memory={
+                "embedder": {
+                    "provider": "openai",
+                    "config": {
+                        "model": "text-embedding-3-small",
+                        "credentials_service": "embedding-production",
+                    },
+                },
+            },
+            router=RouterConfig(model="default"),
+        )
+
+        mem0_key = _get_memory_config(tmp_path / "memory", config, runtime_paths)["embedder"]["config"]["api_key"]
+        knowledge_embedder = create_configured_embedder(config, runtime_paths)
+
+        assert mem0_key == "named-key"
+        assert knowledge_embedder.api_key == mem0_key
+
+        resolved_settings = resolve_embedder_settings(config, runtime_paths)
+        assert "named-key" not in repr(resolved_settings)
 
     def test_keyless_local_endpoint_constructs_both_real_clients(
         self,

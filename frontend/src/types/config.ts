@@ -29,6 +29,7 @@ export interface MemoryConfig {
     provider: string;
     config: {
       model: string;
+      credentials_service?: string;
       host?: string;
       dimensions?: number;
     };

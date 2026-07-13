@@ -636,6 +636,7 @@ Configure global memory defaults:
 - **Backend** - Global default backend (`mem0`, `file`, or `none`)
 - **Provider** - Ollama (local), OpenAI, or Sentence Transformers
 - **Model** - Provider-specific embedding models
+- **Credential service** - Strictly bind an OpenAI-compatible embedder to a dedicated stored key
 - **Host URL** - For Ollama provider
 - **File backend settings** - Path and file memory tuning options
 - **Auto-flush settings** - Background extraction and flush controls for file-backed memory
@@ -1290,6 +1291,7 @@ memory:
     provider: openai               # Default: openai (openai, ollama, huggingface, sentence_transformers)
     config:
       model: text-embedding-3-small  # Default embedding model
+      credentials_service: null     # Optional: strict named credential binding (e.g. embedder)
       api_key: null                # Optional: explicit embedder key (highest priority; see docs/memory.md)
       host: null                   # Optional: For self-hosted
       dimensions: null             # Optional: Embedding dimension override (e.g., 256)
@@ -12297,6 +12299,7 @@ memory:
     provider: openai        # or "ollama", "huggingface", or "sentence_transformers"
     config:
       model: text-embedding-3-small
+      credentials_service: embedder # Optional strict credential binding
       host: null             # For self-hosted (Ollama)
       dimensions: null       # Optional: embedding dimension override (e.g., 256)
 ```
@@ -12307,7 +12310,7 @@ memory:
 | `ollama` | `nomic-embed-text` | Self-hosted, set `host` or `OLLAMA_HOST` |
 | `sentence_transformers` | `sentence-transformers/all-MiniLM-L6-v2` | Fully local Python runtime; auto-installs the optional extra on first use |
 
-The `openai` provider resolves its key in this order: explicit `memory.embedder.config.api_key`, then the dedicated `embedder` credential (seeded from `EMBEDDER_API_KEY` or `EMBEDDER_API_KEY_FILE`), then the shared `OPENAI_API_KEY`.
+The `openai` provider resolves its key in this order: explicit `memory.embedder.config.api_key`; then the service named by `memory.embedder.config.credentials_service`; or, when no service is named, the dedicated `embedder` credential followed by the shared `OPENAI_API_KEY`. A named service is a strict binding and never falls through to another provider key.
 See [Memory](https://docs.mindroom.chat/memory/) for the full embedder credential contract and failure surfacing.
 
 ## Storage
@@ -12391,11 +12394,12 @@ memory:
     provider: openai
     config:
       model: text-embedding-3-small
+      credentials_service: embedder # Optional strict credential binding
       dimensions: null             # Optional: embedding dimension override (e.g., 256)
 ```
 
-The `openai` embedder resolves its API key in this order: explicit `memory.embedder.config.api_key`, then the dedicated `embedder` credential (seeded from `EMBEDDER_API_KEY` or `EMBEDDER_API_KEY_FILE`), then the shared `openai` provider key.
-Use the dedicated credential when your embedding endpoint needs a different key than your chat models.
+The `openai` embedder resolves its API key in this order: explicit `memory.embedder.config.api_key`; then the service named by `memory.embedder.config.credentials_service`; or, when no service is named, the legacy dedicated `embedder` credential (seeded from `EMBEDDER_API_KEY` or `EMBEDDER_API_KEY_FILE`) followed by the shared `openai` provider key.
+An explicit `credentials_service` is a strict binding: if that service has no key, MindRoom does not silently borrow another OpenAI key. Use it when your embedding endpoint needs a different key than chat, voice, or another OpenAI-compatible model.
 When none of these are set, MindRoom sends a non-secret placeholder key so keyless local OpenAI-compatible endpoints keep working, while a keyed endpoint rejects the placeholder with a loud classified auth failure.
 When the embedder rejects its credential, semantic search degrades loudly instead of returning fake-empty results: memory tool output and the per-turn prompt carry the classified cause, and `/api/health` reports an `embedder` block until a request succeeds again.
 

@@ -1,4 +1,4 @@
-"""Process-wide embedder health: classification, probe, and last-known failure.
+"""Process-wide semantic embedder availability and active-client revision.
 
 The OpenAI-compatible embedder records a failure here before raising and
 records healthy on every validated response, so recovery is self-clearing the
@@ -10,12 +10,12 @@ refreshes that never touch the main-process embedder.
 from __future__ import annotations
 
 import asyncio
-import re
 from dataclasses import dataclass
 from threading import Lock
 from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import create_background_task
+from mindroom.embedding_errors import EMBEDDER_EMPTY_VECTOR_DETAIL, describe_embedder_error
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -26,10 +26,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_EMBEDDER_AUTH_FAILED_DETAIL = "embedder authentication failed (HTTP 401)"
-_EMBEDDER_PERMISSION_DENIED_DETAIL = "embedder permission denied (HTTP 403)"
-EMBEDDER_UNREACHABLE_DETAIL = "embedder endpoint unreachable"
-EMBEDDER_EMPTY_VECTOR_DETAIL = "embedder returned an empty vector"
 _PROBE_TEXT = "mindroom embedder health check"
 
 _failure_lock = Lock()
@@ -52,15 +48,6 @@ class EmbedderHealthRecorder:
     def is_current(self) -> bool:
         """Return whether this recorder still belongs to the active config."""
         return self.generation == _health_generation_snapshot()
-
-
-class EmbedderRequestError(RuntimeError):
-    """Embedder failure carrying only the classified, credential-safe detail.
-
-    The embedder boundary raises this instead of the provider exception so
-    upstream loggers — including agno's catch-log-and-return-empty paths —
-    can never render a raw response body that may echo the rejected key.
-    """
 
 
 def get_embedder_failure() -> str | None:
@@ -115,75 +102,6 @@ def handle_embedder_credential_change(
             name="embedder_credential_change_health_check",
         )
     return health_recorder
-
-
-def is_embedder_auth_failure_detail(detail: str | None) -> bool:
-    """Return whether a recorded failure detail describes a credential rejection."""
-    return detail in {_EMBEDDER_AUTH_FAILED_DETAIL, _EMBEDDER_PERMISSION_DENIED_DETAIL}
-
-
-# Fully-fixed classified forms only: the type-name fallback is excluded because
-# identifier-shaped text extracted from operator free text could be a secret.
-_CLASSIFIED_DETAIL_PATTERN = re.compile(
-    r"embedder authentication failed \(HTTP 401\)"
-    r"|embedder permission denied \(HTTP 403\)"
-    r"|embedder request failed \(HTTP \d{3}\)"
-    r"|embedder endpoint unreachable"
-    r"|embedder returned an empty vector"
-    r"|embedder returned \d+ embeddings for \d+ inputs",
-)
-
-
-def extract_classified_embedder_detail(text: str | None) -> str | None:
-    """Extract the classified embedder detail from persisted free text, if any.
-
-    Persisted knowledge ``last_error`` strings are operator-grade free text
-    (git output, reader errors, refresh summaries); only the fixed vocabulary
-    this module emits may cross into model-facing prompts and tool output.
-    """
-    if text is None:
-        return None
-    match = _CLASSIFIED_DETAIL_PATTERN.search(text)
-    return match.group(0) if match else None
-
-
-def _is_embedder_provider_error(exc: BaseException) -> bool:
-    """Return whether an exception came from the embedding provider SDK."""
-    # Deferred so slim entry points never pay the openai SDK import; when a
-    # provider call raised, the SDK is already loaded.
-    from openai import OpenAIError  # noqa: PLC0415
-
-    return isinstance(exc, OpenAIError)
-
-
-def classified_embedder_error(exc: BaseException) -> str | None:
-    """Return a safe detail only when the exception is known to be embedder-related."""
-    if isinstance(exc, EmbedderRequestError) or _is_embedder_provider_error(exc):
-        return describe_embedder_error(exc)
-    return None
-
-
-def describe_embedder_error(exc: BaseException) -> str:
-    """Return a compact failure description safe for logs, metadata, and tool text.
-
-    Every branch returns fixed text (plus at most an HTTP status or exception
-    type name), never `str(exc)` of a provider exception: arbitrary exception
-    text can carry response bodies, hosts, or the rejected key itself.
-    """
-    if isinstance(exc, EmbedderRequestError):
-        return str(exc)
-
-    from openai import APIConnectionError, APIStatusError, AuthenticationError, PermissionDeniedError  # noqa: PLC0415
-
-    if isinstance(exc, AuthenticationError):
-        return _EMBEDDER_AUTH_FAILED_DETAIL
-    if isinstance(exc, PermissionDeniedError):
-        return _EMBEDDER_PERMISSION_DENIED_DETAIL
-    if isinstance(exc, APIStatusError):
-        return f"embedder request failed (HTTP {exc.status_code})"
-    if isinstance(exc, APIConnectionError):
-        return EMBEDDER_UNREACHABLE_DETAIL
-    return f"embedder request failed ({type(exc).__name__})"
 
 
 def embedder_in_use(config: Config) -> bool:

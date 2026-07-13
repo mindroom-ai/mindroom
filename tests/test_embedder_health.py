@@ -10,7 +10,7 @@ import httpx
 import pytest
 from openai import APIConnectionError, APIStatusError, AuthenticationError, PermissionDeniedError
 
-from mindroom import embedder_health
+from mindroom import embedder_health, embedding_errors
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
@@ -18,12 +18,14 @@ from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.embedder_health import (
     capture_embedder_health_recorder,
     check_embedder_health,
-    describe_embedder_error,
     embedder_in_use,
     get_embedder_failure,
     handle_embedder_config_reload,
-    is_embedder_auth_failure_detail,
     probe_embedder,
+)
+from mindroom.embedding_errors import (
+    describe_embedder_error,
+    is_embedder_auth_failure_detail,
 )
 from mindroom.openai_embedder import MindRoomOpenAIEmbedder
 
@@ -34,6 +36,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 SECRET = "sk-super-secret-embedder-key"  # noqa: S105
+EMBEDDER_AUTH_FAILED_DETAIL = "embedder authentication failed (HTTP 401)"
+EMBEDDER_PERMISSION_DENIED_DETAIL = "embedder permission denied (HTTP 403)"
 
 
 @pytest.fixture(autouse=True)
@@ -93,7 +97,7 @@ def test_authentication_error_maps_to_fixed_401_detail() -> None:
     """401 maps to the fixed auth-failed detail."""
     exc = _status_error(401)
     assert is_embedder_auth_failure_detail(describe_embedder_error(exc))
-    assert describe_embedder_error(exc) == embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
+    assert describe_embedder_error(exc) == EMBEDDER_AUTH_FAILED_DETAIL
     assert describe_embedder_error(exc) == "embedder authentication failed (HTTP 401)"
 
 
@@ -101,8 +105,8 @@ def test_permission_denied_maps_to_distinct_403_detail() -> None:
     """403 stays distinct from 401 so operators repair the right thing."""
     exc = _status_error(403)
     assert is_embedder_auth_failure_detail(describe_embedder_error(exc))
-    assert describe_embedder_error(exc) == embedder_health._EMBEDDER_PERMISSION_DENIED_DETAIL
-    assert describe_embedder_error(exc) != embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
+    assert describe_embedder_error(exc) == EMBEDDER_PERMISSION_DENIED_DETAIL
+    assert describe_embedder_error(exc) != EMBEDDER_AUTH_FAILED_DETAIL
 
 
 def test_other_http_status_uses_fixed_message_without_body() -> None:
@@ -133,43 +137,43 @@ def test_generic_exception_maps_to_type_only_detail() -> None:
 
 def test_embedder_request_error_detail_passes_through() -> None:
     """Already-classified errors keep their exact detail."""
-    exc = embedder_health.EmbedderRequestError("embedder authentication failed (HTTP 401)")
+    exc = embedding_errors.EmbedderRequestError("embedder authentication failed (HTTP 401)")
     assert describe_embedder_error(exc) == "embedder authentication failed (HTTP 401)"
 
 
 def test_extract_classified_detail_from_refresh_summary() -> None:
     """The classified cause is extracted from an indexing summary."""
     summary = "Indexed 0 of 3 managed knowledge files (first error: embedder authentication failed (HTTP 401))"
-    detail = embedder_health.extract_classified_embedder_detail(summary)
+    detail = embedding_errors.extract_classified_embedder_detail(summary)
     assert detail == "embedder authentication failed (HTTP 401)"
 
 
 def test_extract_classified_detail_exact_forms() -> None:
     """Exact classified strings extract unchanged; None stays None."""
     assert (
-        embedder_health.extract_classified_embedder_detail("embedder endpoint unreachable")
+        embedding_errors.extract_classified_embedder_detail("embedder endpoint unreachable")
         == "embedder endpoint unreachable"
     )
     assert (
-        embedder_health.extract_classified_embedder_detail("embedder request failed (HTTP 503)")
+        embedding_errors.extract_classified_embedder_detail("embedder request failed (HTTP 503)")
         == "embedder request failed (HTTP 503)"
     )
-    assert embedder_health.extract_classified_embedder_detail(None) is None
+    assert embedding_errors.extract_classified_embedder_detail(None) is None
 
 
 def test_extract_classified_detail_rejects_free_text() -> None:
     """Operator free text — including embedder-prefixed hostile text — never extracts."""
-    assert embedder_health.extract_classified_embedder_detail("git sync failed: fatal: repo unreachable") is None
+    assert embedding_errors.extract_classified_embedder_detail("git sync failed: fatal: repo unreachable") is None
     # The type-name fallback form is deliberately not extractable: an
     # identifier-shaped token inside persisted free text could be a secret.
-    assert embedder_health.extract_classified_embedder_detail(f"embedder request failed ({SECRET})") is None
-    assert embedder_health.extract_classified_embedder_detail("embedder exploded near api_key=sk-secret") is None
+    assert embedding_errors.extract_classified_embedder_detail(f"embedder request failed ({SECRET})") is None
+    assert embedding_errors.extract_classified_embedder_detail("embedder exploded near api_key=sk-secret") is None
 
 
 def test_auth_failure_detail_membership() -> None:
     """Only the two fixed auth details classify as credential rejections."""
-    assert is_embedder_auth_failure_detail(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
-    assert is_embedder_auth_failure_detail(embedder_health._EMBEDDER_PERMISSION_DENIED_DETAIL)
+    assert is_embedder_auth_failure_detail(EMBEDDER_AUTH_FAILED_DETAIL)
+    assert is_embedder_auth_failure_detail(EMBEDDER_PERMISSION_DENIED_DETAIL)
     assert not is_embedder_auth_failure_detail(None)
     assert not is_embedder_auth_failure_detail("embedder request failed (HTTP 500)")
 
@@ -177,8 +181,8 @@ def test_auth_failure_detail_membership() -> None:
 def test_record_and_get_round_trip() -> None:
     """Recording a failure and clearing it round-trips."""
     assert get_embedder_failure() is None
-    capture_embedder_health_recorder().record(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
-    assert get_embedder_failure() == embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
+    capture_embedder_health_recorder().record(EMBEDDER_AUTH_FAILED_DETAIL)
+    assert get_embedder_failure() == EMBEDDER_AUTH_FAILED_DETAIL
     capture_embedder_health_recorder().record(None)
     assert get_embedder_failure() is None
 
@@ -253,7 +257,7 @@ def test_probe_reports_auth_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         "mindroom.embedding_factory.create_configured_embedder",
         lambda *_args: _AuthFailingEmbedder(),
     )
-    assert probe_embedder(_config(), _runtime_paths(tmp_path)) == embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
+    assert probe_embedder(_config(), _runtime_paths(tmp_path)) == EMBEDDER_AUTH_FAILED_DETAIL
 
 
 def test_probe_rejects_empty_vector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -285,12 +289,12 @@ def test_probe_bounds_openai_client_timeout(tmp_path: Path, monkeypatch: pytest.
 @pytest.mark.asyncio
 async def test_check_embedder_health_records_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A failing probe records the failure detail."""
-    monkeypatch.setattr(embedder_health, "probe_embedder", lambda *_args: embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
+    monkeypatch.setattr(embedder_health, "probe_embedder", lambda *_args: EMBEDDER_AUTH_FAILED_DETAIL)
     config = _config(memory={"backend": "mem0"})
 
     await check_embedder_health(config, _runtime_paths(tmp_path), reason="startup")
 
-    assert get_embedder_failure() == embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
+    assert get_embedder_failure() == EMBEDDER_AUTH_FAILED_DETAIL
 
 
 @pytest.mark.asyncio
@@ -299,7 +303,7 @@ async def test_check_embedder_health_success_clears_previous_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A healthy probe clears an earlier recorded failure (degrade then recover)."""
-    capture_embedder_health_recorder().record(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
+    capture_embedder_health_recorder().record(EMBEDDER_AUTH_FAILED_DETAIL)
     monkeypatch.setattr(embedder_health, "probe_embedder", lambda *_args: None)
 
     await check_embedder_health(_config(memory={"backend": "mem0"}), _runtime_paths(tmp_path), reason="startup")
@@ -331,7 +335,7 @@ async def test_reload_with_embedder_change_resets_health_and_reprobes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Changing memory.embedder on reload clears stale health and probes again."""
-    capture_embedder_health_recorder().record(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
+    capture_embedder_health_recorder().record(EMBEDDER_AUTH_FAILED_DETAIL)
     probes: list[str] = []
 
     async def fake_check(_config: Config, _runtime_paths: RuntimePaths, *, reason: str) -> None:
@@ -354,7 +358,7 @@ async def test_reload_without_embedder_change_keeps_recorded_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unrelated reload never clears a recorded embedder failure."""
-    capture_embedder_health_recorder().record(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
+    capture_embedder_health_recorder().record(EMBEDDER_AUTH_FAILED_DETAIL)
 
     async def fake_check(_config: Config, _runtime_paths: RuntimePaths, *, reason: str) -> None:
         msg = f"no probe expected: {reason}"
@@ -368,7 +372,7 @@ async def test_reload_without_embedder_change_keeps_recorded_failure(
         _runtime_paths(tmp_path),
     )
 
-    assert get_embedder_failure() == embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
+    assert get_embedder_failure() == EMBEDDER_AUTH_FAILED_DETAIL
 
 
 @pytest.mark.asyncio
@@ -400,7 +404,7 @@ async def test_reload_disabling_embedder_use_clears_health_without_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Disabling the last semantic consumer clears stale health instead of pinning it forever."""
-    capture_embedder_health_recorder().record(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
+    capture_embedder_health_recorder().record(EMBEDDER_AUTH_FAILED_DETAIL)
 
     async def fake_check(_config: Config, _runtime_paths: RuntimePaths, *, reason: str) -> None:
         msg = f"no probe expected: {reason}"
@@ -431,7 +435,7 @@ async def test_stale_probe_result_is_discarded_after_generation_bump(
     ) -> str:
         # A reload lands while this probe is still in flight.
         embedder_health._reset_embedder_health_generation()
-        return embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
+        return EMBEDDER_AUTH_FAILED_DETAIL
 
     monkeypatch.setattr(embedder_health, "probe_embedder", slow_probe)
 
@@ -446,7 +450,7 @@ def test_stale_embedder_failure_cannot_replace_new_generation_health() -> None:
     embedder_health._reset_embedder_health_generation()
     capture_embedder_health_recorder().record(None)
 
-    assert not recorder.record(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
+    assert not recorder.record(EMBEDDER_AUTH_FAILED_DETAIL)
     assert get_embedder_failure() is None
 
 
@@ -454,10 +458,10 @@ def test_stale_embedder_success_cannot_clear_new_generation_failure() -> None:
     """An old embedder cannot clear a failure from replacement credentials."""
     recorder = capture_embedder_health_recorder()
     embedder_health._reset_embedder_health_generation()
-    capture_embedder_health_recorder().record(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
+    capture_embedder_health_recorder().record(EMBEDDER_AUTH_FAILED_DETAIL)
 
     assert not recorder.record(None)
-    assert get_embedder_failure() == embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
+    assert get_embedder_failure() == EMBEDDER_AUTH_FAILED_DETAIL
 
 
 @pytest.mark.asyncio
@@ -474,8 +478,8 @@ async def test_probe_captures_health_generation_before_thread_dispatch(
         recorder: embedder_health.EmbedderHealthRecorder,
     ) -> str:
         captured_recorders.append(recorder)
-        recorder.record(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
-        return embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
+        recorder.record(EMBEDDER_AUTH_FAILED_DETAIL)
+        return EMBEDDER_AUTH_FAILED_DETAIL
 
     async def fake_to_thread(function: object, *args: object) -> object:
         embedder_health._reset_embedder_health_generation()
@@ -494,7 +498,7 @@ def test_current_generation_embedder_records_failure_and_recovery() -> None:
     """The active generation still records both degraded and healthy outcomes."""
     recorder = capture_embedder_health_recorder()
 
-    assert recorder.record(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
-    assert get_embedder_failure() == embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
+    assert recorder.record(EMBEDDER_AUTH_FAILED_DETAIL)
+    assert get_embedder_failure() == EMBEDDER_AUTH_FAILED_DETAIL
     assert recorder.record(None)
     assert get_embedder_failure() is None

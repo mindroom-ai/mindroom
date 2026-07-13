@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from mindroom.credentials import get_runtime_shared_credentials_manager
-from mindroom.embedder_health import extract_classified_embedder_detail
+from mindroom.embedding_errors import extract_classified_embedder_detail
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.redaction import embedded_http_userinfo
 from mindroom.knowledge.registry import (

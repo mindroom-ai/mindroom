@@ -23,7 +23,7 @@ from agno.vectordb.chroma import ChromaDb
 from mindroom.chunking import SafeFixedSizeChunking
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.credentials import get_runtime_shared_credentials_manager
-from mindroom.embedder_health import classified_embedder_error
+from mindroom.embedding_errors import classified_embedder_error
 from mindroom.embedding_factory import create_configured_embedder
 from mindroom.knowledge.file_listing import (
     git_checkout_present,

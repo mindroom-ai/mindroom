@@ -40,11 +40,16 @@ depends_on = [
 path = "mindroom.embedder_health"
 depends_on = [
     "mindroom.background_tasks",
+    "mindroom.embedding_errors",
     # Deferred (function-level) imports inside the probe path; still runtime edges.
     "mindroom.embedding_factory",
     "mindroom.logging_config",
     "mindroom.openai_embedder",
 ]
+
+[[modules]]
+path = "mindroom.embedding_errors"
+depends_on = []
 
 [[modules]]
 path = "mindroom.model_instance_checks"
@@ -54,6 +59,7 @@ depends_on = []
 path = "mindroom.openai_embedder"
 depends_on = [
     "mindroom.embedder_health",
+    "mindroom.embedding_errors",
     "mindroom.model_defaults",
 ]
 
@@ -416,7 +422,7 @@ depends_on = ["mindroom.config.agent"]
 [[modules]]
 path = "mindroom.custom_tools.memory"
 depends_on = [
-    "mindroom.embedder_health",
+    "mindroom.embedding_errors",
     "mindroom.memory",
 ]
 
@@ -636,6 +642,7 @@ depends_on = [
     "mindroom.credential_policy",
     "mindroom.credentials",
     "mindroom.embedder_health",
+    "mindroom.embedding_factory",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -1519,7 +1526,7 @@ visibility = ["mindroom.memory._backend"]
 path = "mindroom.memory._file_backend"
 depends_on = [
     "mindroom.constants",
-    "mindroom.embedder_health",
+    "mindroom.embedding_errors",
     "mindroom.logging_config",
     "mindroom.memory._policy",
     "mindroom.memory._shared",
@@ -1531,7 +1538,7 @@ visibility = ["mindroom.memory._backend", "mindroom.memory.functions"]
 [[modules]]
 path = "mindroom.memory._semantic_file_search"
 depends_on = [
-    "mindroom.embedder_health",
+    "mindroom.embedding_errors",
     "mindroom.knowledge",
     "mindroom.logging_config",
     "mindroom.memory._shared",
@@ -1543,6 +1550,7 @@ visibility = ["mindroom.memory._file_backend"]
 path = "mindroom.memory._mem0_backend"
 depends_on = [
     "mindroom.embedder_health",
+    "mindroom.embedding_errors",
     "mindroom.logging_config",
     "mindroom.memory._policy",
     "mindroom.memory._prompting",
@@ -2421,6 +2429,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.credentials_sync",
     "mindroom.embedder_health",
+    "mindroom.embedding_errors",
     "mindroom.embeddings",
     "mindroom.google_adc",
     "mindroom.matrix.client_session",
@@ -3042,7 +3051,7 @@ path = "mindroom.knowledge.manager"
 depends_on = [
     "mindroom.chunking",
     "mindroom.constants",
-    "mindroom.embedder_health",
+    "mindroom.embedding_errors",
     "mindroom.embedding_factory",
     "mindroom.knowledge.file_listing",
     "mindroom.knowledge.index_metadata",
@@ -3070,6 +3079,7 @@ depends_on = [
 path = "mindroom.knowledge.refresh_scheduler"
 depends_on = [
     "mindroom.embedder_health",
+    "mindroom.embedding_errors",
     "mindroom.knowledge.refresh_runner",
     "mindroom.knowledge.registry",
     "mindroom.logging_config",
@@ -3091,7 +3101,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.knowledge.utils"
 depends_on = [
-    "mindroom.embedder_health",
+    "mindroom.embedding_errors",
     "mindroom.knowledge.availability",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.registry",

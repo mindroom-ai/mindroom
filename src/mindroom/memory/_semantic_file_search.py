@@ -8,7 +8,7 @@ import time
 from typing import TYPE_CHECKING
 
 from mindroom.config.knowledge import KnowledgeBaseConfig
-from mindroom.embedder_health import extract_classified_embedder_detail
+from mindroom.embedding_errors import extract_classified_embedder_detail
 from mindroom.knowledge import (
     KnowledgeAvailability,
     KnowledgeRefreshScheduler,

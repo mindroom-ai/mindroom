@@ -405,15 +405,22 @@ def get_api_key_for_provider(provider: str, runtime_paths: RuntimePaths) -> str 
     return creds_manager.get_api_key(provider)
 
 
-def get_embedder_api_key(runtime_paths: RuntimePaths, *, explicit_api_key: str | None = None) -> str:
+def get_embedder_api_key(
+    runtime_paths: RuntimePaths,
+    *,
+    explicit_api_key: str | None = None,
+    credentials_service: str | None = None,
+) -> str:
     """Resolve the API key for the OpenAI-compatible semantic-search embedder.
 
     Resolution order:
     1. The explicit ``memory.embedder.config.api_key`` value from config.
-    2. The dedicated ``embedder`` credential service (seeded from
+    2. An explicitly configured credential service, when present. This is a
+       strict binding: a missing key does not fall through to another service.
+    3. Otherwise, the legacy dedicated ``embedder`` service (seeded from
        ``EMBEDDER_API_KEY`` / ``EMBEDDER_API_KEY_FILE``).
-    3. The shared ``openai`` provider key (backward-compat fallback).
-    4. ``_EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY``: the OpenAI SDK refuses to
+    4. Otherwise, the shared ``openai`` provider key (backward-compat fallback).
+    5. ``_EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY``: the OpenAI SDK refuses to
        construct a client without a key, so keyless local endpoints get a
        non-secret placeholder they ignore, while a keyed endpoint rejects it
        with a loud classified auth failure instead of a construction crash.
@@ -425,6 +432,11 @@ def get_embedder_api_key(runtime_paths: RuntimePaths, *, explicit_api_key: str |
     if explicit_api_key and explicit_api_key.strip():
         return explicit_api_key.strip()
     creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
+    if credentials_service is not None:
+        service_api_key = creds_manager.get_api_key(credentials_service)
+        if service_api_key and service_api_key.strip():
+            return service_api_key.strip()
+        return _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
     embedder_api_key = creds_manager.get_api_key(_EMBEDDER_CREDENTIAL_SERVICE)
     if embedder_api_key and embedder_api_key.strip():
         return embedder_api_key.strip()

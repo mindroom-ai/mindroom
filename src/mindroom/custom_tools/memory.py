@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
-from mindroom.embedder_health import classified_embedder_error, is_embedder_auth_failure_detail
+from mindroom.embedding_errors import classified_embedder_error, is_embedder_auth_failure_detail
 from mindroom.logging_config import get_logger
 from mindroom.memory import (
     add_agent_memory,
@@ -32,11 +32,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_EMBEDDER_CREDENTIAL_ADVICE = (
-    "Update the embedder credential: set memory.embedder.config.api_key in config, "
-    "store an 'embedder' credential, or set EMBEDDER_API_KEY."
-)
-
 
 def _memory_result_lines(results: list[MemoryResult]) -> list[str]:
     lines = [f"Found {len(results)} memory(ies):"]
@@ -49,7 +44,21 @@ def _memory_result_lines(results: list[MemoryResult]) -> list[str]:
     return lines
 
 
-def _degraded_search_text(outcome: MemorySearchOutcome) -> str:
+def _embedder_credential_advice(config: Config) -> str:
+    """Describe the active credential binding without recommending a fallback that cannot win."""
+    credentials_service = config.memory.embedder.config.credentials_service
+    if credentials_service is not None:
+        return (
+            "Repair the embedder credential: set memory.embedder.config.api_key in config "
+            f"or replace the key in the '{credentials_service}' credential service."
+        )
+    return (
+        "Repair the embedder credential: set memory.embedder.config.api_key in config, "
+        "store an 'embedder' credential, or set EMBEDDER_API_KEY."
+    )
+
+
+def _degraded_search_text(outcome: MemorySearchOutcome, config: Config) -> str:
     def is_keyword_result(result: MemoryResult) -> bool:
         metadata = result.get("metadata")
         return isinstance(metadata, dict) and metadata.get("search_mode") == "keyword"
@@ -62,7 +71,7 @@ def _degraded_search_text(outcome: MemorySearchOutcome) -> str:
         failure_line = f"{failure_line} {result_detail}"
     lines = [failure_line]
     if is_embedder_auth_failure_detail(outcome.degraded_reason):
-        lines.append(_EMBEDDER_CREDENTIAL_ADVICE)
+        lines.append(_embedder_credential_advice(config))
     if outcome.results:
         lines.append("")
         lines.extend(_memory_result_lines(outcome.results))
@@ -160,7 +169,7 @@ class MemoryTools(Toolkit):
                 execution_identity=self._execution_identity,
             )
             if outcome.degraded_reason is not None:
-                return _degraded_search_text(outcome)
+                return _degraded_search_text(outcome, self._config)
             if not outcome.results:
                 return "No relevant memories found."
             return "\n".join(_memory_result_lines(outcome.results))

@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from mem0 import AsyncMemory
 
-from mindroom.credentials_sync import get_api_key_for_provider, get_embedder_api_key, get_ollama_host
+from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
+from mindroom.embedding_factory import resolve_embedder_settings
 from mindroom.embeddings import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT
@@ -157,11 +158,12 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
     # Ensure storage directories exist
     chroma_path = resolved_storage_path / "chroma"
     chroma_path.mkdir(parents=True, exist_ok=True)
-    embedder_provider = app_config.memory.embedder.provider
+    resolved_embedder = resolve_embedder_settings(app_config, runtime_paths)
+    embedder_provider = resolved_embedder.provider
 
     # Build embedder config from config.yaml
     embedder_provider_config: dict[str, Any] = {
-        "model": app_config.memory.embedder.config.model,
+        "model": resolved_embedder.model,
     }
     embedder_config: dict[str, Any] = {
         "provider": "huggingface" if embedder_provider == "sentence_transformers" else embedder_provider,
@@ -170,24 +172,16 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
 
     # Add provider-specific configuration
     if embedder_provider == "openai":
-        embedder_provider_config["api_key"] = get_embedder_api_key(
-            runtime_paths,
-            explicit_api_key=app_config.memory.embedder.config.api_key,
-        )
+        embedder_provider_config["api_key"] = resolved_embedder.api_key
         # Support custom OpenAI-compatible base URL (e.g., llama.cpp)
-        if app_config.memory.embedder.config.host:
-            embedder_provider_config["openai_base_url"] = app_config.memory.embedder.config.host
-        if app_config.memory.embedder.config.dimensions is not None:
-            embedder_provider_config["embedding_dims"] = app_config.memory.embedder.config.dimensions
+        if resolved_embedder.host:
+            embedder_provider_config["openai_base_url"] = resolved_embedder.host
+        if resolved_embedder.dimensions is not None:
+            embedder_provider_config["embedding_dims"] = resolved_embedder.dimensions
     elif embedder_provider == "ollama":
-        host = (
-            get_ollama_host(runtime_paths=runtime_paths)
-            or app_config.memory.embedder.config.host
-            or OLLAMA_HOST_DEFAULT
-        )
-        embedder_provider_config["ollama_base_url"] = host
-    elif embedder_provider == "sentence_transformers" and app_config.memory.embedder.config.dimensions is not None:
-        embedder_provider_config["embedding_dims"] = app_config.memory.embedder.config.dimensions
+        embedder_provider_config["ollama_base_url"] = resolved_embedder.host
+    elif embedder_provider == "sentence_transformers" and resolved_embedder.dimensions is not None:
+        embedder_provider_config["embedding_dims"] = resolved_embedder.dimensions
 
     # Build LLM config from memory configuration
     if app_config.memory.llm:
