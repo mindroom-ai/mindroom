@@ -255,17 +255,48 @@ class CallManager:
         received_at_ms = self._clock_ms()
         parsed = self._key_transport.parse_incoming(event, received_at_ms=received_at_ms)
         if parsed is None:
+            logger.warning(
+                "call_frame_key_rejected",
+                sender=event.sender,
+                authenticated_device_id=event.authenticated_device_id,
+                reason="invalid_matrixrtc_payload",
+            )
             return
         room_id, received = parsed
-        if (
-            room_id in self._departed_rooms
-            or not self._is_configured_call_room_id(room_id)
-            or not self._is_authorized_call_member(
-                received.user_id,
-                room_id,
+        if room_id in self._departed_rooms:
+            logger.warning(
+                "call_frame_key_rejected",
+                room_id=room_id,
+                sender=received.user_id,
+                device_id=received.claimed_device_id,
+                reason="departed_call_room",
             )
-        ):
             return
+        if not self._is_configured_call_room_id(room_id):
+            logger.warning(
+                "call_frame_key_rejected",
+                room_id=room_id,
+                sender=received.user_id,
+                device_id=received.claimed_device_id,
+                reason="unknown_call_room",
+            )
+            return
+        if not self._is_authorized_call_member(received.user_id, room_id):
+            logger.warning(
+                "call_frame_key_rejected",
+                room_id=room_id,
+                sender=received.user_id,
+                device_id=received.claimed_device_id,
+                reason="unauthorized_call_member",
+            )
+            return
+        logger.info(
+            "call_frame_key_received",
+            room_id=room_id,
+            sender=received.user_id,
+            device_id=received.claimed_device_id,
+            key_index=received.key_index,
+        )
         session = self._sessions.get(room_id)
         if session is not None and session.on_key_received(received):
             return

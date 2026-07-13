@@ -19,6 +19,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_CALL_ENCRYPTION_KEYS_EVENT_TYPE = "io.element.call.encryption_keys"
+
 _PERMANENT_MATRIX_STARTUP_ERROR_CODES = frozenset(
     {
         "M_FORBIDDEN",
@@ -27,6 +29,22 @@ _PERMANENT_MATRIX_STARTUP_ERROR_CODES = frozenset(
         "M_INVALID_USERNAME",
     },
 )
+
+
+def _log_call_key_olm_rejection(
+    event: nio.UnknownToDeviceEvent,
+    reason: str,
+    **details: object,
+) -> None:
+    """Log why an otherwise decrypted call-key event failed provenance checks."""
+    if event.type != _CALL_ENCRYPTION_KEYS_EVENT_TYPE:
+        return
+    logger.warning(
+        "call_key_olm_rejected",
+        sender=event.sender,
+        reason=reason,
+        **details,
+    )
 
 
 class PermanentMatrixStartupError(PermanentStartupError):
@@ -43,9 +61,15 @@ class _MindRoomAsyncClient(nio.AsyncClient):
         sender_device = decrypted.source.get("sender_device")
         sender_keys = decrypted.source.get("keys")
         if not isinstance(sender_device, str) or not isinstance(sender_keys, dict) or self.olm is None:
+            _log_call_key_olm_rejection(decrypted, "missing_sender_identity")
             return decrypted
         sender_ed25519 = sender_keys.get("ed25519")
         if not isinstance(sender_ed25519, str):
+            _log_call_key_olm_rejection(
+                decrypted,
+                "missing_sender_ed25519",
+                sender_device=sender_device,
+            )
             return decrypted
         matching_devices = [
             device
@@ -53,10 +77,28 @@ class _MindRoomAsyncClient(nio.AsyncClient):
             if device.curve25519 == to_device_event.sender_key
         ]
         if len(matching_devices) != 1:
+            _log_call_key_olm_rejection(
+                decrypted,
+                "curve25519_device_match_count",
+                sender_device=sender_device,
+                matching_device_count=len(matching_devices),
+            )
             return decrypted
         device = matching_devices[0]
         if device.id != sender_device or device.ed25519 != sender_ed25519:
+            _log_call_key_olm_rejection(
+                decrypted,
+                "signed_sender_identity_mismatch",
+                sender_device=sender_device,
+                matched_device_id=device.id,
+            )
             return decrypted
+        if decrypted.type == _CALL_ENCRYPTION_KEYS_EVENT_TYPE:
+            logger.info(
+                "call_key_olm_authenticated",
+                sender=decrypted.sender,
+                sender_device=device.id,
+            )
         return AuthenticatedToDeviceEvent(
             source=decrypted.source,
             sender=decrypted.sender,

@@ -213,7 +213,7 @@ class CallSession:
         if inbound is None:
             return True
         self.deps.bridge.set_frame_key(inbound.participant_identity, inbound.key, inbound.key_index)
-        logger.debug(
+        logger.info(
             "call_frame_key_installed",
             room_id=self.room_id,
             participant=inbound.participant_identity,
