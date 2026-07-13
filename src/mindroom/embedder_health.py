@@ -49,6 +49,10 @@ class EmbedderHealthRecorder:
         """Record an outcome only while this recorder is current."""
         return _record_embedder_health_for_generation(self.generation, error)
 
+    def is_current(self) -> bool:
+        """Return whether this recorder still belongs to the active config."""
+        return self.generation == _health_generation_snapshot()
+
 
 class EmbedderRequestError(RuntimeError):
     """Embedder failure carrying only the classified, credential-safe detail.
@@ -235,7 +239,13 @@ def probe_embedder(
     return None
 
 
-async def check_embedder_health(config: Config, runtime_paths: RuntimePaths, *, reason: str) -> None:
+async def check_embedder_health(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    reason: str,
+    health_recorder: EmbedderHealthRecorder | None = None,
+) -> None:
     """Probe the configured embedder off the event loop and record the outcome.
 
     No-ops when the config cannot send keyed embedder requests. Never raises,
@@ -243,7 +253,7 @@ async def check_embedder_health(config: Config, runtime_paths: RuntimePaths, *, 
     """
     if not embedder_in_use(config):
         return
-    health_recorder = capture_embedder_health_recorder()
+    health_recorder = health_recorder or capture_embedder_health_recorder()
     error = await asyncio.to_thread(probe_embedder, config, runtime_paths, health_recorder)
     if not health_recorder.record(error):
         logger.info("embedder_health_probe_discarded_stale", reason=reason)

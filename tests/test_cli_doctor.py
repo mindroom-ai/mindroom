@@ -178,3 +178,29 @@ def test_doctor_seeds_env_credentials_like_the_runtime(
         storage_path=tmp_path / "storage",
     )
     assert get_embedder_api_key(runtime_paths) == "sk-doctor-embedder"
+
+
+def test_doctor_counts_credential_sync_value_error_as_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Malformed credential encryption config is reported without aborting checks."""
+    config_path = tmp_path / "missing" / "config.yaml"
+
+    def fail_credential_sync(**_kwargs: object) -> None:
+        msg = "invalid encryption key"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(
+        "mindroom.cli.doctor.sync_env_to_credentials",
+        fail_credential_sync,
+    )
+    monkeypatch.setattr("mindroom.cli.doctor._check_matrix_homeserver", lambda **_kwargs: (1, 0, 0))
+
+    with pytest.raises(typer.Exit):
+        doctor(config_path=config_path, storage_path=tmp_path / "storage")
+
+    output = capsys.readouterr().out
+    assert "Could not sync env credentials into the store" in output
+    assert "1 warning" in output

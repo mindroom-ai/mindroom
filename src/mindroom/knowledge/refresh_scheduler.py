@@ -9,7 +9,14 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import create_background_task
-from mindroom.embedder_health import check_embedder_health, embedder_in_use
+from mindroom.embedder_health import (
+    EmbedderHealthRecorder,
+    capture_embedder_health_recorder,
+    check_embedder_health,
+    embedder_in_use,
+    extract_classified_embedder_detail,
+    get_embedder_failure,
+)
 from mindroom.knowledge.refresh_runner import (
     is_refresh_active,
     mark_refresh_active,
@@ -59,6 +66,7 @@ class _ScheduledRefresh:
     config: Config
     runtime_paths: RuntimePaths
     execution_identity: ToolExecutionIdentity | None
+    health_recorder: EmbedderHealthRecorder
 
 
 @dataclass(slots=True)
@@ -175,6 +183,7 @@ class KnowledgeRefreshScheduler:
             config=config.model_copy(deep=True),
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
+            health_recorder=capture_embedder_health_recorder(),
         )
         if key in self._tasks:
             self._pending[key] = request
@@ -251,13 +260,27 @@ def _schedule_embedder_probe_after_refresh(
 
 
 async def _check_embedder_after_refresh(request: _ScheduledRefresh, *, refresh_raised: bool) -> None:
-    if not refresh_raised and not await asyncio.to_thread(_persisted_refresh_failed, request):
+    if not request.health_recorder.is_current():
         return
-    await check_embedder_health(request.config, request.runtime_paths, reason="knowledge_refresh_failed")
+    persisted_embedder_failure = await asyncio.to_thread(_persisted_refresh_embedder_failure, request)
+    if refresh_raised or persisted_embedder_failure:
+        if not persisted_embedder_failure:
+            return
+        reason = "knowledge_refresh_failed"
+    else:
+        if get_embedder_failure() is None:
+            return
+        reason = "knowledge_refresh_recovery"
+    await check_embedder_health(
+        request.config,
+        request.runtime_paths,
+        reason=reason,
+        health_recorder=request.health_recorder,
+    )
 
 
-def _persisted_refresh_failed(request: _ScheduledRefresh) -> bool:
-    """Return whether the finished refresh left a persisted failure for its binding."""
+def _persisted_refresh_embedder_failure(request: _ScheduledRefresh) -> bool:
+    """Return whether persisted refresh state proves an embedder failure."""
     try:
         key = resolve_published_index_key(
             request.base_id,
@@ -269,7 +292,7 @@ def _persisted_refresh_failed(request: _ScheduledRefresh) -> bool:
     except ValueError:
         return False
     state = load_published_index_state(published_index_metadata_path(key))
-    return state is not None and (state.refresh_job == "failed" or state.last_error is not None)
+    return state is not None and extract_classified_embedder_detail(state.last_error) is not None
 
 
 def _running_loop_for_schedule(base_id: str) -> asyncio.AbstractEventLoop | None:
