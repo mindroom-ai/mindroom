@@ -41,7 +41,6 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
-from mindroom.delivery_gateway import CancelledVisibleNoteRequest
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -998,20 +997,13 @@ def test_forced_compaction_placeholder_check_degrades_on_storage_error(tmp_path:
         "create_storage",
         side_effect=RuntimeError("storage unavailable"),
     ):
-        result = coordinator._inspect_locked_turn_state(
-            ResponseRequest(
-                thread_history=[],
-                prompt="hello",
-                response_envelope=_envelope(),
-            ),
+        result = coordinator._has_queued_forced_compaction(
             session_id="session",
             scope=scope,
             execution_identity=None,
-            check_forced_compaction=True,
         )
 
-    assert result.retry_is_current is True
-    assert result.forced_compaction_queued is False
+    assert result is False
 
 
 @pytest.mark.asyncio
@@ -1600,245 +1592,6 @@ async def test_prepare_request_after_lock_wraps_refresh_failures(tmp_path: Path)
         )
 
     assert isinstance(excinfo.value.__cause__, RuntimeError)
-
-
-@pytest.mark.asyncio
-async def test_locked_placeholder_is_visible_before_payload_preparation(tmp_path: Path) -> None:
-    """A locked response should expose its placeholder before slow payload hydration."""
-    bot = _bot(tmp_path)
-    coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    target = MessageTarget.resolve("!room:localhost", None, "$event")
-    preparation_started = asyncio.Event()
-    release_preparation = asyncio.Event()
-
-    async def slow_prepare(request: ResponseRequest) -> ResponseRequest:
-        preparation_started.set()
-        await release_preparation.wait()
-        return replace(request, payload_preparation=None)
-
-    send_placeholder = AsyncMock(return_value="$placeholder")
-    request = ResponseRequest(
-        thread_history=[],
-        prompt="hello",
-        user_id="@user:localhost",
-        response_envelope=_envelope(source_event_id="$event", target=target),
-        payload_preparation=_payload_preparation(target),
-    )
-    history_scope = coordinator.deps.state_writer.history_scope()
-    execution_identity = coordinator.deps.tool_runtime.build_execution_identity(
-        target=target,
-        user_id=request.user_id,
-    )
-
-    with (
-        patch("mindroom.delivery_gateway.DeliveryGateway.send_text", new=send_placeholder),
-        patch.object(coordinator.deps.request_preparer, "prepare", new=AsyncMock(side_effect=slow_prepare)),
-    ):
-        locked_turn = asyncio.create_task(
-            coordinator._begin_locked_turn(
-                request,
-                resolved_target=target,
-                history_scope=history_scope,
-                execution_identity=execution_identity,
-                response_kind="ai",
-                placeholder_message="Thinking...",
-            ),
-        )
-        await asyncio.wait_for(preparation_started.wait(), timeout=1.0)
-        send_placeholder.assert_awaited_once()
-        assert not locked_turn.done()
-        release_preparation.set()
-        result = await locked_turn
-
-    assert result is not None
-    assert result.existing_event_id == "$placeholder"
-    assert result.existing_event_is_placeholder is True
-
-
-@pytest.mark.asyncio
-async def test_locked_placeholder_id_survives_payload_preparation_failure(tmp_path: Path) -> None:
-    """Dispatch failure handling should receive the early placeholder event ID."""
-    bot = _bot(tmp_path)
-    coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    target = MessageTarget.resolve("!room:localhost", None, "$event")
-    request = ResponseRequest(
-        thread_history=[],
-        prompt="hello",
-        user_id="@user:localhost",
-        response_envelope=_envelope(source_event_id="$event", target=target),
-        payload_preparation=_payload_preparation(target),
-    )
-    history_scope = coordinator.deps.state_writer.history_scope()
-    execution_identity = coordinator.deps.tool_runtime.build_execution_identity(
-        target=target,
-        user_id=request.user_id,
-    )
-
-    with (
-        patch(
-            "mindroom.delivery_gateway.DeliveryGateway.send_text",
-            new=AsyncMock(return_value="$placeholder"),
-        ),
-        patch.object(
-            coordinator.deps.request_preparer,
-            "prepare",
-            new=AsyncMock(side_effect=RuntimeError("attachment download failed")),
-        ),
-        pytest.raises(PostLockRequestPreparationError) as excinfo,
-    ):
-        await coordinator._begin_locked_turn(
-            request,
-            resolved_target=target,
-            history_scope=history_scope,
-            execution_identity=execution_identity,
-            response_kind="ai",
-            placeholder_message="Thinking...",
-        )
-
-    assert excinfo.value.placeholder_event_id == "$placeholder"
-    assert isinstance(excinfo.value.__cause__, RuntimeError)
-
-
-@pytest.mark.asyncio
-async def test_locked_placeholder_is_finalized_when_payload_preparation_is_cancelled(tmp_path: Path) -> None:
-    """Cancellation during slow hydration should not leave the early placeholder pending."""
-    bot = _bot(tmp_path)
-    coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    target = MessageTarget.resolve("!room:localhost", None, "$event")
-    preparation_started = asyncio.Event()
-
-    async def blocked_prepare(_request: ResponseRequest) -> ResponseRequest:
-        preparation_started.set()
-        await asyncio.Event().wait()
-        unreachable = "unreachable"
-        raise AssertionError(unreachable)
-
-    cancelled_note = AsyncMock(
-        return_value=FinalDeliveryOutcome(
-            terminal_status="cancelled",
-            event_id="$placeholder",
-            is_visible_response=True,
-            failure_reason="sync_restart_cancelled",
-        ),
-    )
-    request = ResponseRequest(
-        thread_history=[],
-        prompt="hello",
-        user_id="@user:localhost",
-        response_envelope=_envelope(source_event_id="$event", target=target),
-        payload_preparation=_payload_preparation(target),
-    )
-    history_scope = coordinator.deps.state_writer.history_scope()
-    execution_identity = coordinator.deps.tool_runtime.build_execution_identity(
-        target=target,
-        user_id=request.user_id,
-    )
-
-    with (
-        patch(
-            "mindroom.delivery_gateway.DeliveryGateway.send_text",
-            new=AsyncMock(return_value="$placeholder"),
-        ),
-        patch(
-            "mindroom.delivery_gateway.DeliveryGateway.deliver_cancelled_visible_note",
-            new=cancelled_note,
-        ),
-        patch.object(
-            coordinator.deps.request_preparer,
-            "prepare",
-            new=AsyncMock(side_effect=blocked_prepare),
-        ),
-    ):
-        locked_turn = asyncio.create_task(
-            coordinator._begin_locked_turn(
-                request,
-                resolved_target=target,
-                history_scope=history_scope,
-                execution_identity=execution_identity,
-                response_kind="ai",
-                placeholder_message="Thinking...",
-            ),
-        )
-        await asyncio.wait_for(preparation_started.wait(), timeout=1.0)
-        locked_turn.cancel("sync_restart")
-        with pytest.raises(asyncio.CancelledError, match="sync_restart"):
-            await locked_turn
-
-    cancellation_request = cancelled_note.await_args.args[0]
-    assert isinstance(cancellation_request, CancelledVisibleNoteRequest)
-    assert cancellation_request.target == target
-    assert cancellation_request.event_id == "$placeholder"
-    assert cancellation_request.existing_event_is_placeholder is True
-    assert cancellation_request.cancel_source == "sync_restart"
-
-
-@pytest.mark.asyncio
-async def test_early_placeholder_survives_later_setup_failure(tmp_path: Path) -> None:
-    """Setup failures after payload preparation should still carry the early placeholder ID."""
-    bot = _bot(tmp_path)
-    coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    request = ResponseRequest(
-        thread_history=[],
-        prompt="hello",
-        user_id="@user:localhost",
-        response_envelope=_envelope(),
-    )
-
-    with (
-        patch(
-            "mindroom.delivery_gateway.DeliveryGateway.send_text",
-            new=AsyncMock(return_value="$placeholder"),
-        ),
-        patch(
-            "mindroom.response_runner.prepare_memory_and_model_context",
-            side_effect=RuntimeError("model context failed"),
-        ),
-        pytest.raises(PostLockRequestPreparationError) as excinfo,
-    ):
-        await coordinator.generate_response(request)
-
-    assert excinfo.value.placeholder_event_id == "$placeholder"
-    assert isinstance(excinfo.value.__cause__, RuntimeError)
-
-
-@pytest.mark.asyncio
-async def test_later_setup_cancellation_preserves_cancel_when_note_delivery_fails(tmp_path: Path) -> None:
-    """Best-effort placeholder cleanup must not replace the original setup cancellation."""
-    bot = _bot(tmp_path)
-    coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    setup_started = asyncio.Event()
-
-    async def blocked_streaming_check(*_args: object, **_kwargs: object) -> bool:
-        setup_started.set()
-        await asyncio.Event().wait()
-        return False
-
-    cancelled_note = AsyncMock(side_effect=RuntimeError("Matrix unavailable"))
-    request = ResponseRequest(
-        thread_history=[],
-        prompt="hello",
-        user_id="@user:localhost",
-        response_envelope=_envelope(),
-    )
-
-    with (
-        patch(
-            "mindroom.delivery_gateway.DeliveryGateway.send_text",
-            new=AsyncMock(return_value="$placeholder"),
-        ),
-        patch("mindroom.response_runner.should_use_streaming", side_effect=blocked_streaming_check),
-        patch(
-            "mindroom.delivery_gateway.DeliveryGateway.deliver_cancelled_visible_note",
-            new=cancelled_note,
-        ),
-    ):
-        response = asyncio.create_task(coordinator.generate_response(request))
-        await asyncio.wait_for(setup_started.wait(), timeout=1.0)
-        response.cancel("sync_restart")
-        with pytest.raises(asyncio.CancelledError, match="sync_restart"):
-            await response
-
-    cancelled_note.assert_awaited_once()
 
 
 @pytest.mark.asyncio

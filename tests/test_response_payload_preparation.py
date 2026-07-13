@@ -194,13 +194,10 @@ async def test_prepare_logs_startup_latency_fields(tmp_path: Path) -> None:
         diagnostics={"cache_read_ms": 11.0, "resolution_ms": 33.0},
     )
 
-    with (
-        patch.object(
-            bot._inbound_turn_normalizer,
-            "build_dispatch_payload_with_attachments",
-            new=AsyncMock(return_value=DispatchPayload(prompt="built")),
-        ),
-        patch("mindroom.response_payload_preparation.emit_timing_event") as emit_timing_event,
+    with patch.object(
+        bot._inbound_turn_normalizer,
+        "build_dispatch_payload_with_attachments",
+        new=AsyncMock(return_value=DispatchPayload(prompt="built")),
     ):
         await preparer.prepare(
             _request(target, _preparation(target, action_kind="team"), thread_history=refreshed_history),
@@ -210,10 +207,6 @@ async def test_prepare_logs_startup_latency_fields(tmp_path: Path) -> None:
         call for call in preparer.logger.info.call_args_list if call.args and call.args[0] == "Response startup latency"
     ]
     assert len(latency_logs) == 1
-    emit_timing_event.assert_called_once()
-    assert emit_timing_event.call_args.args == ("Response payload hydration phases",)
-    assert emit_timing_event.call_args.kwargs["total_ms"] >= 0
-    assert emit_timing_event.call_args.kwargs["payload_builder_ms"] >= 0
     kwargs = latency_logs[0].kwargs
     assert kwargs["action_kind"] == "team"
     assert kwargs["cache_read_ms"] == 11.0

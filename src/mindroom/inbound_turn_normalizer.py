@@ -34,7 +34,7 @@ from mindroom.matrix.media import (
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.media_inputs import MediaInputs
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
-from mindroom.timing import elapsed_ms_between, emit_elapsed_timing, emit_timing_event
+from mindroom.timing import emit_elapsed_timing
 from mindroom.voice_handler import prepare_raw_voice_fallback_message, prepare_voice_message
 
 if TYPE_CHECKING:
@@ -353,7 +353,6 @@ class InboundTurnNormalizer:
         request: DispatchPayloadWithAttachmentsRequest,
     ) -> DispatchPayload:
         """Build dispatch payload by merging thread/history attachment media."""
-        hydration_started = time.monotonic()
         thread_attachment_ids = (
             await resolve_thread_attachment_ids(
                 self._client(),
@@ -364,7 +363,6 @@ class InboundTurnNormalizer:
             if request.thread_id
             else []
         )
-        thread_attachment_ids_ready = time.monotonic()
         history_attachment_ids = parse_attachment_ids_from_thread_history(request.thread_history)
         history_media_attachment_ids = await register_thread_history_media_attachments(
             self._client(),
@@ -373,7 +371,6 @@ class InboundTurnNormalizer:
             thread_id=request.media_thread_id,
             thread_history=request.thread_history,
         )
-        history_media_ready = time.monotonic()
         trusted_current_attachment_ids = merge_attachment_ids(request.trusted_current_attachment_ids)
         attachment_ids = merge_attachment_ids(
             request.current_attachment_ids,
@@ -400,7 +397,6 @@ class InboundTurnNormalizer:
             *trusted_records,
             *[record for record in scoped_records if record.attachment_id not in trusted_record_ids],
         ]
-        records_resolved_at = time.monotonic()
         # Media bytes for earlier attachments stay pinned to the thread-history
         # messages that carried them; only current-turn media rides this input.
         current_attachment_id_set = {*trusted_current_attachment_ids, *request.current_attachment_ids}
@@ -415,19 +411,6 @@ class InboundTurnNormalizer:
             attachment_prompt_blocks.append(format_voice_transcript_attachment_guidance(current_records))
         attachment_prompt = "\n\n".join(block for block in attachment_prompt_blocks if block) or None
         resolved_attachment_ids = [record.attachment_id for record in resolved_records]
-        payload_ready_at = time.monotonic()
-        emit_timing_event(
-            "Attachment hydration phases",
-            room_id=request.room_id,
-            thread_id=request.media_thread_id,
-            thread_attachment_lookup_ms=elapsed_ms_between(hydration_started, thread_attachment_ids_ready),
-            history_media_registration_ms=elapsed_ms_between(thread_attachment_ids_ready, history_media_ready),
-            attachment_record_resolution_ms=elapsed_ms_between(history_media_ready, records_resolved_at),
-            media_materialization_ms=elapsed_ms_between(records_resolved_at, payload_ready_at),
-            total_ms=elapsed_ms_between(hydration_started, payload_ready_at),
-            historical_media_attachment_count=len(history_media_attachment_ids),
-            resolved_attachment_count=len(resolved_records),
-        )
         return DispatchPayload(
             prompt=request.prompt,
             model_prompt=attachment_prompt,

@@ -2223,10 +2223,9 @@ class TestAgentBot(AgentBotTestBase):
             delivery_gateway=bot._delivery_gateway,
         )
 
-        with patch.object(
-            ResponsePayloadPreparer,
-            "prepare",
-            new=AsyncMock(side_effect=RuntimeError(failure_message)),
+        with patch(
+            "mindroom.response_runner.prepare_memory_and_model_context",
+            side_effect=RuntimeError(failure_message),
         ):
             await bot._turn_controller._execute_response_action(
                 room,

@@ -20,7 +20,7 @@ from mindroom import response_runner
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
-from mindroom.delivery_gateway import DeliveryGateway
+from mindroom.delivery_gateway import DeliveryGateway, SendTextRequest
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.logging_config import get_logger
@@ -171,6 +171,12 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
         prepare_history_by_turn[turn] = request.thread_history
         return replace(request, payload_preparation=None, requires_model_history_refresh=False)
 
+    async def fake_send_placeholder(request: SendTextRequest) -> str:
+        assert request.target.reply_to_event_id is not None
+        turn = request.target.reply_to_event_id[-1]
+        events.append(f"placeholder:{turn}")
+        return f"$placeholder{turn}"
+
     async def fake_run_cancellable_response(**kwargs: object) -> str:
         response_function = kwargs["response_function"]
         await response_function(None)  # type: ignore[operator]
@@ -200,6 +206,10 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
     with (
         patch.object(ConversationResolver, "fetch_thread_history", new=AsyncMock(side_effect=fake_fetch)),
         patch.object(bot._request_payload_preparer, "prepare", new=AsyncMock(side_effect=spy_prepare)),
+        patch(
+            "mindroom.delivery_gateway.DeliveryGateway.send_text",
+            new=AsyncMock(side_effect=fake_send_placeholder),
+        ),
         patch.object(
             coordinator,
             "run_cancellable_response",
@@ -224,11 +234,13 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
 
     assert events == [
         "lock:1",
+        "placeholder:1",
         "refresh:1",
         "prepare:1",
         "respond_start:1",
         "respond_end:1",
         "lock:2",
+        "placeholder:2",
         "refresh:2",
         "prepare:2",
         "respond_start:2",
@@ -237,6 +249,39 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
     # Each turn's payload preparation consumed the history refreshed under its own lock.
     assert prepare_history_by_turn[1] is refreshed[0]
     assert prepare_history_by_turn[2] is refreshed[1]
+
+
+@pytest.mark.asyncio
+async def test_setup_cancellation_preserves_cancel_when_placeholder_cleanup_fails(tmp_path: Path) -> None:
+    """Placeholder cleanup failure must not replace the original setup cancellation."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    setup_started = asyncio.Event()
+
+    async def blocked_streaming_check(*_args: object, **_kwargs: object) -> bool:
+        setup_started.set()
+        await asyncio.Event().wait()
+        return False
+
+    cancelled_note = AsyncMock(side_effect=RuntimeError("Matrix unavailable"))
+    with (
+        patch(
+            "mindroom.delivery_gateway.DeliveryGateway.send_text",
+            new=AsyncMock(return_value="$placeholder"),
+        ),
+        patch_response_runner_module(should_use_streaming=AsyncMock(side_effect=blocked_streaming_check)),
+        patch(
+            "mindroom.delivery_gateway.DeliveryGateway.deliver_cancelled_visible_note",
+            new=cancelled_note,
+        ),
+    ):
+        response = asyncio.create_task(coordinator.generate_response(_plain_request(_target())))
+        await asyncio.wait_for(setup_started.wait(), timeout=1.0)
+        response.cancel("sync_restart")
+        with pytest.raises(asyncio.CancelledError, match="sync_restart"):
+            await response
+
+    cancelled_note.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

@@ -307,23 +307,12 @@ class PostLockRequestPreparationError(RuntimeError):
         self.placeholder_event_id = placeholder_event_id
 
 
-@dataclass(frozen=True)
-class _LockedTurnState:
-    """Persisted facts needed before one locked turn becomes visible."""
-
-    retry_is_current: bool
-    forced_compaction_queued: bool
-
-
 @dataclass
 class _EarlyPlaceholderState:
     """Track an early placeholder until normal response settlement takes ownership."""
 
-    lifecycle_guard_enabled: bool = False
     placeholder_event_id: str | None = None
     request: ResponseRequest | None = None
-    response_kind: str | None = None
-    forced_compaction_queued: bool = False
     settlement_started: bool = False
 
 
@@ -737,11 +726,12 @@ class ResponseRunner:
         self,
         request: ResponseRequest,
         *,
+        response_kind: str,
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
     ) -> str | None:
         """Run one locked response operation with shared queued-message bookkeeping."""
         resolved_target = request.response_envelope.target
-        early_placeholder = _EarlyPlaceholderState(lifecycle_guard_enabled=True)
+        early_placeholder = _EarlyPlaceholderState()
         try:
             return await self._lifecycle_coordinator.run_locked_response(
                 target=resolved_target,
@@ -753,38 +743,34 @@ class ResponseRunner:
             )
         except asyncio.CancelledError as error:
             if early_placeholder.placeholder_event_id is not None and not early_placeholder.settlement_started:
-                await self._finalize_early_placeholder_cancellation(early_placeholder, error)
+                await self._finalize_early_placeholder_cancellation(
+                    early_placeholder,
+                    error,
+                    response_kind=response_kind,
+                )
             raise
-        except PostLockRequestPreparationError as error:
-            if (
-                early_placeholder.placeholder_event_id is None
-                or early_placeholder.settlement_started
-                or error.placeholder_event_id is not None
-            ):
+        except Exception as error:
+            already_linked = (
+                isinstance(error, PostLockRequestPreparationError) and error.placeholder_event_id is not None
+            )
+            if early_placeholder.placeholder_event_id is None or early_placeholder.settlement_started or already_linked:
                 raise
             cause = error.__cause__ if isinstance(error.__cause__, Exception) else error
             raise PostLockRequestPreparationError(
-                str(error),
                 placeholder_event_id=early_placeholder.placeholder_event_id,
             ) from cause
-        except Exception as error:
-            if early_placeholder.placeholder_event_id is None or early_placeholder.settlement_started:
-                raise
-            raise PostLockRequestPreparationError(
-                placeholder_event_id=early_placeholder.placeholder_event_id,
-            ) from error
 
     async def _finalize_early_placeholder_cancellation(
         self,
         state: _EarlyPlaceholderState,
         error: asyncio.CancelledError,
+        *,
+        response_kind: str,
     ) -> None:
         """Best-effort terminalize an early placeholder before attempt settlement starts."""
         request = state.request
-        response_kind = state.response_kind
         event_id = state.placeholder_event_id
         assert request is not None
-        assert response_kind is not None
         assert event_id is not None
         try:
             await self.deps.delivery_gateway.deliver_cancelled_visible_note(
@@ -872,40 +858,30 @@ class ResponseRunner:
             reply_to_event_id=reply_to_event_id,
         )
 
-    def _inspect_locked_turn_state(
+    def _has_queued_forced_compaction(
         self,
-        request: ResponseRequest,
         *,
         session_id: str,
         scope: HistoryScope,
         execution_identity: ToolExecutionIdentity | None,
-        check_forced_compaction: bool,
-    ) -> _LockedTurnState:
-        """Read retry eligibility and placeholder ordering from one session snapshot."""
-        retry_source_event_id = request.sync_restart_retry_source_event_id
-        if retry_source_event_id is None and not check_forced_compaction:
-            return _LockedTurnState(retry_is_current=True, forced_compaction_queued=False)
-
+    ) -> bool:
+        """Return whether this scope should compact before creating a reply placeholder."""
         storage = None
         try:
             storage = self.deps.state_writer.create_storage(execution_identity, scope=scope)
             session = storage.get_session(session_id, self.deps.state_writer.session_type_for_scope(scope))
+            if not isinstance(session, AgentSession | TeamSession):
+                return False
+            state = read_scope_state(session, scope)
+            return state.force_compact_before_next_run or has_pending_force_compaction_scope(session, scope)
         except Exception as error:
-            if retry_source_event_id is not None:
-                self.deps.logger.warning(
-                    "sync_restart_retry_history_check_failed",
-                    source_event_id=retry_source_event_id,
-                    scope=scope.key,
-                    exception_type=error.__class__.__name__,
-                )
-                return _LockedTurnState(retry_is_current=False, forced_compaction_queued=False)
             self.deps.logger.warning(
                 "forced_compaction_placeholder_check_failed",
                 session_id=session_id,
                 scope=scope.key,
                 exception_type=error.__class__.__name__,
             )
-            return _LockedTurnState(retry_is_current=True, forced_compaction_queued=False)
+            return False
         finally:
             if storage is not None:
                 try:
@@ -917,40 +893,6 @@ class ResponseRunner:
                         scope=scope.key,
                         exception_type=error.__class__.__name__,
                     )
-
-        typed_session = session if isinstance(session, AgentSession | TeamSession) else None
-        retry_is_current = retry_source_event_id is None or (
-            typed_session is not None
-            and interrupted_source_needs_retry(
-                typed_session.runs or (),
-                scope=scope,
-                source_event_id=retry_source_event_id,
-            )
-        )
-        if not retry_is_current:
-            self.deps.logger.info("sync_restart_retry_skipped", source_event_id=retry_source_event_id)
-            return _LockedTurnState(retry_is_current=False, forced_compaction_queued=False)
-        if not check_forced_compaction or typed_session is None:
-            return _LockedTurnState(retry_is_current=True, forced_compaction_queued=False)
-
-        try:
-            state = read_scope_state(typed_session, scope)
-            forced_compaction_queued = state.force_compact_before_next_run or has_pending_force_compaction_scope(
-                typed_session,
-                scope,
-            )
-        except Exception as error:
-            self.deps.logger.warning(
-                "forced_compaction_placeholder_check_failed",
-                session_id=session_id,
-                scope=scope.key,
-                exception_type=error.__class__.__name__,
-            )
-            forced_compaction_queued = False
-        return _LockedTurnState(
-            retry_is_current=True,
-            forced_compaction_queued=forced_compaction_queued,
-        )
 
     async def _refresh_model_history_after_lock(
         self,
@@ -1078,7 +1020,6 @@ class ResponseRunner:
         resolved_target: MessageTarget,
         history_scope: HistoryScope,
         execution_identity: ToolExecutionIdentity,
-        response_kind: str,
         placeholder_message: str | None = None,
         early_placeholder_state: _EarlyPlaceholderState | None = None,
     ) -> ResponseRequest | None:
@@ -1087,22 +1028,21 @@ class ResponseRunner:
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = self._request_with_locked_target(request, resolved_target)
-        check_forced_compaction = placeholder_message is not None and request.existing_event_id is None
-        locked_turn_state = self._inspect_locked_turn_state(
+        if not self._sync_restart_retry_is_current(
             request,
-            session_id=resolved_target.session_id,
-            scope=history_scope,
+            history_scope=history_scope,
             execution_identity=execution_identity,
-            check_forced_compaction=check_forced_compaction,
-        )
-        placeholder_state.forced_compaction_queued = locked_turn_state.forced_compaction_queued
-        if not locked_turn_state.retry_is_current:
+        ):
             return None
         placeholder_event_id = None
         if (
-            check_forced_compaction
-            and not locked_turn_state.forced_compaction_queued
-            and placeholder_message is not None
+            placeholder_message is not None
+            and request.existing_event_id is None
+            and not self._has_queued_forced_compaction(
+                session_id=resolved_target.session_id,
+                scope=history_scope,
+                execution_identity=execution_identity,
+            )
         ):
             placeholder_event_id = await self.deps.delivery_gateway.send_text(
                 SendTextRequest(
@@ -1114,7 +1054,6 @@ class ResponseRunner:
             if placeholder_event_id is not None:
                 placeholder_state.placeholder_event_id = placeholder_event_id
                 placeholder_state.request = request
-                placeholder_state.response_kind = response_kind
                 request = replace(
                     request,
                     existing_event_id=placeholder_event_id,
@@ -1123,18 +1062,46 @@ class ResponseRunner:
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark("placeholder_sent")
                     request.pipeline_timing.mark_first_visible_reply("placeholder")
-        try:
-            request = await self._prepare_request_after_lock(request)
-        except asyncio.CancelledError as error:
-            if placeholder_event_id is not None and not placeholder_state.lifecycle_guard_enabled:
-                await self._finalize_early_placeholder_cancellation(placeholder_state, error)
-            raise
-        except PostLockRequestPreparationError as error:
-            if placeholder_event_id is None:
-                raise
-            cause = error.__cause__ if isinstance(error.__cause__, Exception) else error
-            raise PostLockRequestPreparationError(placeholder_event_id=placeholder_event_id) from cause
+        request = await self._prepare_request_after_lock(request)
         return self._request_with_locked_target(request, resolved_target)
+
+    def _sync_restart_retry_is_current(
+        self,
+        request: ResponseRequest,
+        *,
+        history_scope: HistoryScope,
+        execution_identity: ToolExecutionIdentity,
+    ) -> bool:
+        """Fail closed unless persisted history still ends in this retry's interrupted source."""
+        source_event_id = request.sync_restart_retry_source_event_id
+        if source_event_id is None:
+            return True
+
+        try:
+            storage = self.deps.state_writer.create_storage(execution_identity, scope=history_scope)
+            try:
+                session = storage.get_session(
+                    request.response_envelope.target.session_id,
+                    self.deps.state_writer.session_type_for_scope(history_scope),
+                )
+                should_retry = isinstance(session, AgentSession | TeamSession) and interrupted_source_needs_retry(
+                    session.runs or (),
+                    scope=history_scope,
+                    source_event_id=source_event_id,
+                )
+            finally:
+                storage.close()
+        except Exception as error:
+            self.deps.logger.warning(
+                "sync_restart_retry_history_check_failed",
+                source_event_id=source_event_id,
+                scope=history_scope.key,
+                exception_type=error.__class__.__name__,
+            )
+            return False
+        if not should_retry:
+            self.deps.logger.info("sync_restart_retry_skipped", source_event_id=source_event_id)
+        return should_retry
 
     async def _finalize_pre_delivery_terminal(
         self,
@@ -1381,7 +1348,6 @@ class ResponseRunner:
         response_kind: str,
         history_scope: HistoryScope | None = None,
         execution_identity: ToolExecutionIdentity | None = None,
-        early_placeholder_state: _EarlyPlaceholderState | None = None,
     ) -> str | None:
         """Finalize one empty prompt through the canonical response lifecycle."""
         resolved_history_scope = history_scope or self.deps.state_writer.history_scope()
@@ -1394,8 +1360,6 @@ class ResponseRunner:
             resolved_target=resolved_target,
             history_scope=resolved_history_scope,
             execution_identity=resolved_execution_identity,
-            response_kind=response_kind,
-            early_placeholder_state=early_placeholder_state,
         )
         if prepared_request is None:
             return None
@@ -1431,6 +1395,7 @@ class ResponseRunner:
         )
         return await self._run_locked_response_lifecycle(
             request,
+            response_kind="team",
             locked_operation=lambda resolved_target, early_placeholder_state: self.generate_team_response_helper_locked(
                 team_request,
                 resolved_target=resolved_target,
@@ -1447,11 +1412,11 @@ class ResponseRunner:
         """Finalize an empty prompt through the locked lifecycle before setup side effects."""
         return await self._run_locked_response_lifecycle(
             request,
-            locked_operation=lambda resolved_target, early_placeholder_state: self._finalize_empty_prompt_locked(
+            response_kind=response_kind,
+            locked_operation=lambda resolved_target, _early_placeholder_state: self._finalize_empty_prompt_locked(
                 request,
                 resolved_target=resolved_target,
                 response_kind=response_kind,
-                early_placeholder_state=early_placeholder_state,
             ),
         )
 
@@ -1480,14 +1445,12 @@ class ResponseRunner:
                 response_kind="team",
                 history_scope=session_scope,
                 execution_identity=retry_execution_identity,
-                early_placeholder_state=placeholder_state,
             )
         prepared_request = await self._begin_locked_turn(
             request,
             resolved_target=resolved_target,
             history_scope=session_scope,
             execution_identity=retry_execution_identity,
-            response_kind="team",
             placeholder_message="🤝 Team Response: Thinking...",
             early_placeholder_state=placeholder_state,
         )
@@ -1921,7 +1884,11 @@ class ResponseRunner:
             )
 
         thinking_msg = None
-        if not request.existing_event_id and not placeholder_state.forced_compaction_queued:
+        if not request.existing_event_id and not self._has_queued_forced_compaction(
+            session_id=session_id,
+            scope=session_scope,
+            execution_identity=tool_dispatch.execution_identity,
+        ):
             thinking_msg = "🤝 Team Response: Thinking..."
 
         def build_team_post_response_outcome(_delivery_outcome: FinalDeliveryOutcome) -> ResponseOutcome:
@@ -2619,6 +2586,7 @@ class ResponseRunner:
         """Generate and send/edit an agent response with lifecycle locking."""
         return await self._run_locked_response_lifecycle(
             request,
+            response_kind="ai",
             locked_operation=lambda resolved_target, early_placeholder_state: self.generate_response_locked(
                 request,
                 resolved_target=resolved_target,
@@ -2647,14 +2615,12 @@ class ResponseRunner:
                 response_kind="ai",
                 history_scope=history_scope,
                 execution_identity=execution_identity,
-                early_placeholder_state=placeholder_state,
             )
         prepared_request = await self._begin_locked_turn(
             request,
             resolved_target=resolved_target,
             history_scope=history_scope,
             execution_identity=execution_identity,
-            response_kind="ai",
             placeholder_message="Thinking...",
             early_placeholder_state=placeholder_state,
         )
@@ -2756,7 +2722,11 @@ class ResponseRunner:
             progress.settle(generation.delivery)
 
         thinking_msg = None
-        if not request.existing_event_id and not placeholder_state.forced_compaction_queued:
+        if not request.existing_event_id and not self._has_queued_forced_compaction(
+            session_id=session_id,
+            scope=self.deps.state_writer.history_scope(),
+            execution_identity=execution_identity,
+        ):
             thinking_msg = "Thinking..."
 
         def build_post_response_outcome(final_delivery_outcome: FinalDeliveryOutcome) -> ResponseOutcome:
