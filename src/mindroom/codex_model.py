@@ -19,7 +19,7 @@ from openai import AsyncOpenAI, OpenAI
 from openai.types.responses import ResponseOutputItemDoneEvent
 
 from mindroom.file_locks import advisory_file_lock
-from mindroom.model_defaults import CODEX_GPT
+from mindroom.model_defaults import CODEX_GPT, CODEX_GPT_ENDPOINT
 from mindroom.openai_tool_search import (
     formatted_input_with_tool_search_items,
     model_deferred_tool_names,
@@ -42,6 +42,7 @@ _CODEX_REFRESH_URL = "https://auth.openai.com/oauth/token"
 _CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 _CODEX_REFRESH_SKEW_SECONDS = 30
 _CODEX_MODEL_PREFIX = "openai-codex/"
+_CODEX_MODEL_ALIASES = {CODEX_GPT: CODEX_GPT_ENDPOINT}
 _CODEX_UNSUPPORTED_REQUEST_PARAMS = {"max_output_tokens", "temperature"}
 _CODEX_PROMPT_CACHE_KEY_PREFIX = "mindroom"
 _CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
@@ -56,8 +57,8 @@ def normalize_codex_model_id(model_id: str) -> str:
     """Return the Codex endpoint model slug from either bare or LLM-plugin-style IDs."""
     normalized = model_id.strip()
     if normalized.startswith(_CODEX_MODEL_PREFIX):
-        return normalized.removeprefix(_CODEX_MODEL_PREFIX)
-    return normalized
+        normalized = normalized.removeprefix(_CODEX_MODEL_PREFIX)
+    return _CODEX_MODEL_ALIASES.get(normalized, normalized)
 
 
 def _borrow_codex_key(*, codex_home: str | Path | None = None) -> tuple[str, str | None]:

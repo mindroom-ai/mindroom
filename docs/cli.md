@@ -617,7 +617,7 @@ mindroom config init --force
 Use `--print` to preview the generated `config.yaml` in the terminal with YAML syntax highlighting.
 It does not create or modify `config.yaml`, `.env`, or starter workspace files.
 
-The `--provider codex` preset generates `provider: codex` with `id: gpt-5.5` and `context_window: 258000`.
+The `--provider codex` preset generates `provider: codex` with `id: gpt-5.6` and `context_window: 258000`.
 They set `extra_kwargs.reasoning_effort: medium`.
 Prompt caching is enabled automatically per active agent session; leave `prompt_cache_key` unset unless you intentionally want to override the derived key.
 Run `codex login` first so MindRoom can read `~/.codex/auth.json`.

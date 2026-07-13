@@ -977,7 +977,7 @@ def _wire_tool(name: str) -> dict[str, object]:
         ("anthropic", "claude-opus-4-20250514", False),
         ("anthropic", "claude-3-5-sonnet-20241022", False),
         ("vertexai_claude", "claude-sonnet-4@20250514", False),
-        ("openai", "gpt-5.5", False),
+        ("openai", "gpt-5.6", False),
         ("bedrock_claude", "anthropic.claude-opus-4-8", False),
     ],
 )
@@ -1172,7 +1172,7 @@ def test_server_tool_blocks_replay_to_non_anthropic_provider_without_crashing() 
         provider_data={"server_tool_blocks": [dict(_SERVER_TOOL_USE_BLOCK), dict(_TOOL_SEARCH_RESULT_BLOCK)]},
     )
 
-    formatted = OpenAIChat(id="gpt-5.5", api_key="test-key")._format_message(assistant)
+    formatted = OpenAIChat(id="gpt-5.6", api_key="test-key")._format_message(assistant)
 
     assert formatted["role"] == "assistant"
     assert formatted["content"] == "I'll search for a weather tool."

@@ -13,7 +13,7 @@ def _base_config() -> dict[str, object]:
         "models": {
             "default": {
                 "provider": "openai",
-                "id": "gpt-5.5",
+                "id": "gpt-5.6",
             },
         },
         "router": {"model": "default"},

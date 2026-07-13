@@ -48,7 +48,7 @@ def test_saas_default_config_models_match_central_defaults() -> None:
     assert config["models"] == {
         name: preset.to_config_dict() for name, preset in model_defaults.SAAS_MODEL_PRESETS.items()
     }
-    assert config["memory"]["llm"]["config"]["model"] == model_defaults.OPENAI_GPT_NANO
+    assert config["memory"]["llm"]["config"]["model"] == model_defaults.OPENAI_GPT_LUNA
     assert config["memory"]["embedder"]["config"]["model"] == model_defaults.OPENAI_EMBEDDING_SMALL
     assert config["voice"]["stt"]["model"] == model_defaults.OPENAI_TRANSCRIPTION
 
@@ -79,6 +79,36 @@ def test_sonnet_presets_use_current_generation() -> None:
         model_defaults.SAAS_MODEL_PRESETS["sonnet"].id,
         bedrock_alternatives["sonnet"].id,
     }
+
+
+def test_openai_presets_use_gpt_5_6_family() -> None:
+    """OpenAI and Codex presets should use the current provider-specific GPT-5.6 models."""
+    openai_alternatives = dict(model_defaults.CONFIG_INIT_MODEL_ALTERNATIVES["openai"])
+
+    assert model_defaults.CONFIG_INIT_MODEL_PRESETS["openai"] == model_defaults.ModelPreset(
+        "openai",
+        "gpt-5.6",
+        1_050_000,
+    )
+    assert model_defaults.CONFIG_INIT_MODEL_PRESETS["codex"] == model_defaults.ModelPreset(
+        "codex",
+        "gpt-5.6",
+        258_000,
+    )
+    assert openai_alternatives == {
+        "openai_terra": model_defaults.ModelPreset("openai", "gpt-5.6-terra", 1_050_000),
+        "openai_luna": model_defaults.ModelPreset("openai", "gpt-5.6-luna", 1_050_000),
+    }
+    assert model_defaults.SAAS_MODEL_PRESETS["gpt5terra"] == model_defaults.ModelPreset(
+        "openrouter",
+        "openai/gpt-5.6-terra",
+        1_050_000,
+    )
+    assert model_defaults.SAAS_MODEL_PRESETS["gpt5luna"] == model_defaults.ModelPreset(
+        "openai",
+        "gpt-5.6-luna",
+        1_050_000,
+    )
 
 
 def test_glm_presets_use_current_generation() -> None:

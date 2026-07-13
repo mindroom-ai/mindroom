@@ -12,7 +12,7 @@ When a user sends an image in a Matrix room:
 4. The responder replies with its analysis
 
 Image support works automatically for agents and teams -- no configuration is needed.
-The selected model must support vision (e.g., Claude, GPT-5.4).
+The selected model must support vision (e.g., Claude, GPT-5.6).
 
 ## Supported Formats
 

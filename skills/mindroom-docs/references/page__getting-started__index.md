@@ -219,7 +219,7 @@ agents:
 models:
   default:
     provider: openai
-    id: gpt-5.5
+    id: gpt-5.6
 
 defaults:
   tools: [scheduler]

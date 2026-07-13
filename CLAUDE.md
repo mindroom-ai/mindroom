@@ -22,8 +22,8 @@ Coding model training data often lags recent releases, so never trust memorized 
 | Anthropic | Balanced default | Claude Sonnet 5 | `claude-sonnet-5` |
 | Anthropic | Max intelligence | Claude Opus 4.8 | `claude-opus-4-8` |
 | Anthropic | Fast / cheap | Claude Haiku 4.5 | `claude-haiku-4-5` |
-| OpenAI | Frontier default | GPT-5.5 | `gpt-5.5` |
-| OpenAI Codex subscription | Frontier via Codex CLI | GPT-5.5 | `gpt-5.5` |
+| OpenAI | Frontier default | GPT-5.6 | `gpt-5.6` |
+| OpenAI Codex subscription | Frontier via Codex CLI | GPT-5.6 | `gpt-5.6` |
 | Google (Gemini API) | Max intelligence | Gemini 3.1 Pro Preview | `gemini-3.1-pro-preview` |
 | Google (Gemini API) | Standard text / coding | Gemini 3.5 Flash | `gemini-3.5-flash` |
 | Google (Gemini API) | Fast / cheap text | Gemini 3.1 Flash-Lite Preview | `gemini-3.1-flash-lite-preview` |

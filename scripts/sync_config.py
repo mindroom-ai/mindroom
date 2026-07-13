@@ -58,7 +58,7 @@ def main() -> int:
             config["memory"]["llm"] = {
                 "provider": "openai",
                 "config": {
-                    "model": model_defaults.OPENAI_GPT_NANO,
+                    "model": model_defaults.OPENAI_GPT_LUNA,
                     "temperature": 0.1,
                     "top_p": 1,
                 },
@@ -73,9 +73,9 @@ def main() -> int:
                 },
             }
 
-    # Override router to use gpt5nano model for better structured output support
+    # Override router to use GPT-5.6 Luna for better structured output support.
     if "router" in config:
-        config["router"]["model"] = "gpt5nano"
+        config["router"]["model"] = "gpt5luna"
 
     if "voice" in config and "stt" in config["voice"]:
         config["voice"]["stt"]["model"] = model_defaults.OPENAI_TRANSCRIPTION

@@ -302,7 +302,7 @@ def test_pinned_fingerprint_leaves_healthy_template_of_other_fingerprint_alone(t
 def _forkserver_runtime(tmp_path: Path) -> tuple[RuntimePaths, Config]:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.5\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.6\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_primary_runtime_paths(

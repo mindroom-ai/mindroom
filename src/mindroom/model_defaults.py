@@ -13,6 +13,7 @@ __all__ = (
     "AWS_BEDROCK_CLAUDE_OPUS",
     "AZURE_OPENAI_DEFAULT_DEPLOYMENT",
     "CODEX_GPT",
+    "CODEX_GPT_ENDPOINT",
     "CONFIG_INIT_MODEL_ALTERNATIVES",
     "CONFIG_INIT_MODEL_PRESETS",
     "DEEPSEEK_REASONER",
@@ -38,8 +39,8 @@ __all__ = (
     "OPENAI_EMBEDDING_DIMENSIONS",
     "OPENAI_EMBEDDING_LARGE",
     "OPENAI_EMBEDDING_SMALL",
-    "OPENAI_GPT_MINI",
-    "OPENAI_GPT_NANO",
+    "OPENAI_GPT_LUNA",
+    "OPENAI_GPT_TERRA",
     "OPENAI_IMAGE",
     "OPENAI_REALTIME",
     "OPENAI_REALTIME_TRANSCRIPTION",
@@ -92,14 +93,15 @@ TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES = (
 AWS_BEDROCK_CLAUDE_OPUS = "anthropic.claude-opus-4-8"
 _AWS_BEDROCK_CLAUDE_SONNET = "global.anthropic.claude-sonnet-5"
 _AWS_BEDROCK_CLAUDE_HAIKU = "global.anthropic.claude-haiku-4-5"
-CODEX_GPT = "gpt-5.5"
-_OPENAI_GPT = "gpt-5.5"
+CODEX_GPT = "gpt-5.6"
+CODEX_GPT_ENDPOINT = "gpt-5.6-sol"
+_OPENAI_GPT = "gpt-5.6"
 # OpenAI's Responses-API tool_search tool requires gpt-5.4 or newer; gating
 # parses the gpt-N.M version from the model id so new releases take the
 # native tool-search path without a list update.
 OPENAI_TOOL_SEARCH_MIN_GPT_VERSION = (5, 4)
-OPENAI_GPT_MINI = "gpt-5.4-mini"
-OPENAI_GPT_NANO = "gpt-5.4-nano"
+OPENAI_GPT_TERRA = "gpt-5.6-terra"
+OPENAI_GPT_LUNA = "gpt-5.6-luna"
 AZURE_OPENAI_DEFAULT_DEPLOYMENT = "your-azure-openai-deployment"
 
 GOOGLE_AVATAR_PROMPT = "gemini-3.1-flash-lite-preview"
@@ -114,7 +116,7 @@ _OPENROUTER_CLAUDE_SONNET = "anthropic/claude-sonnet-5"
 _OPENROUTER_CLAUDE_HAIKU = "anthropic/claude-haiku-4.5"
 _OPENROUTER_GEMINI_FLASH = "google/gemini-3.5-flash"
 _OPENROUTER_GEMINI_LITE = "google/gemini-3.1-flash-lite-preview"
-_OPENROUTER_OPENAI_MINI = "openai/gpt-5.4-mini"
+_OPENROUTER_OPENAI_TERRA = "openai/gpt-5.6-terra"
 _OPENROUTER_NEMOTRON = "nvidia/nemotron-3-super-120b-a12b:free"
 _OPENROUTER_DEEPSEEK_CHAT = "deepseek/deepseek-v4-pro"
 _OPENROUTER_GLM = "z-ai/glm-5.2"
@@ -159,7 +161,7 @@ CONFIG_INIT_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
         "codex": ModelPreset("codex", CODEX_GPT, 258_000),
         "llama_cpp": ModelPreset("llama_cpp", LLAMA_CPP_GEMMA, 128_000),
         "ollama": ModelPreset("ollama", OLLAMA_GEMMA, 128_000),
-        "openai": ModelPreset("openai", _OPENAI_GPT, 258_000),
+        "openai": ModelPreset("openai", _OPENAI_GPT, 1_050_000),
         "openrouter": ModelPreset("openrouter", _OPENROUTER_CLAUDE_SONNET, 1_000_000),
         "vertexai_claude": ModelPreset("vertexai_claude", _ANTHROPIC_SONNET, 1_000_000),
     },
@@ -176,11 +178,11 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
             ("haiku", ModelPreset("bedrock_claude", _AWS_BEDROCK_CLAUDE_HAIKU, 200_000)),
         ),
         "openai": (
-            ("openai_mini", ModelPreset("openai", OPENAI_GPT_MINI, 400_000)),
-            ("openai_nano", ModelPreset("openai", OPENAI_GPT_NANO, 400_000)),
+            ("openai_terra", ModelPreset("openai", OPENAI_GPT_TERRA, 1_050_000)),
+            ("openai_luna", ModelPreset("openai", OPENAI_GPT_LUNA, 1_050_000)),
         ),
         "openrouter": (
-            ("gpt5mini", ModelPreset("openrouter", _OPENROUTER_OPENAI_MINI, 400_000)),
+            ("gpt5terra", ModelPreset("openrouter", _OPENROUTER_OPENAI_TERRA, 1_050_000)),
             ("opus", ModelPreset("openrouter", _OPENROUTER_CLAUDE_OPUS, 1_000_000)),
             ("haiku", ModelPreset("openrouter", _OPENROUTER_CLAUDE_HAIKU, 200_000)),
             ("gemini_flash", ModelPreset("openrouter", _OPENROUTER_GEMINI_FLASH, 1_000_000)),
@@ -201,8 +203,8 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
 SAAS_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
     {
         "default": ModelPreset("openrouter", _OPENROUTER_GEMINI_FLASH, 1_000_000),
-        "gpt5mini": ModelPreset("openrouter", _OPENROUTER_OPENAI_MINI, 400_000),
-        "gpt5nano": ModelPreset("openai", OPENAI_GPT_NANO, 400_000),
+        "gpt5terra": ModelPreset("openrouter", _OPENROUTER_OPENAI_TERRA, 1_050_000),
+        "gpt5luna": ModelPreset("openai", OPENAI_GPT_LUNA, 1_050_000),
         "opus": ModelPreset("openrouter", _OPENROUTER_CLAUDE_OPUS, 1_000_000),
         "sonnet": ModelPreset("openrouter", _OPENROUTER_CLAUDE_SONNET, 1_000_000),
         "haiku": ModelPreset("openrouter", _OPENROUTER_CLAUDE_HAIKU, 200_000),

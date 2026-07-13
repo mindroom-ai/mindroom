@@ -45,7 +45,7 @@ def _config(
 ) -> Config:
     return Config.model_validate(
         {
-            "models": {"default": {"provider": "openai", "id": "gpt-5.5"}},
+            "models": {"default": {"provider": "openai", "id": "gpt-5.6"}},
             "agents": {"watcher": {"display_name": "Watcher", "model": "default", "rooms": ["lobby"]}},
             "rooms": {"lobby": {"display_name": "Lobby"}},
             "external_trigger_policy": policy_overrides,

@@ -2389,7 +2389,7 @@ def test_kubernetes_backend_config_reads_reconcile_pod_templates_from_env(tmp_pa
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.5\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.6\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     base_env = (

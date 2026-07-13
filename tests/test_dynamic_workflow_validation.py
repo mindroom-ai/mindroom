@@ -147,7 +147,7 @@ def test_room_agent_participant_requires_agent_name() -> None:
 
 def test_room_agent_participant_cannot_override_model() -> None:
     """room_agent participants cannot override the agent model."""
-    participants = [{"id": "writer", "kind": "room_agent", "agent": "code", "model": "gpt-5.5"}]
+    participants = [{"id": "writer", "kind": "room_agent", "agent": "code", "model": "gpt-5.6"}]
     with pytest.raises(DynamicWorkflowError, match="cannot override model"):
         validate_workflow_spec(_spec(participants=participants))
 

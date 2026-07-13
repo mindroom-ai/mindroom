@@ -55,7 +55,8 @@ models:
   # OpenAI
   gpt:
     provider: openai
-    id: gpt-5.5
+    id: gpt-5.6
+    context_window: 1050000
 
   # Azure OpenAI
   azure:
@@ -65,7 +66,7 @@ models:
   # OpenAI via Codex CLI subscription
   codex:
     provider: codex
-    id: gpt-5.5
+    id: gpt-5.6
 
   # Google Gemini (both 'google' and 'gemini' work as provider names)
   gemini:
@@ -125,7 +126,7 @@ models:
 Use `provider: codex` when you want MindRoom to call models exposed through an authenticated local Codex CLI session instead of the regular OpenAI API.
 Run `codex login` first so `~/.codex/auth.json` contains ChatGPT OAuth tokens.
 MindRoom refreshes the access token when needed and sends requests to the Codex Responses endpoint.
-The model ID may be either the bare Codex slug, such as `gpt-5.5`, or the LLM-plugin-style form `openai-codex/gpt-5.5`.
+Use the MindRoom alias `gpt-5.6` for GPT-5.6 Sol, a direct Codex slug such as `gpt-5.6-terra`, or the LLM-plugin-style form `openai-codex/gpt-5.6`.
 If you keep Codex state outside `~/.codex`, pass `extra_kwargs.codex_home`.
 For starter config generation, use `mindroom config init --provider codex`.
 
@@ -133,7 +134,7 @@ For starter config generation, use `mindroom config init --provider codex`.
 models:
   default:
     provider: codex
-    id: gpt-5.5
+    id: gpt-5.6
     context_window: 258000
     # Prompt caching is enabled automatically per active agent session.
     extra_kwargs:
@@ -142,7 +143,7 @@ models:
 
 Set Codex reasoning effort through `extra_kwargs.reasoning_effort`.
 Agno maps this to the Responses API `reasoning.effort` field.
-Supported effort values are `minimal`, `low`, `medium`, and `high`.
+Supported GPT-5.6 effort values are `low`, `medium`, `high`, `xhigh`, and `max`.
 The starter Codex profile uses `medium`.
 MindRoom sends a Codex prompt-cache key plus the Codex CLI session headers for each active agent session.
 By default, that key is derived from the current execution identity, so separate Matrix threads can run concurrently without sharing one global cache key.

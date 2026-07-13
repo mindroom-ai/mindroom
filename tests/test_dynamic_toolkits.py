@@ -841,7 +841,7 @@ def test_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machi
 def test_codex_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machinery(tmp_path: Path) -> None:
     """OpenAI-native tool search attaches all deferred toolkits and drops the manager machinery."""
     raw = _base_config_data()
-    raw["models"]["codex_gpt"] = {"provider": "codex", "id": "gpt-5.5"}  # type: ignore[index]
+    raw["models"]["codex_gpt"] = {"provider": "codex", "id": "gpt-5.6"}  # type: ignore[index]
     raw["agents"]["code"]["model"] = "codex_gpt"  # type: ignore[index]
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
         {"sleep": {"defer": True}},
@@ -921,7 +921,7 @@ def test_eager_tool_filter_drops_fully_filtered_deferred_toolkit(tmp_path: Path)
         ("openai", "gpt-4o-mini"),
         # The plain openai provider speaks Chat Completions, where tool search
         # is unavailable even on ids the Codex provider would gate native.
-        ("openai", "gpt-5.5"),
+        ("openai", "gpt-5.6"),
         ("codex", "gpt-4.1"),
         ("anthropic", "claude-opus-4-1"),
     ],

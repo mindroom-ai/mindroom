@@ -39,8 +39,8 @@ from mindroom.model_defaults import (
     LOCAL_QWEN_PRESET_NAME,
     OLLAMA_GEMMA,
     OLLAMA_QWEN,
-    OPENAI_GPT_MINI,
-    OPENAI_GPT_NANO,
+    OPENAI_GPT_LUNA,
+    OPENAI_GPT_TERRA,
     llama_cpp_server_command,
 )
 from mindroom.startup_errors import PermanentStartupError
@@ -668,8 +668,8 @@ class TestConfigInit:
         assert "Default model provider" in output
         assert "llama.cpp" in output
         assert "llama_cpp" not in output
-        assert "openai_mini" not in output
-        assert "openai_nano" not in output
+        assert "openai_terra" not in output
+        assert "openai_luna" not in output
         assert "Use with --matrix-server" not in output
         assert "--profile" not in output
         assert "--minimal" not in output
@@ -981,14 +981,14 @@ class TestConfigInit:
         assert config["models"]["default"]["provider"] == "openai"
         assert config["models"]["default"]["id"] == CONFIG_INIT_MODEL_PRESETS["openai"].id
         assert config["models"]["default"]["context_window"] == CONFIG_INIT_MODEL_PRESETS["openai"].context_window
-        assert "openai_mini" not in config["models"]
-        assert "openai_nano" not in config["models"]
+        assert "openai_terra" not in config["models"]
+        assert "openai_luna" not in config["models"]
 
         config_text = target.read_text(encoding="utf-8")
-        assert "# openai_mini:" in config_text
-        assert f"#   id: {OPENAI_GPT_MINI}" in config_text
-        assert "# openai_nano:" in config_text
-        assert f"#   id: {OPENAI_GPT_NANO}" in config_text
+        assert "# openai_terra:" in config_text
+        assert f"#   id: {OPENAI_GPT_TERRA}" in config_text
+        assert "# openai_luna:" in config_text
+        assert f"#   id: {OPENAI_GPT_LUNA}" in config_text
         assert config["matrix_room_access"] == {"mode": "single_user_private"}
 
     def test_init_anthropic_preset_uses_anthropic_models(self, tmp_path: Path) -> None:
@@ -1160,7 +1160,7 @@ def _old_config_init_mind_memory_config(knowledge_path: str) -> str:
 models:
   default:
     provider: openai
-    id: gpt-5.5
+    id: gpt-5.6
 
 agents:
   assistant:
@@ -1251,7 +1251,7 @@ def _migrated_config_init_mind_memory_config() -> str:
 models:
   default:
     provider: openai
-    id: gpt-5.5
+    id: gpt-5.6
 
 agents:
   assistant:

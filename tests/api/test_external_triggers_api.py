@@ -97,7 +97,7 @@ def _config_payload(
     if owner_authorized:
         authorization["global_users"] = [_OWNER]
     payload: dict[str, object] = {
-        "models": {"default": {"provider": "openai", "id": "gpt-5.5"}},
+        "models": {"default": {"provider": "openai", "id": "gpt-5.6"}},
         "router": {"model": "default"},
         "agents": {
             "research": {

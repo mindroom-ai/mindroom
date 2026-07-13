@@ -138,7 +138,7 @@ agents:
     - For email drafts, maintain appropriate tone and formality based on context
     learning: true
     learning_mode: always
-    model: gpt5mini
+    model: gpt5terra
     role: Manage and respond to emails efficiently using Gmail with Claude Sonnet's
       intelligence
     rooms:
@@ -304,7 +304,7 @@ agents:
     - Summarize findings in a clear, organized manner.
     learning: true
     learning_mode: always
-    model: gpt5mini
+    model: gpt5terra
     role: Conduct research using web sources, Wikipedia, and academic papers.
     rooms:
     - lobby
@@ -475,11 +475,11 @@ models:
     id: claude-sonnet-5
     provider: anthropic
   # --- OpenAI ---
-  gpt55:
-    id: gpt-5.5
+  gpt56:
+    id: gpt-5.6
     provider: openai
-  gpt5mini:
-    id: gpt-5.4-mini
+  gpt5terra:
+    id: gpt-5.6-terra
     provider: openai
   # --- Google ---
   gemini_flash:

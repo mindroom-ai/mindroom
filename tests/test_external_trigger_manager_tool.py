@@ -39,7 +39,7 @@ def _config(
 ) -> Config:
     config = Config.model_validate(
         {
-            "models": {"default": {"provider": "openai", "id": "gpt-5.5"}},
+            "models": {"default": {"provider": "openai", "id": "gpt-5.6"}},
             "agents": {
                 "watcher": {
                     "display_name": "Watcher",
