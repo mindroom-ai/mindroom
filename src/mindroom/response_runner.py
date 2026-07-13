@@ -899,6 +899,8 @@ class ResponseRunner:
     async def _refresh_model_history_after_lock(
         self,
         request: ResponseRequest,
+        *,
+        exclude_event_id: str | None = None,
     ) -> ResponseRequest:
         """Refresh model-facing thread history once this turn owns the lifecycle lock."""
         if request.thread_id is None:
@@ -920,6 +922,10 @@ class ResponseRunner:
                 error=str(exc),
             )
             return request
+        if exclude_event_id is not None:
+            filtered_history = [message for message in refreshed_history if message.event_id != exclude_event_id]
+            if len(filtered_history) != len(refreshed_history):
+                refreshed_history = replace(refreshed_history, messages=filtered_history)
         return replace(
             request,
             thread_history=refreshed_history,
@@ -929,12 +935,17 @@ class ResponseRunner:
     async def _prepare_request_after_lock(
         self,
         request: ResponseRequest,
+        *,
+        exclude_history_event_id: str | None = None,
     ) -> ResponseRequest:
         """Refresh thread history and rebuild any history-derived payload once locked."""
         try:
             if request.pipeline_timing is not None:
                 request.pipeline_timing.mark("thread_refresh_start")
-            request = await self._refresh_model_history_after_lock(request)
+            request = await self._refresh_model_history_after_lock(
+                request,
+                exclude_event_id=exclude_history_event_id,
+            )
             if request.pipeline_timing is not None:
                 request.pipeline_timing.mark("thread_refresh_ready")
             if request.payload_preparation is None:
@@ -1065,7 +1076,10 @@ class ResponseRunner:
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark("placeholder_sent")
                     request.pipeline_timing.mark_first_visible_reply("placeholder")
-        request = await self._prepare_request_after_lock(request)
+        request = await self._prepare_request_after_lock(
+            request,
+            exclude_history_event_id=placeholder_event_id,
+        )
         return self._request_with_locked_target(request, resolved_target)
 
     def _sync_restart_retry_is_current(

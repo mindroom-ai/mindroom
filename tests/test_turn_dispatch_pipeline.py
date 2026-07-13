@@ -461,7 +461,12 @@ class TestAgentBot(AgentBotTestBase):
             assert list(context.thread_history) == full_history
             return DispatchPayload(prompt="hello", attachment_ids=["att_older"])
 
-        async def refresh_thread_history(request: ResponseRequest) -> ResponseRequest:
+        async def refresh_thread_history(
+            request: ResponseRequest,
+            *,
+            exclude_event_id: str | None = None,
+        ) -> ResponseRequest:
+            del exclude_event_id
             return replace(
                 request,
                 thread_history=ThreadHistoryResult(full_history, is_full_history=True),

@@ -264,6 +264,67 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
 
 
 @pytest.mark.asyncio
+async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_history(tmp_path: Path) -> None:
+    """The early placeholder must not re-enter payload, memory, or summary inputs through refresh."""
+    bot = _bot(tmp_path)
+    target = _target(thread_id="$thread", reply_to_event_id="$event")
+    envelope = _envelope(target, source_event_id="$event")
+    refreshed_history = ThreadHistoryResult(
+        [
+            make_visible_message(sender="@user:localhost", body="history", event_id="$history"),
+            make_visible_message(
+                sender="@agent:localhost",
+                body="Thinking...",
+                event_id="$placeholder",
+                content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
+            ),
+        ],
+        is_full_history=True,
+        diagnostics={"cache_status": "fresh"},
+    )
+    resolver = MagicMock(spec=ConversationResolver)
+    resolver.fetch_thread_history = AsyncMock(return_value=refreshed_history)
+    request_preparer = MagicMock(spec=ResponsePayloadPreparer)
+    request_preparer.prepare = AsyncMock(side_effect=lambda request: replace(request, payload_preparation=None))
+    delivery_gateway = MagicMock(spec=DeliveryGateway)
+    delivery_gateway.send_text = AsyncMock(return_value="$placeholder")
+    runner = ResponseRunner(
+        replace(
+            unwrap_extracted_collaborator(bot._response_runner).deps,
+            resolver=resolver,
+            request_preparer=request_preparer,
+            delivery_gateway=delivery_gateway,
+        ),
+    )
+    request = ResponseRequest(
+        thread_history=[],
+        prompt="hello",
+        user_id="@user:localhost",
+        response_envelope=envelope,
+        payload_preparation=_preparation(target, envelope),
+    )
+
+    prepared_request = await runner._begin_locked_turn(
+        request,
+        resolved_target=target,
+        history_scope=runner.deps.state_writer.history_scope(),
+        execution_identity=runner.deps.tool_runtime.build_execution_identity(
+            target=target,
+            user_id=request.user_id,
+        ),
+        placeholder_message="Thinking...",
+    )
+
+    assert prepared_request is not None
+    assert isinstance(prepared_request.thread_history, ThreadHistoryResult)
+    assert [message.event_id for message in prepared_request.thread_history] == ["$history"]
+    assert prepared_request.thread_history.is_full_history is True
+    assert prepared_request.thread_history.diagnostics == {"cache_status": "fresh"}
+    assert prepared_request.existing_event_id == "$placeholder"
+    assert prepared_request.existing_event_is_placeholder is True
+
+
+@pytest.mark.asyncio
 async def test_setup_cancellation_preserves_cancel_when_placeholder_cleanup_fails(tmp_path: Path) -> None:
     """Placeholder cleanup failure must not replace the original setup cancellation."""
     bot = _bot(tmp_path)
