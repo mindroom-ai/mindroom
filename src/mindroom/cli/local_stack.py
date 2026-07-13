@@ -67,7 +67,7 @@ def local_stack_setup(
     cinny_container_name: str = typer.Option(
         _CINNY_DEFAULT_CONTAINER,
         "--cinny-container-name",
-        help="Container name for MindRoom Chat.",
+        help="Container name for MindRoom Chat (legacy default retained for compatibility).",
     ),
     skip_synapse: bool = typer.Option(
         False,

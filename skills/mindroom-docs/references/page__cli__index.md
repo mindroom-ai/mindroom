@@ -761,7 +761,10 @@ By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, a
 │                                                                    [default:           │
 │                                                                    ghcr.io/mindroom-a… │
 │ --cinny-container-n…                          TEXT                 Container name for  │
-│                                                                    MindRoom Chat.      │
+│                                                                    MindRoom Chat       │
+│                                                                    (legacy default     │
+│                                                                    retained for        │
+│                                                                    compatibility).     │
 │                                                                    [default:           │
 │                                                                    mindroom-cinny-loc… │
 │ --skip-synapse                                                     Skip starting       │
