@@ -13,7 +13,7 @@ from openai import AuthenticationError
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.embedder_health import record_embedder_health
+from mindroom.embedder_health import get_embedder_failure, record_embedder_health
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory import add_agent_memory as public_add_agent_memory
 from mindroom.memory import build_memory_prompt_parts as public_build_memory_prompt_parts
@@ -307,26 +307,32 @@ class TestMemoryFacade:
         response = httpx.Response(401, request=request, json={"error": {"message": "bad key"}})
         mock_memory.search.side_effect = AuthenticationError("Error code: 401", response=response, body=None)
 
-        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
-            outcome = await public_search_agent_memories(
-                "query",
-                "agent",
-                storage_path,
-                config,
-                runtime_paths_for(config),
-            )
+        try:
+            with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
+                outcome = await public_search_agent_memories(
+                    "query",
+                    "agent",
+                    storage_path,
+                    config,
+                    runtime_paths_for(config),
+                )
 
-        assert outcome.results == []
-        assert outcome.degraded_reason == "embedder authentication failed (HTTP 401)"
+            assert outcome.results == []
+            assert outcome.degraded_reason == "embedder authentication failed (HTTP 401)"
+            # Mem0 traffic never passes through MindRoom's embedder, so the
+            # backend itself must keep /api/health in sync.
+            assert get_embedder_failure() == "embedder authentication failed (HTTP 401)"
+        finally:
+            record_embedder_health(None)
 
     @pytest.mark.asyncio
-    async def test_mem0_search_consults_health_when_failure_is_swallowed(
+    async def test_mem0_search_success_clears_recorded_failure(
         self,
         mock_memory: AsyncMock,
         storage_path: Path,
         config: Config,
     ) -> None:
-        """Mem0 swallowing an embedder failure into an empty result still surfaces degradation."""
+        """A completed mem0 search (even empty) proves recovery and clears stale health."""
         mock_memory.search.return_value = {"results": []}
         record_embedder_health("embedder authentication failed (HTTP 401)")
         try:
@@ -338,11 +344,12 @@ class TestMemoryFacade:
                     config,
                     runtime_paths_for(config),
                 )
+
+            assert outcome.results == []
+            assert outcome.degraded_reason is None
+            assert get_embedder_failure() is None
         finally:
             record_embedder_health(None)
-
-        assert outcome.results == []
-        assert outcome.degraded_reason == "embedder authentication failed (HTTP 401)"
 
     @pytest.mark.asyncio
     async def test_mem0_search_non_provider_error_raises(

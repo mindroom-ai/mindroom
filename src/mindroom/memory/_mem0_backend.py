@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, cast
 
-from mindroom.embedder_health import describe_embedder_error, get_embedder_failure, is_embedder_provider_error
+from mindroom.embedder_health import describe_embedder_error, is_embedder_provider_error, record_embedder_health
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 
@@ -331,9 +331,12 @@ class Mem0MemoryBackend:
     ) -> MemorySearchOutcome:
         """Search mem0 memories visible to an agent.
 
-        Propagated embedding-provider errors classify into a degraded outcome
-        instead of raising; when Mem0 swallows one internally and returns
-        nothing, the current recorded embedder health fills the gap.
+        Mem0 builds its own internal embedder, so passive health recording in
+        MindRoom's embedder never sees this traffic: the backend records the
+        outcome itself. Mem0's search embeds the query without swallowing
+        (verified against mem0ai 2.0.1), so a completed search proves the
+        embedder round-tripped and a propagated provider error classifies
+        into a degraded outcome instead of raising.
         """
         resolved_storage_path = _primary_mem0_storage_path(
             agent_name,
@@ -362,12 +365,12 @@ class Mem0MemoryBackend:
             if not is_embedder_provider_error(exc):
                 raise
             degraded_reason = describe_embedder_error(exc)
+            record_embedder_health(degraded_reason)
             logger.warning("Mem0 memory search degraded by embedder failure", agent=agent_name, error=degraded_reason)
             return MemorySearchOutcome(results=[], degraded_reason=degraded_reason)
 
         logger.debug("Total memories found", count=len(results), agent=agent_name)
-        if not results and (recorded_failure := get_embedder_failure()) is not None:
-            return MemorySearchOutcome(results=[], degraded_reason=recorded_failure)
+        record_embedder_health(None)
         return MemorySearchOutcome(results=results[:limit])
 
     async def list_all(
