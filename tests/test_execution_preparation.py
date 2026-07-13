@@ -230,7 +230,7 @@ def test_scheduled_limit_zero_disables_replay_plan() -> None:
 
 
 def test_scheduled_limit_caps_larger_plans_only() -> None:
-    """A positive limit converts the plan to a message cap unless it is already tighter."""
+    """A positive limit adds a message cap unless one is already tighter."""
     runs_plan = PreparedHistoryState(
         replay_plan=ResolvedReplayPlan(
             mode="configured",
@@ -244,7 +244,7 @@ def test_scheduled_limit_caps_larger_plans_only() -> None:
     assert capped.replays_persisted_history is True
     assert capped.replay_plan is not None
     assert capped.replay_plan.mode == "limited"
-    assert capped.replay_plan.num_history_runs is None
+    assert capped.replay_plan.num_history_runs == 3
     assert capped.replay_plan.num_history_messages == 2
 
     tighter_plan = PreparedHistoryState(
@@ -268,9 +268,28 @@ def test_scheduled_limit_caps_larger_plans_only() -> None:
     assert _prepared_history_with_scheduled_limit(no_plan, 2) is no_plan
 
 
+def test_scheduled_limit_does_not_widen_a_run_limited_plan() -> None:
+    """A message cap must compose with, rather than replace, an existing run cap."""
+    runs_plan = PreparedHistoryState(
+        replay_plan=ResolvedReplayPlan(
+            mode="limited",
+            estimated_tokens=100,
+            add_history_to_context=True,
+            num_history_runs=1,
+        ),
+        replays_persisted_history=True,
+    )
+
+    capped = _prepared_history_with_scheduled_limit(runs_plan, 5)
+
+    assert capped.replay_plan is not None
+    assert capped.replay_plan.num_history_runs == 1
+    assert capped.replay_plan.num_history_messages == 5
+
+
 @pytest.mark.asyncio
 async def test_scheduled_history_limit_caps_persisted_replay_plan() -> None:
-    """A scheduled turn's context limit converts the persisted-replay plan to a message cap."""
+    """A scheduled turn adds its message cap to the persisted-replay plan."""
 
     async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
         return _prepared_scope_with_persisted_replay()
@@ -294,7 +313,7 @@ async def test_scheduled_history_limit_caps_persisted_replay_plan() -> None:
     replay_plan = prepared.prepared_history.replay_plan
     assert replay_plan is not None
     assert replay_plan.mode == "limited"
-    assert replay_plan.num_history_runs is None
+    assert replay_plan.num_history_runs == 1
     assert replay_plan.num_history_messages == 1
     assert prepared.prepared_history.replays_persisted_history is True
 

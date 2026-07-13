@@ -626,7 +626,7 @@ def _prepared_history_with_scheduled_limit(
     prepared_history: PreparedHistoryState,
     scheduled_history_limit: int,
 ) -> PreparedHistoryState:
-    """Cap one scheduled turn's persisted-replay plan to its history limit."""
+    """Intersect one scheduled turn's persisted-replay plan with its history limit."""
     if scheduled_history_limit <= 0:
         return replace(
             prepared_history,
@@ -643,7 +643,6 @@ def _prepared_history_with_scheduled_limit(
         replay_plan=replace(
             plan,
             mode="limited",
-            num_history_runs=None,
             num_history_messages=scheduled_history_limit,
         ),
     )
