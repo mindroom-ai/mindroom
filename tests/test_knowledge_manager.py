@@ -710,8 +710,7 @@ def test_failed_notice_appends_last_error_cause() -> None:
 
     assert notice is not None
     assert notice.endswith(
-        "Last error: Indexed 0 of 3 managed knowledge files "
-        "(first error: embedder authentication failed (HTTP 401))",
+        "Last error: Indexed 0 of 3 managed knowledge files (first error: embedder authentication failed (HTTP 401))",
     )
 
 

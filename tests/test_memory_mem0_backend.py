@@ -20,12 +20,6 @@ from mindroom.memory import (
     store_conversation_memory,
     update_agent_memory,
 )
-
-
-async def _search_memory_results(*args: object, **kwargs: object) -> list:
-    outcome = await search_agent_memories(*args, **kwargs)
-    assert outcome.degraded_reason is None
-    return outcome.results
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     _private_instance_state_root_path,
@@ -38,6 +32,12 @@ from tests.memory_test_support import FakeMem0ScopedMemory, MockTeamConfig
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+async def _search_memory_results(*args: object, **kwargs: object) -> list:
+    outcome = await search_agent_memories(*args, **kwargs)
+    assert outcome.degraded_reason is None
+    return outcome.results
 
 
 @pytest.fixture
