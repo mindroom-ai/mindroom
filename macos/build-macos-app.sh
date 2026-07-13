@@ -163,7 +163,11 @@ require_architectures() {
         exit 1
     fi
     local architectures
-    architectures=" $(lipo -archs "$binary") "
+    if ! architectures=$(lipo -archs "$binary"); then
+        echo "Could not inspect architectures for required universal binary: $binary" >&2
+        exit 1
+    fi
+    architectures=" $architectures "
     for architecture in "$@"; do
         if [[ "$architectures" != *" $architecture "* ]]; then
             echo "$binary is missing the required $architecture architecture." >&2
