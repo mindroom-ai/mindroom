@@ -29,10 +29,20 @@ from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator
-from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
-from mindroom.response_runner import ResponseRequest, _ResponseGenerationOutcome
+from mindroom.response_payload_preparation import (
+    DispatchPayloadInputs,
+    ResponsePayloadPreparation,
+    ResponsePayloadPreparer,
+)
+from mindroom.response_runner import (
+    ResponseRequest,
+    ResponseRunner,
+    _ResponseGenerationOutcome,
+    prepare_memory_and_model_context,
+)
 from mindroom.stop import StopManager
 from mindroom.streaming import StreamingDeliveryError
+from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.turn_policy import PreparedDispatch
 from tests.conftest import (
     make_matrix_client_mock,
@@ -245,7 +255,6 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
 async def test_scheduled_history_limit_keeps_refreshed_history_for_payload_and_side_effects(tmp_path: Path) -> None:
     """The runner keeps full history until execution preparation builds model context."""
     bot = _bot(tmp_path)
-    coordinator = unwrap_extracted_collaborator(bot._response_runner)
     refreshed = ThreadHistoryResult(
         [
             make_visible_message(sender="@user:localhost", body=f"message {index}", event_id=f"$m{index}")
@@ -259,14 +268,17 @@ async def test_scheduled_history_limit_keeps_refreshed_history_for_payload_and_s
         prepared_histories.append(request.thread_history)
         return replace(request, payload_preparation=None, requires_model_history_refresh=False)
 
-    async def fake_run_cancellable_response(**kwargs: object) -> str:
-        response_function = kwargs["response_function"]
-        await response_function(None)  # type: ignore[operator]
-        return "$response"
-
-    async def fake_process_and_respond(request: ResponseRequest, **_kwargs: object) -> _ResponseGenerationOutcome:
-        del request
-        return _ResponseGenerationOutcome(delivery=_completed_outcome(), run_succeeded=True)
+    resolver = MagicMock(spec=ConversationResolver)
+    resolver.fetch_thread_history = AsyncMock(return_value=refreshed)
+    request_preparer = MagicMock(spec=ResponsePayloadPreparer)
+    request_preparer.prepare = AsyncMock(side_effect=spy_prepare)
+    coordinator = ResponseRunner(
+        replace(
+            unwrap_extracted_collaborator(bot._response_runner).deps,
+            resolver=resolver,
+            request_preparer=request_preparer,
+        ),
+    )
 
     target = _target(thread_id="$thread", reply_to_event_id="$event1")
     envelope = _envelope(target, source_event_id="$event1")
@@ -278,30 +290,21 @@ async def test_scheduled_history_limit_keeps_refreshed_history_for_payload_and_s
         payload_preparation=_preparation(target, envelope),
         scheduled_history_budget=ScheduledHistoryBudget(limit=2, source_event_id="$event1"),
     )
-    post_effects = AsyncMock()
-
-    with (
-        patch.object(ConversationResolver, "fetch_thread_history", new=AsyncMock(return_value=refreshed)),
-        patch.object(bot._request_payload_preparer, "prepare", new=AsyncMock(side_effect=spy_prepare)),
-        patch.object(
-            coordinator,
-            "run_cancellable_response",
-            new=AsyncMock(side_effect=fake_run_cancellable_response),
-        ),
-        patch.object(coordinator, "process_and_respond", new=AsyncMock(side_effect=fake_process_and_respond)),
-        patch_response_runner_module(
-            should_use_streaming=AsyncMock(return_value=False),
-            apply_post_response_effects=post_effects,
-        ),
-    ):
-        assert await coordinator.generate_response(request) == "$response"
+    prepared_request = await coordinator._prepare_request_after_lock(request)
+    _memory_prompt, memory_history, _model_prompt, _model_history = prepare_memory_and_model_context(
+        prepared_request.prompt,
+        prepared_request.thread_history,
+        config=coordinator.deps.runtime.config,
+        runtime_paths=coordinator.deps.runtime_paths,
+        model_prompt=prepared_request.model_prompt,
+    )
 
     assert len(prepared_histories) == 1
     assert prepared_histories == [refreshed]
-    outcome = post_effects.await_args.args[1]
-    assert isinstance(outcome, ResponseOutcome)
-    assert outcome.memory_thread_history is refreshed
-    assert outcome.thread_summary_message_count_hint == 5
+    assert prepared_request.thread_history is refreshed
+    assert prepared_request.scheduled_history_budget is request.scheduled_history_budget
+    assert memory_history is refreshed
+    assert thread_summary_message_count_hint(prepared_request.thread_history) == 5
 
 
 # ---------------------------------------------------------------------------

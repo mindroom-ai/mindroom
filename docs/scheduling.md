@@ -77,7 +77,7 @@ The scheduler validates that mentioned agents and teams are available in the roo
 
 Scheduled tasks normally use the responder's configured conversation history policy.
 Add a context phrase when you want each run to see less of the current room or thread.
-Use `with no history`, `without context`, or `context-free` when the scheduled responder should see only the fired task message.
+Use `with no history`, `without context`, or `context-free` when the scheduled responder should see no prior room or thread messages; the system prompt and fired task message remain available.
 Use phrases such as `with only the last 5 messages of context` or `include the last 5 messages` to cap each scheduled run to recent context.
 
 ```
