@@ -88,6 +88,19 @@ Callers must check `truncated` before claiming the unresolved list is complete.
 `thread_tags` intentionally replaces the removed experimental `thread_resolution` tool and does not auto-read old `com.mindroom.thread.resolution` markers.
 `matrix_api` defaults `room_id` to the active room, supports authorized cross-room targeting, never infers event IDs or state keys from thread context, and now also supports room-scoped full-text search through `action="search"`.
 
+## MindRoom Update Awareness
+
+Enable the `update_awareness` tool to add the installed MindRoom version and the latest published PyPI release to the agent's system prompt.
+The tool checks PyPI at most once every 24 hours and stores the result under `mindroom_data/cache/update_awareness.json`.
+Every prompt assembled during that cache window receives identical version text, so ordinary turns do not invalidate the prompt cache.
+When a newer release is available, the agent is instructed to notify the user briefly at a natural opportunity without repeating the notice in the same conversation.
+
+```yaml
+defaults:
+  tools:
+    - update_awareness
+```
+
 ## Worker-Routed Execution
 
 Some tools default to running in a sandboxed worker container instead of the primary agent process.

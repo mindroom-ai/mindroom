@@ -23,5 +23,6 @@
 | **Agent Orchestration** | subagents, delegate, dynamic_workflow, claude_agent, config_manager, openclaw_compat | [→ agent-orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) |
 | **Automation & Platforms** | aws_lambda, aws_ses, airflow, e2b, daytona, composio, custom_api | [→ automation-and-platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) |
 | **Location, Commerce & Home** | google_maps, openweather, shopify, homeassistant | [→ location-commerce-and-home](https://docs.mindroom.chat/tools/location-commerce-and-home/) |
+| **Runtime Awareness** | update_awareness | [→ tools overview](https://docs.mindroom.chat/tools/#mindroom-update-awareness) |
 
 For tool configuration, presets, and runtime context, see the [Tools Overview](https://docs.mindroom.chat/tools/).

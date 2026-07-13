@@ -44,6 +44,7 @@ dependencies = [
   "mem0ai>=0.1.115",
   "mindroom-nio[e2e]>=0.27.1",
   "openai",
+  "packaging>=24",
   "pydantic>=2",
   "pydantic-settings>=2.10.1",
   "pygments>=2.20",
@@ -388,6 +389,7 @@ twilio = [
   "twilio",
 ]
 unsplash = []
+update_awareness = []
 visualization = [
   "matplotlib",
 ]

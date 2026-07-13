@@ -3014,6 +3014,19 @@ Callers must check `truncated` before claiming the unresolved list is complete.
 `thread_tags` intentionally replaces the removed experimental `thread_resolution` tool and does not auto-read old `com.mindroom.thread.resolution` markers.
 `matrix_api` defaults `room_id` to the active room, supports authorized cross-room targeting, never infers event IDs or state keys from thread context, and now also supports room-scoped full-text search through `action="search"`.
 
+## MindRoom Update Awareness
+
+Enable the `update_awareness` tool to add the installed MindRoom version and the latest published PyPI release to the agent's system prompt.
+The tool checks PyPI at most once every 24 hours and stores the result under `mindroom_data/cache/update_awareness.json`.
+Every prompt assembled during that cache window receives identical version text, so ordinary turns do not invalidate the prompt cache.
+When a newer release is available, the agent is instructed to notify the user briefly at a natural opportunity without repeating the notice in the same conversation.
+
+```yaml
+defaults:
+  tools:
+    - update_awareness
+```
+
 ## Worker-Routed Execution
 
 Some tools default to running in a sandboxed worker container instead of the primary agent process.
@@ -9721,6 +9734,7 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 | **Agent Orchestration** | subagents, delegate, dynamic_workflow, claude_agent, config_manager, openclaw_compat | [→ agent-orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) |
 | **Automation & Platforms** | aws_lambda, aws_ses, airflow, e2b, daytona, composio, custom_api | [→ automation-and-platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) |
 | **Location, Commerce & Home** | google_maps, openweather, shopify, homeassistant | [→ location-commerce-and-home](https://docs.mindroom.chat/tools/location-commerce-and-home/) |
+| **Runtime Awareness** | update_awareness | [→ tools overview](https://docs.mindroom.chat/tools/#mindroom-update-awareness) |
 
 For tool configuration, presets, and runtime context, see the [Tools Overview](https://docs.mindroom.chat/tools/).
 

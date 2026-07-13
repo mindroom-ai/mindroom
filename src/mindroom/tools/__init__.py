@@ -133,6 +133,7 @@ from mindroom.tools.trafilatura import trafilatura_tools
 from mindroom.tools.trello import trello_tools
 from mindroom.tools.twilio import twilio_tools
 from mindroom.tools.unsplash import unsplash_tools
+from mindroom.tools.update_awareness import update_awareness_tools
 from mindroom.tools.visualization import visualization_tools
 from mindroom.tools.web_browser_tools import web_browser_tools
 from mindroom.tools.webex import webex_tools
@@ -259,6 +260,7 @@ __all__ = [
     "trello_tools",
     "twilio_tools",
     "unsplash_tools",
+    "update_awareness_tools",
     "visualization_tools",
     "web_browser_tools",
     "webex_tools",

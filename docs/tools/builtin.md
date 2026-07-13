@@ -27,5 +27,6 @@ icon: lucide/box
 | **Agent Orchestration** | subagents, delegate, dynamic_workflow, claude_agent, config_manager, openclaw_compat | [→ agent-orchestration](agent-orchestration.md) |
 | **Automation & Platforms** | aws_lambda, aws_ses, airflow, e2b, daytona, composio, custom_api | [→ automation-and-platforms](automation-and-platforms.md) |
 | **Location, Commerce & Home** | google_maps, openweather, shopify, homeassistant | [→ location-commerce-and-home](location-commerce-and-home.md) |
+| **Runtime Awareness** | update_awareness | [→ tools overview](index.md#mindroom-update-awareness) |
 
 For tool configuration, presets, and runtime context, see the [Tools Overview](index.md).

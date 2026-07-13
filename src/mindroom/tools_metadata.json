@@ -6858,6 +6858,30 @@
     {
       "agent_override_fields": null,
       "auth_provider": null,
+      "category": "information",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Add daily-cached installed and latest MindRoom release information to the agent system prompt",
+      "display_name": "MindRoom Update Awareness",
+      "docs_url": "https://docs.mindroom.chat/tools/#mindroom-update-awareness",
+      "function_names": [
+        "get_mindroom_update_status"
+      ],
+      "helper_text": null,
+      "icon": "RefreshCw",
+      "icon_color": "text-cyan-500",
+      "name": "update_awareness",
+      "requires_room_context": false,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
       "category": "integrations",
       "config_fields": [
         {
