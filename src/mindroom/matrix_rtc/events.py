@@ -12,8 +12,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from mindroom.matrix import event_types as matrix_event_types
+
 CALL_MEMBER_EVENT_TYPE = "org.matrix.msc3401.call.member"
-CALL_ENCRYPTION_KEYS_EVENT_TYPE = "io.element.call.encryption_keys"
+CALL_ENCRYPTION_KEYS_EVENT_TYPE = matrix_event_types.CALL_ENCRYPTION_KEYS_EVENT_TYPE
 RTC_NOTIFICATION_EVENT_TYPE = "org.matrix.msc4075.rtc.notification"
 
 _CALL_APPLICATION = "m.call"
