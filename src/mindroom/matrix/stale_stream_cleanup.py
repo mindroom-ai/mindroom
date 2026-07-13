@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import nio
 from nio.api import RelationshipType
@@ -52,7 +52,6 @@ from mindroom.matrix.thread_projection import (
 from mindroom.pending_resume_store import (
     discard_pending_resume_records,
     load_pending_resume_records,
-    pending_resume_key,
     pending_resume_ledger_path,
 )
 from mindroom.streaming import (
@@ -94,6 +93,7 @@ _AUTO_RESUME_MESSAGE = (
 _TERMINAL_STREAM_STATUSES = frozenset(
     {STREAM_STATUS_CANCELLED, STREAM_STATUS_COMPLETED, STREAM_STATUS_ERROR, STREAM_STATUS_INTERRUPTED},
 )
+type _AutoResumeDecision = Literal["send", "settled", "retry"]
 
 
 @dataclass(frozen=True)
@@ -107,36 +107,6 @@ class InterruptedThread:
     agent_name: str
     original_sender_id: str | None = None
     timestamp_ms: int = field(default=0, compare=False)
-
-
-@dataclass(frozen=True)
-class _AutoResumeResult:
-    """Resume delivery count plus durable intents that reached a settled outcome."""
-
-    resumed_count: int
-    settled_keys: frozenset[str]
-
-
-@dataclass(frozen=True)
-class _AutoResumeFreshness:
-    """Whether one candidate is authoritatively still the latest human work."""
-
-    is_latest: bool
-    is_authoritative: bool
-
-
-def _should_skip_auto_resume_candidate(
-    freshness: _AutoResumeFreshness,
-    *,
-    candidate_key: str,
-    settled_keys: set[str],
-) -> bool:
-    """Record authoritative suppression and report whether delivery should be skipped."""
-    if freshness.is_latest:
-        return False
-    if freshness.is_authoritative:
-        settled_keys.add(candidate_key)
-    return True
 
 
 @dataclass
@@ -256,34 +226,22 @@ async def auto_resume_interrupted_threads(
     conversation_cache: ConversationCacheProtocol | None = None,
     max_resumes: int | None = None,
     delay: float = 2.0,
-) -> _AutoResumeResult:
+) -> int:
     """Send resume prompts for interrupted threaded conversations."""
     if not interrupted or (max_resumes is not None and max_resumes <= 0):
-        return _AutoResumeResult(resumed_count=0, settled_keys=frozenset())
+        return 0
 
     candidate_threads = _ordered_auto_resume_candidates(interrupted, max_resumes=max_resumes)
     resumed_count = 0
-    settled_keys: set[str] = set()
     delay_due = False
     for interrupted_thread in candidate_threads:
         if max_resumes is not None and resumed_count >= max_resumes:
             break
-        assert interrupted_thread.thread_id is not None
-        candidate_key = pending_resume_key(
-            agent_name=interrupted_thread.agent_name,
-            room_id=interrupted_thread.room_id,
-            thread_id=interrupted_thread.thread_id,
-        )
-        freshness = await _interrupted_target_freshness(
+        if not await _interrupted_target_remains_latest_human_work(
             interrupted_thread,
             config=config,
             runtime_paths=runtime_paths,
             conversation_cache=conversation_cache,
-        )
-        if _should_skip_auto_resume_candidate(
-            freshness,
-            candidate_key=candidate_key,
-            settled_keys=settled_keys,
         ):
             continue
         try:
@@ -295,16 +253,11 @@ async def auto_resume_interrupted_threads(
             if delay_due:
                 await asyncio.sleep(delay)
                 delay_due = False
-                freshness = await _interrupted_target_freshness(
+                if not await _interrupted_target_remains_latest_human_work(
                     interrupted_thread,
                     config=config,
                     runtime_paths=runtime_paths,
                     conversation_cache=conversation_cache,
-                )
-                if _should_skip_auto_resume_candidate(
-                    freshness,
-                    candidate_key=candidate_key,
-                    settled_keys=settled_keys,
                 ):
                     continue
             delay_due = True
@@ -324,7 +277,6 @@ async def auto_resume_interrupted_threads(
                     event_id=delivered.event_id,
                 )
                 resumed_count += 1
-                settled_keys.add(candidate_key)
             else:
                 logger.warning(
                     "Failed to queue auto-resume after restart",
@@ -341,7 +293,7 @@ async def auto_resume_interrupted_threads(
                 error=str(exc),
             )
 
-    return _AutoResumeResult(resumed_count=resumed_count, settled_keys=frozenset(settled_keys))
+    return resumed_count
 
 
 async def resume_pending_interrupted_threads(
@@ -353,125 +305,89 @@ async def resume_pending_interrupted_threads(
     startup_cutoff_ms: int,
     max_resumes: int | None = None,
 ) -> int:
-    """Replay persisted in-flight turns as auto-resume prompts ahead of the full stale-stream scan.
-
-    The pending-resume ledger records every visible turn that was in flight when
-    the previous process died, so interrupted threads can resume within seconds
-    of the bots coming online instead of after a multi-minute estate scan.
-    """
+    """Replay persisted in-flight turns ahead of the full stale-stream scan."""
     if not config.defaults.auto_resume_after_restart or conversation_cache is None:
         return 0
     ledger_path = pending_resume_ledger_path(runtime_paths)
-    records = load_pending_resume_records(ledger_path)
-    eligible = {key: record for key, record in records.items() if record.created_at_ms < startup_cutoff_ms}
-    if not eligible:
-        return 0
-
+    eligible = [
+        record
+        for record in load_pending_resume_records(ledger_path).values()
+        if record.created_at_ms < startup_cutoff_ms
+    ]
     records_to_discard: list[PendingResumeRecord] = []
     interrupted_threads: list[InterruptedThread] = []
     now_ms = int(time.time() * 1000)
-    eligible_items = list(eligible.items())
-    evaluations = await asyncio.gather(
-        *(
-            _evaluate_pending_resume_record(
-                record,
-                config=config,
-                conversation_cache=conversation_cache,
-                now_ms=now_ms,
-            )
-            for _, record in eligible_items
-        ),
-    )
-    for (_, record), evaluation in zip(eligible_items, evaluations, strict=True):
-        if evaluation.discard:
+    records_by_target: dict[tuple[str, str, str, str], PendingResumeRecord] = {}
+    for record in eligible:
+        if _pending_resume_record_is_obsolete(record, config=config, now_ms=now_ms):
             records_to_discard.append(record)
-        if evaluation.interrupted is not None:
-            interrupted_threads.append(evaluation.interrupted)
+            continue
+        record_key = (record.agent_name, record.room_id, record.thread_id, record.target_event_id)
+        records_by_target[record_key] = record
+        interrupted_threads.append(
+            InterruptedThread(
+                room_id=record.room_id,
+                thread_id=record.thread_id,
+                target_event_id=record.target_event_id,
+                partial_text="",
+                agent_name=record.agent_name,
+                original_sender_id=record.requester_user_id,
+                timestamp_ms=record.created_at_ms,
+            ),
+        )
 
-    auto_resume_result = await auto_resume_interrupted_threads(
-        client,
-        interrupted_threads,
-        config=config,
-        runtime_paths=runtime_paths,
-        conversation_cache=conversation_cache,
-        max_resumes=max_resumes,
-    )
-    records_to_discard.extend(eligible[key] for key in auto_resume_result.settled_keys)
+    resumed_count = 0
+    send_attempted = False
+    for candidate in _ordered_auto_resume_candidates(interrupted_threads, max_resumes=max_resumes):
+        if max_resumes is not None and resumed_count >= max_resumes:
+            break
+        assert candidate.thread_id is not None
+        record_key = (candidate.agent_name, candidate.room_id, candidate.thread_id, candidate.target_event_id)
+        record = records_by_target[record_key]
+        if send_attempted:
+            await asyncio.sleep(2.0)
+        decision = await _pending_resume_decision(
+            candidate,
+            config=config,
+            runtime_paths=runtime_paths,
+            conversation_cache=conversation_cache,
+        )
+        if decision == "settled":
+            records_to_discard.append(record)
+        elif decision == "send":
+            send_attempted = True
+            sent = await auto_resume_interrupted_threads(
+                client,
+                [candidate],
+                config=config,
+                runtime_paths=runtime_paths,
+                conversation_cache=conversation_cache,
+                max_resumes=1,
+                delay=0,
+            )
+            if sent:
+                resumed_count += sent
+                records_to_discard.append(record)
     discard_pending_resume_records(ledger_path, records_to_discard)
-    return auto_resume_result.resumed_count
+    return resumed_count
 
 
-@dataclass(frozen=True)
-class _PendingResumeEvaluation:
-    """Outcome of verifying one persisted resume intent against live thread history."""
-
-    interrupted: InterruptedThread | None
-    discard: bool
+def _pending_resume_record_is_obsolete(record: PendingResumeRecord, *, config: Config, now_ms: int) -> bool:
+    """Return whether startup can permanently discard a record without history."""
+    entity_is_missing = record.agent_name not in config.agents and record.agent_name not in config.teams
+    return entity_is_missing or _is_older_than_cleanup_window(record.created_at_ms, now_ms=now_ms)
 
 
-async def _evaluate_pending_resume_record(
-    record: PendingResumeRecord,
-    *,
-    config: Config,
-    conversation_cache: ConversationCacheProtocol,
-    now_ms: int,
-) -> _PendingResumeEvaluation:
-    """Verify one persisted resume intent against authoritative thread history."""
-    if record.agent_name not in config.agents and record.agent_name not in config.teams:
-        return _PendingResumeEvaluation(interrupted=None, discard=True)
-    if _is_older_than_cleanup_window(record.created_at_ms, now_ms=now_ms):
-        # The full stale-stream scan owns anything beyond the restart lookback.
-        return _PendingResumeEvaluation(interrupted=None, discard=True)
-
-    try:
-        history = await conversation_cache.get_strict_thread_history(
-            record.room_id,
-            record.thread_id,
-            caller_label="startup_pending_resume",
-        )
-        _require_authoritative_history(history)
-    except Exception as exc:
-        logger.warning(
-            "Keeping pending auto-resume record after history verification failure",
-            target_event_id=record.target_event_id,
-            error=str(exc),
-        )
-        return _PendingResumeEvaluation(interrupted=None, discard=False)
-
-    target = next((message for message in history if message.event_id == record.target_event_id), None)
-    if target is None or not _pending_target_is_resumable(body=target.body, stream_status=target.stream_status):
-        return _PendingResumeEvaluation(interrupted=None, discard=True)
-    return _PendingResumeEvaluation(
-        interrupted=InterruptedThread(
-            room_id=record.room_id,
-            thread_id=record.thread_id,
-            target_event_id=record.target_event_id,
-            partial_text=_truncate_partial_text(clean_partial_reply_text(target.body)),
-            agent_name=record.agent_name,
-            original_sender_id=record.requester_user_id,
-            timestamp_ms=target.timestamp,
-        ),
-        discard=False,
-    )
-
-
-def _pending_target_is_resumable(*, body: str, stream_status: str | None) -> bool:
-    """Return whether a persisted turn's current visible state still warrants auto-resume."""
-    if stream_status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
-        return True
-    return _is_resumable_interrupted_body(body=body, stream_status=stream_status)
-
-
-async def _interrupted_target_freshness(
+async def _interrupted_target_remains_latest_human_work(
     interrupted_thread: InterruptedThread,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None,
-) -> _AutoResumeFreshness:
+) -> bool:
     """Return whether authoritative history has no newer effective human activity."""
     if conversation_cache is None or interrupted_thread.thread_id is None:
-        return _AutoResumeFreshness(is_latest=False, is_authoritative=False)
+        return False
 
     try:
         history = await conversation_cache.get_strict_thread_history(
@@ -494,14 +410,73 @@ async def _interrupted_target_freshness(
             target_event_id=interrupted_thread.target_event_id,
             error=str(exc),
         )
-        return _AutoResumeFreshness(is_latest=False, is_authoritative=False)
+        return False
 
     if not remains_latest:
         logger.info(
             "Skipping stale auto-resume after newer human activity",
             target_event_id=interrupted_thread.target_event_id,
         )
-    return _AutoResumeFreshness(is_latest=remains_latest, is_authoritative=True)
+    return remains_latest
+
+
+def _pending_target_is_resumable(*, body: str, stream_status: str | None) -> bool:
+    """Return whether a persisted turn's current visible state still warrants auto-resume."""
+    if stream_status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
+        return True
+    return _is_resumable_interrupted_body(body=body, stream_status=stream_status)
+
+
+async def _pending_resume_decision(
+    interrupted_thread: InterruptedThread,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    conversation_cache: ConversationCacheProtocol | None,
+) -> _AutoResumeDecision:
+    """Classify a candidate using one authoritative history read."""
+    if conversation_cache is None or interrupted_thread.thread_id is None:
+        return "retry"
+
+    try:
+        history = await conversation_cache.get_strict_thread_history(
+            interrupted_thread.room_id,
+            interrupted_thread.thread_id,
+            caller_label="startup_auto_resume_freshness",
+        )
+        _require_authoritative_history(history)
+        target_index = next(
+            (index for index, message in enumerate(history) if message.event_id == interrupted_thread.target_event_id),
+            None,
+        )
+        if target_index is None:
+            return "settled"
+        target = history[target_index]
+        if not _pending_target_is_resumable(
+            body=target.body,
+            stream_status=target.stream_status,
+        ):
+            return "settled"
+        remains_latest = _later_thread_activity_is_internal(
+            history[target_index + 1 :],
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Skipping auto-resume because authoritative freshness check failed",
+            target_event_id=interrupted_thread.target_event_id,
+            error=str(exc),
+        )
+        return "retry"
+
+    if not remains_latest:
+        logger.info(
+            "Skipping stale auto-resume after newer human activity",
+            target_event_id=interrupted_thread.target_event_id,
+        )
+        return "settled"
+    return "send"
 
 
 def _require_authoritative_history(history: ThreadReadResult) -> None:
@@ -522,7 +497,6 @@ def _authoritative_history_after_target(
 ) -> Sequence[ResolvedVisibleMessage]:
     """Return history entries after an exact target or raise when history is unusable."""
     _require_authoritative_history(history)
-
     target_index = next(
         (index for index, message in enumerate(history) if message.event_id == target_event_id),
         None,

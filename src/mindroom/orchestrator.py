@@ -1076,7 +1076,7 @@ class _MultiAgentOrchestrator:
             return
 
         try:
-            auto_resume_result = await auto_resume_interrupted_threads(
+            resumed_count = await auto_resume_interrupted_threads(
                 router_bot.client,
                 interrupted_threads,
                 config=config,
@@ -1084,10 +1084,10 @@ class _MultiAgentOrchestrator:
                 conversation_cache=router_bot._conversation_cache,
                 max_resumes=MAX_AUTO_RESUME_AFTER_RESTART_THREADS,
             )
-            if auto_resume_result.resumed_count > 0:
+            if resumed_count > 0:
                 logger.info(
                     "Queued auto-resume messages after restart",
-                    count=auto_resume_result.resumed_count,
+                    count=resumed_count,
                 )
         except Exception as exc:
             logger.warning("Could not auto-resume interrupted threads (non-critical)", error=str(exc))
