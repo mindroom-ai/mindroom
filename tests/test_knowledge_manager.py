@@ -15,9 +15,12 @@ from threading import Event, Lock, get_ident
 from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 from agno.knowledge.document.base import Document
 from fastapi.testclient import TestClient
+from openai import AuthenticationError
+from structlog.testing import capture_logs
 from watchfiles import Change
 
 import mindroom.knowledge.file_listing as knowledge_file_listing_module
@@ -4047,6 +4050,145 @@ async def test_first_time_partial_refresh_does_not_publish_ready_index(
     assert lookup.index is None
     assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
     assert not any("_candidate_" in collection for collection in _VectorDb.collections)
+
+
+def _embedder_auth_error() -> AuthenticationError:
+    request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
+    response = httpx.Response(401, request=request, json={"error": {"message": "Incorrect API key provided"}})
+    return AuthenticationError("Error code: 401", response=response, body=None)
+
+
+@pytest.mark.asyncio
+async def test_partial_refresh_error_includes_first_classified_file_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The persisted refresh summary carries the first classified per-file indexing error."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "aaa-broken.md").write_text("cannot embed", encoding="utf-8")
+    (docs_path / "good.md").write_text("indexed text", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+
+    class _AuthFailingKnowledge(_Knowledge):
+        def insert(
+            self,
+            *,
+            path: str,
+            metadata: dict[str, object],
+            upsert: bool,
+            reader: object | None = None,
+        ) -> None:
+            if Path(path).name == "aaa-broken.md":
+                raise _embedder_auth_error()
+            super().insert(path=path, metadata=metadata, upsert=upsert, reader=reader)
+
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _AuthFailingKnowledge)
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
+
+    assert await manager.reindex_all() == 1
+    assert manager._last_refresh_error == (
+        "Indexed 1 of 2 managed knowledge files (first error: embedder authentication failed (HTTP 401))"
+    )
+
+
+def test_refresh_failure_counter_increments_and_resets_preserving_last_good(tmp_path: Path) -> None:
+    """The failure counter climbs across running transitions, keeps last-good fields, resets on success."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    metadata_path = published_index_metadata_path(key)
+    write_index_metadata_payload(
+        metadata_path,
+        settings=key.indexing_settings.to_metadata(),
+        status="complete",
+        collection="docs_live",
+        indexed_count=1,
+        source_signature="sig",
+    )
+
+    knowledge_registry.mark_published_index_refresh_failed_preserving_last_good(key, error="boom 1")
+    first = load_published_index_state(metadata_path)
+    assert first is not None
+    assert first.consecutive_refresh_failures == 1
+    assert first.status == "complete"
+    assert first.collection == "docs_live"
+
+    knowledge_registry.mark_published_index_refresh_running(key)
+    knowledge_registry.mark_published_index_refresh_failed_preserving_last_good(key, error="boom 2")
+    second = load_published_index_state(metadata_path)
+    assert second is not None
+    assert second.consecutive_refresh_failures == 2
+    assert second.last_error == "boom 2"
+
+    knowledge_registry.mark_published_index_refresh_succeeded(key)
+    recovered = load_published_index_state(metadata_path)
+    assert recovered is not None
+    assert recovered.consecutive_refresh_failures == 0
+    assert recovered.last_error is None
+    assert recovered.status == "complete"
+    assert recovered.collection == "docs_live"
+
+
+def test_refresh_failure_threshold_logs_error_at_three_and_beyond(tmp_path: Path) -> None:
+    """The third consecutive failure and every later one log at ERROR level."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+
+    with capture_logs() as logs:
+        for attempt in range(1, 5):
+            knowledge_registry.mark_published_index_refresh_failed_preserving_last_good(key, error=f"boom {attempt}")
+
+    repeated = [entry for entry in logs if entry["event"] == "knowledge_refresh_failing_repeatedly"]
+    assert [entry["consecutive_refresh_failures"] for entry in repeated] == [3, 4]
+    assert all(entry["log_level"] == "error" for entry in repeated)
+
+
+def test_legacy_metadata_without_failure_counter_parses_as_zero(tmp_path: Path) -> None:
+    """Metadata written before the counter existed loads as zero and increments from there."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    metadata_path = published_index_metadata_path(key)
+    knowledge_registry.mark_published_index_refresh_failed_preserving_last_good(key, error="boom 1")
+    knowledge_registry.mark_published_index_refresh_failed_preserving_last_good(key, error="boom 2")
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    del payload["consecutive_refresh_failures"]
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    legacy = load_published_index_state(metadata_path)
+    assert legacy is not None
+    assert legacy.consecutive_refresh_failures == 0
+
+    knowledge_registry.mark_published_index_refresh_failed_preserving_last_good(key, error="boom 3")
+    bumped = load_published_index_state(metadata_path)
+    assert bumped is not None
+    assert bumped.consecutive_refresh_failures == 1
+
+
+def test_published_state_fingerprint_includes_failure_counter(tmp_path: Path) -> None:
+    """States differing only in the failure counter fingerprint differently."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    knowledge_registry.mark_published_index_refresh_failed_preserving_last_good(key, error="boom")
+    state = load_published_index_state(published_index_metadata_path(key))
+    assert state is not None
+
+    bumped = replace(state, consecutive_refresh_failures=state.consecutive_refresh_failures + 1)
+
+    assert knowledge_refresh_runner._published_state_fingerprint(state) != (
+        knowledge_refresh_runner._published_state_fingerprint(bumped)
+    )
 
 
 @pytest.mark.asyncio
