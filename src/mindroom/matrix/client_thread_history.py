@@ -33,6 +33,7 @@ Cache-trust rules (each encodes a shipped regression fix; do not weaken them):
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -1164,6 +1165,13 @@ async def _group_scanned_sources_by_thread(
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
 ) -> dict[str, list[dict[str, Any]]]:
     """Bucket one room scan's event sources per requested thread with one canonical resolution."""
+    grouped: dict[str, dict[str, dict[str, Any]]] = {
+        root_id: {root_id: scanned_message_sources[root_id]}
+        for root_id in thread_root_ids
+        if root_id in scanned_message_sources
+    }
+    if not grouped:
+        return {}
     event_infos = {
         event_id: EventInfo.from_event(event_source) for event_id, event_source in scanned_message_sources.items()
     }
@@ -1173,11 +1181,6 @@ async def _group_scanned_sources_by_thread(
         event_infos=event_infos,
         ordered_event_ids=ordered_event_ids,
     )
-    grouped: dict[str, dict[str, dict[str, Any]]] = {
-        root_id: {root_id: scanned_message_sources[root_id]}
-        for root_id in thread_root_ids
-        if root_id in scanned_message_sources
-    }
     for event_id in ordered_event_ids:
         root_id = resolved_thread_ids.get(event_id)
         if root_id is None or root_id == event_id:
@@ -1187,17 +1190,23 @@ async def _group_scanned_sources_by_thread(
             continue
         bucket[event_id] = scanned_message_sources[event_id]
 
-    thread_event_sources: dict[str, list[dict[str, Any]]] = {}
-    for root_id, bucket in grouped.items():
-        event_sources = sort_thread_event_sources_root_first(list(bucket.values()), thread_id=root_id)
-        member_event_ids = set(bucket)
-        event_sources.extend(
-            _event_source_for_cache(edit_event)
-            for original_event_id, (edit_event, edit_thread_id) in latest_edits_by_original_event_id.items()
-            if original_event_id in member_event_ids or edit_thread_id == root_id
+    edits_by_root: dict[str, list[dict[str, Any]]] = {}
+    for original_event_id, (edit_event, edit_thread_id) in latest_edits_by_original_event_id.items():
+        target_roots = {
+            root_id
+            for root_id in (original_event_id, resolved_thread_ids.get(original_event_id), edit_thread_id)
+            if root_id in grouped
+        }
+        for root_id in target_roots:
+            edits_by_root.setdefault(root_id, []).append(_event_source_for_cache(edit_event))
+
+    return {
+        root_id: sort_thread_event_sources_root_first(
+            [*bucket.values(), *edits_by_root.get(root_id, [])],
+            thread_id=root_id,
         )
-        thread_event_sources[root_id] = event_sources
-    return thread_event_sources
+        for root_id, bucket in grouped.items()
+    }
 
 
 async def _bulk_scan_thread_event_sources(
@@ -1315,12 +1324,14 @@ async def untrusted_cached_thread_ids(
     thread_ids: Collection[str],
 ) -> tuple[str, ...]:
     """Return the given threads whose durable snapshots would not be served from cache."""
-    untrusted: list[str] = []
-    for thread_id in thread_ids:
-        cache_state = await event_cache.get_thread_cache_state(room_id, thread_id)
-        if thread_cache_rejection_reason(cache_state) is not None:
-            untrusted.append(thread_id)
-    return tuple(untrusted)
+    cache_states = await asyncio.gather(
+        *(event_cache.get_thread_cache_state(room_id, thread_id) for thread_id in thread_ids),
+    )
+    return tuple(
+        thread_id
+        for thread_id, cache_state in zip(thread_ids, cache_states, strict=True)
+        if thread_cache_rejection_reason(cache_state) is not None
+    )
 
 
 async def get_room_threads_page(

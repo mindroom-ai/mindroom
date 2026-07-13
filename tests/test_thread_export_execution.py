@@ -917,7 +917,7 @@ async def test_prefer_cache_bulk_backfills_untrusted_threads(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_prefer_cache_skips_bulk_below_untrusted_threshold(tmp_path: Path) -> None:
-    """A handful of untrusted threads should not pay for a full room scan."""
+    """A single untrusted thread should not pay for a bulk room scan."""
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     _write_matrix_state(tmp_path)
@@ -937,7 +937,7 @@ async def test_prefer_cache_skips_bulk_below_untrusted_threshold(tmp_path: Path)
         ),
         patch(
             "mindroom.thread_export.execution.untrusted_cached_thread_ids",
-            new=AsyncMock(return_value=tuple(thread_ids)),
+            new=AsyncMock(return_value=("$t0:localhost",)),
         ),
         patch(
             "mindroom.thread_export.execution.bulk_refresh_room_thread_histories",

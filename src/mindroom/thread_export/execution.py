@@ -42,9 +42,10 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# One bulk room scan replaces one per-thread history walk per untrusted thread, so it pays off as
-# soon as more than a handful of threads would miss the cache.
-_BULK_BACKFILL_MIN_THREADS = 10
+# The bulk scan stops as soon as every requested root has been seen, so its cost is roughly one
+# walk to the deepest requested root while the per-thread path pays one walk per thread. Two or
+# more untrusted threads therefore already favor the bulk path; a single one is a wash.
+_BULK_BACKFILL_MIN_THREADS = 2
 
 
 async def _bulk_backfill_untrusted_threads(

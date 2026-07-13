@@ -34,6 +34,34 @@ def _message_event(
     )
 
 
+def _edit_event(
+    event_id: str,
+    original_event_id: str,
+    *,
+    timestamp: int,
+    thread_root_id: str,
+) -> nio.RoomMessageText:
+    return nio.RoomMessageText.from_dict(
+        {
+            "event_id": event_id,
+            "sender": "@alice:localhost",
+            "origin_server_ts": timestamp,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+            "content": {
+                "body": "* edited reply",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.replace", "event_id": original_event_id},
+                "m.new_content": {
+                    "body": "edited reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": thread_root_id},
+                },
+            },
+        },
+    )
+
+
 def _messages_response(chunk: list[nio.Event], *, end: str | None) -> nio.RoomMessagesResponse:
     return nio.RoomMessagesResponse(room_id=_ROOM_ID, chunk=chunk, start="", end=end)
 
@@ -46,6 +74,12 @@ async def test_bulk_refresh_scans_room_once_and_stores_each_thread() -> None:
         side_effect=[
             _messages_response(
                 [
+                    _edit_event(
+                        "$a1-edit:localhost",
+                        "$a1:localhost",
+                        timestamp=5000,
+                        thread_root_id="$a:localhost",
+                    ),
                     _message_event("$b1:localhost", "reply b", timestamp=4000, thread_root_id="$b:localhost"),
                     _message_event("$a1:localhost", "reply a", timestamp=3000, thread_root_id="$a:localhost"),
                 ],
@@ -83,7 +117,7 @@ async def test_bulk_refresh_scans_room_once_and_stores_each_thread() -> None:
         for call in event_cache.replace_thread_if_not_newer.await_args_list
     }
     assert stored == {
-        "$a:localhost": ["$a:localhost", "$a1:localhost"],
+        "$a:localhost": ["$a:localhost", "$a1:localhost", "$a1-edit:localhost"],
         "$b:localhost": ["$b:localhost", "$b1:localhost"],
     }
 
