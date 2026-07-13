@@ -354,6 +354,7 @@ class Config(BaseModel):
     _unresolved_plugin_tool_sources: frozenset[str] = PrivateAttr(default=frozenset())
     _runtime_approved_egress_injected_default_tool: bool = PrivateAttr(default=False)
     _runtime_approved_egress_injected_approval_rule: bool = PrivateAttr(default=False)
+    _runtime_knowledge_base_overlays: dict[str, KnowledgeBaseConfig] = PrivateAttr(default_factory=dict)
 
     PRIVATE_KNOWLEDGE_BASE_ID_PREFIX: ClassVar[str] = "__agent_private__:"
     TOOL_PRESETS: ClassVar[dict[str, tuple[str, ...]]] = {
@@ -1063,12 +1064,36 @@ class Config(BaseModel):
     def authored_model_dump(self) -> dict[str, Any]:
         """Serialize authored config."""
         payload = cast("dict[str, Any]", self.model_dump(exclude_unset=True))
+        knowledge_bases = payload.get("knowledge_bases")
+        if isinstance(knowledge_bases, dict):
+            for base_id in self._runtime_knowledge_base_overlays:
+                knowledge_bases.pop(base_id, None)
+            if not knowledge_bases:
+                payload.pop("knowledge_bases", None)
         payload = strip_runtime_approved_egress_overlay_from_dump(
             payload,
             injected_default_tool=self._runtime_approved_egress_injected_default_tool,
             injected_approval_rule=self._runtime_approved_egress_injected_approval_rule,
         )
         return _strip_empty_root_sections(payload)
+
+    def with_runtime_knowledge_base_overlay(
+        self,
+        base_id: str,
+        base_config: KnowledgeBaseConfig,
+    ) -> Config:
+        """Return an effective config with one non-authored knowledge base."""
+        if base_id in self.knowledge_bases and base_id not in self._runtime_knowledge_base_overlays:
+            msg = f"Runtime knowledge base '{base_id}' conflicts with an authored knowledge base"
+            raise ValueError(msg)
+        config = self.model_copy(deep=True)
+        config.knowledge_bases[base_id] = base_config
+        config._runtime_knowledge_base_overlays[base_id] = base_config
+        return config
+
+    def runtime_knowledge_base_overlay(self, base_id: str) -> KnowledgeBaseConfig | None:
+        """Return one runtime-only knowledge base overlay, when present."""
+        return self._runtime_knowledge_base_overlays.get(base_id)
 
     def _agent_culture(self, agent_name: str) -> tuple[str, CultureConfig] | None:
         """Get the configured culture assignment for an agent, if any."""

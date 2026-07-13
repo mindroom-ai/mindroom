@@ -259,6 +259,23 @@ def config(storage_path: Path) -> Config:
     return _test_config(storage_path)
 
 
+def test_semantic_memory_index_is_a_runtime_config_overlay(storage_path: Path, config: Config) -> None:
+    """Synthetic file-memory indexes must not leak into authored config serialization."""
+    root = storage_path / "workspace"
+    base_id = "file_memory_agent_general_test"
+
+    knowledge_config = semantic_file_search._memory_knowledge_config(
+        config,
+        base_id=base_id,
+        root=root,
+        search_config=config.memory.search,
+    )
+
+    assert knowledge_config.knowledge_bases[base_id].path == str(root.resolve())
+    assert knowledge_config.runtime_knowledge_base_overlay(base_id) is knowledge_config.knowledge_bases[base_id]
+    assert base_id not in knowledge_config.authored_model_dump().get("knowledge_bases", {})
+
+
 @pytest.mark.asyncio
 async def test_semantic_memory_search_uses_ready_published_index_without_refresh(
     storage_path: Path,

@@ -79,8 +79,7 @@ def _memory_knowledge_config(
     root: Path,
     search_config: MemorySearchConfig,
 ) -> Config:
-    knowledge_config = config.model_copy(deep=True)
-    knowledge_config.knowledge_bases[base_id] = KnowledgeBaseConfig(
+    base_config = KnowledgeBaseConfig(
         mode="semantic",
         description="File-backed memory search index",
         path=str(root.resolve()),
@@ -90,7 +89,7 @@ def _memory_knowledge_config(
         include_extensions=[".md"],
         include_patterns=_memory_include_patterns(search_config),
     )
-    return knowledge_config
+    return config.with_runtime_knowledge_base_overlay(base_id, base_config)
 
 
 def schedule_semantic_file_memory_refresh(
