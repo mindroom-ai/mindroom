@@ -52,9 +52,6 @@ if TYPE_CHECKING:
     from mindroom.turn_policy import PreparedDispatch, ResponseAction
 
 
-_DM_ROOM_LOOKUP_TIMEOUT_SECONDS = 1.0
-
-
 class _TurnPlan(Protocol):
     kind: Literal["ignore", "route", "respond"]
     response_action: ResponseAction | None
@@ -118,15 +115,11 @@ async def dispatch_text_message(
         timing_scope_token = timing_scope_context.set(event_timing_scope(prepared.event.event_id))
         if await _blocked_before_plan(controller, room, prepared, requester_user_id=requester_user_id):
             return
+
         message_attachment_ids, trusted_attachment_ids, router_extra_content = _attachment_parts(
             prepared,
             media_events=media_events,
             requester_user_id=requester_user_id,
-        )
-        room_is_dm = await is_dm_room(
-            controller._client(),
-            room.room_id,
-            lookup_timeout_seconds=_DM_ROOM_LOOKUP_TIMEOUT_SECONDS,
         )
         if dispatch_timing is not None:
             dispatch_timing.mark("dispatch_plan_start")
@@ -134,7 +127,7 @@ async def dispatch_text_message(
             room,
             prepared.event,
             prepared.dispatch,
-            is_dm=room_is_dm,
+            is_dm=await is_dm_room(controller._client(), room.room_id),
             has_active_response_for_target=controller.deps.response_runner.has_active_response_for_target,
             extra_content=router_extra_content or None,
             media_events=media_events,

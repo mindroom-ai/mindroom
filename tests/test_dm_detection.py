@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -209,51 +208,6 @@ class TestDMDetection:
         assert first_result is True
         assert second_result is False
         assert client.list_direct_rooms.call_count == 2
-
-    async def test_slow_matrix_lookup_uses_bounded_in_memory_fallback(
-        self,
-    ) -> None:
-        """A stalled Matrix lookup should not hold the dispatch decision indefinitely."""
-        client = AsyncMock()
-        client.user_id = "@agent:server"
-
-        async def slow_direct_rooms() -> nio.DirectRoomsResponse:
-            await asyncio.sleep(1)
-            return nio.DirectRoomsResponse({})
-
-        client.list_direct_rooms.side_effect = slow_direct_rooms
-        room = nio.MatrixRoom("!room:server", "@agent:server")
-        room.users = {
-            "@agent:server": MagicMock(),
-            "@user:server": MagicMock(),
-        }
-        client.rooms = {"!room:server": room}
-        result = await asyncio.wait_for(
-            is_dm_room(client, "!room:server", lookup_timeout_seconds=0.01),
-            timeout=0.1,
-        )
-
-        assert result is True
-        client.room_get_state.assert_not_called()
-        assert ("@agent:server", "!room:server") not in rooms._DM_ROOM_CACHE
-
-    async def test_default_lookup_remains_unbounded_for_room_cleanup_callers(self) -> None:
-        """Callers that protect room membership should not inherit the dispatch latency bound."""
-        client = AsyncMock()
-        client.user_id = "@agent:server"
-        release_lookup = asyncio.Event()
-
-        async def blocked_direct_rooms() -> nio.DirectRoomsResponse:
-            await release_lookup.wait()
-            return nio.DirectRoomsResponse({"@user:server": ["!room:server"]})
-
-        client.list_direct_rooms.side_effect = blocked_direct_rooms
-        lookup = asyncio.create_task(is_dm_room(client, "!room:server"))
-        await asyncio.sleep(0.02)
-
-        assert not lookup.done()
-        release_lookup.set()
-        assert await lookup is True
 
     async def test_filter_non_dm_rooms_preserves_order(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test non-DM room filtering keeps only non-DM rooms in input order."""

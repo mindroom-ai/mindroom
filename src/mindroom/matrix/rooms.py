@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -664,12 +663,7 @@ def _has_is_direct_marker(state_events: list[dict[str, Any]]) -> bool:
     return False
 
 
-async def is_dm_room(
-    client: nio.AsyncClient,
-    room_id: str,
-    *,
-    lookup_timeout_seconds: float | None = None,
-) -> bool:
+async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
     """Check if a room is a Direct Message (DM) room.
 
     Detection uses multiple signals in this order:
@@ -680,7 +674,6 @@ async def is_dm_room(
     Args:
         client: The Matrix client
         room_id: The room ID to check
-        lookup_timeout_seconds: Optional bound for callers on latency-sensitive paths
 
     Returns:
         True if the room is a DM room, False otherwise
@@ -693,40 +686,24 @@ async def is_dm_room(
         if time.monotonic() - ts < _DM_ROOM_TTL:
             return is_dm
 
-    lookup_started = time.monotonic()
-    try:
-        async with asyncio.timeout(lookup_timeout_seconds):
-            direct_room_ids = await _get_direct_room_ids(client)
-            if room_id in direct_room_ids:
-                _DM_ROOM_CACHE[cache_key] = (time.monotonic(), True)
-                return True
+    direct_room_ids = await _get_direct_room_ids(client)
+    if room_id in direct_room_ids:
+        _DM_ROOM_CACHE[cache_key] = (time.monotonic(), True)
+        return True
 
-            # Preserve DM-like rooms even when servers don't expose `is_direct` in state.
-            if _is_two_member_group_room(client, room_id):
-                _DM_ROOM_CACHE[cache_key] = (time.monotonic(), True)
-                return True
+    # Preserve DM-like rooms even when servers don't expose `is_direct` in state.
+    if _is_two_member_group_room(client, room_id):
+        _DM_ROOM_CACHE[cache_key] = (time.monotonic(), True)
+        return True
 
-            # Get the room state events, specifically member events.
-            response = await client.room_get_state(room_id)
-            if not isinstance(response, nio.RoomGetStateResponse):
-                return False
+    # Get the room state events, specifically member events.
+    response = await client.room_get_state(room_id)
+    if not isinstance(response, nio.RoomGetStateResponse):
+        return False
 
-            is_dm = _has_is_direct_marker(response.events)
-            _DM_ROOM_CACHE[cache_key] = (time.monotonic(), is_dm)
-            return is_dm
-    except TimeoutError:
-        if lookup_timeout_seconds is None:
-            raise
-        fallback_is_dm = _is_two_member_group_room(client, room_id)
-        logger.warning(
-            "matrix_dm_detection_timed_out",
-            room_id=room_id,
-            user_id=client.user_id,
-            duration_ms=round((time.monotonic() - lookup_started) * 1000, 1),
-            timeout_seconds=lookup_timeout_seconds,
-            fallback_is_dm=fallback_is_dm,
-        )
-        return fallback_is_dm
+    is_dm = _has_is_direct_marker(response.events)
+    _DM_ROOM_CACHE[cache_key] = (time.monotonic(), is_dm)
+    return is_dm
 
 
 async def filter_non_dm_rooms(client: nio.AsyncClient, room_ids: list[str]) -> list[str]:
