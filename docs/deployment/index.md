@@ -58,7 +58,7 @@ If you want worker-routed execution tools like `coding`, `docker`, `file`, `pyth
 ### NixOS LXC container (preferred alternative, agent-controlled machine)
 
 Use this when you want to give a MindRoom agent full freedom over its own virtual machine while you, from the host, control precisely what it can see.
-The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, Cinny, Element, Caddy) plus Docker and `ragenix`-based secrets wiring, so the agent can rebuild and manage the persistent system it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
+The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, MindRoom Chat, Element, Caddy) plus Docker and `ragenix`-based secrets wiring, so the agent can rebuild and manage the persistent system it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
 It is slightly harder to set up by hand, but asking a coding agent such as Codex or Claude Code to do it is trivial: the repo ships machine-oriented instructions in `AGENTS.md`.
 It requires a Linux host running [Incus](https://linuxcontainers.org/incus/docs/main/installing/); see the repo README for the full setup.
 
@@ -81,7 +81,7 @@ docker compose up -d
 ```
 
 The stack exposes MindRoom at `http://localhost:8765`, the MindRoom client at `http://localhost:8080`, and Matrix at `http://localhost:8008`.
-The stack uses published `mindroom`, `mindroom-cinny`, and `mindroom-tuwunel` images by default.
+The stack uses published `mindroom`, `mindroom-chat`, and `mindroom-tuwunel` images by default.
 If you access it from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting it.
 
 ### Direct (Development)
@@ -92,7 +92,7 @@ mindroom run --storage-path ./mindroom_data
 
 The config file path is set via `MINDROOM_CONFIG_PATH` and otherwise defaults to `./config.yaml`, then `~/.mindroom/config.yaml`.
 
-If you want local Matrix + Cinny with a host-installed MindRoom runtime (Linux/macOS), use:
+If you want local Matrix + MindRoom Chat with a host-installed MindRoom runtime (Linux/macOS), use:
 
 ```bash
 mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
