@@ -331,6 +331,7 @@ Your task is to:
 2. Extract the schedule/timing
 3. Create a message that mentions the appropriate agents or teams
 4. Set is_conditional=true only when the request is event-based or conditional
+5. Set history_limit only when the request explicitly limits conversation context
 
 Available agents and teams: {agent_list}
 
@@ -340,6 +341,13 @@ When the request depends on an external event or condition rather than a fixed t
 2. Include BOTH the condition check AND the action in the message
 3. Choose polling frequency based on urgency and type
 4. Set is_conditional to true
+
+Conversation context (history_limit):
+- history_limit is the number of recent thread messages the responding agent sees each time the task fires
+- "with no history", "without context", or "context-free" -> history_limit=0
+- "with only the last 5 messages of context" or "include the last 5 messages" -> history_limit=5
+- Leave history_limit unset (null) when the request says nothing about context or history
+- Remove context phrases like "with no history" from the message itself
 
 Important rules:
 - Set is_conditional=false for normal time-based schedules

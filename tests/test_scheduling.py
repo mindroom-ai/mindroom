@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -211,6 +212,7 @@ def test_build_edited_scheduled_workflow_preserves_metadata_and_strips_text() ->
         cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
         message="original message",
         description="Original description",
+        history_limit=3,
         created_by="@user:server",
         thread_id="$thread1",
         room_id="!old:server",
@@ -233,6 +235,7 @@ def test_build_edited_scheduled_workflow_preserves_metadata_and_strips_text() ->
         execute_at=None,
         message="updated message",
         description="updated message",
+        history_limit=3,
         created_by="@user:server",
         thread_id="$thread1",
         room_id="!new:server",
@@ -1635,6 +1638,44 @@ async def test_edit_scheduled_task_reuses_existing_thread() -> None:
     assert call_kwargs["task_id"] == "task123"
     assert call_kwargs["existing_task"].task_id == "task123"
     assert call_kwargs["existing_task"].workflow.thread_id == "$original_thread"
+    assert call_kwargs["history_limit"] is None
+
+
+@pytest.mark.asyncio
+async def test_edit_scheduled_task_forwards_history_limit_override() -> None:
+    """An explicit history limit on edit must reach the shared scheduling backend."""
+    client = AsyncMock()
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=5),
+        message="Initial message",
+        description="Initial task",
+        thread_id="$original_thread",
+        room_id="!test:server",
+    )
+    state_response = nio.RoomGetStateEventResponse(
+        content={"status": "pending", "workflow": workflow.model_dump_json()},
+        event_type=_SCHEDULED_TASK_EVENT_TYPE,
+        state_key="task123",
+        room_id="!test:server",
+    )
+    client.room_get_state_event = AsyncMock(return_value=state_response)
+
+    with patch(
+        "mindroom.scheduling.schedule_task",
+        new=AsyncMock(return_value=("task123", "✅ Scheduled")),
+    ) as mock_schedule:
+        result = await edit_scheduled_task(
+            runtime=_scheduling_runtime(client=client),
+            room_id="!test:server",
+            task_id="task123",
+            full_text="keep the same schedule",
+            scheduled_by="@user:server",
+            history_limit=2,
+        )
+
+    assert "✅ Updated task `task123`." in result
+    assert mock_schedule.await_args.kwargs["history_limit"] == 2
 
 
 @pytest.mark.asyncio
@@ -2055,6 +2096,134 @@ async def test_schedule_task_persists_via_admin_when_active_agent_lacks_state_po
     assert persisted.workflow.new_thread is False
     listed = await list_scheduled_tasks(client=client, room_id="!test:server", thread_id="$thread", config=config)
     assert "`task1234`" in listed
+
+
+@pytest.mark.asyncio
+async def test_schedule_task_explicit_history_limit_overrides_parse_and_round_trips(tmp_path: Path) -> None:
+    """An explicit history limit wins over the parse, persists to Matrix state, and surfaces in listings."""
+    client = AsyncMock()
+    client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
+    room_state: dict[str, dict[str, Any]] = {}
+    client.room_get_state = AsyncMock(side_effect=lambda room_id: _room_state_response(room_id, room_state))
+    matrix_admin = _RecordingScheduleStateAdmin(room_state)
+    room = _matrix_room("!test:server")
+    runtime_paths = _test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"assistant": AgentConfig(display_name="Assistant", role="Test assistant")},
+            models={"default": ModelConfig(provider="test", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    ids = entity_ids(config, runtime_paths)
+    workflow = ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="*/25"),
+        message="poll the queue",
+        description="Queue poller",
+    )
+
+    with (
+        patch("mindroom.scheduling.responder_candidate_entities_for_room", return_value=[ids["assistant"]]),
+        patch("mindroom.scheduling._extract_mentioned_agents_from_text", return_value=[]),
+        patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=workflow)),
+        patch("mindroom.scheduling._start_scheduled_task", return_value=True),
+        patch("mindroom.scheduling.uuid.uuid4", return_value="task1234"),
+    ):
+        task_id, message = await schedule_task(
+            runtime=_scheduling_runtime(
+                client=client,
+                config=config,
+                runtime_paths=runtime_paths,
+                room=room,
+                matrix_admin=matrix_admin,
+            ),
+            room_id="!test:server",
+            thread_id="$thread",
+            scheduled_by="@alice:server",
+            full_text="every 25 minutes poll the queue with only the last 5 messages",
+            history_limit=5,
+        )
+
+    assert task_id == "task1234"
+    assert "**History:** last 5 messages" in message
+    tasks = await get_scheduled_tasks_for_room(client=client, room_id="!test:server")
+    assert [task.task_id for task in tasks] == ["task1234"]
+    assert tasks[0].workflow.history_limit == 5
+    listed = await list_scheduled_tasks(client=client, room_id="!test:server", thread_id="$thread", config=config)
+    assert "History: last 5 messages" in listed
+
+
+@pytest.mark.asyncio
+async def test_schedule_task_keeps_parse_produced_history_limit(tmp_path: Path) -> None:
+    """Without an explicit override, the parse-produced history limit persists and surfaces."""
+    client = AsyncMock()
+    client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
+        {"event_id": "$state"},
+        room_id="!test:server",
+    )
+    room = _matrix_room("!test:server")
+    runtime_paths = _test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"assistant": AgentConfig(display_name="Assistant", role="Test assistant")},
+            models={"default": ModelConfig(provider="test", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    ids = entity_ids(config, runtime_paths)
+    workflow = ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="*/25"),
+        message="poll the queue",
+        description="Queue poller",
+        history_limit=0,
+    )
+
+    with (
+        patch("mindroom.scheduling.responder_candidate_entities_for_room", return_value=[ids["assistant"]]),
+        patch("mindroom.scheduling._extract_mentioned_agents_from_text", return_value=[]),
+        patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=workflow)),
+        patch("mindroom.scheduling._start_scheduled_task", return_value=True),
+        patch("mindroom.scheduling.uuid.uuid4", return_value="task1234"),
+    ):
+        task_id, message = await schedule_task(
+            runtime=_scheduling_runtime(
+                client=client,
+                config=config,
+                runtime_paths=runtime_paths,
+                room=room,
+            ),
+            room_id="!test:server",
+            thread_id="$thread",
+            scheduled_by="@alice:server",
+            full_text="every 25 minutes poll the queue with no history",
+        )
+
+    assert task_id == "task1234"
+    assert "**History:** none" in message
+    persisted = json.loads(client.room_put_state.await_args.kwargs["content"]["workflow"])
+    assert persisted["history_limit"] == 0
+
+
+@pytest.mark.asyncio
+async def test_schedule_task_rejects_negative_history_limit_before_parsing() -> None:
+    """A negative explicit limit fails fast without spending an AI parse call."""
+    parse_mock = AsyncMock()
+
+    with patch("mindroom.scheduling._parse_workflow_schedule", new=parse_mock):
+        task_id, message = await schedule_task(
+            runtime=_scheduling_runtime(),
+            room_id="!test:server",
+            thread_id=None,
+            scheduled_by="@user:server",
+            full_text="in 5 minutes check logs",
+            history_limit=-1,
+        )
+
+    assert task_id is None
+    assert "history_limit" in message
+    parse_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio

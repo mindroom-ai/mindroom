@@ -28,7 +28,7 @@ class SchedulerTools(Toolkit):
             tools=[self.schedule, self.edit_schedule, self.list_schedules, self.cancel_schedule],
         )
 
-    async def schedule(self, request: str, new_thread: bool = False) -> str:
+    async def schedule(self, request: str, new_thread: bool = False, history_limit: int | None = None) -> str:
         """Schedule a task using natural language.
 
         This uses the exact same scheduling backend as the `!schedule` command.
@@ -40,6 +40,9 @@ class SchedulerTools(Toolkit):
             new_thread: When `False`, post in the current room/thread scope.
                 When `True`, schedule a future room-level root message that can become
                 its own thread when someone replies later.
+            history_limit: Max recent thread messages included as context each time
+                the task fires. Use 0 for no history (recommended for recurring
+                polling tasks), or leave unset for full history.
 
         Returns:
             The scheduling result message.
@@ -57,17 +60,21 @@ class SchedulerTools(Toolkit):
             scheduled_by=context.requester_id,
             full_text=request,
             new_thread=new_thread,
+            history_limit=history_limit,
         )
         if task_id is None:
             raise RuntimeError(response_text)
         return response_text
 
-    async def edit_schedule(self, task_id: str, request: str) -> str:
+    async def edit_schedule(self, task_id: str, request: str, history_limit: int | None = None) -> str:
         """Edit an existing scheduled task by replacing its timing and content.
 
         Args:
             task_id: The ID of the task to edit (from list_schedules).
             request: The new scheduling request, e.g. "tomorrow at 9am check deployment"
+            history_limit: Max recent thread messages included as context each time
+                the task fires. Use 0 for no history. Leave unset to keep the task's
+                existing history limit.
 
         Returns:
             The edit result message.
@@ -85,6 +92,7 @@ class SchedulerTools(Toolkit):
             full_text=request,
             scheduled_by=context.requester_id,
             thread_id=context.resolved_thread_id,
+            history_limit=history_limit,
         )
         _raise_for_scheduler_error(response_text)
         return response_text

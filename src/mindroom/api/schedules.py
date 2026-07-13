@@ -50,6 +50,7 @@ class ScheduledTaskResponse(BaseModel):
     cron_description: str | None = None
     description: str
     message: str
+    history_limit: int | None = None
     thread_id: str | None = None
     new_thread: bool
     created_by: str | None = None

@@ -22,6 +22,7 @@ def _task(
     description: str = "Ping task",
     thread_id: str | None = "$thread123",
     new_thread: bool = False,
+    history_limit: int | None = None,
 ) -> ScheduledTaskRecord:
     cron_schedule = None
     if cron_fields:
@@ -33,6 +34,7 @@ def _task(
         cron_schedule=cron_schedule,
         message=message,
         description=description,
+        history_limit=history_limit,
         thread_id=thread_id,
         room_id=room_id,
         created_by="@user:localhost",
@@ -80,6 +82,7 @@ def test_list_schedules_success(test_client: TestClient) -> None:
             description="Daily task",
             thread_id=None,
             new_thread=True,
+            history_limit=5,
         ),
     ]
 
@@ -97,9 +100,11 @@ def test_list_schedules_success(test_client: TestClient) -> None:
     tasks_by_id = {task["task_id"]: task for task in data["tasks"]}
     assert tasks_by_id["once1234"]["schedule_type"] == "once"
     assert tasks_by_id["once1234"]["new_thread"] is False
+    assert tasks_by_id["once1234"]["history_limit"] is None
     assert tasks_by_id["cron1234"]["cron_expression"] == "0 9 * * *"
     assert tasks_by_id["cron1234"]["new_thread"] is True
     assert tasks_by_id["cron1234"]["thread_id"] is None
+    assert tasks_by_id["cron1234"]["history_limit"] == 5
 
 
 def test_list_schedules_invalid_cron_does_not_fail(test_client: TestClient) -> None:
