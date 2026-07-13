@@ -41,7 +41,7 @@ class _MindRoomAsyncClient(nio.AsyncClient):
         room_id: str,
         message_type: str,
         content: dict[Any, Any],
-    ) -> tuple[str, dict[str, str]]:
+    ) -> tuple[str, dict[str, Any]]:
         """Expose only the coarse stream state needed for encrypted push routing."""
         encrypted_message_type, encrypted_content = super().encrypt(room_id, message_type, content)
         stream_status = content.get(STREAM_STATUS_KEY)
