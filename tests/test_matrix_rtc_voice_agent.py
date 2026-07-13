@@ -572,6 +572,38 @@ def test_terminal_session_close_reports_api_retryability(api_error: object, retr
     assert callbacks == [retryable]
 
 
+def test_realtime_auth_error_reports_actionable_notice_once_without_secret() -> None:
+    """Provider auth failures explain the operator fix without echoing credentials."""
+    notices: list[str] = []
+    handlers: dict[str, object] = {}
+    session = SimpleNamespace(on=lambda event, callback: handlers.__setitem__(event, callback))
+    bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    error = APIStatusError("invalid_api_key for sk-super-secret", status_code=401)
+    bridge._register_error_listener(
+        session,  # type: ignore[arg-type]
+        VoiceAgentOptions(
+            instructions="Be concise.",
+            model="gpt-realtime-2.1",
+            api_key="sk",
+            on_session_error=notices.append,
+        ),
+    )
+
+    handler = cast("Callable[[object], None]", handlers["error"])
+    event = SimpleNamespace(
+        error=SimpleNamespace(type="realtime_model_error", error=error),
+    )
+    handler(event)
+    handler(event)
+
+    assert len(notices) == 1
+    assert "OpenAI Realtime" in notices[0]
+    assert "Update the credential" in notices[0]
+    assert "restart the MindRoom service" in notices[0]
+    assert "rejoin the call" in notices[0]
+    assert "sk-super-secret" not in notices[0]
+
+
 @pytest.mark.asyncio
 async def test_explicit_bridge_close_does_not_report_termination() -> None:
     """Manager-requested shutdown cannot feed back as an unexpected close."""

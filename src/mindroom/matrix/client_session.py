@@ -65,18 +65,8 @@ class _MindRoomAsyncClient(nio.AsyncClient):
         decrypted = super()._handle_decrypt_to_device(to_device_event)
         if not isinstance(to_device_event, nio.OlmEvent) or not isinstance(decrypted, nio.UnknownToDeviceEvent):
             return decrypted
-        sender_device = decrypted.source.get("sender_device")
-        sender_keys = decrypted.source.get("keys")
-        if not isinstance(sender_device, str) or not isinstance(sender_keys, dict) or self.olm is None:
-            _log_call_key_olm_rejection(decrypted, "missing_sender_identity")
-            return decrypted
-        sender_ed25519 = sender_keys.get("ed25519")
-        if not isinstance(sender_ed25519, str):
-            _log_call_key_olm_rejection(
-                decrypted,
-                "missing_sender_ed25519",
-                sender_device=sender_device,
-            )
+        if self.olm is None:
+            _log_call_key_olm_rejection(decrypted, "missing_olm_machine")
             return decrypted
         matching_devices = [
             device
@@ -87,12 +77,30 @@ class _MindRoomAsyncClient(nio.AsyncClient):
             _log_call_key_olm_rejection(
                 decrypted,
                 "curve25519_device_match_count",
-                sender_device=sender_device,
                 matching_device_count=len(matching_devices),
             )
             return decrypted
         device = matching_devices[0]
-        if device.id != sender_device or device.ed25519 != sender_ed25519:
+
+        # The Olm envelope authenticates possession of ``sender_key`` and nio
+        # verifies that the sender in the decrypted payload matches the
+        # envelope sender. Matrix clients do not all include nio's optional
+        # ``sender_device``/``keys`` fields in custom Olm payloads, so map the
+        # authenticated curve25519 key to the uniquely matching device from
+        # the signed device-key store. If redundant identity fields are
+        # present, continue to enforce them as consistency checks.
+        sender_device = decrypted.source.get("sender_device")
+        sender_keys = decrypted.source.get("keys")
+        sender_ed25519 = sender_keys.get("ed25519") if isinstance(sender_keys, dict) else None
+        if sender_device is not None and sender_device != device.id:
+            _log_call_key_olm_rejection(
+                decrypted,
+                "signed_sender_identity_mismatch",
+                sender_device=sender_device,
+                matched_device_id=device.id,
+            )
+            return decrypted
+        if sender_keys is not None and sender_ed25519 != device.ed25519:
             _log_call_key_olm_rejection(
                 decrypted,
                 "signed_sender_identity_mismatch",

@@ -653,6 +653,7 @@ class CallManager:
                         runtime_paths=self._runtime_paths,
                         storage_path=self._runtime_paths.storage_root,
                     ),
+                    on_failure=lambda message: self._send_call_failure_notice(room_id, message),
                 ),
             )
             await session.start(members)
@@ -746,6 +747,30 @@ class CallManager:
             return
         task = asyncio.create_task(self._handle_session_termination(room, bridge, retryable=retryable))
         self._track_background_task(task, event="call_session_termination_failed", room_id=room.room_id)
+
+    def _schedule_call_failure_notice(self, room_id: str, message: str) -> None:
+        """Publish an asynchronous diagnostic without blocking SDK callbacks."""
+        if self._shutting_down:
+            return
+        task = asyncio.create_task(self._send_call_failure_notice(room_id, message))
+        self._track_background_task(task, event="call_failure_notice_failed", room_id=room_id)
+
+    async def _send_call_failure_notice(self, room_id: str, message: str) -> None:
+        """Post a cross-client Matrix notice explaining a silent call failure."""
+        try:
+            response = await self._client.room_send(
+                room_id,
+                message_type="m.room.message",
+                content={"msgtype": "m.notice", "body": message},
+                ignore_unverified_devices=True,
+            )
+        except _MATRIX_NETWORK_ERRORS as error:
+            logger.warning("call_failure_notice_send_failed", room_id=room_id, error=str(error))
+            return
+        if isinstance(response, nio.RoomSendError):
+            logger.warning("call_failure_notice_send_failed", room_id=room_id, error=response.message)
+            return
+        logger.info("call_failure_notice_sent", room_id=room_id)
 
     async def _handle_session_termination(
         self,
@@ -873,6 +898,9 @@ class CallManager:
         def on_session_terminated(retryable: bool) -> None:
             self._schedule_session_termination(room, bridge, retryable=retryable)
 
+        def on_session_error(message: str) -> None:
+            self._schedule_call_failure_notice(room.room_id, message)
+
         if self._config.calls.backend == "realtime":
             if backend.realtime_api_key is None:
                 msg = "Realtime call API key was not resolved"
@@ -887,6 +915,7 @@ class CallManager:
                 on_conversation_turn=transcript.record,
                 on_tools_executed=transcript.record_tool_use,
                 on_session_terminated=on_session_terminated,
+                on_session_error=on_session_error,
             )
         if backend.stt is None or backend.tts is None or tooling.responder is None:
             msg = "Cascaded call agent was not fully materialized"
@@ -900,6 +929,7 @@ class CallManager:
             on_conversation_turn=transcript.record,
             on_tools_executed=transcript.record_tool_use,
             on_session_terminated=on_session_terminated,
+            on_session_error=on_session_error,
         )
 
     def _resolve_speech_service(

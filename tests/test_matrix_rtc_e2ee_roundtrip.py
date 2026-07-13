@@ -56,8 +56,45 @@ def _olm_pair(tmp: str) -> tuple[Olm, Olm, OlmDevice]:
     return bot, rec, rec_dev
 
 
+def _authenticate_rust_style_event(
+    monkeypatch: pytest.MonkeyPatch,
+    client: nio.AsyncClient,
+    olm_event: nio.OlmEvent,
+    decrypted: AuthenticatedToDeviceEvent,
+) -> nio.ToDeviceEvent | None:
+    """Model matrix-rust-sdk omitting nio's redundant identity fields."""
+    rust_style_source = dict(decrypted.source)
+    rust_style_source.pop("sender_device", None)
+    rust_style_source.pop("keys", None)
+    rust_style_event = nio.UnknownToDeviceEvent.from_dict(rust_style_source)
+    with monkeypatch.context() as context:
+        context.setattr(
+            nio.AsyncClient,
+            "_handle_decrypt_to_device",
+            lambda _self, _event: rust_style_event,
+        )
+        return client._handle_decrypt_to_device(olm_event)
+
+
+async def _decrypt_with_ambiguous_sender(
+    transport: ToDeviceFrameKeyTransport,
+    recipient: nio.AsyncClient,
+    sender_olm: Olm,
+    recipient_olm: Olm,
+    sent: list[nio.ToDeviceMessage],
+    target: CallMember,
+) -> nio.ToDeviceEvent | None:
+    """Add a duplicate curve identity and decrypt a newly sent frame key."""
+    recipient_olm.device_store.add(OlmDevice(BOT, "BOTDUP", sender_olm.account.identity_keys))
+    await transport.send_key(room_id=ROOM, key_base64=KEY_B64, key_index=6, targets=[target])
+    encrypted = nio.OlmEvent.from_dict(
+        {"type": "m.room.encrypted", "sender": BOT, "content": sent[1].content},
+    )
+    return recipient._handle_decrypt_to_device(encrypted)
+
+
 @pytest.mark.asyncio
-async def test_frame_key_round_trips_through_real_olm() -> None:
+async def test_frame_key_round_trips_through_real_olm(monkeypatch: pytest.MonkeyPatch) -> None:
     """A frame key survives olm encryption, decryption, and parsing."""
     with tempfile.TemporaryDirectory() as tmp:
         bot_olm, rec_olm, _rec_dev = _olm_pair(tmp)
@@ -109,6 +146,15 @@ async def test_frame_key_round_trips_through_real_olm() -> None:
                 assert received.key_base64 == KEY_B64
                 assert received.key_index == 5
                 assert received.claimed_device_id == "BOTDEV"
+
+                # matrix-rust-sdk (used by Cinny) does not include nio's
+                # redundant sender_device/keys fields for custom Olm events.
+                # The authenticated Olm envelope sender key must still map to
+                # the unique signed device in the recipient's device store.
+                rust_style = _authenticate_rust_style_event(monkeypatch, rec_client, olm_event, decrypted)
+                assert isinstance(rust_style, AuthenticatedToDeviceEvent)
+                assert rust_style.authenticated_device_id == "BOTDEV"
+
                 spoofed_device = AuthenticatedToDeviceEvent(
                     source=decrypted.source,
                     sender=decrypted.sender,
@@ -117,13 +163,14 @@ async def test_frame_key_round_trips_through_real_olm() -> None:
                 )
                 assert transport.parse_incoming(spoofed_device, received_at_ms=1_001) is None
 
-                duplicate = OlmDevice(BOT, "BOTDUP", bot_olm.account.identity_keys)
-                rec_olm.device_store.add(duplicate)
-                await transport.send_key(room_id=ROOM, key_base64=KEY_B64, key_index=6, targets=[target])
-                ambiguous_olm_event = nio.OlmEvent.from_dict(
-                    {"type": "m.room.encrypted", "sender": BOT, "content": sent[1].content},
+                ambiguous = await _decrypt_with_ambiguous_sender(
+                    transport,
+                    rec_client,
+                    bot_olm,
+                    rec_olm,
+                    sent,
+                    target,
                 )
-                ambiguous = rec_client._handle_decrypt_to_device(ambiguous_olm_event)
                 assert isinstance(ambiguous, nio.UnknownToDeviceEvent)
                 assert not isinstance(ambiguous, AuthenticatedToDeviceEvent)
         finally:

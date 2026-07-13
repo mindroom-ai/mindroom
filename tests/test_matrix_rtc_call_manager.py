@@ -1170,6 +1170,62 @@ async def test_session_distributes_and_applies_first_key_on_start() -> None:
 
 
 @pytest.mark.asyncio
+async def test_session_reports_when_callers_encryption_key_never_arrives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller the agent cannot decrypt receives a directional diagnosis."""
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session._E2EE_READY_TIMEOUT_S", 0)
+    notices: list[str] = []
+
+    async def on_failure(message: str) -> None:
+        notices.append(message)
+
+    client = _client()
+    bridge = FakeBridge()
+    session = _session(client, bridge, FakeKeyTransport(), [1_000])
+    session.deps.on_failure = on_failure
+    await session.start([_member("@alice:example.org", "ALICEDEV")])
+    for _ in range(20):
+        if notices:
+            break
+        await asyncio.sleep(0)
+
+    assert len(notices) == 1
+    assert "cannot decrypt or hear your microphone audio" in notices[0]
+    assert "ALICEDEV" in notices[0]
+    assert "one-time-key" in notices[0]
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_session_reports_when_agents_encryption_key_cannot_be_delivered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller who cannot decrypt the agent receives a directional diagnosis."""
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session._KEY_DISTRIBUTION_RETRY_DELAYS_S", (0.0,))
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session._E2EE_READY_TIMEOUT_S", 60.0)
+    notices: list[str] = []
+
+    async def on_failure(message: str) -> None:
+        notices.append(message)
+
+    transport = RecoveringKeyTransport()
+    session = _session(_client(), FakeBridge(), transport, [1_000])
+    session.deps.on_failure = on_failure
+    await session.start([_member("@alice:example.org", "ALICEDEV")])
+    for _ in range(40):
+        if notices:
+            break
+        await asyncio.sleep(0)
+
+    assert len(notices) == 1
+    assert "you will not hear its audio" in notices[0]
+    assert "ALICEDEV" in notices[0]
+    assert "one-time-key" in notices[0]
+    await session.stop()
+
+
+@pytest.mark.asyncio
 async def test_session_publishes_membership_before_peer_receives_first_key() -> None:
     """A peer can admit the sender's first E2EE key from authoritative membership."""
     sender_client = _client()
@@ -2090,6 +2146,34 @@ async def test_terminal_voice_close_stops_session_and_retries_only_when_allowed(
     assert bridge.closed
     assert manager._sessions == {}
     assert (ROOM_ID in manager._retry_tasks) is retryable
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_voice_runtime_error_is_posted_as_actionable_room_notice(tmp_path: Path) -> None:
+    """A connected-but-broken voice provider cannot fail as silent audio."""
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    client.room_send.return_value = nio.RoomSendResponse("$notice", ROOM_ID)
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    await manager.on_room_event(_room(), _member_unknown_event())
+    assert bridge.agent_options is not None
+    assert bridge.agent_options.on_session_error is not None
+
+    notice = (
+        "Voice call error: OpenAI Realtime rejected the configured credential. "
+        "Update it, restart MindRoom, and rejoin the call."
+    )
+    bridge.agent_options.on_session_error(notice)
+    await asyncio.gather(*list(manager._background_tasks))
+
+    client.room_send.assert_awaited_once_with(
+        ROOM_ID,
+        message_type="m.room.message",
+        content={"msgtype": "m.notice", "body": notice},
+        ignore_unverified_devices=True,
+    )
     await manager.shutdown()
 
 

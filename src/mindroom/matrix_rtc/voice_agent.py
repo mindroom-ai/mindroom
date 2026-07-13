@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from livekit.agents.voice.events import (
         CloseEvent,
         ConversationItemAddedEvent,
+        ErrorEvent,
         FunctionToolsExecutedEvent,
         SpeechCreatedEvent,
     )
@@ -272,6 +273,8 @@ class VoiceAgentOptions:
     on_tools_executed: Callable[[list[str]], None] | None = None
     #: Called after an unexpected terminal SDK close; bool means retryable.
     on_session_terminated: Callable[[bool], None] | None = None
+    #: Called with a safe, actionable user-facing description of a runtime failure.
+    on_session_error: Callable[[str], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -297,6 +300,7 @@ class CascadedVoiceAgentOptions:
     on_conversation_turn: Callable[[str, str], None] | None = None
     on_tools_executed: Callable[[list[str]], None] | None = None
     on_session_terminated: Callable[[bool], None] | None = None
+    on_session_error: Callable[[str], None] | None = None
 
 
 type CallVoiceAgentOptions = VoiceAgentOptions | CascadedVoiceAgentOptions
@@ -313,6 +317,7 @@ class RealtimeVoiceBridge:
         self._session: Any = None
         self._owned_speech_resource_closers: tuple[Callable[[], Awaitable[None]], ...] = ()
         self._session_event_tasks: set[asyncio.Future[None]] = set()
+        self._reported_error_notices: set[str] = set()
         self._audio_input: _AuthorizedParticipantAudioInput | None = None
         self._participant_identities: frozenset[str] = frozenset()
 
@@ -468,6 +473,22 @@ class RealtimeVoiceBridge:
             session.on("function_tools_executed", _on_tools_executed)
 
         self._register_termination_listener(session, options)
+        self._register_error_listener(session, options)
+
+    def _register_error_listener(self, session: AgentSession, options: CallVoiceAgentOptions) -> None:
+        """Turn provider/runtime failures into safe, actionable call notices."""
+        on_error = options.on_session_error
+        if on_error is None:
+            return
+
+        def _on_error(event: ErrorEvent) -> None:
+            notice = _describe_voice_error(event)
+            if notice in self._reported_error_notices:
+                return
+            self._reported_error_notices.add(notice)
+            on_error(notice)
+
+        session.on("error", _on_error)
 
     def _register_conversation_listener(self, session: AgentSession, options: CallVoiceAgentOptions) -> None:
         """Record transcript items and reconcile cascaded assistant playout."""
@@ -651,6 +672,49 @@ class CascadedVoiceBridge(RealtimeVoiceBridge):
         await self._start_session(session, agent, options, rtc_module=rtc, room_io_module=room_io)
         if options.greeting_text:
             session.say(options.greeting_text)
+
+
+def _describe_voice_error(event: ErrorEvent) -> str:
+    """Describe a LiveKit speech failure without leaking provider payloads or keys."""
+    wrapper = event.error
+    underlying = getattr(wrapper, "error", wrapper)
+    status_code = getattr(underlying, "status_code", None)
+    error_text = str(underlying).lower()
+    error_type = getattr(wrapper, "type", "voice_error")
+    component = {
+        "realtime_model_error": "OpenAI Realtime voice model",
+        "stt_error": "speech-to-text service",
+        "tts_error": "text-to-speech service",
+        "llm_error": "language model",
+    }.get(error_type, "voice runtime")
+
+    if status_code in {401, 403} or any(
+        marker in error_text
+        for marker in ("invalid_api_key", "incorrect api key", "authentication", "unauthorized")
+    ):
+        return (
+            f"Voice call error: the {component} rejected MindRoom's configured credential, so the agent "
+            "cannot reliably hear or speak in this call. Update the credential used by the MindRoom runtime, "
+            "restart the MindRoom service so it reloads that credential, then leave and rejoin the call. "
+            "Retrying with the same credential will not fix the call."
+        )
+    if status_code == 429 or "rate limit" in error_text or "rate_limit" in error_text:
+        return (
+            f"Voice call error: the {component} is rate-limiting this MindRoom instance, so the agent may not "
+            "produce a response. Check the provider account's quota/billing and request limits, then retry the "
+            "call after the limit clears."
+        )
+    if status_code is not None and status_code >= 500:
+        return (
+            f"Voice call error: the {component} returned a server-side failure (HTTP {status_code}), so the "
+            "agent may not hear or speak. This is usually temporary; retry after the provider recovers. If it "
+            "continues, inspect the MindRoom service logs for the corresponding provider error."
+        )
+    return (
+        f"Voice call error: the {component} failed, so the agent may not hear or speak in this call. Leave and "
+        "rejoin once. If the problem repeats, inspect the MindRoom service logs for the underlying provider "
+        "error and verify that the configured model, endpoint, credential, quota, and network access are valid."
+    )
 
 
 def _speech_component_kwargs(options: SpeechServiceOptions) -> dict[str, Any]:
