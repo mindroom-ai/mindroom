@@ -6,7 +6,7 @@ import json
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1354,3 +1354,114 @@ async def test_untag_thread_canonical_skips_normalization() -> None:
         "resolved",
         requester_user_id=context.requester_id,
     )
+
+
+# -- vocabulary-aware tool description --
+
+
+def _vocabulary_runtime_paths(tag_count: int = 0) -> Path:
+    """Create a storage root, optionally seeding a ranked vocabulary snapshot."""
+    storage_root = Path(tempfile.mkdtemp())
+    if tag_count:
+        tracking = storage_root / "tracking"
+        tracking.mkdir(parents=True)
+        (tracking / "thread_tag_vocabulary.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "built_at": datetime.now(UTC).isoformat(),
+                    "tags": [{"tag": f"tag{i:02d}", "count": tag_count - i} for i in range(tag_count)],
+                },
+            ),
+        )
+    return storage_root
+
+
+def _tool_runtime_paths(storage_root: Path) -> MagicMock:
+    rp = MagicMock()
+    rp.storage_root = storage_root
+    return rp
+
+
+def test_tag_thread_description_embeds_ranked_vocabulary() -> None:
+    """The tag_thread description lists the top tags ranked, without counts."""
+    tool = ThreadTagsTools(runtime_paths=_tool_runtime_paths(_vocabulary_runtime_paths(tag_count=25)))
+
+    description = tool.async_functions["tag_thread"].description
+
+    assert description is not None
+    assert "rebuilt once a day" in description
+    assert "tag00, tag01" in description
+    assert "tag19" in description
+    assert "tag20" not in description  # capped at the top 20
+    assert "25" not in description.split("Most-used tags", 1)[1]  # no usage counts in the ranked list
+
+
+def test_tag_thread_description_without_snapshot_keeps_guidance() -> None:
+    """With no snapshot on disk the description still carries tagging guidance."""
+    tool = ThreadTagsTools(runtime_paths=_tool_runtime_paths(_vocabulary_runtime_paths()))
+
+    description = tool.async_functions["tag_thread"].description
+
+    assert description is not None
+    assert "Prefer existing tags" in description
+    assert "No tags are in use yet" in description
+
+
+def test_tag_thread_description_untouched_without_runtime_paths() -> None:
+    """Direct construction without runtime paths keeps the plain docstring description."""
+    tool = ThreadTagsTools()
+
+    assert tool.async_functions["tag_thread"].description is None
+
+
+@pytest.mark.asyncio
+async def test_tag_thread_coerces_free_form_tag_input() -> None:
+    """Free-form tag input is coerced to the canonical slug before writing."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            new=AsyncMock(return_value="$ctx-thread:localhost"),
+        ),
+        patch(
+            "mindroom.custom_tools.thread_tags.set_thread_tag",
+            new=AsyncMock(return_value=_state("$ctx-thread:localhost", **{"follow-up": _record()})),
+        ) as mock_set,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.tag_thread("Follow Up"))
+
+    assert payload["status"] == "ok"
+    assert payload["tag"] == "follow-up"
+    mock_set.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        "$ctx-thread:localhost",
+        "follow-up",
+        set_by=context.requester_id,
+        note=None,
+        data=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_tag_thread_rejects_tag_with_no_valid_characters() -> None:
+    """Tag input that coerces to nothing returns a structured error before Matrix I/O."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.set_thread_tag",
+            new=AsyncMock(),
+        ) as mock_set,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.tag_thread("!!!"))
+
+    assert payload["status"] == "error"
+    assert "at least one letter" in payload["message"]
+    mock_set.assert_not_awaited()

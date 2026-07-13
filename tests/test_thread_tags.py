@@ -13,9 +13,11 @@ import pytest
 from mindroom.matrix.client_thread_history import RoomThreadsPageError, enumerate_room_thread_root_ids
 from mindroom.matrix.conversation_cache import resolve_thread_root_event_id_for_client
 from mindroom.thread_tags import (
+    COERCED_TAG_MAX_LENGTH,
     THREAD_TAGS_EVENT_TYPE,
     ThreadTagsError,
     ThreadTagsListing,
+    coerce_tag_name,
     get_thread_tags,
     list_tagged_threads,
     remove_thread_tag,
@@ -1581,6 +1583,36 @@ async def test_set_thread_tag_rejects_invalid_tag_names(tag: str) -> None:
         )
 
     client.room_get_state_event.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("raw_tag", "expected"),
+    [
+        ("bug", "bug"),
+        ("  Follow Up  ", "follow-up"),
+        ("Feature\tRequest", "feature-request"),
+        ("needs_underscore", "needs-underscore"),
+        ("Beta -- Release!", "beta-release"),
+        ("-leading-and-trailing-", "leading-and-trailing"),
+        ("x" * (COERCED_TAG_MAX_LENGTH + 10), "x" * COERCED_TAG_MAX_LENGTH),
+    ],
+)
+def test_coerce_tag_name_normalizes_free_form_input(raw_tag: str, expected: str) -> None:
+    """Coercion lowercases, hyphenates separators, and truncates to the cap."""
+    assert coerce_tag_name(raw_tag) == expected
+
+
+@pytest.mark.parametrize("raw_tag", ["", "   ", "!!!", "---", None, 42])
+def test_coerce_tag_name_returns_none_when_nothing_survives(raw_tag: object) -> None:
+    """Input with no valid characters coerces to None instead of raising."""
+    assert coerce_tag_name(raw_tag) is None
+
+
+def test_coerce_tag_name_strips_hyphen_left_by_truncation() -> None:
+    """A truncation cut landing on a separator must not leave a trailing hyphen."""
+    raw_tag = "x" * (COERCED_TAG_MAX_LENGTH - 1) + " tail"
+
+    assert coerce_tag_name(raw_tag) == "x" * (COERCED_TAG_MAX_LENGTH - 1)
 
 
 @pytest.mark.asyncio

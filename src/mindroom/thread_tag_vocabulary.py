@@ -32,8 +32,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-VOCABULARY_DESCRIPTION_TAG_LIMIT = 20
-REBUILD_BOUNDARY_HOUR = 4
+_VOCABULARY_DESCRIPTION_TAG_LIMIT = 20
+_REBUILD_BOUNDARY_HOUR = 4
 _VOCABULARY_FILENAME = "thread_tag_vocabulary.json"
 _SNAPSHOT_VERSION = 1
 
@@ -44,7 +44,7 @@ _rebuild_lock = asyncio.Lock()
 
 
 @dataclass(frozen=True, slots=True)
-class TagUsage:
+class _TagUsage:
     """One tag with its usage count across threads."""
 
     tag: str
@@ -52,11 +52,11 @@ class TagUsage:
 
 
 @dataclass(frozen=True, slots=True)
-class TagVocabularySnapshot:
+class _TagVocabularySnapshot:
     """Ranked tag-usage snapshot with its build timestamp."""
 
     built_at: datetime
-    tags: tuple[TagUsage, ...]
+    tags: tuple[_TagUsage, ...]
 
 
 def _snapshot_path(runtime_paths: RuntimePaths) -> Path:
@@ -76,7 +76,7 @@ def _parse_built_at(value: object) -> datetime | None:
     return built_at
 
 
-def _parse_tag_usage_entry(entry: object) -> TagUsage | None:
+def _parse_tag_usage_entry(entry: object) -> _TagUsage | None:
     """Parse one persisted tag-usage entry."""
     if not isinstance(entry, Mapping):
         return None
@@ -85,10 +85,10 @@ def _parse_tag_usage_entry(entry: object) -> TagUsage | None:
     count = typed_entry.get("count")
     if not isinstance(tag, str) or not isinstance(count, int):
         return None
-    return TagUsage(tag=tag, count=count)
+    return _TagUsage(tag=tag, count=count)
 
 
-def _parse_snapshot_payload(payload: object) -> TagVocabularySnapshot | None:
+def _parse_snapshot_payload(payload: object) -> _TagVocabularySnapshot | None:
     """Parse one persisted snapshot payload, treating malformed data as absent."""
     if not isinstance(payload, Mapping):
         return None
@@ -101,17 +101,17 @@ def _parse_snapshot_payload(payload: object) -> TagVocabularySnapshot | None:
     raw_tags = typed_payload.get("tags")
     if not isinstance(raw_tags, list):
         return None
-    usages: list[TagUsage] = []
+    usages: list[_TagUsage] = []
     for entry in raw_tags:
         usage = _parse_tag_usage_entry(entry)
         if usage is None:
             return None
         usages.append(usage)
 
-    return TagVocabularySnapshot(built_at=built_at, tags=tuple(usages))
+    return _TagVocabularySnapshot(built_at=built_at, tags=tuple(usages))
 
 
-def load_tag_vocabulary_snapshot(runtime_paths: RuntimePaths) -> TagVocabularySnapshot | None:
+def load_tag_vocabulary_snapshot(runtime_paths: RuntimePaths) -> _TagVocabularySnapshot | None:
     """Load the persisted vocabulary snapshot, or None when absent or malformed."""
     path = _snapshot_path(runtime_paths)
     try:
@@ -126,17 +126,17 @@ def load_tag_vocabulary_snapshot(runtime_paths: RuntimePaths) -> TagVocabularySn
     return _parse_snapshot_payload(payload)
 
 
-def most_recent_rebuild_boundary(now: datetime, timezone_name: str) -> datetime:
+def _most_recent_rebuild_boundary(now: datetime, timezone_name: str) -> datetime:
     """Return the most recent daily rebuild boundary at or before *now*."""
     local_now = now.astimezone(ZoneInfo(timezone_name))
-    boundary = local_now.replace(hour=REBUILD_BOUNDARY_HOUR, minute=0, second=0, microsecond=0)
+    boundary = local_now.replace(hour=_REBUILD_BOUNDARY_HOUR, minute=0, second=0, microsecond=0)
     if local_now < boundary:
         boundary -= timedelta(days=1)
     return boundary
 
 
-def snapshot_is_stale(
-    snapshot: TagVocabularySnapshot | None,
+def _snapshot_is_stale(
+    snapshot: _TagVocabularySnapshot | None,
     *,
     now: datetime,
     timezone_name: str,
@@ -144,7 +144,7 @@ def snapshot_is_stale(
     """Return whether the snapshot predates the most recent daily boundary."""
     if snapshot is None:
         return True
-    return snapshot.built_at < most_recent_rebuild_boundary(now, timezone_name)
+    return snapshot.built_at < _most_recent_rebuild_boundary(now, timezone_name)
 
 
 def vocabulary_check_due(config: Config, *, now: datetime) -> bool:
@@ -155,7 +155,7 @@ def vocabulary_check_due(config: Config, *, now: datetime) -> bool:
     """
     if _last_confirmed_fresh_boundary is None:
         return True
-    return _last_confirmed_fresh_boundary < most_recent_rebuild_boundary(now, config.timezone)
+    return _last_confirmed_fresh_boundary < _most_recent_rebuild_boundary(now, config.timezone)
 
 
 async def _count_tag_usage(client: nio.AsyncClient) -> Counter[str]:
@@ -176,13 +176,13 @@ async def _count_tag_usage(client: nio.AsyncClient) -> Counter[str]:
     return usage
 
 
-def _ranked_tag_usage(usage: Counter[str]) -> tuple[TagUsage, ...]:
+def _ranked_tag_usage(usage: Counter[str]) -> tuple[_TagUsage, ...]:
     """Rank tags by usage count descending, tie-broken alphabetically."""
     ranked = sorted(usage.items(), key=lambda item: (-item[1], item[0]))
-    return tuple(TagUsage(tag=tag, count=count) for tag, count in ranked)
+    return tuple(_TagUsage(tag=tag, count=count) for tag, count in ranked)
 
 
-def _write_snapshot(runtime_paths: RuntimePaths, snapshot: TagVocabularySnapshot) -> None:
+def _write_snapshot(runtime_paths: RuntimePaths, snapshot: _TagVocabularySnapshot) -> None:
     """Persist one snapshot durably."""
     payload = {
         "version": _SNAPSHOT_VERSION,
@@ -206,37 +206,37 @@ async def maybe_rebuild_tag_vocabulary(
     """
     global _last_confirmed_fresh_boundary
     async with _rebuild_lock:
-        boundary = most_recent_rebuild_boundary(now, config.timezone)
+        boundary = _most_recent_rebuild_boundary(now, config.timezone)
         if _last_confirmed_fresh_boundary is not None and _last_confirmed_fresh_boundary >= boundary:
             return False
 
         snapshot = load_tag_vocabulary_snapshot(runtime_paths)
-        if not snapshot_is_stale(snapshot, now=now, timezone_name=config.timezone):
+        if not _snapshot_is_stale(snapshot, now=now, timezone_name=config.timezone):
             _last_confirmed_fresh_boundary = boundary
             return False
 
         usage = await _count_tag_usage(client)
-        rebuilt = TagVocabularySnapshot(built_at=now, tags=_ranked_tag_usage(usage))
+        rebuilt = _TagVocabularySnapshot(built_at=now, tags=_ranked_tag_usage(usage))
         _write_snapshot(runtime_paths, rebuilt)
         _last_confirmed_fresh_boundary = boundary
         logger.info(
             "Rebuilt thread tag vocabulary snapshot",
             tag_count=len(rebuilt.tags),
-            top_tags=[usage.tag for usage in rebuilt.tags[:VOCABULARY_DESCRIPTION_TAG_LIMIT]],
+            top_tags=[usage.tag for usage in rebuilt.tags[:_VOCABULARY_DESCRIPTION_TAG_LIMIT]],
         )
         return True
 
 
-def format_tag_vocabulary_for_description(snapshot: TagVocabularySnapshot | None) -> str:
+def format_tag_vocabulary_for_description(snapshot: _TagVocabularySnapshot | None) -> str:
     """Format the ranked tag list (without counts) for the tag_thread tool description."""
     if snapshot is None or not snapshot.tags:
         return "No tags are in use yet; coin sensible new ones."
-    ranked_tags = ", ".join(usage.tag for usage in snapshot.tags[:VOCABULARY_DESCRIPTION_TAG_LIMIT])
+    ranked_tags = ", ".join(usage.tag for usage in snapshot.tags[:_VOCABULARY_DESCRIPTION_TAG_LIMIT])
     return f"Most-used tags, ranked (this list is rebuilt once a day): {ranked_tags}"
 
 
-def format_tag_vocabulary_with_counts(snapshot: TagVocabularySnapshot | None) -> str:
+def format_tag_vocabulary_with_counts(snapshot: _TagVocabularySnapshot | None) -> str:
     """Format the ranked tag list with usage counts for the auto-tagger prompt."""
     if snapshot is None or not snapshot.tags:
         return "(no tags in use yet)"
-    return "\n".join(f"- {usage.tag} ({usage.count})" for usage in snapshot.tags[:VOCABULARY_DESCRIPTION_TAG_LIMIT])
+    return "\n".join(f"- {usage.tag} ({usage.count})" for usage in snapshot.tags[:_VOCABULARY_DESCRIPTION_TAG_LIMIT])
