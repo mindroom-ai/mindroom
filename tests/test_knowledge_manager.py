@@ -37,6 +37,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateK
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.credentials_sync import get_embedder_api_key
 from mindroom.embedder_health import record_embedder_health
 from mindroom.knowledge import KnowledgeRefreshScheduler, resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
@@ -64,6 +65,8 @@ from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_p
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Coroutine, Iterator
+
+    from mindroom.constants import RuntimePaths
 
 
 class _Collection:
@@ -263,12 +266,14 @@ def _config(
     git_configs: dict[str, KnowledgeGitConfig] | None = None,
     watch: bool = False,
     modes: dict[str, str] | None = None,
+    memory: dict[str, object] | None = None,
 ) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
     return bind_runtime_paths(
         Config(
             agents={"helper": AgentConfig(display_name="Helper", knowledge_bases=agent_bases)},
             models={},
+            memory=memory or {},
             knowledge_bases={
                 base_id: KnowledgeBaseConfig(
                     path=str(path),
@@ -5910,6 +5915,110 @@ def test_publish_knowledge_index_caches_handle_without_collection_leases(tmp_pat
     )
 
     assert knowledge_registry._published_indexes[key] is index
+
+
+def _write_queryable_index_state(
+    key: knowledge_registry.PublishedIndexKey,
+    *,
+    collection: str,
+) -> None:
+    _VectorDb.collections[collection] = []
+    published_index_metadata_path(key).parent.mkdir(parents=True, exist_ok=True)
+    knowledge_registry.save_published_index_state(
+        published_index_metadata_path(key),
+        knowledge_registry.PublishedIndexState(
+            settings=key.indexing_settings,
+            status="complete",
+            collection=collection,
+            indexed_count=0,
+            source_signature="credential-rotation-test",
+        ),
+    )
+
+
+def test_cached_handle_rebuilds_after_dashboard_embedder_credential_rotation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Credential save/delete replaces the cached client without rebuilding vectors."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    _write_queryable_index_state(key, collection="credential_rotation")
+    manager = get_runtime_shared_credentials_manager(runtime_paths)
+    manager.save_credentials("openai", {"api_key": "fallback-key"})
+    manager.save_credentials("embedder", {"api_key": "old-key"})
+    constructed_keys: list[str] = []
+
+    def capture_embedder(_config: Config, _runtime_paths: RuntimePaths) -> object:
+        constructed_keys.append(get_embedder_api_key(_runtime_paths))
+        return object()
+
+    monkeypatch.setattr(knowledge_registry, "create_configured_embedder", capture_embedder)
+
+    first = get_published_index("docs", config=config, runtime_paths=runtime_paths)
+    manager.save_credentials("embedder", {"api_key": "new-key"})
+    second = get_published_index("docs", config=config, runtime_paths=runtime_paths)
+    manager.delete_credentials("embedder")
+    third = get_published_index("docs", config=config, runtime_paths=runtime_paths)
+
+    assert first.index is not None
+    assert second.index is not None
+    assert third.index is not None
+    assert first.index is not second.index
+    assert second.index is not third.index
+    assert constructed_keys == ["old-key", "new-key", "fallback-key"]
+    assert first.index.embedder_signature is not None
+    assert second.index.embedder_signature is not None
+    assert "old-key" not in first.index.embedder_signature
+    assert "new-key" not in second.index.embedder_signature
+
+
+def test_cached_handle_rebuilds_after_explicit_embedder_key_reload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A config hot reload replaces a handle that captured the old explicit key."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    old_config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        memory={"embedder": {"config": {"api_key": "explicit-old"}}},
+    )
+    new_config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        memory={"embedder": {"config": {"api_key": "explicit-new"}}},
+    )
+    runtime_paths = runtime_paths_for(old_config)
+    key = resolve_published_index_key("docs", config=old_config, runtime_paths=runtime_paths)
+    assert key == resolve_published_index_key("docs", config=new_config, runtime_paths=runtime_paths)
+    _write_queryable_index_state(key, collection="explicit_key_rotation")
+    constructed_keys: list[str] = []
+
+    def capture_embedder(config: Config, _runtime_paths: RuntimePaths) -> object:
+        constructed_keys.append(
+            get_embedder_api_key(
+                _runtime_paths,
+                explicit_api_key=config.memory.embedder.config.api_key,
+            ),
+        )
+        return object()
+
+    monkeypatch.setattr(knowledge_registry, "create_configured_embedder", capture_embedder)
+
+    first = get_published_index("docs", config=old_config, runtime_paths=runtime_paths)
+    second = get_published_index("docs", config=new_config, runtime_paths=runtime_paths)
+
+    assert first.index is not None
+    assert second.index is not None
+    assert first.index is not second.index
+    assert constructed_keys == ["explicit-old", "explicit-new"]
 
 
 @pytest.mark.asyncio

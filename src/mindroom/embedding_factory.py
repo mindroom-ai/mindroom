@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import TYPE_CHECKING
 
 from mindroom.credentials_sync import get_embedder_api_key, get_ollama_host
@@ -65,3 +66,27 @@ def create_configured_embedder(
         "Supported providers: openai, ollama, sentence_transformers"
     )
     raise ValueError(msg)
+
+
+def embedder_runtime_signature(config: Config, runtime_paths: RuntimePaths) -> str:
+    """Return a non-secret fingerprint of the effective runtime embedder."""
+    provider = config.memory.embedder.provider
+    embedder_config = config.memory.embedder.config
+    if provider == "openai":
+        runtime_values = (
+            provider,
+            embedder_config.model,
+            embedder_config.host,
+            embedder_config.dimensions,
+            get_embedder_api_key(runtime_paths, explicit_api_key=embedder_config.api_key),
+        )
+    elif provider == "ollama":
+        runtime_values = (
+            provider,
+            embedder_config.model,
+            get_ollama_host(runtime_paths=runtime_paths) or embedder_config.host or OLLAMA_HOST_DEFAULT,
+            embedder_config.dimensions,
+        )
+    else:
+        runtime_values = (provider, embedder_config.model, embedder_config.dimensions)
+    return hashlib.sha256(repr(runtime_values).encode()).hexdigest()

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Literal, ParamSpec, Protocol, TypeVar, cast
 
 from agno.vectordb.chroma import ChromaDb
 
-from mindroom.embedding_factory import create_configured_embedder
+from mindroom.embedding_factory import create_configured_embedder, embedder_runtime_signature
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.index_metadata import (
     coerce_nonnegative_metadata_int,
@@ -105,6 +105,7 @@ class _PublishedIndexHandle:
     knowledge: Knowledge
     state: PublishedIndexState
     metadata_path: Path
+    embedder_signature: str | None = None
 
 
 @dataclass(frozen=True)
@@ -644,10 +645,13 @@ def get_published_index(
     metadata_path = published_index_metadata_path(key)
     state = load_published_index_state(metadata_path)
     availability = _published_index_availability(key=key, state=state, metadata_exists=metadata_path.exists())
+    current_embedder_signature = embedder_runtime_signature(config, runtime_paths)
 
     index = _published_indexes.get(key)
     if index is not None:
         if (
+            index.embedder_signature == current_embedder_signature
+            and
             state is not None
             and _cached_index_matches_persisted_state(index, state)
             and _cached_index_still_queryable(index)
@@ -704,6 +708,7 @@ def get_published_index(
         knowledge=knowledge,
         state=state,
         metadata_path=published_index_metadata_path(key),
+        embedder_signature=current_embedder_signature,
     )
     _cache_published_index(index)
     return PublishedIndexResolution(
@@ -721,6 +726,7 @@ def _publish_knowledge_index(
     knowledge: Knowledge,
     state: PublishedIndexState,
     metadata_path: Path | None = None,
+    embedder_signature: str | None = None,
 ) -> _PublishedIndexHandle:
     """Publish a read handle in this process."""
     _evict_published_indexes_for_refresh_target(refresh_target_for_published_index_key(key))
@@ -729,6 +735,7 @@ def _publish_knowledge_index(
         knowledge=knowledge,
         state=state,
         metadata_path=metadata_path or published_index_metadata_path(key),
+        embedder_signature=embedder_signature,
     )
     _cache_published_index(index)
     return index
@@ -746,7 +753,13 @@ def publish_knowledge_index_from_state(
     knowledge = _load_queryable_index_from_state(key, state, config=config, runtime_paths=runtime_paths)
     if knowledge is None:
         return None
-    return _publish_knowledge_index(key, knowledge=knowledge, state=state, metadata_path=metadata_path)
+    return _publish_knowledge_index(
+        key,
+        knowledge=knowledge,
+        state=state,
+        metadata_path=metadata_path,
+        embedder_signature=embedder_runtime_signature(config, runtime_paths),
+    )
 
 
 def _same_physical_binding(key: PublishedIndexKey, refresh_target: KnowledgeRefreshTarget) -> bool:
