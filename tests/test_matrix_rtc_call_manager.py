@@ -2171,7 +2171,11 @@ async def test_voice_runtime_error_is_posted_as_actionable_room_notice(tmp_path:
     client.room_send.assert_awaited_once_with(
         ROOM_ID,
         message_type="m.room.message",
-        content={"msgtype": "m.notice", "body": notice},
+        content={
+            "msgtype": "m.notice",
+            "body": notice,
+            "chat.mindroom.call_failure": {"version": 1},
+        },
         ignore_unverified_devices=True,
     )
     await manager.shutdown()

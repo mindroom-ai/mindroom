@@ -761,7 +761,11 @@ class CallManager:
             response = await self._client.room_send(
                 room_id,
                 message_type="m.room.message",
-                content={"msgtype": "m.notice", "body": message},
+                content={
+                    "msgtype": "m.notice",
+                    "body": message,
+                    "chat.mindroom.call_failure": {"version": 1},
+                },
                 ignore_unverified_devices=True,
             )
         except _MATRIX_NETWORK_ERRORS as error:
