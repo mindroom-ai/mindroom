@@ -271,6 +271,7 @@ class ThreadMutationResolver:
                 return await self._redaction_impact_from_thread_index(
                     room_id,
                     redacted_event_id,
+                    event_id=event_id,
                     resolution_context=resolution_context,
                 )
             if not _redaction_can_affect_thread_cache(target_event_info):
@@ -299,6 +300,7 @@ class ThreadMutationResolver:
         room_id: str,
         redacted_event_id: str,
         *,
+        event_id: str | None,
         resolution_context: MutationResolutionContext | None,
     ) -> MutationThreadImpact:
         """Scope one metadata-less redaction to the thread the cache index already knows.
@@ -318,6 +320,7 @@ class ThreadMutationResolver:
             self.logger.warning(
                 "Redaction thread-index fallback failed; failing closed",
                 room_id=room_id,
+                event_id=event_id,
                 redacted_event_id=redacted_event_id,
                 error=str(exc),
             )
@@ -327,6 +330,7 @@ class ThreadMutationResolver:
         self.logger.info(
             "Scoped metadata-less redaction to its cached thread",
             room_id=room_id,
+            event_id=event_id,
             redacted_event_id=redacted_event_id,
             thread_id=thread_id,
         )
