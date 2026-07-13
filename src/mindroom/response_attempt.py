@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.message_target import MessageTarget
-    from mindroom.pending_resume_store import PendingResumeTracker
+    from mindroom.pending_resume_store import PendingResumeRecord, PendingResumeTracker
     from mindroom.stop import StopManager
     from mindroom.timing import DispatchPipelineTiming
 
@@ -145,8 +145,9 @@ class ResponseAttemptRunner:
                 initial_message_id = await self._send_thinking_message(request)
 
             message_id = request.existing_event_id or initial_message_id
+            pending_resume_record: PendingResumeRecord | None = None
             if message_id is not None:
-                self.deps.pending_resume.note_started(
+                pending_resume_record = self.deps.pending_resume.note_started(
                     message_id,
                     target=request.target,
                     requester_user_id=request.user_id,
@@ -196,7 +197,7 @@ class ResponseAttemptRunner:
                 raise
             finally:
                 if message_id is not None:
-                    self.deps.pending_resume.note_settled(request.target, resumable=resume_pending)
+                    self.deps.pending_resume.note_settled(pending_resume_record, resumable=resume_pending)
                 tracked = self.deps.stop_manager.tracked_messages.get(tracked_message_id)
                 button_already_removed = tracked is None or tracked.reaction_event_id is None
                 self.deps.stop_manager.clear_message(

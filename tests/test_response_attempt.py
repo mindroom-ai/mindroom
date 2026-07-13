@@ -14,6 +14,7 @@ from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.message_target import MessageTarget
+from mindroom.pending_resume_store import PendingResumeRecord
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 
 
@@ -83,7 +84,8 @@ class _DeliveryGateway:
 class _PendingResume:
     def __init__(self) -> None:
         self.started: list[tuple[str, MessageTarget, str | None]] = []
-        self.settled: list[tuple[MessageTarget, bool]] = []
+        self.started_records: list[PendingResumeRecord] = []
+        self.settled: list[tuple[PendingResumeRecord | None, bool]] = []
 
     def note_started(
         self,
@@ -91,11 +93,23 @@ class _PendingResume:
         *,
         target: MessageTarget,
         requester_user_id: str | None,
-    ) -> None:
+    ) -> PendingResumeRecord | None:
         self.started.append((target_event_id, target, requester_user_id))
+        if target.resolved_thread_id is None:
+            return None
+        record = PendingResumeRecord(
+            agent_name="test_agent",
+            room_id=target.room_id,
+            thread_id=target.resolved_thread_id,
+            target_event_id=target_event_id,
+            requester_user_id=requester_user_id,
+            created_at_ms=1_000,
+        )
+        self.started_records.append(record)
+        return record
 
-    def note_settled(self, target: MessageTarget, *, resumable: bool) -> None:
-        self.settled.append((target, resumable))
+    def note_settled(self, record: PendingResumeRecord | None, *, resumable: bool) -> None:
+        self.settled.append((record, resumable))
 
 
 def _runner(
@@ -387,7 +401,7 @@ async def test_response_attempt_records_then_discards_pending_resume_for_complet
     )
 
     assert pending_resume.started == [("$thinking", target, "@user:localhost")]
-    assert pending_resume.settled == [(target, False)]
+    assert pending_resume.settled == [(pending_resume.started_records[0], False)]
 
 
 @pytest.mark.asyncio
@@ -420,7 +434,7 @@ async def test_response_attempt_keeps_pending_resume_only_for_non_user_cancellat
     )
 
     assert pending_resume.started == [("$existing", target, None)]
-    assert pending_resume.settled == [(target, expected_resumable)]
+    assert pending_resume.settled == [(pending_resume.started_records[0], expected_resumable)]
 
 
 @pytest.mark.asyncio
@@ -443,7 +457,7 @@ async def test_response_attempt_discards_pending_resume_when_generation_errors()
             ),
         )
 
-    assert pending_resume.settled == [(target, False)]
+    assert pending_resume.settled == [(pending_resume.started_records[0], False)]
 
 
 @pytest.mark.asyncio

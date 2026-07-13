@@ -86,17 +86,31 @@ def test_records_for_distinct_agents_and_threads_coexist(tmp_path: Path) -> None
     }
 
 
-def test_discard_removes_only_named_keys(tmp_path: Path) -> None:
-    """Discarding consumes exactly the evaluated conversations."""
+def test_discard_removes_only_matching_records(tmp_path: Path) -> None:
+    """Discarding consumes exactly the evaluated record versions."""
     ledger_path = tmp_path / "pending_resumes.json"
     kept = _record(agent_name="other")
     dropped = _record()
     _upsert_pending_resume_record(ledger_path, kept)
     _upsert_pending_resume_record(ledger_path, dropped)
 
-    discard_pending_resume_records(ledger_path, (dropped.key, "missing|!x:y|$z"))
+    missing = _record(agent_name="missing", thread_id="$z")
+    discard_pending_resume_records(ledger_path, (record for record in (dropped, missing)))
 
     assert load_pending_resume_records(ledger_path) == {kept.key: kept}
+
+
+def test_discard_preserves_a_newer_record_for_the_same_conversation(tmp_path: Path) -> None:
+    """Settling an old attempt must not delete a replacement written under the same key."""
+    ledger_path = tmp_path / "pending_resumes.json"
+    old = _record(target_event_id="$old", created_at_ms=1_000)
+    replacement = _record(target_event_id="$new", created_at_ms=2_000)
+    _upsert_pending_resume_record(ledger_path, old)
+    _upsert_pending_resume_record(ledger_path, replacement)
+
+    discard_pending_resume_records(ledger_path, (old,))
+
+    assert load_pending_resume_records(ledger_path) == {replacement.key: replacement}
 
 
 def test_load_tolerates_missing_corrupt_and_malformed_ledgers(tmp_path: Path) -> None:
@@ -137,7 +151,7 @@ def test_tracker_records_thread_turn_and_discards_on_terminal_settle(tmp_path: P
     tracker = PendingResumeTracker(ledger_path=ledger_path, agent_name="test_agent")
     target = MessageTarget.resolve(ROOM_ID, THREAD_ID, "$reply")
 
-    tracker.note_started("$target", target=target, requester_user_id="@user:example.com")
+    record = tracker.note_started("$target", target=target, requester_user_id="@user:example.com")
 
     records = load_pending_resume_records(ledger_path)
     assert set(records) == {f"test_agent|{ROOM_ID}|{THREAD_ID}"}
@@ -146,10 +160,10 @@ def test_tracker_records_thread_turn_and_discards_on_terminal_settle(tmp_path: P
     assert record.requester_user_id == "@user:example.com"
     assert record.created_at_ms > 0
 
-    tracker.note_settled(target, resumable=True)
+    tracker.note_settled(record, resumable=True)
     assert set(load_pending_resume_records(ledger_path)) == {f"test_agent|{ROOM_ID}|{THREAD_ID}"}
 
-    tracker.note_settled(target, resumable=False)
+    tracker.note_settled(record, resumable=False)
     assert load_pending_resume_records(ledger_path) == {}
 
 
@@ -159,8 +173,8 @@ def test_tracker_skips_room_mode_turns(tmp_path: Path) -> None:
     tracker = PendingResumeTracker(ledger_path=ledger_path, agent_name="test_agent")
     target = MessageTarget.resolve(ROOM_ID, None, "$reply", room_mode=True)
 
-    tracker.note_started("$target", target=target, requester_user_id="@user:example.com")
-    tracker.note_settled(target, resumable=False)
+    record = tracker.note_started("$target", target=target, requester_user_id="@user:example.com")
+    tracker.note_settled(record, resumable=False)
 
     assert not ledger_path.exists()
 
@@ -172,5 +186,5 @@ def test_tracker_contains_ledger_write_failures(tmp_path: Path) -> None:
     tracker = PendingResumeTracker(ledger_path=blocked_path, agent_name="test_agent")
     target = MessageTarget.resolve(ROOM_ID, THREAD_ID, "$reply")
 
-    tracker.note_started("$target", target=target, requester_user_id=None)
-    tracker.note_settled(target, resumable=False)
+    record = tracker.note_started("$target", target=target, requester_user_id=None)
+    tracker.note_settled(record, resumable=False)

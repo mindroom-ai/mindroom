@@ -30,6 +30,11 @@ logger = get_logger(__name__)
 _LEDGER_FILENAME = "pending_resumes.json"
 
 
+def pending_resume_key(*, agent_name: str, room_id: str, thread_id: str) -> str:
+    """Return the one-record-per-conversation ledger key."""
+    return f"{agent_name}|{room_id}|{thread_id}"
+
+
 @dataclass(frozen=True)
 class PendingResumeRecord:
     """One persisted in-flight visible turn that may need restart auto-resume."""
@@ -44,7 +49,11 @@ class PendingResumeRecord:
     @property
     def key(self) -> str:
         """Return the one-record-per-conversation ledger key."""
-        return f"{self.agent_name}|{self.room_id}|{self.thread_id}"
+        return pending_resume_key(
+            agent_name=self.agent_name,
+            room_id=self.room_id,
+            thread_id=self.thread_id,
+        )
 
     def to_payload(self) -> dict[str, object]:
         """Return the JSON-safe ledger payload for this record."""
@@ -126,10 +135,16 @@ def _upsert_pending_resume_record(ledger_path: Path, record: PendingResumeRecord
     _write_records(ledger_path, records)
 
 
-def discard_pending_resume_records(ledger_path: Path, keys: Iterable[str]) -> None:
-    """Remove the given conversation keys from the ledger when present."""
+def discard_pending_resume_records(
+    ledger_path: Path,
+    expected_records: Iterable[PendingResumeRecord],
+) -> None:
+    """Remove records only when the ledger still contains the evaluated version."""
+    expected_by_key = {record.key: record for record in expected_records}
+    if not expected_by_key:
+        return
     records = load_pending_resume_records(ledger_path)
-    remaining = {key: record for key, record in records.items() if key not in set(keys)}
+    remaining = {key: record for key, record in records.items() if expected_by_key.get(key) != record}
     if len(remaining) != len(records):
         _write_records(ledger_path, remaining)
 
@@ -160,10 +175,10 @@ class PendingResumeTracker:
         *,
         target: MessageTarget,
         requester_user_id: str | None,
-    ) -> None:
+    ) -> PendingResumeRecord | None:
         """Persist one in-flight visible turn; room-level turns are not resumable."""
         if target.resolved_thread_id is None:
-            return
+            return None
         record = PendingResumeRecord(
             agent_name=self.agent_name,
             room_id=target.room_id,
@@ -176,13 +191,13 @@ class PendingResumeTracker:
             _upsert_pending_resume_record(self.ledger_path, record)
         except Exception as exc:
             logger.warning("Failed to persist pending-resume record", key=record.key, error=str(exc))
+        return record
 
-    def note_settled(self, target: MessageTarget, *, resumable: bool) -> None:
+    def note_settled(self, record: PendingResumeRecord | None, *, resumable: bool) -> None:
         """Drop the turn's record when it settled in a user-visible terminal state."""
-        if resumable or target.resolved_thread_id is None:
+        if resumable or record is None:
             return
-        key = f"{self.agent_name}|{target.room_id}|{target.resolved_thread_id}"
         try:
-            discard_pending_resume_records(self.ledger_path, (key,))
+            discard_pending_resume_records(self.ledger_path, (record,))
         except Exception as exc:
-            logger.warning("Failed to discard pending-resume record", key=key, error=str(exc))
+            logger.warning("Failed to discard pending-resume record", key=record.key, error=str(exc))

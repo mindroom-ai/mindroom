@@ -52,6 +52,7 @@ from mindroom.matrix.thread_projection import (
 from mindroom.pending_resume_store import (
     discard_pending_resume_records,
     load_pending_resume_records,
+    pending_resume_key,
     pending_resume_ledger_path,
 )
 from mindroom.streaming import (
@@ -106,6 +107,36 @@ class InterruptedThread:
     agent_name: str
     original_sender_id: str | None = None
     timestamp_ms: int = field(default=0, compare=False)
+
+
+@dataclass(frozen=True)
+class _AutoResumeResult:
+    """Resume delivery count plus durable intents that reached a settled outcome."""
+
+    resumed_count: int
+    settled_keys: frozenset[str]
+
+
+@dataclass(frozen=True)
+class _AutoResumeFreshness:
+    """Whether one candidate is authoritatively still the latest human work."""
+
+    is_latest: bool
+    is_authoritative: bool
+
+
+def _should_skip_auto_resume_candidate(
+    freshness: _AutoResumeFreshness,
+    *,
+    candidate_key: str,
+    settled_keys: set[str],
+) -> bool:
+    """Record authoritative suppression and report whether delivery should be skipped."""
+    if freshness.is_latest:
+        return False
+    if freshness.is_authoritative:
+        settled_keys.add(candidate_key)
+    return True
 
 
 @dataclass
@@ -225,22 +256,34 @@ async def auto_resume_interrupted_threads(
     conversation_cache: ConversationCacheProtocol | None = None,
     max_resumes: int | None = None,
     delay: float = 2.0,
-) -> int:
+) -> _AutoResumeResult:
     """Send resume prompts for interrupted threaded conversations."""
     if not interrupted or (max_resumes is not None and max_resumes <= 0):
-        return 0
+        return _AutoResumeResult(resumed_count=0, settled_keys=frozenset())
 
     candidate_threads = _ordered_auto_resume_candidates(interrupted, max_resumes=max_resumes)
     resumed_count = 0
+    settled_keys: set[str] = set()
     delay_due = False
     for interrupted_thread in candidate_threads:
         if max_resumes is not None and resumed_count >= max_resumes:
             break
-        if not await _interrupted_target_remains_latest_human_work(
+        assert interrupted_thread.thread_id is not None
+        candidate_key = pending_resume_key(
+            agent_name=interrupted_thread.agent_name,
+            room_id=interrupted_thread.room_id,
+            thread_id=interrupted_thread.thread_id,
+        )
+        freshness = await _interrupted_target_freshness(
             interrupted_thread,
             config=config,
             runtime_paths=runtime_paths,
             conversation_cache=conversation_cache,
+        )
+        if _should_skip_auto_resume_candidate(
+            freshness,
+            candidate_key=candidate_key,
+            settled_keys=settled_keys,
         ):
             continue
         try:
@@ -252,11 +295,16 @@ async def auto_resume_interrupted_threads(
             if delay_due:
                 await asyncio.sleep(delay)
                 delay_due = False
-                if not await _interrupted_target_remains_latest_human_work(
+                freshness = await _interrupted_target_freshness(
                     interrupted_thread,
                     config=config,
                     runtime_paths=runtime_paths,
                     conversation_cache=conversation_cache,
+                )
+                if _should_skip_auto_resume_candidate(
+                    freshness,
+                    candidate_key=candidate_key,
+                    settled_keys=settled_keys,
                 ):
                     continue
             delay_due = True
@@ -276,6 +324,7 @@ async def auto_resume_interrupted_threads(
                     event_id=delivered.event_id,
                 )
                 resumed_count += 1
+                settled_keys.add(candidate_key)
             else:
                 logger.warning(
                     "Failed to queue auto-resume after restart",
@@ -292,7 +341,7 @@ async def auto_resume_interrupted_threads(
                 error=str(exc),
             )
 
-    return resumed_count
+    return _AutoResumeResult(resumed_count=resumed_count, settled_keys=frozenset(settled_keys))
 
 
 async def resume_pending_interrupted_threads(
@@ -318,22 +367,28 @@ async def resume_pending_interrupted_threads(
     if not eligible:
         return 0
 
-    consumed_keys: list[str] = []
+    records_to_discard: list[PendingResumeRecord] = []
     interrupted_threads: list[InterruptedThread] = []
     now_ms = int(time.time() * 1000)
-    for key, record in eligible.items():
-        evaluation = await _evaluate_pending_resume_record(
-            record,
-            config=config,
-            conversation_cache=conversation_cache,
-            now_ms=now_ms,
-        )
-        if evaluation.consume:
-            consumed_keys.append(key)
+    eligible_items = list(eligible.items())
+    evaluations = await asyncio.gather(
+        *(
+            _evaluate_pending_resume_record(
+                record,
+                config=config,
+                conversation_cache=conversation_cache,
+                now_ms=now_ms,
+            )
+            for _, record in eligible_items
+        ),
+    )
+    for (_, record), evaluation in zip(eligible_items, evaluations, strict=True):
+        if evaluation.discard:
+            records_to_discard.append(record)
         if evaluation.interrupted is not None:
             interrupted_threads.append(evaluation.interrupted)
 
-    resumed_count = await auto_resume_interrupted_threads(
+    auto_resume_result = await auto_resume_interrupted_threads(
         client,
         interrupted_threads,
         config=config,
@@ -341,9 +396,9 @@ async def resume_pending_interrupted_threads(
         conversation_cache=conversation_cache,
         max_resumes=max_resumes,
     )
-    if consumed_keys:
-        discard_pending_resume_records(ledger_path, consumed_keys)
-    return resumed_count
+    records_to_discard.extend(eligible[key] for key in auto_resume_result.settled_keys)
+    discard_pending_resume_records(ledger_path, records_to_discard)
+    return auto_resume_result.resumed_count
 
 
 @dataclass(frozen=True)
@@ -351,7 +406,7 @@ class _PendingResumeEvaluation:
     """Outcome of verifying one persisted resume intent against live thread history."""
 
     interrupted: InterruptedThread | None
-    consume: bool
+    discard: bool
 
 
 async def _evaluate_pending_resume_record(
@@ -363,10 +418,10 @@ async def _evaluate_pending_resume_record(
 ) -> _PendingResumeEvaluation:
     """Verify one persisted resume intent against authoritative thread history."""
     if record.agent_name not in config.agents and record.agent_name not in config.teams:
-        return _PendingResumeEvaluation(interrupted=None, consume=True)
+        return _PendingResumeEvaluation(interrupted=None, discard=True)
     if _is_older_than_cleanup_window(record.created_at_ms, now_ms=now_ms):
         # The full stale-stream scan owns anything beyond the restart lookback.
-        return _PendingResumeEvaluation(interrupted=None, consume=True)
+        return _PendingResumeEvaluation(interrupted=None, discard=True)
 
     try:
         history = await conversation_cache.get_strict_thread_history(
@@ -381,11 +436,11 @@ async def _evaluate_pending_resume_record(
             target_event_id=record.target_event_id,
             error=str(exc),
         )
-        return _PendingResumeEvaluation(interrupted=None, consume=False)
+        return _PendingResumeEvaluation(interrupted=None, discard=False)
 
     target = next((message for message in history if message.event_id == record.target_event_id), None)
     if target is None or not _pending_target_is_resumable(body=target.body, stream_status=target.stream_status):
-        return _PendingResumeEvaluation(interrupted=None, consume=True)
+        return _PendingResumeEvaluation(interrupted=None, discard=True)
     return _PendingResumeEvaluation(
         interrupted=InterruptedThread(
             room_id=record.room_id,
@@ -396,7 +451,7 @@ async def _evaluate_pending_resume_record(
             original_sender_id=record.requester_user_id,
             timestamp_ms=target.timestamp,
         ),
-        consume=True,
+        discard=False,
     )
 
 
@@ -407,16 +462,16 @@ def _pending_target_is_resumable(*, body: str, stream_status: str | None) -> boo
     return _is_resumable_interrupted_body(body=body, stream_status=stream_status)
 
 
-async def _interrupted_target_remains_latest_human_work(
+async def _interrupted_target_freshness(
     interrupted_thread: InterruptedThread,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None,
-) -> bool:
+) -> _AutoResumeFreshness:
     """Return whether authoritative history has no newer effective human activity."""
     if conversation_cache is None or interrupted_thread.thread_id is None:
-        return False
+        return _AutoResumeFreshness(is_latest=False, is_authoritative=False)
 
     try:
         history = await conversation_cache.get_strict_thread_history(
@@ -439,14 +494,14 @@ async def _interrupted_target_remains_latest_human_work(
             target_event_id=interrupted_thread.target_event_id,
             error=str(exc),
         )
-        return False
+        return _AutoResumeFreshness(is_latest=False, is_authoritative=False)
 
     if not remains_latest:
         logger.info(
             "Skipping stale auto-resume after newer human activity",
             target_event_id=interrupted_thread.target_event_id,
         )
-    return remains_latest
+    return _AutoResumeFreshness(is_latest=remains_latest, is_authoritative=True)
 
 
 def _require_authoritative_history(history: ThreadReadResult) -> None:

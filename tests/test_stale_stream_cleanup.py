@@ -55,7 +55,7 @@ from tests.conftest import (
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
 BOT_USER_ID = "@actual_test_agent:localhost"
 OTHER_BOT_USER_ID = "@actual_other:localhost"
@@ -723,7 +723,7 @@ async def test_auto_resume_sends_correctly_threaded_messages(tmp_path: Path) -> 
         ) as mock_send,
         patch("mindroom.matrix.stale_stream_cleanup.asyncio.sleep", new=AsyncMock()) as mock_sleep,
     ):
-        resumed_count = await auto_resume_interrupted_threads(
+        auto_resume_result = await auto_resume_interrupted_threads(
             client,
             interrupted,
             config=config,
@@ -731,7 +731,7 @@ async def test_auto_resume_sends_correctly_threaded_messages(tmp_path: Path) -> 
             conversation_cache=_auto_resume_conversation_cache(interrupted),
         )
 
-    assert resumed_count == 2
+    assert auto_resume_result.resumed_count == 2
     assert mock_send.await_count == 2
     first_content = mock_send.await_args_list[0].args[2]
     second_content = mock_send.await_args_list[1].args[2]
@@ -788,7 +788,7 @@ async def test_auto_resume_classifies_later_activity_by_effective_sender_and_his
         "mindroom.matrix.stale_stream_cleanup.send_message_result",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$resume")),
     ) as mock_send:
-        resumed_count = await auto_resume_interrupted_threads(
+        auto_resume_result = await auto_resume_interrupted_threads(
             client,
             interrupted,
             config=config,
@@ -796,7 +796,7 @@ async def test_auto_resume_classifies_later_activity_by_effective_sender_and_his
             conversation_cache=conversation_cache,
         )
 
-    assert resumed_count == expected_resumes
+    assert auto_resume_result.resumed_count == expected_resumes
     assert mock_send.await_count == expected_resumes
 
 
@@ -836,7 +836,7 @@ async def test_auto_resume_fails_closed_without_authoritative_target_history(
         )
 
     with patch("mindroom.matrix.stale_stream_cleanup.send_message_result", new=AsyncMock()) as mock_send:
-        resumed_count = await auto_resume_interrupted_threads(
+        auto_resume_result = await auto_resume_interrupted_threads(
             client,
             interrupted,
             config=config,
@@ -844,7 +844,7 @@ async def test_auto_resume_fails_closed_without_authoritative_target_history(
             conversation_cache=conversation_cache,
         )
 
-    assert resumed_count == 0
+    assert auto_resume_result.resumed_count == 0
     mock_send.assert_not_awaited()
 
 
@@ -877,7 +877,7 @@ async def test_auto_resume_rechecks_after_delay_and_bounds_history_reads(tmp_pat
         ) as mock_send,
         patch("mindroom.matrix.stale_stream_cleanup.asyncio.sleep", new=AsyncMock()) as mock_sleep,
     ):
-        resumed_count = await auto_resume_interrupted_threads(
+        auto_resume_result = await auto_resume_interrupted_threads(
             client,
             interrupted,
             config=config,
@@ -886,7 +886,7 @@ async def test_auto_resume_rechecks_after_delay_and_bounds_history_reads(tmp_pat
             max_resumes=2,
         )
 
-    assert resumed_count == 2
+    assert auto_resume_result.resumed_count == 2
     assert [call.args[2]["m.relates_to"]["event_id"] for call in mock_send.await_args_list] == [
         "$thread-3",
         "$thread-1",
@@ -922,7 +922,7 @@ async def test_auto_resume_target_mention_ignores_unprepared_unrelated_entity(tm
         "mindroom.matrix.stale_stream_cleanup.send_message_result",
         new=AsyncMock(return_value=delivered_matrix_event("$resume1")),
     ) as mock_send:
-        resumed_count = await auto_resume_interrupted_threads(
+        auto_resume_result = await auto_resume_interrupted_threads(
             client,
             interrupted,
             config=config,
@@ -930,7 +930,7 @@ async def test_auto_resume_target_mention_ignores_unprepared_unrelated_entity(tm
             conversation_cache=_auto_resume_conversation_cache(interrupted),
         )
 
-    assert resumed_count == 1
+    assert auto_resume_result.resumed_count == 1
     content = mock_send.await_args.args[2]
     assert content["body"] == f"@Test Agent {AUTO_RESUME_MESSAGE}"
     assert content["m.mentions"] == {"user_ids": [BOT_USER_ID]}
@@ -1008,7 +1008,7 @@ async def test_auto_resume_skips_thread_id_none(tmp_path: Path) -> None:
         "mindroom.matrix.stale_stream_cleanup.send_message_result",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$resume")),
     ) as mock_send:
-        resumed_count = await auto_resume_interrupted_threads(
+        auto_resume_result = await auto_resume_interrupted_threads(
             client,
             interrupted,
             config=config,
@@ -1016,7 +1016,7 @@ async def test_auto_resume_skips_thread_id_none(tmp_path: Path) -> None:
             conversation_cache=_auto_resume_conversation_cache(interrupted),
         )
 
-    assert resumed_count == 1
+    assert auto_resume_result.resumed_count == 1
     mock_send.assert_awaited_once()
     assert mock_send.await_args.args[1] == ROOM_ID
     assert mock_send.await_args.args[2]["m.relates_to"]["event_id"] == "$threaded"
@@ -1042,7 +1042,7 @@ async def test_auto_resume_records_outbound_message_when_send_succeeds(tmp_path:
         "mindroom.matrix.stale_stream_cleanup.send_message_result",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$resume")),
     ):
-        resumed_count = await auto_resume_interrupted_threads(
+        auto_resume_result = await auto_resume_interrupted_threads(
             client,
             interrupted,
             config=config,
@@ -1050,7 +1050,7 @@ async def test_auto_resume_records_outbound_message_when_send_succeeds(tmp_path:
             conversation_cache=conversation_cache,
         )
 
-    assert resumed_count == 1
+    assert auto_resume_result.resumed_count == 1
     conversation_cache.notify_outbound_message.assert_called_once()
     record_args = conversation_cache.notify_outbound_message.call_args.args
     assert record_args[:2] == (ROOM_ID, "$resume")
@@ -2544,7 +2544,7 @@ async def test_auto_resume_dedupes_same_agent_and_thread_using_newest_target(tmp
         "mindroom.matrix.stale_stream_cleanup.send_message_result",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$resume")),
     ) as mock_send:
-        resumed_count = await auto_resume_interrupted_threads(
+        auto_resume_result = await auto_resume_interrupted_threads(
             client,
             interrupted,
             config=config,
@@ -2552,7 +2552,7 @@ async def test_auto_resume_dedupes_same_agent_and_thread_using_newest_target(tmp
             conversation_cache=_auto_resume_conversation_cache(interrupted),
         )
 
-    assert resumed_count == 1
+    assert auto_resume_result.resumed_count == 1
     mock_send.assert_awaited_once()
     assert mock_send.await_args.args[2]["m.relates_to"]["m.in_reply_to"] == {"event_id": "$newer"}
 
@@ -2601,7 +2601,7 @@ async def test_auto_resume_honors_cap_after_replacing_older_duplicate_targets(tm
         "mindroom.matrix.stale_stream_cleanup.send_message_result",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$resume")),
     ) as mock_send:
-        resumed_count = await auto_resume_interrupted_threads(
+        auto_resume_result = await auto_resume_interrupted_threads(
             client,
             interrupted,
             config=config,
@@ -2610,7 +2610,7 @@ async def test_auto_resume_honors_cap_after_replacing_older_duplicate_targets(tm
             max_resumes=2,
         )
 
-    assert resumed_count == 2
+    assert auto_resume_result.resumed_count == 2
     assert mock_send.await_count == 2
     first_content = mock_send.await_args_list[0].args[2]
     second_content = mock_send.await_args_list[1].args[2]
@@ -2648,7 +2648,7 @@ async def test_auto_resume_cap_uses_timestamps_not_room_iteration_order(tmp_path
         "mindroom.matrix.stale_stream_cleanup.send_message_result",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$resume")),
     ) as mock_send:
-        resumed_count = await auto_resume_interrupted_threads(
+        auto_resume_result = await auto_resume_interrupted_threads(
             client,
             interrupted,
             config=config,
@@ -2657,7 +2657,7 @@ async def test_auto_resume_cap_uses_timestamps_not_room_iteration_order(tmp_path
             max_resumes=1,
         )
 
-    assert resumed_count == 1
+    assert auto_resume_result.resumed_count == 1
     mock_send.assert_awaited_once()
     sent_content = mock_send.await_args.args[2]
     assert sent_content["m.relates_to"]["event_id"] == "$thread-new"
@@ -2766,7 +2766,12 @@ async def test_orchestrator_auto_resume_uses_router_client(tmp_path: Path) -> No
 
     with patch(
         "mindroom.orchestrator.auto_resume_interrupted_threads",
-        new=AsyncMock(return_value=1),
+        new=AsyncMock(
+            return_value=stale_stream_cleanup_module._AutoResumeResult(
+                resumed_count=1,
+                settled_keys=frozenset(),
+            ),
+        ),
     ) as mock_auto_resume:
         await orchestrator._auto_resume_after_restart(interrupted, config)
 
@@ -2841,7 +2846,7 @@ async def test_auto_resume_continues_after_send_exception(tmp_path: Path) -> Non
         ) as mock_send,
         patch("mindroom.matrix.stale_stream_cleanup.asyncio.sleep", new=AsyncMock()),
     ):
-        resumed_count = await auto_resume_interrupted_threads(
+        auto_resume_result = await auto_resume_interrupted_threads(
             client,
             interrupted,
             config=config,
@@ -2849,7 +2854,7 @@ async def test_auto_resume_continues_after_send_exception(tmp_path: Path) -> Non
             conversation_cache=_auto_resume_conversation_cache(interrupted),
         )
 
-    assert resumed_count == 2
+    assert auto_resume_result.resumed_count == 2
     assert mock_send.await_count == 3
 
 
@@ -2987,6 +2992,8 @@ async def _run_pending_resume_replay(
     records: list[PendingResumeRecord],
     startup_cutoff_ms: int = NOW_MS,
     now_ms: int = NOW_MS,
+    max_resumes: int | None = None,
+    send_side_effect: Callable[..., object] | None = None,
 ) -> tuple[int, AsyncMock]:
     runtime_paths = runtime_paths_for(config)
     ledger_path = pending_resume_ledger_path(runtime_paths)
@@ -2996,7 +3003,11 @@ async def _run_pending_resume_replay(
     with (
         patch(
             "mindroom.matrix.stale_stream_cleanup.send_message_result",
-            new=AsyncMock(side_effect=delivered_matrix_side_effect("$resume")),
+            new=AsyncMock(
+                side_effect=(
+                    send_side_effect if send_side_effect is not None else delivered_matrix_side_effect("$resume")
+                ),
+            ),
         ) as mock_send,
         patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=now_ms / 1000),
     ):
@@ -3006,6 +3017,7 @@ async def _run_pending_resume_replay(
             runtime_paths=runtime_paths,
             conversation_cache=conversation_cache,
             startup_cutoff_ms=startup_cutoff_ms,
+            max_resumes=max_resumes,
         )
     return resumed_count, mock_send
 
@@ -3163,6 +3175,108 @@ async def test_pending_resume_replay_keeps_record_when_history_is_degraded(tmp_p
     assert resumed_count == 0
     mock_send.assert_not_awaited()
     assert _ledger_keys(config) == {record.key}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_mode", ["freshness", "send"])
+async def test_pending_resume_replay_keeps_record_after_transient_delivery_failure(
+    tmp_path: Path,
+    failure_mode: str,
+) -> None:
+    """A verified intent remains durable until a resume prompt is authoritatively settled."""
+    config = _make_config(tmp_path)
+    record = _pending_record()
+    history = _authoritative_history(
+        _history_message(
+            "$target",
+            timestamp=NOW_MS - 60_000,
+            content={STREAM_STATUS_KEY: "streaming"},
+        ),
+    )
+    conversation_cache = _pending_resume_cache(history)
+    send_side_effect = None
+    if failure_mode == "freshness":
+        conversation_cache.get_strict_thread_history.side_effect = [history, RuntimeError("history failed")]
+    else:
+
+        def fail_send(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        send_side_effect = fail_send
+
+    resumed_count, _mock_send = await _run_pending_resume_replay(
+        config,
+        conversation_cache,
+        records=[record],
+        send_side_effect=send_side_effect,
+    )
+
+    assert resumed_count == 0
+    assert _ledger_keys(config) == {record.key}
+
+
+@pytest.mark.asyncio
+async def test_pending_resume_replay_keeps_records_not_attempted_after_cap(tmp_path: Path) -> None:
+    """The successful-send cap must leave older unattempted intents for a later startup."""
+    config = _make_config(tmp_path)
+    older = _pending_record(thread_id="$thread-old", target_event_id="$target-old", created_at_ms=100)
+    newer = _pending_record(thread_id="$thread-new", target_event_id="$target-new", created_at_ms=200)
+    conversation_cache = _pending_resume_cache(_authoritative_history())
+
+    def history_for_thread(_: str, thread_id: str, **__: object) -> ThreadHistoryResult:
+        suffix = thread_id.removeprefix("$thread-")
+        timestamp = 100 if suffix == "old" else 200
+        return _authoritative_history(
+            _history_message(
+                f"$target-{suffix}",
+                timestamp=timestamp,
+                content={STREAM_STATUS_KEY: "streaming"},
+            ),
+        )
+
+    conversation_cache.get_strict_thread_history.side_effect = history_for_thread
+
+    resumed_count, mock_send = await _run_pending_resume_replay(
+        config,
+        conversation_cache,
+        records=[older, newer],
+        max_resumes=1,
+    )
+
+    assert resumed_count == 1
+    assert mock_send.await_args.args[2]["m.relates_to"]["event_id"] == "$thread-new"
+    assert _ledger_keys(config) == {older.key}
+
+
+@pytest.mark.asyncio
+async def test_pending_resume_replay_does_not_discard_current_process_replacement(tmp_path: Path) -> None:
+    """Replay may settle only the exact pre-startup record it evaluated."""
+    config = _make_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    ledger_path = pending_resume_ledger_path(runtime_paths)
+    interrupted = _pending_record(target_event_id="$old", created_at_ms=NOW_MS - 60_000)
+    replacement = _pending_record(target_event_id="$current", created_at_ms=NOW_MS + 1)
+    history = _authoritative_history(
+        _history_message(
+            "$old",
+            timestamp=NOW_MS - 60_000,
+            content={STREAM_STATUS_KEY: "streaming"},
+        ),
+    )
+
+    def replace_during_send(*_args: object, **_kwargs: object) -> object:
+        _upsert_pending_resume_record(ledger_path, replacement)
+        return delivered_matrix_event("$resume")
+
+    resumed_count, _mock_send = await _run_pending_resume_replay(
+        config,
+        _pending_resume_cache(history),
+        records=[interrupted],
+        send_side_effect=replace_during_send,
+    )
+
+    assert resumed_count == 1
+    assert load_pending_resume_records(ledger_path) == {replacement.key: replacement}
 
 
 @pytest.mark.asyncio
