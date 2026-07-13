@@ -15,8 +15,11 @@ from mindroom.config.main import Config
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
+    SCHEDULED_HISTORY_LIMIT_KEY,
+    SOURCE_KIND_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamResolution
@@ -666,6 +669,101 @@ class TestAgentBot(AgentBotTestBase):
         assert first_call["message"] is None
         assert second_call["requester_user_id"] == "@user:localhost"
         assert second_call["message"] == "[Attached image]"
+
+    @pytest.mark.asyncio
+    async def test_router_relays_scheduled_history_limit_to_selected_agent(self, tmp_path: Path) -> None:
+        """A scheduled fire routed by the router carries its history cap through the handoff."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+                },
+                authorization={"default_room_access": True},
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
+        _wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        tracker = _set_turn_store_tracker(bot, MagicMock())
+        tracker.has_responded.return_value = False
+        bot._turn_controller._execute_router_relay = AsyncMock()
+        bot._conversation_resolver.extract_message_context = AsyncMock(
+            return_value=MessageContext(
+                am_i_mentioned=False,
+                is_thread=False,
+                thread_id=None,
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+            ),
+        )
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.canonical_alias = None
+        room.users = {
+            "@mindroom_router:localhost": MagicMock(),
+            "@mindroom_calculator:localhost": MagicMock(),
+            "@mindroom_general:localhost": MagicMock(),
+            "@user:localhost": MagicMock(),
+        }
+        event = self._make_handler_event(
+            "message",
+            sender="@mindroom_router:localhost",
+            event_id="$scheduled_route_text",
+        )
+        event.body = "⏰ [Automated Task]\nhelp me"
+        event.source = {
+            "content": {
+                "body": event.body,
+                SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
+                ORIGINAL_SENDER_KEY: "@user:localhost",
+                SCHEDULED_HISTORY_LIMIT_KEY: 4,
+            },
+        }
+
+        with (
+            patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
+            patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
+            patch(
+                "mindroom.turn_policy.responder_candidate_entities_for_room",
+                return_value=[
+                    entity_ids(config, runtime_paths_for(config))["calculator"],
+                    entity_ids(config, runtime_paths_for(config))["general"],
+                ],
+            ),
+            patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
+            patch(
+                "mindroom.turn_controller.suggest_responder_for_message",
+                new_callable=AsyncMock,
+                return_value="general",
+            ),
+            patch(
+                "mindroom.turn_controller.interactive.handle_text_response",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            await bot._on_message(room, event)
+            await drain_coalescing(bot)
+
+        bot._turn_controller._execute_router_relay.assert_awaited_once()
+        call = bot._turn_controller._execute_router_relay.await_args.kwargs
+        assert call["requester_user_id"] == "@user:localhost"
+        assert call["extra_content"] == {
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            SCHEDULED_HISTORY_LIMIT_KEY: 4,
+        }
 
     @pytest.mark.asyncio
     async def test_router_dispatch_parity_text_and_image_skip_under_same_conditions(self, tmp_path: Path) -> None:

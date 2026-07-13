@@ -32,7 +32,7 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
-from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
+from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import HookContextSupport, HookRegistry, HookRegistryState
 from mindroom.inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
@@ -604,6 +604,39 @@ async def test_scheduled_fire_history_limit_reaches_response_request(config: Con
     request = harness.runner.requests[0]
     assert request.scheduled_history_limit == 3
     assert request.response_envelope.origin.intent is TurnIntent.SCHEDULED_FIRE
+
+
+@pytest.mark.asyncio
+async def test_scheduled_router_handoff_history_limit_reaches_response_request(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """A trusted router handoff preserves the scheduled fire's history cap for the target agent."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "@general could you help with this?",
+                "msgtype": "m.text",
+                constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                constants.ORIGINAL_SENDER_KEY: _SENDER,
+                constants.SCHEDULED_HISTORY_LIMIT_KEY: 2,
+            },
+            "event_id": "$scheduled-router-handoff:localhost",
+            "sender": _entity_user_id(config, ROUTER_AGENT_NAME),
+            "origin_server_ts": 1_000_000,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    request = harness.runner.requests[0]
+    assert request.scheduled_history_limit == 2
+    assert request.response_envelope.origin.intent is TurnIntent.ROUTER_HANDOFF
 
 
 @pytest.mark.asyncio

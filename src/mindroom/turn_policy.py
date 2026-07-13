@@ -82,6 +82,7 @@ class PreparedDispatch:
     correlation_id: str
     envelope: MessageEnvelope
     current_prompt_is_structured: bool = False
+    scheduled_history_limit: int | None = None
 
     def __post_init__(self) -> None:
         """Require the prepared envelope and dispatch target to describe the same delivery."""

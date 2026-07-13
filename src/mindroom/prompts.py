@@ -331,7 +331,7 @@ Your task is to:
 2. Extract the schedule/timing
 3. Create a message that mentions the appropriate agents or teams
 4. Set is_conditional=true only when the request is event-based or conditional
-5. Set history_limit only when the request explicitly limits conversation context
+5. Resolve history_limit using the conversation context rules below
 
 Available agents and teams: {agent_list}
 
@@ -347,7 +347,8 @@ Conversation context (history_limit):
 - "with no history", "without context", or "context-free" -> history_limit=0
 - "with only the last 5 messages of context" or "include the last 5 messages" -> history_limit=5
 - On edits, "restore full history" or "use unlimited history" -> history_limit=null
-- Leave history_limit unset (null) when the request says nothing about context or history
+- On edits, keep the current history_limit unchanged when the request says nothing about context or history
+- For new schedules, leave history_limit unset (null) when the request says nothing about context or history
 - Remove context phrases like "with no history" from the message itself
 
 Important rules:

@@ -280,9 +280,14 @@ Usage: `!schedule <time> <message>` - Schedule tasks, reminders, or agent/team w
 - `!schedule Daily at 9am, @finance market report`
 - `!schedule Weekly on Friday, @analyst prepare weekly summary`
 
+**Conversation Context Limits:**
+- `!schedule Every hour, @ops check deployment health with no history`
+- `!schedule Daily at 9am, @research summarize AI news with only the last 5 messages`
+
 How it works:
 - **Time-based**: Executes at specific times or intervals
 - **Event-based**: Automatically converts to smart polling (e.g., "if email" → check every 1-2 min)
+- **History limits**: Scheduled responders normally see full configured history; "with no history" uses none, and "last N messages" caps each run
 - Agents and teams receive clear instructions about conditions to check
 - Multiple agents collaborate when mentioned together; mention a team directly for its team workflow
 - Automated tasks are clearly marked and agents or teams follow up when they fire"""
@@ -332,7 +337,11 @@ Alternative syntax: `!editschedule`, `!edit-schedule`
 Examples:
 - `!edit_schedule abc123 tomorrow at 9am @finance send market update`
 - `!edit_schedule task42 every weekday at 8am check build status`
+- `!edit_schedule task42 keep the same schedule but restore full history`
+- `!edit_schedule task42 every weekday at 8am check build status with no history`
 
+Omitted fields stay unchanged, including any existing history limit.
+Use "restore full history" or "use unlimited history" to remove a history limit.
 Use `!list_schedules` to find task IDs before editing."""
 
     if topic == "config":

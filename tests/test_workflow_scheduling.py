@@ -409,10 +409,11 @@ class TestParseWorkflowSchedule:
         )
 
         prompt = mock_agent.arun.call_args.args[0]
-        assert "Set history_limit only when the request explicitly limits conversation context" in prompt
+        assert "Resolve history_limit using the conversation context rules below" in prompt
         assert '"with no history", "without context", or "context-free" -> history_limit=0' in prompt
         assert '"restore full history" or "use unlimited history" -> history_limit=null' in prompt
-        assert "Leave history_limit unset (null) when the request says nothing about context or history" in prompt
+        assert "keep the current history_limit unchanged when the request says nothing" in prompt
+        assert "For new schedules, leave history_limit unset (null) when the request says nothing" in prompt
         assert isinstance(result, ScheduledWorkflow)
         assert result.history_limit == 0
 
@@ -1097,6 +1098,101 @@ class TestIntegrationWithScheduling:
         stored_workflow = ScheduledWorkflow(**json.loads(stored_content["workflow"]))
         assert stored_workflow.message == original_message
         assert stored_workflow.history_limit is None
+
+    @patch("mindroom.model_loading.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
+    async def test_edit_reparse_preserves_existing_history_limit_when_request_omits_context(
+        self,
+        mock_agent_class: Mock,
+        mock_get_model: Mock,  # noqa: ARG002
+    ) -> None:
+        """A timing-only edit carries an existing history limit forward."""
+        original_message = "tool-audit schedule test - safe to ignore"
+        client = AsyncMock()
+        client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse("$scheduled-state", "!room:server"))
+
+        mock_agent = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.content = ScheduledWorkflow(
+            schedule_type="once",
+            execute_at=datetime.now(UTC) + timedelta(hours=6),
+            message=original_message,
+            description="Post a test reminder in the current thread.",
+            history_limit=5,
+        )
+        mock_agent.arun.return_value = mock_response
+        mock_agent_class.return_value = mock_agent
+
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "research": AgentConfig(
+                        display_name="Research",
+                        role="Research agent",
+                        rooms=["!room:server"],
+                    ),
+                },
+                router=RouterConfig(model="default"),
+            ),
+        )
+        persist_entity_accounts(
+            config,
+            runtime_paths_for(config),
+            usernames={"router": "router", "research": "research"},
+        )
+        room = nio.MatrixRoom("!room:server", "@bot:server")
+        research_matrix_id = entity_identity_registry(config, runtime_paths_for(config)).current_id("research").full_id
+        room.users[research_matrix_id] = nio.RoomMember(
+            user_id=research_matrix_id,
+            display_name="Research",
+            avatar_url=None,
+        )
+        room.members_synced = True
+
+        existing_task = ScheduledTaskRecord(
+            task_id="task123",
+            room_id="!room:server",
+            status="pending",
+            created_at=datetime.now(UTC),
+            workflow=ScheduledWorkflow(
+                schedule_type="once",
+                execute_at=datetime.now(UTC) + timedelta(hours=3),
+                message=original_message,
+                description="Post a test reminder in the current thread.",
+                history_limit=5,
+                room_id="!room:server",
+                thread_id="$thread123",
+                created_by="@user:server",
+            ),
+        )
+
+        task_id, message = await schedule_task(
+            runtime=SchedulingRuntime(
+                client=client,
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                room=room,
+                conversation_cache=_conversation_cache(),
+                event_cache=_event_cache(),
+            ),
+            room_id="!room:server",
+            thread_id="$thread123",
+            scheduled_by="@user:server",
+            full_text="Change to 6 hours from now instead and keep the same message",
+            task_id="task123",
+            existing_task=existing_task,
+        )
+
+        assert task_id == "task123"
+        prompt = mock_agent.arun.call_args.args[0]
+        assert "keep the current history_limit unchanged" in prompt
+        assert '"history_limit": 5' in prompt
+
+        assert f"**Will post:** {original_message}" in message
+        stored_content = client.room_put_state.await_args.kwargs["content"]
+        stored_workflow = ScheduledWorkflow(**json.loads(stored_content["workflow"]))
+        assert stored_workflow.message == original_message
+        assert stored_workflow.history_limit == 5
 
 
 class TestValidateConditionalWorkflow:

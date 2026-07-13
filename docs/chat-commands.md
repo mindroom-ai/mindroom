@@ -108,6 +108,15 @@ Include `@agent_name` or `@team_name` in your schedule to target specific respon
 
 The scheduler validates that mentioned agents and teams are available in the room before creating the task.
 
+Add `with no history`, `without context`, or `context-free` when each scheduled run should see no prior conversation messages.
+
+Add a phrase such as `with only the last 5 messages of context` to cap each scheduled run to recent context.
+
+```
+!schedule Every hour, @ops check deployment health with no history
+!schedule Daily at 9am, @research summarize AI news with only the last 5 messages
+```
+
 Schedules use the timezone from `config.yaml` (defaults to UTC).
 
 See [Scheduling](scheduling.md) for full details.
@@ -138,6 +147,8 @@ Use `!list_schedules` to find task IDs.
 ### `!edit_schedule`
 
 Replace an existing scheduled task with new timing and content.
+Omitted fields stay unchanged, including any existing history limit.
+Use `restore full history` or `use unlimited history` to remove a history limit.
 
 ```
 !edit_schedule <task-id> <new-task-description>
@@ -146,6 +157,11 @@ Replace an existing scheduled task with new timing and content.
 The task description is re-parsed to update timing and content.
 
 Schedule type cannot be changed (one-time to recurring or vice versa) -- cancel and recreate instead.
+
+```
+!edit_schedule task42 keep the same schedule but restore full history
+!edit_schedule task42 every weekday at 8am check build status with no history
+```
 
 **Aliases:** `!editschedule`, `!edit-schedule`
 
