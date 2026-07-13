@@ -44,7 +44,6 @@ from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.identity import managed_account_user_id
 from mindroom.matrix.rooms import ensure_all_rooms_exist, ensure_root_space, ensure_user_in_rooms
 from mindroom.matrix.stale_stream_cleanup import (
-    MAX_AUTO_RESUME_AFTER_RESTART_THREADS,
     StaleStreamCleanupActor,
     recover_stale_streaming_messages,
 )
@@ -260,10 +259,13 @@ class _MultiAgentOrchestrator:
             event_cache_provider=lambda: self._runtime_support.event_cache,
         )
         self._startup_maintenance = StartupMaintenanceController(
-            recover_stale_streams=lambda bots, config, startup_cutoff_ms: self._recover_stale_streams_after_restart(
-                bots,
-                config,
-                startup_cutoff_ms,
+            recover_stale_streams=lambda bots, config, startup_cutoff_ms, scanned_room_ids: (
+                self._recover_stale_streams_after_restart(
+                    bots,
+                    config,
+                    startup_cutoff_ms,
+                    scanned_room_ids,
+                )
             ),
             setup_rooms_and_memberships=self._setup_startup_rooms_and_memberships,
             sync_runtime_support=lambda config: self._sync_runtime_support_services(config, start_watcher=True),
@@ -997,6 +999,7 @@ class _MultiAgentOrchestrator:
         bots: list[AgentBot | TeamBot],
         config: Config,
         startup_cutoff_ms: int,
+        scanned_room_ids: set[str],
     ) -> None:
         """Recover interrupted responses from one concurrent room scan."""
         actors: dict[str, StaleStreamCleanupActor] = {}
@@ -1018,7 +1021,7 @@ class _MultiAgentOrchestrator:
             config=config,
             runtime_paths=self.runtime_paths,
             startup_cutoff_ms=startup_cutoff_ms,
-            max_resumes=MAX_AUTO_RESUME_AFTER_RESTART_THREADS,
+            scanned_room_ids=scanned_room_ids,
         )
         logger.info(
             "Completed stale stream recovery",

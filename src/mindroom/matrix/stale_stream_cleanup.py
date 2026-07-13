@@ -81,7 +81,6 @@ _RECOVERY_ROOM_CONCURRENCY = 8
 _STOP_REACTION_KEYS = frozenset({"🛑", "⏹️"})
 _MAX_REQUESTER_RESOLUTION_DEPTH = 10
 _MAX_EXTRA_INTERRUPTED_HISTORY_PAGES = 10
-MAX_AUTO_RESUME_AFTER_RESTART_THREADS = 50
 _INTERRUPTED_PARTIAL_TEXT_LIMIT = 280
 _AUTO_RESUME_MESSAGE = (
     "[System: Previous response was interrupted by service restart. Please continue where you left off.]"
@@ -194,11 +193,16 @@ async def recover_stale_streaming_messages(
     config: Config,
     runtime_paths: RuntimePaths,
     startup_cutoff_ms: int,
-    max_resumes: int = MAX_AUTO_RESUME_AFTER_RESTART_THREADS,
+    scanned_room_ids: set[str],
     room_concurrency: int = _RECOVERY_ROOM_CONCURRENCY,
 ) -> _StaleStreamRecoveryResult:
     """Recover stale streams through one concurrent Matrix-history path."""
-    room_actors = await _joined_room_actors(actors)
+    room_actors = {
+        room_id: joined_actors
+        for room_id, joined_actors in (await _joined_room_actors(actors)).items()
+        if room_id not in scanned_room_ids
+    }
+    scanned_room_ids.update(room_actors)
     if not room_actors:
         return _StaleStreamRecoveryResult(room_count=0, cleaned_count=0, resumed_count=0)
 
@@ -238,13 +242,7 @@ async def recover_stale_streaming_messages(
         for completed in asyncio.as_completed(tasks):
             room_cleaned_count, interrupted_threads = await completed
             cleaned_count += room_cleaned_count
-            remaining_resumes = max_resumes - resumed_count
-            if (
-                resume_client is None
-                or not config.defaults.auto_resume_after_restart
-                or not interrupted_threads
-                or remaining_resumes <= 0
-            ):
+            if resume_client is None or not config.defaults.auto_resume_after_restart or not interrupted_threads:
                 continue
             resumed_count += await _auto_resume_interrupted_threads(
                 resume_client,
@@ -252,7 +250,6 @@ async def recover_stale_streaming_messages(
                 config=config,
                 runtime_paths=runtime_paths,
                 conversation_cache=resume_conversation_cache,
-                max_resumes=remaining_resumes,
                 delay_before_first=resumed_count > 0,
             )
     finally:
@@ -305,20 +302,17 @@ async def _auto_resume_interrupted_threads(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
-    max_resumes: int | None = None,
     delay: float = 2.0,
     delay_before_first: bool = False,
 ) -> int:
     """Send resume prompts for interrupted threaded conversations."""
-    if not interrupted or (max_resumes is not None and max_resumes <= 0):
+    if not interrupted:
         return 0
 
-    candidate_threads = _ordered_auto_resume_candidates(interrupted, max_resumes=max_resumes)
+    candidate_threads = _ordered_auto_resume_candidates(interrupted)
     resumed_count = 0
     delay_due = delay_before_first
     for interrupted_thread in candidate_threads:
-        if max_resumes is not None and resumed_count >= max_resumes:
-            break
         if not await _interrupted_target_remains_latest_human_work(
             interrupted_thread,
             config=config,
@@ -1662,10 +1656,8 @@ def _truncate_partial_text(text: str, *, limit: int = _INTERRUPTED_PARTIAL_TEXT_
 
 def _ordered_auto_resume_candidates(
     interrupted: list[_InterruptedThread],
-    *,
-    max_resumes: int | None,
 ) -> list[_InterruptedThread]:
-    """Return newest unique capped candidates first, then older delivery fallbacks."""
+    """Return each unique interrupted thread once in timestamp order."""
     latest_by_key: dict[tuple[str, str, str], _InterruptedThread] = {}
 
     for interrupted_thread in interrupted:
@@ -1676,7 +1668,7 @@ def _ordered_auto_resume_candidates(
         if existing is None or interrupted_thread.timestamp_ms >= existing.timestamp_ms:
             latest_by_key[key] = interrupted_thread
 
-    unique_threads = sorted(
+    return sorted(
         latest_by_key.values(),
         key=lambda interrupted_thread: (
             interrupted_thread.timestamp_ms,
@@ -1685,9 +1677,6 @@ def _ordered_auto_resume_candidates(
             interrupted_thread.agent_name,
         ),
     )
-    if max_resumes is None or max_resumes >= len(unique_threads):
-        return unique_threads
-    return [*unique_threads[-max_resumes:], *reversed(unique_threads[:-max_resumes])]
 
 
 def _has_restart_interrupted_note(body: str) -> bool:

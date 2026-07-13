@@ -15,21 +15,39 @@ async def _wait_for_controller(controller: StartupMaintenanceController) -> None
 
 
 @pytest.mark.asyncio
-async def test_startup_maintenance_runs_phases_in_order_and_passes_cutoff() -> None:
-    """Maintenance phases run in order and pass cutoff into stale cleanup."""
+async def test_startup_maintenance_scans_rooms_joined_during_concurrent_setup() -> None:
+    """Maintenance should overlap setup with recovery and then scan newly joined rooms."""
     call_order: list[str] = []
     bots = [MagicMock()]
     config = MagicMock()
+    joined_room_ids = {"!initial:example.com"}
+    recovery_waves: list[set[str]] = []
+    initial_rooms_discovered = asyncio.Event()
+    room_setup_finished = asyncio.Event()
 
-    async def recover_stale(started_bots: list[object], recovery_config: object, startup_cutoff_ms: int) -> None:
+    async def recover_stale(
+        started_bots: list[object],
+        recovery_config: object,
+        startup_cutoff_ms: int,
+        scanned_room_ids: set[str],
+    ) -> None:
         assert started_bots == bots
         assert recovery_config is config
         assert startup_cutoff_ms == 123456
-        call_order.append("recover")
+        newly_joined_room_ids = joined_room_ids - scanned_room_ids
+        scanned_room_ids.update(newly_joined_room_ids)
+        recovery_waves.append(newly_joined_room_ids)
+        call_order.append(f"recover-{len(recovery_waves)}")
+        if len(recovery_waves) == 1:
+            initial_rooms_discovered.set()
+            await room_setup_finished.wait()
 
     async def setup_rooms(started_bots: list[object]) -> None:
         assert started_bots == bots
+        await initial_rooms_discovered.wait()
         call_order.append("setup")
+        joined_room_ids.add("!joined-during-setup:example.com")
+        room_setup_finished.set()
 
     async def sync_runtime_support(sync_config: object) -> None:
         assert sync_config is config
@@ -48,7 +66,11 @@ async def test_startup_maintenance_runs_phases_in_order_and_passes_cutoff() -> N
     controller.start(bots, config, startup_cutoff_ms=123456)
     await _wait_for_controller(controller)
 
-    assert call_order == ["recover", "setup", "support", "approval_ready"]
+    assert recovery_waves == [
+        {"!initial:example.com"},
+        {"!joined-during-setup:example.com"},
+    ]
+    assert call_order == ["recover-1", "setup", "recover-2", "support", "approval_ready"]
 
 
 @pytest.mark.asyncio
@@ -56,7 +78,7 @@ async def test_startup_maintenance_continues_after_failed_recovery_and_room_setu
     """Later phases still run after stale recovery and room setup fail."""
     call_order: list[str] = []
 
-    async def recover_stale(_: list[object], __: object, ___: int) -> None:
+    async def recover_stale(_: list[object], __: object, ___: int, ____: set[str]) -> None:
         call_order.append("recover")
         msg = "recovery failed"
         raise RuntimeError(msg)
@@ -82,7 +104,7 @@ async def test_startup_maintenance_continues_after_failed_recovery_and_room_setu
     controller.start([MagicMock()], MagicMock(), startup_cutoff_ms=123456)
     await _wait_for_controller(controller)
 
-    assert call_order == ["recover", "setup", "support", "approval_ready"]
+    assert call_order == ["recover", "setup", "recover", "support", "approval_ready"]
 
 
 @pytest.mark.asyncio
