@@ -1234,6 +1234,44 @@ async def test_session_reports_only_device_missing_inbound_key(
 
 
 @pytest.mark.asyncio
+async def test_rejoining_device_must_send_a_new_inbound_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A departed device cannot reuse its old key-readiness state on rejoin."""
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session._E2EE_READY_TIMEOUT_S", 0)
+    notices: list[str] = []
+
+    async def on_failure(message: str) -> None:
+        notices.append(message)
+
+    alice = _member("@alice:example.org", "ALICEDEV")
+    session = _session(_client(), FakeBridge(), FakeKeyTransport(), [1_000])
+    session.deps.on_failure = on_failure
+    await session.start([alice])
+    assert session.on_key_received(
+        ReceivedFrameKey(
+            user_id=alice.user_id,
+            claimed_device_id=alice.device_id,
+            key_base64="QUFBQUFBQUFBQUFBQUFBQQ==",
+            key_index=2,
+            received_at_ms=1_500,
+        ),
+    )
+
+    await session.on_members_changed([])
+    assert session._devices_with_received_key == set()
+    await session.on_members_changed([alice])
+    for _ in range(20):
+        if notices:
+            break
+        await asyncio.sleep(0)
+
+    assert len(notices) == 1
+    assert "ALICEDEV" in notices[0]
+    await session.stop()
+
+
+@pytest.mark.asyncio
 async def test_session_reports_when_agents_encryption_key_cannot_be_delivered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

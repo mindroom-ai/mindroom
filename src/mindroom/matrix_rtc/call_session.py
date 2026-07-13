@@ -190,6 +190,8 @@ class CallSession:
         """React to remote membership changes (key rotation/sharing)."""
         if self._stopped:
             return
+        active_device_ids = {member.device_id for member in members}
+        self._devices_with_received_key.intersection_update(active_device_ids)
         self._members = members
         self._sync_bridge_participants()
         if not self.e2ee_enabled:
