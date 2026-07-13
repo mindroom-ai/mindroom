@@ -695,6 +695,43 @@ def test_failed_notice_without_index_says_unavailable() -> None:
     assert "Do not claim to have searched it." in notice
 
 
+def test_failed_notice_appends_last_error_cause() -> None:
+    """A refresh-failed notice carries the persisted safe cause for the agent to relay."""
+    notice = knowledge_utils.format_knowledge_availability_notice(
+        {
+            "docs": KnowledgeAvailabilityDetail(
+                availability=KnowledgeAvailability.REFRESH_FAILED,
+                search_available=False,
+                last_error="Indexed 0 of 3 managed knowledge files (first error: "
+                "embedder authentication failed (HTTP 401))",
+            ),
+        },
+    )
+
+    assert notice is not None
+    assert notice.endswith(
+        "Last error: Indexed 0 of 3 managed knowledge files "
+        "(first error: embedder authentication failed (HTTP 401))",
+    )
+
+
+def test_stale_failed_notice_appends_last_error_cause() -> None:
+    """A last-good-index refresh failure still appends the persisted cause."""
+    notice = knowledge_utils.format_knowledge_availability_notice(
+        {
+            "docs": KnowledgeAvailabilityDetail(
+                availability=KnowledgeAvailability.REFRESH_FAILED,
+                search_available=True,
+                last_error="embedder endpoint unreachable",
+            ),
+        },
+    )
+
+    assert notice is not None
+    assert "may be stale this turn" in notice
+    assert notice.endswith("Last error: embedder endpoint unreachable")
+
+
 def test_config_mismatch_notice_without_index_says_unavailable() -> None:
     """Cold config-mismatched knowledge must not imply stale semantic search occurred."""
     notice = knowledge_utils.format_knowledge_availability_notice(
@@ -3622,6 +3659,31 @@ async def test_cold_failed_refresh_cooldown_is_settings_aware(tmp_path: Path) ->
     assert scheduler.schedule_refresh.call_count == 2
     assert scheduler.schedule_refresh.call_args_list[0].kwargs["config"] is changed_config
     assert scheduler.schedule_refresh.call_args_list[1].kwargs["config"] is newer_config
+
+
+@pytest.mark.asyncio
+async def test_refresh_failed_detail_carries_persisted_last_error(tmp_path: Path) -> None:
+    """The availability detail exposes the persisted refresh failure cause."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    knowledge_registry.mark_published_index_refresh_failed_preserving_last_good(
+        key,
+        error="Indexed 0 of 1 managed knowledge files (first error: embedder authentication failed (HTTP 401))",
+    )
+    scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
+    scheduler.schedule_refresh = MagicMock()
+
+    resolution = resolve_agent_knowledge_access("helper", config, runtime_paths, refresh_scheduler=scheduler)
+
+    detail = resolution.unavailable["docs"]
+    assert detail.availability is KnowledgeAvailability.REFRESH_FAILED
+    assert detail.last_error == (
+        "Indexed 0 of 1 managed knowledge files (first error: embedder authentication failed (HTTP 401))"
+    )
 
 
 @pytest.mark.asyncio

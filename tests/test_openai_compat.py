@@ -133,6 +133,7 @@ def _knowledge_lookup(
                 source_signature=hashlib.sha256().hexdigest(),
                 last_published_at="2999-01-01T00:00:00+00:00",
                 last_refresh_at=None,
+                last_error=None,
             ),
         )
         if knowledge is not None

@@ -89,6 +89,7 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             ),
             availability=KnowledgeAvailability.READY,
+            state=None,
         )
 
         with patch("mindroom.knowledge.utils.get_published_index", return_value=lookup):
@@ -142,6 +143,7 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                 ),
                 availability=KnowledgeAvailability.READY,
+                state=None,
             )
 
         with patch("mindroom.knowledge.utils.get_published_index", side_effect=_lookup):
@@ -247,3 +249,28 @@ class TestAgentBot(AgentBotTestBase):
 
         docs = await vector_db.async_search(query="knowledge query", limit=3)
         assert [doc.content for doc in docs] == ["research 1", "research 2"]
+
+    def test_multi_knowledge_vector_db_sync_raises_when_all_sources_fail(self) -> None:
+        """When every knowledge source fails, the first error surfaces instead of empty results."""
+        vector_db = _MultiKnowledgeVectorDb(
+            vector_dbs=[
+                _FailingStubVectorDb(error_message="first boom"),
+                _FailingStubVectorDb(error_message="second boom"),
+            ],
+        )
+
+        with pytest.raises(RuntimeError, match="first boom"):
+            vector_db.search(query="knowledge query", limit=3)
+
+    @pytest.mark.asyncio
+    async def test_multi_knowledge_vector_db_async_raises_when_all_sources_fail(self) -> None:
+        """Async search re-raises the first captured failure when every source fails."""
+        vector_db = _MultiKnowledgeVectorDb(
+            vector_dbs=[
+                _FailingStubVectorDb(error_message="first boom"),
+                _FailingStubVectorDb(error_message="second boom"),
+            ],
+        )
+
+        with pytest.raises(RuntimeError, match="first boom"):
+            await vector_db.async_search(query="knowledge query", limit=3)
