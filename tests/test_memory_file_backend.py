@@ -275,6 +275,9 @@ def test_semantic_memory_index_is_a_runtime_config_overlay(storage_path: Path, c
     assert knowledge_config.knowledge_bases[base_id].path == str(root.resolve())
     assert knowledge_config.runtime_knowledge_base_overlay(base_id) is knowledge_config.knowledge_bases[base_id]
     assert base_id not in knowledge_config.authored_model_dump().get("knowledge_bases", {})
+    assert base_id not in config.knowledge_bases
+    assert config.runtime_knowledge_base_overlay(base_id) is None
+    assert knowledge_config.memory is config.memory
 
 
 @pytest.mark.parametrize(

@@ -1086,9 +1086,13 @@ class Config(BaseModel):
         if base_id in self.knowledge_bases and base_id not in self._runtime_knowledge_base_overlays:
             msg = f"Runtime knowledge base '{base_id}' conflicts with an authored knowledge base"
             raise ValueError(msg)
-        config = self.model_copy(deep=True)
-        config.knowledge_bases[base_id] = base_config
-        config._runtime_knowledge_base_overlays[base_id] = base_config
+        config = self.model_copy(
+            update={"knowledge_bases": {**self.knowledge_bases, base_id: base_config}},
+        )
+        config._runtime_knowledge_base_overlays = {
+            **self._runtime_knowledge_base_overlays,
+            base_id: base_config,
+        }
         return config
 
     def runtime_knowledge_base_overlay(self, base_id: str) -> KnowledgeBaseConfig | None:
