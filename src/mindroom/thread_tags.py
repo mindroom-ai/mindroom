@@ -22,13 +22,19 @@ _DEFAULT_USER_POWER_LEVEL = 0
 _MAX_THREAD_TAG_WRITE_ATTEMPTS = 3
 _TAG_NAME_RE = re.compile(r"^[a-z0-9-]{1,50}$")
 _PRIORITY_LEVELS = frozenset({"high", "medium", "low"})
+_COERCE_SEPARATOR_RE = re.compile(r"[\s_]+")
+_COERCE_INVALID_CHARS_RE = re.compile(r"[^a-z0-9-]")
+_COERCE_HYPHEN_RUN_RE = re.compile(r"-{2,}")
+COERCED_TAG_MAX_LENGTH = 25
 
 __all__ = [
+    "COERCED_TAG_MAX_LENGTH",
     "THREAD_TAGS_EVENT_TYPE",
     "ThreadTagRecord",
     "ThreadTagsError",
     "ThreadTagsListing",
     "ThreadTagsState",
+    "coerce_tag_name",
     "get_thread_tags",
     "list_tagged_threads",
     "normalize_tag_name",
@@ -177,6 +183,26 @@ def normalize_tag_name(tag: object) -> str:
         msg = "tag must be 1-50 chars of lowercase letters, digits, or hyphens."
         raise ThreadTagsError(msg)
     return normalized_tag
+
+
+def coerce_tag_name(tag: object) -> str | None:
+    """Coerce free-form tag input into a valid canonical tag name.
+
+    Lowercases, converts whitespace and underscore runs to hyphens, drops other
+    invalid characters, collapses hyphen runs, and truncates to
+    ``COERCED_TAG_MAX_LENGTH``. Returns None when nothing valid survives.
+    """
+    normalized_tag = _normalize_non_empty_string(tag)
+    if normalized_tag is None:
+        return None
+
+    normalized_tag = _COERCE_SEPARATOR_RE.sub("-", normalized_tag.lower())
+    normalized_tag = _COERCE_INVALID_CHARS_RE.sub("", normalized_tag)
+    normalized_tag = _COERCE_HYPHEN_RUN_RE.sub("-", normalized_tag)
+    normalized_tag = normalized_tag[:COERCED_TAG_MAX_LENGTH].strip("-")
+    if not normalized_tag:
+        return None
+    return normalize_tag_name(normalized_tag)
 
 
 def _normalize_blocked_by(value: object) -> list[str]:
