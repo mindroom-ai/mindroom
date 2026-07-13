@@ -22,7 +22,7 @@ from mindroom.inbound_turn_normalizer import (
     DispatchPayloadWithAttachmentsRequest,
 )
 from mindroom.matrix.cache import ThreadHistoryResult
-from mindroom.timing import elapsed_ms_between, emit_elapsed_timing
+from mindroom.timing import elapsed_ms_between, emit_elapsed_timing, emit_timing_event
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -112,7 +112,7 @@ class ResponsePayloadPreparer:
             )
 
         payload_ready_monotonic = time.monotonic()
-        self.logger.info(
+        emit_timing_event(
             "Response payload hydration phases",
             event_id=dispatch.envelope.source_event_id,
             payload_builder_ms=elapsed_ms_between(payload_builder_started, payload_builder_ready),

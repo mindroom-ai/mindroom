@@ -34,33 +34,35 @@ The normal text dispatch path now bounds DM lookup to one second at `src/mindroo
 
 Room-cleanup callers retain the original unbounded behavior by omitting the optional timeout, so a transient lookup delay cannot cause them to leave a DM incorrectly.
 
-Once the response lifecycle lock is acquired and the locked retry guard has approved the turn, agent and team responses now send a pending-stream placeholder before thread refresh and payload hydration at `src/mindroom/response_runner.py:957-1004`.
+Once the response lifecycle lock is acquired and the locked retry guard has approved the turn, agent and team responses now send a pending-stream placeholder before thread refresh and payload hydration at `src/mindroom/response_runner.py:1074-1137`.
 
 The ordering still avoids placeholders for empty prompts, stale restart retries, existing response events, and queued forced-compaction turns.
 
-The early event ID is adopted by the existing streaming and delivery lifecycle, propagated into dispatch-failure finalization at `src/mindroom/turn_controller.py:1755-1763`, and converted to a terminal cancellation note if hydration is cancelled at `src/mindroom/response_runner.py:1005-1021`.
+The early event ID is adopted by the existing streaming and delivery lifecycle, propagated into dispatch-failure finalization at `src/mindroom/turn_controller.py:1755-1763`, and guarded through all later pre-attempt setup at `src/mindroom/response_runner.py:736-804`.
 
-The fix adds structured phase timings for dispatch context at `src/mindroom/text_ingress_dispatch.py:155-164`, response payload building and hooks at `src/mindroom/response_payload_preparation.py:114-122`, and attachment hydration at `src/mindroom/inbound_turn_normalizer.py:419-430`.
+The fix adds structured phase timings for dispatch context at `src/mindroom/text_ingress_dispatch.py:156-165`, response payload building and hooks at `src/mindroom/response_payload_preparation.py:115-123`, and attachment hydration at `src/mindroom/inbound_turn_normalizer.py:419-430`.
+
+These phase events use the existing debug-level timing subsystem and require `MINDROOM_TIMING=1`.
 
 Pipeline summaries now measure first visibility directly from lock acquisition and retain thread refresh as a diagnostic span at `src/mindroom/timing.py:63-89`.
 
 ## Validation
 
-The fresh targeted command was `uv run pytest tests/test_dm_detection.py tests/test_queued_message_notify.py tests/test_response_payload_preparation.py tests/test_sync_restart_retry.py tests/test_timing.py tests/test_turn_dispatch_pipeline.py -x -n 0 --no-cov -v` inside `nix-shell shell.nix`.
+The fresh targeted command was `uv run pytest tests/test_dm_detection.py tests/test_queued_message_notify.py tests/test_response_payload_preparation.py tests/test_sync_restart_retry.py tests/test_timing.py tests/test_turn_dispatch_pipeline.py -x -n 0 --no-cov -q`.
 
-The targeted run collected 163 tests and passed all 163 in 6.78 seconds on Python 3.13.13.
+The targeted run collected 165 tests and passed all 165.
 
 `tests/test_dm_detection.py:213-256` proves that latency-sensitive DM lookup times out to the in-memory fallback while the default cleanup behavior remains unbounded.
 
 `tests/test_queued_message_notify.py:1597-1647` blocks payload preparation deliberately and proves that the placeholder is already visible while hydration remains pending.
 
-`tests/test_queued_message_notify.py:1650-1763` verifies that early placeholders are preserved across setup failures and finalized on cancellation.
+`tests/test_queued_message_notify.py:1658-1844` verifies that early placeholders are preserved across setup failures, finalized on cancellation, and do not replace the original cancellation if note delivery fails.
 
 `tests/test_response_payload_preparation.py:206-220` verifies emission of response payload phase timing, and `tests/test_timing.py:445-507` verifies the revised additive pipeline segments and thread-refresh diagnostic.
 
-The full suite was intentionally skipped at the user's direction because repeated attempts to access the Nix daemon from the sandbox had stalled or terminated prior sessions.
+The full `uv run pytest -n 0 --no-cov -q` suite completed successfully across 9,883 collected tests.
 
-The user reported that targeted and adjacent regression suites had also passed in the prior sessions, but the 163-test run above is the validation rerun captured directly in this session.
+`uv run pre-commit run --all-files`, `uv run tach check --dependencies --interfaces`, and `git diff --check` also passed.
 
 ## Confidence and limitations
 

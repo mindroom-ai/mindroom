@@ -34,7 +34,7 @@ from mindroom.matrix.media import (
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.media_inputs import MediaInputs
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
-from mindroom.timing import elapsed_ms_between, emit_elapsed_timing
+from mindroom.timing import elapsed_ms_between, emit_elapsed_timing, emit_timing_event
 from mindroom.voice_handler import prepare_raw_voice_fallback_message, prepare_voice_message
 
 if TYPE_CHECKING:
@@ -416,7 +416,7 @@ class InboundTurnNormalizer:
         attachment_prompt = "\n\n".join(block for block in attachment_prompt_blocks if block) or None
         resolved_attachment_ids = [record.attachment_id for record in resolved_records]
         payload_ready_at = time.monotonic()
-        self.deps.logger.info(
+        emit_timing_event(
             "Attachment hydration phases",
             room_id=request.room_id,
             thread_id=request.media_thread_id,

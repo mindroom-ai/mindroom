@@ -35,6 +35,7 @@ from mindroom.timing import (
     DispatchPipelineTiming,
     attach_dispatch_pipeline_timing,
     elapsed_ms_between,
+    emit_timing_event,
     event_timing_scope,
     get_dispatch_pipeline_timing,
 )
@@ -128,8 +129,6 @@ async def dispatch_text_message(
             requester_user_id=requester_user_id,
         )
         plan_inputs_ready_at = time.monotonic()
-        if dispatch_timing is not None:
-            dispatch_timing.mark("dispatch_plan_start")
         dm_detection_started = time.monotonic()
         room_is_dm = await is_dm_room(
             controller._client(),
@@ -137,6 +136,8 @@ async def dispatch_text_message(
             lookup_timeout_seconds=_DM_ROOM_LOOKUP_TIMEOUT_SECONDS,
         )
         dm_detection_ready_at = time.monotonic()
+        if dispatch_timing is not None:
+            dispatch_timing.mark("dispatch_plan_start")
         plan = await controller.deps.turn_policy.plan_turn(
             room,
             prepared.event,
@@ -152,7 +153,7 @@ async def dispatch_text_message(
         if dispatch_timing is not None:
             dispatch_timing.mark("dispatch_plan_ready")
         plan_ready_at = time.monotonic()
-        controller.deps.logger.info(
+        emit_timing_event(
             "Dispatch context hydration phases",
             event_id=prepared.event.event_id,
             prepare_dispatch_ms=elapsed_ms_between(context_hydration_started, dispatch_prepared_at),

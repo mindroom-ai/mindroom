@@ -998,13 +998,20 @@ def test_forced_compaction_placeholder_check_degrades_on_storage_error(tmp_path:
         "create_storage",
         side_effect=RuntimeError("storage unavailable"),
     ):
-        result = coordinator._has_queued_forced_compaction(
+        result = coordinator._inspect_locked_turn_state(
+            ResponseRequest(
+                thread_history=[],
+                prompt="hello",
+                response_envelope=_envelope(),
+            ),
             session_id="session",
             scope=scope,
             execution_identity=None,
+            check_forced_compaction=True,
         )
 
-    assert result is False
+    assert result.retry_is_current is True
+    assert result.forced_compaction_queued is False
 
 
 @pytest.mark.asyncio
@@ -1072,8 +1079,9 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
         request: ResponseRequest,
         *,
         resolved_target: MessageTarget,
+        early_placeholder_state: object,
     ) -> str:
-        del resolved_target
+        del resolved_target, early_placeholder_state
         return str(request.user_id)
 
     with (
@@ -1762,6 +1770,75 @@ async def test_locked_placeholder_is_finalized_when_payload_preparation_is_cance
     assert cancellation_request.event_id == "$placeholder"
     assert cancellation_request.existing_event_is_placeholder is True
     assert cancellation_request.cancel_source == "sync_restart"
+
+
+@pytest.mark.asyncio
+async def test_early_placeholder_survives_later_setup_failure(tmp_path: Path) -> None:
+    """Setup failures after payload preparation should still carry the early placeholder ID."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    request = ResponseRequest(
+        thread_history=[],
+        prompt="hello",
+        user_id="@user:localhost",
+        response_envelope=_envelope(),
+    )
+
+    with (
+        patch(
+            "mindroom.delivery_gateway.DeliveryGateway.send_text",
+            new=AsyncMock(return_value="$placeholder"),
+        ),
+        patch(
+            "mindroom.response_runner.prepare_memory_and_model_context",
+            side_effect=RuntimeError("model context failed"),
+        ),
+        pytest.raises(PostLockRequestPreparationError) as excinfo,
+    ):
+        await coordinator.generate_response(request)
+
+    assert excinfo.value.placeholder_event_id == "$placeholder"
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+
+@pytest.mark.asyncio
+async def test_later_setup_cancellation_preserves_cancel_when_note_delivery_fails(tmp_path: Path) -> None:
+    """Best-effort placeholder cleanup must not replace the original setup cancellation."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    setup_started = asyncio.Event()
+
+    async def blocked_streaming_check(*_args: object, **_kwargs: object) -> bool:
+        setup_started.set()
+        await asyncio.Event().wait()
+        return False
+
+    cancelled_note = AsyncMock(side_effect=RuntimeError("Matrix unavailable"))
+    request = ResponseRequest(
+        thread_history=[],
+        prompt="hello",
+        user_id="@user:localhost",
+        response_envelope=_envelope(),
+    )
+
+    with (
+        patch(
+            "mindroom.delivery_gateway.DeliveryGateway.send_text",
+            new=AsyncMock(return_value="$placeholder"),
+        ),
+        patch("mindroom.response_runner.should_use_streaming", side_effect=blocked_streaming_check),
+        patch(
+            "mindroom.delivery_gateway.DeliveryGateway.deliver_cancelled_visible_note",
+            new=cancelled_note,
+        ),
+    ):
+        response = asyncio.create_task(coordinator.generate_response(request))
+        await asyncio.wait_for(setup_started.wait(), timeout=1.0)
+        response.cancel("sync_restart")
+        with pytest.raises(asyncio.CancelledError, match="sync_restart"):
+            await response
+
+    cancelled_note.assert_awaited_once()
 
 
 @pytest.mark.asyncio
