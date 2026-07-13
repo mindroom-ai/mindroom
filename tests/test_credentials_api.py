@@ -12,6 +12,7 @@ from mindroom.api import credentials_oauth_flows
 from mindroom.api.main import initialize_api_app
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
+from mindroom.embedder_health import capture_embedder_health_recorder, get_embedder_failure
 
 
 @pytest.fixture
@@ -123,6 +124,20 @@ class TestCredentialsAPI:
 
         # Verify the key was saved
         assert mock_credentials_manager.get_api_key("openai") == "sk-test123"
+
+    def test_set_embedder_api_key_invalidates_inflight_health_writers(self, test_client: TestClient) -> None:
+        """A dashboard key rotation starts a new health generation."""
+        old_recorder = capture_embedder_health_recorder()
+        old_recorder.record("embedder authentication failed (HTTP 401)")
+
+        response = test_client.post(
+            "/api/credentials/embedder/api-key",
+            json={"service": "embedder", "api_key": "new-key", "key_name": "api_key"},
+        )
+
+        assert response.status_code == 200
+        assert get_embedder_failure() is None
+        assert not old_recorder.record("embedder authentication failed (HTTP 401)")
 
     def test_rejects_raw_worker_key_query_param(
         self,

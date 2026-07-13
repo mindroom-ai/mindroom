@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -13,7 +14,7 @@ from openai import AuthenticationError
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.embedder_health import capture_embedder_health_recorder, get_embedder_failure
+from mindroom.embedder_health import EmbedderRequestError, capture_embedder_health_recorder, get_embedder_failure
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory import add_agent_memory as public_add_agent_memory
 from mindroom.memory import build_memory_prompt_parts as public_build_memory_prompt_parts
@@ -24,6 +25,7 @@ from mindroom.memory import search_agent_memories as public_search_agent_memorie
 from mindroom.memory import store_conversation_memory as public_store_conversation_memory
 from mindroom.memory import update_agent_memory as public_update_agent_memory
 from mindroom.memory._prompting import format_memories_as_context
+from mindroom.memory.config import _Mem0StrictOpenAIEmbedder
 from mindroom.prompts import MEMORY_CONTEXT_PROMPT_TEMPLATE
 from mindroom.tool_system.worker_routing import agent_state_root_path, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for
@@ -239,6 +241,46 @@ class TestMemoryFacade:
             assert call_args[1]["metadata"]["test"] == "value"
 
     @pytest.mark.asyncio
+    async def test_add_agent_memory_surfaces_embedding_failure_swallowed_by_mem0(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """An empty normal return from Mem0 cannot turn a failed write into success."""
+        failure_detail = "embedder authentication failed (HTTP 401)"
+
+        class FailingEmbedder:
+            def get_embedding(self, _text: str) -> list[float]:
+                raise EmbedderRequestError(failure_detail)
+
+            def get_embeddings_batch(self, _texts: list[str]) -> list[list[float]]:
+                raise EmbedderRequestError(failure_detail)
+
+        class SwallowingMemory:
+            def __init__(self) -> None:
+                self.embedding_model = _Mem0StrictOpenAIEmbedder(FailingEmbedder())
+
+            async def add(self, messages: list[dict], **_kwargs: object) -> dict[str, list]:
+                try:
+                    self.embedding_model.embed_batch([message["content"] for message in messages])
+                except EmbedderRequestError:
+                    for message in messages:
+                        with suppress(EmbedderRequestError):
+                            self.embedding_model.embed(message["content"])
+                return {"results": []}
+
+        try:
+            with (
+                patch("mindroom.memory._backend.create_memory_instance", return_value=SwallowingMemory()),
+                pytest.raises(EmbedderRequestError, match="embedder authentication failed"),
+            ):
+                await add_agent_memory("Never stored", "test_agent", storage_path, config)
+
+            assert get_embedder_failure() == "embedder authentication failed (HTTP 401)"
+        finally:
+            capture_embedder_health_recorder().record(None)
+
+    @pytest.mark.asyncio
     async def test_add_agent_memory_error_handling(
         self,
         mock_memory: AsyncMock,
@@ -377,6 +419,51 @@ class TestMemoryFacade:
         assert [result["id"] for result in outcome.results] == ["personal"]
         assert outcome.degraded_reason == "embedder authentication failed (HTTP 401)"
         capture_embedder_health_recorder().record(None)
+
+    @pytest.mark.asyncio
+    async def test_mem0_later_scope_success_clears_earlier_scope_failure(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Outcome stays partial while process health follows the latest real request."""
+        config.teams = {
+            "first": MockTeamConfig(agents=["agent", "calculator"]),
+            "second": MockTeamConfig(agents=["agent", "finance"]),
+        }
+        request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
+        response = httpx.Response(401, request=request, json={"error": {"message": "bad key"}})
+        auth_error_message = "Error code: 401"
+        calls = 0
+
+        async def search(*_args: object, **_kwargs: object) -> dict[str, list[dict]]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return {"results": [{"id": "personal", "memory": "personal"}]}
+            if calls == 2:
+                raise AuthenticationError(auth_error_message, response=response, body=None)
+            capture_embedder_health_recorder().record(None)
+            return {"results": [{"id": "team", "memory": "team"}]}
+
+        mock_memory.search.side_effect = search
+        capture_embedder_health_recorder().record("embedder authentication failed (HTTP 401)")
+        try:
+            with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
+                outcome = await public_search_agent_memories(
+                    "query",
+                    "agent",
+                    storage_path,
+                    config,
+                    runtime_paths_for(config),
+                )
+
+            assert [result["id"] for result in outcome.results] == ["personal", "team"]
+            assert outcome.degraded_reason == "embedder authentication failed (HTTP 401)"
+            assert get_embedder_failure() is None
+        finally:
+            capture_embedder_health_recorder().record(None)
 
     @pytest.mark.asyncio
     async def test_mem0_search_success_clears_recorded_failure(

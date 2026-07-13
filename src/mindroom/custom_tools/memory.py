@@ -50,9 +50,16 @@ def _memory_result_lines(results: list[MemoryResult]) -> list[str]:
 
 
 def _degraded_search_text(outcome: MemorySearchOutcome) -> str:
-    failure_line = f"Semantic memory search unavailable: {outcome.degraded_reason}."
+    def is_keyword_result(result: MemoryResult) -> bool:
+        metadata = result.get("metadata")
+        return isinstance(metadata, dict) and metadata.get("search_mode") == "keyword"
+
+    keyword_only = bool(outcome.results) and all(is_keyword_result(result) for result in outcome.results)
+    availability = "unavailable" if not outcome.results or keyword_only else "partially unavailable"
+    failure_line = f"Semantic memory search {availability}: {outcome.degraded_reason}."
     if outcome.results:
-        failure_line = f"{failure_line} Showing keyword matches only."
+        result_detail = "Showing keyword matches only." if keyword_only else "Showing results from available scopes."
+        failure_line = f"{failure_line} {result_detail}"
     lines = [failure_line]
     if is_embedder_auth_failure_detail(outcome.degraded_reason):
         lines.append(_EMBEDDER_CREDENTIAL_ADVICE)

@@ -575,6 +575,29 @@ class TestMemoryConfig:
         with pytest.raises(EmbedderRequestError, match="embedder returned 0 embeddings for 1 inputs"):
             result.embedding_model.embed("query", "search")
 
+    def test_mem0_strict_adapter_remembers_swallowed_operation_failure(self) -> None:
+        """A later successful retry cannot hide a batch failure from the caller."""
+        failure_detail = "embedder authentication failed (HTTP 401)"
+
+        class BatchFailingEmbedder:
+            def get_embedding(self, _text: str) -> list[float]:
+                return [0.1, 0.2]
+
+            def get_embeddings_batch(self, _texts: list[str]) -> list[list[float]]:
+                raise EmbedderRequestError(failure_detail)
+
+        adapter = _Mem0StrictOpenAIEmbedder(BatchFailingEmbedder())
+        adapter.begin_operation()
+
+        with pytest.raises(EmbedderRequestError):
+            adapter.embed_batch(["first", "second"])
+        assert adapter.embed("first") == [0.1, 0.2]
+        with pytest.raises(EmbedderRequestError, match="embedder authentication failed"):
+            adapter.raise_for_operation_failure()
+
+        # Consuming the failure resets the next operation.
+        adapter.raise_for_operation_failure()
+
     def test_memory_auto_flush_batch_config_is_parameterized(self) -> None:
         """Auto-flush batch/extractor limits should be configurable."""
         memory = MemoryConfig.model_validate(

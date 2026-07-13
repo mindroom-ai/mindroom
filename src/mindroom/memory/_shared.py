@@ -74,10 +74,10 @@ class ScopedMemoryCrud(ScopedMemoryWriter, Protocol):
 class MemorySearchOutcome:
     """One memory search's results plus its semantic-degradation state.
 
-    ``degraded_reason`` carries the safe classified failure detail when the
-    semantic path was unavailable (results then hold keyword fallback matches,
-    if any); it stays ``None`` for a healthy search, including a healthy empty
-    one.
+    ``degraded_reason`` carries the safe classified failure detail when all or
+    part of the semantic path was unavailable. Results may hold keyword
+    fallback matches or semantic matches from healthy scopes; it stays ``None``
+    for a healthy search, including a healthy empty one.
     """
 
     results: list[MemoryResult]

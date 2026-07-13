@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from mem0 import AsyncMemory
@@ -35,6 +35,22 @@ class _Mem0StrictOpenAIEmbedder:
     """Adapt MindRoom's strict OpenAI embedder to Mem0's embedding interface."""
 
     embedder: _StrictOpenAIEmbedder
+    _operation_failure: Exception | None = field(default=None, init=False, repr=False)
+
+    def _remember_operation_failure(self, exc: Exception) -> None:
+        if self._operation_failure is None:
+            self._operation_failure = exc
+
+    def begin_operation(self) -> None:
+        """Start tracking failures that Mem0 may swallow during one operation."""
+        self._operation_failure = None
+
+    def raise_for_operation_failure(self) -> None:
+        """Raise a safe error when Mem0 swallowed an embedding failure."""
+        failure = self._operation_failure
+        self._operation_failure = None
+        if failure is not None:
+            raise failure
 
     def embed(
         self,
@@ -42,7 +58,11 @@ class _Mem0StrictOpenAIEmbedder:
         memory_action: Literal["add", "search", "update"] | None = None,
     ) -> list[float]:
         del memory_action
-        return self.embedder.get_embedding(text.replace("\n", " "))
+        try:
+            return self.embedder.get_embedding(text.replace("\n", " "))
+        except Exception as exc:
+            self._remember_operation_failure(exc)
+            raise
 
     def embed_batch(
         self,
@@ -50,7 +70,11 @@ class _Mem0StrictOpenAIEmbedder:
         memory_action: Literal["add", "search", "update"] = "add",
     ) -> list[list[float]]:
         del memory_action
-        return self.embedder.get_embeddings_batch([text.replace("\n", " ") for text in texts])
+        try:
+            return self.embedder.get_embeddings_batch([text.replace("\n", " ") for text in texts])
+        except Exception as exc:
+            self._remember_operation_failure(exc)
+            raise
 
 
 def _chroma_similarity_from_distance(distance: float | None, space: str) -> float | None:

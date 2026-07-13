@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, Protocol, TypeVar, cast, runtime_checkable
 
 from mindroom.embedder_health import (
     EmbedderHealthRecorder,
@@ -50,6 +50,13 @@ _T = TypeVar("_T")
 logger = get_logger(__name__)
 
 
+@runtime_checkable
+class _OperationTrackedEmbedder(Protocol):
+    def begin_operation(self) -> None: ...
+
+    def raise_for_operation_failure(self) -> None: ...
+
+
 def _record_classified_embedder_failure(
     exc: BaseException,
     health_recorder: EmbedderHealthRecorder,
@@ -73,6 +80,23 @@ async def _run_mem0_embedder_mutation(
             raise
         raise EmbedderRequestError(detail) from None
     health_recorder.record(None)
+    return result
+
+
+async def _strict_mem0_add(
+    memory: ScopedMemoryWriter,
+    messages: list[dict],
+    *,
+    user_id: str,
+    metadata: dict[str, object],
+) -> object:
+    """Add through Mem0 and surface embedding failures it catches internally."""
+    embedder = getattr(memory, "embedding_model", None)
+    if isinstance(embedder, _OperationTrackedEmbedder):
+        embedder.begin_operation()
+    result = await memory.add(messages, user_id=user_id, metadata=metadata)
+    if isinstance(embedder, _OperationTrackedEmbedder):
+        embedder.raise_for_operation_failure()
     return result
 
 
@@ -309,7 +333,7 @@ async def _add_mem0_scope_messages(
     health_recorder: EmbedderHealthRecorder,
 ) -> str | None:
     try:
-        await memory.add(messages, user_id=user_id, metadata=metadata)
+        await _strict_mem0_add(memory, messages, user_id=user_id, metadata=metadata)
     except Exception as error:
         if (detail := _record_classified_embedder_failure(error, health_recorder)) is not None:
             logger.warning(failure_log, error=detail, **failure_context)
@@ -353,7 +377,12 @@ class Mem0MemoryBackend:
 
         async def add_memory() -> None:
             memory = await self.create_memory(resolved_storage_path, config)
-            await memory.add(messages, user_id=agent_scope_user_id(agent_name), metadata=metadata)
+            await _strict_mem0_add(
+                memory,
+                messages,
+                user_id=agent_scope_user_id(agent_name),
+                metadata=metadata,
+            )
 
         await _run_mem0_embedder_mutation(add_memory, health_recorder)
         logger.info("Memory added", agent=agent_name)
@@ -424,7 +453,8 @@ class Mem0MemoryBackend:
             logger.debug("Team memories found", team_id=team_id, count=len(team_memories))
 
         logger.debug("Total memories found", count=len(results), agent=agent_name)
-        health_recorder.record(degraded_reason)
+        if degraded_reason is None:
+            health_recorder.record(None)
         return MemorySearchOutcome(results=results[:limit], degraded_reason=degraded_reason)
 
     async def list_all(

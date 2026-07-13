@@ -14,6 +14,7 @@ from structlog.testing import capture_logs
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.embedder_health import EmbedderRequestError, capture_embedder_health_recorder, get_embedder_failure
 from mindroom.memory import (
     add_agent_memory,
     delete_agent_memory,
@@ -23,6 +24,7 @@ from mindroom.memory import (
     store_conversation_memory,
     update_agent_memory,
 )
+from mindroom.memory.config import _Mem0StrictOpenAIEmbedder
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     _private_instance_state_root_path,
@@ -168,6 +170,56 @@ async def test_store_conversation_memory_redacts_embedder_provider_error(
 
     assert secret not in str(logs)
     assert "embedder authentication failed (HTTP 401)" in str(logs)
+
+
+@pytest.mark.asyncio
+async def test_store_conversation_memory_detects_embedding_failure_swallowed_by_mem0(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Automatic writes remain degraded when Mem0 catches every embedding error."""
+    config.memory.backend = "mem0"
+    failure_detail = "embedder authentication failed (HTTP 401)"
+
+    class FailingEmbedder:
+        def get_embedding(self, _text: str) -> list[float]:
+            raise EmbedderRequestError(failure_detail)
+
+        def get_embeddings_batch(self, _texts: list[str]) -> list[list[float]]:
+            raise EmbedderRequestError(failure_detail)
+
+    class SwallowingMemory:
+        def __init__(self) -> None:
+            self.embedding_model = _Mem0StrictOpenAIEmbedder(FailingEmbedder())
+
+        async def add(self, messages: list[dict], **_kwargs: object) -> dict[str, list]:
+            try:
+                self.embedding_model.embed_batch([message["content"] for message in messages])
+            except EmbedderRequestError:
+                return {"results": []}
+            return {"results": []}
+
+    async def create_swallowing_memory(*_args: object, **_kwargs: object) -> SwallowingMemory:
+        return SwallowingMemory()
+
+    try:
+        with (
+            patch("mindroom.memory._backend.create_memory_instance", side_effect=create_swallowing_memory),
+            capture_logs() as logs,
+        ):
+            await store_conversation_memory(
+                "Remember this",
+                "general",
+                storage_path,
+                "session",
+                config,
+                runtime_paths_for(config),
+            )
+
+        assert get_embedder_failure() == "embedder authentication failed (HTTP 401)"
+        assert "embedder authentication failed (HTTP 401)" in str(logs)
+    finally:
+        capture_embedder_health_recorder().record(None)
 
 
 @pytest.mark.asyncio

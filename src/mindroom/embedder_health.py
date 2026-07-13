@@ -97,6 +97,11 @@ def _reset_embedder_health_generation() -> None:
         _current_failure = None
 
 
+def handle_embedder_credential_change() -> None:
+    """Invalidate health writers after the effective credential may have changed."""
+    _reset_embedder_health_generation()
+
+
 def is_embedder_auth_failure_detail(detail: str | None) -> bool:
     """Return whether a recorded failure detail describes a credential rejection."""
     return detail in {_EMBEDDER_AUTH_FAILED_DETAIL, _EMBEDDER_PERMISSION_DENIED_DETAIL}

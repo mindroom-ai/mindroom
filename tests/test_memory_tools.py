@@ -330,6 +330,30 @@ class TestMemoryTools:
         assert "credential" not in result
         assert "[id=k1] [keyword] Keyword hit" in result
 
+    @pytest.mark.asyncio
+    async def test_search_memories_partial_semantic_results_are_not_called_keyword_only(
+        self,
+        tools: MemoryTools,
+    ) -> None:
+        """A failed Mem0 scope can coexist with semantic results from healthy scopes."""
+        outcome = MemorySearchOutcome(
+            results=[{"id": "m1", "memory": "Healthy scope hit", "metadata": {}}],
+            degraded_reason="embedder endpoint unreachable",
+        )
+
+        with patch(
+            "mindroom.custom_tools.memory.search_agent_memories",
+            new_callable=AsyncMock,
+            return_value=outcome,
+        ):
+            result = await tools.search_memories("anything")
+
+        assert result.splitlines()[0] == (
+            "Semantic memory search partially unavailable: embedder endpoint unreachable. "
+            "Showing results from available scopes."
+        )
+        assert "keyword matches only" not in result
+
     def test_credential_advice_names_the_real_config_path(self) -> None:
         """The advised YAML path must parse into EmbedderConfig.api_key."""
         assert "memory.embedder.config.api_key" in _EMBEDDER_CREDENTIAL_ADVICE

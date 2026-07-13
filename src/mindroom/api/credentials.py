@@ -35,6 +35,7 @@ from mindroom.api.credentials_target import (
 )
 from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import list_worker_grantable_shared_services, validate_service_name
+from mindroom.embedder_health import handle_embedder_credential_change
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
 
 if TYPE_CHECKING:
@@ -42,12 +43,20 @@ if TYPE_CHECKING:
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 
+_EMBEDDER_CREDENTIAL_SERVICES = frozenset({"embedder", "openai"})
+
 
 def _validated_service(service: str) -> str:
     try:
         return validate_service_name(service)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _handle_runtime_credential_change(service: str, access: _DashboardCredentialAccess) -> None:
+    """Invalidate embedder health when a global credential may change its key."""
+    if access.target.worker_scope is None and service in _EMBEDDER_CREDENTIAL_SERVICES:
+        handle_embedder_credential_change()
 
 
 @dataclass(frozen=True)
@@ -248,6 +257,7 @@ async def set_credentials(
 
     creds = access.credentials_for_save(service, payload.credentials)
     access.save(service, creds)
+    _handle_runtime_credential_change(service, access)
 
     return {"status": "success", "message": f"Credentials saved for {service}"}
 
@@ -276,6 +286,7 @@ async def set_api_key(
     credentials[payload.key_name] = payload.api_key
     credentials["_source"] = "ui"
     access.save(service, credentials)
+    _handle_runtime_credential_change(service, access)
 
     return {"status": "success", "message": f"API key set for {service}"}
 
@@ -365,6 +376,7 @@ async def delete_credentials(
     if existing_credentials:
         access.reject_stored_oauth_credentials(existing_credentials)
     access.delete(service)
+    _handle_runtime_credential_change(service, access)
 
     return {"status": "success", "message": f"Credentials deleted for {service}"}
 
@@ -400,6 +412,7 @@ async def copy_credentials(
     target_creds = {k: v for k, v in source_creds.items() if not k.startswith("_")}
     target_creds["_source"] = "ui"
     access.save(service, target_creds)
+    _handle_runtime_credential_change(service, access)
 
     return {"status": "success", "message": f"Credentials copied from {source_service} to {service}"}
 
