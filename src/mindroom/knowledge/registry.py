@@ -33,6 +33,7 @@ from mindroom.knowledge.indexing_config import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_knowledge_binding
+from mindroom.strict_knowledge import StrictSearchKnowledge
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -478,7 +479,7 @@ def _build_published_index_knowledge(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> Knowledge:
-    return Knowledge(
+    return StrictSearchKnowledge(
         vector_db=_build_published_index_vector_db(key, state, config=config, runtime_paths=runtime_paths),
     )
 

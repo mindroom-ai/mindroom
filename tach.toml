@@ -42,7 +42,6 @@ depends_on = [
     "mindroom.background_tasks",
     # Deferred (function-level) import inside probe_embedder; still a runtime edge.
     "mindroom.embedding_factory",
-    "mindroom.knowledge.redaction",
     "mindroom.logging_config",
 ]
 
@@ -206,10 +205,18 @@ visibility = ["mindroom.agents"]
 
 [[modules]]
 path = "mindroom.knowledge_source_descriptions"
-depends_on = []
+depends_on = ["mindroom.strict_knowledge"]
 visibility = [
     "mindroom.agent_knowledge_descriptions",
     "mindroom.knowledge.utils",
+]
+
+[[modules]]
+path = "mindroom.strict_knowledge"
+depends_on = []
+visibility = [
+    "mindroom.knowledge.registry",
+    "mindroom.knowledge_source_descriptions",
 ]
 
 [[modules]]
@@ -3013,6 +3020,7 @@ depends_on = [
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.indexing_config",
     "mindroom.runtime_resolution",
+    "mindroom.strict_knowledge",
     "mindroom.tool_system.worker_routing",
 ]
 
