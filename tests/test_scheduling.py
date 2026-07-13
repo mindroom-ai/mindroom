@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
@@ -2207,8 +2207,11 @@ async def test_schedule_task_keeps_parse_produced_history_limit(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_schedule_task_rejects_negative_history_limit_before_parsing() -> None:
-    """A negative explicit limit fails fast without spending an AI parse call."""
+@pytest.mark.parametrize("invalid_history_limit", [-1, True, 1.5, "5"])
+async def test_schedule_task_rejects_invalid_history_limit_before_parsing(
+    invalid_history_limit: object,
+) -> None:
+    """An invalid explicit limit fails fast without spending an AI parse call."""
     parse_mock = AsyncMock()
 
     with patch("mindroom.scheduling._parse_workflow_schedule", new=parse_mock):
@@ -2218,7 +2221,7 @@ async def test_schedule_task_rejects_negative_history_limit_before_parsing() -> 
             thread_id=None,
             scheduled_by="@user:server",
             full_text="in 5 minutes check logs",
-            history_limit=-1,
+            history_limit=cast("int", invalid_history_limit),
         )
 
     assert task_id is None

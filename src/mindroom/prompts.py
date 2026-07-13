@@ -346,6 +346,7 @@ Conversation context (history_limit):
 - history_limit is the number of recent thread messages the responding agent sees each time the task fires
 - "with no history", "without context", or "context-free" -> history_limit=0
 - "with only the last 5 messages of context" or "include the last 5 messages" -> history_limit=5
+- On edits, "restore full history" or "use unlimited history" -> history_limit=null
 - Leave history_limit unset (null) when the request says nothing about context or history
 - Remove context phrases like "with no history" from the message itself
 

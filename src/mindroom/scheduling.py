@@ -1248,8 +1248,10 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         Tuple of (task_id, response_message)
 
     """
-    if history_limit is not None and history_limit < 0:
-        return (None, "❌ history_limit must be 0 or a positive number of messages.")
+    if history_limit is not None and (
+        isinstance(history_limit, bool) or not isinstance(history_limit, int) or history_limit < 0
+    ):
+        return (None, "❌ history_limit must be a non-negative integer.")
 
     client = runtime.client
     config = runtime.config

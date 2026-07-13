@@ -74,7 +74,7 @@ class SchedulerTools(Toolkit):
             request: The new scheduling request, e.g. "tomorrow at 9am check deployment"
             history_limit: Max recent thread messages included as context each time
                 the task fires. Use 0 for no history. Leave unset to keep the task's
-                existing history limit.
+                existing history limit. To restore full history, say so in request.
 
         Returns:
             The edit result message.
