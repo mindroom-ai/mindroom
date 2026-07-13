@@ -24,6 +24,7 @@ logger = get_logger(__name__)
 
 type _StartupBot = AgentBot | TeamBot
 type _SetupRooms = Callable[[list[_StartupBot]], Awaitable[None]]
+type _ReplayPendingResumes = Callable[[Config, int], Awaitable[None]]
 type _CleanupStaleStreams = Callable[[list[_StartupBot], Config, int], Awaitable[list[InterruptedThread]]]
 type _AutoResume = Callable[[list[InterruptedThread], Config], Awaitable[None]]
 type _SyncRuntimeSupport = Callable[[Config], Awaitable[None]]
@@ -35,6 +36,7 @@ type _RunningBots = Callable[[], list[_StartupBot]]
 class StartupMaintenanceController:
     """Own detached post-sync startup maintenance task lifecycle."""
 
+    replay_pending_resumes: _ReplayPendingResumes
     setup_rooms_and_memberships: _SetupRooms
     cleanup_stale_streams: _CleanupStaleStreams
     auto_resume: _AutoResume
@@ -75,6 +77,14 @@ class StartupMaintenanceController:
         self.start(bots, config, startup_cutoff_ms=self.startup_cutoff_ms)
 
     async def _run(self, bots: list[_StartupBot], config: Config, startup_cutoff_ms: int) -> None:
+        # Interrupted turns must resume within seconds of the bots coming
+        # online, so persisted resume intents replay before the multi-minute
+        # room and stale-stream sweeps below.
+        await self._run_phase(
+            "startup_maintenance.pending_resume_replay",
+            lambda: self.replay_pending_resumes(config, startup_cutoff_ms),
+            failure_message="Startup pending auto-resume replay failed",
+        )
         await self._run_phase(
             "startup_maintenance.rooms_and_memberships",
             lambda: self.setup_rooms_and_memberships(bots),

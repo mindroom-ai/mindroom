@@ -40,6 +40,7 @@ from mindroom.orchestration.runtime import (
     log_cancelled_response_source,
     request_task_cancel,
 )
+from mindroom.pending_resume_store import PendingResumeTracker, pending_resume_ledger_path
 from mindroom.post_response_effects import PostResponseEffectsSupport, ResponseOutcome
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.response_terminal import (
@@ -1837,6 +1838,10 @@ class ResponseRunner:
                     notify_outbound_event=self.deps.resolver.deps.conversation_cache.notify_outbound_event,
                     notify_outbound_redaction=(
                         self.deps.post_response_effects.conversation_cache.notify_outbound_redaction
+                    ),
+                    pending_resume=PendingResumeTracker(
+                        ledger_path=pending_resume_ledger_path(self.deps.runtime_paths),
+                        agent_name=self.deps.agent_name,
                     ),
                 ),
             ).run(

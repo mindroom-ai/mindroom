@@ -25,6 +25,7 @@ from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import ThreadHistoryResult
+from mindroom.pending_resume_store import PendingResumeTracker
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator
@@ -132,6 +133,10 @@ def _attempt_runner(tmp_path: Path, stop_manager: StopManager) -> tuple[Response
             config=_config(tmp_path),
             notify_outbound_event=MagicMock(),
             notify_outbound_redaction=MagicMock(),
+            pending_resume=PendingResumeTracker(
+                ledger_path=tmp_path / "tracking" / "pending_resumes.json",
+                agent_name="test_agent",
+            ),
         ),
     )
     return runner, gateway

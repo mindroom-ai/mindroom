@@ -49,6 +49,11 @@ from mindroom.matrix.thread_projection import (
     ordered_event_ids_from_scanned_event_sources,
     resolve_thread_ids_for_event_infos,
 )
+from mindroom.pending_resume_store import (
+    discard_pending_resume_records,
+    load_pending_resume_records,
+    pending_resume_ledger_path,
+)
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
@@ -62,6 +67,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ThreadReadResult
+    from mindroom.pending_resume_store import PendingResumeRecord
 
 logger = get_logger(__name__)
 
@@ -289,6 +295,118 @@ async def auto_resume_interrupted_threads(
     return resumed_count
 
 
+async def resume_pending_interrupted_threads(
+    client: nio.AsyncClient,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    conversation_cache: ConversationCacheProtocol | None,
+    startup_cutoff_ms: int,
+    max_resumes: int | None = None,
+) -> int:
+    """Replay persisted in-flight turns as auto-resume prompts ahead of the full stale-stream scan.
+
+    The pending-resume ledger records every visible turn that was in flight when
+    the previous process died, so interrupted threads can resume within seconds
+    of the bots coming online instead of after a multi-minute estate scan.
+    """
+    if not config.defaults.auto_resume_after_restart or conversation_cache is None:
+        return 0
+    ledger_path = pending_resume_ledger_path(runtime_paths)
+    records = load_pending_resume_records(ledger_path)
+    eligible = {key: record for key, record in records.items() if record.created_at_ms < startup_cutoff_ms}
+    if not eligible:
+        return 0
+
+    consumed_keys: list[str] = []
+    interrupted_threads: list[InterruptedThread] = []
+    now_ms = int(time.time() * 1000)
+    for key, record in eligible.items():
+        evaluation = await _evaluate_pending_resume_record(
+            record,
+            config=config,
+            conversation_cache=conversation_cache,
+            now_ms=now_ms,
+        )
+        if evaluation.consume:
+            consumed_keys.append(key)
+        if evaluation.interrupted is not None:
+            interrupted_threads.append(evaluation.interrupted)
+
+    resumed_count = await auto_resume_interrupted_threads(
+        client,
+        interrupted_threads,
+        config=config,
+        runtime_paths=runtime_paths,
+        conversation_cache=conversation_cache,
+        max_resumes=max_resumes,
+    )
+    if consumed_keys:
+        discard_pending_resume_records(ledger_path, consumed_keys)
+    return resumed_count
+
+
+@dataclass(frozen=True)
+class _PendingResumeEvaluation:
+    """Outcome of verifying one persisted resume intent against live thread history."""
+
+    interrupted: InterruptedThread | None
+    consume: bool
+
+
+async def _evaluate_pending_resume_record(
+    record: PendingResumeRecord,
+    *,
+    config: Config,
+    conversation_cache: ConversationCacheProtocol,
+    now_ms: int,
+) -> _PendingResumeEvaluation:
+    """Verify one persisted resume intent against authoritative thread history."""
+    if record.agent_name not in config.agents and record.agent_name not in config.teams:
+        return _PendingResumeEvaluation(interrupted=None, consume=True)
+    if _is_older_than_cleanup_window(record.created_at_ms, now_ms=now_ms):
+        # The full stale-stream scan owns anything beyond the restart lookback.
+        return _PendingResumeEvaluation(interrupted=None, consume=True)
+
+    try:
+        history = await conversation_cache.get_strict_thread_history(
+            record.room_id,
+            record.thread_id,
+            caller_label="startup_pending_resume",
+        )
+        _require_authoritative_history(history)
+    except Exception as exc:
+        logger.warning(
+            "Keeping pending auto-resume record after history verification failure",
+            target_event_id=record.target_event_id,
+            error=str(exc),
+        )
+        return _PendingResumeEvaluation(interrupted=None, consume=False)
+
+    target = next((message for message in history if message.event_id == record.target_event_id), None)
+    if target is None or not _pending_target_is_resumable(body=target.body, stream_status=target.stream_status):
+        return _PendingResumeEvaluation(interrupted=None, consume=True)
+    return _PendingResumeEvaluation(
+        interrupted=InterruptedThread(
+            room_id=record.room_id,
+            thread_id=record.thread_id,
+            target_event_id=record.target_event_id,
+            partial_text=_truncate_partial_text(clean_partial_reply_text(target.body)),
+            agent_name=record.agent_name,
+            original_sender_id=record.requester_user_id,
+            timestamp_ms=target.timestamp,
+        ),
+        consume=True,
+    )
+
+
+def _pending_target_is_resumable(*, body: str, stream_status: str | None) -> bool:
+    """Return whether a persisted turn's current visible state still warrants auto-resume."""
+    if stream_status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
+        return True
+    return _is_resumable_interrupted_body(body=body, stream_status=stream_status)
+
+
 async def _interrupted_target_remains_latest_human_work(
     interrupted_thread: InterruptedThread,
     *,
@@ -331,12 +449,8 @@ async def _interrupted_target_remains_latest_human_work(
     return remains_latest
 
 
-def _authoritative_history_after_target(
-    history: ThreadReadResult,
-    *,
-    target_event_id: str,
-) -> Sequence[ResolvedVisibleMessage]:
-    """Return history entries after an exact target or raise when history is unusable."""
+def _require_authoritative_history(history: ThreadReadResult) -> None:
+    """Raise when thread history cannot be trusted for auto-resume decisions."""
     history_source = history.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC)
     if not history.is_full_history or is_thread_history_degraded(history):
         msg = "Thread history is incomplete or degraded"
@@ -344,6 +458,15 @@ def _authoritative_history_after_target(
     if history_source not in {THREAD_HISTORY_SOURCE_CACHE, THREAD_HISTORY_SOURCE_HOMESERVER}:
         msg = f"Non-authoritative thread history source: {history_source!r}"
         raise ValueError(msg)
+
+
+def _authoritative_history_after_target(
+    history: ThreadReadResult,
+    *,
+    target_event_id: str,
+) -> Sequence[ResolvedVisibleMessage]:
+    """Return history entries after an exact target or raise when history is unusable."""
+    _require_authoritative_history(history)
 
     target_index = next(
         (index for index, message in enumerate(history) if message.event_id == target_event_id),
@@ -1573,12 +1696,17 @@ def _has_generic_interrupted_note(body: str) -> bool:
 def _has_resumable_interrupted_note(state: _MessageState) -> bool:
     """Return whether the visible body represents a restart-resumable interruption."""
     assert state.latest_body is not None
-    if _has_restart_interrupted_note(state.latest_body):
-        return state.stream_status in {None, STREAM_STATUS_ERROR, STREAM_STATUS_INTERRUPTED}
-    return state.stream_status in {
+    return _is_resumable_interrupted_body(body=state.latest_body, stream_status=state.stream_status)
+
+
+def _is_resumable_interrupted_body(*, body: str, stream_status: str | None) -> bool:
+    """Return whether one visible body and stream status pair is a restart-resumable interruption."""
+    if _has_restart_interrupted_note(body):
+        return stream_status in {None, STREAM_STATUS_ERROR, STREAM_STATUS_INTERRUPTED}
+    return stream_status in {
         STREAM_STATUS_ERROR,
         STREAM_STATUS_INTERRUPTED,
-    } and _has_generic_interrupted_note(state.latest_body)
+    } and _has_generic_interrupted_note(body)
 
 
 def _interrupted_thread_from_terminal_state(

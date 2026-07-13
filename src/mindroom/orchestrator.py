@@ -48,6 +48,7 @@ from mindroom.matrix.stale_stream_cleanup import (
     InterruptedThread,
     auto_resume_interrupted_threads,
     cleanup_stale_streaming_messages,
+    resume_pending_interrupted_threads,
 )
 from mindroom.matrix.state import load_rooms, resolve_room_aliases
 from mindroom.matrix.users import (
@@ -261,6 +262,10 @@ class _MultiAgentOrchestrator:
             event_cache_provider=lambda: self._runtime_support.event_cache,
         )
         self._startup_maintenance = StartupMaintenanceController(
+            replay_pending_resumes=lambda config, startup_cutoff_ms: self._replay_pending_auto_resumes(
+                config,
+                startup_cutoff_ms,
+            ),
             setup_rooms_and_memberships=self._setup_startup_rooms_and_memberships,
             cleanup_stale_streams=lambda bots, config, startup_cutoff_ms: self._cleanup_stale_streams_after_restart(
                 bots,
@@ -1035,6 +1040,27 @@ class _MultiAgentOrchestrator:
         if cleaned_count > 0:
             logger.info("Cleaned stale streaming messages", count=cleaned_count)
         return interrupted_threads
+
+    async def _replay_pending_auto_resumes(self, config: Config, startup_cutoff_ms: int) -> None:
+        """Replay persisted in-flight resume intents before the slow startup scans."""
+        router_bot = self._router_bot()
+        if router_bot is None or router_bot.client is None:
+            logger.warning("Pending auto-resume replay skipped because the router client is unavailable")
+            return
+
+        try:
+            resumed_count = await resume_pending_interrupted_threads(
+                router_bot.client,
+                config=config,
+                runtime_paths=self.runtime_paths,
+                conversation_cache=router_bot._conversation_cache,
+                startup_cutoff_ms=startup_cutoff_ms,
+                max_resumes=MAX_AUTO_RESUME_AFTER_RESTART_THREADS,
+            )
+            if resumed_count > 0:
+                logger.info("Queued persisted auto-resume messages after restart", count=resumed_count)
+        except Exception as exc:
+            logger.warning("Could not replay pending auto-resumes (non-critical)", error=str(exc))
 
     async def _auto_resume_after_restart(
         self,

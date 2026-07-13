@@ -22,6 +22,11 @@ async def test_startup_maintenance_runs_phases_in_order_and_passes_cutoff() -> N
     config = MagicMock()
     interrupted_threads = [MagicMock()]
 
+    async def replay_pending_resumes(replay_config: object, startup_cutoff_ms: int) -> None:
+        assert replay_config is config
+        assert startup_cutoff_ms == 123456
+        call_order.append("pending_replay")
+
     async def setup_rooms(started_bots: list[object]) -> None:
         assert started_bots == bots
         call_order.append("setup")
@@ -46,6 +51,7 @@ async def test_startup_maintenance_runs_phases_in_order_and_passes_cutoff() -> N
         call_order.append("approval_ready")
 
     controller = StartupMaintenanceController(
+        replay_pending_resumes=replay_pending_resumes,
         setup_rooms_and_memberships=setup_rooms,
         cleanup_stale_streams=cleanup_stale,
         auto_resume=auto_resume,
@@ -56,13 +62,18 @@ async def test_startup_maintenance_runs_phases_in_order_and_passes_cutoff() -> N
     controller.start(bots, config, startup_cutoff_ms=123456)
     await _wait_for_controller(controller)
 
-    assert call_order == ["setup", "cleanup", "resume", "support", "approval_ready"]
+    assert call_order == ["pending_replay", "setup", "cleanup", "resume", "support", "approval_ready"]
 
 
 @pytest.mark.asyncio
-async def test_startup_maintenance_continues_after_failed_room_setup() -> None:
-    """Later phases still run after room setup fails."""
+async def test_startup_maintenance_continues_after_failed_replay_and_room_setup() -> None:
+    """Later phases still run after pending-resume replay and room setup fail."""
     call_order: list[str] = []
+
+    async def replay_pending_resumes(_: object, __: int) -> None:
+        call_order.append("pending_replay")
+        msg = "pending replay failed"
+        raise RuntimeError(msg)
 
     async def setup_rooms(_: list[object]) -> None:
         call_order.append("setup")
@@ -83,6 +94,7 @@ async def test_startup_maintenance_continues_after_failed_room_setup() -> None:
         call_order.append("approval_ready")
 
     controller = StartupMaintenanceController(
+        replay_pending_resumes=replay_pending_resumes,
         setup_rooms_and_memberships=setup_rooms,
         cleanup_stale_streams=cleanup_stale,
         auto_resume=auto_resume,
@@ -93,7 +105,7 @@ async def test_startup_maintenance_continues_after_failed_room_setup() -> None:
     controller.start([MagicMock()], MagicMock(), startup_cutoff_ms=123456)
     await _wait_for_controller(controller)
 
-    assert call_order == ["setup", "cleanup", "resume", "support", "approval_ready"]
+    assert call_order == ["pending_replay", "setup", "cleanup", "resume", "support", "approval_ready"]
 
 
 @pytest.mark.asyncio
@@ -107,6 +119,7 @@ async def test_startup_maintenance_cancel_reports_unfinished_and_replays_with_ru
         await release.wait()
 
     controller = StartupMaintenanceController(
+        replay_pending_resumes=AsyncMock(),
         setup_rooms_and_memberships=setup_rooms,
         cleanup_stale_streams=AsyncMock(return_value=[]),
         auto_resume=AsyncMock(),
@@ -141,6 +154,7 @@ async def test_startup_maintenance_cancel_reports_unfinished_and_replays_with_ru
 async def test_startup_maintenance_cancel_completed_task_returns_false() -> None:
     """Canceling completed maintenance does not request replay."""
     controller = StartupMaintenanceController(
+        replay_pending_resumes=AsyncMock(),
         setup_rooms_and_memberships=AsyncMock(),
         cleanup_stale_streams=AsyncMock(return_value=[]),
         auto_resume=AsyncMock(),
@@ -170,6 +184,7 @@ async def test_startup_maintenance_runtime_support_failure_skips_approval_ready_
         raise RuntimeError(msg)
 
     controller = StartupMaintenanceController(
+        replay_pending_resumes=AsyncMock(),
         setup_rooms_and_memberships=AsyncMock(),
         cleanup_stale_streams=AsyncMock(return_value=[]),
         auto_resume=AsyncMock(),

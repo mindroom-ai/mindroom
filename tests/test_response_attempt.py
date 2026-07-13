@@ -80,11 +80,30 @@ class _DeliveryGateway:
         return self.event_id
 
 
+class _PendingResume:
+    def __init__(self) -> None:
+        self.started: list[tuple[str, MessageTarget, str | None]] = []
+        self.settled: list[tuple[MessageTarget, bool]] = []
+
+    def note_started(
+        self,
+        target_event_id: str,
+        *,
+        target: MessageTarget,
+        requester_user_id: str | None,
+    ) -> None:
+        self.started.append((target_event_id, target, requester_user_id))
+
+    def note_settled(self, target: MessageTarget, *, resumable: bool) -> None:
+        self.settled.append((target, resumable))
+
+
 def _runner(
     *,
     delivery_gateway: _DeliveryGateway | None = None,
     stop_manager: _StopManager | None = None,
     show_stop_button: bool = False,
+    pending_resume: _PendingResume | None = None,
 ) -> tuple[ResponseAttemptRunner, _DeliveryGateway, _StopManager]:
     resolved_delivery_gateway = delivery_gateway or _DeliveryGateway()
     resolved_stop_manager = stop_manager or _StopManager()
@@ -99,6 +118,7 @@ def _runner(
                 config=Config(),
                 notify_outbound_event=MagicMock(),
                 notify_outbound_redaction=MagicMock(),
+                pending_resume=pending_resume or _PendingResume(),
             ),
         ),
         resolved_delivery_gateway,
@@ -345,3 +365,106 @@ async def test_response_attempt_cancellation_records_reason_logs_provenance_and_
     log_call = getattr(runner.deps.logger, log_method).call_args
     assert log_call.args[0] == log_message
     assert log_call.kwargs["message_id"] == "$existing"
+
+
+@pytest.mark.asyncio
+async def test_response_attempt_records_then_discards_pending_resume_for_completed_turn() -> None:
+    """A completed visible attempt should persist and then discard its resume intent."""
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
+    pending_resume = _PendingResume()
+    runner, _delivery_gateway, _stop_manager = _runner(pending_resume=pending_resume)
+
+    async def response_function(_message_id: str | None) -> None:
+        return None
+
+    await runner.run(
+        ResponseAttemptRequest(
+            target=target,
+            response_function=response_function,
+            thinking_message="Thinking...",
+            user_id="@user:localhost",
+        ),
+    )
+
+    assert pending_resume.started == [("$thinking", target, "@user:localhost")]
+    assert pending_resume.settled == [(target, False)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cancel_args", "expected_resumable"),
+    [
+        ((USER_STOP_CANCEL_MSG,), False),
+        ((SYNC_RESTART_CANCEL_MSG,), True),
+        ((), True),
+    ],
+)
+async def test_response_attempt_keeps_pending_resume_only_for_non_user_cancellations(
+    cancel_args: tuple[str, ...],
+    expected_resumable: bool,
+) -> None:
+    """Only user-stopped attempts settle a terminal outcome that drops the resume intent."""
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
+    pending_resume = _PendingResume()
+    runner, _delivery_gateway, _stop_manager = _runner(pending_resume=pending_resume)
+
+    async def response_function(_message_id: str | None) -> None:
+        raise asyncio.CancelledError(*cancel_args)
+
+    await runner.run(
+        ResponseAttemptRequest(
+            target=target,
+            response_function=response_function,
+            existing_event_id="$existing",
+        ),
+    )
+
+    assert pending_resume.started == [("$existing", target, None)]
+    assert pending_resume.settled == [(target, expected_resumable)]
+
+
+@pytest.mark.asyncio
+async def test_response_attempt_discards_pending_resume_when_generation_errors() -> None:
+    """A raising attempt still settles an error terminal note, so the resume intent drops."""
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
+    pending_resume = _PendingResume()
+    runner, _delivery_gateway, _stop_manager = _runner(pending_resume=pending_resume)
+
+    async def response_function(_message_id: str | None) -> None:
+        msg = "generation failed"
+        raise RuntimeError(msg)
+
+    with pytest.raises(RuntimeError, match="generation failed"):
+        await runner.run(
+            ResponseAttemptRequest(
+                target=target,
+                response_function=response_function,
+                existing_event_id="$existing",
+            ),
+        )
+
+    assert pending_resume.settled == [(target, False)]
+
+
+@pytest.mark.asyncio
+async def test_response_attempt_skips_pending_resume_without_visible_message() -> None:
+    """Attempts with no visible message have nothing an auto-resume prompt could target."""
+    target = MessageTarget.resolve("!room:localhost", None, "$reply", room_mode=True)
+    pending_resume = _PendingResume()
+    runner, _delivery_gateway, _stop_manager = _runner(
+        delivery_gateway=_DeliveryGateway(event_id=None),
+        pending_resume=pending_resume,
+    )
+
+    async def response_function(_message_id: str | None) -> None:
+        return None
+
+    await runner.run(
+        ResponseAttemptRequest(
+            target=target,
+            response_function=response_function,
+        ),
+    )
+
+    assert pending_resume.started == []
+    assert pending_resume.settled == []

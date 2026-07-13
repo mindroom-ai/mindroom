@@ -1224,6 +1224,7 @@ depends_on = [
     "mindroom.matrix.client_visible_messages",
     "mindroom.memory",
     "mindroom.orchestration.runtime",
+    "mindroom.pending_resume_store",
     "mindroom.post_response_effects",
     "mindroom.response_attempt",
     "mindroom.response_lifecycle",
@@ -1251,6 +1252,19 @@ visibility = [
     "mindroom.response_runner",
     "mindroom.text_ingress_dispatch",
     "mindroom.turn_controller",
+]
+
+[[modules]]
+path = "mindroom.pending_resume_store"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.durable_write",
+    "mindroom.logging_config",
+]
+visibility = [
+    "mindroom.matrix.stale_stream_cleanup",
+    "mindroom.response_attempt",
+    "mindroom.response_runner",
 ]
 
 [[modules]]
@@ -2170,6 +2184,7 @@ depends_on = [
     "mindroom.matrix.message_content",
     "mindroom.matrix.thread_projection",
     "mindroom.matrix.visible_body",
+    "mindroom.pending_resume_store",
     "mindroom.streaming",
 ]
 
