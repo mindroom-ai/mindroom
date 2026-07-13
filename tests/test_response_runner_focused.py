@@ -242,7 +242,7 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
 
 @pytest.mark.asyncio
 async def test_scheduled_history_limit_caps_refreshed_history_before_payload_prepare(tmp_path: Path) -> None:
-    """A limited scheduled fire caps post-lock refreshed history before payload assembly."""
+    """A limited scheduled fire caps model context without truncating memory or summary inputs."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     refreshed = ThreadHistoryResult(
@@ -253,9 +253,11 @@ async def test_scheduled_history_limit_caps_refreshed_history_before_payload_pre
         is_full_history=True,
     )
     prepared_histories: list[object] = []
+    uncapped_histories: list[object] = []
 
     async def spy_prepare(request: ResponseRequest) -> ResponseRequest:
         prepared_histories.append(request.thread_history)
+        uncapped_histories.append(request.uncapped_thread_history)
         return replace(request, payload_preparation=None, requires_model_history_refresh=False)
 
     async def fake_run_cancellable_response(**kwargs: object) -> str:
@@ -277,6 +279,7 @@ async def test_scheduled_history_limit_caps_refreshed_history_before_payload_pre
         payload_preparation=_preparation(target, envelope),
         scheduled_history_limit=2,
     )
+    post_effects = AsyncMock()
 
     with (
         patch.object(ConversationResolver, "fetch_thread_history", new=AsyncMock(return_value=refreshed)),
@@ -289,7 +292,7 @@ async def test_scheduled_history_limit_caps_refreshed_history_before_payload_pre
         patch.object(coordinator, "process_and_respond", new=AsyncMock(side_effect=fake_process_and_respond)),
         patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
-            apply_post_response_effects=AsyncMock(),
+            apply_post_response_effects=post_effects,
         ),
     ):
         assert await coordinator.generate_response(request) == "$response"
@@ -298,6 +301,11 @@ async def test_scheduled_history_limit_caps_refreshed_history_before_payload_pre
     capped_history = prepared_histories[0]
     assert isinstance(capped_history, tuple)
     assert [message.event_id for message in capped_history] == ["$m2", "$m3"]
+    assert uncapped_histories == [refreshed]
+    outcome = post_effects.await_args.args[1]
+    assert isinstance(outcome, ResponseOutcome)
+    assert outcome.memory_thread_history is refreshed
+    assert outcome.thread_summary_message_count_hint == 5
 
 
 # ---------------------------------------------------------------------------
