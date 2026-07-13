@@ -286,6 +286,7 @@ MindRoom tracks runtime phases internally:
 | `ready` | Orchestrator booted, serving requests |
 | `failed` | Startup or runtime failure (detail message available) |
 
+When the semantic-search embedder is failing, the health payload additionally carries `"embedder": {"status": "failing", "detail": ...}` with the classified cause; this block is diagnostic only and never flips liveness.
 Use `/api/health` for liveness probes and `/api/ready` for readiness probes in container orchestrators. Note: `/api/health` returns `503` when Matrix sync is stale (>180s without successful sync, after the 120s watchdog timeout has attempted recovery). Configure liveness probe `failureThreshold` to allow sufficient time for watchdog self-healing.
 
 ### Tools & Matrix

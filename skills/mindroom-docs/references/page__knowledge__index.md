@@ -375,9 +375,12 @@ memory:
 
 | Provider | Model Example | Notes |
 |----------|---------------|-------|
-| `openai` | `text-embedding-3-small` | Requires `OPENAI_API_KEY` |
+| `openai` | `text-embedding-3-small` | Key resolution below; keyless local endpoints allowed |
 | `ollama` | `nomic-embed-text` | Self-hosted, set `host` or `OLLAMA_HOST` |
 | `sentence_transformers` | `sentence-transformers/all-MiniLM-L6-v2` | Fully local Python runtime; auto-installs the optional extra on first use |
+
+The `openai` provider resolves its key in this order: explicit `memory.embedder.config.api_key`, then the dedicated `embedder` credential (seeded from `EMBEDDER_API_KEY` or `EMBEDDER_API_KEY_FILE`), then the shared `OPENAI_API_KEY`.
+See [Memory](memory.md) for the full embedder credential contract and failure surfacing.
 
 ## Storage
 

@@ -48,6 +48,11 @@ memory:
       dimensions: null             # Optional: embedding dimension override (e.g., 256)
 ```
 
+The `openai` embedder resolves its API key in this order: explicit `memory.embedder.config.api_key`, then the dedicated `embedder` credential (seeded from `EMBEDDER_API_KEY` or `EMBEDDER_API_KEY_FILE`), then the shared `openai` provider key.
+Use the dedicated credential when your embedding endpoint needs a different key than your chat models.
+Keyless local OpenAI-compatible endpoints keep working when none of these are set.
+When the embedder rejects its credential, semantic search degrades loudly instead of returning fake-empty results: memory tool output and the per-turn prompt carry the classified cause, and `/api/health` reports an `embedder` block until a request succeeds again.
+
 Fully local embedder example:
 
 ```yaml

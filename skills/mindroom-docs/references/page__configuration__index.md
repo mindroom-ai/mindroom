@@ -173,6 +173,7 @@ Set the API key for each provider you use in `config.yaml`:
 | `CEREBRAS_API_KEY` | Cerebras |
 | `GROQ_API_KEY` | Groq |
 | `OLLAMA_HOST` | Ollama (host URL, not a key) |
+| `EMBEDDER_API_KEY` | Dedicated semantic-search embedder key (optional; falls back to the shared `OPENAI_API_KEY`) |
 | `OPENAI_BASE_URL` | Base URL for OpenAI-compatible APIs (e.g., local inference servers) |
 
 All API key variables also support a `_FILE` suffix for file-based secrets (e.g., `ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key`).
@@ -433,7 +434,7 @@ memory:
     provider: openai               # Default: openai (openai, ollama, huggingface, sentence_transformers)
     config:
       model: text-embedding-3-small  # Default embedding model
-      api_key: null                # Optional: From env var
+      api_key: null                # Optional: explicit embedder key (highest priority; see docs/memory.md)
       host: null                   # Optional: For self-hosted
       dimensions: null             # Optional: Embedding dimension override (e.g., 256)
   llm:                             # Optional: LLM for memory operations
