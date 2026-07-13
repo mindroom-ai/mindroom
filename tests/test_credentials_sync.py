@@ -12,6 +12,7 @@ from mindroom import credentials_sync as credentials_sync_mod
 from mindroom.credentials import CredentialsManager
 from mindroom.credentials_sync import (
     _EMBEDDER_CREDENTIAL_SERVICE,
+    _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY,
     _ENV_TO_SERVICE_MAP,
     get_api_key_for_provider,
     get_embedder_api_key,
@@ -982,17 +983,46 @@ class TestCredentialsSync:
 
         assert get_embedder_api_key(runtime_paths) == "openai-key"
 
-    def test_get_embedder_api_key_returns_none_when_nothing_configured(
+    def test_get_embedder_api_key_returns_placeholder_when_nothing_configured(
         self,
         credentials_manager: CredentialsManager,
     ) -> None:
-        """Keyless local endpoints keep working when no key exists anywhere."""
+        """Keyless mode resolves the placeholder so client construction never crashes."""
         runtime_paths = _runtime_paths(
             credentials_manager.storage_root,
             shared_credentials_dir=credentials_manager.base_path,
         )
 
-        assert get_embedder_api_key(runtime_paths) is None
+        assert get_embedder_api_key(runtime_paths) == _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
+
+    def test_get_embedder_api_key_strips_resolved_values(
+        self,
+        credentials_manager: CredentialsManager,
+    ) -> None:
+        """Keys with stray whitespace must be stripped before reaching the Authorization header."""
+        runtime_paths = _runtime_paths(
+            credentials_manager.storage_root,
+            shared_credentials_dir=credentials_manager.base_path,
+        )
+
+        assert get_embedder_api_key(runtime_paths, explicit_api_key="explicit-key\n") == "explicit-key"
+
+        credentials_manager.save_credentials(_EMBEDDER_CREDENTIAL_SERVICE, {"api_key": " embedder-key "})
+        assert get_embedder_api_key(runtime_paths) == "embedder-key"
+
+    def test_get_embedder_api_key_ignores_non_string_stored_credential(
+        self,
+        credentials_manager: CredentialsManager,
+    ) -> None:
+        """A malformed stored value resolves as absent instead of crashing resolution."""
+        credentials_manager.save_credentials(_EMBEDDER_CREDENTIAL_SERVICE, {"api_key": 42})
+        credentials_manager.save_credentials("openai", {"api_key": "openai-key"})
+        runtime_paths = _runtime_paths(
+            credentials_manager.storage_root,
+            shared_credentials_dir=credentials_manager.base_path,
+        )
+
+        assert get_embedder_api_key(runtime_paths) == "openai-key"
 
     def test_get_embedder_api_key_treats_blank_values_as_absent(
         self,

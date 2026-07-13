@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from mem0.configs.embeddings.base import BaseEmbedderConfig
+from mem0.embeddings.openai import OpenAIEmbedding
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -14,6 +16,7 @@ from mindroom.config.memory import MemoryConfig, _MemoryEmbedderConfig, _MemoryL
 from mindroom.config.models import EmbedderConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.credentials_sync import _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
 from mindroom.embedding_factory import create_configured_embedder
 from mindroom.memory.config import _get_memory_config, _memory_collection_name, create_memory_instance
 from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT
@@ -279,6 +282,33 @@ class TestMemoryConfig:
 
         assert mem0_key == "dedicated-embedder-key"
         assert knowledge_embedder.api_key == mem0_key
+
+    def test_keyless_local_endpoint_constructs_both_real_clients(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """With no key anywhere, both real client paths construct via the placeholder (keyless local mode)."""
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        runtime_paths = _runtime_paths(tmp_path)
+        config = Config(
+            memory={
+                "embedder": {
+                    "provider": "openai",
+                    "config": {"model": "embeddinggemma:300m", "host": "http://localhost:9292/v1"},
+                },
+            },
+            router=RouterConfig(model="default"),
+        )
+
+        knowledge_embedder = create_configured_embedder(config, runtime_paths)
+        assert knowledge_embedder.api_key == _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
+        assert knowledge_embedder.client.api_key == _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
+
+        mem0_embedder_config = _get_memory_config(tmp_path / "memory", config, runtime_paths)["embedder"]["config"]
+        assert mem0_embedder_config["api_key"] == _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
+        mem0_embedding = OpenAIEmbedding(BaseEmbedderConfig(**mem0_embedder_config))
+        assert mem0_embedding.client.api_key == _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
 
     def test_get_memory_config_openai_embedder_maps_provider_settings(self, tmp_path: Path) -> None:
         """OpenAI Mem0 embedder config should keep the provider-specific field names."""

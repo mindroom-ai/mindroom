@@ -34,6 +34,11 @@ _ENV_TO_SERVICE_MAP = {v: k for k, v in PROVIDER_ENV_KEYS.items()}
 # model loading, while the embedder is a separate authentication concern.
 _EMBEDDER_CREDENTIAL_SERVICE = "embedder"
 
+# Sent when no embedder key resolves: the OpenAI SDK rejects client
+# construction without a key, keyless local endpoints ignore the header, and
+# keyed endpoints answer HTTP 401 through the classified failure path.
+_EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY = "mindroom-keyless-placeholder"
+
 
 @dataclass(frozen=True)
 class _CredentialSeedDeclaration:
@@ -400,7 +405,7 @@ def get_api_key_for_provider(provider: str, runtime_paths: RuntimePaths) -> str 
     return creds_manager.get_api_key(provider)
 
 
-def get_embedder_api_key(runtime_paths: RuntimePaths, *, explicit_api_key: str | None = None) -> str | None:
+def get_embedder_api_key(runtime_paths: RuntimePaths, *, explicit_api_key: str | None = None) -> str:
     """Resolve the API key for the OpenAI-compatible semantic-search embedder.
 
     Resolution order:
@@ -408,17 +413,25 @@ def get_embedder_api_key(runtime_paths: RuntimePaths, *, explicit_api_key: str |
     2. The dedicated ``embedder`` credential service (seeded from
        ``EMBEDDER_API_KEY`` / ``EMBEDDER_API_KEY_FILE``).
     3. The shared ``openai`` provider key (backward-compat fallback).
-    4. ``None``, so keyless local OpenAI-compatible endpoints keep working.
+    4. ``_EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY``: the OpenAI SDK refuses to
+       construct a client without a key, so keyless local endpoints get a
+       non-secret placeholder they ignore, while a keyed endpoint rejects it
+       with a loud classified auth failure instead of a construction crash.
 
-    Blank values are treated as absent so they never shadow a real key.
+    Blank values are treated as absent so they never shadow a real key, and
+    resolved keys are stripped so stray whitespace never reaches the
+    ``Authorization`` header.
     """
     if explicit_api_key and explicit_api_key.strip():
-        return explicit_api_key
+        return explicit_api_key.strip()
     creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
     embedder_api_key = creds_manager.get_api_key(_EMBEDDER_CREDENTIAL_SERVICE)
     if embedder_api_key and embedder_api_key.strip():
-        return embedder_api_key
-    return get_api_key_for_provider("openai", runtime_paths=runtime_paths)
+        return embedder_api_key.strip()
+    openai_api_key = get_api_key_for_provider("openai", runtime_paths=runtime_paths)
+    if openai_api_key and openai_api_key.strip():
+        return openai_api_key.strip()
+    return _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
 
 
 def get_ollama_host(runtime_paths: RuntimePaths) -> str | None:

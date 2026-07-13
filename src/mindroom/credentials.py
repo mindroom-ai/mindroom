@@ -416,13 +416,26 @@ class CredentialsManager:
             key_name: Name of the key field (default: 'api_key')
 
         Returns:
-            API key string or None if not found
+            API key string, or None if not found or not stored as a string
 
         """
         credentials = self.load_credentials(service)
-        if credentials:
-            return credentials.get(key_name)
-        return None
+        if not credentials:
+            return None
+        value = credentials.get(key_name)
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            # The generic credentials API accepts arbitrary JSON, so a
+            # malformed save must resolve as "no key", not crash resolution.
+            logger.warning(
+                "Ignoring non-string credential value",
+                service=service,
+                key_name=key_name,
+                value_type=type(value).__name__,
+            )
+            return None
+        return value
 
 
 def _credentials_base_path(storage_root: Path) -> Path:

@@ -79,7 +79,7 @@ def _memory_collection_name(config: Config) -> str:
     return f"{_MEMORY_COLLECTION_PREFIX}_{digest}"
 
 
-def _get_memory_config(storage_path: Path, config: Config, runtime_paths: RuntimePaths) -> dict:  # noqa: C901, PLR0912
+def _get_memory_config(storage_path: Path, config: Config, runtime_paths: RuntimePaths) -> dict:  # noqa: C901
     """Get Mem0 configuration with ChromaDB backend.
 
     Args:
@@ -111,12 +111,10 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
 
     # Add provider-specific configuration
     if embedder_provider == "openai":
-        api_key = get_embedder_api_key(
+        embedder_provider_config["api_key"] = get_embedder_api_key(
             runtime_paths,
             explicit_api_key=app_config.memory.embedder.config.api_key,
         )
-        if api_key:
-            embedder_provider_config["api_key"] = api_key
         # Support custom OpenAI-compatible base URL (e.g., llama.cpp)
         if app_config.memory.embedder.config.host:
             embedder_provider_config["openai_base_url"] = app_config.memory.embedder.config.host
