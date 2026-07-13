@@ -325,8 +325,6 @@ def get_model_instance(
     provider = model_config.provider
     model_id = model_config.id
 
-    logger.info("Using AI model", model=model_name, provider=provider, id=model_id)
-
     extra_kwargs = dict(model_config.extra_kwargs or {})
 
     creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
@@ -346,6 +344,13 @@ def get_model_instance(
         extra_kwargs,
         runtime_paths,
         execution_identity,
+    )
+    logger.info(
+        "Using AI model",
+        model=model_name,
+        provider=provider,
+        configured_id=model_id,
+        effective_id=model.id,
     )
     if config.debug.log_llm_requests:
         install_llm_request_logging(
