@@ -10,11 +10,8 @@ import httpx
 import pytest
 from openai import AuthenticationError
 
-from mindroom.embedder_health import (
-    EMBEDDER_AUTH_FAILED_DETAIL,
-    get_embedder_failure,
-    record_embedder_health,
-)
+from mindroom import embedder_health
+from mindroom.embedder_health import get_embedder_failure, record_embedder_health
 from mindroom.openai_embedder import MindRoomOpenAIEmbedder
 
 if TYPE_CHECKING:
@@ -66,7 +63,7 @@ def test_get_embedding_raises_and_records_failure() -> None:
     with pytest.raises(AuthenticationError):
         embedder.get_embedding("hello")
 
-    assert get_embedder_failure() == EMBEDDER_AUTH_FAILED_DETAIL
+    assert get_embedder_failure() == embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
 
 
 def test_get_embedding_and_usage_raises_instead_of_empty_tuple() -> None:
@@ -76,7 +73,7 @@ def test_get_embedding_and_usage_raises_instead_of_empty_tuple() -> None:
     with pytest.raises(AuthenticationError):
         embedder.get_embedding_and_usage("hello")
 
-    assert get_embedder_failure() == EMBEDDER_AUTH_FAILED_DETAIL
+    assert get_embedder_failure() == embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
 
 
 @pytest.mark.asyncio
@@ -87,7 +84,7 @@ async def test_async_get_embedding_raises_instead_of_empty_list() -> None:
     with pytest.raises(AuthenticationError):
         await embedder.async_get_embedding("hello")
 
-    assert get_embedder_failure() == EMBEDDER_AUTH_FAILED_DETAIL
+    assert get_embedder_failure() == embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
 
 
 @pytest.mark.asyncio
@@ -98,7 +95,7 @@ async def test_async_get_embedding_and_usage_raises_instead_of_empty_tuple() -> 
     with pytest.raises(AuthenticationError):
         await embedder.async_get_embedding_and_usage("hello")
 
-    assert get_embedder_failure() == EMBEDDER_AUTH_FAILED_DETAIL
+    assert get_embedder_failure() == embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
 
 
 @pytest.mark.asyncio
@@ -113,7 +110,7 @@ async def test_async_batch_raises_without_per_item_retry() -> None:
 
     # One batch request only: no per-item retries against the same rejected key.
     assert async_client.embeddings.create.await_count == 1
-    assert get_embedder_failure() == EMBEDDER_AUTH_FAILED_DETAIL
+    assert get_embedder_failure() == embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
 
 
 def test_recorded_failure_never_contains_the_key() -> None:
@@ -130,7 +127,7 @@ def test_recorded_failure_never_contains_the_key() -> None:
 
 def test_successful_embedding_clears_recorded_failure() -> None:
     """A non-empty vector clears an earlier recorded failure."""
-    record_embedder_health(EMBEDDER_AUTH_FAILED_DETAIL)
+    record_embedder_health(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
     client = MagicMock()
     client.embeddings.create.return_value = _success_response()
     embedder = MindRoomOpenAIEmbedder(id="gemini-embedding-001", api_key=SECRET, openai_client=client)
@@ -154,7 +151,7 @@ def test_get_embedding_and_usage_success_returns_vector_and_usage() -> None:
 @pytest.mark.asyncio
 async def test_async_success_clears_recorded_failure() -> None:
     """An async success clears an earlier recorded failure."""
-    record_embedder_health(EMBEDDER_AUTH_FAILED_DETAIL)
+    record_embedder_health(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
     async_client = MagicMock()
     async_client.embeddings.create = AsyncMock(return_value=_success_response())
     embedder = MindRoomOpenAIEmbedder(id="gemini-embedding-001", api_key=SECRET, async_client=async_client)

@@ -27,8 +27,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.memory import MemorySearchOutcome
-    from mindroom.memory._shared import MemoryResult
+    from mindroom.memory import MemoryResult, MemorySearchOutcome
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)

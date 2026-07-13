@@ -22,9 +22,9 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-EMBEDDER_AUTH_FAILED_DETAIL = "embedder authentication failed (HTTP 401)"
-EMBEDDER_PERMISSION_DENIED_DETAIL = "embedder permission denied (HTTP 403)"
-_EMBEDDER_UNREACHABLE_DETAIL = "embedder endpoint unreachable"
+_EMBEDDER_AUTH_FAILED_DETAIL = "embedder authentication failed (HTTP 401)"
+_EMBEDDER_PERMISSION_DENIED_DETAIL = "embedder permission denied (HTTP 403)"
+EMBEDDER_UNREACHABLE_DETAIL = "embedder endpoint unreachable"
 _EMBEDDER_EMPTY_VECTOR_DETAIL = "embedder returned an empty vector"
 _PROBE_TEXT = "mindroom embedder health check"
 
@@ -45,18 +45,9 @@ def get_embedder_failure() -> str | None:
         return _current_failure
 
 
-def is_embedder_auth_error(exc: BaseException) -> bool:
-    """Return whether an exception is an embedder credential rejection."""
-    # Deferred so slim entry points never pay the openai SDK import; when an
-    # embedding call raised, the SDK is already loaded.
-    from openai import AuthenticationError, PermissionDeniedError  # noqa: PLC0415
-
-    return isinstance(exc, AuthenticationError | PermissionDeniedError)
-
-
 def is_embedder_auth_failure_detail(detail: str | None) -> bool:
     """Return whether a recorded failure detail describes a credential rejection."""
-    return detail in {EMBEDDER_AUTH_FAILED_DETAIL, EMBEDDER_PERMISSION_DENIED_DETAIL}
+    return detail in {_EMBEDDER_AUTH_FAILED_DETAIL, _EMBEDDER_PERMISSION_DENIED_DETAIL}
 
 
 def is_embedder_provider_error(exc: BaseException) -> bool:
@@ -81,13 +72,13 @@ def describe_embedder_error(exc: BaseException) -> str:
     from mindroom.knowledge.redaction import redact_credentials_in_text  # noqa: PLC0415
 
     if isinstance(exc, AuthenticationError):
-        return EMBEDDER_AUTH_FAILED_DETAIL
+        return _EMBEDDER_AUTH_FAILED_DETAIL
     if isinstance(exc, PermissionDeniedError):
-        return EMBEDDER_PERMISSION_DENIED_DETAIL
+        return _EMBEDDER_PERMISSION_DENIED_DETAIL
     if isinstance(exc, APIStatusError):
         return f"embedder request failed (HTTP {exc.status_code})"
     if isinstance(exc, APIConnectionError):
-        return _EMBEDDER_UNREACHABLE_DETAIL
+        return EMBEDDER_UNREACHABLE_DETAIL
     return redact_credentials_in_text(f"{type(exc).__name__}: {exc}")
 
 

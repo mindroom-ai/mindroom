@@ -17,6 +17,7 @@ from google.auth.exceptions import DefaultCredentialsError, RefreshError
 
 from mindroom import constants
 from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_path
+from mindroom.embedder_health import EMBEDDER_UNREACHABLE_DETAIL, probe_embedder
 from mindroom.embeddings import create_sentence_transformers_embedder
 from mindroom.google_adc import load_google_application_credentials
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
@@ -258,48 +259,6 @@ def _with_local_network_hint(detail: str, base_url: str | None) -> str:
         f"{detail}; local host '{host}' may be unreachable from this Python runtime"
         " (try a reachable LAN IP instead of .local)"
     )
-
-
-def _validate_openai_embeddings_endpoint(
-    api_key: str,
-    base_url: str,
-    model: str,
-) -> tuple[bool | None, str]:
-    """Validate a custom OpenAI-compatible embeddings endpoint with a tiny request."""
-    url = f"{base_url.rstrip('/')}/embeddings"
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    payload = {"model": model, "input": "mindroom doctor embedder check"}
-
-    try:
-        resp = httpx.post(url, headers=headers, json=payload, timeout=10)
-    except httpx.HTTPError as exc:
-        return None, str(exc)
-
-    if not resp.is_success:
-        return False, f"HTTP {resp.status_code}"
-
-    error_detail: str | None = None
-    try:
-        body = resp.json()
-    except ValueError:
-        error_detail = "invalid JSON response"
-    else:
-        data = body.get("data") if isinstance(body, dict) else None
-        if not isinstance(data, list) or not data:
-            error_detail = "missing embeddings data"
-        else:
-            first_item = data[0]
-            if not isinstance(first_item, dict):
-                error_detail = "invalid embeddings payload"
-            else:
-                embedding = first_item.get("embedding")
-                if not isinstance(embedding, list) or not embedding:
-                    error_detail = "empty embedding vector"
-
-    if error_detail is not None:
-        return False, error_detail
-
-    return True, ""
 
 
 def _validate_provider_key(
@@ -655,6 +614,24 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
             f"Memory embedder: sentence_transformers/{emb.config.model} could not validate",
         )
 
+    if emb.provider == "openai":
+        # One real embedding round-trip through the shared probe, which builds
+        # the configured embedder and resolves the key via get_embedder_api_key
+        # (explicit config key > 'embedder' credential > openai fallback).
+        error = probe_embedder(config, runtime_paths)
+        host_suffix = f" ({emb.config.host})" if emb.config.host else ""
+        valid: bool | None = True if error is None else None if error == EMBEDDER_UNREACHABLE_DETAIL else False
+        detail = error or ""
+        if error is not None and emb.config.host:
+            detail = _with_local_network_hint(detail, emb.config.host)
+        return _print_validation(
+            valid,
+            detail,
+            f"Memory embedder: openai/{emb.config.model} embedding round-trip succeeded{host_suffix}",
+            f"Memory embedder: openai/{emb.config.model} embedding request failed{host_suffix}",
+            f"Memory embedder: openai/{emb.config.model} could not reach embeddings endpoint{host_suffix}",
+        )
+
     env_key = env_key_for_provider(emb.provider)
     api_key = runtime_paths.env_value(env_key) if env_key else None
     if env_key and not api_key:
@@ -662,16 +639,6 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
             f"[yellow]![/yellow] Memory embedder ({emb.provider}): {env_key} not set",
         )
         return 0, 0, 1
-
-    if emb.provider == "openai" and emb.config.host:
-        valid, detail = _validate_openai_embeddings_endpoint(api_key or "", emb.config.host, emb.config.model)
-        return _print_validation(
-            valid,
-            _with_local_network_hint(detail, emb.config.host),
-            f"Memory embedder: openai/{emb.config.model} embeddings endpoint reachable ({emb.config.host})",
-            f"Memory embedder: openai/{emb.config.model} embeddings endpoint failed ({emb.config.host})",
-            f"Memory embedder: openai/{emb.config.model} could not reach embeddings endpoint ({emb.config.host})",
-        )
 
     base_url = emb.config.host
     valid, detail = _validate_provider_key(emb.provider, api_key or "", base_url)

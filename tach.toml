@@ -1405,6 +1405,7 @@ depends_on = [
     "mindroom.memory.auto_flush",
     "mindroom.memory.functions",
     "mindroom.memory._prompting",
+    "mindroom.memory._shared",
 ]
 
 [[modules]]
@@ -2406,6 +2407,7 @@ depends_on = [
     "mindroom.cli.config",
     "mindroom.config.main",
     "mindroom.constants",
+    "mindroom.embedder_health",
     "mindroom.embeddings",
     "mindroom.google_adc",
     "mindroom.matrix.client_session",

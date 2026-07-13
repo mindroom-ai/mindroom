@@ -14,14 +14,11 @@ from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.embedder_health import (
-    EMBEDDER_AUTH_FAILED_DETAIL,
-    EMBEDDER_PERMISSION_DENIED_DETAIL,
     check_embedder_health,
     describe_embedder_error,
     embedder_in_use,
     get_embedder_failure,
     handle_embedder_config_reload,
-    is_embedder_auth_error,
     is_embedder_auth_failure_detail,
     probe_embedder,
     record_embedder_health,
@@ -92,23 +89,23 @@ class _EmptyVectorEmbedder:
 def test_authentication_error_maps_to_fixed_401_detail() -> None:
     """401 maps to the fixed auth-failed detail."""
     exc = _status_error(401)
-    assert is_embedder_auth_error(exc)
-    assert describe_embedder_error(exc) == EMBEDDER_AUTH_FAILED_DETAIL
+    assert is_embedder_auth_failure_detail(describe_embedder_error(exc))
+    assert describe_embedder_error(exc) == embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
     assert describe_embedder_error(exc) == "embedder authentication failed (HTTP 401)"
 
 
 def test_permission_denied_maps_to_distinct_403_detail() -> None:
     """403 stays distinct from 401 so operators repair the right thing."""
     exc = _status_error(403)
-    assert is_embedder_auth_error(exc)
-    assert describe_embedder_error(exc) == EMBEDDER_PERMISSION_DENIED_DETAIL
-    assert describe_embedder_error(exc) != EMBEDDER_AUTH_FAILED_DETAIL
+    assert is_embedder_auth_failure_detail(describe_embedder_error(exc))
+    assert describe_embedder_error(exc) == embedder_health._EMBEDDER_PERMISSION_DENIED_DETAIL
+    assert describe_embedder_error(exc) != embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
 
 
 def test_other_http_status_uses_fixed_message_without_body() -> None:
     """Non-auth HTTP failures use a fixed message without the response body."""
     exc = _status_error(500, message=f"internal error at http://user:{SECRET}@embeddings.local/v1")
-    assert not is_embedder_auth_error(exc)
+    assert not is_embedder_auth_failure_detail(describe_embedder_error(exc))
     detail = describe_embedder_error(exc)
     assert detail == "embedder request failed (HTTP 500)"
     assert SECRET not in detail
@@ -134,8 +131,8 @@ def test_generic_exception_is_credential_redacted() -> None:
 
 def test_auth_failure_detail_membership() -> None:
     """Only the two fixed auth details classify as credential rejections."""
-    assert is_embedder_auth_failure_detail(EMBEDDER_AUTH_FAILED_DETAIL)
-    assert is_embedder_auth_failure_detail(EMBEDDER_PERMISSION_DENIED_DETAIL)
+    assert is_embedder_auth_failure_detail(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
+    assert is_embedder_auth_failure_detail(embedder_health._EMBEDDER_PERMISSION_DENIED_DETAIL)
     assert not is_embedder_auth_failure_detail(None)
     assert not is_embedder_auth_failure_detail("embedder request failed (HTTP 500)")
 
@@ -143,8 +140,8 @@ def test_auth_failure_detail_membership() -> None:
 def test_record_and_get_round_trip() -> None:
     """Recording a failure and clearing it round-trips."""
     assert get_embedder_failure() is None
-    record_embedder_health(EMBEDDER_AUTH_FAILED_DETAIL)
-    assert get_embedder_failure() == EMBEDDER_AUTH_FAILED_DETAIL
+    record_embedder_health(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
+    assert get_embedder_failure() == embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
     record_embedder_health(None)
     assert get_embedder_failure() is None
 
@@ -219,7 +216,7 @@ def test_probe_reports_auth_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         "mindroom.embedding_factory.create_configured_embedder",
         lambda *_args: _AuthFailingEmbedder(),
     )
-    assert probe_embedder(_config(), _runtime_paths(tmp_path)) == EMBEDDER_AUTH_FAILED_DETAIL
+    assert probe_embedder(_config(), _runtime_paths(tmp_path)) == embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
 
 
 def test_probe_rejects_empty_vector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -234,12 +231,12 @@ def test_probe_rejects_empty_vector(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 @pytest.mark.asyncio
 async def test_check_embedder_health_records_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A failing probe records the failure detail."""
-    monkeypatch.setattr(embedder_health, "probe_embedder", lambda *_args: EMBEDDER_AUTH_FAILED_DETAIL)
+    monkeypatch.setattr(embedder_health, "probe_embedder", lambda *_args: embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
     config = _config(memory={"backend": "mem0"})
 
     await check_embedder_health(config, _runtime_paths(tmp_path), reason="startup")
 
-    assert get_embedder_failure() == EMBEDDER_AUTH_FAILED_DETAIL
+    assert get_embedder_failure() == embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
 
 
 @pytest.mark.asyncio
@@ -248,7 +245,7 @@ async def test_check_embedder_health_success_clears_previous_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A healthy probe clears an earlier recorded failure (degrade then recover)."""
-    record_embedder_health(EMBEDDER_AUTH_FAILED_DETAIL)
+    record_embedder_health(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
     monkeypatch.setattr(embedder_health, "probe_embedder", lambda *_args: None)
 
     await check_embedder_health(_config(memory={"backend": "mem0"}), _runtime_paths(tmp_path), reason="startup")
@@ -280,7 +277,7 @@ async def test_reload_with_embedder_change_resets_health_and_reprobes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Changing memory.embedder on reload clears stale health and probes again."""
-    record_embedder_health(EMBEDDER_AUTH_FAILED_DETAIL)
+    record_embedder_health(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
     probes: list[str] = []
 
     async def fake_check(_config: Config, _runtime_paths: RuntimePaths, *, reason: str) -> None:
@@ -303,7 +300,7 @@ async def test_reload_without_embedder_change_keeps_recorded_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unrelated reload never clears a recorded embedder failure."""
-    record_embedder_health(EMBEDDER_AUTH_FAILED_DETAIL)
+    record_embedder_health(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
 
     async def fake_check(_config: Config, _runtime_paths: RuntimePaths, *, reason: str) -> None:
         msg = f"no probe expected: {reason}"
@@ -317,4 +314,4 @@ async def test_reload_without_embedder_change_keeps_recorded_failure(
         _runtime_paths(tmp_path),
     )
 
-    assert get_embedder_failure() == EMBEDDER_AUTH_FAILED_DETAIL
+    assert get_embedder_failure() == embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
