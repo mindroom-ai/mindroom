@@ -49,7 +49,10 @@ from mindroom.tool_system.registry_state import (
     reconcile_dynamic_tool_state,
     restore_tool_registry_snapshot,
 )
-from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, resolve_worker_target
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    resolve_worker_target,
+)
 from mindroom.tools.crawl4ai import crawl4ai_tools
 from mindroom.tools.custom_api import custom_api_tools
 
@@ -538,9 +541,11 @@ def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> N
             *,
             runtime_paths: object,
             worker_target: object,
+            current_room_id: str | None,
         ) -> None:
             self.runtime_paths = runtime_paths
             self.worker_target = worker_target
+            self.current_room_id = current_room_id
             super().__init__(name=tool_name, tools=[])
 
     @register_tool_with_metadata(
@@ -551,6 +556,7 @@ def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> N
         managed_init_args=(
             ToolManagedInitArg.RUNTIME_PATHS,
             ToolManagedInitArg.WORKER_TARGET,
+            ToolManagedInitArg.CURRENT_ROOM_ID,
         ),
     )
     def _explicit_runtime_tool_factory() -> type[ExplicitRuntimeToolkit]:
@@ -563,10 +569,19 @@ def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> N
     )
 
     try:
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@user:localhost",
+            room_id="!room:localhost",
+            thread_id="$thread:localhost",
+            resolved_thread_id="$thread:localhost",
+            session_id="session",
+        )
         worker_target = resolve_worker_target(
             "shared",
             "general",
-            execution_identity=None,
+            execution_identity=execution_identity,
             tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
             account_id=runtime_paths.env_value("ACCOUNT_ID"),
         )
@@ -577,14 +592,8 @@ def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> N
         )
         assert isinstance(tool, ExplicitRuntimeToolkit)
         assert tool.runtime_paths == runtime_paths
-        assert tool.worker_target == ResolvedWorkerTarget(
-            worker_scope="shared",
-            routing_agent_name="general",
-            execution_identity=None,
-            tenant_id=None,
-            account_id=None,
-            worker_key=None,
-        )
+        assert tool.worker_target == worker_target
+        assert tool.current_room_id == execution_identity.room_id
     finally:
         TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)

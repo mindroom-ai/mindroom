@@ -25,9 +25,7 @@ from mindroom.thread_summary import (
     THREAD_SUMMARY_MAX_LENGTH,
     ThreadSummaryWriteError,
     _build_conversation_text,
-    _count_non_summary_messages,
     _generate_summary,
-    _is_thread_summary_message,
     _last_summary_counts,
     _next_thread_summary_threshold,
     _next_threshold,
@@ -36,6 +34,8 @@ from mindroom.thread_summary import (
     _thread_locks,
     _thread_summary_cache_key,
     _ThreadSummary,
+    count_non_summary_thread_messages,
+    is_thread_summary_message,
     maybe_generate_thread_summary,
     normalize_thread_summary_text,
     send_thread_summary_event,
@@ -1451,7 +1451,9 @@ class TestSetManualThreadSummary:
 
         assert result.event_id == "$summary1"
         assert result.summary == "Fix ISSUE-116"
-        assert result.message_count == _count_non_summary_messages(conversation_cache.get_thread_history.return_value)
+        assert result.message_count == count_non_summary_thread_messages(
+            conversation_cache.get_thread_history.return_value,
+        )
         mock_send.assert_awaited_once_with(
             client,
             "!room:x",
@@ -1769,11 +1771,11 @@ class TestSummaryNoticeFiltering:
         assert "Existing thread summary" not in text
 
     def test_summary_notice_detected(self) -> None:
-        """_is_thread_summary_message correctly identifies summary notices."""
+        """is_thread_summary_message correctly identifies summary notices."""
         notice = _make_summary_notice_message("$thread1", message_count=5)
-        assert _is_thread_summary_message(notice)
+        assert is_thread_summary_message(notice)
 
     def test_regular_message_not_detected_as_summary(self) -> None:
         """Regular messages are not flagged as summary notices."""
         regular = _make_thread_history(1)[0]
-        assert not _is_thread_summary_message(regular)
+        assert not is_thread_summary_message(regular)

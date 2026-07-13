@@ -1242,6 +1242,8 @@ defaults:
   worker_scope: null               # Default: null (no runtime reuse; set shared/user/user_agent to enable)
   worker_grantable_credentials: null  # Default: null (deny by default; list credential service names to make available inside isolated workers, e.g. [openai, github_private])
   allow_self_config: false         # Default: false (allow agents to modify their own config via a tool)
+  thread_summary_model: null       # Default: null (uses the default model)
+  thread_auto_tag_model: null      # Default: null (uses thread_summary_model, then default)
   thread_summary_temperature: 0.2  # Default: 0.2 (set null to omit temperature and use provider defaults)
   thread_summary_first_threshold: 1  # Default: 1 (first automatic thread summary after first message)
   thread_summary_subsequent_interval: 10  # Default: 10 (messages between later automatic thread summaries)
@@ -1256,6 +1258,10 @@ Set it to `null` to omit the field and use provider defaults.
 MindRoom always omits temperature for Vertex Claude thread summaries because the provider rejects that field on this path.
 Use `room_thread_summary_models` when automatic summaries in a specific room should use a different model from `defaults.thread_summary_model`.
 Keys can be managed room aliases such as `lobby` or raw Matrix room IDs such as `!room:example.org`.
+
+`defaults.thread_auto_tag_model` selects the model for automatic one-shot thread tagging.
+When unset, it falls back to `defaults.thread_summary_model`, then the `default` model.
+Set it to a cheaper configured model to limit the extra inference cost.
 
 `defaults.worker_grantable_credentials` is a list of credential service names.
 Use built-in names like `openai`, `azure`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
@@ -6837,6 +6843,8 @@ list_thread_tags(exclude_tag="resolved", include_untagged=True)
 - It enumerates Matrix `/threads` and may stop at the 2000-root safety cap.
 - The response includes `include_untagged: bool` and `truncated: bool`.
 - Callers must check `truncated` before claiming the unresolved list is complete.
+- The `tag_thread()` description includes up to 20 of the current room's most-used tags that are short enough for model output, from a cache-stable daily snapshot, so agents prefer existing vocabulary.
+- The vocabulary is room-scoped, so tags from other rooms are never included.
 
 ## [`thread_summary`]
 
@@ -7024,6 +7032,15 @@ The summarizer posts one `m.notice` summary after a thread reaches the configure
 Set `room_thread_summary_models` to override the automatic summary model for a managed room alias or raw Matrix room ID.
 MindRoom uses `defaults.thread_summary_temperature` for automatic summaries when the provider supports runtime temperature overrides, and always omits temperature for Vertex Claude summaries.
 The `thread_summary` tool complements that automatic behavior by letting an agent publish a manual summary immediately and advance the stored summary baseline.
+Automatic thread tagging runs as a post-response background effect even when the responding agent does not have the `thread_tags` tool.
+After the first delivered reply in a new untagged thread, MindRoom verifies authoritative full history before asking the configured model for up to three normalized tags.
+Threads with more than three non-summary visible messages are never retroactively tagged.
+Existing tags win, including tags added while the model call is running.
+The model comes from `defaults.thread_auto_tag_model`, falling back to `defaults.thread_summary_model` and then `default`.
+Each room has its own vocabulary snapshot built only from that room's tag state.
+The first qualifying post-response task after 04:00 in the configured timezone refreshes that room's snapshot for the day.
+The refresh reads Matrix tag state and writes a durable local snapshot under `mindroom_data/tracking/thread_tag_vocabulary/`.
+Automatic tagging can add one model call and up to three Matrix state writes for an eligible new thread, so configure a cheap model when that cost matters.
 
 ## Related Docs
 

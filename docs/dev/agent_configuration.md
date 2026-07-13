@@ -374,6 +374,8 @@ defaults:
   allow_self_config: false
   max_preload_chars: 50000  # Hard cap for context_files preload
   tool_output_auto_save_threshold_bytes: 51200  # Auto-save supported tool outputs larger than 50 KiB
+  thread_summary_model: null  # Use the default model when unset
+  thread_auto_tag_model: null  # Use thread_summary_model, then default, when unset
   thread_summary_temperature: 0.2  # Set null to omit temperature and use provider defaults
   thread_summary_first_threshold: 1  # First automatic thread summary after 1 message
   thread_summary_subsequent_interval: 10  # Re-summarize after each additional 10 messages
@@ -386,6 +388,8 @@ defaults:
 
 Automatic thread summaries use `defaults.thread_summary_temperature` when the selected provider supports runtime temperature overrides.
 MindRoom always omits temperature for Vertex Claude thread summaries because the provider rejects that field on this path.
+Automatic thread tagging uses `defaults.thread_auto_tag_model`.
+When unset, it falls back to `defaults.thread_summary_model`, then the `default` model.
 
 ## Room Configuration
 
@@ -653,6 +657,8 @@ defaults:
   markdown: true
   enable_streaming: true
   tool_output_auto_save_threshold_bytes: 51200
+  thread_summary_model: null
+  thread_auto_tag_model: null
   thread_summary_first_threshold: 1
   thread_summary_subsequent_interval: 10
 

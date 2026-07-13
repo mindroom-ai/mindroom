@@ -40,9 +40,9 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 
-def _build_tag_thread_description(runtime_paths: RuntimePaths) -> str:
-    """Build the model-facing tag_thread description with the daily tag vocabulary."""
-    snapshot = load_tag_vocabulary_snapshot(runtime_paths)
+def _build_tag_thread_description(runtime_paths: RuntimePaths, room_id: str) -> str:
+    """Build the model-facing tag_thread description with one room's vocabulary."""
+    snapshot = load_tag_vocabulary_snapshot(runtime_paths, room_id)
     return (
         "Add or update one tag on the current or specified Matrix thread.\n"
         "Tags label a thread's durable topic on the room's thread cards. Input is normalized: "
@@ -74,13 +74,20 @@ def _serialized_tags_for_output(
 class ThreadTagsTools(Toolkit):
     """Tools for tagging Matrix threads via shared room state."""
 
-    def __init__(self, runtime_paths: RuntimePaths | None = None) -> None:
+    def __init__(
+        self,
+        runtime_paths: RuntimePaths | None = None,
+        current_room_id: str | None = None,
+    ) -> None:
         super().__init__(
             name="thread_tags",
             tools=[self.tag_thread, self.untag_thread, self.list_thread_tags],
         )
-        if runtime_paths is not None:
-            self.async_functions["tag_thread"].description = _build_tag_thread_description(runtime_paths)
+        if runtime_paths is not None and current_room_id is not None:
+            self.async_functions["tag_thread"].description = _build_tag_thread_description(
+                runtime_paths,
+                current_room_id,
+            )
 
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:

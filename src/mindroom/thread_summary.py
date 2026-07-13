@@ -153,21 +153,21 @@ def _next_threshold(
     return last_summarized_count + subsequent_interval
 
 
-def _is_thread_summary_message(message: ResolvedVisibleMessage) -> bool:
+def is_thread_summary_message(message: ResolvedVisibleMessage) -> bool:
     """Return whether a visible thread message is itself a summary notice."""
     return isinstance(message.content.get("io.mindroom.thread_summary"), dict)
 
 
-def _count_non_summary_messages(thread_history: Sequence[ResolvedVisibleMessage]) -> int:
+def count_non_summary_thread_messages(thread_history: Sequence[ResolvedVisibleMessage]) -> int:
     """Count visible thread messages while excluding summary notices."""
-    return sum(1 for message in thread_history if not _is_thread_summary_message(message))
+    return sum(1 for message in thread_history if not is_thread_summary_message(message))
 
 
 def thread_summary_message_count_hint(
     thread_history: Sequence[ResolvedVisibleMessage],
 ) -> int:
     """Return a lower-bound post-response thread size without refetching history."""
-    return _count_non_summary_messages(thread_history) + 1
+    return count_non_summary_thread_messages(thread_history) + 1
 
 
 def _next_thread_summary_threshold(
@@ -266,7 +266,7 @@ def _build_conversation_text(thread_history: Sequence[ResolvedVisibleMessage]) -
     """
     lines: list[str] = []
     for msg in thread_history:
-        if _is_thread_summary_message(msg):
+        if is_thread_summary_message(msg):
             continue
         sender = msg.sender or "unknown"
         body = msg.body or ""
@@ -460,7 +460,7 @@ async def set_manual_thread_summary(
             msg = "Failed to fetch thread history for the target thread."
             raise ThreadSummaryWriteError(msg) from exc
 
-        message_count = _count_non_summary_messages(thread_history)
+        message_count = count_non_summary_thread_messages(thread_history)
         try:
             event_id = await send_thread_summary_event(
                 client,
@@ -512,7 +512,7 @@ async def maybe_generate_thread_summary(
         # lower bound. Other agents or humans can post before this background
         # task runs, so a stale hint must never suppress the live re-fetch.
         thread_history = await _load_thread_history(conversation_cache, room_id, thread_id)
-        message_count = _count_non_summary_messages(thread_history)
+        message_count = count_non_summary_thread_messages(thread_history)
         if message_count_hint is not None:
             message_count = max(message_count, message_count_hint)
         if message_count < threshold:

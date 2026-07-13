@@ -23,7 +23,11 @@ if TYPE_CHECKING:
     dependencies=["agno"],
     docs_url="https://github.com/mindroom-ai/mindroom",
     function_names=("list_thread_tags", "tag_thread", "untag_thread"),
-    managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
+    managed_init_args=(
+        ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.CURRENT_ROOM_ID,
+    ),
+    requires_room_context=True,
 )
 def thread_tags_tools() -> type[ThreadTagsTools]:
     """Return Matrix thread tagging tools."""

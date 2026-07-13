@@ -479,6 +479,9 @@ def _build_managed_tool_init_kwargs(
             init_kwargs[init_arg.value] = tool_output_workspace_root
         elif init_arg == ToolManagedInitArg.WORKER_TOOLS_OVERRIDE:
             init_kwargs[init_arg.value] = worker_tools_override
+        elif init_arg == ToolManagedInitArg.CURRENT_ROOM_ID:
+            execution_identity = worker_target.execution_identity if worker_target is not None else None
+            init_kwargs[init_arg.value] = execution_identity.room_id if execution_identity is not None else None
     return init_kwargs
 
 

@@ -6,11 +6,13 @@ import json
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 import mindroom.tools  # noqa: F401
+from mindroom import thread_tag_vocabulary
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.thread_tags import ThreadTagsTools
@@ -20,6 +22,9 @@ from mindroom.thread_tags import ThreadTagRecord, ThreadTagsError, ThreadTagsLis
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
 
 
 def _make_context(
@@ -89,6 +94,7 @@ def test_thread_tags_tool_registered_and_instantiates() -> None:
     )
 
     assert "thread_tags" in TOOL_METADATA
+    assert TOOL_METADATA["thread_tags"].requires_room_context
     assert isinstance(
         get_tool_by_name("thread_tags", runtime_paths_for(config), worker_target=None),
         ThreadTagsTools,
@@ -1359,33 +1365,40 @@ async def test_untag_thread_canonical_skips_normalization() -> None:
 # -- vocabulary-aware tool description --
 
 
-def _vocabulary_runtime_paths(tag_count: int = 0) -> Path:
-    """Create a storage root, optionally seeding a ranked vocabulary snapshot."""
-    storage_root = Path(tempfile.mkdtemp())
-    if tag_count:
-        tracking = storage_root / "tracking"
-        tracking.mkdir(parents=True)
-        (tracking / "thread_tag_vocabulary.json").write_text(
+def _vocabulary_runtime_paths(
+    tmp_path: Path,
+    room_tags: dict[str, list[str]],
+) -> RuntimePaths:
+    """Create runtime paths with room-scoped ranked vocabulary snapshots."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    for room_id, tags in room_tags.items():
+        path = thread_tag_vocabulary._snapshot_path(runtime_paths, room_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
             json.dumps(
                 {
                     "version": 1,
+                    "room_id": room_id,
                     "built_at": datetime.now(UTC).isoformat(),
-                    "tags": [{"tag": f"tag{i:02d}", "count": tag_count - i} for i in range(tag_count)],
+                    "tags": [{"tag": tag, "count": len(tags) - index} for index, tag in enumerate(tags)],
                 },
             ),
+            encoding="utf-8",
         )
-    return storage_root
+    return runtime_paths
 
 
-def _tool_runtime_paths(storage_root: Path) -> MagicMock:
-    rp = MagicMock()
-    rp.storage_root = storage_root
-    return rp
-
-
-def test_tag_thread_description_embeds_ranked_vocabulary() -> None:
+def test_tag_thread_description_embeds_ranked_room_vocabulary(tmp_path: Path) -> None:
     """The tag_thread description lists the top tags ranked, without counts."""
-    tool = ThreadTagsTools(runtime_paths=_tool_runtime_paths(_vocabulary_runtime_paths(tag_count=25)))
+    room_id = "!room-a:localhost"
+    runtime_paths = _vocabulary_runtime_paths(
+        tmp_path,
+        {room_id: [f"tag{i:02d}" for i in range(25)]},
+    )
+    tool = ThreadTagsTools(
+        runtime_paths=runtime_paths,
+        current_room_id=room_id,
+    )
 
     description = tool.async_functions["tag_thread"].description
 
@@ -1394,12 +1407,36 @@ def test_tag_thread_description_embeds_ranked_vocabulary() -> None:
     assert "tag00, tag01" in description
     assert "tag19" in description
     assert "tag20" not in description  # capped at the top 20
-    assert "25" not in description.split("Most-used tags", 1)[1]  # no usage counts in the ranked list
+    assert "25" not in description.split("Most-used short tags", 1)[1]  # no counts in the ranked list
 
 
-def test_tag_thread_description_without_snapshot_keeps_guidance() -> None:
+def test_tag_thread_description_never_leaks_another_room_vocabulary(tmp_path: Path) -> None:
+    """The current room's tool schema excludes tags from every other room."""
+    room_a = "!room-a:localhost"
+    room_b = "!room-b:localhost"
+    runtime_paths = _vocabulary_runtime_paths(
+        tmp_path,
+        {room_a: ["alpha"], room_b: ["secret-beta"]},
+    )
+    tool = ThreadTagsTools(
+        runtime_paths=runtime_paths,
+        current_room_id=room_a,
+    )
+
+    description = tool.async_functions["tag_thread"].description
+
+    assert description is not None
+    assert "alpha" in description
+    assert "secret-beta" not in description
+
+
+def test_tag_thread_description_without_snapshot_keeps_guidance(tmp_path: Path) -> None:
     """With no snapshot on disk the description still carries tagging guidance."""
-    tool = ThreadTagsTools(runtime_paths=_tool_runtime_paths(_vocabulary_runtime_paths()))
+    room_id = "!room-a:localhost"
+    tool = ThreadTagsTools(
+        runtime_paths=_vocabulary_runtime_paths(tmp_path, {}),
+        current_room_id=room_id,
+    )
 
     description = tool.async_functions["tag_thread"].description
 
@@ -1408,9 +1445,9 @@ def test_tag_thread_description_without_snapshot_keeps_guidance() -> None:
     assert "No tags are in use yet" in description
 
 
-def test_tag_thread_description_untouched_without_runtime_paths() -> None:
-    """Direct construction without runtime paths keeps the plain docstring description."""
-    tool = ThreadTagsTools()
+def test_tag_thread_description_untouched_without_room_identity(tmp_path: Path) -> None:
+    """Construction without Matrix room identity exposes no vocabulary snapshot."""
+    tool = ThreadTagsTools(runtime_paths=_vocabulary_runtime_paths(tmp_path, {}))
 
     assert tool.async_functions["tag_thread"].description is None
 

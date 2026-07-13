@@ -174,6 +174,8 @@ list_thread_tags(exclude_tag="resolved", include_untagged=True)
 - It enumerates Matrix `/threads` and may stop at the 2000-root safety cap.
 - The response includes `include_untagged: bool` and `truncated: bool`.
 - Callers must check `truncated` before claiming the unresolved list is complete.
+- The `tag_thread()` description includes up to 20 of the current room's most-used tags that are short enough for model output, from a cache-stable daily snapshot, so agents prefer existing vocabulary.
+- The vocabulary is room-scoped, so tags from other rooms are never included.
 
 ## [`thread_summary`]
 
@@ -361,6 +363,15 @@ The summarizer posts one `m.notice` summary after a thread reaches the configure
 Set `room_thread_summary_models` to override the automatic summary model for a managed room alias or raw Matrix room ID.
 MindRoom uses `defaults.thread_summary_temperature` for automatic summaries when the provider supports runtime temperature overrides, and always omits temperature for Vertex Claude summaries.
 The `thread_summary` tool complements that automatic behavior by letting an agent publish a manual summary immediately and advance the stored summary baseline.
+Automatic thread tagging runs as a post-response background effect even when the responding agent does not have the `thread_tags` tool.
+After the first delivered reply in a new untagged thread, MindRoom verifies authoritative full history before asking the configured model for up to three normalized tags.
+Threads with more than three non-summary visible messages are never retroactively tagged.
+Existing tags win, including tags added while the model call is running.
+The model comes from `defaults.thread_auto_tag_model`, falling back to `defaults.thread_summary_model` and then `default`.
+Each room has its own vocabulary snapshot built only from that room's tag state.
+The first qualifying post-response task after 04:00 in the configured timezone refreshes that room's snapshot for the day.
+The refresh reads Matrix tag state and writes a durable local snapshot under `mindroom_data/tracking/thread_tag_vocabulary/`.
+Automatic tagging can add one model call and up to three Matrix state writes for an eligible new thread, so configure a cheap model when that cost matters.
 
 ## Related Docs
 

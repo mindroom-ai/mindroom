@@ -172,6 +172,7 @@ class PostResponseEffectsSupport:
             room_id,
             thread_id,
             self.runtime.config,
+            self.runtime_paths,
             message_count_hint=message_count_hint,
         )
 
@@ -324,6 +325,7 @@ async def apply_post_response_effects(
         and not final_delivery_outcome.suppressed
         and outcome.thread_summary_room_id is not None
         and outcome.thread_summary_thread_id is not None
+        and deps.queue_thread_auto_tag is not None
         and (
             deps.should_queue_thread_auto_tag is None
             or deps.should_queue_thread_auto_tag(
@@ -332,7 +334,6 @@ async def apply_post_response_effects(
                 outcome.thread_summary_message_count_hint,
             )
         )
-        and deps.queue_thread_auto_tag is not None
     ):
         deps.queue_thread_auto_tag(
             outcome.thread_summary_room_id,
