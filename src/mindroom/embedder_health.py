@@ -10,6 +10,7 @@ refreshes that never touch the main-process embedder.
 from __future__ import annotations
 
 import asyncio
+import re
 from threading import Lock
 from typing import TYPE_CHECKING
 
@@ -57,6 +58,31 @@ def get_embedder_failure() -> str | None:
 def is_embedder_auth_failure_detail(detail: str | None) -> bool:
     """Return whether a recorded failure detail describes a credential rejection."""
     return detail in {_EMBEDDER_AUTH_FAILED_DETAIL, _EMBEDDER_PERMISSION_DENIED_DETAIL}
+
+
+# Fully-fixed classified forms only: the type-name fallback is excluded because
+# identifier-shaped text extracted from operator free text could be a secret.
+_CLASSIFIED_DETAIL_PATTERN = re.compile(
+    r"embedder authentication failed \(HTTP 401\)"
+    r"|embedder permission denied \(HTTP 403\)"
+    r"|embedder request failed \(HTTP \d{3}\)"
+    r"|embedder endpoint unreachable"
+    r"|embedder returned an empty vector"
+    r"|embedder returned \d+ embeddings for \d+ inputs",
+)
+
+
+def extract_classified_embedder_detail(text: str | None) -> str | None:
+    """Extract the classified embedder detail from persisted free text, if any.
+
+    Persisted knowledge ``last_error`` strings are operator-grade free text
+    (git output, reader errors, refresh summaries); only the fixed vocabulary
+    this module emits may cross into model-facing prompts and tool output.
+    """
+    if text is None:
+        return None
+    match = _CLASSIFIED_DETAIL_PATTERN.search(text)
+    return match.group(0) if match else None
 
 
 def is_embedder_provider_error(exc: BaseException) -> bool:

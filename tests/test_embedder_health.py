@@ -134,6 +134,35 @@ def test_embedder_request_error_detail_passes_through() -> None:
     assert describe_embedder_error(exc) == "embedder authentication failed (HTTP 401)"
 
 
+def test_extract_classified_detail_from_refresh_summary() -> None:
+    """The classified cause is extracted from an indexing summary."""
+    summary = "Indexed 0 of 3 managed knowledge files (first error: embedder authentication failed (HTTP 401))"
+    detail = embedder_health.extract_classified_embedder_detail(summary)
+    assert detail == "embedder authentication failed (HTTP 401)"
+
+
+def test_extract_classified_detail_exact_forms() -> None:
+    """Exact classified strings extract unchanged; None stays None."""
+    assert (
+        embedder_health.extract_classified_embedder_detail("embedder endpoint unreachable")
+        == "embedder endpoint unreachable"
+    )
+    assert (
+        embedder_health.extract_classified_embedder_detail("embedder request failed (HTTP 503)")
+        == "embedder request failed (HTTP 503)"
+    )
+    assert embedder_health.extract_classified_embedder_detail(None) is None
+
+
+def test_extract_classified_detail_rejects_free_text() -> None:
+    """Operator free text — including embedder-prefixed hostile text — never extracts."""
+    assert embedder_health.extract_classified_embedder_detail("git sync failed: fatal: repo unreachable") is None
+    # The type-name fallback form is deliberately not extractable: an
+    # identifier-shaped token inside persisted free text could be a secret.
+    assert embedder_health.extract_classified_embedder_detail(f"embedder request failed ({SECRET})") is None
+    assert embedder_health.extract_classified_embedder_detail("embedder exploded near api_key=sk-secret") is None
+
+
 def test_auth_failure_detail_membership() -> None:
     """Only the two fixed auth details classify as credential rejections."""
     assert is_embedder_auth_failure_detail(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)

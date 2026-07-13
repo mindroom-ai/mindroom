@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.embedder_health import extract_classified_embedder_detail
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.redaction import embedded_http_userinfo
 from mindroom.knowledge.registry import (
@@ -65,6 +66,7 @@ class KnowledgeBaseAccessResolution:
 
     knowledge: Knowledge | None
     availability: KnowledgeAvailability
+    last_error: str | None = None
 
 
 class _KnowledgeVectorDb(Protocol):
@@ -473,7 +475,8 @@ def resolve_knowledge_base_access(
     knowledge = lookup.index.knowledge if lookup is not None and lookup.index is not None else None
     if knowledge is not None:
         _apply_knowledge_metadata(base_id, knowledge, config)
-    return KnowledgeBaseAccessResolution(knowledge=knowledge, availability=availability)
+    last_error = lookup.state.last_error if lookup is not None and lookup.state is not None else None
+    return KnowledgeBaseAccessResolution(knowledge=knowledge, availability=availability, last_error=last_error)
 
 
 def _stale_availability_notice(base_id: str, *, search_available: bool) -> str:
@@ -519,7 +522,10 @@ def format_knowledge_availability_notice(
         elif availability is KnowledgeAvailability.STALE:
             lines.append(_stale_availability_notice(base_id, search_available=search_available))
         elif availability is KnowledgeAvailability.REFRESH_FAILED:
-            cause = f" Last error: {detail.last_error}" if detail.last_error else ""
+            # Persisted last_error is operator-grade free text; only the fixed
+            # classified embedder vocabulary may enter model-facing prompts.
+            classified_cause = extract_classified_embedder_detail(detail.last_error)
+            cause = f" Last error: {classified_cause}" if classified_cause else ""
             if search_available:
                 lines.append(
                     f"Knowledge base `{base_id}` had a recent refresh failure and may be stale this turn. "

@@ -15,6 +15,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.utils import KnowledgeBaseAccessResolution
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory import add_agent_memory as public_add_agent_memory
 from mindroom.memory import build_memory_enhanced_prompt as public_build_memory_enhanced_prompt
@@ -408,14 +409,14 @@ async def test_semantic_memory_missing_knowledge_index_schedules_refresh_and_rai
     def list_files(*_args: object, **_kwargs: object) -> list[Path]:
         return [memory_file.resolve()]
 
-    def resolve_access(*_args: object, **_kwargs: object) -> object:
-        return SimpleNamespace(knowledge=None, availability=KnowledgeAvailability.INITIALIZING)
+    def resolve_access(*_args: object, **_kwargs: object) -> KnowledgeBaseAccessResolution:
+        return KnowledgeBaseAccessResolution(knowledge=None, availability=KnowledgeAvailability.INITIALIZING)
 
     monkeypatch.setattr(semantic_file_search, "list_knowledge_files", list_files)
     monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access", resolve_access)
     monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
 
-    with pytest.raises(semantic_file_search.SemanticFileMemoryIndexUnavailableError):
+    with pytest.raises(semantic_file_search.SemanticFileMemoryIndexUnavailableError) as excinfo:
         await semantic_file_search.search_semantic_file_memories(
             "semantic memory",
             scope_user_id="agent_general",
@@ -427,6 +428,54 @@ async def test_semantic_memory_missing_knowledge_index_schedules_refresh_and_rai
         )
 
     assert scheduled_base_ids
+    # Plain warm-up carries no degradation cause.
+    assert excinfo.value.degraded_reason is None
+
+
+@pytest.mark.asyncio
+async def test_semantic_memory_cold_failed_index_carries_classified_cause(
+    storage_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cold index kept unpublished by an embedder failure surfaces the classified cause."""
+    root = storage_path / "memory-root"
+    memory_file = root / "memory" / "2026-06-02.md"
+    memory_file.parent.mkdir(parents=True)
+    memory_file.write_text("Serialized semantic memory.\n", encoding="utf-8")
+
+    class FakeScheduler:
+        def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
+            del base_id
+
+    def list_files(*_args: object, **_kwargs: object) -> list[Path]:
+        return [memory_file.resolve()]
+
+    def resolve_access(*_args: object, **_kwargs: object) -> KnowledgeBaseAccessResolution:
+        return KnowledgeBaseAccessResolution(
+            knowledge=None,
+            availability=KnowledgeAvailability.REFRESH_FAILED,
+            last_error=(
+                "Indexed 0 of 1 managed knowledge files (first error: embedder authentication failed (HTTP 401))"
+            ),
+        )
+
+    monkeypatch.setattr(semantic_file_search, "list_knowledge_files", list_files)
+    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access", resolve_access)
+    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
+
+    with pytest.raises(semantic_file_search.SemanticFileMemoryIndexUnavailableError) as excinfo:
+        await semantic_file_search.search_semantic_file_memories(
+            "semantic memory",
+            scope_user_id="agent_general",
+            root=root,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            search_config=config.memory.search,
+            limit=5,
+        )
+
+    assert excinfo.value.degraded_reason == "embedder authentication failed (HTTP 401)"
 
 
 @pytest.mark.asyncio
@@ -763,6 +812,39 @@ async def test_file_backend_semantic_search_falls_back_to_keyword_on_index_error
     assert outcome.degraded_reason == "embedder request failed (RuntimeError)"
     assert any(result.get("memory") == "Keyword fallback memory" for result in outcome.results)
     assert all((result.get("metadata") or {}).get("search_mode") == "keyword" for result in outcome.results)
+
+
+@pytest.mark.asyncio
+async def test_file_backend_cold_failed_index_degrades_instead_of_healthy_fallback(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A never-built index kept down by an auth failure is not a healthy keyword fallback."""
+    config.memory.backend = "file"
+    config.memory.search.mode = "semantic"
+    config.agents["general"].memory_backend = "file"
+
+    await add_agent_memory("Keyword fallback memory", "general", storage_path, config)
+
+    with patch(
+        "mindroom.memory._file_backend.search_semantic_file_memories",
+        side_effect=semantic_file_search.SemanticFileMemoryIndexUnavailableError(
+            "Semantic file-memory index is not ready",
+            degraded_reason="embedder authentication failed (HTTP 401)",
+        ),
+    ):
+        outcome = await public_search_agent_memories(
+            "Keyword fallback",
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            5,
+            get_tool_execution_identity(),
+        )
+
+    assert outcome.degraded_reason == "embedder authentication failed (HTTP 401)"
+    assert any(result.get("memory") == "Keyword fallback memory" for result in outcome.results)
 
 
 @pytest.mark.asyncio

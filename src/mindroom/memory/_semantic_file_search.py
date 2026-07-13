@@ -8,6 +8,7 @@ import time
 from typing import TYPE_CHECKING
 
 from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.embedder_health import extract_classified_embedder_detail
 from mindroom.knowledge import (
     KnowledgeAvailability,
     KnowledgeRefreshScheduler,
@@ -39,7 +40,16 @@ _memory_refresh_scheduler = KnowledgeRefreshScheduler()
 
 
 class SemanticFileMemoryIndexUnavailableError(RuntimeError):
-    """Raised when semantic file memory should use keyword fallback for this request."""
+    """Raised when semantic file memory should use keyword fallback for this request.
+
+    ``degraded_reason`` carries the classified embedder failure that keeps the
+    index unpublished (a cold index whose refreshes fail on a bad credential);
+    it stays ``None`` for genuine warm-up, which falls back silently.
+    """
+
+    def __init__(self, message: str, *, degraded_reason: str | None = None) -> None:
+        super().__init__(message)
+        self.degraded_reason = degraded_reason
 
 
 def _safe_identifier(value: str) -> str:
@@ -229,7 +239,10 @@ async def search_semantic_file_memories(
     )
     if resolution.knowledge is None:
         msg = "Semantic file-memory index is not ready"
-        raise SemanticFileMemoryIndexUnavailableError(msg)
+        raise SemanticFileMemoryIndexUnavailableError(
+            msg,
+            degraded_reason=extract_classified_embedder_detail(resolution.last_error),
+        )
 
     query_start = time.monotonic()
     documents = await asyncio.to_thread(

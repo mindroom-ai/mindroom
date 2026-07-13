@@ -37,6 +37,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateK
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.embedder_health import record_embedder_health
 from mindroom.knowledge import KnowledgeRefreshScheduler, resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.file_listing import (
@@ -695,8 +696,8 @@ def test_failed_notice_without_index_says_unavailable() -> None:
     assert "Do not claim to have searched it." in notice
 
 
-def test_failed_notice_appends_last_error_cause() -> None:
-    """A refresh-failed notice carries the persisted safe cause for the agent to relay."""
+def test_failed_notice_appends_classified_last_error_cause() -> None:
+    """A refresh-failed notice extracts only the classified cause from the summary."""
     notice = knowledge_utils.format_knowledge_availability_notice(
         {
             "docs": KnowledgeAvailabilityDetail(
@@ -709,9 +710,26 @@ def test_failed_notice_appends_last_error_cause() -> None:
     )
 
     assert notice is not None
-    assert notice.endswith(
-        "Last error: Indexed 0 of 3 managed knowledge files (first error: embedder authentication failed (HTTP 401))",
+    assert notice.endswith("Last error: embedder authentication failed (HTTP 401)")
+    assert "Indexed 0 of 3" not in notice
+
+
+def test_failed_notice_never_renders_unclassified_last_error() -> None:
+    """Operator-grade free text in last_error stays out of model-facing prompts."""
+    notice = knowledge_utils.format_knowledge_availability_notice(
+        {
+            "docs": KnowledgeAvailabilityDetail(
+                availability=KnowledgeAvailability.REFRESH_FAILED,
+                search_available=False,
+                last_error="git sync failed: fatal: could not read from https://token@git.example.com/repo.git",
+            ),
+        },
     )
+
+    assert notice is not None
+    assert "Last error" not in notice
+    assert "git sync failed" not in notice
+    assert "token" not in notice
 
 
 def test_stale_failed_notice_appends_last_error_cause() -> None:
@@ -4150,6 +4168,49 @@ async def test_partial_refresh_error_includes_first_classified_file_error(
     assert await manager.reindex_all() == 1
     assert manager._last_refresh_error == (
         "Indexed 1 of 2 managed knowledge files (first error: embedder authentication failed (HTTP 401))"
+    )
+
+
+@pytest.mark.asyncio
+async def test_swallowed_insert_failure_captures_recorded_embedder_health(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A vectorless file whose failure agno swallowed still gets the classified cause.
+
+    In production agno's insert path catches the embedder exception internally
+    and returns normally, so the per-file except never fires; the strict
+    embedder's health record is the only surviving trace of the real cause.
+    """
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "broken.md").write_text("cannot embed", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+
+    class _SwallowingKnowledge(_Knowledge):
+        def insert(
+            self,
+            *,
+            path: str,
+            metadata: dict[str, object],
+            upsert: bool,
+            reader: object | None = None,
+        ) -> None:
+            # Mirror agno: the embedder raised (recording health), agno caught
+            # it, and insert returned normally without adding vectors.
+            del path, metadata, upsert, reader
+            record_embedder_health("embedder authentication failed (HTTP 401)")
+
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _SwallowingKnowledge)
+    record_embedder_health(None)
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
+    try:
+        assert await manager.reindex_all() == 0
+    finally:
+        record_embedder_health(None)
+
+    assert manager._last_refresh_error == (
+        "Indexed 0 of 1 managed knowledge files (first error: embedder authentication failed (HTTP 401))"
     )
 
 

@@ -1527,6 +1527,7 @@ visibility = ["mindroom.memory._backend", "mindroom.memory.functions"]
 [[modules]]
 path = "mindroom.memory._semantic_file_search"
 depends_on = [
+    "mindroom.embedder_health",
     "mindroom.knowledge",
     "mindroom.logging_config",
     "mindroom.memory._shared",
@@ -3084,6 +3085,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.knowledge.utils"
 depends_on = [
+    "mindroom.embedder_health",
     "mindroom.knowledge.availability",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.registry",

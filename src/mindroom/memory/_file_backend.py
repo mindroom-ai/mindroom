@@ -907,10 +907,14 @@ class FileMemoryBackend:
                     limit=limit,
                     execution_identity=execution_identity,
                 )
-            except SemanticFileMemoryIndexUnavailableError:
+            except SemanticFileMemoryIndexUnavailableError as exc:
+                # A cold index kept unpublished by a classified embedder
+                # failure degrades loudly; plain warm-up stays silent.
+                degraded_reason = exc.degraded_reason
                 logger.debug(
                     "File-memory semantic index unavailable; falling back to keyword search",
                     agent=agent_name,
+                    degraded_reason=degraded_reason,
                 )
                 results = await asyncio.to_thread(keyword_results)
             except Exception as exc:

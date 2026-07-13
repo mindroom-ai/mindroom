@@ -24,7 +24,7 @@ from agno.vectordb.chroma import ChromaDb
 from mindroom.chunking import SafeFixedSizeChunking
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.credentials import get_runtime_shared_credentials_manager
-from mindroom.embedder_health import describe_embedder_error
+from mindroom.embedder_health import describe_embedder_error, get_embedder_failure
 from mindroom.embedding_factory import create_configured_embedder
 from mindroom.knowledge.file_listing import (
     git_checkout_present,
@@ -1063,6 +1063,12 @@ class KnowledgeManager:
                 logger.info("Scanned empty knowledge file with no vectors", base_id=self.base_id, path=relative_path)
                 return True
 
+            # agno's insert path catches embedder failures internally and
+            # returns normally, so a rejected credential surfaces here as a
+            # vectorless file; the strict embedder recorded the classified
+            # failure before agno swallowed it.
+            if self._last_file_index_error is None and (recorded_failure := get_embedder_failure()) is not None:
+                self._last_file_index_error = recorded_failure
             logger.warning("Indexing produced no vectors for file", base_id=self.base_id, path=relative_path)
             if indexed_files is not None and indexed_signatures is not None:
                 indexed_files.discard(relative_path)
