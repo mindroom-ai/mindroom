@@ -188,7 +188,7 @@ def _requester_resolution_message(
 async def recover_stale_streaming_messages(
     actors: dict[str, StaleStreamCleanupActor],
     *,
-    resume_client: nio.AsyncClient,
+    resume_client: nio.AsyncClient | None,
     resume_conversation_cache: ConversationCacheProtocol | None,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -203,7 +203,7 @@ async def recover_stale_streaming_messages(
 
     semaphore = asyncio.Semaphore(max(1, room_concurrency))
     all_bot_user_ids = set(actors)
-    resume_user_id = resume_client.user_id
+    resume_user_id = resume_client.user_id if resume_client is not None else None
 
     async def recover_room(
         room_id: str,
@@ -238,7 +238,12 @@ async def recover_stale_streaming_messages(
             room_cleaned_count, interrupted_threads = await completed
             cleaned_count += room_cleaned_count
             remaining_resumes = max_resumes - resumed_count
-            if not config.defaults.auto_resume_after_restart or not interrupted_threads or remaining_resumes <= 0:
+            if (
+                resume_client is None
+                or not config.defaults.auto_resume_after_restart
+                or not interrupted_threads
+                or remaining_resumes <= 0
+            ):
                 continue
             resumed_count += await _auto_resume_interrupted_threads(
                 resume_client,

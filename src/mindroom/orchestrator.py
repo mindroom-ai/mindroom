@@ -1010,14 +1010,11 @@ class _MultiAgentOrchestrator:
         if not actors:
             return
         router_bot = self._router_bot()
-        if router_bot is None or router_bot.client is None:
-            logger.warning("Stale stream recovery skipped because the router client is unavailable")
-            return
 
         result = await recover_stale_streaming_messages(
             actors,
-            resume_client=router_bot.client,
-            resume_conversation_cache=router_bot._conversation_cache,
+            resume_client=router_bot.client if router_bot is not None else None,
+            resume_conversation_cache=router_bot._conversation_cache if router_bot is not None else None,
             config=config,
             runtime_paths=self.runtime_paths,
             startup_cutoff_ms=startup_cutoff_ms,

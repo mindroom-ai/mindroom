@@ -2788,6 +2788,45 @@ async def test_recovery_scans_unique_rooms_and_resumes_before_slow_rooms_finish(
 
 
 @pytest.mark.asyncio
+async def test_recovery_without_resume_client_still_cleans_rooms(tmp_path: Path) -> None:
+    """Router loss should disable only resume delivery, not Matrix cleanup."""
+    config = _make_config(tmp_path)
+    config.defaults.auto_resume_after_restart = True
+    client = make_matrix_client_mock(user_id=BOT_USER_ID)
+    actors = {BOT_USER_ID: StaleStreamCleanupActor(client, MagicMock())}
+    interrupted = InterruptedThread(
+        room_id=ROOM_ID,
+        thread_id="$thread",
+        target_event_id="$target",
+        partial_text="Partial",
+        agent_name="test_agent",
+    )
+
+    with (
+        patch("mindroom.matrix.stale_stream_cleanup.get_joined_rooms", new=AsyncMock(return_value=[ROOM_ID])),
+        patch(
+            "mindroom.matrix.stale_stream_cleanup._cleanup_stale_streaming_room",
+            new=AsyncMock(return_value=(1, [interrupted])),
+        ),
+        patch(
+            "mindroom.matrix.stale_stream_cleanup._auto_resume_interrupted_threads",
+            new=AsyncMock(),
+        ) as auto_resume,
+    ):
+        result = await recover_stale_streaming_messages(
+            actors,
+            resume_client=None,
+            resume_conversation_cache=None,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            startup_cutoff_ms=NOW_MS,
+        )
+
+    assert result == StaleStreamRecoveryResult(room_count=1, cleaned_count=1, resumed_count=0)
+    auto_resume.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_shared_room_cleanup_routes_edits_through_each_message_owner(tmp_path: Path) -> None:
     """A shared history scan must use each bot's own client for Matrix edits."""
     config = _make_config(tmp_path)
@@ -2943,6 +2982,34 @@ async def test_orchestrator_recovery_uses_router_for_resume_and_all_started_bots
     assert mock_recover.await_args.kwargs["runtime_paths"] == runtime_paths_for(config)
     assert mock_recover.await_args.kwargs["startup_cutoff_ms"] == NOW_MS
     assert mock_recover.await_args.kwargs["max_resumes"] == 10
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_recovery_still_cleans_when_router_is_unavailable(tmp_path: Path) -> None:
+    """Missing resume delivery must not suppress cleanup through started bot clients."""
+    config = _make_config(tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    orchestrator.config = config
+
+    agent_client = AsyncMock(spec=nio.AsyncClient)
+    agent_bot = MagicMock()
+    agent_bot.agent_name = "test_agent"
+    agent_bot.client = agent_client
+    agent_bot.agent_user = MagicMock(user_id=BOT_USER_ID)
+    agent_bot._conversation_cache = MagicMock()
+    orchestrator.agent_bots = {"test_agent": agent_bot}
+
+    with patch(
+        "mindroom.orchestrator.recover_stale_streaming_messages",
+        new=AsyncMock(return_value=StaleStreamRecoveryResult(room_count=1, cleaned_count=1, resumed_count=0)),
+    ) as mock_recover:
+        await orchestrator._recover_stale_streams_after_restart([agent_bot], config, NOW_MS)
+
+    mock_recover.assert_awaited_once()
+    assert mock_recover.await_args.kwargs["resume_client"] is None
+    assert mock_recover.await_args.kwargs["resume_conversation_cache"] is None
+    actors = mock_recover.await_args.args[0]
+    assert actors[BOT_USER_ID].client is agent_client
 
 
 @pytest.mark.asyncio
