@@ -44,6 +44,8 @@ __all__ = [
     "ROUTER_THREAD_CONTEXT_HEADER",
     "SKILLS_TOOL_USAGE_PROMPT",
     "TEAM_MODE_SELECTION_PROMPT_TEMPLATE",
+    "THREAD_AUTO_TAG_INSTRUCTIONS",
+    "THREAD_AUTO_TAG_USER_PROMPT_TEMPLATE",
     "THREAD_SUMMARY_INSTRUCTIONS",
     "THREAD_SUMMARY_USER_PROMPT_TEMPLATE",
     "VOICE_TRANSCRIPTION_NORMALIZER_PROMPT_TEMPLATE",
@@ -292,6 +294,26 @@ BAD -> GOOD EXAMPLES:
 THREAD_SUMMARY_USER_PROMPT_TEMPLATE = (
     "<thread_messages>\n{conversation}\n</thread_messages>\n\nSummarize the above thread."
 )
+
+THREAD_AUTO_TAG_INSTRUCTIONS = """You are a thread tagger.
+Given the opening message of a chat thread and the tags already in use, choose 1-3 short topic tags for the thread.
+
+RULES:
+- STRONGLY prefer tags from the existing list; only coin a new tag when nothing listed fits.
+- Tags are lowercase, hyphen-separated, at most 25 characters (e.g. "bug", "feature-request", "billing").
+- Tag the durable topic of the thread, not transient state like "in-progress" or "waiting".
+- Return 1-3 tags, most relevant first. Fewer good tags beat more mediocre ones.
+"""
+
+THREAD_AUTO_TAG_USER_PROMPT_TEMPLATE = """Existing tags with usage counts:
+{tag_vocabulary}
+
+Opening message of the thread:
+<first_message>
+{first_message}
+</first_message>
+
+Choose 1-3 tags for this thread."""
 
 COMPACTION_SUMMARY_PROMPT = """You are updating a durable conversation handoff summary for a future model call.
 

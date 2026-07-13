@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 from mindroom import interactive
 from mindroom.background_tasks import create_background_task
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
+from mindroom.thread_auto_tag import run_thread_auto_tag
+from mindroom.thread_auto_tag import should_queue_thread_auto_tag as should_queue_thread_auto_tag_check
 from mindroom.thread_summary import maybe_generate_thread_summary
 from mindroom.thread_summary import should_queue_thread_summary as should_queue_thread_summary_check
 from mindroom.timing import timed
@@ -62,6 +64,8 @@ class PostResponseEffectsDeps:
     persist_response_event_id: Callable[[str, str], None] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
     queue_thread_summary: Callable[[str, str, int | None, str | None], None] | None = None
+    should_queue_thread_auto_tag: Callable[[str, str, int | None], bool] | None = None
+    queue_thread_auto_tag: Callable[[str, str, int | None], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -157,6 +161,41 @@ class PostResponseEffectsSupport:
             owner=self.runtime,
         )
 
+    def should_queue_thread_auto_tag(
+        self,
+        room_id: str,
+        thread_id: str,
+        message_count_hint: int | None,
+    ) -> bool:
+        """Return whether an auto-tag check should be queued for this response."""
+        return should_queue_thread_auto_tag_check(
+            room_id,
+            thread_id,
+            self.runtime.config,
+            message_count_hint=message_count_hint,
+        )
+
+    def queue_thread_auto_tag(
+        self,
+        room_id: str,
+        thread_id: str,
+        message_count_hint: int | None,
+    ) -> None:
+        """Queue background thread auto-tagging and daily tag-vocabulary upkeep."""
+        create_background_task(
+            run_thread_auto_tag(
+                self._client(),
+                room_id,
+                thread_id,
+                self.runtime.config,
+                self.runtime_paths,
+                conversation_cache=self.conversation_cache,
+                message_count_hint=message_count_hint,
+            ),
+            name=f"thread_auto_tag_{room_id}_{thread_id}",
+            owner=self.runtime,
+        )
+
     def build_deps(
         self,
         *,
@@ -187,6 +226,8 @@ class PostResponseEffectsSupport:
             persist_response_event_id=persist_response_event_id,
             should_queue_thread_summary=self.should_queue_thread_summary,
             queue_thread_summary=self.queue_thread_summary,
+            should_queue_thread_auto_tag=self.should_queue_thread_auto_tag,
+            queue_thread_auto_tag=self.queue_thread_auto_tag,
         )
 
 
@@ -276,4 +317,25 @@ async def apply_post_response_effects(
             outcome.thread_summary_thread_id,
             outcome.thread_summary_message_count_hint,
             outcome.thread_summary_entity_name,
+        )
+
+    if (
+        response_event_id is not None
+        and not final_delivery_outcome.suppressed
+        and outcome.thread_summary_room_id is not None
+        and outcome.thread_summary_thread_id is not None
+        and (
+            deps.should_queue_thread_auto_tag is None
+            or deps.should_queue_thread_auto_tag(
+                outcome.thread_summary_room_id,
+                outcome.thread_summary_thread_id,
+                outcome.thread_summary_message_count_hint,
+            )
+        )
+        and deps.queue_thread_auto_tag is not None
+    ):
+        deps.queue_thread_auto_tag(
+            outcome.thread_summary_room_id,
+            outcome.thread_summary_thread_id,
+            outcome.thread_summary_message_count_hint,
         )
