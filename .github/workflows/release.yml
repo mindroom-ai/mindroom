@@ -61,14 +61,23 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
       - name: Build universal uv binary
+        working-directory: ${{ runner.temp }}
         run: |
           UV_VERSION=$(uv --version | awk '{ print $2 }')
-          UV_X86_64_ARCHIVE="$RUNNER_TEMP/uv-x86_64-apple-darwin.tar.gz"
-          curl --fail --location --silent --show-error \
-            "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-apple-darwin.tar.gz" \
-            --output "$UV_X86_64_ARCHIVE"
-          tar -xzf "$UV_X86_64_ARCHIVE" -C "$RUNNER_TEMP"
-          lipo -create "$(command -v uv)" \
+          for ARCHITECTURE in aarch64 x86_64; do
+            UV_ARCHIVE="uv-${ARCHITECTURE}-apple-darwin.tar.gz"
+            curl --fail --location --silent --show-error \
+              "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${UV_ARCHIVE}" \
+              --output "$UV_ARCHIVE"
+            curl --fail --location --silent --show-error \
+              "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${UV_ARCHIVE}.sha256" \
+              --output "${UV_ARCHIVE}.sha256"
+          done
+          shasum --algorithm 256 --check uv-*-apple-darwin.tar.gz.sha256
+          tar -xzf uv-aarch64-apple-darwin.tar.gz
+          tar -xzf uv-x86_64-apple-darwin.tar.gz
+          lipo -create \
+            "$RUNNER_TEMP/uv-aarch64-apple-darwin/uv" \
             "$RUNNER_TEMP/uv-x86_64-apple-darwin/uv" \
             -output "$RUNNER_TEMP/uv-universal"
           chmod 755 "$RUNNER_TEMP/uv-universal"
