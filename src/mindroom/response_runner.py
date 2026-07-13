@@ -757,7 +757,11 @@ class ResponseRunner:
             )
             if early_placeholder.placeholder_event_id is None or early_placeholder.settlement_started or already_linked:
                 raise
-            cause = error.__cause__ if isinstance(error.__cause__, Exception) else error
+            cause = (
+                error.__cause__
+                if isinstance(error, PostLockRequestPreparationError) and isinstance(error.__cause__, Exception)
+                else error
+            )
             raise PostLockRequestPreparationError(
                 placeholder_event_id=early_placeholder.placeholder_event_id,
             ) from cause

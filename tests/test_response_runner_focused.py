@@ -35,6 +35,7 @@ from mindroom.response_payload_preparation import (
     ResponsePayloadPreparer,
 )
 from mindroom.response_runner import (
+    PostLockRequestPreparationError,
     ResponseRequest,
     ResponseRunner,
     _ResponseGenerationOutcome,
@@ -355,6 +356,33 @@ async def test_setup_cancellation_preserves_cancel_when_placeholder_cleanup_fail
             await response
 
     cancelled_note.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_early_placeholder_failure_preserves_non_preparation_error_cause(tmp_path: Path) -> None:
+    """Only the preparation wrapper is unwrapped when linking an early placeholder failure."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    underlying_error = ValueError("underlying failure")
+    proximate_error = RuntimeError("proximate setup failure")
+    proximate_error.__cause__ = underlying_error
+
+    async def fail_after_placeholder(
+        _target: MessageTarget,
+        early_placeholder: response_runner._EarlyPlaceholderState,
+    ) -> str | None:
+        early_placeholder.placeholder_event_id = "$placeholder"
+        raise proximate_error
+
+    with pytest.raises(PostLockRequestPreparationError) as exc_info:
+        await runner._run_locked_response_lifecycle(
+            _plain_request(_target()),
+            response_kind="agent",
+            locked_operation=fail_after_placeholder,
+        )
+
+    assert exc_info.value.placeholder_event_id == "$placeholder"
+    assert exc_info.value.__cause__ is proximate_error
+    assert exc_info.value.__cause__.__cause__ is underlying_error
 
 
 @pytest.mark.asyncio
