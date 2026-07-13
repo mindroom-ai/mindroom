@@ -285,6 +285,36 @@ async def test_untag_thread_defaults_to_context_thread_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_untag_thread_coerces_free_form_tag_input() -> None:
+    """Untag should canonicalize free-form input exactly like tag creation."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            new=AsyncMock(return_value="$ctx-thread:localhost"),
+        ),
+        patch(
+            "mindroom.custom_tools.thread_tags.remove_thread_tag",
+            new=AsyncMock(return_value=_state("$ctx-thread:localhost")),
+        ) as mock_remove,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.untag_thread("Follow Up"))
+
+    assert payload["status"] == "ok"
+    assert payload["tag"] == "follow-up"
+    mock_remove.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        "$ctx-thread:localhost",
+        "follow-up",
+        requester_user_id=context.requester_id,
+    )
+
+
+@pytest.mark.asyncio
 async def test_untag_thread_explicit_thread_id_overrides_same_room_context() -> None:
     """An explicit untag target should not be silently replaced by context state."""
     tool = ThreadTagsTools()
@@ -932,6 +962,41 @@ async def test_list_thread_tags_room_wide_normalizes_mixed_case_include_and_excl
         tag=None,
         include_tag="blocked",
         exclude_tag="resolved",
+        include_untagged=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_thread_tags_coerces_all_free_form_tag_filters() -> None:
+    """Every list filter should use the same model-facing tag coercion."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id=None, reply_to_event_id=None)
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.list_tagged_threads",
+            new=AsyncMock(return_value=_listing({})),
+        ) as mock_list,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(
+            await tool.list_thread_tags(
+                tag="Follow Up",
+                include_tag=" Needs Review ",
+                exclude_tag="Already_Resolved",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["tag"] == "follow-up"
+    assert payload["include_tag"] == "needs-review"
+    assert payload["exclude_tag"] == "already-resolved"
+    mock_list.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        tag="follow-up",
+        include_tag="needs-review",
+        exclude_tag="already-resolved",
         include_untagged=False,
     )
 

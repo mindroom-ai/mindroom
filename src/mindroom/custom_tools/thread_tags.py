@@ -26,7 +26,6 @@ from mindroom.thread_tags import (
     ThreadTagsListing,
     coerce_tag_name,
     list_tagged_threads,
-    normalize_tag_name,
     remove_thread_tag,
     set_thread_tag,
 )
@@ -69,6 +68,15 @@ def _serialized_tags_for_output(
     if tag is None:
         return serialized
     return {tag: serialized[tag]} if tag in serialized else {}
+
+
+def _coerce_tool_tag(tag: str) -> str:
+    """Canonicalize one model-facing tag input or raise a shared validation error."""
+    normalized_tag = coerce_tag_name(tag)
+    if normalized_tag is None:
+        msg = "tag must contain at least one letter, digit, or hyphen after normalization."
+        raise ThreadTagsError(msg)
+    return normalized_tag
 
 
 class ThreadTagsTools(Toolkit):
@@ -130,13 +138,14 @@ class ThreadTagsTools(Toolkit):
                 message="Not authorized to access the target room.",
             )
 
-        normalized_tag = coerce_tag_name(tag)
-        if normalized_tag is None:
+        try:
+            normalized_tag = _coerce_tool_tag(tag)
+        except ThreadTagsError as exc:
             return self._payload(
                 "error",
                 action="tag",
                 room_id=resolved_room_id,
-                message="tag must contain at least one letter, digit, or hyphen after normalization.",
+                message=str(exc),
             )
 
         thread_target = await resolve_canonical_tool_thread_target(
@@ -198,7 +207,7 @@ class ThreadTagsTools(Toolkit):
         room_id: str | None = None,
         canonical: bool = False,
     ) -> str:
-        """Remove one tag from the current or specified Matrix thread."""
+        """Remove one tag, normalizing free-form input exactly like tag_thread."""
         context = get_tool_runtime_context()
         if context is None:
             return self._context_error()
@@ -221,7 +230,7 @@ class ThreadTagsTools(Toolkit):
             )
 
         try:
-            normalized_tag = normalize_tag_name(tag)
+            normalized_tag = _coerce_tool_tag(tag)
         except ThreadTagsError as exc:
             return self._payload(
                 "error",
@@ -317,6 +326,8 @@ class ThreadTagsTools(Toolkit):
         (threads with no tags appear with an empty `tags` dict). This enables the
         headline query for "what threads are still unresolved?":
 
+        All tag filter inputs use the same free-form normalization as `tag_thread`.
+
             list_thread_tags(exclude_tag="resolved", include_untagged=True)
 
         Parameters:
@@ -377,9 +388,9 @@ class ThreadTagsTools(Toolkit):
             )
 
         try:
-            normalized_tag = normalize_tag_name(tag) if tag is not None else None
-            normalized_include_tag = normalize_tag_name(include_tag) if include_tag is not None else None
-            normalized_exclude_tag = normalize_tag_name(exclude_tag) if exclude_tag is not None else None
+            normalized_tag = _coerce_tool_tag(tag) if tag is not None else None
+            normalized_include_tag = _coerce_tool_tag(include_tag) if include_tag is not None else None
+            normalized_exclude_tag = _coerce_tool_tag(exclude_tag) if exclude_tag is not None else None
         except ThreadTagsError as exc:
             return self._payload(
                 "error",
