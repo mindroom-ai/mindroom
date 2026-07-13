@@ -36,6 +36,7 @@ from mindroom.history.runtime import (
     resolve_agent_preparation_inputs,
 )
 from mindroom.history.storage import read_scope_seen_event_ids
+from mindroom.history.types import ResolvedReplayPlan
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.prompt_message_tags import render_msg_tag
@@ -52,7 +53,7 @@ if TYPE_CHECKING:
 
     from mindroom.attachments import AttachmentRecord
     from mindroom.config.main import Config, ResolvedRuntimeModel
-    from mindroom.history.types import CompactionLifecycle, PreparedHistoryState, ResolvedReplayPlan
+    from mindroom.history.types import CompactionLifecycle, PreparedHistoryState
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.timing import DispatchPipelineTiming
@@ -621,6 +622,33 @@ def _scope_seen_event_ids(scope_context: ScopeSessionContext | None) -> set[str]
     return read_scope_seen_event_ids(scope_context.session, scope_context.scope)
 
 
+def _prepared_history_with_scheduled_limit(
+    prepared_history: PreparedHistoryState,
+    scheduled_history_limit: int,
+) -> PreparedHistoryState:
+    """Cap one scheduled turn's persisted-replay plan to its history limit."""
+    if scheduled_history_limit <= 0:
+        return replace(
+            prepared_history,
+            replay_plan=ResolvedReplayPlan(mode="disabled", estimated_tokens=0, add_history_to_context=False),
+            replays_persisted_history=False,
+        )
+    plan = prepared_history.replay_plan
+    if plan is None or not plan.add_history_to_context:
+        return prepared_history
+    if plan.num_history_messages is not None and plan.num_history_messages <= scheduled_history_limit:
+        return prepared_history
+    return replace(
+        prepared_history,
+        replay_plan=replace(
+            plan,
+            mode="limited",
+            num_history_runs=None,
+            num_history_messages=scheduled_history_limit,
+        ),
+    )
+
+
 @timed("system_prompt_assembly.history_prepare.finalize")
 def _finalize_prepared_history(
     *,
@@ -716,6 +744,8 @@ async def _prepare_execution_context_common(
         static_prompt_tokens=final_static_tokens,
         pipeline_timing=pipeline_timing,
     )
+    if ctx.scheduled_history_limit is not None:
+        prepared_history = _prepared_history_with_scheduled_limit(prepared_history, ctx.scheduled_history_limit)
     if pipeline_timing is not None:
         pipeline_timing.mark("prompt_assembly_start")
     if not prepared_history.replays_persisted_history and thread_history:

@@ -1093,6 +1093,7 @@ def make_turn_context(
     matrix_run_metadata: dict[str, Any] | None = None,
     active_event_ids: frozenset[str] = frozenset(),
     system_enrichment_items: tuple[EnrichmentItem, ...] = (),
+    scheduled_history_limit: int | None = None,
 ) -> ResponseTurnContext:
     """Build one response-turn context with test defaults."""
     return ResponseTurnContext(
@@ -1107,6 +1108,7 @@ def make_turn_context(
         matrix_run_metadata=matrix_run_metadata,
         active_event_ids=active_event_ids,
         system_enrichment_items=system_enrichment_items,
+        scheduled_history_limit=scheduled_history_limit,
     )
 
 

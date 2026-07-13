@@ -56,6 +56,7 @@ from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
+    scheduled_history_limit_from_content,
     source_kind_allows_internal_relay_detection,
 )
 from mindroom.entity_resolution import entity_identity_registry
@@ -108,6 +109,7 @@ from mindroom.timing import (
     get_dispatch_pipeline_timing,
 )
 from mindroom.turn_origin import (
+    TurnIntent,
     classify_turn_origin,
     original_sender_for_router_handoff,
     original_sender_for_router_relay,
@@ -158,6 +160,19 @@ def _room_level_context_event(event: TextDispatchEvent) -> TextDispatchEvent:
         source=stripped_source,
         server_timestamp=event.server_timestamp,
     )
+
+
+def _scheduled_history_limit_for_dispatch(
+    event: DispatchEvent,
+    dispatch: PreparedDispatch,
+) -> int | None:
+    """Return the per-turn history limit annotated on one trusted scheduled fire."""
+    if dispatch.envelope.origin.intent is not TurnIntent.SCHEDULED_FIRE:
+        return None
+    content = event.source.get("content") if isinstance(event.source, dict) else None
+    if not isinstance(content, dict):
+        return None
+    return scheduled_history_limit_from_content(content)
 
 
 def _queued_notice_dispatch_metadata(
@@ -1672,6 +1687,7 @@ class TurnController:
 
             self.deps.logger.info(processing_log, event_id=event.event_id)
             current_timestamp_ms = normalize_timestamp_ms(event.server_timestamp)
+            scheduled_history_limit = _scheduled_history_limit_for_dispatch(event, dispatch)
             payload_preparation = ResponsePayloadPreparation(
                 dispatch=dispatch,
                 prompt=event.body,
@@ -1718,6 +1734,7 @@ class TurnController:
                             correlation_id=dispatch.correlation_id,
                             matrix_run_metadata=matrix_run_metadata,
                             requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
+                            scheduled_history_limit=scheduled_history_limit,
                             payload_preparation=payload_preparation,
                             current_timestamp_ms=current_timestamp_ms,
                             current_prompt_is_structured=dispatch.current_prompt_is_structured,
@@ -1741,6 +1758,7 @@ class TurnController:
                             correlation_id=dispatch.correlation_id,
                             matrix_run_metadata=matrix_run_metadata,
                             requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
+                            scheduled_history_limit=scheduled_history_limit,
                             payload_preparation=payload_preparation,
                             current_timestamp_ms=current_timestamp_ms,
                             current_prompt_is_structured=dispatch.current_prompt_is_structured,

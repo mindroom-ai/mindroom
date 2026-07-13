@@ -244,6 +244,29 @@ def prepare_memory_and_model_context(
     return prompt, thread_history, model_prompt_content, model_thread_history
 
 
+def _limit_thread_history_for_scheduled_turn(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    scheduled_history_limit: int,
+) -> Sequence[ResolvedVisibleMessage]:
+    """Return the newest ``scheduled_history_limit`` messages for one scheduled turn."""
+    if scheduled_history_limit <= 0:
+        return ()
+    return tuple(thread_history[-scheduled_history_limit:])
+
+
+def _request_with_scheduled_history_limit(request: ResponseRequest) -> ResponseRequest:
+    """Cap the model-facing thread history when this turn is a limited scheduled fire."""
+    if request.scheduled_history_limit is None:
+        return request
+    return replace(
+        request,
+        thread_history=_limit_thread_history_for_scheduled_turn(
+            request.thread_history,
+            request.scheduled_history_limit,
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class ResponseRequest:
     """Typed carrier for one response lifecycle request."""
@@ -261,6 +284,7 @@ class ResponseRequest:
     matrix_run_metadata: Mapping[str, Any] | None = None
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     requires_model_history_refresh: bool = False
+    scheduled_history_limit: int | None = None
     payload_preparation: ResponsePayloadPreparation | None = None
     current_timestamp_ms: float | None = None
     current_prompt_is_structured: bool = False
@@ -856,6 +880,7 @@ class ResponseRunner:
         """Refresh thread history and rebuild any history-derived payload once locked."""
         try:
             request = await self._refresh_model_history_after_lock(request)
+            request = _request_with_scheduled_history_limit(request)
             if request.payload_preparation is None:
                 return request
             return await self.deps.request_preparer.prepare(request)
@@ -911,6 +936,7 @@ class ResponseRunner:
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
             active_event_ids=frozenset(active_event_ids),
             system_enrichment_items=tuple(system_enrichment_items),
+            scheduled_history_limit=request.scheduled_history_limit,
         )
 
     def _notify_sync_restart_cancelled(
@@ -1458,6 +1484,7 @@ class ResponseRunner:
             matrix_run_metadata=matrix_run_metadata,
             active_event_ids=frozenset(active_event_ids),
             system_enrichment_items=tuple(request.system_enrichment_items),
+            scheduled_history_limit=request.scheduled_history_limit,
         )
         team_turn_recorder = self._build_turn_recorder(
             user_message=request.prompt,

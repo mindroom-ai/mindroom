@@ -11,7 +11,7 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, SCHEDULED_HISTORY_LIMIT_KEY, SOURCE_KIND_KEY
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import EVENT_SCHEDULE_FIRED, HookRegistry, ScheduleFiredContext, hook
@@ -61,12 +61,14 @@ def _workflow(
     room_id: str | None = "!room:localhost",
     thread_id: str | None = "$thread",
     new_thread: bool = False,
+    history_limit: int | None = None,
 ) -> ScheduledWorkflow:
     return ScheduledWorkflow(
         schedule_type="once",
         execute_at=datetime.now(UTC),
         message=message,
         description="executor test task",
+        history_limit=history_limit,
         room_id=room_id,
         thread_id=thread_id,
         new_thread=new_thread,
@@ -133,6 +135,34 @@ async def test_fire_task_with_valid_agent_delivers_in_thread(tmp_path: Path) -> 
     assert content["m.relates_to"]["event_id"] == "$thread"
     assert content[ORIGINAL_SENDER_KEY] == "@user:localhost"
     assert content[SOURCE_KIND_KEY] == SCHEDULED_SOURCE_KIND
+    assert SCHEDULED_HISTORY_LIMIT_KEY not in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("history_limit", [0, 5])
+async def test_fire_task_with_history_limit_annotates_message_content(tmp_path: Path, history_limit: int) -> None:
+    """A per-schedule history limit rides on the fired message so dispatch can cap that turn."""
+    config = _agent_config(tmp_path)
+    workflow = _workflow("@research Poll the queue", history_limit=history_limit)
+    conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
+
+    with patch(
+        "mindroom.hooks.sender._send_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$delivered")),
+    ) as mock_send:
+        outcome = await execute_scheduled_workflow(
+            AsyncMock(),
+            workflow,
+            config,
+            runtime_paths_for(config),
+            conversation_cache,
+            task_id="task-1",
+        )
+
+    assert outcome.delivered is True
+    content = mock_send.await_args.args[2]
+    assert content[SOURCE_KIND_KEY] == SCHEDULED_SOURCE_KIND
+    assert content[SCHEDULED_HISTORY_LIMIT_KEY] == history_limit
 
 
 @pytest.mark.asyncio

@@ -210,6 +210,9 @@ class ResponseTurnContext:
     matrix_run_metadata: dict[str, Any] | None
     active_event_ids: frozenset[str] = frozenset()
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
+    # Set only for scheduled fires that carry a history limit; caps persisted
+    # session replay for this one turn without touching authored history config.
+    scheduled_history_limit: int | None = None
 
 
 @dataclass(frozen=True)

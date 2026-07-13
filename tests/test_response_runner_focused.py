@@ -35,6 +35,7 @@ from mindroom.streaming import StreamingDeliveryError
 from mindroom.turn_policy import PreparedDispatch
 from tests.conftest import (
     make_matrix_client_mock,
+    make_visible_message,
     patch_response_runner_module,
     replace_response_runner_deps,
     request_envelope,
@@ -237,6 +238,66 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
     # Each turn's payload preparation consumed the history refreshed under its own lock.
     assert prepare_history_by_turn[1] is refreshed[0]
     assert prepare_history_by_turn[2] is refreshed[1]
+
+
+@pytest.mark.asyncio
+async def test_scheduled_history_limit_caps_refreshed_history_before_payload_prepare(tmp_path: Path) -> None:
+    """A limited scheduled fire caps post-lock refreshed history before payload assembly."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    refreshed = ThreadHistoryResult(
+        [
+            make_visible_message(sender="@user:localhost", body=f"message {index}", event_id=f"$m{index}")
+            for index in range(4)
+        ],
+        is_full_history=True,
+    )
+    prepared_histories: list[object] = []
+
+    async def spy_prepare(request: ResponseRequest) -> ResponseRequest:
+        prepared_histories.append(request.thread_history)
+        return replace(request, payload_preparation=None, requires_model_history_refresh=False)
+
+    async def fake_run_cancellable_response(**kwargs: object) -> str:
+        response_function = kwargs["response_function"]
+        await response_function(None)  # type: ignore[operator]
+        return "$response"
+
+    async def fake_process_and_respond(request: ResponseRequest, **_kwargs: object) -> _ResponseGenerationOutcome:
+        del request
+        return _ResponseGenerationOutcome(delivery=_completed_outcome(), run_succeeded=True)
+
+    target = _target(thread_id="$thread", reply_to_event_id="$event1")
+    envelope = _envelope(target, source_event_id="$event1")
+    request = ResponseRequest(
+        thread_history=[],
+        prompt="poll the queue",
+        user_id="@user:localhost",
+        response_envelope=envelope,
+        payload_preparation=_preparation(target, envelope),
+        scheduled_history_limit=2,
+    )
+
+    with (
+        patch.object(ConversationResolver, "fetch_thread_history", new=AsyncMock(return_value=refreshed)),
+        patch.object(bot._request_payload_preparer, "prepare", new=AsyncMock(side_effect=spy_prepare)),
+        patch.object(
+            coordinator,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
+        patch.object(coordinator, "process_and_respond", new=AsyncMock(side_effect=fake_process_and_respond)),
+        patch_response_runner_module(
+            should_use_streaming=AsyncMock(return_value=False),
+            apply_post_response_effects=AsyncMock(),
+        ),
+    ):
+        assert await coordinator.generate_response(request) == "$response"
+
+    assert len(prepared_histories) == 1
+    capped_history = prepared_histories[0]
+    assert isinstance(capped_history, tuple)
+    assert [message.event_id for message in capped_history] == ["$m2", "$m3"]
 
 
 # ---------------------------------------------------------------------------

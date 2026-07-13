@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol, cast, runtime_checkable
 
-from mindroom.constants import SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
+from mindroom.constants import SCHEDULED_HISTORY_LIMIT_KEY, SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
 
 MESSAGE_SOURCE_KIND = "message"
 VOICE_SOURCE_KIND = "voice"
@@ -129,6 +129,14 @@ def source_kind_from_content(content: Mapping[str, Any]) -> str | None:
     """Return canonical source-kind metadata from Matrix content."""
     source_kind = content.get(SOURCE_KIND_KEY)
     return _source_kind_from_value(source_kind)
+
+
+def scheduled_history_limit_from_content(content: Mapping[str, Any]) -> int | None:
+    """Return the scheduled-turn history limit annotated on Matrix content."""
+    value = content.get(SCHEDULED_HISTORY_LIMIT_KEY)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
 
 
 def is_visible_router_voice_echo_content(content: object) -> bool:

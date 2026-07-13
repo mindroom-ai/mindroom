@@ -24,6 +24,7 @@ from mindroom.execution_preparation import (
     _fallback_static_token_budget,
     _messages_with_current_prompt,
     _prepare_execution_context_common,
+    _prepared_history_with_scheduled_limit,
     _ThreadAttachmentContext,
     prepare_agent_execution_context,
     render_prepared_messages_text,
@@ -31,7 +32,13 @@ from mindroom.execution_preparation import (
 from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.prompt_tokens import estimate_agent_static_tokens
 from mindroom.history.runtime import PreparedScopeHistory, _HistoryPreparationInputs
-from mindroom.history.types import HistoryPolicy, HistoryScope, PreparedHistoryState, ResolvedHistorySettings
+from mindroom.history.types import (
+    HistoryPolicy,
+    HistoryScope,
+    PreparedHistoryState,
+    ResolvedHistorySettings,
+    ResolvedReplayPlan,
+)
 from mindroom.tool_schema_cache import clear_tool_schema_cache
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import FakeModel, bind_runtime_paths, make_turn_context, make_visible_message
@@ -202,6 +209,126 @@ async def test_prepare_execution_context_skips_fallback_replay_when_persisted_hi
 
     assert prepared.prepared_history.replays_persisted_history is True
     assert prepared.context_messages[0].content == "@alice:localhost: older context"
+
+
+def test_scheduled_limit_zero_disables_replay_plan() -> None:
+    """A zero limit disables persisted replay entirely for the scheduled turn."""
+    prepared = PreparedHistoryState(
+        replay_plan=ResolvedReplayPlan(
+            mode="configured",
+            estimated_tokens=500,
+            add_history_to_context=True,
+            num_history_runs=3,
+        ),
+        replays_persisted_history=True,
+    )
+
+    capped = _prepared_history_with_scheduled_limit(prepared, 0)
+
+    assert capped.replays_persisted_history is False
+    assert capped.replay_plan == ResolvedReplayPlan(mode="disabled", estimated_tokens=0, add_history_to_context=False)
+
+
+def test_scheduled_limit_caps_larger_plans_only() -> None:
+    """A positive limit converts the plan to a message cap unless it is already tighter."""
+    runs_plan = PreparedHistoryState(
+        replay_plan=ResolvedReplayPlan(
+            mode="configured",
+            estimated_tokens=500,
+            add_history_to_context=True,
+            num_history_runs=3,
+        ),
+        replays_persisted_history=True,
+    )
+    capped = _prepared_history_with_scheduled_limit(runs_plan, 2)
+    assert capped.replays_persisted_history is True
+    assert capped.replay_plan is not None
+    assert capped.replay_plan.mode == "limited"
+    assert capped.replay_plan.num_history_runs is None
+    assert capped.replay_plan.num_history_messages == 2
+
+    tighter_plan = PreparedHistoryState(
+        replay_plan=ResolvedReplayPlan(
+            mode="limited",
+            estimated_tokens=100,
+            add_history_to_context=True,
+            num_history_messages=1,
+        ),
+        replays_persisted_history=True,
+    )
+    assert _prepared_history_with_scheduled_limit(tighter_plan, 2) is tighter_plan
+
+    disabled_plan = PreparedHistoryState(
+        replay_plan=ResolvedReplayPlan(mode="disabled", estimated_tokens=0, add_history_to_context=False),
+        replays_persisted_history=False,
+    )
+    assert _prepared_history_with_scheduled_limit(disabled_plan, 2) is disabled_plan
+
+    no_plan = PreparedHistoryState()
+    assert _prepared_history_with_scheduled_limit(no_plan, 2) is no_plan
+
+
+@pytest.mark.asyncio
+async def test_scheduled_history_limit_caps_persisted_replay_plan() -> None:
+    """A scheduled turn's context limit converts the persisted-replay plan to a message cap."""
+
+    async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
+        return _prepared_scope_with_persisted_replay()
+
+    prepared = await _prepare_execution_context_common(
+        make_turn_context(reply_to_event_id="$current", scheduled_history_limit=1),
+        scope_context=None,
+        prompt="Current request",
+        thread_history=[
+            make_visible_message(sender="@alice:localhost", body="older context", event_id="$older"),
+        ],
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        config=_config(),
+        prepare_scope_history_fn=prepare_scope_history,
+        estimate_static_tokens_fn=lambda text: len(text.split()),
+        render_messages_text_fn=render_prepared_messages_text,
+        fallback_static_token_budget=100,
+    )
+
+    replay_plan = prepared.prepared_history.replay_plan
+    assert replay_plan is not None
+    assert replay_plan.mode == "limited"
+    assert replay_plan.num_history_runs is None
+    assert replay_plan.num_history_messages == 1
+    assert prepared.prepared_history.replays_persisted_history is True
+
+
+@pytest.mark.asyncio
+async def test_scheduled_history_limit_zero_yields_prompt_only_context() -> None:
+    """With history_limit=0 the scheduled turn sees no persisted replay and no thread fallback."""
+
+    async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
+        return _prepared_scope_with_persisted_replay()
+
+    prepared = await _prepare_execution_context_common(
+        make_turn_context(reply_to_event_id="$current", scheduled_history_limit=0),
+        scope_context=None,
+        prompt="Current request",
+        # The runner caps model-facing thread history before payload assembly,
+        # so a zero-limit scheduled turn arrives here with no thread history.
+        thread_history=[],
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        config=_config(),
+        prepare_scope_history_fn=prepare_scope_history,
+        estimate_static_tokens_fn=lambda text: len(text.split()),
+        render_messages_text_fn=render_prepared_messages_text,
+        fallback_static_token_budget=100,
+    )
+
+    assert prepared.prepared_history.replays_persisted_history is False
+    replay_plan = prepared.prepared_history.replay_plan
+    assert replay_plan is not None
+    assert replay_plan.add_history_to_context is False
+    assert prepared.context_messages == ()
+    assert len(prepared.messages) == 1
+    assert "Current request" in str(prepared.messages[0].content)
 
 
 @pytest.mark.asyncio
