@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import nio
 import pytest
@@ -18,6 +19,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_bookkeeping import (
     MutationThreadImpact,
     MutationThreadImpactState,
+    ThreadMutationResolver,
     resolve_event_thread_impact_for_client,
     resolve_redaction_thread_impact_for_client,
 )
@@ -399,6 +401,92 @@ async def test_resolve_redaction_thread_impact_for_client_returns_room_level_for
     )
 
     assert impact == MutationThreadImpact.room_level()
+
+
+def _mutation_resolver_with_index(
+    *,
+    fetch_event_info: AsyncMock,
+    get_thread_id_for_event: AsyncMock,
+    logger: Mock | None = None,
+) -> ThreadMutationResolver:
+    """Build one mutation resolver over a stub runtime exposing only the event->thread index."""
+    resolved_logger = logger if logger is not None else Mock()
+    return ThreadMutationResolver(
+        logger_getter=lambda: resolved_logger,
+        runtime=SimpleNamespace(event_cache=SimpleNamespace(get_thread_id_for_event=get_thread_id_for_event)),
+        fetch_event_info_for_thread_resolution=fetch_event_info,
+    )
+
+
+@pytest.mark.asyncio
+async def test_metadata_less_redaction_scopes_to_cached_thread_index() -> None:
+    """A redaction whose target metadata is gone should invalidate only the cache-known thread."""
+    logger = Mock()
+    resolver = _mutation_resolver_with_index(
+        fetch_event_info=AsyncMock(return_value=None),
+        get_thread_id_for_event=AsyncMock(return_value="$thread-root:localhost"),
+        logger=logger,
+    )
+
+    impact = await resolver.resolve_redaction_thread_impact(
+        "!room:localhost",
+        "$old-target:localhost",
+        failure_message="Failed to apply sync redaction to cache",
+        event_id="$redaction:localhost",
+    )
+
+    assert impact == MutationThreadImpact.threaded("$thread-root:localhost")
+    logger.info.assert_called_once_with(
+        "Scoped metadata-less redaction to its cached thread",
+        room_id="!room:localhost",
+        event_id="$redaction:localhost",
+        redacted_event_id="$old-target:localhost",
+        thread_id="$thread-root:localhost",
+    )
+
+
+@pytest.mark.asyncio
+async def test_metadata_less_redaction_stays_unknown_without_index_entry() -> None:
+    """A redaction target absent from the cache index must keep failing closed."""
+    resolver = _mutation_resolver_with_index(
+        fetch_event_info=AsyncMock(return_value=None),
+        get_thread_id_for_event=AsyncMock(return_value=None),
+    )
+
+    impact = await resolver.resolve_redaction_thread_impact(
+        "!room:localhost",
+        "$untracked-target:localhost",
+        failure_message="Failed to apply sync redaction to cache",
+    )
+
+    assert impact == MutationThreadImpact.unknown()
+
+
+@pytest.mark.asyncio
+async def test_metadata_less_redaction_stays_unknown_when_index_lookup_fails() -> None:
+    """An index lookup error must not weaken the fail-closed redaction path."""
+    logger = Mock()
+    resolver = _mutation_resolver_with_index(
+        fetch_event_info=AsyncMock(return_value=None),
+        get_thread_id_for_event=AsyncMock(side_effect=RuntimeError("cache unavailable")),
+        logger=logger,
+    )
+
+    impact = await resolver.resolve_redaction_thread_impact(
+        "!room:localhost",
+        "$old-target:localhost",
+        failure_message="Failed to apply sync redaction to cache",
+        event_id="$redaction:localhost",
+    )
+
+    assert impact == MutationThreadImpact.unknown()
+    logger.warning.assert_called_once_with(
+        "Redaction thread-index fallback failed; failing closed",
+        room_id="!room:localhost",
+        event_id="$redaction:localhost",
+        redacted_event_id="$old-target:localhost",
+        error="cache unavailable",
+    )
 
 
 @pytest.mark.asyncio
