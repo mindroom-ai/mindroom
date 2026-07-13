@@ -1,7 +1,7 @@
 """Process-wide embedder health: classification, probe, and last-known failure.
 
-The OpenAI-compatible embedder records a failure here before re-raising and
-records healthy on any non-empty vector, so recovery is self-clearing the
+The OpenAI-compatible embedder records a failure here before raising and
+records healthy on every validated response, so recovery is self-clearing the
 moment a real embedding request succeeds. Probes cover the paths passive
 recording cannot see: startup, config reload, and subprocess knowledge
 refreshes that never touch the main-process embedder.
@@ -25,11 +25,20 @@ logger = get_logger(__name__)
 _EMBEDDER_AUTH_FAILED_DETAIL = "embedder authentication failed (HTTP 401)"
 _EMBEDDER_PERMISSION_DENIED_DETAIL = "embedder permission denied (HTTP 403)"
 EMBEDDER_UNREACHABLE_DETAIL = "embedder endpoint unreachable"
-_EMBEDDER_EMPTY_VECTOR_DETAIL = "embedder returned an empty vector"
+EMBEDDER_EMPTY_VECTOR_DETAIL = "embedder returned an empty vector"
 _PROBE_TEXT = "mindroom embedder health check"
 
 _failure_lock = Lock()
 _current_failure: str | None = None
+
+
+class EmbedderRequestError(RuntimeError):
+    """Embedder failure carrying only the classified, credential-safe detail.
+
+    The embedder boundary raises this instead of the provider exception so
+    upstream loggers — including agno's catch-log-and-return-empty paths —
+    can never render a raw response body that may echo the rejected key.
+    """
 
 
 def record_embedder_health(error: str | None) -> None:
@@ -62,14 +71,14 @@ def is_embedder_provider_error(exc: BaseException) -> bool:
 def describe_embedder_error(exc: BaseException) -> str:
     """Return a compact failure description safe for logs, metadata, and tool text.
 
-    HTTP and transport failures map to fixed messages so raw response bodies,
-    hosts, and keys never leak; anything else is credential-redacted free text.
+    Every branch returns fixed text (plus at most an HTTP status or exception
+    type name), never `str(exc)` of a provider exception: arbitrary exception
+    text can carry response bodies, hosts, or the rejected key itself.
     """
-    from openai import APIConnectionError, APIStatusError, AuthenticationError, PermissionDeniedError  # noqa: PLC0415
+    if isinstance(exc, EmbedderRequestError):
+        return str(exc)
 
-    # Deferred: importing the knowledge package here would recurse back into
-    # this module through knowledge/__init__ -> refresh_scheduler.
-    from mindroom.knowledge.redaction import redact_credentials_in_text  # noqa: PLC0415
+    from openai import APIConnectionError, APIStatusError, AuthenticationError, PermissionDeniedError  # noqa: PLC0415
 
     if isinstance(exc, AuthenticationError):
         return _EMBEDDER_AUTH_FAILED_DETAIL
@@ -79,7 +88,7 @@ def describe_embedder_error(exc: BaseException) -> str:
         return f"embedder request failed (HTTP {exc.status_code})"
     if isinstance(exc, APIConnectionError):
         return EMBEDDER_UNREACHABLE_DETAIL
-    return redact_credentials_in_text(f"{type(exc).__name__}: {exc}")
+    return f"embedder request failed ({type(exc).__name__})"
 
 
 def embedder_in_use(config: Config) -> bool:
@@ -115,7 +124,7 @@ def probe_embedder(config: Config, runtime_paths: RuntimePaths) -> str | None:
     except Exception as exc:
         return describe_embedder_error(exc)
     if not vector:
-        return _EMBEDDER_EMPTY_VECTOR_DETAIL
+        return EMBEDDER_EMPTY_VECTOR_DETAIL
     return None
 
 

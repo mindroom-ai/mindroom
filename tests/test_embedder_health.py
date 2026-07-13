@@ -120,13 +120,18 @@ def test_transport_error_uses_fixed_message_without_host() -> None:
     assert "embeddings.internal.example" not in detail
 
 
-def test_generic_exception_is_credential_redacted() -> None:
-    """Free-form exception text passes through credential redaction."""
-    exc = RuntimeError(f"could not read https://user:{SECRET}@git.example.com/repo.git")
+def test_generic_exception_maps_to_type_only_detail() -> None:
+    """Unknown exception text never passes through, only the type name does."""
+    exc = RuntimeError(f"provider rejected api_key={SECRET}")
     detail = describe_embedder_error(exc)
-    assert detail.startswith("RuntimeError:")
+    assert detail == "embedder request failed (RuntimeError)"
     assert SECRET not in detail
-    assert "***" in detail
+
+
+def test_embedder_request_error_detail_passes_through() -> None:
+    """Already-classified errors keep their exact detail."""
+    exc = embedder_health.EmbedderRequestError("embedder authentication failed (HTTP 401)")
+    assert describe_embedder_error(exc) == "embedder authentication failed (HTTP 401)"
 
 
 def test_auth_failure_detail_membership() -> None:
