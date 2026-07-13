@@ -13,7 +13,7 @@ from openai import AuthenticationError
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.embedder_health import get_embedder_failure, record_embedder_health
+from mindroom.embedder_health import capture_embedder_health_recorder, get_embedder_failure
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory import add_agent_memory as public_add_agent_memory
 from mindroom.memory import build_memory_prompt_parts as public_build_memory_prompt_parts
@@ -323,7 +323,7 @@ class TestMemoryFacade:
             # backend itself must keep /api/health in sync.
             assert get_embedder_failure() == "embedder authentication failed (HTTP 401)"
         finally:
-            record_embedder_health(None)
+            capture_embedder_health_recorder().record(None)
 
     @pytest.mark.asyncio
     async def test_mem0_search_classifies_provider_failure_during_initialization(
@@ -347,7 +347,7 @@ class TestMemoryFacade:
 
         assert outcome.results == []
         assert outcome.degraded_reason == "embedder authentication failed (HTTP 401)"
-        record_embedder_health(None)
+        capture_embedder_health_recorder().record(None)
 
     @pytest.mark.asyncio
     async def test_mem0_team_scope_failure_preserves_agent_scope_results(
@@ -376,7 +376,7 @@ class TestMemoryFacade:
 
         assert [result["id"] for result in outcome.results] == ["personal"]
         assert outcome.degraded_reason == "embedder authentication failed (HTTP 401)"
-        record_embedder_health(None)
+        capture_embedder_health_recorder().record(None)
 
     @pytest.mark.asyncio
     async def test_mem0_search_success_clears_recorded_failure(
@@ -387,7 +387,7 @@ class TestMemoryFacade:
     ) -> None:
         """A completed mem0 search (even empty) proves recovery and clears stale health."""
         mock_memory.search.return_value = {"results": []}
-        record_embedder_health("embedder authentication failed (HTTP 401)")
+        capture_embedder_health_recorder().record("embedder authentication failed (HTTP 401)")
         try:
             with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
                 outcome = await public_search_agent_memories(
@@ -402,7 +402,7 @@ class TestMemoryFacade:
             assert outcome.degraded_reason is None
             assert get_embedder_failure() is None
         finally:
-            record_embedder_health(None)
+            capture_embedder_health_recorder().record(None)
 
     @pytest.mark.asyncio
     async def test_mem0_search_non_provider_error_raises(
@@ -616,7 +616,7 @@ class TestMemoryFacade:
             with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
                 prompt_parts = await build_memory_prompt_parts("Original prompt", "agent", storage_path, config)
         finally:
-            record_embedder_health(None)
+            capture_embedder_health_recorder().record(None)
 
         assert "Semantic memory search is unavailable this turn" in prompt_parts.turn_context
         assert "embedder authentication failed (HTTP 401)" in prompt_parts.turn_context

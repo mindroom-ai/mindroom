@@ -918,7 +918,9 @@ class FileMemoryBackend:
                 )
                 results = await asyncio.to_thread(keyword_results)
             except Exception as exc:
-                degraded_reason = classified_embedder_error(exc) or f"semantic memory search failed ({type(exc).__name__})"
+                degraded_reason = (
+                    classified_embedder_error(exc) or f"semantic memory search failed ({type(exc).__name__})"
+                )
                 logger.exception(
                     "File-memory semantic search failed; falling back to keyword search",
                     agent=agent_name,

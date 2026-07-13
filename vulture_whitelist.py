@@ -43,6 +43,8 @@ _.thinking  # unused attribute (src/mindroom/history/summary_call.py)
 start_new_session  # unused variable (src/mindroom/knowledge/refresh_runner.py)
 _.check_hostname  # unused attribute (src/mindroom/matrix/client_session.py)
 _.verify_mode  # unused attribute (src/mindroom/matrix/client_session.py)
+_.uploaded_key_count  # nio's Olm machine state (src/mindroom/matrix/client_session.py)
+_.embedding_model  # mem0's runtime embedding adapter (src/mindroom/memory/config.py)
 top_k  # unused variable (src/mindroom/memory/_shared.py)
 dirty  # unused variable (src/mindroom/memory/auto_flush.py)
 in_flight  # unused variable (src/mindroom/memory/auto_flush.py)
@@ -88,6 +90,9 @@ _.get_embedding_and_usage  # unused method (src/mindroom/knowledge/manager.py)
 _.async_get_embedding  # unused method (src/mindroom/knowledge/manager.py)
 _.async_get_embedding_and_usage  # unused method (src/mindroom/knowledge/manager.py)
 _.async_get_embeddings_batch_and_usage  # unused method (src/mindroom/embeddings.py)
+_.embed  # mem0 embedding adapter protocol (src/mindroom/memory/config.py)
+_.embed_batch  # mem0 embedding adapter protocol (src/mindroom/memory/config.py)
+_._handle_vector_db_insert  # Agno insertion callback override (src/mindroom/strict_knowledge.py)
 DEEPSEEK_REASONER  # used by scripts/utilities/rewrite_git_commits_ai.py
 SAAS_MODEL_PRESETS  # used by scripts/sync_config.py
 _.to_config_dict  # used by scripts/sync_config.py

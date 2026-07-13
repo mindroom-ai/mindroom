@@ -651,8 +651,7 @@ def get_published_index(
     if index is not None:
         if (
             index.embedder_signature == current_embedder_signature
-            and
-            state is not None
+            and state is not None
             and _cached_index_matches_persisted_state(index, state)
             and _cached_index_still_queryable(index)
         ):

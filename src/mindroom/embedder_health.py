@@ -63,13 +63,6 @@ class EmbedderRequestError(RuntimeError):
     """
 
 
-def record_embedder_health(error: str | None) -> None:
-    """Record the outcome of the most recent embedding request or probe."""
-    global _current_failure
-    with _failure_lock:
-        _current_failure = error
-
-
 def get_embedder_failure() -> str | None:
     """Return the last recorded embedder failure, or None when healthy."""
     with _failure_lock:
@@ -134,7 +127,7 @@ def extract_classified_embedder_detail(text: str | None) -> str | None:
     return match.group(0) if match else None
 
 
-def is_embedder_provider_error(exc: BaseException) -> bool:
+def _is_embedder_provider_error(exc: BaseException) -> bool:
     """Return whether an exception came from the embedding provider SDK."""
     # Deferred so slim entry points never pay the openai SDK import; when a
     # provider call raised, the SDK is already loaded.
@@ -145,7 +138,7 @@ def is_embedder_provider_error(exc: BaseException) -> bool:
 
 def classified_embedder_error(exc: BaseException) -> str | None:
     """Return a safe detail only when the exception is known to be embedder-related."""
-    if isinstance(exc, EmbedderRequestError) or is_embedder_provider_error(exc):
+    if isinstance(exc, EmbedderRequestError) or _is_embedder_provider_error(exc):
         return describe_embedder_error(exc)
     return None
 

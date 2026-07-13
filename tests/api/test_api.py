@@ -31,7 +31,7 @@ from mindroom.api import workers as workers_api
 from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
-from mindroom.embedder_health import record_embedder_health
+from mindroom.embedder_health import capture_embedder_health_recorder
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import mark_matrix_sync_loop_started, mark_matrix_sync_success, reset_matrix_sync_health
 from mindroom.matrix.state import MatrixState
@@ -893,11 +893,11 @@ def test_health_check(test_client: TestClient) -> None:
 def test_health_check_reports_recorded_embedder_failure(test_client: TestClient) -> None:
     """A recorded embedder failure appears as an additive block without flipping status."""
     reset_matrix_sync_health()
-    record_embedder_health("embedder authentication failed (HTTP 401)")
+    capture_embedder_health_recorder().record("embedder authentication failed (HTTP 401)")
     try:
         response = test_client.get("/api/health")
     finally:
-        record_embedder_health(None)
+        capture_embedder_health_recorder().record(None)
 
     assert response.status_code == 200
     data = response.json()
@@ -911,7 +911,7 @@ def test_health_check_reports_recorded_embedder_failure(test_client: TestClient)
 def test_health_check_omits_embedder_block_when_healthy(test_client: TestClient) -> None:
     """No embedder block appears while the embedder is healthy."""
     reset_matrix_sync_health()
-    record_embedder_health(None)
+    capture_embedder_health_recorder().record(None)
 
     response = test_client.get("/api/health")
 

@@ -38,7 +38,6 @@ from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_embedder_api_key
-from mindroom.embedder_health import record_embedder_health
 from mindroom.knowledge import KnowledgeRefreshScheduler, resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.file_listing import (
@@ -4199,15 +4198,15 @@ async def test_vectorless_file_does_not_inherit_process_global_embedder_health(
             # Simulate an unrelated request recording health while this insert
             # returns without vectors.
             del path, metadata, upsert, reader
-            record_embedder_health("embedder authentication failed (HTTP 401)")
+            embedder_health.capture_embedder_health_recorder().record("embedder authentication failed (HTTP 401)")
 
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _SwallowingKnowledge)
-    record_embedder_health(None)
+    embedder_health.capture_embedder_health_recorder().record(None)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
     try:
         assert await manager.reindex_all() == 0
     finally:
-        record_embedder_health(None)
+        embedder_health.capture_embedder_health_recorder().record(None)
 
     assert manager._last_refresh_error == "Indexed 0 of 1 managed knowledge files"
 
@@ -4807,7 +4806,7 @@ async def test_successful_subprocess_refresh_probes_to_clear_stale_health(
     runtime_paths = runtime_paths_for(config)
     scheduler = KnowledgeRefreshScheduler()
     probe_reasons: list[str] = []
-    record_embedder_health("embedder authentication failed (HTTP 401)")
+    embedder_health.capture_embedder_health_recorder().record("embedder authentication failed (HTTP 401)")
 
     async def _fake_refresh(_base_id: str, **_kwargs: object) -> None:
         return None
@@ -4833,7 +4832,7 @@ async def test_successful_subprocess_refresh_probes_to_clear_stale_health(
             await asyncio.sleep(0.01)
         await scheduler.shutdown()
     finally:
-        record_embedder_health(None)
+        embedder_health.capture_embedder_health_recorder().record(None)
 
     assert probe_reasons == ["knowledge_refresh_recovery"]
 
@@ -4873,7 +4872,7 @@ async def test_refresh_scheduled_before_reload_cannot_probe_old_config(
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     await started.wait()
     embedder_health._reset_embedder_health_generation()
-    record_embedder_health("embedder authentication failed (HTTP 401)")
+    embedder_health.capture_embedder_health_recorder().record("embedder authentication failed (HTTP 401)")
     release.set()
     for _ in range(200):
         if not scheduler._tasks:
@@ -4881,7 +4880,7 @@ async def test_refresh_scheduled_before_reload_cannot_probe_old_config(
         await asyncio.sleep(0.01)
     await wait_for_background_tasks(timeout=5)
     await scheduler.shutdown()
-    record_embedder_health(None)
+    embedder_health.capture_embedder_health_recorder().record(None)
 
     assert probe_reasons == []
 

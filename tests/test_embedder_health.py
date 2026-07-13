@@ -24,7 +24,6 @@ from mindroom.embedder_health import (
     handle_embedder_config_reload,
     is_embedder_auth_failure_detail,
     probe_embedder,
-    record_embedder_health,
 )
 from mindroom.openai_embedder import MindRoomOpenAIEmbedder
 
@@ -39,9 +38,9 @@ SECRET = "sk-super-secret-embedder-key"  # noqa: S105
 
 @pytest.fixture(autouse=True)
 def _reset_embedder_health() -> Iterator[None]:
-    record_embedder_health(None)
+    capture_embedder_health_recorder().record(None)
     yield
-    record_embedder_health(None)
+    capture_embedder_health_recorder().record(None)
 
 
 def _status_error(status_code: int, message: str = "boom") -> APIStatusError:
@@ -178,9 +177,9 @@ def test_auth_failure_detail_membership() -> None:
 def test_record_and_get_round_trip() -> None:
     """Recording a failure and clearing it round-trips."""
     assert get_embedder_failure() is None
-    record_embedder_health(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
+    capture_embedder_health_recorder().record(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
     assert get_embedder_failure() == embedder_health._EMBEDDER_AUTH_FAILED_DETAIL
-    record_embedder_health(None)
+    capture_embedder_health_recorder().record(None)
     assert get_embedder_failure() is None
 
 
@@ -300,7 +299,7 @@ async def test_check_embedder_health_success_clears_previous_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A healthy probe clears an earlier recorded failure (degrade then recover)."""
-    record_embedder_health(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
+    capture_embedder_health_recorder().record(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
     monkeypatch.setattr(embedder_health, "probe_embedder", lambda *_args: None)
 
     await check_embedder_health(_config(memory={"backend": "mem0"}), _runtime_paths(tmp_path), reason="startup")
@@ -332,7 +331,7 @@ async def test_reload_with_embedder_change_resets_health_and_reprobes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Changing memory.embedder on reload clears stale health and probes again."""
-    record_embedder_health(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
+    capture_embedder_health_recorder().record(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
     probes: list[str] = []
 
     async def fake_check(_config: Config, _runtime_paths: RuntimePaths, *, reason: str) -> None:
@@ -355,7 +354,7 @@ async def test_reload_without_embedder_change_keeps_recorded_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unrelated reload never clears a recorded embedder failure."""
-    record_embedder_health(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
+    capture_embedder_health_recorder().record(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
 
     async def fake_check(_config: Config, _runtime_paths: RuntimePaths, *, reason: str) -> None:
         msg = f"no probe expected: {reason}"
@@ -401,7 +400,7 @@ async def test_reload_disabling_embedder_use_clears_health_without_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Disabling the last semantic consumer clears stale health instead of pinning it forever."""
-    record_embedder_health(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
+    capture_embedder_health_recorder().record(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
 
     async def fake_check(_config: Config, _runtime_paths: RuntimePaths, *, reason: str) -> None:
         msg = f"no probe expected: {reason}"
@@ -445,7 +444,7 @@ def test_stale_embedder_failure_cannot_replace_new_generation_health() -> None:
     """An old embedder cannot report failure after credentials reload."""
     recorder = capture_embedder_health_recorder()
     embedder_health._reset_embedder_health_generation()
-    record_embedder_health(None)
+    capture_embedder_health_recorder().record(None)
 
     assert not recorder.record(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
     assert get_embedder_failure() is None
@@ -455,7 +454,7 @@ def test_stale_embedder_success_cannot_clear_new_generation_failure() -> None:
     """An old embedder cannot clear a failure from replacement credentials."""
     recorder = capture_embedder_health_recorder()
     embedder_health._reset_embedder_health_generation()
-    record_embedder_health(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
+    capture_embedder_health_recorder().record(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
 
     assert not recorder.record(None)
     assert get_embedder_failure() == embedder_health._EMBEDDER_AUTH_FAILED_DETAIL

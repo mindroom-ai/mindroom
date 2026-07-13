@@ -14,8 +14,8 @@ from mindroom import embedder_health
 from mindroom.embedder_health import (
     EMBEDDER_EMPTY_VECTOR_DETAIL,
     EmbedderRequestError,
+    capture_embedder_health_recorder,
     get_embedder_failure,
-    record_embedder_health,
 )
 from mindroom.openai_embedder import MindRoomOpenAIEmbedder
 
@@ -27,9 +27,9 @@ SECRET = "sk-rotted-litellm-key"  # noqa: S105
 
 @pytest.fixture(autouse=True)
 def _reset_embedder_health() -> Iterator[None]:
-    record_embedder_health(None)
+    capture_embedder_health_recorder().record(None)
     yield
-    record_embedder_health(None)
+    capture_embedder_health_recorder().record(None)
 
 
 def _auth_error() -> AuthenticationError:
@@ -227,7 +227,7 @@ async def test_async_batch_empty_vector_raises() -> None:
 
 def test_successful_embedding_clears_recorded_failure() -> None:
     """A validated response clears an earlier recorded failure."""
-    record_embedder_health(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
+    capture_embedder_health_recorder().record(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
     embedder = _sync_embedder_returning(_success_response())
 
     assert embedder.get_embedding("hello") == [1.0, 2.0]
@@ -247,7 +247,7 @@ def test_get_embedding_and_usage_success_returns_vector_and_usage() -> None:
 @pytest.mark.asyncio
 async def test_async_success_clears_recorded_failure() -> None:
     """An async success clears an earlier recorded failure."""
-    record_embedder_health(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
+    capture_embedder_health_recorder().record(embedder_health._EMBEDDER_AUTH_FAILED_DETAIL)
     async_client = MagicMock()
     async_client.embeddings.create = AsyncMock(return_value=_success_response())
     embedder = MindRoomOpenAIEmbedder(id="gemini-embedding-001", api_key=SECRET, async_client=async_client)
