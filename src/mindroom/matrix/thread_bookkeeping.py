@@ -37,6 +37,11 @@ Who may mutate thread state, and how:
 
 5. Redactions of reactions are always ROOM_LEVEL: removing an annotation cannot change any cached
    thread's visible messages.
+
+6. Redactions whose target metadata is gone fall back to the cache's own event->thread index before
+   failing closed: the homeserver strips a redacted event's content, so old redaction targets are
+   often unresolvable through event metadata even though the durable cache still knows exactly which
+   thread holds the event. Only when the index has no entry either does the impact stay UNKNOWN.
 """
 
 from __future__ import annotations
@@ -263,7 +268,11 @@ class ThreadMutationResolver:
                     resolution_context=resolution_context,
                 )
             except ThreadMembershipLookupError:
-                return MutationThreadImpact.unknown()
+                return await self._redaction_impact_from_thread_index(
+                    room_id,
+                    redacted_event_id,
+                    resolution_context=resolution_context,
+                )
             if not _redaction_can_affect_thread_cache(target_event_info):
                 return MutationThreadImpact.room_level()
             resolution = await resolve_related_event_thread_membership(
@@ -284,6 +293,44 @@ class ThreadMutationResolver:
                 error=str(exc),
             )
             return MutationThreadImpact.unknown()
+
+    async def _redaction_impact_from_thread_index(
+        self,
+        room_id: str,
+        redacted_event_id: str,
+        *,
+        resolution_context: MutationResolutionContext | None,
+    ) -> MutationThreadImpact:
+        """Scope one metadata-less redaction to the thread the cache index already knows.
+
+        The homeserver strips a redacted event's content, so old redaction targets often cannot be
+        resolved through event metadata. When the durable cache holds the event, its event->thread
+        index names the only cached thread the redaction can affect; invalidating just that thread
+        preserves the fail-closed guarantee without discarding every other cached thread in the room.
+        """
+        try:
+            thread_id = await self._lookup_thread_id_for_mutation_context(
+                room_id,
+                redacted_event_id,
+                resolution_context=resolution_context,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Redaction thread-index fallback failed; failing closed",
+                room_id=room_id,
+                redacted_event_id=redacted_event_id,
+                error=str(exc),
+            )
+            return MutationThreadImpact.unknown()
+        if thread_id is None:
+            return MutationThreadImpact.unknown()
+        self.logger.info(
+            "Scoped metadata-less redaction to its cached thread",
+            room_id=room_id,
+            redacted_event_id=redacted_event_id,
+            thread_id=thread_id,
+        )
+        return MutationThreadImpact.threaded(thread_id)
 
     async def resolve_thread_impact_for_mutation(
         self,
