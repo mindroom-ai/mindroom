@@ -54,8 +54,13 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
 
     # Resolve credentials the way `mindroom run` will: seed/update env-backed
     # services (EMBEDDER_API_KEY, provider keys, ...) into the shared store so
-    # preflight probes validate the keys the runtime will actually use.
-    sync_env_to_credentials(runtime_paths=runtime_paths)
+    # preflight probes validate the keys the runtime will actually use. An
+    # unwritable store must not abort the preflight — the storage check below
+    # reports that failure itself.
+    try:
+        sync_env_to_credentials(runtime_paths=runtime_paths)
+    except OSError as exc:
+        console.print(f"[yellow]![/yellow] Could not sync env credentials into the store ({exc})")
 
     # 1. Config file exists
     p, f, w = _run_doctor_step("Checking config file...", lambda: _check_config_exists(config_path))
