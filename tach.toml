@@ -37,12 +37,25 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.embedder_health"
+depends_on = [
+    "mindroom.background_tasks",
+    # Deferred (function-level) import inside probe_embedder; still a runtime edge.
+    "mindroom.embedding_factory",
+    "mindroom.knowledge.redaction",
+    "mindroom.logging_config",
+]
+
+[[modules]]
 path = "mindroom.model_instance_checks"
 depends_on = []
 
 [[modules]]
 path = "mindroom.openai_embedder"
-depends_on = ["mindroom.model_defaults"]
+depends_on = [
+    "mindroom.embedder_health",
+    "mindroom.model_defaults",
+]
 
 [[modules]]
 path = "mindroom.path_globs"
@@ -589,6 +602,7 @@ depends_on = [
     "mindroom.api.workers",
     "mindroom.constants",
     "mindroom.credentials_sync",
+    "mindroom.embedder_health",
     "mindroom.file_watcher",
     "mindroom.knowledge",
     "mindroom.knowledge.watch",
@@ -1180,6 +1194,7 @@ depends_on = [
     "mindroom.bot",
     "mindroom.config.main",
     "mindroom.constants",
+    "mindroom.embedder_health",
     "mindroom.entity_resolution",
     "mindroom.hooks",
     "mindroom.knowledge",
@@ -3005,6 +3020,7 @@ path = "mindroom.knowledge.manager"
 depends_on = [
     "mindroom.chunking",
     "mindroom.constants",
+    "mindroom.embedder_health",
     "mindroom.embedding_factory",
     "mindroom.knowledge.file_listing",
     "mindroom.knowledge.index_metadata",
@@ -3030,6 +3046,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.knowledge.refresh_scheduler"
 depends_on = [
+    "mindroom.embedder_health",
     "mindroom.knowledge.refresh_runner",
     "mindroom.knowledge.registry",
     "mindroom.logging_config",

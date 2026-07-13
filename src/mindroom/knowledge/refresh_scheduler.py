@@ -8,6 +8,8 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from mindroom.background_tasks import create_background_task
+from mindroom.embedder_health import check_embedder_health, embedder_in_use
 from mindroom.knowledge.refresh_runner import (
     is_refresh_active,
     mark_refresh_active,
@@ -15,7 +17,13 @@ from mindroom.knowledge.refresh_runner import (
     refresh_knowledge_binding,
     refresh_knowledge_binding_in_subprocess,
 )
-from mindroom.knowledge.registry import KnowledgeRefreshTarget, resolve_refresh_target
+from mindroom.knowledge.registry import (
+    KnowledgeRefreshTarget,
+    load_published_index_state,
+    published_index_metadata_path,
+    resolve_published_index_key,
+    resolve_refresh_target,
+)
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -203,17 +211,65 @@ class KnowledgeRefreshScheduler:
 
     async def _run_refresh(self, key: KnowledgeRefreshTarget, request: _ScheduledRefresh) -> None:
         async with self._refresh_semaphore():
-            await refresh_knowledge_binding_in_subprocess(
-                key.base_id,
-                config=request.config,
-                runtime_paths=request.runtime_paths,
-                execution_identity=request.execution_identity,
-            )
+            try:
+                await refresh_knowledge_binding_in_subprocess(
+                    key.base_id,
+                    config=request.config,
+                    runtime_paths=request.runtime_paths,
+                    execution_identity=request.execution_identity,
+                )
+            except Exception:
+                _schedule_embedder_probe_after_refresh(key, request, refresh_raised=True)
+                raise
+        _schedule_embedder_probe_after_refresh(key, request, refresh_raised=False)
 
     def _refresh_semaphore(self) -> asyncio.Semaphore:
         if self._refresh_slots is None:
             self._refresh_slots = asyncio.Semaphore(max(self.max_concurrent_refreshes, 1))
         return self._refresh_slots
+
+
+def _schedule_embedder_probe_after_refresh(
+    key: KnowledgeRefreshTarget,
+    request: _ScheduledRefresh,
+    *,
+    refresh_raised: bool,
+) -> None:
+    """Fire-and-forget an embedder health probe when a refresh failed.
+
+    Subprocess refreshes never touch the main-process embedder, so passive
+    health recording alone would miss key rotation without query traffic. The
+    probe only records health state; the persisted last_error stays untouched,
+    so distinct reader/Git/chunking errors are preserved verbatim.
+    """
+    if not embedder_in_use(request.config):
+        return
+    create_background_task(
+        _check_embedder_after_refresh(request, refresh_raised=refresh_raised),
+        name=f"embedder_refresh_health_check:{key.base_id}",
+    )
+
+
+async def _check_embedder_after_refresh(request: _ScheduledRefresh, *, refresh_raised: bool) -> None:
+    if not refresh_raised and not await asyncio.to_thread(_persisted_refresh_failed, request):
+        return
+    await check_embedder_health(request.config, request.runtime_paths, reason="knowledge_refresh_failed")
+
+
+def _persisted_refresh_failed(request: _ScheduledRefresh) -> bool:
+    """Return whether the finished refresh left a persisted failure for its binding."""
+    try:
+        key = resolve_published_index_key(
+            request.base_id,
+            config=request.config,
+            runtime_paths=request.runtime_paths,
+            execution_identity=request.execution_identity,
+            create=False,
+        )
+    except ValueError:
+        return False
+    state = load_published_index_state(published_index_metadata_path(key))
+    return state is not None and (state.refresh_job == "failed" or state.last_error is not None)
 
 
 def _running_loop_for_schedule(base_id: str) -> asyncio.AbstractEventLoop | None:

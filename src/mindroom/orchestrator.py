@@ -18,7 +18,9 @@ from mindroom import constants
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.approval_transport import ApprovalMatrixTransport
 from mindroom.authorization import is_authorized_sender
+from mindroom.background_tasks import create_background_task
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.embedder_health import check_embedder_health, handle_embedder_config_reload
 from mindroom.entity_resolution import (
     DuplicateManagedEntityIdentityError,
     MissingManagedEntityAccountError,
@@ -1126,6 +1128,10 @@ class _MultiAgentOrchestrator:
         for entity_name in start_results.retryable_entities:
             await self._schedule_bot_start_retry(entity_name)
 
+        create_background_task(
+            check_embedder_health(config, self.runtime_paths, reason="startup"),
+            name="embedder_startup_health_check",
+        )
         set_runtime_ready()
         # Stay alive until explicit shutdown. Hot reload replaces sync tasks in
         # self._sync_tasks, so awaiting the initial task generation would let a
@@ -1357,6 +1363,7 @@ class _MultiAgentOrchestrator:
         plugin_changes: tuple[str, ...],
     ) -> None:
         """Publish post-reload runtime services and external trigger delivery binding."""
+        handle_embedder_config_reload(current_config, new_config, self.runtime_paths)
         await self._sync_runtime_support_services(
             new_config,
             start_watcher=self.running,

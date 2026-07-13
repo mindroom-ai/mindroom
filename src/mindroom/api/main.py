@@ -37,6 +37,7 @@ from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.workers import router as workers_router
 from mindroom.credentials_sync import sync_env_to_credentials
+from mindroom.embedder_health import get_embedder_failure
 from mindroom.knowledge import KnowledgeRefreshScheduler, reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.logging_config import get_logger
@@ -719,6 +720,12 @@ async def health_check(request: Request) -> JSONResponse:
     }
     if sync_health.stale_entities:
         response["stale_sync_entities"] = list(sync_health.stale_entities)
+
+    embedder_failure = get_embedder_failure()
+    if embedder_failure is not None:
+        # Additive diagnostic only: a broken embedder degrades semantic search
+        # but must not flip liveness and restart an otherwise usable runtime.
+        response["embedder"] = {"status": "failing", "detail": embedder_failure}
 
     if runtime_state.phase == "ready" and not sync_health.is_healthy:
         response["status"] = "unhealthy"

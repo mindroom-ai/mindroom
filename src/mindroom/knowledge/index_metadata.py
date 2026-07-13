@@ -27,7 +27,7 @@ def optional_metadata_str(value: object) -> str | None:  # noqa: D103
     return value if isinstance(value, str) and value else None
 
 
-def _coerce_nonnegative_metadata_int(value: object) -> int | None:
+def coerce_nonnegative_metadata_int(value: object) -> int | None:  # noqa: D103
     match value:
         case bool():
             return None
@@ -58,7 +58,7 @@ def parse_index_metadata_fields(
         settings[key] = value
 
     collection = optional_metadata_str(payload.get("collection"))
-    indexed_count = _coerce_nonnegative_metadata_int(payload.get("indexed_count"))
+    indexed_count = coerce_nonnegative_metadata_int(payload.get("indexed_count"))
     source_signature = optional_metadata_str(payload.get("source_signature"))
     settings_mode = optional_metadata_str(settings.get("mode"))
     require_complete_fields = require_complete_fields_for_all_statuses or raw_status == "complete"

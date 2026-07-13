@@ -4,6 +4,12 @@ Lives apart from the light helpers in ``mindroom.embeddings`` because
 subclassing agno's ``OpenAIEmbedder`` imports the openai SDK; the embedding
 factory imports this module only when the openai provider is configured
 (#1436).
+
+Unlike agno's base embedder, every sync/async/batch method here raises on
+provider failure instead of returning empty vectors: a silent ``[]`` turns an
+auth failure into fake-empty search results and unpublished indexes
+(ISSUE-237). Each path also records process-wide embedder health so recovery
+is visible the moment a real request succeeds again.
 """
 
 from __future__ import annotations
@@ -12,8 +18,9 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from agno.knowledge.embedder.openai import OpenAIEmbedder
-from agno.utils.log import log_info, log_warning
+from agno.utils.log import log_info
 
+from mindroom.embedder_health import describe_embedder_error, record_embedder_health
 from mindroom.model_defaults import OPENAI_EMBEDDING_DIMENSIONS
 
 if TYPE_CHECKING:
@@ -49,38 +56,75 @@ class MindRoomOpenAIEmbedder(OpenAIEmbedder):
             request.update(self.request_params)
         return request
 
-    # NOTE: These overrides intentionally mirror agno's async/embedder methods
-    # because upstream inlines request construction instead of calling a shared helper.
-    # Keep them aligned with agno when upgrading that dependency.
+    @staticmethod
+    def _record_success(embedding: list[float]) -> None:
+        if embedding:
+            record_embedder_health(None)
+
+    # NOTE: These overrides intentionally mirror agno's sync/async embedder
+    # methods because upstream inlines request construction instead of calling
+    # a shared helper. Keep them aligned with agno when upgrading that
+    # dependency, but never reintroduce its swallow-and-return-[] behavior.
     def response(self, text: str) -> CreateEmbeddingResponse:
         """Request a single embedding synchronously."""
         return self.client.embeddings.create(**self._request_params(text))
 
+    def get_embedding(self, text: str) -> list[float]:
+        """Request one embedding; raise on provider failure."""
+        try:
+            response = self.response(text)
+        except Exception as exc:
+            record_embedder_health(describe_embedder_error(exc))
+            raise
+        embedding = response.data[0].embedding
+        self._record_success(embedding)
+        return embedding
+
+    def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]:
+        """Request one embedding and its usage payload; raise on provider failure."""
+        try:
+            response = self.response(text)
+        except Exception as exc:
+            record_embedder_health(describe_embedder_error(exc))
+            raise
+        embedding = response.data[0].embedding
+        self._record_success(embedding)
+        usage = response.usage
+        return embedding, usage.model_dump() if usage else None
+
     async def async_get_embedding(self, text: str) -> list[float]:
-        """Request a single embedding asynchronously."""
+        """Request a single embedding asynchronously; raise on provider failure."""
         try:
             response: CreateEmbeddingResponse = await self.aclient.embeddings.create(**self._request_params(text))
-            return response.data[0].embedding
-        except Exception as e:
-            log_warning(e)
-            return []
+        except Exception as exc:
+            record_embedder_health(describe_embedder_error(exc))
+            raise
+        embedding = response.data[0].embedding
+        self._record_success(embedding)
+        return embedding
 
     async def async_get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]:
-        """Request one embedding and its usage payload asynchronously."""
+        """Request one embedding and its usage payload asynchronously; raise on provider failure."""
         try:
             response = await self.aclient.embeddings.create(**self._request_params(text))
-            embedding = response.data[0].embedding
-            usage = response.usage
-            return embedding, usage.model_dump() if usage else None
-        except Exception as e:
-            log_warning(f"Error getting embedding: {e}")
-            return [], None
+        except Exception as exc:
+            record_embedder_health(describe_embedder_error(exc))
+            raise
+        embedding = response.data[0].embedding
+        self._record_success(embedding)
+        usage = response.usage
+        return embedding, usage.model_dump() if usage else None
 
     async def async_get_embeddings_batch_and_usage(
         self,
         texts: list[str],
     ) -> tuple[list[list[float]], list[dict[str, Any] | None]]:
-        """Request embeddings for a batch of texts and return per-item usage."""
+        """Request embeddings for a batch of texts; raise on provider failure.
+
+        A failing batch fails the whole call instead of retrying per item:
+        after a batch-wide auth failure every retry repeats the same rejected
+        credential and obscures the root cause.
+        """
         all_embeddings: list[list[float]] = []
         all_usage: list[dict[str, Any] | None] = []
         log_info(f"Getting embeddings and usage for {len(texts)} texts in batches of {self.batch_size} (async)")
@@ -91,20 +135,14 @@ class MindRoomOpenAIEmbedder(OpenAIEmbedder):
                 response: CreateEmbeddingResponse = await self.aclient.embeddings.create(
                     **self._request_params(batch_texts),
                 )
-                batch_embeddings = [data.embedding for data in response.data]
-                all_embeddings.extend(batch_embeddings)
-                usage_dict = response.usage.model_dump() if response.usage else None
-                all_usage.extend([usage_dict] * len(batch_embeddings))
-            except Exception as e:
-                log_warning(f"Error in async batch embedding: {e}")
-                for text in batch_texts:
-                    try:
-                        embedding, usage = await self.async_get_embedding_and_usage(text)
-                        all_embeddings.append(embedding)
-                        all_usage.append(usage)
-                    except Exception as inner:
-                        log_warning(f"Error in individual async embedding fallback: {inner}")
-                        all_embeddings.append([])
-                        all_usage.append(None)
+            except Exception as exc:
+                record_embedder_health(describe_embedder_error(exc))
+                raise
+            batch_embeddings = [data.embedding for data in response.data]
+            for embedding in batch_embeddings:
+                self._record_success(embedding)
+            all_embeddings.extend(batch_embeddings)
+            usage_dict = response.usage.model_dump() if response.usage else None
+            all_usage.extend([usage_dict] * len(batch_embeddings))
 
         return all_embeddings, all_usage

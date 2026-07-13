@@ -19,6 +19,7 @@ from agno.vectordb.chroma import ChromaDb
 from mindroom.embedding_factory import create_configured_embedder
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.index_metadata import (
+    coerce_nonnegative_metadata_int,
     load_index_metadata_payload,
     optional_metadata_str,
     parse_index_metadata_fields,
@@ -91,6 +92,7 @@ class PublishedIndexState:
     last_error: str | None = None
     updated_at: str | None = None
     last_refresh_at: str | None = None
+    consecutive_refresh_failures: int = 0
 
 
 @dataclass(frozen=True)
@@ -124,6 +126,7 @@ class _PublishedIndexVectorDb(Protocol):
 
 
 _published_indexes: dict[PublishedIndexKey, _PublishedIndexHandle] = {}
+_CONSECUTIVE_REFRESH_FAILURE_ALERT_THRESHOLD = 3
 _PRIVATE_KNOWLEDGE_BASE_ID_PREFIX = "__agent_private__:"
 _MAX_PRIVATE_PUBLISHED_INDEXES = 128
 _PUBLISHED_INDEX_STATUSES = {"resetting", "indexing", "complete", "failed"}
@@ -297,6 +300,7 @@ def load_published_index_state(metadata_path: Path) -> PublishedIndexState | Non
         last_error=optional_metadata_str(payload.get("last_error")),
         updated_at=optional_metadata_str(payload.get("updated_at")),
         last_refresh_at=optional_metadata_str(payload.get("last_refresh_at")),
+        consecutive_refresh_failures=coerce_nonnegative_metadata_int(payload.get("consecutive_refresh_failures")) or 0,
     )
 
 
@@ -316,6 +320,7 @@ def save_published_index_state(metadata_path: Path, state: PublishedIndexState) 
         last_error=state.last_error,
         updated_at=state.updated_at,
         last_refresh_at=state.last_refresh_at,
+        consecutive_refresh_failures=state.consecutive_refresh_failures,
     )
 
 
@@ -408,9 +413,18 @@ def mark_published_index_refresh_failed_preserving_last_good(key: PublishedIndex
         reason="refresh_failed",
         last_error=error,
     )
+    consecutive_refresh_failures = (current.consecutive_refresh_failures if current is not None else 0) + 1
+    state = replace(state, consecutive_refresh_failures=consecutive_refresh_failures)
     if current is not None and current.status == "complete":
         state = replace(state, status="complete")
     save_published_index_state(published_index_metadata_path(key), state)
+    if consecutive_refresh_failures >= _CONSECUTIVE_REFRESH_FAILURE_ALERT_THRESHOLD:
+        logger.error(
+            "knowledge_refresh_failing_repeatedly",
+            base_id=key.base_id,
+            consecutive_refresh_failures=consecutive_refresh_failures,
+            last_error=error,
+        )
 
 
 def mark_published_index_refresh_succeeded(key: PublishedIndexKey) -> None:
@@ -427,6 +441,7 @@ def mark_published_index_refresh_succeeded(key: PublishedIndexKey) -> None:
             last_error=None,
             updated_at=_utc_now(),
             last_refresh_at=_utc_now(),
+            consecutive_refresh_failures=0,
         ),
     )
 

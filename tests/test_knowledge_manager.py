@@ -29,6 +29,7 @@ import mindroom.knowledge.utils as knowledge_utils
 from mindroom import file_locks
 from mindroom.api import config_lifecycle, main
 from mindroom.api import knowledge as knowledge_api
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
@@ -4410,6 +4411,104 @@ async def test_refresh_scheduler_runs_independent_per_binding_tasks(
     await asyncio.sleep(0)
     assert any(key.base_id == "a" for key in scheduler._tasks)
     release["a"].set()
+    await scheduler.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_refresh_scheduler_probes_embedder_after_persisted_refresh_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refresh that persisted REFRESH_FAILED triggers one embedder health probe."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    scheduler = KnowledgeRefreshScheduler()
+    probe_reasons: list[str] = []
+
+    async def _fake_refresh(base_id: str, **_kwargs: object) -> None:
+        key = resolve_published_index_key(base_id, config=config, runtime_paths=runtime_paths, create=True)
+        knowledge_registry.mark_published_index_refresh_failed_preserving_last_good(
+            key,
+            error="Indexed 0 of 3 managed knowledge files",
+        )
+
+    async def _fake_check(_config: Config, _runtime_paths: object, *, reason: str) -> None:
+        probe_reasons.append(reason)
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.check_embedder_health", _fake_check)
+
+    scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    for _ in range(200):
+        if probe_reasons:
+            break
+        await asyncio.sleep(0.01)
+    await scheduler.shutdown()
+
+    assert probe_reasons == ["knowledge_refresh_failed"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_scheduler_probes_embedder_when_refresh_subprocess_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refresh subprocess crash also triggers the embedder health probe."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    scheduler = KnowledgeRefreshScheduler()
+    probe_reasons: list[str] = []
+
+    async def _fake_refresh(_base_id: str, **_kwargs: object) -> None:
+        msg = "subprocess exited 1"
+        raise RuntimeError(msg)
+
+    async def _fake_check(_config: Config, _runtime_paths: object, *, reason: str) -> None:
+        probe_reasons.append(reason)
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.check_embedder_health", _fake_check)
+
+    scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    for _ in range(200):
+        if probe_reasons:
+            break
+        await asyncio.sleep(0.01)
+    await scheduler.shutdown()
+
+    assert probe_reasons == ["knowledge_refresh_failed"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_scheduler_does_not_probe_after_successful_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refresh with no persisted failure never triggers a probe."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    scheduler = KnowledgeRefreshScheduler()
+    refreshed = asyncio.Event()
+
+    async def _fake_refresh(_base_id: str, **_kwargs: object) -> None:
+        refreshed.set()
+
+    async def _fake_check(_config: Config, _runtime_paths: object, *, reason: str) -> None:
+        msg = f"unexpected embedder probe: {reason}"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.check_embedder_health", _fake_check)
+
+    scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    await asyncio.wait_for(refreshed.wait(), timeout=5)
+    await wait_for_background_tasks(timeout=5)
     await scheduler.shutdown()
 
 

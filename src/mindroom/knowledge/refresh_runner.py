@@ -875,6 +875,7 @@ def _published_state_fingerprint(state: PublishedIndexState | None) -> tuple[obj
         state.refresh_job,
         state.reason,
         state.last_error,
+        state.consecutive_refresh_failures,
     )
 
 

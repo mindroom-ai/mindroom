@@ -24,6 +24,7 @@ from agno.vectordb.chroma import ChromaDb
 from mindroom.chunking import SafeFixedSizeChunking
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.embedder_health import describe_embedder_error
 from mindroom.embedding_factory import create_configured_embedder
 from mindroom.knowledge.file_listing import (
     git_checkout_present,
@@ -338,6 +339,7 @@ class KnowledgeManager:
     _git_sync_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _git_last_successful_commit: str | None = field(default=None, init=False)
     _last_refresh_error: str | None = field(default=None, init=False)
+    _last_file_index_error: str | None = field(default=None, init=False)
     _git_lfs_checked: bool = field(default=False, init=False)
     _git_lfs_repository_ready: bool = field(default=False, init=False)
     _git_tracked_relative_paths: set[str] | None = field(default=None, init=False, repr=False)
@@ -1039,7 +1041,9 @@ class KnowledgeManager:
                 upsert=upsert,
                 reader=reader,
             )
-        except Exception:
+        except Exception as exc:
+            if self._last_file_index_error is None:
+                self._last_file_index_error = describe_embedder_error(exc)
             logger.exception("Failed to index knowledge file", base_id=self.base_id, path=str(resolved_path))
             return False
 
@@ -1129,6 +1133,7 @@ class KnowledgeManager:
 
         async with self._lock:
             self._last_refresh_error = None
+            self._last_file_index_error = None
             files = await asyncio.to_thread(self.list_files)
             candidate_knowledge = self._build_knowledge(self._candidate_collection_name())
             candidate_vector_db = candidate_knowledge.vector_db
@@ -1149,7 +1154,10 @@ class KnowledgeManager:
                     indexed_signatures=candidate_indexed_signatures,
                 )
                 if indexed_count != len(files):
-                    self._last_refresh_error = f"Indexed {indexed_count} of {len(files)} managed knowledge files"
+                    summary = f"Indexed {indexed_count} of {len(files)} managed knowledge files"
+                    if self._last_file_index_error is not None:
+                        summary = f"{summary} (first error: {self._last_file_index_error})"
+                    self._last_refresh_error = summary
                     return indexed_count
 
                 expected_paths = {self._relative_path(file_path) for file_path in files}
