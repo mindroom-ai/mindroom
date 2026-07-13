@@ -14,7 +14,7 @@
 **AI agents that live in your chat rooms.**
 
 MindRoom is an open-source multi-agent runtime built on [Matrix](https://matrix.org/) that works with nearly any [cloud or local AI model](docs/configuration/models.md).
-You define agents in a YAML file or in the web dashboard; MindRoom gives each one a Matrix account, and you talk to them in threads in the [MindRoom chat client](https://github.com/mindroom-ai/mindroom-cinny) — or any other Matrix client you already use.
+You define agents in a YAML file or in the web dashboard; MindRoom gives each one a Matrix account, and you talk to them in threads in [MindRoom Chat](https://github.com/mindroom-ai/mindroom-chat) — or any other Matrix client you already use.
 Because Matrix bridges to other platforms, the same agents also work in Slack, Telegram, Discord, WhatsApp, IRC, and email — with the same persistent memory everywhere.
 Self-host the whole stack, or run only the MindRoom backend locally and pair it with hosted Matrix at [mindroom.chat](https://mindroom.chat).
 
@@ -79,7 +79,7 @@ Two AI agents from different companies collaborating — impossible with app-bou
 MindRoom plays in the same space but makes different architectural bets:
 
 - **Multi-agent and multi-user by default.** Both are personal-first: one owner talking to their assistant. In MindRoom every agent is a real Matrix user, so you run a fleet of specialists and teams, share them with family, a project, or a whole company, and scope access per user and per room.
-- **An AI-native interface on an open protocol.** With WhatsApp, Signal, or Telegram as the front end, you rent UX from platforms that were never designed for agents and can cut bots off at any time. MindRoom's home is Matrix, with a [Cinny fork](https://github.com/mindroom-ai/mindroom-cinny) tuned for AI: collapsible tool-call traces, model metadata on every response, streaming with in-place edits, response cancellation, and first-class threads. Bridges to those apps are additive, not the foundation.
+- **An AI-native interface on an open protocol.** With WhatsApp, Signal, or Telegram as the front end, you rent UX from platforms that were never designed for agents and can cut bots off at any time. MindRoom's home is Matrix, with [MindRoom Chat](https://github.com/mindroom-ai/mindroom-chat) tuned for AI: collapsible tool-call traces, model metadata on every response, streaming with in-place edits, response cancellation, and first-class threads. Bridges to those apps are additive, not the foundation.
 - **Sandboxing with real secrets isolation.** Execution tools (shell, Python, coding) can run in isolated container workers with no access to the primary process's secrets — your agent uses credentialed tools (Gmail, GitHub, ...) while the code it executes can never read those credentials. Per-tool [approval rules](docs/configuration/index.md) and [egress approval](docs/deployment/approved-egress.md) add human-in-the-loop control.
 - **Batteries included.** 100+ built-in tool integrations with typed configuration, OAuth flows, and automatic dependency installation — plus OpenClaw-compatible skills on top.
 
@@ -121,7 +121,7 @@ git clone https://github.com/mindroom-ai/mindroom
 cd mindroom
 uv sync
 
-# Point at your Matrix homeserver, or bootstrap a local Synapse + Cinny stack:
+# Point at your Matrix homeserver, or bootstrap a local Synapse + MindRoom Chat stack:
 #   mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
 export MATRIX_HOMESERVER=https://your-matrix.server
 export ANTHROPIC_API_KEY=your-key-here
@@ -253,7 +253,7 @@ Teams, cultures, per-room models, context compaction, history controls, and memo
 ## Deployment
 
 - **Own homeserver** — set `MATRIX_HOMESERVER` and run against any Synapse, Conduit, or Dendrite instance.
-- **Local stack** — `mindroom local-stack-setup` bootstraps a local Synapse + Cinny via Docker.
+- **Local stack** — `mindroom local-stack-setup` bootstraps a local Synapse + MindRoom Chat via Docker.
 - **Hosted Matrix** — run only the backend locally against hosted Matrix at [mindroom.chat](https://mindroom.chat), pairing via [chat.mindroom.chat](https://chat.mindroom.chat) ([guide](docs/deployment/hosted-matrix.md)).
 - **Docker** — single-container runtime ([guide](docs/deployment/docker.md)).
 - **Kubernetes** — Helm charts for enterprise-scale, multi-tenant deployments ([guide](docs/deployment/kubernetes.md)).
@@ -288,7 +288,7 @@ By building on it, MindRoom inherits instead of reimplements:
 - **Agents**: Python, built on [Agno](https://agno.dev/) and [mindroom-nio](https://github.com/mindroom-ai/mindroom-nio)
 - **AI models**: Anthropic, OpenAI, Google, Ollama, Bedrock, or any OpenAI-compatible endpoint
 - **Memory**: Mem0 + ChromaDB vector storage, persistent on disk
-- **UI**: web dashboard for administration; the [MindRoom chat client](https://github.com/mindroom-ai/mindroom-cinny) (or any Matrix client) for chat
+- **UI**: web dashboard for administration; [MindRoom Chat](https://github.com/mindroom-ai/mindroom-chat) (or any Matrix client) for chat
 
 See [docs/architecture](docs/architecture) for internals.
 

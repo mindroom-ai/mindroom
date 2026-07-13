@@ -43,7 +43,7 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ doctor              Check your environment for common issues.                          │
 │ connect             Pair this local MindRoom install with the hosted provisioning      │
 │                     service.                                                           │
-│ local-stack-setup   Start local Synapse + MindRoom Cinny using Docker only.            │
+│ local-stack-setup   Start local Synapse + MindRoom Chat using Docker only.             │
 │ config              Manage MindRoom configuration files.                               │
 │ avatars             Generate and sync managed avatar assets.                           │
 │ threads             Export Matrix threads to local files.                              │
@@ -711,7 +711,7 @@ mindroom connect \
 
 ## local-stack-setup
 
-Start local Synapse and the MindRoom Cinny client container for development.
+Start local Synapse and the MindRoom Chat client container for development.
 
 By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, and `MATRIX_SSL_VERIFY=false` into `.env` next to your active `config.yaml` so `mindroom run` works without inline env exports.
 
@@ -730,7 +730,7 @@ By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, a
 
  Usage: root local-stack-setup [OPTIONS]
 
- Start local Synapse + MindRoom Cinny using Docker only.
+ Start local Synapse + MindRoom Chat using Docker only.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --synapse-dir                                 PATH                 Directory           │
@@ -742,8 +742,9 @@ By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, a
 │                                                                    [default:           │
 │                                                                    local/matrix]       │
 │ --homeserver-url                              TEXT                 Homeserver URL that │
-│                                                                    Cinny and MindRoom  │
-│                                                                    should use.         │
+│                                                                    MindRoom Chat and   │
+│                                                                    MindRoom should     │
+│                                                                    use.                │
 │                                                                    [default:           │
 │                                                                    http://localhost:8… │
 │ --server-name                                 TEXT                 Matrix server name  │
@@ -752,15 +753,15 @@ By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, a
 │                                                                    --homeserver-url    │
 │                                                                    hostname).          │
 │ --cinny-port                                  INTEGER RANGE        Local host port for │
-│                                               [1<=x<=65535]        the MindRoom Cinny  │
+│                                               [1<=x<=65535]        the MindRoom Chat   │
 │                                                                    container.          │
 │                                                                    [default: 8080]     │
 │ --cinny-image                                 TEXT                 Docker image for    │
-│                                                                    MindRoom Cinny.     │
+│                                                                    MindRoom Chat.      │
 │                                                                    [default:           │
 │                                                                    ghcr.io/mindroom-a… │
 │ --cinny-container-n…                          TEXT                 Container name for  │
-│                                                                    MindRoom Cinny.     │
+│                                                                    MindRoom Chat.      │
 │                                                                    [default:           │
 │                                                                    mindroom-cinny-loc… │
 │ --skip-synapse                                                     Skip starting       │

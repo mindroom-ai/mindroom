@@ -3563,7 +3563,7 @@ class TestLocalStackSetup:
     """Tests for `mindroom local-stack-setup`."""
 
     def test_starts_synapse_and_cinny_containers(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Command starts Synapse compose and the Cinny container."""
+        """Command starts Synapse compose and the MindRoom Chat container."""
         synapse_dir = tmp_path / "matrix"
         synapse_dir.mkdir()
         (synapse_dir / "docker-compose.yml").write_text("services: {}\n")
@@ -3604,6 +3604,7 @@ class TestLocalStackSetup:
         assert ["docker", "compose", "up", "-d"] in commands
         assert any(cmd[:3] == ["docker", "rm", "-f"] for cmd in commands)
         assert any(cmd[:3] == ["docker", "run", "-d"] for cmd in commands)
+        assert any(cmd[-1] == "ghcr.io/mindroom-ai/mindroom-chat:latest" for cmd in commands)
 
         cinny_config = storage_path / "local" / "cinny-config.json"
         assert cinny_config.exists()
