@@ -69,6 +69,7 @@ def _bot(tmp_path: Path) -> AgentBot:
     )
     bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
     bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
     install_runtime_cache_support(bot)
     wrap_extracted_collaborators(bot)
     return bot
@@ -205,7 +206,15 @@ async def test_prepare_logs_startup_latency_fields(tmp_path: Path) -> None:
     latency_logs = [
         call for call in preparer.logger.info.call_args_list if call.args and call.args[0] == "Response startup latency"
     ]
+    phase_logs = [
+        call
+        for call in preparer.logger.info.call_args_list
+        if call.args and call.args[0] == "Response payload hydration phases"
+    ]
     assert len(latency_logs) == 1
+    assert len(phase_logs) == 1
+    assert phase_logs[0].kwargs["total_ms"] >= 0
+    assert phase_logs[0].kwargs["payload_builder_ms"] >= 0
     kwargs = latency_logs[0].kwargs
     assert kwargs["action_kind"] == "team"
     assert kwargs["cache_read_ms"] == 11.0

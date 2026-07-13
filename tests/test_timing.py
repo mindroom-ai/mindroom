@@ -451,6 +451,7 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
             "response_payload_ready": 9.0,
             "lock_wait_start": 10.0,
             "lock_acquired": 12.0,
+            "thread_refresh_start": 12.5,
             "thread_refresh_ready": 13.0,
             "response_runtime_start": 14.0,
             "response_runtime_ready": 15.0,
@@ -486,10 +487,9 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
     assert summary["first_visible_kind"] == "stream_update"
     assert summary["seg_ingress_ms"] == 1000.0
     assert summary["seg_coalescing_ms"] == 2000.0
-    assert summary["seg_dispatch_ms"] == 6000.0
-    assert summary["seg_response_queue_ms"] == 3000.0
-    assert summary["seg_thread_refresh_ms"] == 1000.0
-    assert summary["seg_first_visible_reply_ms"] == 7000.0
+    assert summary["seg_dispatch_ms"] == 7000.0
+    assert summary["seg_response_queue_ms"] == 2000.0
+    assert summary["seg_first_visible_reply_ms"] == 8000.0
     assert summary["seg_after_first_visible_ms"] == 5000.0
     assert summary["time_to_first_visible_reply_ms"] == 20000.0
     assert summary["total_pipeline_ms"] == 25000.0
@@ -498,6 +498,7 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
     assert summary["diag_dispatch_prepare_ms"] == 2000.0
     assert summary["diag_dispatch_plan_ms"] == 1000.0
     assert summary["diag_response_payload_setup_ms"] == 1000.0
+    assert summary["diag_thread_refresh_ms"] == 500.0
     assert summary["diag_lock_wait_ms"] == 2000.0
     assert summary["diag_runtime_prepare_ms"] == 1000.0
     assert summary["diag_llm_prepare_ms"] == 1500.0

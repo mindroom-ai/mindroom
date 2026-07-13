@@ -34,6 +34,7 @@ from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.timing import (
     DispatchPipelineTiming,
     attach_dispatch_pipeline_timing,
+    elapsed_ms_between,
     event_timing_scope,
     get_dispatch_pipeline_timing,
 )
@@ -49,6 +50,9 @@ if TYPE_CHECKING:
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.turn_controller import TurnController
     from mindroom.turn_policy import PreparedDispatch, ResponseAction
+
+
+_DM_ROOM_LOOKUP_TIMEOUT_SECONDS = 1.0
 
 
 class _TurnPlan(Protocol):
@@ -94,6 +98,7 @@ async def dispatch_text_message(
 ) -> None:
     """Run the normal text or command dispatch pipeline for a prepared text event."""
     timing_scope_token = None
+    context_hydration_started = time.monotonic()
     try:
         dispatch_timing = get_dispatch_pipeline_timing(raw_event.source)
         prepared = await _prepare_text_dispatch(
@@ -111,22 +116,32 @@ async def dispatch_text_message(
         )
         if prepared is None:
             return
+        dispatch_prepared_at = time.monotonic()
         timing_scope_token = timing_scope_context.set(event_timing_scope(prepared.event.event_id))
         if await _blocked_before_plan(controller, room, prepared, requester_user_id=requester_user_id):
             return
+        preplan_ready_at = time.monotonic()
 
         message_attachment_ids, trusted_attachment_ids, router_extra_content = _attachment_parts(
             prepared,
             media_events=media_events,
             requester_user_id=requester_user_id,
         )
+        plan_inputs_ready_at = time.monotonic()
         if dispatch_timing is not None:
             dispatch_timing.mark("dispatch_plan_start")
+        dm_detection_started = time.monotonic()
+        room_is_dm = await is_dm_room(
+            controller._client(),
+            room.room_id,
+            lookup_timeout_seconds=_DM_ROOM_LOOKUP_TIMEOUT_SECONDS,
+        )
+        dm_detection_ready_at = time.monotonic()
         plan = await controller.deps.turn_policy.plan_turn(
             room,
             prepared.event,
             prepared.dispatch,
-            is_dm=await is_dm_room(controller._client(), room.room_id),
+            is_dm=room_is_dm,
             has_active_response_for_target=controller.deps.response_runner.has_active_response_for_target,
             extra_content=router_extra_content or None,
             media_events=media_events,
@@ -136,6 +151,17 @@ async def dispatch_text_message(
         )
         if dispatch_timing is not None:
             dispatch_timing.mark("dispatch_plan_ready")
+        plan_ready_at = time.monotonic()
+        controller.deps.logger.info(
+            "Dispatch context hydration phases",
+            event_id=prepared.event.event_id,
+            prepare_dispatch_ms=elapsed_ms_between(context_hydration_started, dispatch_prepared_at),
+            preplan_guard_ms=elapsed_ms_between(dispatch_prepared_at, preplan_ready_at),
+            plan_inputs_ms=elapsed_ms_between(preplan_ready_at, plan_inputs_ready_at),
+            dm_detection_ms=elapsed_ms_between(dm_detection_started, dm_detection_ready_at),
+            turn_plan_ms=elapsed_ms_between(dm_detection_ready_at, plan_ready_at),
+            total_ms=elapsed_ms_between(context_hydration_started, plan_ready_at),
+        )
         await _apply_turn_plan(
             controller,
             room,

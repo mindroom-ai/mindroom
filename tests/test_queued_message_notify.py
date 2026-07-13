@@ -41,6 +41,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
+from mindroom.delivery_gateway import CancelledVisibleNoteRequest
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -150,6 +151,7 @@ def _bot(tmp_path: Path) -> AgentBot:
     )
     bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
     bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
     install_runtime_cache_support(bot)
     wrap_extracted_collaborators(bot)
     return bot
@@ -1413,7 +1415,9 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
     """Team delivery/session setup must enter the runner with the finalized stable room target."""
     bot = _bot(tmp_path)
     bot.client = MagicMock()
-    bot.client.rooms = {}
+    cached_room = MagicMock(encrypted=False)
+    bot.client.rooms = {"!room:localhost": cached_room}
+    bot.client.room_send = AsyncMock()
     bot.client.room_typing = AsyncMock()
     bot.orchestrator = MagicMock()
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
@@ -1479,7 +1483,9 @@ async def test_generate_team_response_keeps_locked_target_when_payload_preparati
     """Team response setup and delivery should keep the target selected before lock acquisition."""
     bot = _bot(tmp_path)
     bot.client = MagicMock()
-    bot.client.rooms = {}
+    cached_room = MagicMock(encrypted=False)
+    bot.client.rooms = {"!room:localhost": cached_room}
+    bot.client.room_send = AsyncMock()
     bot.client.room_typing = AsyncMock()
     bot.orchestrator = MagicMock()
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
@@ -1586,6 +1592,176 @@ async def test_prepare_request_after_lock_wraps_refresh_failures(tmp_path: Path)
         )
 
     assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+
+@pytest.mark.asyncio
+async def test_locked_placeholder_is_visible_before_payload_preparation(tmp_path: Path) -> None:
+    """A locked response should expose its placeholder before slow payload hydration."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    target = MessageTarget.resolve("!room:localhost", None, "$event")
+    preparation_started = asyncio.Event()
+    release_preparation = asyncio.Event()
+
+    async def slow_prepare(request: ResponseRequest) -> ResponseRequest:
+        preparation_started.set()
+        await release_preparation.wait()
+        return replace(request, payload_preparation=None)
+
+    send_placeholder = AsyncMock(return_value="$placeholder")
+    request = ResponseRequest(
+        thread_history=[],
+        prompt="hello",
+        user_id="@user:localhost",
+        response_envelope=_envelope(source_event_id="$event", target=target),
+        payload_preparation=_payload_preparation(target),
+    )
+    history_scope = coordinator.deps.state_writer.history_scope()
+    execution_identity = coordinator.deps.tool_runtime.build_execution_identity(
+        target=target,
+        user_id=request.user_id,
+    )
+
+    with (
+        patch("mindroom.delivery_gateway.DeliveryGateway.send_text", new=send_placeholder),
+        patch.object(coordinator.deps.request_preparer, "prepare", new=AsyncMock(side_effect=slow_prepare)),
+    ):
+        locked_turn = asyncio.create_task(
+            coordinator._begin_locked_turn(
+                request,
+                resolved_target=target,
+                history_scope=history_scope,
+                execution_identity=execution_identity,
+                response_kind="ai",
+                placeholder_message="Thinking...",
+            ),
+        )
+        await asyncio.wait_for(preparation_started.wait(), timeout=1.0)
+        send_placeholder.assert_awaited_once()
+        assert not locked_turn.done()
+        release_preparation.set()
+        result = await locked_turn
+
+    assert result is not None
+    assert result.existing_event_id == "$placeholder"
+    assert result.existing_event_is_placeholder is True
+
+
+@pytest.mark.asyncio
+async def test_locked_placeholder_id_survives_payload_preparation_failure(tmp_path: Path) -> None:
+    """Dispatch failure handling should receive the early placeholder event ID."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    target = MessageTarget.resolve("!room:localhost", None, "$event")
+    request = ResponseRequest(
+        thread_history=[],
+        prompt="hello",
+        user_id="@user:localhost",
+        response_envelope=_envelope(source_event_id="$event", target=target),
+        payload_preparation=_payload_preparation(target),
+    )
+    history_scope = coordinator.deps.state_writer.history_scope()
+    execution_identity = coordinator.deps.tool_runtime.build_execution_identity(
+        target=target,
+        user_id=request.user_id,
+    )
+
+    with (
+        patch(
+            "mindroom.delivery_gateway.DeliveryGateway.send_text",
+            new=AsyncMock(return_value="$placeholder"),
+        ),
+        patch.object(
+            coordinator.deps.request_preparer,
+            "prepare",
+            new=AsyncMock(side_effect=RuntimeError("attachment download failed")),
+        ),
+        pytest.raises(PostLockRequestPreparationError) as excinfo,
+    ):
+        await coordinator._begin_locked_turn(
+            request,
+            resolved_target=target,
+            history_scope=history_scope,
+            execution_identity=execution_identity,
+            response_kind="ai",
+            placeholder_message="Thinking...",
+        )
+
+    assert excinfo.value.placeholder_event_id == "$placeholder"
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+
+@pytest.mark.asyncio
+async def test_locked_placeholder_is_finalized_when_payload_preparation_is_cancelled(tmp_path: Path) -> None:
+    """Cancellation during slow hydration should not leave the early placeholder pending."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    target = MessageTarget.resolve("!room:localhost", None, "$event")
+    preparation_started = asyncio.Event()
+
+    async def blocked_prepare(_request: ResponseRequest) -> ResponseRequest:
+        preparation_started.set()
+        await asyncio.Event().wait()
+        unreachable = "unreachable"
+        raise AssertionError(unreachable)
+
+    cancelled_note = AsyncMock(
+        return_value=FinalDeliveryOutcome(
+            terminal_status="cancelled",
+            event_id="$placeholder",
+            is_visible_response=True,
+            failure_reason="sync_restart_cancelled",
+        ),
+    )
+    request = ResponseRequest(
+        thread_history=[],
+        prompt="hello",
+        user_id="@user:localhost",
+        response_envelope=_envelope(source_event_id="$event", target=target),
+        payload_preparation=_payload_preparation(target),
+    )
+    history_scope = coordinator.deps.state_writer.history_scope()
+    execution_identity = coordinator.deps.tool_runtime.build_execution_identity(
+        target=target,
+        user_id=request.user_id,
+    )
+
+    with (
+        patch(
+            "mindroom.delivery_gateway.DeliveryGateway.send_text",
+            new=AsyncMock(return_value="$placeholder"),
+        ),
+        patch(
+            "mindroom.delivery_gateway.DeliveryGateway.deliver_cancelled_visible_note",
+            new=cancelled_note,
+        ),
+        patch.object(
+            coordinator.deps.request_preparer,
+            "prepare",
+            new=AsyncMock(side_effect=blocked_prepare),
+        ),
+    ):
+        locked_turn = asyncio.create_task(
+            coordinator._begin_locked_turn(
+                request,
+                resolved_target=target,
+                history_scope=history_scope,
+                execution_identity=execution_identity,
+                response_kind="ai",
+                placeholder_message="Thinking...",
+            ),
+        )
+        await asyncio.wait_for(preparation_started.wait(), timeout=1.0)
+        locked_turn.cancel("sync_restart")
+        with pytest.raises(asyncio.CancelledError, match="sync_restart"):
+            await locked_turn
+
+    cancellation_request = cancelled_note.await_args.args[0]
+    assert isinstance(cancellation_request, CancelledVisibleNoteRequest)
+    assert cancellation_request.target == target
+    assert cancellation_request.event_id == "$placeholder"
+    assert cancellation_request.existing_event_is_placeholder is True
+    assert cancellation_request.cancel_source == "sync_restart"
 
 
 @pytest.mark.asyncio

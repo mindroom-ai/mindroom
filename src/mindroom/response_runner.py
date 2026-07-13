@@ -17,7 +17,13 @@ from mindroom.agents import show_tool_calls_for_agent
 from mindroom.ai import ResponseTurnContext, ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
 from mindroom.background_tasks import create_background_task
-from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from mindroom.constants import (
+    ATTACHMENT_IDS_KEY,
+    ORIGINAL_SENDER_KEY,
+    ROUTER_AGENT_NAME,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
+)
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
@@ -72,6 +78,7 @@ from .delivery_gateway import (
     FinalizeStreamedResponseRequest,
     MatrixCompactionLifecycle,
     ResponseIdentity,
+    SendTextRequest,
     StreamingDeliveryRequest,
 )
 from .media_inputs import MediaInputs
@@ -289,6 +296,15 @@ class ResponseRequest:
 
 class PostLockRequestPreparationError(RuntimeError):
     """Raised when post-lock request preparation fails before generation starts."""
+
+    def __init__(
+        self,
+        message: str = "Post-lock request preparation failed",
+        *,
+        placeholder_event_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.placeholder_event_id = placeholder_event_id
 
 
 @dataclass
@@ -855,7 +871,11 @@ class ResponseRunner:
     ) -> ResponseRequest:
         """Refresh thread history and rebuild any history-derived payload once locked."""
         try:
+            if request.pipeline_timing is not None:
+                request.pipeline_timing.mark("thread_refresh_start")
             request = await self._refresh_model_history_after_lock(request)
+            if request.pipeline_timing is not None:
+                request.pipeline_timing.mark("thread_refresh_ready")
             if request.payload_preparation is None:
                 return request
             return await self.deps.request_preparer.prepare(request)
@@ -941,8 +961,10 @@ class ResponseRunner:
         resolved_target: MessageTarget,
         history_scope: HistoryScope,
         execution_identity: ToolExecutionIdentity,
+        response_kind: str,
+        placeholder_message: str | None = None,
     ) -> ResponseRequest | None:
-        """Run the shared post-lock request preparation for one locked turn."""
+        """Expose a locked turn before running its potentially slow preparation."""
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = self._request_with_locked_target(request, resolved_target)
@@ -952,11 +974,52 @@ class ResponseRunner:
             execution_identity=execution_identity,
         ):
             return None
-        request = await self._prepare_request_after_lock(request)
-        request = self._request_with_locked_target(request, resolved_target)
-        if request.pipeline_timing is not None:
-            request.pipeline_timing.mark("thread_refresh_ready")
-        return request
+        placeholder_event_id = None
+        if (
+            placeholder_message is not None
+            and request.existing_event_id is None
+            and not self._has_queued_forced_compaction(
+                session_id=resolved_target.session_id,
+                scope=history_scope,
+                execution_identity=execution_identity,
+            )
+        ):
+            placeholder_event_id = await self.deps.delivery_gateway.send_text(
+                SendTextRequest(
+                    target=resolved_target,
+                    response_text=placeholder_message,
+                    extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
+                ),
+            )
+            if placeholder_event_id is not None:
+                request = replace(
+                    request,
+                    existing_event_id=placeholder_event_id,
+                    existing_event_is_placeholder=True,
+                )
+                if request.pipeline_timing is not None:
+                    request.pipeline_timing.mark("placeholder_sent")
+                    request.pipeline_timing.mark_first_visible_reply("placeholder")
+        try:
+            request = await self._prepare_request_after_lock(request)
+        except asyncio.CancelledError as error:
+            if placeholder_event_id is not None:
+                await self.deps.delivery_gateway.deliver_cancelled_visible_note(
+                    CancelledVisibleNoteRequest(
+                        target=resolved_target,
+                        event_id=placeholder_event_id,
+                        existing_event_is_placeholder=True,
+                        cancel_source=classify_cancel_source(error),
+                        identity=self._response_identity(request, response_kind=response_kind),
+                    ),
+                )
+            raise
+        except PostLockRequestPreparationError as error:
+            if placeholder_event_id is None:
+                raise
+            cause = error.__cause__ if isinstance(error.__cause__, Exception) else error
+            raise PostLockRequestPreparationError(placeholder_event_id=placeholder_event_id) from cause
+        return self._request_with_locked_target(request, resolved_target)
 
     def _sync_restart_retry_is_current(
         self,
@@ -1253,6 +1316,7 @@ class ResponseRunner:
             resolved_target=resolved_target,
             history_scope=resolved_history_scope,
             execution_identity=resolved_execution_identity,
+            response_kind=response_kind,
         )
         if prepared_request is None:
             return None
@@ -1339,6 +1403,8 @@ class ResponseRunner:
             resolved_target=resolved_target,
             history_scope=session_scope,
             execution_identity=retry_execution_identity,
+            response_kind="team",
+            placeholder_message="🤝 Team Response: Thinking...",
         )
         if prepared_request is None:
             return None
@@ -2502,6 +2568,8 @@ class ResponseRunner:
             resolved_target=resolved_target,
             history_scope=history_scope,
             execution_identity=execution_identity,
+            response_kind="ai",
+            placeholder_message="Thinking...",
         )
         if prepared_request is None:
             return None

@@ -2174,12 +2174,12 @@ class TestAgentBot(AgentBotTestBase):
         )
 
     @pytest.mark.asyncio
-    async def test_execute_dispatch_action_marks_terminal_error_event_without_placeholder(
+    async def test_execute_dispatch_action_edits_early_placeholder_on_setup_failure(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Dispatch setup failures should track the terminal error event even without a placeholder."""
+        """Dispatch setup failures should replace and track the early placeholder."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
@@ -2215,7 +2215,7 @@ class TestAgentBot(AgentBotTestBase):
 
         failure_message = "setup failed"
 
-        mock_edit = AsyncMock(return_value=False)
+        mock_edit = AsyncMock(return_value=True)
         install_edit_message_mock(bot, mock_edit)
         bot._delivery_gateway.send_text = AsyncMock(return_value="$error")
         _replace_turn_policy_deps(
@@ -2239,7 +2239,7 @@ class TestAgentBot(AgentBotTestBase):
                 handled_turn=TurnRecord.create([event.event_id]),
             )
 
-        mock_edit.assert_not_awaited()
+        mock_edit.assert_awaited_once()
         bot._delivery_gateway.send_text.assert_awaited_once()
         tracker.record_handled_turn.assert_called_once_with(
             TurnRecord.create(

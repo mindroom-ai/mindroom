@@ -88,7 +88,9 @@ class ResponsePayloadPreparer:
         if pipeline_timing is not None:
             pipeline_timing.mark("response_payload_start")
 
+        payload_builder_started = time.monotonic()
         payload = await self._build_payload(preparation, thread_history=request.thread_history)
+        payload_builder_ready = time.monotonic()
 
         prepared_payload = await self.ingress_hook_runner.apply_message_enrichment(
             dispatch,
@@ -96,6 +98,7 @@ class ResponsePayloadPreparer:
             target_entity_name=self.agent_name,
             target_member_names=preparation.target_member_names,
         )
+        message_enrichment_ready = time.monotonic()
         system_enrichment_items = await self.ingress_hook_runner.apply_system_enrichment(
             dispatch,
             prepared_payload.envelope,
@@ -109,6 +112,14 @@ class ResponsePayloadPreparer:
             )
 
         payload_ready_monotonic = time.monotonic()
+        self.logger.info(
+            "Response payload hydration phases",
+            event_id=dispatch.envelope.source_event_id,
+            payload_builder_ms=elapsed_ms_between(payload_builder_started, payload_builder_ready),
+            message_enrichment_ms=elapsed_ms_between(payload_builder_ready, message_enrichment_ready),
+            system_enrichment_ms=elapsed_ms_between(message_enrichment_ready, payload_ready_monotonic),
+            total_ms=elapsed_ms_between(payload_builder_started, payload_ready_monotonic),
+        )
         if pipeline_timing is not None:
             pipeline_timing.mark("response_payload_ready")
         self._log_dispatch_latency(

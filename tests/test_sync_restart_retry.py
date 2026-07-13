@@ -144,8 +144,11 @@ async def test_locked_retry_guard_precedes_payload_and_fails_closed(
         else:
             assert await task is None
 
-    assert events == (["lock", "history", "prepare"] if history_case == "current" else ["lock", "history"])
-    bot.client.room_send.assert_not_awaited()
+    assert events == (["lock", "history", "history", "prepare"] if history_case == "current" else ["lock", "history"])
+    if history_case == "current":
+        bot.client.room_send.assert_awaited_once()
+    else:
+        bot.client.room_send.assert_not_awaited()
 
 
 def _request(on_sync_restart_cancelled: Callable[[], None] | None = None) -> ResponseRequest:

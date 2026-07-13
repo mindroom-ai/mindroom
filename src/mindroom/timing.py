@@ -63,10 +63,9 @@ type _TimingMetadataValue = str | int | float | bool
 _PRIMARY_SEGMENTS: tuple[tuple[str, str, str], ...] = (
     ("seg_ingress_ms", "message_received", "gate_enter"),
     ("seg_coalescing_ms", "gate_enter", "gate_exit"),
-    ("seg_dispatch_ms", "gate_exit", "response_payload_ready"),
-    ("seg_response_queue_ms", "response_payload_ready", "lock_acquired"),
-    ("seg_thread_refresh_ms", "lock_acquired", "thread_refresh_ready"),
-    ("seg_first_visible_reply_ms", "thread_refresh_ready", "first_visible_reply"),
+    ("seg_dispatch_ms", "gate_exit", "lock_wait_start"),
+    ("seg_response_queue_ms", "lock_wait_start", "lock_acquired"),
+    ("seg_first_visible_reply_ms", "lock_acquired", "first_visible_reply"),
     ("seg_after_first_visible_ms", "first_visible_reply", "response_complete"),
 )
 
@@ -81,6 +80,7 @@ _DIAGNOSTIC_SPANS: tuple[tuple[str, str, str], ...] = (
     ("diag_dispatch_prepare_ms", "dispatch_prepare_start", "dispatch_prepare_ready"),
     ("diag_dispatch_plan_ms", "dispatch_plan_start", "dispatch_plan_ready"),
     ("diag_response_payload_setup_ms", "response_payload_start", "response_payload_ready"),
+    ("diag_thread_refresh_ms", "thread_refresh_start", "thread_refresh_ready"),
     ("diag_lock_wait_ms", "lock_wait_start", "lock_acquired"),
     ("diag_runtime_prepare_ms", "response_runtime_start", "response_runtime_ready"),
     ("diag_llm_prepare_ms", "ai_prepare_start", "history_ready"),
