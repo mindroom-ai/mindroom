@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from importlib.metadata import PackageNotFoundError
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -16,6 +17,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.update_awareness import (
     _RELEASE_CACHE_TTL_SECONDS,
     UpdateAwarenessTools,
+    _current_mindroom_version,
     _mindroom_release_status,
     _MindRoomReleaseStatus,
     _ReleaseLookupError,
@@ -33,6 +35,15 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
         storage_path=tmp_path / "mindroom_data",
         process_env={},
     )
+
+
+def test_current_version_is_unknown_when_distribution_metadata_is_missing() -> None:
+    """A missing installed distribution should not prevent agent startup."""
+    with patch(
+        "mindroom.custom_tools.update_awareness.installed_distribution_version",
+        side_effect=PackageNotFoundError("mindroom"),
+    ):
+        assert _current_mindroom_version() == "unknown"
 
 
 def test_release_status_uses_persistent_cache_within_daily_ttl(tmp_path: Path) -> None:

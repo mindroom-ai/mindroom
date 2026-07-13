@@ -6,6 +6,7 @@ import json
 import threading
 import time
 from dataclasses import asdict, dataclass
+from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as installed_distribution_version
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -71,8 +72,8 @@ def _normalize_version(raw_version: str) -> str:
 def _current_mindroom_version() -> str:
     try:
         return _normalize_version(installed_distribution_version("mindroom"))
-    except _ReleaseLookupError:
-        logger.warning("installed_mindroom_version_invalid")
+    except (PackageNotFoundError, _ReleaseLookupError) as exc:
+        logger.warning("installed_mindroom_version_invalid", error=str(exc))
         return "unknown"
 
 
