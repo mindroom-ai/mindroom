@@ -18,6 +18,8 @@ from mindroom.background_tasks import create_background_task
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
+    from agno.knowledge.embedder.base import Embedder
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -165,6 +167,26 @@ def _memory_backend_uses_embedder(backend: str, search_mode: str) -> bool:
     return backend == "mem0" or (backend == "file" and search_mode == "semantic")
 
 
+_PROBE_TIMEOUT_SECONDS = 10.0
+
+
+def _bound_probe_client_timeout(embedder: Embedder) -> None:
+    """Cap the probe's SDK client so a stalled endpoint fails fast.
+
+    The installed OpenAI SDK defaults allow a 600-second read timeout plus
+    retries, which would hang `mindroom doctor` and pin probe threads for
+    minutes; normal runtime embedding traffic keeps the SDK defaults.
+    """
+    from mindroom.openai_embedder import MindRoomOpenAIEmbedder  # noqa: PLC0415
+
+    if isinstance(embedder, MindRoomOpenAIEmbedder):
+        embedder.client_params = {
+            **(embedder.client_params or {}),
+            "timeout": _PROBE_TIMEOUT_SECONDS,
+            "max_retries": 0,
+        }
+
+
 def probe_embedder(config: Config, runtime_paths: RuntimePaths) -> str | None:
     """Run one strict embedding round-trip; return None when healthy."""
     # Deferred to break the import cycle with the embedding factory and keep
@@ -173,6 +195,7 @@ def probe_embedder(config: Config, runtime_paths: RuntimePaths) -> str | None:
 
     try:
         embedder = create_configured_embedder(config, runtime_paths)
+        _bound_probe_client_timeout(embedder)
         vector = embedder.get_embedding(_PROBE_TEXT)
     except Exception as exc:
         return describe_embedder_error(exc)

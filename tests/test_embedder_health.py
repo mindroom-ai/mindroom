@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
 from openai import APIConnectionError, APIStatusError, AuthenticationError, PermissionDeniedError
 
 from mindroom import embedder_health
+from mindroom.openai_embedder import MindRoomOpenAIEmbedder
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
@@ -260,6 +263,23 @@ def test_probe_rejects_empty_vector(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         lambda *_args: _EmptyVectorEmbedder(),
     )
     assert probe_embedder(_config(), _runtime_paths(tmp_path)) == "embedder returned an empty vector"
+
+
+def test_probe_bounds_openai_client_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Probes cap the SDK client so a stalled endpoint fails in seconds, not minutes."""
+    client = MagicMock()
+    client.embeddings.create.return_value = SimpleNamespace(
+        data=[SimpleNamespace(embedding=[0.1, 0.2])],
+        usage=None,
+    )
+    embedder = MindRoomOpenAIEmbedder(id="text-embedding-3-small", api_key="sk-x", openai_client=client)
+    monkeypatch.setattr(
+        "mindroom.embedding_factory.create_configured_embedder",
+        lambda *_args: embedder,
+    )
+
+    assert probe_embedder(_config(), _runtime_paths(tmp_path)) is None
+    assert embedder.client_params == {"timeout": 10.0, "max_retries": 0}
 
 
 @pytest.mark.asyncio

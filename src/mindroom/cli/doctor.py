@@ -17,7 +17,8 @@ from google.auth.exceptions import DefaultCredentialsError, RefreshError
 
 from mindroom import constants
 from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_path
-from mindroom.embedder_health import EMBEDDER_UNREACHABLE_DETAIL, probe_embedder
+from mindroom.credentials_sync import sync_env_to_credentials
+from mindroom.embedder_health import EMBEDDER_UNREACHABLE_DETAIL, probe_embedder, semantic_embedder_configured
 from mindroom.embeddings import create_sentence_transformers_embedder
 from mindroom.google_adc import load_google_application_credentials
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
@@ -50,6 +51,11 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
     runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
     config_path = runtime_paths.config_path
     console.print(f"[dim]Config directory: {runtime_paths.config_dir}[/dim]")
+
+    # Resolve credentials the way `mindroom run` will: seed/update env-backed
+    # services (EMBEDDER_API_KEY, provider keys, ...) into the shared store so
+    # preflight probes validate the keys the runtime will actually use.
+    sync_env_to_credentials(runtime_paths=runtime_paths)
 
     # 1. Config file exists
     p, f, w = _run_doctor_step("Checking config file...", lambda: _check_config_exists(config_path))
@@ -526,6 +532,11 @@ def _check_memory_config(config: Config, runtime_paths: RuntimePaths) -> tuple[i
         else:
             labels = "/".join("disabled" if backend == "none" else backend for backend in sorted(backends))
             console.print(f"[green]✓[/green] Memory backend: mixed (per-agent {labels})")
+        # Semantic knowledge bases and file-backend semantic memory search
+        # need the shared embedder even without mem0.
+        if semantic_embedder_configured(config):
+            p, f, w = _check_memory_embedder(config, runtime_paths=runtime_paths)
+            return 1 + p, f, w
         return 1, 0, 0
 
     if len(backends) > 1:

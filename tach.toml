@@ -40,9 +40,10 @@ depends_on = [
 path = "mindroom.embedder_health"
 depends_on = [
     "mindroom.background_tasks",
-    # Deferred (function-level) import inside probe_embedder; still a runtime edge.
+    # Deferred (function-level) imports inside the probe path; still runtime edges.
     "mindroom.embedding_factory",
     "mindroom.logging_config",
+    "mindroom.openai_embedder",
 ]
 
 [[modules]]
@@ -2415,6 +2416,7 @@ depends_on = [
     "mindroom.cli.config",
     "mindroom.config.main",
     "mindroom.constants",
+    "mindroom.credentials_sync",
     "mindroom.embedder_health",
     "mindroom.embeddings",
     "mindroom.google_adc",
