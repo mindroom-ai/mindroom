@@ -155,23 +155,26 @@ async def test_store_conversation_memory_redacts_embedder_provider_error(
     async def create_failing_memory(*_args: object, **_kwargs: object) -> FailingMemory:
         return FailingMemory()
 
-    with (
-        patch("mindroom.memory._backend.create_memory_instance", side_effect=create_failing_memory),
-        capture_logs() as logs,
-    ):
-        await store_conversation_memory(
-            "Remember this",
-            "general",
-            storage_path,
-            "session",
-            config,
-            runtime_paths_for(config),
-        )
+    try:
+        with (
+            patch("mindroom.memory._backend.create_memory_instance", side_effect=create_failing_memory),
+            capture_logs() as logs,
+        ):
+            await store_conversation_memory(
+                "Remember this",
+                "general",
+                storage_path,
+                "session",
+                config,
+                runtime_paths_for(config),
+            )
 
-    assert secret not in str(logs)
-    assert "embedder authentication failed (HTTP 401)" in str(logs)
-    assert "Conversation memory was not stored in any target" in str(logs)
-    assert "Memory added" not in str(logs)
+        assert secret not in str(logs)
+        assert "embedder authentication failed (HTTP 401)" in str(logs)
+        assert "Conversation memory was not stored in any target" in str(logs)
+        assert "Memory added" not in str(logs)
+    finally:
+        capture_embedder_health_recorder().record(None)
 
 
 @pytest.mark.asyncio

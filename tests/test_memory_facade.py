@@ -444,6 +444,8 @@ class TestMemoryFacade:
                 return {"results": [{"id": "personal", "memory": "personal"}]}
             if calls == 2:
                 raise AuthenticationError(auth_error_message, response=response, body=None)
+            # A real successful Mem0 request clears health inside
+            # MindRoomOpenAIEmbedder; this fake must model that side effect.
             capture_embedder_health_recorder().record(None)
             return {"results": [{"id": "team", "memory": "team"}]}
 

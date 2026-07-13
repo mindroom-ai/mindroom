@@ -54,7 +54,7 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
 
     # Resolve credentials the way `mindroom run` will: seed/update env-backed
     # services (EMBEDDER_API_KEY, provider keys, ...) into the shared store so
-    # preflight probes validate the keys the runtime will actually use. An
+    # preflight probes validate the keys the runtime will actually use.
     # Credential-store failures must not abort the remaining diagnostics, but
     # they are counted because the general storage check may target another path.
     try:
