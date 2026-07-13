@@ -1018,6 +1018,17 @@ def test_ordered_auto_resume_candidates_returns_all_unique_threads_when_unlimite
     assert [thread.target_event_id for thread in selected] == ["$target-two", "$newer-one", "$target-three"]
 
 
+def test_resume_limit_does_not_increase_deep_history_scan_limit(tmp_path: Path) -> None:
+    """A larger relay circuit breaker must not make each room scan more old pages."""
+    config = _make_config(tmp_path)
+    config.defaults.auto_resume_after_restart = True
+
+    scan_policy = stale_stream_cleanup_module._cleanup_scan_policy(config, startup_cutoff_ms=NOW_MS)
+
+    assert stale_stream_cleanup_module.MAX_AUTO_RESUME_AFTER_RESTART_THREADS == 50
+    assert scan_policy.max_extra_old_pages == 10
+
+
 @pytest.mark.asyncio
 async def test_auto_resume_skips_thread_id_none(tmp_path: Path) -> None:
     """Auto-resume should skip interrupted records that do not have a thread ID."""
@@ -2981,7 +2992,7 @@ async def test_orchestrator_recovery_uses_router_for_resume_and_all_started_bots
     assert mock_recover.await_args.kwargs["config"] == config
     assert mock_recover.await_args.kwargs["runtime_paths"] == runtime_paths_for(config)
     assert mock_recover.await_args.kwargs["startup_cutoff_ms"] == NOW_MS
-    assert mock_recover.await_args.kwargs["max_resumes"] == 10
+    assert mock_recover.await_args.kwargs["max_resumes"] == 50
 
 
 @pytest.mark.asyncio

@@ -80,7 +80,8 @@ _RATE_LIMIT_DELAY_SECONDS = 0.15
 _RECOVERY_ROOM_CONCURRENCY = 8
 _STOP_REACTION_KEYS = frozenset({"🛑", "⏹️"})
 _MAX_REQUESTER_RESOLUTION_DEPTH = 10
-MAX_AUTO_RESUME_AFTER_RESTART_THREADS = 10
+_MAX_EXTRA_INTERRUPTED_HISTORY_PAGES = 10
+MAX_AUTO_RESUME_AFTER_RESTART_THREADS = 50
 _INTERRUPTED_PARTIAL_TEXT_LIMIT = 280
 _AUTO_RESUME_MESSAGE = (
     "[System: Previous response was interrupted by service restart. Please continue where you left off.]"
@@ -159,7 +160,7 @@ def _cleanup_scan_policy(config: Config, *, startup_cutoff_ms: int | None) -> _C
     return _CleanupScanPolicy(
         startup_cutoff_ms=startup_cutoff_ms,
         collect_terminal_interrupted_for_resume=collect_terminal_interrupted_for_resume,
-        max_extra_old_pages=(MAX_AUTO_RESUME_AFTER_RESTART_THREADS if collect_terminal_interrupted_for_resume else 0),
+        max_extra_old_pages=(_MAX_EXTRA_INTERRUPTED_HISTORY_PAGES if collect_terminal_interrupted_for_resume else 0),
     )
 
 
