@@ -679,7 +679,7 @@ def _describe_voice_error(event: ErrorEvent) -> str:
     wrapper = event.error
     underlying = getattr(wrapper, "error", wrapper)
     status_code = getattr(underlying, "status_code", None)
-    error_text = str(underlying).lower()
+    error_text = _exception_chain_text(underlying)
     error_type = getattr(wrapper, "type", "voice_error")
     component = {
         "realtime_model_error": "OpenAI Realtime voice model",
@@ -698,6 +698,16 @@ def _describe_voice_error(event: ErrorEvent) -> str:
             "restart the MindRoom service so it reloads that credential, then leave and rejoin the call. "
             "Retrying with the same credential will not fix the call."
         )
+    if any(
+        marker in error_text
+        for marker in ("certificate_verify_failed", "certificate verify failed", "sslcertverificationerror")
+    ):
+        return (
+            f"Voice call error: MindRoom could not establish a trusted TLS connection to the {component}, so "
+            "the agent cannot hear or speak. Ensure the MindRoom service has an up-to-date system CA bundle; "
+            "for a custom Python runtime, configure SSL_CERT_FILE to point at that bundle. Restart MindRoom "
+            "after correcting the service environment, then leave and rejoin the call."
+        )
     if status_code == 429 or "rate limit" in error_text or "rate_limit" in error_text:
         return (
             f"Voice call error: the {component} is rate-limiting this MindRoom instance, so the agent may not "
@@ -715,6 +725,18 @@ def _describe_voice_error(event: ErrorEvent) -> str:
         "rejoin once. If the problem repeats, inspect the MindRoom service logs for the underlying provider "
         "error and verify that the configured model, endpoint, credential, quota, and network access are valid."
     )
+
+
+def _exception_chain_text(error: object) -> str:
+    """Collect exception causes for classification without exposing them to users."""
+    parts: list[str] = []
+    current: object | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen and len(parts) < 8:
+        seen.add(id(current))
+        parts.append(f"{type(current).__name__}: {current}".lower())
+        current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+    return " | ".join(parts)
 
 
 def _speech_component_kwargs(options: SpeechServiceOptions) -> dict[str, Any]:

@@ -604,6 +604,34 @@ def test_realtime_auth_error_reports_actionable_notice_once_without_secret() -> 
     assert "sk-super-secret" not in notices[0]
 
 
+def test_realtime_tls_error_reports_ca_bundle_remediation() -> None:
+    """A certificate failure names the concrete service-environment repair."""
+    notices: list[str] = []
+    handlers: dict[str, object] = {}
+    session = SimpleNamespace(on=lambda event, callback: handlers.__setitem__(event, callback))
+    bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    outer = APIConnectionError("OpenAI Realtime client connection error", retryable=True)
+    outer.__cause__ = RuntimeError("SSL: CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate")
+    bridge._register_error_listener(
+        session,  # type: ignore[arg-type]
+        VoiceAgentOptions(
+            instructions="Be concise.",
+            model="gpt-realtime-2.1",
+            api_key="sk",
+            on_session_error=notices.append,
+        ),
+    )
+
+    handler = cast("Callable[[object], None]", handlers["error"])
+    handler(SimpleNamespace(error=SimpleNamespace(type="realtime_model_error", error=outer)))
+
+    assert len(notices) == 1
+    assert "trusted TLS connection" in notices[0]
+    assert "system CA bundle" in notices[0]
+    assert "SSL_CERT_FILE" in notices[0]
+    assert "Restart MindRoom" in notices[0]
+
+
 @pytest.mark.asyncio
 async def test_explicit_bridge_close_does_not_report_termination() -> None:
     """Manager-requested shutdown cannot feed back as an unexpected close."""
