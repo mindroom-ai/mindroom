@@ -237,6 +237,7 @@ class TestConfigInit:
             "website",
             "browser",
             "scheduler",
+            "update_awareness",
             "todo",
             "subagents",
             "matrix_message",
@@ -255,6 +256,7 @@ class TestConfigInit:
             "include_entrypoint": False,
         }
         assert config["memory"]["auto_flush"]["enabled"] is True
+        assert config["defaults"]["tools"] == ["scheduler", "update_awareness"]
         assert "openclaw_compat" not in target.read_text()
 
         env_content = (tmp_path / ".env").read_text()

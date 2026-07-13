@@ -952,6 +952,7 @@ agents:
       - website
       - browser
       - scheduler
+      - update_awareness
       - todo
       - subagents
       - matrix_message
@@ -1014,6 +1015,7 @@ defaults:
   worker_tools: []
   tools:
     - scheduler
+    - update_awareness
   markdown: true
   compaction:
     enabled: true
