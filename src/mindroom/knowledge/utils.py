@@ -641,7 +641,9 @@ class _MultiKnowledgeVectorDb:
     ) -> list[Document]:
         """Async variant of ``search`` that searches DBs concurrently."""
 
-        async def _search_one(vdb: _KnowledgeVectorDb) -> list[Document] | Exception:
+        async def _search_one(
+            vdb: _KnowledgeVectorDb,
+        ) -> tuple[list[Document] | None, Exception | None]:
             results: list[Document]
             try:
                 if isinstance(vdb, _AsyncKnowledgeVectorDb):
@@ -657,15 +659,15 @@ class _MultiKnowledgeVectorDb:
                     vector_db_type=type(vdb).__name__,
                     exc_info=True,
                 )
-                return exc
-            return results
+                return None, exc
+            return results, None
 
         outcomes = await asyncio.gather(*[_search_one(vdb) for vdb in self._resolved_vector_dbs()])
-        results_by_db = [outcome for outcome in outcomes if not isinstance(outcome, Exception)]
+        results_by_db = [results for results, _error in outcomes if results is not None]
         if not results_by_db:
-            for outcome in outcomes:
-                if isinstance(outcome, Exception):
-                    raise outcome
+            for _results, error in outcomes:
+                if error is not None:
+                    raise error
         return _interleave_documents(results_by_db, limit)
 
 

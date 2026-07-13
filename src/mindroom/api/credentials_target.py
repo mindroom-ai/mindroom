@@ -35,6 +35,7 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -50,6 +51,16 @@ class RequestCredentialsTarget:
     agent_name: str | None
     execution_identity: ToolExecutionIdentity | None
     allowed_shared_services: frozenset[str] | None = None
+
+
+def loaded_runtime_config_for_credentials_request(
+    request: Request,
+) -> tuple[Config, RuntimePaths] | None:
+    """Return the loaded runtime config without making global edits depend on it."""
+    try:
+        return config_lifecycle.read_committed_runtime_config(request)
+    except HTTPException:
+        return None
 
 
 def _reject_raw_worker_targeting(request: Request) -> None:

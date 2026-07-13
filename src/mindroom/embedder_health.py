@@ -89,17 +89,32 @@ def _record_embedder_health_for_generation(generation: int, error: str | None) -
         return True
 
 
-def _reset_embedder_health_generation() -> None:
-    """Clear recorded health and invalidate every in-flight probe."""
+def _reset_embedder_health_generation() -> EmbedderHealthRecorder:
+    """Clear recorded health and return a writer for the new generation."""
     global _current_failure, _health_generation
     with _failure_lock:
         _health_generation += 1
         _current_failure = None
+        return EmbedderHealthRecorder(_health_generation)
 
 
-def handle_embedder_credential_change() -> None:
-    """Invalidate health writers after the effective credential may have changed."""
-    _reset_embedder_health_generation()
+def handle_embedder_credential_change(
+    config: Config | None = None,
+    runtime_paths: RuntimePaths | None = None,
+) -> EmbedderHealthRecorder:
+    """Invalidate old writers and optionally probe the replacement credential."""
+    health_recorder = _reset_embedder_health_generation()
+    if config is not None and runtime_paths is not None:
+        create_background_task(
+            check_embedder_health(
+                config,
+                runtime_paths,
+                reason="credential_change",
+                health_recorder=health_recorder,
+            ),
+            name="embedder_credential_change_health_check",
+        )
+    return health_recorder
 
 
 def is_embedder_auth_failure_detail(detail: str | None) -> bool:

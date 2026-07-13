@@ -331,17 +331,18 @@ async def _add_mem0_scope_messages(
     failure_log: str,
     failure_context: dict[str, object],
     health_recorder: EmbedderHealthRecorder,
-) -> str | None:
+) -> bool:
+    """Write one Mem0 replica and report whether it actually succeeded."""
     try:
         await _strict_mem0_add(memory, messages, user_id=user_id, metadata=metadata)
     except Exception as error:
         if (detail := _record_classified_embedder_failure(error, health_recorder)) is not None:
             logger.warning(failure_log, error=detail, **failure_context)
-            return detail
+            return False
         logger.exception(failure_log, error_type=type(error).__name__, **failure_context)
-        return None
+        return False
     health_recorder.record(None)
-    return None
+    return True
 
 
 @dataclass(frozen=True)
@@ -634,6 +635,7 @@ class Mem0MemoryBackend:
             failure_log = "Failed to add memory"
             failure_context = {"agent": agent_name}
 
+        stored_targets = 0
         for target_storage_path in target_storage_paths:
             health_recorder = capture_embedder_health_recorder()
             try:
@@ -643,7 +645,7 @@ class Mem0MemoryBackend:
                     raise
                 logger.warning(failure_log, error=detail, **failure_context)
                 continue
-            await _add_mem0_scope_messages(
+            if await _add_mem0_scope_messages(
                 memory=memory,
                 messages=messages,
                 user_id=scope_user_id,
@@ -651,17 +653,32 @@ class Mem0MemoryBackend:
                 failure_log=failure_log,
                 failure_context=failure_context,
                 health_recorder=health_recorder,
+            ):
+                stored_targets += 1
+
+        if stored_targets == 0:
+            logger.warning(
+                "Conversation memory was not stored in any target",
+                requested_targets=len(target_storage_paths),
+                **failure_context,
             )
+            return
 
         if isinstance(agent_name, list):
             logger.info(
                 "Team memory added",
                 team_id=scope_user_id,
                 members=agent_name,
-                storage_targets=len(target_storage_paths),
+                storage_targets=stored_targets,
+                requested_targets=len(target_storage_paths),
             )
         else:
-            logger.info("Memory added", agent=agent_name)
+            logger.info(
+                "Memory added",
+                agent=agent_name,
+                storage_targets=stored_targets,
+                requested_targets=len(target_storage_paths),
+            )
 
     def load_entrypoint_context(
         self,

@@ -170,6 +170,8 @@ async def test_store_conversation_memory_redacts_embedder_provider_error(
 
     assert secret not in str(logs)
     assert "embedder authentication failed (HTTP 401)" in str(logs)
+    assert "Conversation memory was not stored in any target" in str(logs)
+    assert "Memory added" not in str(logs)
 
 
 @pytest.mark.asyncio
@@ -218,6 +220,8 @@ async def test_store_conversation_memory_detects_embedding_failure_swallowed_by_
 
         assert get_embedder_failure() == "embedder authentication failed (HTTP 401)"
         assert "embedder authentication failed (HTTP 401)" in str(logs)
+        assert "Conversation memory was not stored in any target" in str(logs)
+        assert "Memory added" not in str(logs)
     finally:
         capture_embedder_health_recorder().record(None)
 

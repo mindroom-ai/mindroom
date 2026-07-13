@@ -28,6 +28,7 @@ from mindroom.api.credentials_target import (
     RequestCredentialsTarget,
     delete_credentials_for_target,
     load_credentials_for_target,
+    loaded_runtime_config_for_credentials_request,
     primary_runtime_scoped_services_for_target,
     request_may_target_scoped_credentials,
     resolve_request_credentials_target,
@@ -53,10 +54,52 @@ def _validated_service(service: str) -> str:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-def _handle_runtime_credential_change(service: str, access: _DashboardCredentialAccess) -> None:
-    """Invalidate embedder health when a global credential may change its key."""
-    if access.target.worker_scope is None and service in _EMBEDDER_CREDENTIAL_SERVICES:
+def _effective_embedder_api_key(request: Request, access: _DashboardCredentialAccess) -> str | None:
+    """Resolve the effective key using the same precedence as the embedder."""
+    runtime_config = loaded_runtime_config_for_credentials_request(request)
+    if runtime_config is not None:
+        config, _runtime_paths = runtime_config
+        explicit_key = config.memory.embedder.config.api_key
+        if explicit_key and explicit_key.strip():
+            return explicit_key.strip()
+
+    shared_manager = access.target.base_manager.shared_manager()
+    embedder_key = shared_manager.get_api_key("embedder")
+    if embedder_key and embedder_key.strip():
+        return embedder_key.strip()
+    openai_key = shared_manager.get_api_key("openai")
+    return openai_key.strip() if openai_key and openai_key.strip() else None
+
+
+def _embedder_api_key_before_change(
+    service: str,
+    request: Request,
+    access: _DashboardCredentialAccess,
+) -> str | None:
+    """Capture the key only for mutations that can affect this runtime."""
+    if access.target.worker_scope is not None or service not in _EMBEDDER_CREDENTIAL_SERVICES:
+        return None
+    return _effective_embedder_api_key(request, access)
+
+
+def _handle_runtime_credential_change(
+    service: str,
+    request: Request,
+    access: _DashboardCredentialAccess,
+    previous_embedder_api_key: str | None,
+) -> None:
+    """Invalidate and re-probe health only when the effective key changed."""
+    if access.target.worker_scope is not None or service not in _EMBEDDER_CREDENTIAL_SERVICES:
+        return
+    if _effective_embedder_api_key(request, access) == previous_embedder_api_key:
+        return
+
+    runtime_config = loaded_runtime_config_for_credentials_request(request)
+    if runtime_config is None:
         handle_embedder_credential_change()
+        return
+    config, runtime_paths = runtime_config
+    handle_embedder_credential_change(config, runtime_paths)
 
 
 @dataclass(frozen=True)
@@ -254,10 +297,11 @@ async def set_credentials(
     existing_credentials = access.load(service)
     if existing_credentials:
         access.reject_stored_oauth_credentials(existing_credentials)
+    previous_embedder_api_key = _embedder_api_key_before_change(service, http_request, access)
 
     creds = access.credentials_for_save(service, payload.credentials)
     access.save(service, creds)
-    _handle_runtime_credential_change(service, access)
+    _handle_runtime_credential_change(service, http_request, access, previous_embedder_api_key)
 
     return {"status": "success", "message": f"Credentials saved for {service}"}
 
@@ -283,10 +327,11 @@ async def set_api_key(
 
     credentials = access.load(service) or {}
     access.reject_stored_oauth_credentials(credentials)
+    previous_embedder_api_key = _embedder_api_key_before_change(service, http_request, access)
     credentials[payload.key_name] = payload.api_key
     credentials["_source"] = "ui"
     access.save(service, credentials)
-    _handle_runtime_credential_change(service, access)
+    _handle_runtime_credential_change(service, http_request, access, previous_embedder_api_key)
 
     return {"status": "success", "message": f"API key set for {service}"}
 
@@ -375,8 +420,9 @@ async def delete_credentials(
     existing_credentials = access.load(service)
     if existing_credentials:
         access.reject_stored_oauth_credentials(existing_credentials)
+    previous_embedder_api_key = _embedder_api_key_before_change(service, request, access)
     access.delete(service)
-    _handle_runtime_credential_change(service, access)
+    _handle_runtime_credential_change(service, request, access, previous_embedder_api_key)
 
     return {"status": "success", "message": f"Credentials deleted for {service}"}
 
@@ -408,11 +454,12 @@ async def copy_credentials(
     if destination_creds:
         reject_oauth_credentials_document(destination_creds)
 
+    previous_embedder_api_key = _embedder_api_key_before_change(service, request, access)
     # Copy credentials, marking as UI-sourced
     target_creds = {k: v for k, v in source_creds.items() if not k.startswith("_")}
     target_creds["_source"] = "ui"
     access.save(service, target_creds)
-    _handle_runtime_credential_change(service, access)
+    _handle_runtime_credential_change(service, request, access, previous_embedder_api_key)
 
     return {"status": "success", "message": f"Credentials copied from {source_service} to {service}"}
 
