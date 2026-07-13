@@ -30,6 +30,7 @@ from mindroom.matrix_rtc.voice_agent import (
     _AudioFrameStream,
     _AuthorizedParticipantAudioInput,
     _build_mindroom_llm,
+    _describe_voice_error,
 )
 
 if TYPE_CHECKING:
@@ -578,6 +579,7 @@ def test_realtime_auth_error_reports_actionable_notice_once_without_secret() -> 
     handlers: dict[str, object] = {}
     session = SimpleNamespace(on=lambda event, callback: handlers.__setitem__(event, callback))
     bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    bridge._session = session
     error = APIStatusError("invalid_api_key for sk-super-secret", status_code=401)
     bridge._register_error_listener(
         session,  # type: ignore[arg-type]
@@ -610,6 +612,7 @@ def test_realtime_tls_error_reports_ca_bundle_remediation() -> None:
     handlers: dict[str, object] = {}
     session = SimpleNamespace(on=lambda event, callback: handlers.__setitem__(event, callback))
     bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    bridge._session = session
     outer = APIConnectionError("OpenAI Realtime client connection error", retryable=True)
     outer.__cause__ = RuntimeError("SSL: CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate")
     bridge._register_error_listener(
@@ -630,6 +633,74 @@ def test_realtime_tls_error_reports_ca_bundle_remediation() -> None:
     assert "system CA bundle" in notices[0]
     assert "SSL_CERT_FILE" in notices[0]
     assert "Restart MindRoom" in notices[0]
+
+
+def test_stale_session_error_does_not_report_or_consume_dedupe() -> None:
+    """An error from a replaced SDK session cannot affect the active call."""
+    notices: list[str] = []
+    handlers: dict[str, object] = {}
+    stale_session = SimpleNamespace(on=lambda event, callback: handlers.__setitem__(event, callback))
+    bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    bridge._session = stale_session
+    bridge._register_error_listener(
+        stale_session,  # type: ignore[arg-type]
+        VoiceAgentOptions(
+            instructions="Be concise.",
+            model="gpt-realtime-2.1",
+            api_key="sk",
+            on_session_error=notices.append,
+        ),
+    )
+    bridge._session = SimpleNamespace()
+
+    handler = cast("Callable[[object], None]", handlers["error"])
+    handler(
+        SimpleNamespace(
+            error=SimpleNamespace(
+                type="realtime_model_error",
+                error=APIStatusError("invalid_api_key", status_code=401),
+            ),
+        ),
+    )
+
+    assert notices == []
+    assert bridge._reported_error_notices == set()
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_text"),
+    [
+        (APIStatusError("rate limit reached", status_code=429), "rate-limiting"),
+        (APIStatusError("provider unavailable", status_code=503), "server-side failure (HTTP 503)"),
+        (RuntimeError("unexpected provider failure for sk-super-secret"), "voice runtime failed"),
+    ],
+)
+def test_voice_error_classification_covers_remaining_safe_notices(
+    error: Exception,
+    expected_text: str,
+) -> None:
+    """Every remaining provider-error branch returns credential-safe remediation."""
+    notice = _describe_voice_error(
+        SimpleNamespace(error=SimpleNamespace(type="voice_error", error=error)),  # type: ignore[arg-type]
+    )
+
+    assert expected_text in notice
+    assert "sk-super-secret" not in notice
+
+
+def test_noncredential_authentication_text_uses_generic_notice() -> None:
+    """A broad authentication phrase alone does not imply a rejected credential."""
+    notice = _describe_voice_error(
+        SimpleNamespace(
+            error=SimpleNamespace(
+                type="realtime_model_error",
+                error=APIStatusError("multi-factor authentication required", status_code=400),
+            ),
+        ),  # type: ignore[arg-type]
+    )
+
+    assert "voice model failed" in notice
+    assert "Update the credential" not in notice
 
 
 @pytest.mark.asyncio

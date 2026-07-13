@@ -482,6 +482,8 @@ class RealtimeVoiceBridge:
             return
 
         def _on_error(event: ErrorEvent) -> None:
+            if self._session is not session:
+                return
             notice = _describe_voice_error(event)
             if notice in self._reported_error_notices:
                 return
@@ -689,8 +691,7 @@ def _describe_voice_error(event: ErrorEvent) -> str:
     }.get(error_type, "voice runtime")
 
     if status_code in {401, 403} or any(
-        marker in error_text
-        for marker in ("invalid_api_key", "incorrect api key", "authentication", "unauthorized")
+        marker in error_text for marker in ("invalid_api_key", "incorrect api key", "unauthorized")
     ):
         return (
             f"Voice call error: the {component} rejected MindRoom's configured credential, so the agent "

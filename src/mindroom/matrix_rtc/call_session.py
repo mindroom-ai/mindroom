@@ -138,7 +138,8 @@ class CallSession:
     _key_distribution_retry_scheduled: bool = field(default=False, init=False)
     _key_distribution_wakeup_scheduled: bool = field(default=False, init=False)
     _key_retry_attempt: int = field(default=0, init=False)
-    _received_remote_key: bool = field(default=False, init=False)
+    _devices_with_received_key: set[str] = field(default_factory=set, init=False)
+    _undelivered_key_device_ids: frozenset[str] = field(default_factory=frozenset, init=False)
     _reported_failure_codes: set[str] = field(default_factory=set, init=False)
 
     def __post_init__(self) -> None:
@@ -196,6 +197,8 @@ class CallSession:
         # A roster change is a fresh delivery opportunity: restart the backoff.
         self._key_retry_attempt = 0
         await self._distribute_keys()
+        if self._missing_inbound_key_device_ids():
+            self._spawn(self._report_missing_inbound_key_after_timeout())
 
     def on_key_received(self, received: ReceivedFrameKey) -> bool:
         """Install a current participant's frame key and report roster admission."""
@@ -218,7 +221,7 @@ class CallSession:
         )
         if inbound is None:
             return True
-        self._received_remote_key = True
+        self._devices_with_received_key.add(received.claimed_device_id)
         self.deps.bridge.set_frame_key(inbound.participant_identity, inbound.key, inbound.key_index)
         logger.info(
             "call_frame_key_installed",
@@ -299,10 +302,14 @@ class CallSession:
                     targets=list(distribution.targets),
                 )
             self._key_manager.mark_distributed(distribution, tuple(delivered))
-            if len(delivered) == len(distribution.targets):
+            undelivered_device_ids = frozenset(
+                target.device_id for target in distribution.targets if target not in delivered
+            )
+            if not undelivered_device_ids:
                 self._key_retry_attempt = 0
+                self._undelivered_key_device_ids = frozenset()
             else:
-                self._schedule_key_distribution_retry()
+                self._schedule_key_distribution_retry(undelivered_device_ids)
             if distribution.apply_after_ms <= 0:
                 self._apply_own_key(distribution.key, distribution.key_index)
             else:
@@ -310,8 +317,13 @@ class CallSession:
                     self._apply_own_key_later(distribution.key, distribution.key_index, distribution.apply_after_ms),
                 )
 
-    def _schedule_key_distribution_retry(self) -> None:
+    def _schedule_key_distribution_retry(
+        self,
+        undelivered_device_ids: frozenset[str] | None = None,
+    ) -> None:
         """Re-attempt undelivered recipients on a bounded backoff."""
+        if undelivered_device_ids is not None:
+            self._undelivered_key_device_ids = undelivered_device_ids
         if self._key_distribution_retry_scheduled or self._stopped:
             return
         if self._key_retry_attempt >= len(_KEY_DISTRIBUTION_RETRY_DELAYS_S):
@@ -320,7 +332,7 @@ class CallSession:
                 room_id=self.room_id,
                 hint="undelivered recipients will be retried on the next membership change",
             )
-            target_devices = ", ".join(sorted({member.device_id for member in self._members})) or "unknown device"
+            target_devices = ", ".join(sorted(self._undelivered_key_device_ids)) or "unknown device"
             self._report_failure_once(
                 "outbound_encryption_key_missing",
                 "Encrypted call setup error: MindRoom could not deliver the agent's media encryption key to "
@@ -350,9 +362,12 @@ class CallSession:
     async def _report_missing_inbound_key_after_timeout(self) -> None:
         """Explain the otherwise-silent case where the agent cannot decrypt the caller."""
         await asyncio.sleep(_E2EE_READY_TIMEOUT_S)
-        if self._stopped or self._received_remote_key:
+        if self._stopped:
             return
-        target_devices = ", ".join(sorted({member.device_id for member in self._members})) or "unknown device"
+        missing_device_ids = self._missing_inbound_key_device_ids()
+        if not missing_device_ids:
+            return
+        target_devices = ", ".join(sorted(missing_device_ids))
         self._report_failure_once(
             "inbound_encryption_key_missing",
             "Encrypted call setup error: MindRoom has not received a usable media encryption key from your "
@@ -361,6 +376,10 @@ class CallSession:
             "client and have the server operator inspect encrypted to-device events, the device's Olm session, "
             "and its signed one-time-key supply.",
         )
+
+    def _missing_inbound_key_device_ids(self) -> frozenset[str]:
+        """Return active remote devices whose media key is still unavailable."""
+        return frozenset(member.device_id for member in self._members) - self._devices_with_received_key
 
     def _report_failure_once(self, code: str, message: str) -> None:
         """Coalesce one actionable room notice per failure mode."""

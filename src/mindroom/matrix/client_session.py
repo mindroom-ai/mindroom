@@ -11,6 +11,7 @@ import nio
 
 from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
+from mindroom.matrix.event_types import CALL_ENCRYPTION_KEYS_EVENT_TYPE
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.startup_errors import PermanentStartupError
 
@@ -18,8 +19,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
 logger = get_logger(__name__)
-
-_CALL_ENCRYPTION_KEYS_EVENT_TYPE = "io.element.call.encryption_keys"
 
 _PERMANENT_MATRIX_STARTUP_ERROR_CODES = frozenset(
     {
@@ -37,7 +36,7 @@ def _log_call_key_olm_rejection(
     **details: object,
 ) -> None:
     """Log why an otherwise decrypted call-key event failed provenance checks."""
-    if event.type != _CALL_ENCRYPTION_KEYS_EVENT_TYPE:
+    if event.type != CALL_ENCRYPTION_KEYS_EVENT_TYPE:
         return
     logger.warning(
         "call_key_olm_rejected",
@@ -117,11 +116,11 @@ class _MindRoomAsyncClient(nio.AsyncClient):
             _log_call_key_olm_rejection(
                 decrypted,
                 "signed_sender_identity_mismatch",
-                sender_device=sender_device,
-                matched_device_id=device.id,
+                sender_ed25519=sender_ed25519,
+                matched_ed25519=device.ed25519,
             )
             return decrypted
-        if decrypted.type == _CALL_ENCRYPTION_KEYS_EVENT_TYPE:
+        if decrypted.type == CALL_ENCRYPTION_KEYS_EVENT_TYPE:
             logger.info(
                 "call_key_olm_authenticated",
                 sender=decrypted.sender,

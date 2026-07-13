@@ -1198,6 +1198,42 @@ async def test_session_reports_when_callers_encryption_key_never_arrives(
 
 
 @pytest.mark.asyncio
+async def test_session_reports_only_device_missing_inbound_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One device's key cannot hide another active device's missing key."""
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session._E2EE_READY_TIMEOUT_S", 0)
+    notices: list[str] = []
+
+    async def on_failure(message: str) -> None:
+        notices.append(message)
+
+    alice_phone = _member("@alice:example.org", "ALICEPHONE")
+    alice_tablet = _member("@alice:example.org", "ALICETABLET")
+    session = _session(_client(), FakeBridge(), FakeKeyTransport(), [1_000])
+    session.deps.on_failure = on_failure
+    await session.start([alice_phone, alice_tablet])
+    assert session.on_key_received(
+        ReceivedFrameKey(
+            user_id=alice_phone.user_id,
+            claimed_device_id=alice_phone.device_id,
+            key_base64="QUFBQUFBQUFBQUFBQUFBQQ==",
+            key_index=2,
+            received_at_ms=1_500,
+        ),
+    )
+    for _ in range(20):
+        if notices:
+            break
+        await asyncio.sleep(0)
+
+    assert len(notices) == 1
+    assert "ALICETABLET" in notices[0]
+    assert "ALICEPHONE" not in notices[0]
+    await session.stop()
+
+
+@pytest.mark.asyncio
 async def test_session_reports_when_agents_encryption_key_cannot_be_delivered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1222,6 +1258,40 @@ async def test_session_reports_when_agents_encryption_key_cannot_be_delivered(
     assert "you will not hear its audio" in notices[0]
     assert "ALICEDEV" in notices[0]
     assert "one-time-key" in notices[0]
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_session_reports_only_device_with_undelivered_outbound_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The outbound failure notice excludes devices that received the key."""
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session._KEY_DISTRIBUTION_RETRY_DELAYS_S", (0.0,))
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session._E2EE_READY_TIMEOUT_S", 60.0)
+    notices: list[str] = []
+
+    async def on_failure(message: str) -> None:
+        notices.append(message)
+
+    class PhoneOnlyKeyTransport(FakeKeyTransport):
+        async def send_key(self, **kwargs: object) -> list[CallMember]:
+            await super().send_key(**kwargs)  # type: ignore[arg-type]
+            targets = cast("list[CallMember]", kwargs["targets"])
+            return [target for target in targets if target.device_id == "ALICEPHONE"]
+
+    alice_phone = _member("@alice:example.org", "ALICEPHONE")
+    alice_tablet = _member("@alice:example.org", "ALICETABLET")
+    session = _session(_client(), FakeBridge(), PhoneOnlyKeyTransport(), [1_000])
+    session.deps.on_failure = on_failure
+    await session.start([alice_phone, alice_tablet])
+    for _ in range(40):
+        if notices:
+            break
+        await asyncio.sleep(0)
+
+    assert len(notices) == 1
+    assert "ALICETABLET" in notices[0]
+    assert "ALICEPHONE" not in notices[0]
     await session.stop()
 
 
