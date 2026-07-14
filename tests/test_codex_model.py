@@ -497,6 +497,7 @@ def test_openai_native_tool_search_rejects_custom_compatible_base_url() -> None:
         "gpt-5.6",
         base_url="https://api.openai.com/v1/",
     )
+    assert openai_native_tool_search_supported("openai", "gpt-5.6", base_url="")
     assert not openai_native_tool_search_supported("openai", "gpt-5.6", base_url=123)
 
 

@@ -63,7 +63,7 @@ def openai_native_tool_search_supported(provider: str, model_id: str, *, base_ur
         return False
     if (
         canonical_provider == "openai"
-        and base_url is not None
+        and base_url not in (None, "")
         and (not isinstance(base_url, str) or base_url.rstrip("/") != _OPENAI_API_BASE_URL)
     ):
         return False
