@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from collections.abc import Set as AbstractSet
 
-    from mindroom.config.calls import CallAgentConfig
+    from mindroom.config.calls import ResolvedCallAgentConfig
     from mindroom.config.main import Config
     from mindroom.config.voice import SpeechServiceConfig
     from mindroom.constants import RuntimePaths
@@ -168,7 +168,7 @@ class CallManager:
     ) -> None:
         self._agent_name = agent_name
         self._config = config
-        self._call_config: CallAgentConfig = config.calls.agents[agent_name]
+        self._call_config: ResolvedCallAgentConfig = config.calls.resolve_agent_config(agent_name)
         self._client = client
         self._runtime_paths = runtime_paths
         self._ssl_verify = ssl_verify

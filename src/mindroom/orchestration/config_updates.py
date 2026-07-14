@@ -120,7 +120,7 @@ def _identify_entities_to_restart(
 
 def _call_agents_to_restart(config: Config | None, new_config: Config) -> set[str]:
     """Return call agents whose managers captured an obsolete config snapshot."""
-    if config is None or config == new_config:
+    if config is None or config.authored_model_dump() == new_config.authored_model_dump():
         return set()
     old_agents = set(config.calls.agents) if config.calls.enabled else set()
     new_agents = set(new_config.calls.agents) if new_config.calls.enabled else set()

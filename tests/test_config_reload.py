@@ -1835,6 +1835,81 @@ def test_config_update_plan_restarts_old_and_new_call_agents_when_calls_change()
     assert plan.entities_to_restart == {"general", "writer"}
 
 
+def test_config_update_plan_restarts_call_agents_when_global_defaults_change() -> None:
+    """A global call default change rebuilds managers inheriting that value."""
+    old_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            calls=CallsConfig(
+                enabled=True,
+                model="gpt-realtime-old",
+                agents={"general": CallAgentConfig()},
+            ),
+            router=RouterConfig(model="default"),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            calls=CallsConfig(
+                enabled=True,
+                model="gpt-realtime-new",
+                agents={"general": CallAgentConfig()},
+            ),
+            router=RouterConfig(model="default"),
+        ),
+    )
+    running_entities = {ROUTER_AGENT_NAME, "general"}
+
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={entity: AsyncMock() for entity in running_entities},
+    )
+
+    assert plan.entities_to_restart == {"general"}
+
+
+def test_config_update_plan_restarts_call_agent_for_explicit_null_override() -> None:
+    """Authored null must restart a manager that previously inherited its voice."""
+    common = {
+        "agents": {"general": AgentConfig(display_name="General Agent")},
+        "router": RouterConfig(model="default"),
+    }
+    old_config = _runtime_bound_config(
+        Config(
+            **common,
+            calls=CallsConfig(
+                enabled=True,
+                voice="marin",
+                agents={"general": CallAgentConfig()},
+            ),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            **common,
+            calls=CallsConfig(
+                enabled=True,
+                voice="marin",
+                agents={"general": CallAgentConfig(voice=None)},
+            ),
+        ),
+    )
+
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities={ROUTER_AGENT_NAME, "general"},
+        existing_entities={ROUTER_AGENT_NAME, "general"},
+        agent_bots={ROUTER_AGENT_NAME: AsyncMock(), "general": AsyncMock()},
+    )
+
+    assert plan.entities_to_restart == {"general"}
+
+
 def test_config_update_plan_restarts_call_agents_when_authorization_changes() -> None:
     """Call managers restart so admission uses the current authorization rules."""
     old_config = _runtime_bound_config(

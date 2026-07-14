@@ -31,29 +31,34 @@ The agent leaves the call and clears its membership state event when the caller 
 ```yaml
 calls:
   enabled: true
+  backend: realtime                # shared default; preserves OpenAI speech-to-speech
+  model: gpt-realtime-2.1          # shared OpenAI realtime model
+  credentials_service: openai      # shared strict credential service binding
+  voice: marin                     # optional shared voice preset
   agents:
-    assistant:
-      backend: realtime            # default; preserves OpenAI speech-to-speech
-      model: gpt-realtime-2.1      # OpenAI realtime model
-      credentials_service: openai  # strict credential service binding; defaults to openai
-      voice: marin                 # optional voice preset
+    assistant: {}                  # enable this agent and inherit every shared default
   # livekit_service_url: https://rtc.example.org   # same-server .well-known override
 ```
 
 Voice calls require the `matrix_calls` extra (`pip install "mindroom[matrix_calls]"` or `uv sync --extra matrix_calls`).
-Each `calls.agents` entry owns that agent's voice backend and speech models, so one agent can use OpenAI Realtime while another uses a cascaded STT and TTS pipeline.
-The realtime backend reads its API key only from that agent's `credentials_service`, which defaults to the `openai` credential service seeded by `OPENAI_API_KEY`.
+The top-level `backend`, `model`, `credentials_service`, `voice`, `stt`, and `tts` fields are shared defaults for every calls-enabled agent.
+`calls.agents` maps each enabled agent name to its optional overrides, and an empty entry inherits every top-level default.
+Migrate the former list form `agents: [assistant]` to the mapping form `agents: {assistant: {}}`.
+An override replaces the corresponding top-level field only for that agent, so one agent can use the shared OpenAI Realtime defaults while another uses its own cascaded STT and TTS pipeline.
+Omitted override fields inherit, while explicit `null` clears an inherited `voice`, `stt`, or `tts` value; an effective cascaded profile must still provide both STT and TTS.
+`enabled` and `livekit_service_url` remain global and cannot be overridden per agent.
+The realtime backend reads its API key only from the agent's effective `credentials_service`, which defaults to the `openai` credential service seeded by `OPENAI_API_KEY`.
 Set a different service when voice and chat use different OpenAI credentials; a missing selected service does not fall back to another key.
 For example, these two agents use independent voice pipelines:
 
 ```yaml
 calls:
   enabled: true
+  backend: realtime
+  model: gpt-realtime-2.1
+  voice: marin
   agents:
-    concierge:
-      backend: realtime
-      model: gpt-realtime-2.1
-      voice: marin
+    concierge: {}
     local_assistant:
       backend: cascaded
       stt:
@@ -82,21 +87,21 @@ The agent can therefore use Anthropic, Gemini, OpenAI, or any other MindRoom mod
 ```yaml
 calls:
   enabled: true
+  backend: cascaded
+  stt:
+    provider: openai
+    model: gpt-4o-transcribe
+    api_key: your-stt-key
+    extra_kwargs:
+      language: en
+  tts:
+    provider: openai
+    model: tts-1
+    api_key: your-tts-key
+    extra_kwargs:
+      voice: ash
   agents:
-    assistant:
-      backend: cascaded
-      stt:
-        provider: openai
-        model: gpt-4o-transcribe
-        api_key: your-stt-key
-        extra_kwargs:
-          language: en
-      tts:
-        provider: openai
-        model: tts-1
-        api_key: your-tts-key
-        extra_kwargs:
-          voice: ash
+    assistant: {}
 ```
 
 Each speech component has its own `provider`, `model`, `host`, `api_key`, and `extra_kwargs`.
@@ -128,21 +133,21 @@ agents:
 
 calls:
   enabled: true
+  backend: cascaded
+  stt:
+    provider: openai_compatible
+    model: whisper-large-v3
+    host: http://127.0.0.1:9000
+    extra_kwargs:
+      language: en
+  tts:
+    provider: openai_compatible
+    model: tts-1
+    host: http://127.0.0.1:9001
+    extra_kwargs:
+      voice: ash
   agents:
-    assistant:
-      backend: cascaded
-      stt:
-        provider: openai_compatible
-        model: whisper-large-v3
-        host: http://127.0.0.1:9000
-        extra_kwargs:
-          language: en
-      tts:
-        provider: openai_compatible
-        model: tts-1
-        host: http://127.0.0.1:9001
-        extra_kwargs:
-          voice: ash
+    assistant: {}
 ```
 
 `host` accepts either the service root or its `/v1` base URL.

@@ -656,12 +656,57 @@ def test_openai_cloud_speech_uses_explicit_endpoint(
     assert service.base_url == "https://api.openai.com/v1"
 
 
-def test_default_bridge_factory_uses_each_agent_backend(tmp_path: Path) -> None:
-    """Each call manager selects the backend from its own agent profile."""
-    speech = SpeechServiceConfig(
+def test_call_manager_inherits_global_realtime_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An empty agent profile inherits the deployment-wide realtime defaults."""
+    config = Config(
+        agents={"helper": AgentConfig(display_name="Helper")},
+        models={},
+        calls=CallsConfig(
+            enabled=True,
+            model="gpt-realtime-global",
+            credentials_service="voice-default",
+            voice="cedar",
+            agents={"helper": CallAgentConfig()},
+        ),
+    )
+    key_lookup = MagicMock(return_value="sk-global")
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.get_api_key_for_service", key_lookup)
+
+    manager = CallManager(
+        agent_name="helper",
+        config=config,
+        client=_client(),
+        runtime_paths=test_runtime_paths(tmp_path),
+        ssl_verify=True,
+        tool_support=object(),  # type: ignore[arg-type]
+        get_invited_rooms_by_agent=dict,
+    )
+
+    backend = manager._resolve_voice_backend(ROOM_ID)
+
+    assert manager._call_config.backend == "realtime"
+    assert manager._call_config.model == "gpt-realtime-global"
+    assert manager._call_config.credentials_service == "voice-default"
+    assert manager._call_config.voice == "cedar"
+    assert backend is not None
+    assert backend.realtime_api_key == "sk-global"
+    key_lookup.assert_called_once_with("voice-default", manager._runtime_paths)
+
+
+def test_default_bridge_factory_uses_global_defaults_and_agent_overrides(tmp_path: Path) -> None:
+    """Each manager merges global defaults with its own backend overrides."""
+    default_speech = SpeechServiceConfig(
         provider="openai_compatible",
-        model="local-speech",
+        model="default-speech",
         host="http://127.0.0.1:9000",
+    )
+    other_tts = SpeechServiceConfig(
+        provider="openai_compatible",
+        model="other-tts",
+        host="http://127.0.0.1:9001",
     )
     config = Config(
         agents={
@@ -671,9 +716,13 @@ def test_default_bridge_factory_uses_each_agent_backend(tmp_path: Path) -> None:
         models={},
         calls=CallsConfig(
             enabled=True,
+            model="gpt-realtime-global",
+            voice="cedar",
+            stt=default_speech,
+            tts=default_speech,
             agents={
                 "helper": CallAgentConfig(model="gpt-realtime-custom", voice="marin"),
-                "other": CallAgentConfig(backend="cascaded", stt=speech, tts=speech),
+                "other": CallAgentConfig(backend="cascaded", tts=other_tts),
             },
         ),
     )
@@ -701,10 +750,62 @@ def test_default_bridge_factory_uses_each_agent_backend(tmp_path: Path) -> None:
 
     assert isinstance(realtime_bridge, RealtimeVoiceBridge)
     assert isinstance(cascaded_bridge, CascadedVoiceBridge)
+    assert realtime_manager._call_config.backend == "realtime"
     assert realtime_manager._call_config.model == "gpt-realtime-custom"
     assert realtime_manager._call_config.voice == "marin"
-    assert cascaded_manager._call_config.stt == speech
-    assert cascaded_manager._call_config.tts == speech
+    assert cascaded_manager._call_config.backend == "cascaded"
+    assert cascaded_manager._call_config.stt == default_speech
+    assert cascaded_manager._call_config.tts == other_tts
+
+
+def test_agent_explicit_null_voice_clears_global_default(tmp_path: Path) -> None:
+    """An explicit null remains distinct from an omitted voice override."""
+    config = Config(
+        agents={"helper": AgentConfig(display_name="Helper")},
+        models={},
+        calls=CallsConfig(
+            enabled=True,
+            voice="marin",
+            agents={"helper": CallAgentConfig(voice=None)},
+        ),
+    )
+
+    manager = CallManager(
+        agent_name="helper",
+        config=config,
+        client=_client(),
+        runtime_paths=test_runtime_paths(tmp_path),
+        ssl_verify=True,
+        tool_support=object(),  # type: ignore[arg-type]
+        get_invited_rooms_by_agent=dict,
+    )
+
+    assert manager._call_config.voice is None
+
+
+def test_call_agent_override_round_trips_omitted_and_explicit_null_fields() -> None:
+    """Full config serialization must preserve override authorship semantics."""
+    config = Config(
+        agents={
+            "inherited": AgentConfig(display_name="Inherited"),
+            "cleared": AgentConfig(display_name="Cleared"),
+        },
+        calls=CallsConfig(
+            enabled=True,
+            voice="marin",
+            agents={
+                "inherited": CallAgentConfig(),
+                "cleared": CallAgentConfig(voice=None),
+            },
+        ),
+    )
+
+    dumped = config.model_dump()
+    restored = Config.model_validate(dumped)
+
+    assert dumped["calls"]["agents"] == {"inherited": {}, "cleared": {"voice": None}}
+    assert restored.calls.resolve_agent_config("inherited").voice == "marin"
+    assert restored.calls.resolve_agent_config("cleared").voice is None
 
 
 @pytest.mark.asyncio
@@ -2938,13 +3039,30 @@ def test_calls_config_rejects_agents_sharing_a_room() -> None:
 
 
 def test_cascaded_calls_require_both_speech_services() -> None:
-    """Cascaded configuration fails before runtime when either speech leg is absent."""
-    speech = SpeechServiceConfig(model="gpt-4o-transcribe")
+    """Cascaded requirements validate after global defaults and overrides merge."""
+    stt = SpeechServiceConfig(model="gpt-4o-transcribe")
+    tts = SpeechServiceConfig(model="tts-1")
 
-    with pytest.raises(ValueError, match="Cascaded calls require: tts"):
-        CallAgentConfig(backend="cascaded", stt=speech)
-    with pytest.raises(ValueError, match="Cascaded calls require: stt"):
-        CallAgentConfig(backend="cascaded", tts=speech)
+    config = CallsConfig(
+        stt=stt,
+        agents={"helper": CallAgentConfig(backend="cascaded", tts=tts)},
+    )
+
+    resolved = config.resolve_agent_config("helper")
+    assert resolved.backend == "cascaded"
+    assert resolved.stt == stt
+    assert resolved.tts == tts
+
+    with pytest.raises(ValueError, match=r"Cascaded calls require.*tts"):
+        CallsConfig(
+            stt=stt,
+            agents={"helper": CallAgentConfig(backend="cascaded")},
+        )
+    with pytest.raises(ValueError, match=r"Cascaded calls require.*stt"):
+        CallsConfig(
+            tts=tts,
+            agents={"helper": CallAgentConfig(backend="cascaded")},
+        )
 
 
 def test_openai_compatible_speech_config_requires_endpoint() -> None:

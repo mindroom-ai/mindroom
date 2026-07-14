@@ -523,14 +523,15 @@ voice:
 # Voice calls via Element Call / MatrixRTC (optional)
 calls:
   enabled: false                   # Default: false
-  agents:                          # Call settings keyed by shared agent name (at most one agent per room)
+  backend: realtime                # Shared default: realtime or cascaded
+  model: gpt-realtime-2.1          # Shared default OpenAI realtime speech-to-speech model
+  credentials_service: openai      # Shared default credential service for realtime calls
+  voice: null                      # Optional shared default realtime voice preset
+  stt: null                        # Shared default; effective cascaded profiles require STT
+  tts: null                        # Shared default; effective cascaded profiles require TTS
+  agents:                          # Enabled shared agents and optional per-agent overrides
     assistant:
-      backend: realtime            # realtime (default) or cascaded
-      model: gpt-realtime-2.1      # OpenAI realtime speech-to-speech model
-      credentials_service: openai  # Credential service used by this realtime agent
-      voice: null                  # Optional realtime voice preset
-      stt: null                    # Cascaded SpeechServiceConfig; required with backend: cascaded
-      tts: null                    # Cascaded SpeechServiceConfig; required with backend: cascaded
+      voice: marin                 # Override any shared field for only this agent
   livekit_service_url: null        # Optional override for .well-known discovery
 
 # Internal MindRoom user account (optional, omit for hosted/public profiles)
