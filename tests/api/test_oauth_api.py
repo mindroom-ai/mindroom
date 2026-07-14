@@ -676,6 +676,20 @@ def test_oauth_provider_rejects_client_config_suffix_for_tool_config_service() -
         )
 
 
+def test_oauth_provider_rejects_public_loopback_client_without_pkce() -> None:
+    with pytest.raises(ValueError, match="public loopback client requires S256 PKCE"):
+        OAuthProvider(
+            id="public_mail",
+            display_name="Public Mail",
+            authorization_url="https://auth.example.test/authorize",
+            token_url="https://auth.example.test/token",
+            scopes=("mail.read",),
+            credential_service="public_mail_oauth",
+            client_config_services=("public_mail_oauth_client",),
+            loopback_client_id="bundled-public-client",
+        )
+
+
 def test_connect_generates_authorization_url_with_opaque_state(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
@@ -780,6 +794,44 @@ def test_connect_generates_pkce_challenge_for_pkce_provider(tmp_path: Path) -> N
     )
     assert code_challenge == expected_challenge
     assert code_verifier not in response.json()["auth_url"]
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/api/oauth/public_mail/connect?agent_name=general"),
+        ("GET", "/api/oauth/public_mail/authorize?agent_name=general"),
+    ],
+)
+def test_oauth_entrypoints_reject_bundled_client_from_remote_request(
+    tmp_path: Path,
+    method: str,
+    path: str,
+) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"},
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload())
+    provider = OAuthProvider(
+        id="public_mail",
+        display_name="Public Mail",
+        authorization_url="https://auth.example.test/authorize",
+        token_url="https://auth.example.test/token",
+        scopes=("mail.read",),
+        credential_service="public_mail_oauth",
+        client_config_services=("public_mail_oauth_client",),
+        pkce_code_challenge_method="S256",
+        loopback_client_id="bundled-public-client",
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app, base_url="https://mindroom.example.test") as client:
+            _login(client)
+            response = client.request(method, path)
+
+    assert response.status_code == 503
+    assert "available only when MindRoom is opened on localhost" in response.json()["detail"]
 
 
 def test_provider_exchange_and_refresh_use_oauth_client(
@@ -3586,7 +3638,7 @@ def test_google_status_reports_connected_with_service_account(tmp_path: Path) ->
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
     provider = google_drive_oauth_provider()
 
-    with TestClient(api_app) as client:
+    with TestClient(api_app, base_url="http://localhost:8765") as client:
         _login(client)
         status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
 
@@ -3597,6 +3649,24 @@ def test_google_status_reports_connected_with_service_account(tmp_path: Path) ->
     assert status_response.json()["client_config_redirect_uri_supported"] is True
     assert status_response.json()["has_service_account_config"] is True
     assert status_response.json()["connected"] is True
+
+
+def test_status_hides_bundled_client_from_remote_request(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"},
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload())
+    provider = google_drive_oauth_provider()
+
+    with TestClient(api_app, base_url="https://mindroom.example.test") as client:
+        _login(client)
+        status_response = client.get(f"/api/oauth/{provider.id}/status")
+
+    assert status_response.status_code == 200
+    assert status_response.json()["has_client_config"] is False
+    assert status_response.json()["has_custom_client_config"] is False
+    assert status_response.json()["connected"] is False
 
 
 def test_status_rejects_expired_access_token_without_refresh(tmp_path: Path) -> None:

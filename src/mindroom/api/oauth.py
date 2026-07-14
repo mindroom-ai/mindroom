@@ -19,7 +19,13 @@ from mindroom.api.dashboard_credential_scope import build_dashboard_execution_id
 from mindroom.credentials import delete_scoped_credentials, load_scoped_credentials, save_scoped_credentials
 from mindroom.logging_config import get_logger
 from mindroom.mcp.oauth import disconnect_mcp_oauth_request_session
-from mindroom.oauth import OAuthClaimValidationError, OAuthProvider, OAuthProviderError
+from mindroom.oauth import (
+    OAuthClaimValidationError,
+    OAuthClientConfigResolution,
+    OAuthProvider,
+    OAuthProviderError,
+    is_oauth_loopback_hostname,
+)
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.service import (
     OAuthConnectTarget,
@@ -95,6 +101,26 @@ async def _require_oauth_browser_user(request: Request) -> RedirectResponse | No
     return None
 
 
+def _client_config_resolution_for_request(
+    request: Request,
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    *,
+    reject_remote_bundled: bool,
+) -> OAuthClientConfigResolution | None:
+    """Resolve an OAuth client that can return to the requesting browser host."""
+    resolution = provider.client_config_resolution(runtime_paths)
+    if resolution is None or resolution.stored or is_oauth_loopback_hostname(request.url.hostname):
+        return resolution
+    if reject_remote_bundled:
+        detail = (
+            "The built-in OAuth client is available only when MindRoom is opened on localhost. "
+            "Set MINDROOM_PUBLIC_URL (or MINDROOM_BASE_URL) and configure a custom OAuth client for remote access."
+        )
+        raise HTTPException(status_code=503, detail=detail)
+    return None
+
+
 async def _issue_authorization_url(
     request: Request,
     provider: OAuthProvider,
@@ -103,6 +129,12 @@ async def _issue_authorization_url(
     agent_name: str | None,
     connect_token: str | None = None,
 ) -> OAuthConnectResponse:
+    _client_config_resolution_for_request(
+        request,
+        provider,
+        runtime_paths,
+        reject_remote_bundled=True,
+    )
     if connect_token:
         try:
             connect_target = lookup_oauth_connect_token(provider, runtime_paths, connect_token)
@@ -427,7 +459,12 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
         )
         or {}
     )
-    client_config_resolution = provider.client_config_resolution(runtime_paths)
+    client_config_resolution = _client_config_resolution_for_request(
+        request,
+        provider,
+        runtime_paths,
+        reject_remote_bundled=False,
+    )
     has_client_config = client_config_resolution is not None
     has_service_account_config = oauth_provider_service_account_configured(provider, runtime_paths)
     credentials_usable = oauth_credentials_usable(provider, runtime_paths, credentials)

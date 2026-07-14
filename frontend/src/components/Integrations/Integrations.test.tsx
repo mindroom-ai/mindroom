@@ -429,7 +429,12 @@ describe("Integrations", () => {
       ).toBeGreaterThan(0);
       expect(
         screen.getAllByText(
-          /MindRoom project maintainers do not automatically receive data from local installations/,
+          /Project maintainers have no automatic access merely because they maintain MindRoom; if they also operate this installation, they may have operator access/,
+        ).length,
+      ).toBeGreaterThan(0);
+      expect(
+        screen.getAllByText(
+          /The installation operator and anyone with administrative or filesystem access may be able to access stored credentials and data/,
         ).length,
       ).toBeGreaterThan(0);
       expect(
@@ -446,6 +451,43 @@ describe("Integrations", () => {
         "https://docs.mindroom.chat/privacy/",
       );
     }
+  });
+
+  it("discloses data handling for dynamically registered Google OAuth providers", async () => {
+    mockUseTools.mockReturnValue({
+      tools: [
+        ...mockTools,
+        {
+          name: "google_tasks_tool",
+          display_name: "Google Tasks Tool",
+          description: "Manage Google Tasks",
+          icon: "✅",
+          icon_color: null,
+          category: "productivity",
+          status: "available",
+          setup_type: "oauth",
+          config_fields: null,
+          helper_text: null,
+          docs_url: null,
+          dependencies: null,
+          auth_provider: "google_tasks",
+        },
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    });
+
+    render(<Integrations />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Google Tasks")).toBeInTheDocument();
+      expect(
+        screen.getAllByText(
+          /Project maintainers have no automatic access merely because they maintain MindRoom/,
+        ),
+      ).toHaveLength(3);
+    });
   });
 
   it("should display all integration cards", async () => {

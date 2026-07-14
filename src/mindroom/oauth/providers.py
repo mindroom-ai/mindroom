@@ -42,6 +42,7 @@ _SUPPORTED_TOKEN_ENDPOINT_AUTH_METHODS = frozenset(
     {_PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD, "client_secret_post", "client_secret_basic"},
 )
 _SUPPORTED_PKCE_CODE_CHALLENGE_METHODS = frozenset({None, "S256"})
+_OAUTH_LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 class OAuthProviderError(RuntimeError):
@@ -121,7 +122,7 @@ class OAuthRuntimeEndpoints:
 
 
 @dataclass(frozen=True, slots=True)
-class _OAuthClientConfigResolution:
+class OAuthClientConfigResolution:
     """Resolved OAuth client settings plus the credential service that supplied them."""
 
     config: OAuthClientConfig
@@ -366,6 +367,11 @@ def _pkce_s256_code_challenge(code_verifier: str) -> str:
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
+def is_oauth_loopback_hostname(hostname: str | None) -> bool:
+    """Return whether a hostname is supported by the bundled loopback flow."""
+    return hostname is not None and hostname.casefold() in _OAUTH_LOOPBACK_HOSTNAMES
+
+
 @dataclass(frozen=True, slots=True)
 class OAuthProvider:
     """Provider definition registered by core or a plugin."""
@@ -444,6 +450,13 @@ class OAuthProvider:
         if self.loopback_client_id is not None and not self.loopback_client_id.strip():
             msg = f"OAuth provider '{self.id}' loopback_client_id must not be blank"
             raise ValueError(msg)
+        if (
+            self.loopback_client_id is not None
+            and self.loopback_client_secret is None
+            and self.pkce_code_challenge_method is None
+        ):
+            msg = f"OAuth provider '{self.id}' public loopback client requires S256 PKCE"
+            raise ValueError(msg)
         if self.loopback_client_secret is not None and self.loopback_client_id is None:
             msg = f"OAuth provider '{self.id}' loopback_client_secret requires loopback_client_id"
             raise ValueError(msg)
@@ -470,26 +483,26 @@ class OAuthProvider:
         resolution = self.client_config_resolution(runtime_paths)
         return resolution.config if resolution is not None else None
 
-    def client_config_resolution(self, runtime_paths: RuntimePaths) -> _OAuthClientConfigResolution | None:
+    def client_config_resolution(self, runtime_paths: RuntimePaths) -> OAuthClientConfigResolution | None:
         """Return stored or bundled OAuth app client settings and their source."""
         manager = get_runtime_credentials_manager(runtime_paths)
         for service in self.client_config_services:
             config = self._stored_client_config_from_service(runtime_paths, manager.load_credentials(service), True)
             if config is not None:
-                return _OAuthClientConfigResolution(config=config, service=service)
+                return OAuthClientConfigResolution(config=config, service=service)
         for service in self.shared_client_config_services:
             config = self._stored_client_config_from_service(runtime_paths, manager.load_credentials(service), False)
             if config is not None:
-                return _OAuthClientConfigResolution(config=config, service=service)
+                return OAuthClientConfigResolution(config=config, service=service)
         if self.loopback_client_id is None:
             return None
         redirect_uri = self.default_redirect_uri(runtime_paths)
-        if urlparse(redirect_uri).hostname not in {"localhost", "127.0.0.1", "::1"}:
+        if not is_oauth_loopback_hostname(urlparse(redirect_uri).hostname):
             return None
         service = (
             self.client_config_services[0] if self.client_config_services else self.shared_client_config_services[0]
         )
-        return _OAuthClientConfigResolution(
+        return OAuthClientConfigResolution(
             config=OAuthClientConfig(
                 client_id=self.loopback_client_id,
                 client_secret=self.loopback_client_secret,
@@ -507,7 +520,7 @@ class OAuthProvider:
     async def client_config_resolution_async(
         self,
         runtime_paths: RuntimePaths,
-    ) -> _OAuthClientConfigResolution | None:
+    ) -> OAuthClientConfigResolution | None:
         """Return stored client settings, after any lazy runtime bootstrap."""
         resolution = self.client_config_resolution(runtime_paths)
         if resolution is not None:

@@ -54,12 +54,6 @@ import { EnhancedConfigDialog } from "./EnhancedConfigDialog";
 import { FilterSelector } from "@/components/shared/FilterSelector";
 
 const SHARED_ONLY_PROVIDER_IDS = new Set(["spotify", "homeassistant"]);
-const GOOGLE_OAUTH_PROVIDER_IDS = new Set([
-  "google_drive",
-  "google_calendar",
-  "google_sheets",
-  "google_gmail",
-]);
 
 const titleFromProviderId = (providerId: string) =>
   providerId
@@ -895,7 +889,9 @@ export function Integrations() {
 
   const IntegrationCard = ({ integration }: { integration: Integration }) => {
     const isConnected = integration.status === "connected";
-    const usesGoogleUserData = GOOGLE_OAUTH_PROVIDER_IDS.has(integration.id);
+    const usesGoogleUserData = (
+      integration.oauth_provider_id ?? integration.id
+    ).startsWith("google_");
     const statusLabel = integration.status_error
       ? "Status error"
       : integration.status === "not_connected"
@@ -929,9 +925,12 @@ export function Integrations() {
               Google data for the selected agent and credential scope. Shared or
               unscoped agents can use the connected account for any user
               authorized to invoke them. Relevant results may be sent to your
-              configured AI model and retained in session or Matrix history.
-              MindRoom project maintainers do not automatically receive data
-              from local installations.{" "}
+              configured AI model and retained in session or Matrix history. The
+              installation operator and anyone with administrative or filesystem
+              access may be able to access stored credentials and data. Project
+              maintainers have no automatic access merely because they maintain
+              MindRoom; if they also operate this installation, they may have
+              operator access.{" "}
               <a
                 href="https://docs.mindroom.chat/privacy/"
                 target="_blank"
