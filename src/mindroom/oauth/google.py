@@ -21,6 +21,7 @@ from mindroom.oauth.providers import (
     OAuthProviderError,
     OAuthRuntimeEndpoints,
     OAuthTokenResult,
+    is_oauth_loopback_hostname,
     oauth_expires_at_from_response,
 )
 
@@ -61,6 +62,12 @@ def _provisioning_client_credentials(runtime_paths: RuntimePaths) -> tuple[str, 
             "and MINDROOM_LOCAL_CLIENT_SECRET. Run `mindroom connect --pair-code ...` again."
         )
         raise OAuthProviderError(msg)
+    parsed_url = httpx.URL(provisioning_url)
+    if parsed_url.scheme != "https" and not (
+        parsed_url.scheme == "http" and is_oauth_loopback_hostname(parsed_url.host)
+    ):
+        msg = "MINDROOM_PROVISIONING_URL must use HTTPS, except for localhost development."
+        raise OAuthProviderError(msg)
     return provisioning_url, client_id, client_secret
 
 
@@ -84,7 +91,7 @@ async def _google_runtime_bootstrapper(
 ) -> OAuthRuntimeEndpoints:
     """Fetch the installed-app client config through an authenticated local pairing."""
     resolution = _provider.client_config_resolution(runtime_paths)
-    if resolution is not None and resolution.custom:
+    if resolution is not None:
         return _google_runtime_endpoints()
 
     manager = get_runtime_credentials_manager(runtime_paths)

@@ -340,6 +340,15 @@ def _load_service_config_from_env() -> ServiceConfig:
     if not cors_origins:
         cors_origins = [DEFAULT_CORS_ORIGINS]
 
+    google_oauth_client_id = os.getenv("MINDROOM_GOOGLE_OAUTH_CLIENT_ID", "").strip() or None
+    google_oauth_client_secret = _read_secret(
+        env_name="MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET",
+        file_env_name="MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET_FILE",
+    )
+    if (google_oauth_client_id is None) != (google_oauth_client_secret is None):
+        msg = "MINDROOM_GOOGLE_OAUTH_CLIENT_ID and its client secret must be configured together."
+        raise ValueError(msg)
+
     return ServiceConfig(
         matrix_homeserver=matrix_homeserver,
         matrix_server_name=matrix_server_name,
@@ -351,11 +360,8 @@ def _load_service_config_from_env() -> ServiceConfig:
         cors_origins=cors_origins,
         listen_host=os.getenv("MINDROOM_PROVISIONING_HOST", DEFAULT_LISTEN_HOST).strip(),
         listen_port=_env_int("MINDROOM_PROVISIONING_PORT", default=DEFAULT_LISTEN_PORT, minimum=1),
-        google_oauth_client_id=os.getenv("MINDROOM_GOOGLE_OAUTH_CLIENT_ID", "").strip() or None,
-        google_oauth_client_secret=_read_secret(
-            env_name="MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET",
-            file_env_name="MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET_FILE",
-        ),
+        google_oauth_client_id=google_oauth_client_id,
+        google_oauth_client_secret=google_oauth_client_secret,
     )
 
 

@@ -40,6 +40,32 @@ def _service_config(
     )
 
 
+@pytest.mark.parametrize(
+    ("client_id", "client_secret"),
+    [("google-client-id", None), (None, "google-client-secret")],
+)
+def test_service_config_rejects_partial_google_oauth_client(
+    monkeypatch: pytest.MonkeyPatch,
+    client_id: str | None,
+    client_secret: str | None,
+) -> None:
+    """The provisioning service fails at startup when only half the Google client is configured."""
+    monkeypatch.setenv("MATRIX_REGISTRATION_TOKEN", "server-secret-token")
+    monkeypatch.delenv("MATRIX_REGISTRATION_TOKEN_FILE", raising=False)
+    monkeypatch.delenv("MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET_FILE", raising=False)
+    if client_id is None:
+        monkeypatch.delenv("MINDROOM_GOOGLE_OAUTH_CLIENT_ID", raising=False)
+    else:
+        monkeypatch.setenv("MINDROOM_GOOGLE_OAUTH_CLIENT_ID", client_id)
+    if client_secret is None:
+        monkeypatch.delenv("MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET", raising=False)
+    else:
+        monkeypatch.setenv("MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET", client_secret)
+
+    with pytest.raises(ValueError, match="must be configured together"):
+        provisioning._load_service_config_from_env()
+
+
 def _patch_matrix_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     token_to_user = {
         "token-alice": "@alice:mindroom.chat",
