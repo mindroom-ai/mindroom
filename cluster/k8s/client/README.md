@@ -76,6 +76,18 @@ The chart serves `/runtime-config.js` directly from nginx because the image entr
 The client registers its service worker at `basePath/sw.js`, scoped to `basePath/`.
 Set `serviceWorker.enabled: false` to keep the client from registering it at all.
 
+When the client shares an origin with sibling applications, list their root-relative path prefixes
+so the PWA app-shell fallback leaves those navigations to the network:
+
+```yaml
+serviceWorker:
+  navigationFallbackExcludePaths:
+    - /other-app
+```
+
+Each prefix excludes its exact path and descendants without excluding similarly named client routes.
+Use a MindRoom Chat release that supports runtime navigation exclusions.
+
 A Matrix client that previously controlled the origin root is a known footgun: its root-scoped service worker keeps serving the old app for every path on the origin, including the new base path.
 Browsers replace a service worker by re-fetching its script URL, so the deterministic fix is to serve a worker at the old root `/sw.js` whose only job is to purge caches, release its clients into `basePath/`, and unregister itself.
 Enable that cleanup worker when migrating such an origin:

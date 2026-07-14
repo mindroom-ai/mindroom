@@ -280,6 +280,18 @@ jobs:
             --set serviceWorker.enabled=false \
             > "$render_dir/base-path.yaml"
           grep -F 'location = /mindroom/version.json' "$render_dir/base-path.yaml"
+          cat > "$render_dir/service-worker-values.yaml" <<'EOF'
+          serviceWorker:
+            navigationFallbackExcludePaths:
+              - /other-app
+              - /control-panel
+          EOF
+          helm template mindroom-client "$CLIENT_CHART_DIR" \
+            --namespace mindroom \
+            --values "$render_dir/service-worker-values.yaml" \
+            > "$render_dir/service-worker.yaml"
+          grep -F 'window.__SERVICE_WORKER_NAVIGATION_FALLBACK_EXCLUDE_PATHS__ = [\"/other-app\",\"/control-panel\"]' \
+            "$render_dir/service-worker.yaml"
           helm template mindroom-client "$CLIENT_CHART_DIR" \
             --namespace mindroom \
             --set config.existingConfigMap=existing-client-config \

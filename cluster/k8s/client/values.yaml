@@ -82,6 +82,9 @@ matrixRTC:
 serviceWorker:
   # Register the client service worker, scoped to basePath.
   enabled: true
+  # Root-relative sibling application paths that the PWA navigation fallback
+  # must leave to the network. Requires client support for runtime exclusions.
+  navigationFallbackExcludePaths: []
 
 # Serve a cleanup service worker at the origin-root /sw.js.
 # A Matrix client that previously controlled the origin root can leave a
