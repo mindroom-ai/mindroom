@@ -367,6 +367,34 @@ async def test_llm_usage_telemetry_normalizes_anthropic_cache_tokens(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_llm_usage_telemetry_handles_missing_cache_read_tokens(tmp_path: Path) -> None:
+    """Missing cache counters should not break telemetry after a successful response."""
+    usage = MessageMetrics(input_tokens=100)
+    # Agno's OpenAI Responses parser assigns its optional cached_tokens value directly.
+    vars(usage)["cache_read_tokens"] = None
+    model = _FakeModel(response_usage=usage)
+
+    with capture_logs() as logs:
+        install_llm_request_logging(
+            model,
+            agent_name="default",
+            debug_config=DebugConfig(),
+            default_log_dir=tmp_path,
+            configured_provider="openai",
+        )
+        await model.ainvoke(
+            messages=[Message(role="user", content="hello")],
+            assistant_message=Message(role="assistant"),
+            tools=[],
+        )
+
+    usage_log = logs[0]
+    assert usage_log["cache_read_tokens"] is None
+    assert usage_log["uncached_input_tokens"] == 100
+    assert usage_log["cache_read_ratio"] == 0.0
+
+
+@pytest.mark.asyncio
 async def test_llm_usage_telemetry_reports_missing_provider_metrics(tmp_path: Path) -> None:
     """Completed calls without provider metrics should remain visible in telemetry."""
     model = _FakeModel()

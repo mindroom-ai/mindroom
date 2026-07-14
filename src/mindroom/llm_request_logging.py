@@ -356,9 +356,10 @@ def _log_llm_usage(
         configured_provider=configured_provider,
         model_id=model.id,
     )
-    uncached_input_tokens = context_input_tokens - usage.cache_read_tokens if context_input_tokens is not None else None
+    cache_read_tokens = usage.cache_read_tokens or 0
+    uncached_input_tokens = context_input_tokens - cache_read_tokens if context_input_tokens is not None else None
     cache_read_ratio = (
-        usage.cache_read_tokens / context_input_tokens
+        cache_read_tokens / context_input_tokens
         if context_input_tokens is not None and context_input_tokens > 0
         else 0.0
     )
