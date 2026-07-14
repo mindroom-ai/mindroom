@@ -22,6 +22,7 @@ from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, SendTextRequest
 from mindroom.dispatch_source import ScheduledHistoryBudget
+from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.logging_config import get_logger
@@ -438,7 +439,16 @@ async def test_scheduled_history_limit_keeps_refreshed_history_for_payload_and_s
     assert prepared_request.thread_history is refreshed
     assert prepared_request.scheduled_history_budget is request.scheduled_history_budget
     assert memory_history is refreshed
-    assert thread_summary_message_count_hint(prepared_request.thread_history) == 5
+    assert (
+        thread_summary_message_count_hint(
+            prepared_request.thread_history,
+            trusted_sender_ids=current_internal_sender_ids(
+                coordinator.deps.runtime.config,
+                coordinator.deps.runtime_paths,
+            ),
+        )
+        == 5
+    )
 
 
 # ---------------------------------------------------------------------------
