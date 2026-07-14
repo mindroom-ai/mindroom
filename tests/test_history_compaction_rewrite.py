@@ -51,7 +51,7 @@ from mindroom.hooks import (
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.message_target import MessageTarget
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
-from mindroom.token_budget import estimate_text_tokens
+from mindroom.token_budget import estimate_compaction_input_tokens, estimate_text_tokens
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
     FakeModel,
@@ -142,6 +142,34 @@ async def test_rewrite_passes_full_summary_input_budget_into_chunk_construction(
     assert "run-1 user" in summary_inputs[0]
     assert "run-5 user" in summary_inputs[0]
     assert rewrite_result.compacted_run_count == 5
+
+
+def test_build_summary_input_accounts_for_wrappers_separators_and_run_indexes() -> None:
+    runs = [
+        _completed_run(
+            f"run-{index}",
+            messages=[Message(role="user", content="payload")],
+        )
+        for index in range(300)
+    ]
+    full_input, full_runs = _build_summary_input(
+        previous_summary="existing summary",
+        compacted_runs=runs,
+        max_input_tokens=1_000_000,
+        history_settings=_ALL_HISTORY_SETTINGS,
+    )
+    assert len(full_runs) == len(runs)
+
+    tight_budget = estimate_compaction_input_tokens(full_input) - 50
+    summary_input, included_runs = _build_summary_input(
+        previous_summary="existing summary",
+        compacted_runs=runs,
+        max_input_tokens=tight_budget,
+        history_settings=_ALL_HISTORY_SETTINGS,
+    )
+
+    assert 0 < len(included_runs) < len(runs)
+    assert estimate_compaction_input_tokens(summary_input) <= tight_budget
 
 
 @pytest.mark.asyncio

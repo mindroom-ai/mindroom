@@ -591,14 +591,18 @@ def _build_summary_input(
         escaped_summary = _escape_xml_content(previous_summary)
         summary_block = f"<previous_summary>\n{escaped_summary}\n</previous_summary>"
 
-    remaining = max_input_tokens - estimate_compaction_input_tokens(summary_block) - _WRAPPER_OVERHEAD_TOKENS
+    empty_input = _compose_summary_input(summary_block, "")
+    remaining = max_input_tokens - estimate_compaction_input_tokens(empty_input) - _WRAPPER_OVERHEAD_TOKENS
 
     if remaining <= 0:
         return summary_block, []
 
     included_runs: list[RunOutput | TeamRunOutput] = []
-    for run in compacted_runs:
-        run_tokens = _estimate_serialized_run_tokens(run, history_settings)
+    serialized_runs: list[str] = []
+    for index, run in enumerate(compacted_runs):
+        serialized_run = _serialize_run(run, index, history_settings)
+        separator = "\n\n" if serialized_runs else ""
+        run_tokens = estimate_compaction_input_tokens(f"{separator}{serialized_run}")
         if run_tokens > remaining:
             if not included_runs:
                 return _build_oversized_summary_input(
@@ -609,15 +613,13 @@ def _build_summary_input(
                 )
             break
         included_runs.append(run)
+        serialized_runs.append(serialized_run)
         remaining -= run_tokens
 
     if not included_runs:
         return summary_block, []
 
-    serialized_runs = "\n\n".join(
-        _serialize_run(run, index, history_settings) for index, run in enumerate(included_runs)
-    )
-    return _compose_summary_input(summary_block, serialized_runs), included_runs
+    return _compose_summary_input(summary_block, "\n\n".join(serialized_runs)), included_runs
 
 
 def _build_oversized_summary_input(
@@ -738,10 +740,8 @@ def _truncate_excerpt(text: str, max_chars: int) -> str:
 def _remaining_excerpt_budget(max_input_tokens: int, summary_block: str) -> int:
     return (
         max_input_tokens
-        - estimate_compaction_input_tokens(summary_block)
-        - estimate_compaction_input_tokens(
-            "<new_conversation>\n\n</new_conversation>",
-        )
+        - estimate_compaction_input_tokens(_compose_summary_input(summary_block, ""))
+        - _WRAPPER_OVERHEAD_TOKENS
     )
 
 
@@ -751,10 +751,6 @@ def _compose_summary_input(summary_block: str, serialized_runs: str) -> str:
         parts.append(summary_block)
     parts.append(f"<new_conversation>\n{serialized_runs}\n</new_conversation>")
     return "\n\n".join(parts)
-
-
-def _estimate_serialized_run_tokens(run: RunOutput | TeamRunOutput, history_settings: ResolvedHistorySettings) -> int:
-    return estimate_compaction_input_tokens(_serialize_run(run, 0, history_settings))
 
 
 def _messages_for_runs(
