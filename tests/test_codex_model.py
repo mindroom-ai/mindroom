@@ -82,6 +82,7 @@ def test_normalize_codex_model_id_uses_endpoint_slug(configured_id: str, endpoin
 def test_codex_home_expands_explicit_tilde(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Explicit Codex home paths should expand a user-home prefix like the default path."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
 
     assert _codex_home_path(codex_home="~/custom-codex") == tmp_path / "custom-codex"
 
