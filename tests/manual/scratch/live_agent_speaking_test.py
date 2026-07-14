@@ -58,7 +58,7 @@ from livekit import rtc  # noqa: E402
 
 from mindroom.config.agent import AgentConfig  # noqa: E402
 from mindroom.config.auth import AuthorizationConfig  # noqa: E402
-from mindroom.config.calls import CallsConfig  # noqa: E402
+from mindroom.config.calls import CallAgentConfig, CallsConfig  # noqa: E402
 from mindroom.config.main import Config  # noqa: E402
 from mindroom.config.memory import MemoryConfig  # noqa: E402
 from mindroom.config.models import ModelConfig  # noqa: E402
@@ -129,23 +129,30 @@ def log(m: str) -> None:
 def call_config(openai_key: str) -> CallsConfig:
     """Build the selected real call backend for this live harness."""
     if CALL_BACKEND == "realtime":
-        return CallsConfig(enabled=True, agents=[AGENT], livekit_service_url=SERVICE_URL)
+        return CallsConfig(
+            enabled=True,
+            agents={AGENT: CallAgentConfig()},
+            livekit_service_url=SERVICE_URL,
+        )
     return CallsConfig(
         enabled=True,
-        agents=[AGENT],
+        agents={
+            AGENT: CallAgentConfig(
+                backend="cascaded",
+                stt=SpeechServiceConfig(
+                    provider="openai",
+                    model="gpt-4o-transcribe",
+                    api_key=openai_key,
+                ),
+                tts=SpeechServiceConfig(
+                    provider="openai",
+                    model="tts-1",
+                    api_key=openai_key,
+                    extra_kwargs={"voice": "alloy"},
+                ),
+            ),
+        },
         livekit_service_url=SERVICE_URL,
-        backend="cascaded",
-        stt=SpeechServiceConfig(
-            provider="openai",
-            model="gpt-4o-transcribe",
-            api_key=openai_key,
-        ),
-        tts=SpeechServiceConfig(
-            provider="openai",
-            model="tts-1",
-            api_key=openai_key,
-            extra_kwargs={"voice": "alloy"},
-        ),
     )
 
 

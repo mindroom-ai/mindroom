@@ -14,7 +14,7 @@ import pytest
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
-from mindroom.config.calls import CallsConfig
+from mindroom.config.calls import CallAgentConfig, CallsConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
@@ -237,7 +237,10 @@ def test_call_admission_reads_live_invites_from_managed_agents(tmp_path: Path) -
     bot = _agent_bot(tmp_path)
     other = _agent_bot(tmp_path, agent_name="other")
     bot.config.agents["other"] = AgentConfig(display_name="Other")
-    bot.config.calls = CallsConfig(enabled=True, agents=["code", "other"])
+    bot.config.calls = CallsConfig(
+        enabled=True,
+        agents={"code": CallAgentConfig(), "other": CallAgentConfig()},
+    )
     bot.orchestrator = MagicMock(agent_bots={"code": bot, "other": other})
     bot._room_lifecycle.invited_rooms.add("!code-call:localhost")
     other._room_lifecycle.invited_rooms.add("!other-call:localhost")

@@ -345,7 +345,7 @@ async def apply_config_change(
         if load_error:
             return load_error
         assert config is not None
-        config_dict = config.model_dump()
+        config_dict = config.authored_model_dump()
 
         # Apply the specific change
         _set_nested_value(config_dict, config_path_str, new_value)

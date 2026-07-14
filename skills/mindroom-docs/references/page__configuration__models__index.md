@@ -166,20 +166,7 @@ Supported GPT-5.6 effort values are `low`, `medium`, `high`, `xhigh`, and `max`.
 Codex clients also show Ultra, but Ultra adds Codex-managed subagent orchestration and is not reproduced by this model adapter.
 The starter Codex profile uses `medium`.
 
-### Codex and Speech Features
-
-The Codex provider handles model inference only; the recommended GPT-5.6 models accept text and image input and return text.
-Other account-exposed models can have different modalities, such as the text-only GPT-5.3 Codex Spark preview.
-Codex ChatGPT OAuth does not authenticate OpenAI speech or Realtime APIs.
-ChatGPT and OpenAI API billing are [managed separately](https://help.openai.com/en/articles/9039756-managing-billing-settings-on-chatgpt-web-and-platform).
-
-| Capability | Available through `provider: codex` | Configuration |
-|------------|-------------------------------------|---------------|
-| Text and image input with text output | Yes | The normal model configuration above |
-| Matrix voice-message transcription | No | Configure [`voice.stt`](https://docs.mindroom.chat/voice/) with OpenAI API credentials or an OpenAI-compatible local endpoint |
-| Text-to-speech | No | Configure a [TTS tool](https://docs.mindroom.chat/voice/#text-to-speech-tools) or cascaded call speech service |
-| Realtime speech-to-speech calls | No | Configure the [realtime call backend](https://docs.mindroom.chat/voice-calls/) with a separate OpenAI API credential service |
-| Cascaded calls using Codex for reasoning | Yes | Keep the agent on Codex and configure separate STT and TTS services in the [cascaded backend](https://docs.mindroom.chat/voice-calls/#cascaded-cloud-example) |
+The Codex provider supports text and image input with text output; transcription, text-to-speech, and realtime speech are not supported.
 
 This adapter follows the local Codex CLI authentication-file and backend contracts, so upstream Codex changes can require a MindRoom update.
 Use `provider: openai` when you want the public OpenAI API contract and API billing instead.

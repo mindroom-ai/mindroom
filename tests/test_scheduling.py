@@ -2086,6 +2086,7 @@ async def test_schedule_task_persists_via_admin_when_active_agent_lacks_state_po
 
     assert task_id == "task1234"
     assert "✅ Scheduled" in message
+    assert "**Delivery:** Current room/thread scope" in message
     matrix_admin.put_room_state.assert_awaited_once()
     tasks = await get_scheduled_tasks_for_room(client=client, room_id="!test:server")
     assert [task.task_id for task in tasks] == ["task1234"]

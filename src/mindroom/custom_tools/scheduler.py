@@ -28,18 +28,16 @@ class SchedulerTools(Toolkit):
             tools=[self.schedule, self.edit_schedule, self.list_schedules, self.cancel_schedule],
         )
 
-    async def schedule(self, request: str, new_thread: bool = False, history_limit: int | None = None) -> str:
+    async def schedule(self, request: str, new_thread: bool, history_limit: int | None = None) -> str:
         """Schedule a task using natural language.
 
         This uses the exact same scheduling backend as the `!schedule` command.
-        By default, the task posts back into the current scope.
-        Set `new_thread=True` to schedule a future room-level root message instead.
 
         Args:
             request: The scheduling request, e.g. "in 5 minutes remind me to check logs"
-            new_thread: When `False`, post in the current room/thread scope.
-                When `True`, schedule a future room-level root message that can become
-                its own thread when someone replies later.
+            new_thread: Required delivery choice. Use `False` to post in the current
+                room/thread scope. Use `True` to schedule a future room-level root
+                message that can become its own thread when someone replies later.
             history_limit: Max recent thread messages included as context each time
                 the task fires. Use 0 for no history (recommended for recurring
                 polling tasks), or leave unset for full history.

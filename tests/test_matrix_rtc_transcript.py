@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
-from mindroom.config.calls import CallsConfig
+from mindroom.config.calls import CallAgentConfig, CallsConfig
 from mindroom.config.main import Config
 from mindroom.matrix_rtc.transcript import CallTranscript
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -35,7 +35,7 @@ def _config(
     return Config(
         agents={AGENT: agent},
         models={},
-        calls=CallsConfig(enabled=True, agents=[AGENT]),
+        calls=CallsConfig(enabled=True, agents={AGENT: CallAgentConfig()}),
     )
 
 

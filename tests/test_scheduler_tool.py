@@ -63,9 +63,17 @@ async def test_scheduler_tool_requires_context() -> None:
     """Tool should fail clearly when called outside Matrix response context."""
     tools = SchedulerTools()
 
-    result = await tools.schedule("in 10 minutes remind me to check logs")
+    result = await tools.schedule("in 10 minutes remind me to check logs", new_thread=False)
 
     assert "unavailable" in result
+
+
+def test_scheduler_tool_requires_explicit_delivery_mode() -> None:
+    """The model-facing schema must not silently choose a delivery scope."""
+    function = SchedulerTools().async_functions["schedule"].model_copy(deep=True)
+    function.process_entrypoint()
+
+    assert set(function.parameters["required"]) == {"request", "new_thread"}
 
 
 @pytest.mark.asyncio
@@ -83,9 +91,9 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         ) as mock_schedule,
         tool_runtime_context(context),
     ):
-        result = await tools.schedule("tomorrow at 3pm check deployment")
+        result = await tools.schedule("tomorrow at 3pm check deployment", new_thread=False)
         new_thread_result = await tools.schedule("tomorrow at 4pm check deployment", new_thread=True)
-        limited_result = await tools.schedule("every 25 minutes poll the queue", history_limit=0)
+        limited_result = await tools.schedule("every 25 minutes poll the queue", new_thread=False, history_limit=0)
 
     assert result == "✅ Scheduled"
     assert new_thread_result == "✅ Scheduled"
@@ -147,7 +155,7 @@ async def test_scheduler_tool_raises_when_backend_rejects_request() -> None:
         tool_runtime_context(context),
         pytest.raises(RuntimeError, match="schedule is not valid"),
     ):
-        await tools.schedule("next message")
+        await tools.schedule("next message", new_thread=False)
 
 
 @pytest.mark.asyncio
