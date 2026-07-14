@@ -204,8 +204,8 @@ mindroom run
 - [Deployment](https://docs.mindroom.chat/deployment/) - Docker and Kubernetes deployment
 - [Bridges](https://docs.mindroom.chat/deployment/bridges/) - Connect Telegram, Slack, and other platforms to Matrix
 - [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) - Isolate code-execution tools in a sandbox
-- [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) - Admin OAuth setup for Gmail/Calendar/Drive/Sheets
-- [Google Services OAuth (Individual)](https://docs.mindroom.chat/deployment/google-services-user-oauth/) - Single-user OAuth setup
+- [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) - Custom admin OAuth setup for Gmail/Calendar/Drive/Sheets
+- [Google Services OAuth (Local Install)](https://docs.mindroom.chat/deployment/google-services-user-oauth/) - Connect Google locally without Cloud setup
 - [CLI Reference](https://docs.mindroom.chat/cli/) - Command-line interface
 - [Support](https://docs.mindroom.chat/support/) - Contact and troubleshooting help
 - [Privacy Policy](https://docs.mindroom.chat/privacy/) - Privacy and data handling information

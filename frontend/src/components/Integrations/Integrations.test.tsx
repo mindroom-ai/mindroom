@@ -418,6 +418,36 @@ describe("Integrations", () => {
     });
   });
 
+  it("discloses Google data handling before connection", async () => {
+    render(<Integrations />);
+
+    await waitFor(() => {
+      expect(
+        screen.getAllByText(
+          /By connecting, you authorize this MindRoom installation/,
+        ).length,
+      ).toBeGreaterThan(0);
+      expect(
+        screen.getAllByText(
+          /MindRoom project maintainers do not automatically receive data from local installations/,
+        ).length,
+      ).toBeGreaterThan(0);
+      expect(
+        screen.getAllByText(
+          /Shared or unscoped agents can use the connected account for any user authorized to invoke them/,
+        ).length,
+      ).toBeGreaterThan(0);
+    });
+    for (const link of screen.getAllByRole("link", {
+      name: "Privacy policy",
+    })) {
+      expect(link).toHaveAttribute(
+        "href",
+        "https://docs.mindroom.chat/privacy/",
+      );
+    }
+  });
+
   it("should display all integration cards", async () => {
     render(<Integrations />);
 
@@ -511,6 +541,7 @@ describe("Integrations", () => {
       status: "not_connected",
       connected: false,
       oauth_client_configured: true,
+      oauth_custom_client_configured: true,
       oauth_client_config_service: "google_drive_oauth_client",
     });
 
@@ -552,6 +583,7 @@ describe("Integrations", () => {
       status: "not_connected",
       connected: false,
       oauth_client_configured: true,
+      oauth_custom_client_configured: true,
       oauth_client_config_service: "google_oauth_client",
       oauth_client_redirect_uri_supported: false,
     });
@@ -581,6 +613,47 @@ describe("Integrations", () => {
         expect.arrayContaining([
           expect.objectContaining({ name: "redirect_uri" }),
         ]),
+      );
+    });
+  });
+
+  it("offers a custom client without blocking bundled OAuth", async () => {
+    mockGoogleDriveLoadStatus.mockResolvedValueOnce({
+      status: "available",
+      connected: false,
+      oauth_client_configured: true,
+      oauth_custom_client_configured: false,
+      oauth_client_config_service: "google_drive_oauth_client",
+      oauth_client_redirect_uri_supported: true,
+    });
+
+    render(<Integrations />);
+
+    await waitFor(() => {
+      expect(
+        screen.getAllByRole("button", { name: "Connect" }).length,
+      ).toBeGreaterThan(0);
+      expect(
+        screen.getByRole("button", { name: "Use custom client" }),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Configure client" }),
+      ).not.toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Use custom client" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/"name":"client_secret"/)).toHaveTextContent(
+        /"required":true/,
+      );
+      expect(mockEnhancedConfigDialogProps).toHaveBeenCalledWith(
+        expect.objectContaining({
+          service: "google_drive_oauth_client",
+          configFields: expect.arrayContaining([
+            expect.objectContaining({ name: "redirect_uri" }),
+          ]),
+        }),
       );
     });
   });

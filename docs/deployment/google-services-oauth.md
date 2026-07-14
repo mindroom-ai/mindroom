@@ -6,7 +6,8 @@ icon: lucide/mail
 
 MindRoom uses the generic OAuth framework for Google tools.
 Each Google service has its own provider ID, callback URL, token service, OAuth client config service, and editable tool settings service.
-There is no bundled `/api/google/*` OAuth flow.
+Local loopback installations use MindRoom's bundled public desktop OAuth client with PKCE and do not need Google Cloud setup.
+Public and organization-managed deployments can override the bundled client with their own Google Cloud Web application client.
 
 ## Providers
 
@@ -17,9 +18,10 @@ There is no bundled `/api/google/*` OAuth flow.
 | Google Sheets | `google_sheets` | `/api/oauth/google_sheets/callback` | `google_sheets_oauth` | `google_sheets_oauth_client` | `google_sheets` | Sheets read/write, plus OpenID email/profile |
 | Gmail | `google_gmail` | `/api/oauth/google_gmail/callback` | `google_gmail_oauth` | `google_gmail_oauth_client` | `gmail` | Gmail readonly, modify, compose plus OpenID email/profile |
 
-## Google Cloud Setup
+## Custom Google Cloud Setup
 
-Create an OAuth client in Google Cloud Console.
+Skip this section for a normal local installation.
+Create a **Web application** OAuth client in Google Cloud Console when you need a public callback origin or a custom Google OAuth app.
 Enable only the APIs for the tools you plan to use.
 Add one authorized redirect URI for each provider you enable.
 
@@ -34,9 +36,9 @@ http://localhost:8765/api/oauth/google_gmail/callback
 
 For production, replace the origin with your public MindRoom origin.
 
-## Stored Client Config
+## Custom Client Config
 
-OAuth app client config is stored through normal credential storage, separate from user OAuth tokens and editable tool settings.
+Custom OAuth app client config is stored through normal credential storage, separate from user OAuth tokens and editable tool settings.
 Use one provider-specific service when one Google Cloud OAuth client should apply to only that provider.
 Use `google_oauth_client` when one shared Google Cloud OAuth client should apply to every Google provider.
 Provider-specific services win over `google_oauth_client`.
@@ -57,7 +59,7 @@ The shared `google_oauth_client` service ignores `redirect_uri` and derives each
 Dashboard credential responses redact `client_secret`.
 Saving redacted client config may omit or blank `client_secret` only when `client_id` is unchanged.
 Changing `client_id` requires submitting the matching new `client_secret`.
-First-time client config saves require `client_id` and `client_secret`.
+First-time custom client config saves require `client_id` and `client_secret`.
 Client config services are not worker-grantable and are never mirrored into worker containers.
 Client config services cannot be copied into ordinary credential services.
 
@@ -92,6 +94,8 @@ GOOGLE_GMAIL_ALLOWED_HOSTED_DOMAINS=example.com
 ## Runtime Behavior
 
 Dashboard and agent-issued connect links use `/api/oauth/{provider}/connect` or `/api/oauth/{provider}/authorize`.
+The bundled desktop client is selected only when no stored custom client exists and the resolved callback hostname is a loopback hostname.
+Stored provider-specific or shared custom client config always takes precedence over the bundled client.
 OAuth callback state is stored server-side as an opaque token and bound to the authenticated dashboard user and scoped credential target.
 Connections made for a shared-scope agent are stored per agent, so other agents never inherit that account.
 Disconnecting a provider removes the token service for the selected scope and preserves that provider's editable tool settings.

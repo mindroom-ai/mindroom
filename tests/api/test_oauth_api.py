@@ -869,6 +869,65 @@ def test_provider_exchange_and_refresh_use_oauth_client(
     assert refreshed["expires_at"] == 1300.0
 
 
+def test_provider_exchange_uses_public_auth_for_bundled_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path, {})
+    provider = OAuthProvider(
+        id="public_mail",
+        display_name="Public Mail",
+        authorization_url="https://auth.example.test/authorize",
+        token_url="https://auth.example.test/token",
+        scopes=("mail.read",),
+        credential_service="public_mail_oauth",
+        client_config_services=("public_mail_oauth_client",),
+        pkce_code_challenge_method="S256",
+        loopback_client_id="bundled-public-client",
+    )
+    seen: dict[str, Any] = {}
+
+    class FakeOAuth2Client:
+        def __init__(self, **kwargs: object) -> None:
+            seen["init_kwargs"] = kwargs
+
+        async def __aenter__(self) -> FakeOAuth2Client:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def fetch_token(self, url: str, **kwargs: object) -> dict[str, Any]:
+            seen["fetch"] = {"url": url, **kwargs}
+            return {"access_token": "access-token", "scope": "mail.read"}
+
+    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+
+    result = asyncio.run(
+        provider.exchange_code(
+            "auth-code",
+            runtime_paths,
+            code_verifier="pkce-verifier",
+        ),
+    )
+
+    assert seen["init_kwargs"] == {
+        "client_id": "bundled-public-client",
+        "client_secret": None,
+        "scope": ("mail.read",),
+        "redirect_uri": "http://localhost:8765/api/oauth/public_mail/callback",
+        "token_endpoint_auth_method": "none",
+        "timeout": 20.0,
+    }
+    assert seen["fetch"] == {
+        "url": "https://auth.example.test/token",
+        "code": "auth-code",
+        "grant_type": "authorization_code",
+        "code_verifier": "pkce-verifier",
+    }
+    assert result.token_data["client_id"] == "bundled-public-client"
+
+
 def test_provider_refresh_token_data_skips_unexpired_access_token(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1525,7 +1584,7 @@ def test_google_oauth_client_config_prefers_stored_provider_config(tmp_path: Pat
     )
 
 
-def test_google_oauth_client_config_ignores_env(tmp_path: Path) -> None:
+def test_google_oauth_client_config_ignores_env_for_public_deployment(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
         {
@@ -3532,7 +3591,10 @@ def test_google_status_reports_connected_with_service_account(tmp_path: Path) ->
         status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
 
     assert status_response.status_code == 200
-    assert status_response.json()["has_client_config"] is False
+    assert status_response.json()["has_client_config"] is True
+    assert status_response.json()["has_custom_client_config"] is False
+    assert status_response.json()["client_config_service"] == "google_drive_oauth_client"
+    assert status_response.json()["client_config_redirect_uri_supported"] is True
     assert status_response.json()["has_service_account_config"] is True
     assert status_response.json()["connected"] is True
 

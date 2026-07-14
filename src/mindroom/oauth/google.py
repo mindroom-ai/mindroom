@@ -24,6 +24,9 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# Installed apps distribute a public client ID and cannot keep a client secret.
+# PKCE protects the authorization-code exchange for this loopback-only client.
+_GOOGLE_PUBLIC_OAUTH_CLIENT_ID = "974295579207-ibhtamfcpa2pp4gjh36bf6cvnb423gk2.apps.googleusercontent.com"
 GOOGLE_IDENTITY_SCOPES = (
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
@@ -134,6 +137,8 @@ def _google_oauth_provider(
             "include_granted_scopes": "true",
             "prompt": "consent",
         },
+        pkce_code_challenge_method="S256",
+        loopback_client_id=_GOOGLE_PUBLIC_OAUTH_CLIENT_ID,
         status_capabilities=status_capabilities,
         token_parser=_google_token_parser,
     )

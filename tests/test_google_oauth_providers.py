@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from mindroom.oauth.google import _google_oauth_provider, _google_token_parser
+from mindroom.constants import resolve_runtime_paths
+from mindroom.oauth.google import (
+    _GOOGLE_PUBLIC_OAUTH_CLIENT_ID,
+    _google_oauth_provider,
+    _google_token_parser,
+)
 from mindroom.oauth.google_calendar import _GOOGLE_CALENDAR_OAUTH_SCOPES, google_calendar_oauth_provider
 from mindroom.oauth.google_drive import _GOOGLE_DRIVE_OAUTH_SCOPES, google_drive_oauth_provider
 from mindroom.oauth.google_gmail import _GOOGLE_GMAIL_OAUTH_SCOPES, google_gmail_oauth_provider
@@ -15,6 +22,8 @@ from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_r
 from mindroom.oauth.service import build_oauth_connect_instruction
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.oauth.providers import OAuthProvider
 
 GOOGLE_AUTHORIZATION_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -118,6 +127,9 @@ def test_public_google_oauth_providers_preserve_shared_google_oauth_fields(provi
         f"MINDROOM_OAUTH_{provider_prefix}_ALLOWED_HOSTED_DOMAINS",
     )
     assert provider.extra_auth_params == GOOGLE_EXTRA_AUTH_PARAMS
+    assert provider.pkce_code_challenge_method == "S256"
+    assert provider.loopback_client_id == _GOOGLE_PUBLIC_OAUTH_CLIENT_ID
+    assert provider.loopback_client_secret is None
     assert provider.token_parser is _google_token_parser
 
 
@@ -151,8 +163,57 @@ def test_google_oauth_provider_helper_builds_common_google_provider_skeleton() -
         "MINDROOM_OAUTH_GOOGLE_EXAMPLE_ALLOWED_HOSTED_DOMAINS",
     )
     assert provider.extra_auth_params == GOOGLE_EXTRA_AUTH_PARAMS
+    assert provider.pkce_code_challenge_method == "S256"
+    assert provider.loopback_client_id == _GOOGLE_PUBLIC_OAUTH_CLIENT_ID
+    assert provider.loopback_client_secret is None
     assert provider.status_capabilities == ("Example read/write",)
     assert provider.token_parser is _google_token_parser
+
+
+def test_google_oauth_provider_uses_bundled_public_client_on_fresh_install(tmp_path: Path) -> None:
+    """A fresh local runtime can start Google OAuth without stored app credentials."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={},
+    )
+    provider = google_drive_oauth_provider()
+
+    resolution = provider.client_config_resolution(runtime_paths)
+
+    assert resolution is not None
+    assert resolution.stored is False
+    assert resolution.service == "google_drive_oauth_client"
+    assert resolution.config.client_id == _GOOGLE_PUBLIC_OAUTH_CLIENT_ID
+    assert resolution.config.client_secret is None
+    assert resolution.config.redirect_uri == "http://localhost:8765/api/oauth/google_drive/callback"
+    assert resolution.config.token_endpoint_auth_method == "none"  # noqa: S105
+
+
+def test_google_oauth_provider_bundled_client_authorization_uses_pkce(tmp_path: Path) -> None:
+    """The bundled desktop client sends an S256 challenge and the local callback."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={},
+    )
+    provider = google_gmail_oauth_provider()
+    code_verifier = provider.issue_pkce_code_verifier()
+    assert code_verifier is not None
+
+    auth_url = asyncio.run(
+        provider.authorization_uri_async(
+            runtime_paths,
+            state="test-state",
+            code_verifier=code_verifier,
+        ),
+    )
+    params = parse_qs(urlparse(auth_url).query)
+
+    assert params["client_id"] == [_GOOGLE_PUBLIC_OAUTH_CLIENT_ID]
+    assert params["redirect_uri"] == ["http://localhost:8765/api/oauth/google_gmail/callback"]
+    assert params["code_challenge_method"] == ["S256"]
+    assert params["state"] == ["test-state"]
 
 
 def test_oauth_connection_required_payload_preserves_structured_fields() -> None:

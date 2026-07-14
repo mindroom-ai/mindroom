@@ -187,6 +187,7 @@ describe("Generic OAuth integration provider", () => {
       status: "not_connected",
       connected: false,
       oauth_client_configured: false,
+      oauth_custom_client_configured: false,
     });
   });
 
@@ -199,6 +200,7 @@ describe("Generic OAuth integration provider", () => {
       status: "not_connected",
       connected: false,
       oauth_client_configured: false,
+      oauth_custom_client_configured: false,
     });
   });
 
@@ -207,17 +209,20 @@ describe("Generic OAuth integration provider", () => {
       ok: true,
       json: async () => ({
         connected: false,
-        has_client_config: false,
+        has_client_config: true,
+        has_custom_client_config: false,
         has_service_account_config: false,
-        client_config_service: "google_drive_oauth_client",
+        client_config_service: "google_oauth_client",
       }),
     });
 
     const status = await integrationProviders.google_drive.loadStatus!();
 
     expect(status).toMatchObject({
-      oauth_client_configured: false,
-      oauth_client_config_service: "google_drive_oauth_client",
+      status: "available",
+      oauth_client_configured: true,
+      oauth_custom_client_configured: false,
+      oauth_client_config_service: "google_oauth_client",
     });
   });
 });

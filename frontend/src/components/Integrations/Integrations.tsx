@@ -54,6 +54,12 @@ import { EnhancedConfigDialog } from "./EnhancedConfigDialog";
 import { FilterSelector } from "@/components/shared/FilterSelector";
 
 const SHARED_ONLY_PROVIDER_IDS = new Set(["spotify", "homeassistant"]);
+const GOOGLE_OAUTH_PROVIDER_IDS = new Set([
+  "google_drive",
+  "google_calendar",
+  "google_sheets",
+  "google_gmail",
+]);
 
 const titleFromProviderId = (providerId: string) =>
   providerId
@@ -400,6 +406,8 @@ export function Integrations() {
     if (!integration.oauth_client_config_service) {
       return false;
     }
+    const hasCustomClientConfig =
+      integration.oauth_custom_client_configured === true;
     const configFields: ToolFieldSchema[] = [
       {
         name: "client_id",
@@ -413,17 +421,14 @@ export function Integrations() {
         name: "client_secret",
         label: "Client Secret",
         type: "password",
-        required: integration.oauth_client_configured !== true,
-        requiredWhenFieldChanges:
-          integration.oauth_client_configured === true ? "client_id" : null,
-        placeholder:
-          integration.oauth_client_configured === true
-            ? "Required when changing Client ID"
-            : "OAuth app client secret",
-        description:
-          integration.oauth_client_configured === true
-            ? "The saved secret is kept for edits that do not change the Client ID."
-            : "OAuth app client secret",
+        required: !hasCustomClientConfig,
+        requiredWhenFieldChanges: hasCustomClientConfig ? "client_id" : null,
+        placeholder: hasCustomClientConfig
+          ? "Required when changing Client ID"
+          : "OAuth app client secret",
+        description: hasCustomClientConfig
+          ? "The saved secret is kept for edits that do not change the Client ID."
+          : "OAuth app client secret",
       },
     ];
     if (integration.oauth_client_redirect_uri_supported === true) {
@@ -443,7 +448,7 @@ export function Integrations() {
       displayName: `${integration.name} OAuth Client`,
       description: `Configure the OAuth app client used to connect ${integration.name}.`,
       configFields,
-      isEditing: integration.oauth_client_configured === true,
+      isEditing: hasCustomClientConfig,
       docsUrl: integration.docs_url || null,
       helperText: null,
       icon: null,
@@ -623,12 +628,12 @@ export function Integrations() {
       );
     }
 
-    const canEditOAuthClientConfig =
+    const canConfigureOAuthClient =
       integration.setup_type === "oauth" &&
       integration.oauth_client_configured === true &&
       integration.oauth_service_account_configured !== true &&
       Boolean(integration.oauth_client_config_service);
-    const oauthClientConfigButton = canEditOAuthClientConfig ? (
+    const oauthClientConfigButton = canConfigureOAuthClient ? (
       <Button
         onClick={() => openOAuthClientConfigDialog(integration)}
         disabled={loading}
@@ -636,7 +641,9 @@ export function Integrations() {
         size="sm"
       >
         <Settings className="h-4 w-4 mr-1" />
-        Edit client
+        {integration.oauth_custom_client_configured === true
+          ? "Edit client"
+          : "Use custom client"}
       </Button>
     ) : null;
 
@@ -793,7 +800,7 @@ export function Integrations() {
     if (
       integration.setup_type === "oauth" &&
       integration.status !== "connected" &&
-      canEditOAuthClientConfig
+      canConfigureOAuthClient
     ) {
       return (
         <div className="flex gap-2 items-center">
@@ -888,6 +895,7 @@ export function Integrations() {
 
   const IntegrationCard = ({ integration }: { integration: Integration }) => {
     const isConnected = integration.status === "connected";
+    const usesGoogleUserData = GOOGLE_OAUTH_PROVIDER_IDS.has(integration.id);
     const statusLabel = integration.status_error
       ? "Status error"
       : integration.status === "not_connected"
@@ -915,6 +923,26 @@ export function Integrations() {
             )}
           </div>
           <CardDescription>{integration.description}</CardDescription>
+          {usesGoogleUserData ? (
+            <p className="text-xs text-muted-foreground">
+              By connecting, you authorize this MindRoom installation to access
+              Google data for the selected agent and credential scope. Shared or
+              unscoped agents can use the connected account for any user
+              authorized to invoke them. Relevant results may be sent to your
+              configured AI model and retained in session or Matrix history.
+              MindRoom project maintainers do not automatically receive data
+              from local installations.{" "}
+              <a
+                href="https://docs.mindroom.chat/privacy/"
+                target="_blank"
+                rel="noreferrer"
+                className="underline underline-offset-2"
+              >
+                Privacy policy
+              </a>
+              .
+            </p>
+          ) : null}
           {integration.status_error ? (
             <p className="text-xs text-muted-foreground">
               Status error: {integration.status_error}

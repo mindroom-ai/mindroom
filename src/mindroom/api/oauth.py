@@ -63,6 +63,7 @@ class OAuthStatusResponse(BaseModel):
     client_config_redirect_uri_supported: bool = False
     connected: bool
     has_client_config: bool
+    has_custom_client_config: bool = False
     has_service_account_config: bool = False
     email: str | None = None
     hosted_domain: str | None = None
@@ -467,6 +468,7 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
         client_config_redirect_uri_supported=client_config_redirect_uri_supported,
         connected=connected,
         has_client_config=has_client_config,
+        has_custom_client_config=(client_config_resolution is not None and client_config_resolution.stored),
         has_service_account_config=has_service_account_config,
         email=_claim_str(credentials, "email"),
         hosted_domain=_claim_str(credentials, "hd"),

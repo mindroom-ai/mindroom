@@ -25,6 +25,7 @@ const OAUTH_COMPLETE_MESSAGE_TYPE = "mindroom:oauth-complete";
 type OAuthStatus = {
   connected: boolean;
   hasClientConfig: boolean;
+  hasCustomClientConfig: boolean;
   hasServiceAccountConfig: boolean;
   clientConfigService?: string;
   clientConfigRedirectUriSupported: boolean;
@@ -93,6 +94,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
           : "not_connected",
       connected: status.connected,
       oauth_client_configured: status.hasClientConfig,
+      oauth_custom_client_configured: status.hasCustomClientConfig,
       oauth_client_config_service: status.clientConfigService,
       oauth_client_redirect_uri_supported:
         status.clientConfigRedirectUriSupported,
@@ -179,6 +181,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
         return {
           connected: false,
           hasClientConfig: false,
+          hasCustomClientConfig: false,
           hasServiceAccountConfig: false,
           clientConfigRedirectUriSupported: false,
           statusError: detail,
@@ -188,6 +191,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
       return {
         connected: data.connected === true,
         hasClientConfig: data.has_client_config === true,
+        hasCustomClientConfig: data.has_custom_client_config === true,
         hasServiceAccountConfig: data.has_service_account_config === true,
         clientConfigRedirectUriSupported:
           data.client_config_redirect_uri_supported === true,
@@ -205,6 +209,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
       return {
         connected: false,
         hasClientConfig: false,
+        hasCustomClientConfig: false,
         hasServiceAccountConfig: false,
         clientConfigRedirectUriSupported: false,
         statusError: `Failed to load ${this.integration.name} OAuth status.`,
