@@ -16,35 +16,52 @@ from uuid import uuid4
 
 from mindroom.logging_config import get_logger
 from mindroom.memory import add_agent_memory
-from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from mindroom.runtime_resolution import resolve_agent_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 
 _TRANSCRIPT_DIRNAME = "calls"
 
 
-def _call_transcript_path(
-    *,
-    agent_name: str,
-    config: Config,
-    storage_path: Path,
-    room_id: str,
-    started_at: datetime,
-) -> Path:
-    """Choose a transcript location compatible with the agent's runtime."""
-    if config.resolve_entity(agent_name).memory_backend == "file":
-        base = agent_workspace_root_path(storage_path, agent_name) / _TRANSCRIPT_DIRNAME
-    else:
-        base = storage_path / _TRANSCRIPT_DIRNAME / agent_name
+def _new_call_transcript_path(base: Path, *, room_id: str, started_at: datetime) -> Path:
+    """Create one collision-safe transcript path under an already-resolved root."""
     safe_room = re.sub(r"[^A-Za-z0-9_.-]", "_", room_id)
     stamp = started_at.strftime("%Y-%m-%d_%H-%M-%S")
     return base / f"{stamp}_{uuid4().hex}_{safe_room}.md"
+
+
+def _call_transcript_roots(
+    *,
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+) -> tuple[Path, Path]:
+    """Resolve transcript storage and portable-reference roots for one caller scope."""
+    agent_runtime = resolve_agent_runtime(
+        agent_name,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        create=True,
+    )
+    if config.resolve_entity(agent_name).memory_backend == "file":
+        workspace = agent_runtime.workspace
+        if workspace is None:
+            msg = f"File-memory agent '{agent_name}' has no resolved workspace"
+            raise ValueError(msg)
+        return workspace.root / _TRANSCRIPT_DIRNAME, workspace.root
+    if agent_runtime.execution.is_private:
+        return agent_runtime.state_root / _TRANSCRIPT_DIRNAME, agent_runtime.state_root
+    storage_root = runtime_paths.storage_root.expanduser().resolve()
+    return storage_root / _TRANSCRIPT_DIRNAME / agent_name, storage_root
 
 
 @dataclass
@@ -56,6 +73,8 @@ class CallTranscript:
     room_id: str
     room_display_name: str
     started_at: datetime
+    reference_root: Path
+    execution_identity: ToolExecutionIdentity | None
     _turns: int = field(default=0, init=False)
     _write_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _pending: list[str] = field(default_factory=list, init=False)
@@ -68,25 +87,28 @@ class CallTranscript:
         *,
         agent_name: str,
         config: Config,
-        storage_path: Path,
+        runtime_paths: RuntimePaths,
+        execution_identity: ToolExecutionIdentity | None,
         room_id: str,
         room_display_name: str,
     ) -> CallTranscript:
         """Create the transcript for a call starting now."""
         started_at = datetime.now(tz=UTC)
-        path = _call_transcript_path(
+        transcript_root, reference_root = _call_transcript_roots(
             agent_name=agent_name,
             config=config,
-            storage_path=storage_path,
-            room_id=room_id,
-            started_at=started_at,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
         )
+        path = _new_call_transcript_path(transcript_root, room_id=room_id, started_at=started_at)
         return cls(
             path=path,
             agent_name=agent_name,
             room_id=room_id,
             room_display_name=room_display_name,
             started_at=started_at,
+            reference_root=reference_root,
+            execution_identity=execution_identity,
         )
 
     def record(self, speaker: str, text: str) -> None:
@@ -159,7 +181,7 @@ class CallTranscript:
         del self._pending[: len(lines)]
         self._header_written = True
 
-    async def finalize(self, *, config: Config, runtime_paths: RuntimePaths, storage_path: Path) -> None:
+    async def finalize(self, *, config: Config, runtime_paths: RuntimePaths) -> None:
         """Flush remaining turns and store a memory reference for the call."""
         ended_at = datetime.now(tz=UTC)
         duration_minutes = max(1, round((ended_at - self.started_at).total_seconds() / 60))
@@ -178,12 +200,7 @@ class CallTranscript:
         memory_backend = config.resolve_entity(self.agent_name).memory_backend
         if memory_backend == "none":
             return
-        if memory_backend == "file":
-            transcript_path = self.path.relative_to(
-                agent_workspace_root_path(storage_path, self.agent_name),
-            ).as_posix()
-        else:
-            transcript_path = self.path.relative_to(storage_path).as_posix()
+        transcript_path = self.path.relative_to(self.reference_root).as_posix()
         summary = (
             f"Joined a voice call in {self.room_display_name} ({self.room_id}): "
             f"{self._turns} spoken turns over ~{duration_minutes} min. "
@@ -197,10 +214,11 @@ class CallTranscript:
             await add_agent_memory(
                 memory_content,
                 self.agent_name,
-                storage_path,
+                runtime_paths.storage_root,
                 config,
                 runtime_paths,
                 metadata={"source": "matrix_rtc_call", "transcript_path": transcript_path},
+                execution_identity=self.execution_identity,
             )
         except Exception as error:
             logger.warning("call_memory_reference_failed", agent=self.agent_name, error=str(error))

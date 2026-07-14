@@ -5,13 +5,42 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+from agno.models.openai import OpenAIChat
+
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.model_loading import get_model_instance
+from mindroom.openai_responses_model import MindRoomOpenAIResponses
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def test_first_party_openai_gpt_5_4_and_newer_use_responses(tmp_path: Path) -> None:
+    """First-party current GPT uses Responses while old and compatible models keep Chat Completions."""
+    config = bind_runtime_paths(
+        Config(
+            models={
+                "current": ModelConfig(provider="openai", id="gpt-5.6", extra_kwargs={"api_key": "dummy-key"}),
+                "older": ModelConfig(provider="openai", id="gpt-4o", extra_kwargs={"api_key": "dummy-key"}),
+                "compatible": ModelConfig(
+                    provider="openai",
+                    id="gpt-5.6",
+                    extra_kwargs={"api_key": "dummy-key", "base_url": "http://localhost:9292/v1"},
+                ),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+
+    current = get_model_instance(config, runtime_paths_for(config), "current")
+    older = get_model_instance(config, runtime_paths_for(config), "older")
+    compatible = get_model_instance(config, runtime_paths_for(config), "compatible")
+
+    assert isinstance(current, MindRoomOpenAIResponses)
+    assert isinstance(older, OpenAIChat)
+    assert isinstance(compatible, OpenAIChat)
 
 
 def test_vertexai_claude_gets_explicit_timeout_so_large_outputs_can_run_non_streaming(tmp_path: Path) -> None:

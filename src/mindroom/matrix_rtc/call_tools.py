@@ -87,6 +87,7 @@ class CallAgentTooling:
 
     tools: tuple[Any, ...]
     instructions: str
+    execution_identity: ToolExecutionIdentity
     responder: Callable[[str, Callable[[list[str]], None] | None], Awaitable[CallAgentResponse]] | None = None
     finalize_spoken_response: Callable[[str | None, str, bool], Awaitable[None] | None] | None = None
 
@@ -256,6 +257,7 @@ async def build_call_tools(
         return CallAgentTooling(
             tools=(),
             instructions="",
+            execution_identity=execution_identity,
             responder=responder,
             finalize_spoken_response=response_tracker.finalize,
         )
@@ -335,7 +337,11 @@ async def build_call_tools(
         )
     instructions = await _render_system_prompt(agent, session, run_context, visible_functions)
     logger.info("call_tools_built", agent=agent_name, room_id=room_id, tool_count=len(tools))
-    return CallAgentTooling(tools=tuple(tools), instructions=instructions)
+    return CallAgentTooling(
+        tools=tuple(tools),
+        instructions=instructions,
+        execution_identity=execution_identity,
+    )
 
 
 async def _run_call_agent(

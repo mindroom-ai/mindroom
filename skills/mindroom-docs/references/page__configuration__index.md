@@ -525,7 +525,7 @@ calls:
   voice: null                      # Optional shared default realtime voice preset
   stt: null                        # Shared default; effective cascaded profiles require STT
   tts: null                        # Shared default; effective cascaded profiles require TTS
-  agents:                          # Enabled shared agents and optional per-agent overrides
+  agents:                          # Enabled agents and optional per-agent overrides (at most one per room)
     assistant:
       voice: marin                 # Override any shared field for only this agent
   livekit_service_url: null        # Optional override for .well-known discovery

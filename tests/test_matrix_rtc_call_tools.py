@@ -27,6 +27,7 @@ from mindroom.matrix_rtc.call_tools import (
 )
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -276,6 +277,17 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     refresh_scheduler = object()
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
+    execution_identity = build_tool_execution_identity(
+        channel="matrix",
+        agent_name=AGENT,
+        runtime_paths=runtime_paths,
+        requester_id=REQUESTER,
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="!room:example.org",
+    )
+    knowledge_calls: list[dict[str, object]] = []
 
     def fake_create_agent(*args: object, **kwargs: object) -> FakeAgnoAgent:
         create_calls.append(args)
@@ -286,10 +298,12 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
         "mindroom.matrix_rtc.call_tools.create_agent",
         fake_create_agent,
     )
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access",
-        lambda *_args, **_kwargs: SimpleNamespace(knowledge=knowledge),
-    )
+
+    def fake_resolve_knowledge(*_args: object, **kwargs: object) -> SimpleNamespace:
+        knowledge_calls.append(kwargs)
+        return SimpleNamespace(knowledge=knowledge)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access", fake_resolve_knowledge)
     seen_targets: list[MessageTarget] = []
 
     class StrictToolSupport:
@@ -317,11 +331,11 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
             target: MessageTarget,
             user_id: str | None,
             agent_name: str | None = None,
-        ) -> SimpleNamespace:
+        ) -> object:
             assert user_id == REQUESTER
             assert agent_name == AGENT
             seen_targets.append(target)
-            return SimpleNamespace()
+            return execution_identity
 
     tooling = await build_call_tools(
         agent_name=AGENT,
@@ -339,7 +353,9 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     assert create_kwargs["refresh_scheduler"] is refresh_scheduler
     assert create_kwargs["tool_function_filter"] is not None
     assert create_calls
-    assert create_calls[0][3] is not None
+    assert create_calls[0][3] is execution_identity
+    assert knowledge_calls[0]["execution_identity"] is execution_identity
+    assert tooling.execution_identity is execution_identity
     assert len(seen_targets) == 2
     assert seen_targets[0] is seen_targets[1]
     assert seen_targets[0].session_id == "!room:example.org"
@@ -445,6 +461,7 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
 
     assert tooling.tools == ()
     assert tooling.instructions == ""
+    assert tooling.execution_identity is execution_identity
     assert tooling.responder is not None
     response = await tooling.responder("What is the weather?", recorded_tool_uses.append)
 

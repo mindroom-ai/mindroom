@@ -299,6 +299,8 @@ depends_on = [
     "mindroom.claude_prompt_cache",
     "mindroom.claude_stream_retry",
     "mindroom.codex_model",
+    "mindroom.openai_responses_model",
+    "mindroom.openai_tool_search",
     "mindroom.vertex_claude_compat",
 ]
 visibility = [
@@ -2283,7 +2285,7 @@ path = "mindroom.matrix_rtc.transcript"
 depends_on = [
     "mindroom.logging_config",
     "mindroom.memory",
-    "mindroom.tool_system.worker_routing",
+    "mindroom.runtime_resolution",
 ]
 
 [[modules]]
