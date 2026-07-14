@@ -133,6 +133,8 @@ async def test_set_thread_summary_defaults_to_context_room_and_thread() -> None:
         context.room_id,
         "$ctx-thread:localhost",
         "  🧵 Ready\nfor\t review  ",
+        config=context.config,
+        runtime_paths=context.runtime_paths,
         conversation_cache=context.conversation_cache,
     )
 
@@ -163,6 +165,8 @@ async def test_set_thread_summary_returns_helper_summary() -> None:
         context.room_id,
         "$ctx-thread:localhost",
         "# **Fix** [ISSUE-116](http://example.com)",
+        config=context.config,
+        runtime_paths=context.runtime_paths,
         conversation_cache=context.conversation_cache,
     )
 
@@ -213,6 +217,8 @@ async def test_set_thread_summary_normalizes_explicit_thread_id() -> None:
         context.room_id,
         "$thread-root:localhost",
         "done",
+        config=context.config,
+        runtime_paths=context.runtime_paths,
         conversation_cache=context.conversation_cache,
     )
 

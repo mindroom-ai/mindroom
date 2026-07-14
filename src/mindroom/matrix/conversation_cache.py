@@ -182,6 +182,15 @@ class ConversationCacheProtocol(Protocol):
     ) -> ThreadReadResult:
         """Resolve strict full thread history without live dispatch timeouts or stale fallback."""
 
+    async def get_fresh_strict_thread_history(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        caller_label: str = "unknown",
+    ) -> ThreadReadResult:
+        """Resolve strict full history without reusing the current turn's memoized read."""
+
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Resolve the cached thread root for one event when known."""
 
@@ -837,6 +846,21 @@ class MatrixConversationCache(ConversationCacheProtocol):
     ) -> ThreadReadResult:
         """Resolve strict full thread history without live dispatch timeouts or stale fallback."""
         return await self._read_thread_memoized(
+            room_id,
+            thread_id,
+            mode=ThreadReadMode.STRICT_FULL,
+            caller_label=caller_label,
+        )
+
+    async def get_fresh_strict_thread_history(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        caller_label: str = "unknown",
+    ) -> ThreadReadResult:
+        """Resolve strict full history without reusing the current turn's memoized read."""
+        return await self._reads.read_thread(
             room_id,
             thread_id,
             mode=ThreadReadMode.STRICT_FULL,

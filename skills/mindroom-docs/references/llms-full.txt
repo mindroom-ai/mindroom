@@ -1242,6 +1242,7 @@ defaults:
   worker_scope: null               # Default: null (no runtime reuse; set shared/user/user_agent to enable)
   worker_grantable_credentials: null  # Default: null (deny by default; list credential service names to make available inside isolated workers, e.g. [openai, github_private])
   allow_self_config: false         # Default: false (allow agents to modify their own config via a tool)
+  thread_summary_model: null       # Default: null (uses the default model)
   thread_summary_temperature: 0.2  # Default: 0.2 (set null to omit temperature and use provider defaults)
   thread_summary_first_threshold: 1  # Default: 1 (first automatic thread summary after first message)
   thread_summary_subsequent_interval: 10  # Default: 10 (messages between later automatic thread summaries)
@@ -1256,6 +1257,11 @@ Set it to `null` to omit the field and use provider defaults.
 MindRoom always omits temperature for Vertex Claude thread summaries because the provider rejects that field on this path.
 Use `room_thread_summary_models` when automatic summaries in a specific room should use a different model from `defaults.thread_summary_model`.
 Keys can be managed room aliases such as `lobby` or raw Matrix room IDs such as `!room:example.org`.
+
+When a thread has no trusted prior summary, its first automatic summary call is summary-only so a useful thread title appears early.
+The next scheduled automatic summary refresh also returns one to three topic tags when the thread has no existing tags, whether the prior summary was automatic or manual.
+This delayed initial enrichment uses the same summary model, room override, temperature, prompt, and background task as the refreshed summary.
+After initial enrichment completes, later summary refreshes do not regenerate or replace tags.
 
 `defaults.worker_grantable_credentials` is a list of credential service names.
 Use built-in names like `openai`, `azure`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
@@ -6832,6 +6838,7 @@ list_thread_tags(exclude_tag="resolved", include_untagged=True)
 
 - This tool writes shared room state, so it is stricter than `matrix_message` about Matrix permissions.
 - Tag writes and removals return the updated canonical tag state for the target thread.
+- `tag_thread()`, `untag_thread()`, and every `list_thread_tags()` tag filter share one normalizer: valid canonical IDs up to 50 characters are preserved, while other free-form input is coerced to a short lowercase hyphenated tag.
 - `list_thread_tags()` can inspect the active thread or an explicitly provided `thread_id`.
 - `list_thread_tags(include_tag=..., exclude_tag=...)` filters which threads are returned: `include_tag` keeps only threads with that tag, `exclude_tag` removes threads with that tag.
 - Both filters can be combined.
@@ -6841,6 +6848,8 @@ list_thread_tags(exclude_tag="resolved", include_untagged=True)
 - It enumerates Matrix `/threads` and may stop at the 2000-root safety cap.
 - The response includes `include_untagged: bool` and `truncated: bool`.
 - Callers must check `truncated` before claiming the unresolved list is complete.
+- The `tag_thread()` description includes up to 20 of the current room's most-used tags that are short enough for model output, from a cache-stable daily snapshot, so agents prefer existing vocabulary.
+- The vocabulary is room-scoped, so tags from other rooms are never included.
 
 ## [`thread_summary`]
 
@@ -7024,10 +7033,23 @@ matrix_message(action="reply", message="Sharing the plan here.", attachment_ids=
 ## Related Matrix Runtime Features
 
 Automatic thread summaries are still implemented in `src/mindroom/thread_summary.py` as bot runtime behavior.
-The summarizer posts one `m.notice` summary after a thread reaches the configured first threshold (one message by default), and then again every ten additional messages by default, using `defaults.thread_summary_model` or `default`.
+The summarizer posts one `m.notice` summary after a successful response brings a thread to the configured first threshold (one message by default), and then again every ten additional messages by default, using `defaults.thread_summary_model` or `default`.
 Set `room_thread_summary_models` to override the automatic summary model for a managed room alias or raw Matrix room ID.
 MindRoom uses `defaults.thread_summary_temperature` for automatic summaries when the provider supports runtime temperature overrides, and always omits temperature for Vertex Claude summaries.
 The `thread_summary` tool complements that automatic behavior by letting an agent publish a manual summary immediately and advance the stored summary baseline.
+When no trusted prior summary exists, the first automatic summary is summary-only so a useful thread title appears early.
+The next scheduled refresh uses one structured model call to update the summary and produce up to three normalized topic tags, whether the prior summary was automatic or manual.
+The background task bypasses inherited per-turn history memoization so the model sees fresh authoritative full history including the delivered response.
+Existing tags win, including tags observed after the model call finishes.
+MindRoom serializes automatic and tool-driven tag mutations per thread within one running process, and persisted removal tombstones prevent a later automatic batch from repopulating a deliberately untagged thread.
+The initial tags use the same summary model, room override, temperature, prompt, lock, and background lifecycle as the refreshed summary.
+Expected Matrix write failures are isolated so a failed tag write does not block the summary and a failed summary write does not undo tags.
+Failed initial tag reads or all-failed tag writes leave the summary's durable enrichment marker incomplete, so the next summary threshold retries structured enrichment.
+Once existing tags, prior tag-state history, or newly written tags mark initial enrichment complete, later summary refreshes use a summary-only schema and never regenerate or replace tags.
+Each room has its own vocabulary snapshot built only from that room's tag state.
+The first successful post-response check after midnight in the configured timezone refreshes a stale room snapshot for the day.
+The refresh reads Matrix tag state and writes a durable local snapshot under `mindroom_data/tracking/thread_tag_vocabulary/`.
+Initial enrichment uses the summary call that would already run and can add up to three Matrix state writes.
 
 ## Related Docs
 

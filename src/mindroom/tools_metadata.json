@@ -657,7 +657,7 @@
       "icon": "Tags",
       "icon_color": "text-emerald-500",
       "name": "thread_tags",
-      "requires_room_context": false,
+      "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
     },

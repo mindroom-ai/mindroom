@@ -61,7 +61,7 @@ class PostResponseEffectsDeps:
     queue_memory_persistence: Callable[[], None] | None = None
     persist_response_event_id: Callable[[str, str], None] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
-    queue_thread_summary: Callable[[str, str, int | None, str | None], None] | None = None
+    queue_thread_summary: Callable[[str, str, str | None], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +93,7 @@ class PostResponseEffectsSupport:
             room_id=room_id,
             thread_id=thread_id,
             config=self.runtime.config,
+            runtime_paths=self.runtime_paths,
             message_count_hint=message_count_hint,
         )
 
@@ -135,7 +136,6 @@ class PostResponseEffectsSupport:
         self,
         room_id: str,
         thread_id: str,
-        message_count_hint: int | None,
         entity_name: str | None,
     ) -> None:
         """Queue background thread summarization with timing instrumentation."""
@@ -146,7 +146,6 @@ class PostResponseEffectsSupport:
             config=self.runtime.config,
             runtime_paths=self.runtime_paths,
             conversation_cache=self.conversation_cache,
-            message_count_hint=message_count_hint,
             entity_name=entity_name,
         )
         create_background_task(
@@ -257,7 +256,9 @@ async def apply_post_response_effects(
             )
 
     if (
-        response_event_id is not None
+        outcome.run_succeeded
+        and final_delivery_outcome.terminal_status == "completed"
+        and response_event_id is not None
         and not final_delivery_outcome.suppressed
         and outcome.thread_summary_room_id is not None
         and outcome.thread_summary_thread_id is not None
@@ -274,6 +275,5 @@ async def apply_post_response_effects(
         deps.queue_thread_summary(
             outcome.thread_summary_room_id,
             outcome.thread_summary_thread_id,
-            outcome.thread_summary_message_count_hint,
             outcome.thread_summary_entity_name,
         )

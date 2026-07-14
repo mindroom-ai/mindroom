@@ -65,13 +65,14 @@ from tests.conftest import (
 from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine
     from pathlib import Path
 
     from mindroom.config.main import Config
     from mindroom.constants import (
         RuntimePaths,
     )
+    from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.matrix.users import AgentMatrixUser
 
 
@@ -859,8 +860,20 @@ class TestAgentBot(AgentBotTestBase):
         async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
             return None
 
-        async def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
+        async def fake_team_response_stream(turn_recorder: TurnRecorder) -> AsyncGenerator[str, None]:
+            turn_recorder.mark_completed()
             yield "Team reply"
+
+        async def fake_send_streaming_response(*args: object, **_kwargs: object) -> StreamTransportOutcome:
+            response_stream = cast("AsyncIterator[object]", args[4])
+            async for _chunk in response_stream:
+                pass
+            return StreamTransportOutcome(
+                last_physical_stream_event_id="$team-response",
+                terminal_status="completed",
+                rendered_body="Team reply",
+                visible_body_state="visible_body",
+            )
 
         scheduled_tasks: list[asyncio.Task[None]] = []
         scheduled_names: list[str] = []
@@ -916,7 +929,7 @@ class TestAgentBot(AgentBotTestBase):
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=True),
                 typing_indicator=_noop_typing_indicator,
-                team_response_stream=lambda *_args, **_kwargs: fake_team_response_stream(),
+                team_response_stream=lambda *_args, **kwargs: fake_team_response_stream(kwargs["turn_recorder"]),
             ),
             patch.object(
                 bot._turn_policy,
@@ -927,14 +940,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
-                new=AsyncMock(
-                    return_value=StreamTransportOutcome(
-                        last_physical_stream_event_id="$team-response",
-                        terminal_status="completed",
-                        rendered_body="Team reply",
-                        visible_body_state="visible_body",
-                    ),
-                ),
+                new=AsyncMock(side_effect=fake_send_streaming_response),
             ),
             patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
@@ -998,7 +1004,13 @@ class TestAgentBot(AgentBotTestBase):
             ),
         )
 
-        assert thread_summary_message_count_hint(thread_history) == 5
+        assert (
+            thread_summary_message_count_hint(
+                thread_history,
+                trusted_sender_ids=frozenset({"@mindroom_general:localhost"}),
+            )
+            == 5
+        )
 
     @pytest.mark.asyncio
     async def test_generate_team_response_streams_into_placeholder_event(

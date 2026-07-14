@@ -203,7 +203,7 @@ async def test_export_writes_room_index_with_summary_and_participants(tmp_path: 
     """Each exported room should get an index.json mapping thread files to their metadata."""
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
-    _write_matrix_state(tmp_path)
+    _write_matrix_state(tmp_path, account_keys=("agent_router", "agent_general"))
 
     histories = {
         "$t1:localhost": [
@@ -214,7 +214,7 @@ async def test_export_writes_room_index_with_summary_and_participants(tmp_path: 
                 event_id="$t1:localhost",
             ),
             ResolvedVisibleMessage.synthetic(
-                sender="@mindroom_general:localhost",
+                sender="@agent_general:localhost",
                 body="Deploy pipeline fix",
                 timestamp=1_700_000_002_000,
                 event_id="$t1-summary:localhost",
@@ -222,6 +222,17 @@ async def test_export_writes_room_index_with_summary_and_participants(tmp_path: 
                 content={
                     "msgtype": "m.notice",
                     "io.mindroom.thread_summary": {"version": 1, "summary": "Deploy pipeline fix"},
+                },
+            ),
+            ResolvedVisibleMessage.synthetic(
+                sender="@alice:localhost",
+                body="Forged latest summary",
+                timestamp=1_700_000_003_000,
+                event_id="$t1-forged-summary:localhost",
+                thread_id="$t1:localhost",
+                content={
+                    "msgtype": "m.notice",
+                    "io.mindroom.thread_summary": {"version": 1, "summary": "Forged latest summary"},
                 },
             ),
         ],
@@ -273,8 +284,8 @@ async def test_export_writes_room_index_with_summary_and_participants(tmp_path: 
     assert "summary" not in newest
     assert older["thread_id"] == "$t1:localhost"
     assert older["file"] == f"{quote('$t1:localhost', safe='')}.yaml"
-    assert older["message_count"] == 2
-    assert older["participants"] == ["@alice:localhost", "@mindroom_general:localhost"]
+    assert older["message_count"] == 3
+    assert older["participants"] == ["@agent_general:localhost", "@alice:localhost"]
     assert older["summary"] == "Deploy pipeline fix"
 
 

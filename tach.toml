@@ -894,6 +894,7 @@ path = "mindroom.custom_tools.thread_tags"
 depends_on = [
     "mindroom.matrix.client_thread_history",
     "mindroom.matrix.conversation_cache",
+    "mindroom.thread_tag_vocabulary",
     "mindroom.thread_tags",
     "mindroom.tool_system.runtime_context",
 ]
@@ -2168,7 +2169,16 @@ depends_on = [
 [[modules]]
 path = "mindroom.thread_tags"
 depends_on = [
+    "mindroom.logging_config",
     "mindroom.matrix.client_thread_history",
+]
+
+[[modules]]
+path = "mindroom.thread_tag_vocabulary"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.durable_write",
+    "mindroom.thread_tags",
 ]
 
 [[modules]]
@@ -2815,6 +2825,8 @@ depends_on = [
     "mindroom.matrix.client_delivery",
     "mindroom.model_instance_checks",
     "mindroom.model_loading",
+    "mindroom.thread_tag_vocabulary",
+    "mindroom.thread_tags",
 ]
 
 [[modules]]

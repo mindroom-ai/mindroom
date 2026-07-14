@@ -389,6 +389,7 @@ defaults:
   worker_scope: null               # Default: null (no runtime reuse; set shared/user/user_agent to enable)
   worker_grantable_credentials: null  # Default: null (deny by default; list credential service names to make available inside isolated workers, e.g. [openai, github_private])
   allow_self_config: false         # Default: false (allow agents to modify their own config via a tool)
+  thread_summary_model: null       # Default: null (uses the default model)
   thread_summary_temperature: 0.2  # Default: 0.2 (set null to omit temperature and use provider defaults)
   thread_summary_first_threshold: 1  # Default: 1 (first automatic thread summary after first message)
   thread_summary_subsequent_interval: 10  # Default: 10 (messages between later automatic thread summaries)
@@ -403,6 +404,11 @@ Set it to `null` to omit the field and use provider defaults.
 MindRoom always omits temperature for Vertex Claude thread summaries because the provider rejects that field on this path.
 Use `room_thread_summary_models` when automatic summaries in a specific room should use a different model from `defaults.thread_summary_model`.
 Keys can be managed room aliases such as `lobby` or raw Matrix room IDs such as `!room:example.org`.
+
+When a thread has no trusted prior summary, its first automatic summary call is summary-only so a useful thread title appears early.
+The next scheduled automatic summary refresh also returns one to three topic tags when the thread has no existing tags, whether the prior summary was automatic or manual.
+This delayed initial enrichment uses the same summary model, room override, temperature, prompt, and background task as the refreshed summary.
+After initial enrichment completes, later summary refreshes do not regenerate or replace tags.
 
 `defaults.worker_grantable_credentials` is a list of credential service names.
 Use built-in names like `openai`, `azure`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.

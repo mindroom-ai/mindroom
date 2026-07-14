@@ -6,11 +6,13 @@ import json
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 import mindroom.tools  # noqa: F401
+from mindroom import thread_tag_vocabulary
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.thread_tags import ThreadTagsTools
@@ -20,6 +22,9 @@ from mindroom.thread_tags import ThreadTagRecord, ThreadTagsError, ThreadTagsLis
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
 
 
 def _make_context(
@@ -89,6 +94,7 @@ def test_thread_tags_tool_registered_and_instantiates() -> None:
     )
 
     assert "thread_tags" in TOOL_METADATA
+    assert TOOL_METADATA["thread_tags"].requires_room_context
     assert isinstance(
         get_tool_by_name("thread_tags", runtime_paths_for(config), worker_target=None),
         ThreadTagsTools,
@@ -274,6 +280,68 @@ async def test_untag_thread_defaults_to_context_thread_id() -> None:
         context.room_id,
         "$ctx-thread:localhost",
         "resolved",
+        requester_user_id=context.requester_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_untag_thread_coerces_free_form_tag_input() -> None:
+    """Untag should canonicalize free-form input exactly like tag creation."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            new=AsyncMock(return_value="$ctx-thread:localhost"),
+        ),
+        patch(
+            "mindroom.custom_tools.thread_tags.remove_thread_tag",
+            new=AsyncMock(return_value=_state("$ctx-thread:localhost")),
+        ) as mock_remove,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.untag_thread("Follow Up"))
+
+    assert payload["status"] == "ok"
+    assert payload["tag"] == "follow-up"
+    mock_remove.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        "$ctx-thread:localhost",
+        "follow-up",
+        requester_user_id=context.requester_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_untag_thread_preserves_long_canonical_tag_beside_prefix_sibling() -> None:
+    """Untag must target a valid long ID instead of its 25-character sibling."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+    long_tag = "abcdefghijklmnopqrstuvwxyz"
+    short_sibling = long_tag[:25]
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            new=AsyncMock(return_value="$ctx-thread:localhost"),
+        ),
+        patch(
+            "mindroom.custom_tools.thread_tags.remove_thread_tag",
+            new=AsyncMock(return_value=_state("$ctx-thread:localhost", **{short_sibling: _record()})),
+        ) as remove,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.untag_thread(long_tag))
+
+    assert payload["status"] == "ok"
+    assert payload["tag"] == long_tag
+    remove.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        "$ctx-thread:localhost",
+        long_tag,
         requester_user_id=context.requester_id,
     )
 
@@ -931,6 +999,77 @@ async def test_list_thread_tags_room_wide_normalizes_mixed_case_include_and_excl
 
 
 @pytest.mark.asyncio
+async def test_list_thread_tags_coerces_all_free_form_tag_filters() -> None:
+    """Every list filter should use the same model-facing tag coercion."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id=None, reply_to_event_id=None)
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.list_tagged_threads",
+            new=AsyncMock(return_value=_listing({})),
+        ) as mock_list,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(
+            await tool.list_thread_tags(
+                tag="Follow Up",
+                include_tag=" Needs Review ",
+                exclude_tag="Already_Resolved",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["tag"] == "follow-up"
+    assert payload["include_tag"] == "needs-review"
+    assert payload["exclude_tag"] == "already-resolved"
+    mock_list.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        tag="follow-up",
+        include_tag="needs-review",
+        exclude_tag="already-resolved",
+        include_untagged=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_thread_tags_preserves_long_canonical_filter_beside_prefix_sibling() -> None:
+    """List filters must preserve exact 26-50 character canonical tag IDs."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id=None, reply_to_event_id=None)
+    long_tag = "abcdefghijklmnopqrstuvwxyz"
+    short_sibling = long_tag[:25]
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.list_tagged_threads",
+            new=AsyncMock(return_value=_listing({})),
+        ) as list_tags,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(
+            await tool.list_thread_tags(
+                tag=long_tag,
+                include_tag=long_tag,
+                exclude_tag=short_sibling,
+            ),
+        )
+
+    assert payload["tag"] == long_tag
+    assert payload["include_tag"] == long_tag
+    assert payload["exclude_tag"] == short_sibling
+    list_tags.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        tag=long_tag,
+        include_tag=long_tag,
+        exclude_tag=short_sibling,
+        include_untagged=False,
+    )
+
+
+@pytest.mark.asyncio
 async def test_list_thread_tags_explicit_same_room_target_can_list_room_wide_from_thread_context() -> None:
     """An explicit same-room target should disable thread fallback and allow room-wide listing."""
     tool = ThreadTagsTools()
@@ -1354,3 +1493,177 @@ async def test_untag_thread_canonical_skips_normalization() -> None:
         "resolved",
         requester_user_id=context.requester_id,
     )
+
+
+# -- vocabulary-aware tool description --
+
+
+def _vocabulary_runtime_paths(
+    tmp_path: Path,
+    room_tags: dict[str, list[str]],
+) -> RuntimePaths:
+    """Create runtime paths with room-scoped ranked vocabulary snapshots."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    for room_id, tags in room_tags.items():
+        path = thread_tag_vocabulary._snapshot_path(runtime_paths, room_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "room_id": room_id,
+                    "built_at": datetime.now(UTC).isoformat(),
+                    "tags": [{"tag": tag, "count": len(tags) - index} for index, tag in enumerate(tags)],
+                },
+            ),
+            encoding="utf-8",
+        )
+    return runtime_paths
+
+
+def test_tag_thread_description_embeds_ranked_room_vocabulary(tmp_path: Path) -> None:
+    """The tag_thread description lists the top tags ranked, without counts."""
+    room_id = "!room-a:localhost"
+    runtime_paths = _vocabulary_runtime_paths(
+        tmp_path,
+        {room_id: [f"tag{i:02d}" for i in range(25)]},
+    )
+    tool = ThreadTagsTools(
+        runtime_paths=runtime_paths,
+        current_room_id=room_id,
+    )
+
+    description = tool.async_functions["tag_thread"].description
+
+    assert description is not None
+    assert "rebuilt once a day" in description
+    assert "tag00, tag01" in description
+    assert "tag19" in description
+    assert "tag20" not in description  # capped at the top 20
+    assert "25" not in description.split("Most-used short tags", 1)[1]  # no counts in the ranked list
+
+
+def test_tag_thread_description_never_leaks_another_room_vocabulary(tmp_path: Path) -> None:
+    """The current room's tool schema excludes tags from every other room."""
+    room_a = "!room-a:localhost"
+    room_b = "!room-b:localhost"
+    runtime_paths = _vocabulary_runtime_paths(
+        tmp_path,
+        {room_a: ["alpha"], room_b: ["secret-beta"]},
+    )
+    tool = ThreadTagsTools(
+        runtime_paths=runtime_paths,
+        current_room_id=room_a,
+    )
+
+    description = tool.async_functions["tag_thread"].description
+
+    assert description is not None
+    assert "alpha" in description
+    assert "secret-beta" not in description
+
+
+def test_tag_thread_description_without_snapshot_keeps_guidance(tmp_path: Path) -> None:
+    """With no snapshot on disk the description still carries tagging guidance."""
+    room_id = "!room-a:localhost"
+    tool = ThreadTagsTools(
+        runtime_paths=_vocabulary_runtime_paths(tmp_path, {}),
+        current_room_id=room_id,
+    )
+
+    description = tool.async_functions["tag_thread"].description
+
+    assert description is not None
+    assert "Prefer existing tags" in description
+    assert "No reusable short tags are in use yet" in description
+
+
+def test_tag_thread_description_untouched_without_room_identity(tmp_path: Path) -> None:
+    """Construction without Matrix room identity exposes no vocabulary snapshot."""
+    tool = ThreadTagsTools(runtime_paths=_vocabulary_runtime_paths(tmp_path, {}))
+
+    assert tool.async_functions["tag_thread"].description is None
+
+
+@pytest.mark.asyncio
+async def test_tag_thread_coerces_free_form_tag_input() -> None:
+    """Free-form tag input is coerced to the canonical slug before writing."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            new=AsyncMock(return_value="$ctx-thread:localhost"),
+        ),
+        patch(
+            "mindroom.custom_tools.thread_tags.set_thread_tag",
+            new=AsyncMock(return_value=_state("$ctx-thread:localhost", **{"follow-up": _record()})),
+        ) as mock_set,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.tag_thread("Follow Up"))
+
+    assert payload["status"] == "ok"
+    assert payload["tag"] == "follow-up"
+    mock_set.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        "$ctx-thread:localhost",
+        "follow-up",
+        set_by=context.requester_id,
+        note=None,
+        data=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_tag_thread_preserves_long_canonical_tag() -> None:
+    """Exact canonical IDs should round-trip through creation and references."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+    long_tag = "abcdefghijklmnopqrstuvwxyz"
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            new=AsyncMock(return_value="$ctx-thread:localhost"),
+        ),
+        patch(
+            "mindroom.custom_tools.thread_tags.set_thread_tag",
+            new=AsyncMock(return_value=_state("$ctx-thread:localhost", **{long_tag: _record()})),
+        ) as set_tag,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.tag_thread(long_tag))
+
+    assert payload["tag"] == long_tag
+    set_tag.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        "$ctx-thread:localhost",
+        long_tag,
+        set_by=context.requester_id,
+        note=None,
+        data=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_tag_thread_rejects_tag_with_no_valid_characters() -> None:
+    """Tag input that coerces to nothing returns a structured error before Matrix I/O."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.set_thread_tag",
+            new=AsyncMock(),
+        ) as mock_set,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.tag_thread("!!!"))
+
+    assert payload["status"] == "error"
+    assert "at least one letter" in payload["message"]
+    mock_set.assert_not_awaited()
