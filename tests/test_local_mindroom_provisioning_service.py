@@ -18,7 +18,12 @@ if TYPE_CHECKING:
     import httpx
 
 
-def _service_config(state_path: Path) -> provisioning.ServiceConfig:
+def _service_config(
+    state_path: Path,
+    *,
+    google_oauth_client_id: str | None = None,
+    google_oauth_client_secret: str | None = None,
+) -> provisioning.ServiceConfig:
     return provisioning.ServiceConfig(
         matrix_homeserver="https://mindroom.chat",
         matrix_server_name="mindroom.chat",
@@ -30,6 +35,8 @@ def _service_config(state_path: Path) -> provisioning.ServiceConfig:
         cors_origins=["https://chat.mindroom.chat"],
         listen_host="127.0.0.1",
         listen_port=8776,
+        google_oauth_client_id=google_oauth_client_id,
+        google_oauth_client_secret=google_oauth_client_secret,
     )
 
 
@@ -231,6 +238,56 @@ def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.Mon
             },
         )
         assert register_after_revoke.status_code == 403
+
+
+def test_paired_client_fetches_google_oauth_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only an authenticated paired runtime receives the installed-app client."""
+    _patch_matrix_auth(monkeypatch)
+    app = provisioning.create_app(
+        _service_config(
+            tmp_path / "state.json",
+            google_oauth_client_id="google-client-id",
+            google_oauth_client_secret="google-client-secret",  # noqa: S106
+        ),
+    )
+
+    with TestClient(app) as client:
+        complete = _pair_local_client(client)
+        missing_auth = client.get("/v1/local-mindroom/oauth/google-client")
+        response = client.get(
+            "/v1/local-mindroom/oauth/google-client",
+            headers={
+                "X-Local-MindRoom-Client-Id": complete["client_id"],
+                "X-Local-MindRoom-Client-Secret": complete["client_secret"],
+            },
+        )
+
+    assert missing_auth.status_code == 401
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.json() == {
+        "client_id": "google-client-id",
+        "client_secret": "google-client-secret",
+    }
+
+
+def test_google_oauth_client_endpoint_requires_server_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A paired client receives an explicit error when the server has no Google app."""
+    _patch_matrix_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        complete = _pair_local_client(client)
+        response = client.get(
+            "/v1/local-mindroom/oauth/google-client",
+            headers={
+                "X-Local-MindRoom-Client-Id": complete["client_id"],
+                "X-Local-MindRoom-Client-Secret": complete["client_secret"],
+            },
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Google OAuth client is not configured"
 
 
 def test_pair_status_accepts_session_header_without_pair_code_query(

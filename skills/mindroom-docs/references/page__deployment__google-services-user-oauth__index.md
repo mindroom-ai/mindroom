@@ -1,9 +1,10 @@
 # Google Services OAuth For Local Installs
 
-MindRoom includes a public Google desktop OAuth client for local installations.
+Paired local installations automatically retrieve MindRoom's Google desktop OAuth client from the provisioning service.
 You do not need to create a Google Cloud project, register callback URLs, or copy a client secret.
-MindRoom distributes only the desktop client ID and never bundles or sends its optional client secret.
-The bundled client uses OAuth PKCE and is available when the provider callback uses `localhost`, `127.0.0.1`, or `::1`.
+The client configuration is not bundled in the package or committed to the source repository.
+The local runtime uses OAuth PKCE and a callback on `localhost`, `127.0.0.1`, or `::1`.
+Run `mindroom connect --pair-code ...` before connecting Google, or configure a custom Google OAuth client for an unpaired self-hosted installation.
 
 ## Choose Providers
 
@@ -40,7 +41,8 @@ MindRoom does not mirror Google OAuth tokens into worker containers.
 ## Privacy and Access Scope
 
 For a local installation, the MindRoom project maintainers do not automatically receive your OAuth tokens or Google data.
-Google returns the bundled desktop client's authorization response directly to the local loopback callback, so ownership of the OAuth app registration does not reveal your tokens or Google data to the project maintainers.
+The paired provisioning service sends the Google desktop app client configuration to the local runtime but does not receive the Google authorization code, access token, refresh token, or Google API data.
+Google returns the authorization response directly to the local loopback callback, and the local runtime performs the token exchange and stores the resulting connection.
 The software running on your machine stores the connection, while the Google API, your configured AI model provider, and your Matrix homeserver process the data sent to each of them.
 The installation operator and anyone with administrative or filesystem access to its storage may be able to access locally stored credentials and data.
 
@@ -55,7 +57,7 @@ See the [Privacy Policy](https://docs.mindroom.chat/privacy/) for the complete d
 
 ## Custom Google OAuth App
 
-A custom Google OAuth app is optional for a local installation.
+A custom Google OAuth app is optional for a paired local installation and required for an unpaired self-hosted installation.
 Use one when you operate a public MindRoom origin, need organization-specific Google policies, or want your own consent-screen branding.
 
 Select **Use custom client** in the dashboard and enter the client ID and client secret from a Google Cloud **Web application** OAuth client.

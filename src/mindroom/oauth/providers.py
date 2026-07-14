@@ -38,6 +38,7 @@ _DEFAULT_AUTHORIZE_TIMEOUT_SECONDS = 20.0
 _DEFAULT_REFRESH_SKEW_SECONDS = 60.0
 _DEFAULT_TOKEN_ENDPOINT_AUTH_METHOD: _TokenEndpointAuthMethod = "client_secret_post"  # noqa: S105
 _PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD: _TokenEndpointAuthMethod = "none"  # noqa: S105
+RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY = "_oauth_client_runtime_bootstrap"
 _SUPPORTED_TOKEN_ENDPOINT_AUTH_METHODS = frozenset(
     {_PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD, "client_secret_post", "client_secret_basic"},
 )
@@ -494,13 +495,23 @@ class OAuthProvider:
         """Return stored or bundled OAuth app client settings and their source."""
         manager = get_runtime_credentials_manager(runtime_paths)
         for service in self.client_config_services:
-            config = self._stored_client_config_from_service(runtime_paths, manager.load_credentials(service), True)
+            credentials = manager.load_credentials(service)
+            config = self._stored_client_config_from_service(runtime_paths, credentials, True)
             if config is not None:
-                return OAuthClientConfigResolution(config=config, service=service)
+                return OAuthClientConfigResolution(
+                    config=config,
+                    service=service,
+                    stored=(credentials or {}).get(RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY) is not True,
+                )
         for service in self.shared_client_config_services:
-            config = self._stored_client_config_from_service(runtime_paths, manager.load_credentials(service), False)
+            credentials = manager.load_credentials(service)
+            config = self._stored_client_config_from_service(runtime_paths, credentials, False)
             if config is not None:
-                return OAuthClientConfigResolution(config=config, service=service)
+                return OAuthClientConfigResolution(
+                    config=config,
+                    service=service,
+                    stored=(credentials or {}).get(RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY) is not True,
+                )
         if self.loopback_client_id is None:
             return None
         redirect_uri = self.default_redirect_uri(runtime_paths)

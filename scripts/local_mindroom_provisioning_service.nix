@@ -36,6 +36,18 @@ in
       description = "File containing the Matrix registration token.";
     };
 
+    googleOAuthClientId = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Google desktop OAuth client ID distributed to paired local runtimes.";
+    };
+
+    googleOAuthClientSecretFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "File containing the Google desktop OAuth client secret distributed to paired local runtimes.";
+    };
+
     listenHost = lib.mkOption {
       type = lib.types.str;
       default = "127.0.0.1";
@@ -68,6 +80,13 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = (cfg.googleOAuthClientId == null) == (cfg.googleOAuthClientSecretFile == null);
+        message = "googleOAuthClientId and googleOAuthClientSecretFile must be configured together.";
+      }
+    ];
+
     users.users.mindroom-local-provisioning = {
       isSystemUser = true;
       group = "mindroom-local-provisioning";
@@ -94,6 +113,9 @@ in
         MINDROOM_PROVISIONING_CORS_ORIGINS = lib.concatStringsSep "," cfg.corsOrigins;
       } // lib.optionalAttrs (cfg.matrixServerName != null) {
         MATRIX_SERVER_NAME = cfg.matrixServerName;
+      } // lib.optionalAttrs (cfg.googleOAuthClientId != null) {
+        MINDROOM_GOOGLE_OAUTH_CLIENT_ID = cfg.googleOAuthClientId;
+        MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET_FILE = cfg.googleOAuthClientSecretFile;
       };
 
       serviceConfig = {

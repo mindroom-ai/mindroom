@@ -30,6 +30,7 @@ from mindroom.oauth import service as oauth_service
 from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.providers import (
+    RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
     OAuthClientConfig,
     OAuthProviderError,
     OAuthRefreshRejectedError,
@@ -3643,7 +3644,7 @@ def test_google_status_reports_connected_with_service_account(tmp_path: Path) ->
         status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
 
     assert status_response.status_code == 200
-    assert status_response.json()["has_client_config"] is True
+    assert status_response.json()["has_client_config"] is False
     assert status_response.json()["has_custom_client_config"] is False
     assert status_response.json()["client_config_service"] == "google_drive_oauth_client"
     assert status_response.json()["client_config_redirect_uri_supported"] is True
@@ -3651,13 +3652,21 @@ def test_google_status_reports_connected_with_service_account(tmp_path: Path) ->
     assert status_response.json()["connected"] is True
 
 
-def test_status_hides_bundled_client_from_remote_request(tmp_path: Path) -> None:
+def test_status_hides_runtime_bootstrapped_client_from_remote_request(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
         {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"},
     )
     api_app = _make_test_app(runtime_paths, _config_payload())
     provider = google_drive_oauth_provider()
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "google_oauth_client",
+        {
+            "client_id": "provisioned-client-id",
+            "client_secret": "provisioned-client-secret",
+            RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
+        },
+    )
 
     with TestClient(api_app, base_url="https://mindroom.example.test") as client:
         _login(client)

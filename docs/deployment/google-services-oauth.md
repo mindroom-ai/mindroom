@@ -6,8 +6,8 @@ icon: lucide/mail
 
 MindRoom uses the generic OAuth framework for Google tools.
 Each Google service has its own provider ID, callback URL, token service, OAuth client config service, and editable tool settings service.
-Local loopback installations use MindRoom's bundled public desktop OAuth client with PKCE and do not need Google Cloud setup.
-Public and organization-managed deployments can override the bundled client with their own Google Cloud Web application client.
+Paired local installations retrieve MindRoom's desktop OAuth client from the provisioning service and use it locally with PKCE.
+Public, unpaired, and organization-managed deployments can configure their own Google Cloud Web application client.
 
 ## Providers
 
@@ -94,8 +94,10 @@ GOOGLE_GMAIL_ALLOWED_HOSTED_DOMAINS=example.com
 ## Runtime Behavior
 
 Dashboard and agent-issued connect links use `/api/oauth/{provider}/connect` or `/api/oauth/{provider}/authorize`.
-The bundled desktop client is selected only when no stored custom client exists and the resolved callback hostname is a loopback hostname.
-Stored provider-specific or shared custom client config always takes precedence over the bundled client.
+The paired desktop client is fetched only when no stored custom client exists and is cached in the local credential store for resilience.
+The provisioning service supplies the app client configuration but never receives Google authorization codes, Google tokens, or Google API data.
+Stored provider-specific or shared custom client config always takes precedence over the provisioned client.
+The provisioned client is available only when the resolved callback hostname is a loopback hostname.
 OAuth callback state is stored server-side as an opaque token and bound to the authenticated dashboard user and scoped credential target.
 Connections made for a shared-scope agent are stored per agent, so other agents never inherit that account.
 Disconnecting a provider removes the token service for the selected scope and preserves that provider's editable tool settings.

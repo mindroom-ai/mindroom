@@ -103,7 +103,8 @@ Use `worker_scope: user_agent` when each requester should get separate per-agent
 `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` are **not Matrix user access tokens**.
 `MINDROOM_NAMESPACE` is appended to managed agent usernames and room aliases to avoid collisions on shared homeservers.
 
-They can only call provisioning-service endpoints that accept local client credentials (for example agent registration flows).
+They can only call provisioning-service endpoints that accept local client credentials, including agent registration and retrieval of the Google desktop app client configuration.
+The Google app client configuration lets the local process exchange OAuth codes directly with Google; the provisioning service does not receive the resulting Google authorization code or tokens.
 Revoke them from `Settings -> Local MindRoom` in the chat UI.
 
 ## Trust Model (Hosted Server vs Message Privacy)

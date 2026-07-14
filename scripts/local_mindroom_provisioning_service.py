@@ -53,7 +53,7 @@ from urllib.parse import quote
 
 import httpx
 import uvicorn
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -95,6 +95,8 @@ class ServiceConfig:
     cors_origins: list[str]
     listen_host: str
     listen_port: int
+    google_oauth_client_id: str | None = None
+    google_oauth_client_secret: str | None = None
 
 
 @dataclass(slots=True)
@@ -212,6 +214,13 @@ class RegisterAgentResponse(BaseModel):
 
     status: Literal["created", "user_in_use"]
     user_id: str
+
+
+class GoogleOAuthClientResponse(BaseModel):
+    """Installed-app OAuth client returned only to an authenticated local install."""
+
+    client_id: str
+    client_secret: str
 
 
 def _new_runtime_state() -> ProvisioningState:
@@ -342,6 +351,11 @@ def _load_service_config_from_env() -> ServiceConfig:
         cors_origins=cors_origins,
         listen_host=os.getenv("MINDROOM_PROVISIONING_HOST", DEFAULT_LISTEN_HOST).strip(),
         listen_port=_env_int("MINDROOM_PROVISIONING_PORT", default=DEFAULT_LISTEN_PORT, minimum=1),
+        google_oauth_client_id=os.getenv("MINDROOM_GOOGLE_OAUTH_CLIENT_ID", "").strip() or None,
+        google_oauth_client_secret=_read_secret(
+            env_name="MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET",
+            file_env_name="MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET_FILE",
+        ),
     )
 
 
@@ -880,6 +894,31 @@ async def register_agent(
         _persist_state_unlocked(state, config.state_path)
 
     return await _register_agent_with_matrix(config, payload)
+
+
+@router.get("/v1/local-mindroom/oauth/google-client", response_model=GoogleOAuthClientResponse)
+async def google_oauth_client(
+    response: Response,
+    config: Annotated[ServiceConfig, Depends(_service_config_from_request)],
+    state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
+    x_local_mindroom_client_id: Annotated[str | None, Header(alias="X-Local-MindRoom-Client-Id")] = None,
+    x_local_mindroom_client_secret: Annotated[str | None, Header(alias="X-Local-MindRoom-Client-Secret")] = None,
+) -> GoogleOAuthClientResponse:
+    """Return the Google installed-app client to one paired local runtime."""
+    now = _now_utc()
+    async with state.lock:
+        connection = _require_local_client(state, x_local_mindroom_client_id, x_local_mindroom_client_secret)
+        _enforce_rate_limit_unlocked(state, key=f"oauth:google-client:{connection.id}", limit=60, window_seconds=60)
+        connection.last_seen_at = now
+        _persist_state_unlocked(state, config.state_path)
+
+    if not config.google_oauth_client_id or not config.google_oauth_client_secret:
+        raise HTTPException(status_code=503, detail="Google OAuth client is not configured")
+    response.headers["Cache-Control"] = "no-store"
+    return GoogleOAuthClientResponse(
+        client_id=config.google_oauth_client_id,
+        client_secret=config.google_oauth_client_secret,
+    )
 
 
 def create_app(config: ServiceConfig | None = None) -> FastAPI:

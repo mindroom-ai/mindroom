@@ -101,7 +101,7 @@ async def _require_oauth_browser_user(request: Request) -> RedirectResponse | No
     return None
 
 
-def _client_config_resolution_for_request(
+async def _client_config_resolution_for_request(
     request: Request,
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
@@ -109,7 +109,10 @@ def _client_config_resolution_for_request(
     reject_remote_bundled: bool,
 ) -> OAuthClientConfigResolution | None:
     """Resolve an OAuth client that can return to the requesting browser host."""
-    resolution = provider.client_config_resolution(runtime_paths)
+    try:
+        resolution = await provider.client_config_resolution_async(runtime_paths)
+    except OAuthProviderError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     if resolution is None or resolution.stored or is_oauth_loopback_hostname(request.url.hostname):
         return resolution
     if reject_remote_bundled:
@@ -129,7 +132,7 @@ async def _issue_authorization_url(
     agent_name: str | None,
     connect_token: str | None = None,
 ) -> OAuthConnectResponse:
-    _client_config_resolution_for_request(
+    await _client_config_resolution_for_request(
         request,
         provider,
         runtime_paths,
@@ -459,14 +462,18 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
         )
         or {}
     )
-    client_config_resolution = _client_config_resolution_for_request(
-        request,
-        provider,
-        runtime_paths,
-        reject_remote_bundled=False,
+    has_service_account_config = oauth_provider_service_account_configured(provider, runtime_paths)
+    client_config_resolution = (
+        provider.client_config_resolution(runtime_paths)
+        if has_service_account_config
+        else await _client_config_resolution_for_request(
+            request,
+            provider,
+            runtime_paths,
+            reject_remote_bundled=False,
+        )
     )
     has_client_config = client_config_resolution is not None
-    has_service_account_config = oauth_provider_service_account_configured(provider, runtime_paths)
     credentials_usable = oauth_credentials_usable(provider, runtime_paths, credentials)
     if credentials_usable and has_client_config and not has_service_account_config:
         try:
