@@ -39,7 +39,7 @@ from mindroom.history.types import (
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
-from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from mindroom.token_budget import estimate_compaction_input_tokens, estimate_text_tokens, stable_serialize
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
 
 if TYPE_CHECKING:
@@ -510,7 +510,7 @@ async def _generate_compaction_summary_with_retry(
     retry_policy = DEFAULT_SUMMARY_RETRY_POLICY
     attempt = 1
     while True:
-        estimated_input_tokens = estimate_text_tokens(summary_input)
+        estimated_input_tokens = estimate_compaction_input_tokens(summary_input)
         started = asyncio.get_running_loop().time()
         logger.info(
             "Compaction summary chunk request",
@@ -553,10 +553,8 @@ async def _generate_compaction_summary_with_retry(
                     max_input_tokens=retry_budget,
                 )
                 # The policy decides whether a retry is allowed; rebuilt_runs is the
-                # feasibility gate. Only a shrunken budget can rebuild empty (an
-                # unchanged budget reproduces the input that already fit), and it
-                # means no run fits — fall through to raise instead of resending
-                # the too-large input.
+                # feasibility gate. If no run fits the smaller budget, fall through
+                # to raise instead of resending the original input.
                 if rebuilt_runs:
                     summary_input = rebuilt_input
                     included_runs = rebuilt_runs
@@ -593,7 +591,7 @@ def _build_summary_input(
         escaped_summary = _escape_xml_content(previous_summary)
         summary_block = f"<previous_summary>\n{escaped_summary}\n</previous_summary>"
 
-    remaining = max_input_tokens - estimate_text_tokens(summary_block) - _WRAPPER_OVERHEAD_TOKENS
+    remaining = max_input_tokens - estimate_compaction_input_tokens(summary_block) - _WRAPPER_OVERHEAD_TOKENS
 
     if remaining <= 0:
         return summary_block, []
@@ -654,19 +652,19 @@ def _serialize_oversized_run_excerpt(
         return None
 
     full_run = _serialize_run(run, index, history_settings)
-    if estimate_text_tokens(full_run) <= max_tokens:
+    if estimate_compaction_input_tokens(full_run) <= max_tokens:
         return full_run
 
     blocks = _excerpt_blocks(run, history_settings)
-    budget_chars = max_tokens * 4
+    budget_chars = max_tokens * 2
     while budget_chars > 0:
         excerpt = _serialize_run_excerpt(run, index=index, blocks=blocks, content_budget_chars=budget_chars)
-        if estimate_text_tokens(excerpt) <= max_tokens:
+        if estimate_compaction_input_tokens(excerpt) <= max_tokens:
             return excerpt
         budget_chars //= 2
 
     minimal_excerpt = _serialize_run_excerpt(run, index=index, blocks=blocks, content_budget_chars=0)
-    if estimate_text_tokens(minimal_excerpt) <= max_tokens:
+    if estimate_compaction_input_tokens(minimal_excerpt) <= max_tokens:
         return minimal_excerpt
     return None
 
@@ -740,8 +738,8 @@ def _truncate_excerpt(text: str, max_chars: int) -> str:
 def _remaining_excerpt_budget(max_input_tokens: int, summary_block: str) -> int:
     return (
         max_input_tokens
-        - estimate_text_tokens(summary_block)
-        - estimate_text_tokens(
+        - estimate_compaction_input_tokens(summary_block)
+        - estimate_compaction_input_tokens(
             "<new_conversation>\n\n</new_conversation>",
         )
     )
@@ -756,7 +754,7 @@ def _compose_summary_input(summary_block: str, serialized_runs: str) -> str:
 
 
 def _estimate_serialized_run_tokens(run: RunOutput | TeamRunOutput, history_settings: ResolvedHistorySettings) -> int:
-    return estimate_text_tokens(_serialize_run(run, 0, history_settings))
+    return estimate_compaction_input_tokens(_serialize_run(run, 0, history_settings))
 
 
 def _messages_for_runs(

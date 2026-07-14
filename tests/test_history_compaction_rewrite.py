@@ -125,7 +125,7 @@ async def test_rewrite_passes_full_summary_input_budget_into_chunk_construction(
             ),
             available_history_budget=None,
             selected_run_ids=tuple(f"run-{index}" for index in range(1, 6)),
-            summary_input_budget=70_000,
+            summary_input_budget=110_000,
             before_tokens=0,
             runs_before=len(runs),
             threshold_tokens=None,
@@ -138,7 +138,7 @@ async def test_rewrite_passes_full_summary_input_budget_into_chunk_construction(
     assert rewrite_result is not None
     assert len(summary_inputs) == 1
     assert build_summary_input_spy.call_count == 1
-    assert build_summary_input_spy.call_args.kwargs["max_input_tokens"] == 70_000
+    assert build_summary_input_spy.call_args.kwargs["max_input_tokens"] == 110_000
     assert "run-1 user" in summary_inputs[0]
     assert "run-5 user" in summary_inputs[0]
     assert rewrite_result.compacted_run_count == 5

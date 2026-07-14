@@ -18,8 +18,8 @@ It enforces the call-side half of the compaction invariants
    ``SummaryRetryPolicy`` decides which error classes warrant a smaller retry
    (timeouts and the named context-length fragments), the shrink schedule
    (halving), and the give-up floor — no inline string matching at call sites.
-   Empty-text success responses re-issue once at the unchanged budget instead,
-   because shrinking cannot fix a transient empty response.
+   Empty-text success responses also retry with less input because some providers
+   surface rejected or oversized requests as an empty successful response.
 
 5. Output-capped summaries use an explicit retry signal.
    ``generate_compaction_summary`` refuses to return a likely truncated summary,
@@ -86,9 +86,8 @@ class SummaryRetryPolicy:
     """Explicit retry policy for failed compaction summary calls.
 
     The schedule is deterministic: each shrinkable failure divides the input
-    budget by ``shrink_divisor`` (clamped to ``floor_tokens``), while an empty
-    result re-issues at the unchanged budget; once the budget can no longer
-    shrink, or ``max_attempts`` is reached, the error propagates.
+    budget by ``shrink_divisor`` (clamped to ``floor_tokens``); once the budget
+    can no longer shrink, or ``max_attempts`` is reached, the error propagates.
     """
 
     max_attempts: int = 2
@@ -106,12 +105,7 @@ class SummaryRetryPolicy:
         """Return the input budget for the next attempt, or None when the policy gives up."""
         if attempt >= self.max_attempts:
             return None
-        if isinstance(error, _CompactionSummaryEmptyResultError):
-            # Shrinking does not fix an empty response: the provider fault is
-            # transient (a byte-identical input has been observed to fail
-            # fast-empty and then summarize fine), so re-issue unchanged.
-            return budget
-        if not self.should_shrink(error):
+        if not isinstance(error, _CompactionSummaryEmptyResultError) and not self.should_shrink(error):
             return None
         smaller_budget = max(self.floor_tokens, budget // self.shrink_divisor)
         if smaller_budget >= budget:

@@ -20,6 +20,18 @@ def estimate_text_tokens(value: str | list[str] | None) -> int:
     return len(stable_serialize(value)) // 4
 
 
+def estimate_compaction_input_tokens(value: str) -> int:
+    """Conservatively estimate tokens for serialized compaction history.
+
+    Compaction serializes arbitrary history, including dense structured text and
+    Unicode. Use tighter character and UTF-8 byte ratios than the prose-oriented
+    generic estimate when enforcing the summary model's input budget.
+    """
+    character_estimate = (len(value) + 1) // 2
+    byte_estimate = (len(value.encode("utf-8")) + 2) // 3
+    return max(character_estimate, byte_estimate)
+
+
 def compute_compaction_input_budget(
     context_window: int,
     *,

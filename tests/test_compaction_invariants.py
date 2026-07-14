@@ -56,6 +56,7 @@ from mindroom.history.summary_call import (
 )
 from mindroom.history.types import HistoryPolicy, HistoryScope, HistoryScopeState, ResolvedHistorySettings
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
+from mindroom.token_budget import estimate_compaction_input_tokens
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 from tests.conftest import FakeModel, bind_runtime_paths, prepare_history_for_run_for_test
 
@@ -687,16 +688,21 @@ async def test_generate_compaction_summary_empty_result_raises_typed_error_with_
         )
 
 
-def test_retry_policy_reissues_same_budget_for_empty_result() -> None:
-    """Empty-result failures retry once at the SAME budget; shrinking would not help."""
+def test_retry_policy_shrinks_budget_for_empty_result() -> None:
+    """Empty results may be a provider's response to an oversized request."""
     error = _CompactionSummaryEmptyResultError("summary generation returned no result")
-    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) == 16_000
+    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) == 8_000
     assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=2, budget=16_000, error=error) is None
 
 
+def test_compaction_input_estimate_uses_conservative_character_and_byte_ratios() -> None:
+    assert estimate_compaction_input_tokens("structured: true") == 8
+    assert estimate_compaction_input_tokens("☃☃") == 2
+
+
 @pytest.mark.asyncio
-async def test_compaction_retries_empty_summary_result_once_at_same_budget(tmp_path: Path) -> None:
-    """One transient empty summary response recovers on the plain re-issue."""
+async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_path: Path) -> None:
+    """An empty summary response retries with a smaller input."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session(
@@ -737,9 +743,9 @@ async def test_compaction_retries_empty_summary_result_once_at_same_budget(tmp_p
         )
 
     assert outcome is not None
-    # Chunk 1 fails empty, is re-issued unchanged, then chunk 2 compacts run-2.
+    # Chunk 1 fails empty, is rebuilt smaller, then chunk 2 compacts run-2.
     assert len(attempts) == 3
-    assert attempts[0] == attempts[1]
+    assert estimate_compaction_input_tokens(attempts[1]) < estimate_compaction_input_tokens(attempts[0])
     assert attempts[2] != attempts[1]
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
