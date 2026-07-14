@@ -49,7 +49,7 @@ from mindroom.thread_summary import (
     update_last_summary_count,
 )
 from mindroom.thread_tag_vocabulary import _TagUsage, _TagVocabularySnapshot
-from mindroom.thread_tags import ThreadTagsError
+from mindroom.thread_tags import SetThreadTagsIfEmptyResult, ThreadTagsError
 from tests.conftest import make_matrix_client_mock
 
 if TYPE_CHECKING:
@@ -737,8 +737,16 @@ class TestMaybeGenerateThreadSummary:
             patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=thread_history)) as load,
             patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value=generated)) as generate,
             patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")) as send,
-            patch("mindroom.thread_summary.get_thread_tags", new=AsyncMock(return_value=None)) as get_tags,
-            patch("mindroom.thread_summary.set_thread_tag", new=AsyncMock()) as set_tag,
+            patch(
+                "mindroom.thread_summary.set_thread_tags_if_empty",
+                new=AsyncMock(
+                    return_value=SetThreadTagsIfEmptyResult(
+                        had_existing_tags=False,
+                        applied_tags=("bug", "authentication"),
+                        failed_tags=(),
+                    ),
+                ),
+            ) as set_tags,
         ):
             await self._maybe_generate(client, config, rp)
 
@@ -761,8 +769,13 @@ class TestMaybeGenerateThreadSummary:
             self.conversation_cache,
             initial_enrichment_complete=True,
         )
-        get_tags.assert_awaited_once_with(client, "!room:x", "$thread1")
-        assert [call.args[3] for call in set_tag.await_args_list] == ["bug", "authentication"]
+        set_tags.assert_awaited_once_with(
+            client,
+            "!room:x",
+            "$thread1",
+            ["bug", "authentication"],
+            set_by="@bot:localhost",
+        )
 
     async def test_forged_summary_metadata_cannot_suppress_initial_enrichment(self) -> None:
         """A human-authored reserved key must remain ordinary conversation input."""
@@ -785,8 +798,16 @@ class TestMaybeGenerateThreadSummary:
             patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=thread_history)),
             patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value=generated)) as generate,
             patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")) as send,
-            patch("mindroom.thread_summary.get_thread_tags", new=AsyncMock(return_value=None)),
-            patch("mindroom.thread_summary.set_thread_tag", new=AsyncMock()) as set_tag,
+            patch(
+                "mindroom.thread_summary.set_thread_tags_if_empty",
+                new=AsyncMock(
+                    return_value=SetThreadTagsIfEmptyResult(
+                        had_existing_tags=False,
+                        applied_tags=("bug",),
+                        failed_tags=(),
+                    ),
+                ),
+            ) as set_tags,
         ):
             await self._maybe_generate(client, config, rp)
 
@@ -798,11 +819,11 @@ class TestMaybeGenerateThreadSummary:
             tag_vocabulary="(no reusable short tags in use yet)",
             trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS,
         )
-        set_tag.assert_awaited_once_with(
+        set_tags.assert_awaited_once_with(
             client,
             "!room:x",
             "$thread1",
-            "bug",
+            ["bug"],
             set_by="@bot:localhost",
         )
         assert send.await_args.args[4] == 5
@@ -814,8 +835,6 @@ class TestMaybeGenerateThreadSummary:
         client.user_id = "@bot:localhost"
         config = _mock_config(first_threshold=1)
         rp = _mock_runtime_paths()
-        manual_state = MagicMock(tags={"manual": MagicMock()})
-
         with (
             patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=_make_thread_history(2))),
             patch(
@@ -831,12 +850,26 @@ class TestMaybeGenerateThreadSummary:
                 "mindroom.thread_summary.send_thread_summary_event",
                 new=AsyncMock(return_value="$summary"),
             ) as send,
-            patch("mindroom.thread_summary.get_thread_tags", new=AsyncMock(return_value=manual_state)),
-            patch("mindroom.thread_summary.set_thread_tag", new=AsyncMock()) as set_tag,
+            patch(
+                "mindroom.thread_summary.set_thread_tags_if_empty",
+                new=AsyncMock(
+                    return_value=SetThreadTagsIfEmptyResult(
+                        had_existing_tags=True,
+                        applied_tags=(),
+                        failed_tags=(),
+                    ),
+                ),
+            ) as set_tags,
         ):
             await self._maybe_generate(client, config, rp)
 
-        set_tag.assert_not_awaited()
+        set_tags.assert_awaited_once_with(
+            client,
+            "!room:x",
+            "$thread1",
+            ["bug"],
+            set_by="@bot:localhost",
+        )
         assert send.await_args.kwargs["initial_enrichment_complete"] is True
 
     async def test_later_summary_refresh_does_not_touch_tag_state(self) -> None:
@@ -859,8 +892,7 @@ class TestMaybeGenerateThreadSummary:
             patch("mindroom.thread_summary.load_tag_vocabulary_snapshot") as load_vocabulary,
             patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="🧵 Refreshed")) as generate,
             patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")),
-            patch("mindroom.thread_summary.get_thread_tags", new=AsyncMock()) as get_tags,
-            patch("mindroom.thread_summary.set_thread_tag", new=AsyncMock()) as set_tag,
+            patch("mindroom.thread_summary.set_thread_tags_if_empty", new=AsyncMock()) as set_tags,
         ):
             await self._maybe_generate(client, config, rp)
 
@@ -874,8 +906,7 @@ class TestMaybeGenerateThreadSummary:
         )
         rebuild.assert_awaited_once()
         load_vocabulary.assert_not_called()
-        get_tags.assert_not_awaited()
-        set_tag.assert_not_awaited()
+        set_tags.assert_not_awaited()
 
     async def test_vocabulary_and_summary_send_failures_do_not_block_initial_tags(self) -> None:
         """Background maintenance and Matrix summary failures should stay isolated from tag writes."""
@@ -903,12 +934,20 @@ class TestMaybeGenerateThreadSummary:
                 "mindroom.thread_summary.send_thread_summary_event",
                 new=AsyncMock(side_effect=RuntimeError("send failed")),
             ),
-            patch("mindroom.thread_summary.get_thread_tags", new=AsyncMock(return_value=None)),
-            patch("mindroom.thread_summary.set_thread_tag", new=AsyncMock()) as set_tag,
+            patch(
+                "mindroom.thread_summary.set_thread_tags_if_empty",
+                new=AsyncMock(
+                    return_value=SetThreadTagsIfEmptyResult(
+                        had_existing_tags=False,
+                        applied_tags=("bug",),
+                        failed_tags=(),
+                    ),
+                ),
+            ) as set_tags,
         ):
             await self._maybe_generate(client, config, rp)
 
-        set_tag.assert_awaited_once_with(client, "!room:x", "$thread1", "bug", set_by="@bot:localhost")
+        set_tags.assert_awaited_once_with(client, "!room:x", "$thread1", ["bug"], set_by="@bot:localhost")
 
     async def test_raw_tag_write_failure_does_not_block_remaining_tags_or_summary(self) -> None:
         """Transport exceptions from one tag write should not abort the enrichment delivery."""
@@ -916,7 +955,13 @@ class TestMaybeGenerateThreadSummary:
         client.user_id = "@bot:localhost"
         config = _mock_config(first_threshold=1)
         rp = _mock_runtime_paths()
-        set_tag = AsyncMock(side_effect=[TimeoutError("timed out"), None])
+        set_tags = AsyncMock(
+            return_value=SetThreadTagsIfEmptyResult(
+                had_existing_tags=False,
+                applied_tags=("authentication",),
+                failed_tags=("bug",),
+            ),
+        )
         send_summary = AsyncMock(return_value="$summary")
 
         with (
@@ -930,13 +975,18 @@ class TestMaybeGenerateThreadSummary:
                     ),
                 ),
             ),
-            patch("mindroom.thread_summary.get_thread_tags", new=AsyncMock(return_value=None)),
-            patch("mindroom.thread_summary.set_thread_tag", new=set_tag),
+            patch("mindroom.thread_summary.set_thread_tags_if_empty", new=set_tags),
             patch("mindroom.thread_summary.send_thread_summary_event", new=send_summary),
         ):
             await self._maybe_generate(client, config, rp)
 
-        assert [call.args[3] for call in set_tag.await_args_list] == ["bug", "authentication"]
+        set_tags.assert_awaited_once_with(
+            client,
+            "!room:x",
+            "$thread1",
+            ["bug", "authentication"],
+            set_by="@bot:localhost",
+        )
         assert send_summary.await_args.kwargs["initial_enrichment_complete"] is True
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 2
 
@@ -960,15 +1010,14 @@ class TestMaybeGenerateThreadSummary:
                 ),
             ),
             patch(
-                "mindroom.thread_summary.get_thread_tags",
+                "mindroom.thread_summary.set_thread_tags_if_empty",
                 new=AsyncMock(side_effect=TimeoutError("timed out")),
-            ),
-            patch("mindroom.thread_summary.set_thread_tag", new=AsyncMock()) as set_tag,
+            ) as set_tags,
             patch("mindroom.thread_summary.send_thread_summary_event", new=send_summary),
         ):
             await self._maybe_generate(client, config, rp)
 
-        set_tag.assert_not_awaited()
+        set_tags.assert_awaited_once()
         assert send_summary.await_args.kwargs["initial_enrichment_complete"] is False
 
     async def test_all_tag_write_failures_mark_enrichment_retryable(self) -> None:
@@ -990,10 +1039,15 @@ class TestMaybeGenerateThreadSummary:
                     ),
                 ),
             ),
-            patch("mindroom.thread_summary.get_thread_tags", new=AsyncMock(return_value=None)),
             patch(
-                "mindroom.thread_summary.set_thread_tag",
-                new=AsyncMock(side_effect=TimeoutError("timed out")),
+                "mindroom.thread_summary.set_thread_tags_if_empty",
+                new=AsyncMock(
+                    return_value=SetThreadTagsIfEmptyResult(
+                        had_existing_tags=False,
+                        applied_tags=(),
+                        failed_tags=("bug",),
+                    ),
+                ),
             ),
             patch("mindroom.thread_summary.send_thread_summary_event", new=send_summary),
         ):
@@ -1470,7 +1524,13 @@ class TestMaybeGenerateThreadSummary:
         client.user_id = "@bot:localhost"
         config = _mock_config(first_threshold=1)
         rp = _mock_runtime_paths()
-        set_tag = AsyncMock()
+        set_tags = AsyncMock(
+            return_value=SetThreadTagsIfEmptyResult(
+                had_existing_tags=False,
+                applied_tags=("bug",),
+                failed_tags=(),
+            ),
+        )
 
         with (
             pytest.raises(asyncio.CancelledError),
@@ -1484,8 +1544,7 @@ class TestMaybeGenerateThreadSummary:
                     ),
                 ),
             ),
-            patch("mindroom.thread_summary.get_thread_tags", new=AsyncMock(return_value=None)),
-            patch("mindroom.thread_summary.set_thread_tag", new=set_tag),
+            patch("mindroom.thread_summary.set_thread_tags_if_empty", new=set_tags),
             patch(
                 "mindroom.thread_summary.send_thread_summary_event",
                 new=AsyncMock(side_effect=asyncio.CancelledError),
@@ -1493,7 +1552,7 @@ class TestMaybeGenerateThreadSummary:
         ):
             await self._maybe_generate(client, config, rp)
 
-        set_tag.assert_awaited_once_with(client, "!room:x", "$thread1", "bug", set_by="@bot:localhost")
+        set_tags.assert_awaited_once_with(client, "!room:x", "$thread1", ["bug"], set_by="@bot:localhost")
         assert _thread_summary_cache_key("!room:x", "$thread1") not in _last_summary_counts
 
     async def test_generation_exception_records_count(self) -> None:
@@ -1623,8 +1682,16 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=thread_history)),
             patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value=generated)) as generate,
-            patch("mindroom.thread_summary.get_thread_tags", new=AsyncMock(return_value=None)),
-            patch("mindroom.thread_summary.set_thread_tag", new=AsyncMock()) as set_tag,
+            patch(
+                "mindroom.thread_summary.set_thread_tags_if_empty",
+                new=AsyncMock(
+                    return_value=SetThreadTagsIfEmptyResult(
+                        had_existing_tags=False,
+                        applied_tags=("bug",),
+                        failed_tags=(),
+                    ),
+                ),
+            ) as set_tags,
             patch(
                 "mindroom.thread_summary.send_thread_summary_event",
                 new=AsyncMock(return_value="$summary"),
@@ -1633,7 +1700,7 @@ class TestMaybeGenerateThreadSummary:
             await self._maybe_generate(client, config, rp)
 
         assert generate.await_args.kwargs["tag_vocabulary"] == "(no reusable short tags in use yet)"
-        set_tag.assert_awaited_once_with(client, "!room:x", "$thread1", "bug", set_by="@bot:localhost")
+        set_tags.assert_awaited_once_with(client, "!room:x", "$thread1", ["bug"], set_by="@bot:localhost")
         assert send_summary.await_args.kwargs["initial_enrichment_complete"] is True
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 15
 

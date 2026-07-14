@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
+from weakref import WeakValueDictionary
 
 import nio
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from mindroom.logging_config import get_logger
 from mindroom.matrix.client_thread_history import enumerate_room_thread_root_ids
+
+logger = get_logger(__name__)
 
 THREAD_TAGS_EVENT_TYPE = "com.mindroom.thread.tags"
 _POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
@@ -30,6 +35,7 @@ COERCED_TAG_MAX_LENGTH = 25
 __all__ = [
     "COERCED_TAG_MAX_LENGTH",
     "THREAD_TAGS_EVENT_TYPE",
+    "SetThreadTagsIfEmptyResult",
     "ThreadTagRecord",
     "ThreadTagsError",
     "ThreadTagsListing",
@@ -40,7 +46,12 @@ __all__ = [
     "normalize_tag_name",
     "remove_thread_tag",
     "set_thread_tag",
+    "set_thread_tags_if_empty",
 ]
+
+type _ThreadTagMutationKey = tuple[str, str]
+
+_thread_tag_mutation_locks: WeakValueDictionary[_ThreadTagMutationKey, asyncio.Lock] = WeakValueDictionary()
 
 # ARCHITECTURE DECISION: One State Event Per Thread Tag
 #
@@ -127,6 +138,25 @@ class ThreadTagsListing:
     tag_state: dict[str, ThreadTagsState]
     include_untagged: bool
     truncated: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SetThreadTagsIfEmptyResult:
+    """Outcome of one conditional automatic-tag batch."""
+
+    had_existing_tags: bool
+    applied_tags: tuple[str, ...]
+    failed_tags: tuple[str, ...]
+
+
+def _thread_tag_mutation_lock(room_id: str, thread_root_id: str) -> asyncio.Lock:
+    """Return the process-local mutation lock shared by all clients for one thread."""
+    key = room_id, thread_root_id
+    lock = _thread_tag_mutation_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _thread_tag_mutation_locks[key] = lock
+    return lock
 
 
 def _parse_timestamp(value: object) -> datetime | None:
@@ -787,6 +817,33 @@ async def set_thread_tag(
         thread_root_id,
         field_name="thread_root_id",
     )
+    async with _thread_tag_mutation_lock(room_id, normalized_thread_root_id):
+        return await _set_thread_tag_under_lock(
+            client,
+            room_id,
+            normalized_thread_root_id,
+            tag,
+            set_by=set_by,
+            note=note,
+            data=data,
+        )
+
+
+async def _set_thread_tag_under_lock(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_root_id: str,
+    tag: str,
+    *,
+    set_by: str,
+    note: str | None = None,
+    data: Mapping[str, Any] | None = None,
+) -> ThreadTagsState:
+    """Persist one thread tag while the caller holds the thread mutation lock."""
+    normalized_thread_root_id = _require_non_empty_string(
+        thread_root_id,
+        field_name="thread_root_id",
+    )
     normalized_tag = normalize_tag_name(tag)
     normalized_set_by = _require_non_empty_string(
         set_by,
@@ -844,6 +901,59 @@ async def set_thread_tag(
     raise ThreadTagsError(msg)
 
 
+async def set_thread_tags_if_empty(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_root_id: str,
+    tags: Sequence[str],
+    *,
+    set_by: str,
+) -> SetThreadTagsIfEmptyResult:
+    """Set a batch of tags only when the thread has no tags at mutation time."""
+    normalized_thread_root_id = _require_non_empty_string(
+        thread_root_id,
+        field_name="thread_root_id",
+    )
+    normalized_set_by = _require_non_empty_string(set_by, field_name="set_by")
+
+    async with _thread_tag_mutation_lock(room_id, normalized_thread_root_id):
+        existing_state = await get_thread_tags(client, room_id, normalized_thread_root_id)
+        if existing_state is not None and existing_state.tags:
+            return SetThreadTagsIfEmptyResult(
+                had_existing_tags=True,
+                applied_tags=(),
+                failed_tags=(),
+            )
+
+        applied_tags: list[str] = []
+        failed_tags: list[str] = []
+        for tag in tags:
+            try:
+                await _set_thread_tag_under_lock(
+                    client,
+                    room_id,
+                    normalized_thread_root_id,
+                    tag,
+                    set_by=normalized_set_by,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to write conditional thread tag",
+                    room_id=room_id,
+                    thread_root_id=normalized_thread_root_id,
+                    tag=tag,
+                )
+                failed_tags.append(tag)
+            else:
+                applied_tags.append(tag)
+
+        return SetThreadTagsIfEmptyResult(
+            had_existing_tags=False,
+            applied_tags=tuple(applied_tags),
+            failed_tags=tuple(failed_tags),
+        )
+
+
 async def remove_thread_tag(
     client: nio.AsyncClient,
     room_id: str,
@@ -853,6 +963,29 @@ async def remove_thread_tag(
     requester_user_id: str | None = None,
 ) -> ThreadTagsState:
     """Remove one tag from the persisted thread state."""
+    normalized_thread_root_id = _require_non_empty_string(
+        thread_root_id,
+        field_name="thread_root_id",
+    )
+    async with _thread_tag_mutation_lock(room_id, normalized_thread_root_id):
+        return await _remove_thread_tag_under_lock(
+            client,
+            room_id,
+            normalized_thread_root_id,
+            tag,
+            requester_user_id=requester_user_id,
+        )
+
+
+async def _remove_thread_tag_under_lock(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_root_id: str,
+    tag: str,
+    *,
+    requester_user_id: str | None = None,
+) -> ThreadTagsState:
+    """Remove one tag while the caller holds the thread mutation lock."""
     normalized_thread_root_id = _require_non_empty_string(
         thread_root_id,
         field_name="thread_root_id",

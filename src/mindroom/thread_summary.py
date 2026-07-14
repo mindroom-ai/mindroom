@@ -27,7 +27,7 @@ from mindroom.thread_tag_vocabulary import (
     load_tag_vocabulary_snapshot,
     maybe_rebuild_tag_vocabulary,
 )
-from mindroom.thread_tags import coerce_tag_name, get_thread_tags, set_thread_tag
+from mindroom.thread_tags import coerce_tag_name, set_thread_tags_if_empty
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
@@ -462,43 +462,42 @@ async def _apply_initial_tags(
     if not tags or not set_by:
         return False
     try:
-        existing_state = await get_thread_tags(client, room_id, thread_id)
+        result = await set_thread_tags_if_empty(
+            client,
+            room_id,
+            thread_id,
+            tags,
+            set_by=set_by,
+        )
     except Exception:
         logger.exception(
-            "Failed to check existing thread tags; skipping automatic tags",
+            "Failed to apply automatic thread tags",
             room_id=room_id,
             thread_id=thread_id,
         )
         return False
-    if existing_state is not None and existing_state.tags:
+    if result.had_existing_tags:
         logger.info(
             "Skipping automatic tags because the thread already has tags",
             room_id=room_id,
             thread_id=thread_id,
         )
         return True
-
-    applied_tags: list[str] = []
-    for tag in tags:
-        try:
-            await set_thread_tag(client, room_id, thread_id, tag, set_by=set_by)
-        except Exception:
-            logger.exception(
-                "Failed to write automatic thread tag",
-                room_id=room_id,
-                thread_id=thread_id,
-                tag=tag,
-            )
-            continue
-        applied_tags.append(tag)
-    if applied_tags:
+    if result.failed_tags:
+        logger.warning(
+            "Failed to write some automatic thread tags",
+            room_id=room_id,
+            thread_id=thread_id,
+            tags=result.failed_tags,
+        )
+    if result.applied_tags:
         logger.info(
             "Automatically tagged thread",
             room_id=room_id,
             thread_id=thread_id,
-            tags=applied_tags,
+            tags=result.applied_tags,
         )
-    return bool(applied_tags)
+    return bool(result.applied_tags)
 
 
 async def _refresh_tag_vocabulary(
