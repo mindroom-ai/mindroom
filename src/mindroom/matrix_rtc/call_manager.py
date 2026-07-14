@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from collections.abc import Set as AbstractSet
 
+    from mindroom.config.calls import CallAgentConfig
     from mindroom.config.main import Config
     from mindroom.config.voice import SpeechServiceConfig
     from mindroom.constants import RuntimePaths
@@ -167,11 +168,12 @@ class CallManager:
     ) -> None:
         self._agent_name = agent_name
         self._config = config
+        self._call_config: CallAgentConfig = config.calls.agents[agent_name]
         self._client = client
         self._runtime_paths = runtime_paths
         self._ssl_verify = ssl_verify
         self._bridge_factory = bridge_factory or (
-            _default_cascaded_bridge_factory if config.calls.backend == "cascaded" else _default_bridge_factory
+            _default_cascaded_bridge_factory if self._call_config.backend == "cascaded" else _default_bridge_factory
         )
         self._tool_support = tool_support
         self._get_invited_rooms_by_agent = get_invited_rooms_by_agent
@@ -598,7 +600,7 @@ class CallManager:
             tooling = await self._build_tooling(
                 room_id,
                 requester_id=members[0].user_id,
-                cascaded=self._config.calls.backend == "cascaded",
+                cascaded=self._call_config.backend == "cascaded",
             )
         except Exception as error:
             logger.warning(
@@ -836,7 +838,7 @@ class CallManager:
     def _start_logical_call(self, room_id: str, requester_id: str) -> _LogicalCallState:
         """Create the state shared by every media attempt for one caller presence."""
         session_id = None
-        if self._config.calls.backend == "cascaded":
+        if self._call_config.backend == "cascaded":
             session_id = f"{create_session_id(room_id, None)}:call:{uuid4().hex}"
         logical_call = _LogicalCallState(requester_id=requester_id, cascaded_session_id=session_id)
         self._logical_calls[room_id] = logical_call
@@ -859,9 +861,9 @@ class CallManager:
         warn_if_unavailable: bool = True,
     ) -> _ResolvedVoiceBackend | None:
         """Resolve backend-specific credentials without affecting call lifecycle."""
-        if self._config.calls.backend == "realtime":
+        if self._call_config.backend == "realtime":
             api_key = get_api_key_for_service(
-                self._config.calls.credentials_service,
+                self._call_config.credentials_service,
                 self._runtime_paths,
             )
             if not api_key:
@@ -870,13 +872,13 @@ class CallManager:
                         "call_join_skipped_no_openai_key",
                         room_id=room_id,
                         agent=self._agent_name,
-                        credentials_service=self._config.calls.credentials_service,
+                        credentials_service=self._call_config.credentials_service,
                     )
                 return None
             return _ResolvedVoiceBackend(realtime_api_key=api_key)
 
-        stt_config = self._config.calls.stt
-        tts_config = self._config.calls.tts
+        stt_config = self._call_config.stt
+        tts_config = self._call_config.tts
         if stt_config is None or tts_config is None:
             msg = "Cascaded call configuration requires STT and TTS"
             raise ValueError(msg)
@@ -913,15 +915,15 @@ class CallManager:
         def on_session_error(message: str) -> None:
             self._schedule_call_failure_notice(room.room_id, message)
 
-        if self._config.calls.backend == "realtime":
+        if self._call_config.backend == "realtime":
             if backend.realtime_api_key is None:
                 msg = "Realtime call API key was not resolved"
                 raise RuntimeError(msg)
             return VoiceAgentOptions(
                 instructions=_build_call_instructions(tooling.instructions),
-                model=self._config.calls.model,
+                model=self._call_config.model,
                 api_key=backend.realtime_api_key,
-                voice=self._config.calls.voice,
+                voice=self._call_config.voice,
                 greeting_instructions="Briefly greet the caller and let them know you joined the call.",
                 tools=tooling.tools,
                 on_conversation_turn=transcript.record,

@@ -15,7 +15,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.auth import AuthorizationConfig
-from mindroom.config.calls import CallsConfig
+from mindroom.config.calls import CallAgentConfig, CallsConfig
 from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig
 from mindroom.config.models import ModelConfig
@@ -45,6 +45,7 @@ from mindroom.matrix_rtc.voice_agent import (
     CallVoiceAgentOptions,
     CascadedVoiceAgentOptions,
     CascadedVoiceBridge,
+    RealtimeVoiceBridge,
     VoiceAgentOptions,
 )
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
@@ -216,8 +217,7 @@ def _config(*, enabled: bool = True, credentials_service: str = "openai") -> Con
         authorization=AuthorizationConfig(global_users=["@alice:example.org"]),
         calls=CallsConfig(
             enabled=enabled,
-            credentials_service=credentials_service,
-            agents=["helper"],
+            agents={"helper": CallAgentConfig(credentials_service=credentials_service)},
             livekit_service_url=SERVICE_URL,
         ),
     )
@@ -237,23 +237,26 @@ def _cascaded_config(*, local: bool = False) -> Config:
         config.memory = MemoryConfig(backend="none")
     config.calls = CallsConfig(
         enabled=True,
-        backend="cascaded",
-        agents=["helper"],
+        agents={
+            "helper": CallAgentConfig(
+                backend="cascaded",
+                stt=SpeechServiceConfig(
+                    provider="openai_compatible" if local else "openai",
+                    model="whisper-large-v3" if local else "gpt-4o-transcribe",
+                    api_key=None if local else "stt-key",
+                    host="http://127.0.0.1:9000" if local else None,
+                    extra_kwargs={"language": "en"},
+                ),
+                tts=SpeechServiceConfig(
+                    provider="openai_compatible",
+                    model="tts-1",
+                    api_key=None if local else "tts-key",
+                    host="http://127.0.0.1:9001",
+                    extra_kwargs={"voice": "ash"},
+                ),
+            ),
+        },
         livekit_service_url=SERVICE_URL,
-        stt=SpeechServiceConfig(
-            provider="openai_compatible" if local else "openai",
-            model="whisper-large-v3" if local else "gpt-4o-transcribe",
-            api_key=None if local else "stt-key",
-            host="http://127.0.0.1:9000" if local else None,
-            extra_kwargs={"language": "en"},
-        ),
-        tts=SpeechServiceConfig(
-            provider="openai_compatible",
-            model="tts-1",
-            api_key=None if local else "tts-key",
-            host="http://127.0.0.1:9001",
-            extra_kwargs={"voice": "ash"},
-        ),
     )
     return config
 
@@ -653,10 +656,28 @@ def test_openai_cloud_speech_uses_explicit_endpoint(
     assert service.base_url == "https://api.openai.com/v1"
 
 
-def test_default_bridge_factory_tracks_configured_backend(tmp_path: Path) -> None:
-    """Backend config selects cascaded media without changing CallSession."""
-    config = _cascaded_config(local=True)
-    manager = CallManager(
+def test_default_bridge_factory_uses_each_agent_backend(tmp_path: Path) -> None:
+    """Each call manager selects the backend from its own agent profile."""
+    speech = SpeechServiceConfig(
+        provider="openai_compatible",
+        model="local-speech",
+        host="http://127.0.0.1:9000",
+    )
+    config = Config(
+        agents={
+            "helper": AgentConfig(display_name="Helper"),
+            "other": AgentConfig(display_name="Other"),
+        },
+        models={},
+        calls=CallsConfig(
+            enabled=True,
+            agents={
+                "helper": CallAgentConfig(model="gpt-realtime-custom", voice="marin"),
+                "other": CallAgentConfig(backend="cascaded", stt=speech, tts=speech),
+            },
+        ),
+    )
+    realtime_manager = CallManager(
         agent_name="helper",
         config=config,
         client=_client(),
@@ -665,10 +686,25 @@ def test_default_bridge_factory_tracks_configured_backend(tmp_path: Path) -> Non
         tool_support=object(),  # type: ignore[arg-type]
         get_invited_rooms_by_agent=dict,
     )
+    cascaded_manager = CallManager(
+        agent_name="other",
+        config=config,
+        client=_client(),
+        runtime_paths=test_runtime_paths(tmp_path),
+        ssl_verify=True,
+        tool_support=object(),  # type: ignore[arg-type]
+        get_invited_rooms_by_agent=dict,
+    )
 
-    bridge = manager._bridge_factory("@helper:example.org:BOTDEV", False)
+    realtime_bridge = realtime_manager._bridge_factory("@helper:example.org:BOTDEV", False)
+    cascaded_bridge = cascaded_manager._bridge_factory("@other:example.org:BOTDEV", False)
 
-    assert isinstance(bridge, CascadedVoiceBridge)
+    assert isinstance(realtime_bridge, RealtimeVoiceBridge)
+    assert isinstance(cascaded_bridge, CascadedVoiceBridge)
+    assert realtime_manager._call_config.model == "gpt-realtime-custom"
+    assert realtime_manager._call_config.voice == "marin"
+    assert cascaded_manager._call_config.stt == speech
+    assert cascaded_manager._call_config.tts == speech
 
 
 @pytest.mark.asyncio
@@ -1779,7 +1815,11 @@ async def test_manager_accepts_key_for_alias_only_configured_room(
         agents={"helper": AgentConfig(display_name="Helper", rooms=["#voice:example.org"])},
         models={},
         authorization=AuthorizationConfig(global_users=["@alice:example.org"]),
-        calls=CallsConfig(enabled=True, agents=["helper"], livekit_service_url=SERVICE_URL),
+        calls=CallsConfig(
+            enabled=True,
+            agents={"helper": CallAgentConfig()},
+            livekit_service_url=SERVICE_URL,
+        ),
     )
     room = _room(encrypted=True)
     room.canonical_alias = "#voice:example.org"
@@ -1934,7 +1974,11 @@ async def test_manager_rejects_participant_selected_remote_focus(
     config = Config(
         agents={"helper": AgentConfig(display_name="Helper")},
         models={},
-        calls=CallsConfig(enabled=True, agents=["helper"], livekit_service_url=SERVICE_URL),
+        calls=CallsConfig(
+            enabled=True,
+            agents={"helper": CallAgentConfig()},
+            livekit_service_url=SERVICE_URL,
+        ),
     )
     manager = _manager(_client(), FakeBridge(), tmp_path, config)
     members = [
@@ -1958,7 +2002,11 @@ async def test_manager_rejects_unconfigured_same_server_focus(
     config = Config(
         agents={"helper": AgentConfig(display_name="Helper")},
         models={},
-        calls=CallsConfig(enabled=True, agents=["helper"], livekit_service_url=SERVICE_URL),
+        calls=CallsConfig(
+            enabled=True,
+            agents={"helper": CallAgentConfig()},
+            livekit_service_url=SERVICE_URL,
+        ),
     )
     manager = _manager(_client(), FakeBridge(), tmp_path, config)
     member = _member(
@@ -2039,7 +2087,11 @@ async def test_manager_recovers_inherited_focus_after_founder_leaves(tmp_path: P
     config = Config(
         agents={"helper": AgentConfig(display_name="Helper")},
         models={},
-        calls=CallsConfig(enabled=True, agents=["helper"], livekit_service_url=SERVICE_URL),
+        calls=CallsConfig(
+            enabled=True,
+            agents={"helper": CallAgentConfig()},
+            livekit_service_url=SERVICE_URL,
+        ),
     )
     manager = _manager(_client(), FakeBridge(), tmp_path, config)
     follower = _member(
@@ -2108,7 +2160,7 @@ async def test_manager_rejects_insecure_remote_focus(tmp_path: Path) -> None:
     config = Config(
         agents={"helper": AgentConfig(display_name="Helper")},
         models={},
-        calls=CallsConfig(enabled=True, agents=["helper"]),
+        calls=CallsConfig(enabled=True, agents={"helper": CallAgentConfig()}),
     )
     manager = _manager(_client(), FakeBridge(), tmp_path, config)
     member = _member(
@@ -2844,14 +2896,14 @@ async def test_rapid_roster_changes_preserve_key_activation_deadline(
 def test_calls_config_rejects_unknown_agents() -> None:
     """Call configuration may reference only declared agents."""
     with pytest.raises(ValueError, match=r"calls\.agents references unknown agent"):
-        Config(models={}, calls=CallsConfig(enabled=True, agents=["missing"]))
+        Config(models={}, calls=CallsConfig(enabled=True, agents={"missing": CallAgentConfig()}))
 
 
 def test_calls_config_validates_realtime_credentials_service() -> None:
     """Realtime credential bindings use safe normalized service names."""
-    assert CallsConfig(credentials_service=" openai-realtime ").credentials_service == "openai-realtime"
+    assert CallAgentConfig(credentials_service=" openai-realtime ").credentials_service == "openai-realtime"
     with pytest.raises(ValueError, match="Service name can only include"):
-        CallsConfig(credentials_service="../openai")
+        CallAgentConfig(credentials_service="../openai")
 
 
 def test_calls_config_rejects_requester_private_agents() -> None:
@@ -2865,7 +2917,7 @@ def test_calls_config_rejects_requester_private_agents() -> None:
                     private=AgentPrivateConfig(per="user_agent"),
                 ),
             },
-            calls=CallsConfig(enabled=True, agents=["private"]),
+            calls=CallsConfig(enabled=True, agents={"private": CallAgentConfig()}),
         )
 
 
@@ -2878,7 +2930,10 @@ def test_calls_config_rejects_agents_sharing_a_room() -> None:
                 "one": AgentConfig(display_name="One", rooms=["voice"]),
                 "two": AgentConfig(display_name="Two", rooms=["voice"]),
             },
-            calls=CallsConfig(enabled=True, agents=["one", "two"]),
+            calls=CallsConfig(
+                enabled=True,
+                agents={"one": CallAgentConfig(), "two": CallAgentConfig()},
+            ),
         )
 
 
@@ -2887,9 +2942,9 @@ def test_cascaded_calls_require_both_speech_services() -> None:
     speech = SpeechServiceConfig(model="gpt-4o-transcribe")
 
     with pytest.raises(ValueError, match="Cascaded calls require: tts"):
-        CallsConfig(backend="cascaded", stt=speech)
+        CallAgentConfig(backend="cascaded", stt=speech)
     with pytest.raises(ValueError, match="Cascaded calls require: stt"):
-        CallsConfig(backend="cascaded", tts=speech)
+        CallAgentConfig(backend="cascaded", tts=speech)
 
 
 def test_openai_compatible_speech_config_requires_endpoint() -> None:
@@ -3001,7 +3056,7 @@ def test_calls_config_rejects_agents_sharing_a_resolved_room(tmp_path: Path) -> 
                     "one": {"display_name": "One", "rooms": ["voice"]},
                     "two": {"display_name": "Two", "rooms": [ROOM_ID]},
                 },
-                "calls": {"enabled": True, "agents": ["one", "two"]},
+                "calls": {"enabled": True, "agents": {"one": {}, "two": {}}},
             },
             runtime_paths,
         )
@@ -3016,7 +3071,7 @@ def test_calls_config_rejects_equivalent_room_refs_before_matrix_state(tmp_path:
                     "one": {"display_name": "One", "rooms": ["voice"]},
                     "two": {"display_name": "Two", "rooms": ["#voice:example.org"]},
                 },
-                "calls": {"enabled": True, "agents": ["one", "two"]},
+                "calls": {"enabled": True, "agents": {"one": {}, "two": {}}},
             },
             test_runtime_paths(tmp_path),
         )
@@ -3030,7 +3085,10 @@ def test_manager_fails_closed_when_live_room_resolves_multiple_call_agents(tmp_p
             "helper": AgentConfig(display_name="Helper", rooms=[ROOM_ID]),
             "other": AgentConfig(display_name="Other", rooms=["#voice:example.org"]),
         },
-        calls=CallsConfig(enabled=True, agents=["helper", "other"]),
+        calls=CallsConfig(
+            enabled=True,
+            agents={"helper": CallAgentConfig(), "other": CallAgentConfig()},
+        ),
     )
     manager = _manager(_client(), FakeBridge(), tmp_path, config)
     room = _room()

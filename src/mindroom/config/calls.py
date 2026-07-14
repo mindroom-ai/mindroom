@@ -11,12 +11,11 @@ from mindroom.credentials import validate_service_name
 from mindroom.model_defaults import OPENAI_REALTIME
 
 
-class CallsConfig(BaseModel):
-    """Configuration for agents joining Matrix voice calls."""
+class CallAgentConfig(BaseModel):
+    """Voice pipeline configuration for one calls-enabled agent."""
 
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool = Field(default=False, description="Enable agents joining Element Call voice calls")
     backend: Literal["realtime", "cascaded"] = Field(
         default="realtime",
         description="Voice backend: OpenAI realtime speech-to-speech or cascaded STT/agent/TTS",
@@ -32,14 +31,6 @@ class CallsConfig(BaseModel):
     voice: str | None = Field(default=None, description="Realtime model voice preset")
     stt: SpeechServiceConfig | None = Field(default=None, description="Cascaded speech-to-text service")
     tts: SpeechServiceConfig | None = Field(default=None, description="Cascaded text-to-speech service")
-    agents: list[str] = Field(
-        default_factory=list,
-        description="Agents allowed to join calls in their rooms (at most one per room)",
-    )
-    livekit_service_url: str | None = Field(
-        default=None,
-        description="Same-server MatrixRTC authorization service URL override (otherwise discovered from .well-known)",
-    )
 
     @field_validator("credentials_service")
     @classmethod
@@ -57,3 +48,19 @@ class CallsConfig(BaseModel):
             msg = "Cascaded calls require: " + ", ".join(missing)
             raise ValueError(msg)
         return self
+
+
+class CallsConfig(BaseModel):
+    """Global MatrixRTC settings and per-agent voice pipelines."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(default=False, description="Enable agents joining Element Call voice calls")
+    agents: dict[str, CallAgentConfig] = Field(
+        default_factory=dict,
+        description="Call configuration by agent name (at most one agent per room)",
+    )
+    livekit_service_url: str | None = Field(
+        default=None,
+        description="Same-server MatrixRTC authorization service URL override (otherwise discovered from .well-known)",
+    )

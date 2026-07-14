@@ -31,17 +31,43 @@ The agent leaves the call and clears its membership state event when the caller 
 ```yaml
 calls:
   enabled: true
-  backend: realtime           # default; preserves OpenAI speech-to-speech
-  agents: [assistant]        # shared agents that may join calls in their configured rooms
-  model: gpt-realtime-2.1    # OpenAI realtime model
-  credentials_service: openai # strict credential service binding; defaults to openai
-  voice: marin               # optional voice preset
+  agents:
+    assistant:
+      backend: realtime            # default; preserves OpenAI speech-to-speech
+      model: gpt-realtime-2.1      # OpenAI realtime model
+      credentials_service: openai  # strict credential service binding; defaults to openai
+      voice: marin                 # optional voice preset
   # livekit_service_url: https://rtc.example.org   # same-server .well-known override
 ```
 
 Voice calls require the `matrix_calls` extra (`pip install "mindroom[matrix_calls]"` or `uv sync --extra matrix_calls`).
-The realtime backend reads its API key only from `calls.credentials_service`, which defaults to the `openai` credential service seeded by `OPENAI_API_KEY`.
+Each `calls.agents` entry owns that agent's voice backend and speech models, so one agent can use OpenAI Realtime while another uses a cascaded STT and TTS pipeline.
+The realtime backend reads its API key only from that agent's `credentials_service`, which defaults to the `openai` credential service seeded by `OPENAI_API_KEY`.
 Set a different service when voice and chat use different OpenAI credentials; a missing selected service does not fall back to another key.
+For example, these two agents use independent voice pipelines:
+
+```yaml
+calls:
+  enabled: true
+  agents:
+    concierge:
+      backend: realtime
+      model: gpt-realtime-2.1
+      voice: marin
+    local_assistant:
+      backend: cascaded
+      stt:
+        provider: openai_compatible
+        model: whisper-large-v3
+        host: http://127.0.0.1:9000
+      tts:
+        provider: openai_compatible
+        model: kokoro
+        host: http://127.0.0.1:9001
+        extra_kwargs:
+          voice: af_heart
+```
+
 MindRoom enforces at most one calls-enabled agent per room.
 Calls only join rooms configured for that agent and only while the sole caller passes the normal room and per-agent reply permissions.
 Calls-enabled agents also join calls in ad-hoc rooms they accepted through their normal authorized-invite policy. This lets Matrix clients create a private, temporary voice room and invite one agent without adding that room to `config.yaml` first.
@@ -56,20 +82,21 @@ The agent can therefore use Anthropic, Gemini, OpenAI, or any other MindRoom mod
 ```yaml
 calls:
   enabled: true
-  backend: cascaded
-  agents: [assistant]
-  stt:
-    provider: openai
-    model: gpt-4o-transcribe
-    api_key: your-stt-key
-    extra_kwargs:
-      language: en
-  tts:
-    provider: openai
-    model: tts-1
-    api_key: your-tts-key
-    extra_kwargs:
-      voice: ash
+  agents:
+    assistant:
+      backend: cascaded
+      stt:
+        provider: openai
+        model: gpt-4o-transcribe
+        api_key: your-stt-key
+        extra_kwargs:
+          language: en
+      tts:
+        provider: openai
+        model: tts-1
+        api_key: your-tts-key
+        extra_kwargs:
+          voice: ash
 ```
 
 Each speech component has its own `provider`, `model`, `host`, `api_key`, and `extra_kwargs`.
@@ -101,20 +128,21 @@ agents:
 
 calls:
   enabled: true
-  backend: cascaded
-  agents: [assistant]
-  stt:
-    provider: openai_compatible
-    model: whisper-large-v3
-    host: http://127.0.0.1:9000
-    extra_kwargs:
-      language: en
-  tts:
-    provider: openai_compatible
-    model: tts-1
-    host: http://127.0.0.1:9001
-    extra_kwargs:
-      voice: ash
+  agents:
+    assistant:
+      backend: cascaded
+      stt:
+        provider: openai_compatible
+        model: whisper-large-v3
+        host: http://127.0.0.1:9000
+        extra_kwargs:
+          language: en
+      tts:
+        provider: openai_compatible
+        model: tts-1
+        host: http://127.0.0.1:9001
+        extra_kwargs:
+          voice: ash
 ```
 
 `host` accepts either the service root or its `/v1` base URL.

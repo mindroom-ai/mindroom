@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
-from mindroom.config.calls import CallsConfig
+from mindroom.config.calls import CallAgentConfig, CallsConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.entity_resolution import (
@@ -36,7 +36,10 @@ def _call_config(tmp_path: Path, **accept_invites_by_agent: bool) -> Config:
                 name: AgentConfig(display_name=name.title(), accept_invites=accept_invites)
                 for name, accept_invites in accept_invites_by_agent.items()
             },
-            calls=CallsConfig(enabled=True, agents=list(accept_invites_by_agent)),
+            calls=CallsConfig(
+                enabled=True,
+                agents={name: CallAgentConfig() for name in accept_invites_by_agent},
+            ),
         ),
         runtime_paths=runtime_paths,
     )
