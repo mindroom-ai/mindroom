@@ -839,7 +839,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         config,
         runtime_paths,
         model_name="default",
-        tag_vocabulary="(no reusable short tags in use yet)",
+        tag_vocabulary=None,
         trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
     )
     mock_send.assert_awaited_once_with(
@@ -936,7 +936,7 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         config,
         runtime_paths,
         model_name="qwen",
-        tag_vocabulary="(no reusable short tags in use yet)",
+        tag_vocabulary=None,
         trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
     )
 

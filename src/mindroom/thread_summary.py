@@ -84,7 +84,7 @@ class _ThreadSummary(BaseModel):
 
 
 class _ThreadEnrichment(_ThreadSummary):
-    """Structured first-summary response with one-shot topic tags."""
+    """Structured second-summary response with one-shot topic tags."""
 
     tags: list[str] = Field(
         min_length=1,
@@ -369,7 +369,7 @@ async def _generate_summary(
     tag_vocabulary: str | None = None,
     trusted_sender_ids: Collection[str] | None = None,
 ) -> str | _ThreadEnrichment | None:
-    """Generate a summary and, on the first call, one-shot tags via one LLM run."""
+    """Generate a summary and optional one-shot tags via one LLM run."""
     resolved_model_name = model_name or config.defaults.thread_summary_model or "default"
     model = model_loading.get_model_instance(config, runtime_paths, resolved_model_name)
     _configure_summary_model_temperature(
@@ -716,7 +716,7 @@ async def maybe_generate_thread_summary(
     conversation_cache: ConversationCacheProtocol,
     entity_name: str | None = None,
 ) -> None:
-    """Generate a summary and one-shot initial tags when a threshold is crossed."""
+    """Generate an early summary, then one-shot initial tags on its first refresh."""
     refreshed_tag_vocabulary = await _refresh_tag_vocabulary(client, room_id, config, runtime_paths)
     async with _thread_summary_lock(room_id, thread_id):
         # This background task inherits the response turn's ContextVars, so it
@@ -746,7 +746,7 @@ async def maybe_generate_thread_summary(
         if message_count < threshold:
             return
 
-        initial_enrichment = not _recover_initial_enrichment_complete(
+        initial_enrichment = recovered_summary_count > 0 and not _recover_initial_enrichment_complete(
             thread_history,
             trusted_sender_ids=trusted_sender_ids,
         )

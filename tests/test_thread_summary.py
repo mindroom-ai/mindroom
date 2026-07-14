@@ -83,6 +83,7 @@ def _make_summary_notice_message(
     message_count: int,
     event_id: str = "$summary-event",
     initial_enrichment_complete: bool | None = True,
+    model: str = "manual",
     sender: str = "@mindroom:localhost",
 ) -> ResolvedVisibleMessage:
     """Build a synthetic thread summary notice for history-counting regressions."""
@@ -91,7 +92,7 @@ def _make_summary_notice_message(
         "version": 1,
         "summary": summary,
         "message_count": message_count,
-        "model": "manual",
+        "model": model,
     }
     if initial_enrichment_complete is not None:
         summary_metadata["initial_enrichment_complete"] = initial_enrichment_complete
@@ -112,6 +113,23 @@ def _make_summary_notice_message(
         },
         thread_id=thread_id,
     )
+
+
+def _make_due_second_summary_history(
+    count: int = 12,
+    *,
+    prior_model: str = "default",
+) -> list[ResolvedVisibleMessage]:
+    """Build history whose first summary is due for its tagged refresh."""
+    return [
+        *_make_thread_history(count),
+        _make_summary_notice_message(
+            "$thread1",
+            message_count=2,
+            initial_enrichment_complete=None,
+            model=prior_model,
+        ),
+    ]
 
 
 def _mock_client() -> AsyncMock:
@@ -721,20 +739,65 @@ class TestMaybeGenerateThreadSummary:
         client.room_send.assert_awaited_once()
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 5
 
-    async def test_initial_summary_call_persists_summary_and_tags_once(self) -> None:
-        """The first summary call should produce both artifacts without a second model run."""
+    async def test_first_summary_call_is_summary_only(self) -> None:
+        """The early first summary should not assign tags before the topic settles."""
         client = _mock_client()
         client.user_id = "@bot:localhost"
         config = _mock_config(first_threshold=1)
         rp = _mock_runtime_paths()
         thread_history = _make_thread_history(2)
+
+        with (
+            patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=thread_history)) as load,
+            patch(
+                "mindroom.thread_summary._generate_summary",
+                new=AsyncMock(return_value="🧵 Login failure investigation"),
+            ) as generate,
+            patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")) as send,
+            patch("mindroom.thread_summary.set_thread_tags_if_empty", new=AsyncMock()) as set_tags,
+        ):
+            await self._maybe_generate(client, config, rp)
+
+        load.assert_awaited_once_with(self.conversation_cache, "!room:x", "$thread1")
+        generate.assert_awaited_once_with(
+            thread_history,
+            config,
+            rp,
+            model_name="default",
+            tag_vocabulary=None,
+            trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS,
+        )
+        send.assert_awaited_once_with(
+            client,
+            "!room:x",
+            "$thread1",
+            "🧵 Login failure investigation",
+            2,
+            "default",
+            self.conversation_cache,
+            initial_enrichment_complete=None,
+        )
+        set_tags.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "prior_model",
+        ["default", "manual"],
+        ids=["automatic-first-summary", "manual-first-summary"],
+    )
+    async def test_second_summary_call_persists_summary_and_tags_once(self, prior_model: str) -> None:
+        """The first refresh should update either kind of prior summary and assign initial tags."""
+        client = _mock_client()
+        client.user_id = "@bot:localhost"
+        config = _mock_config(first_threshold=1)
+        rp = _mock_runtime_paths()
+        thread_history = _make_due_second_summary_history(prior_model=prior_model)
         generated = _ThreadEnrichment(
             summary="🧵 Login failure investigation",
             tags=["bug", "authentication"],
         )
 
         with (
-            patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=thread_history)) as load,
+            patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=thread_history)),
             patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value=generated)) as generate,
             patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")) as send,
             patch(
@@ -750,7 +813,6 @@ class TestMaybeGenerateThreadSummary:
         ):
             await self._maybe_generate(client, config, rp)
 
-        load.assert_awaited_once_with(self.conversation_cache, "!room:x", "$thread1")
         generate.assert_awaited_once_with(
             thread_history,
             config,
@@ -764,7 +826,7 @@ class TestMaybeGenerateThreadSummary:
             "!room:x",
             "$thread1",
             "🧵 Login failure investigation",
-            2,
+            12,
             "default",
             self.conversation_cache,
             initial_enrichment_complete=True,
@@ -777,8 +839,8 @@ class TestMaybeGenerateThreadSummary:
             set_by="@bot:localhost",
         )
 
-    async def test_forged_summary_metadata_cannot_suppress_initial_enrichment(self) -> None:
-        """A human-authored reserved key must remain ordinary conversation input."""
+    async def test_forged_summary_metadata_cannot_advance_to_initial_enrichment(self) -> None:
+        """A human-authored reserved key must not make the first call assign tags."""
         client = _mock_client()
         client.user_id = "@bot:localhost"
         config = _mock_config()
@@ -789,14 +851,13 @@ class TestMaybeGenerateThreadSummary:
             sender="@attacker:localhost",
         )
         thread_history = [*_make_thread_history(4), forged_notice]
-        generated = _ThreadEnrichment(
-            summary="🧵 Login failure investigation",
-            tags=["bug"],
-        )
 
         with (
             patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=thread_history)),
-            patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value=generated)) as generate,
+            patch(
+                "mindroom.thread_summary._generate_summary",
+                new=AsyncMock(return_value="🧵 Login failure investigation"),
+            ) as generate,
             patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")) as send,
             patch(
                 "mindroom.thread_summary.set_thread_tags_if_empty",
@@ -816,18 +877,12 @@ class TestMaybeGenerateThreadSummary:
             config,
             rp,
             model_name="default",
-            tag_vocabulary="(no reusable short tags in use yet)",
+            tag_vocabulary=None,
             trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS,
         )
-        set_tags.assert_awaited_once_with(
-            client,
-            "!room:x",
-            "$thread1",
-            ["bug"],
-            set_by="@bot:localhost",
-        )
+        set_tags.assert_not_awaited()
         assert send.await_args.args[4] == 5
-        assert send.await_args.kwargs["initial_enrichment_complete"] is True
+        assert send.await_args.kwargs["initial_enrichment_complete"] is None
 
     @pytest.mark.parametrize(
         "tag_result",
@@ -856,7 +911,10 @@ class TestMaybeGenerateThreadSummary:
         config = _mock_config(first_threshold=1)
         rp = _mock_runtime_paths()
         with (
-            patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=_make_thread_history(2))),
+            patch(
+                "mindroom.thread_summary._load_thread_history",
+                new=AsyncMock(return_value=_make_due_second_summary_history()),
+            ),
             patch(
                 "mindroom.thread_summary._generate_summary",
                 new=AsyncMock(
@@ -930,7 +988,10 @@ class TestMaybeGenerateThreadSummary:
         rp = _mock_runtime_paths()
 
         with (
-            patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=_make_thread_history(2))),
+            patch(
+                "mindroom.thread_summary._load_thread_history",
+                new=AsyncMock(return_value=_make_due_second_summary_history()),
+            ),
             patch(
                 "mindroom.thread_summary.maybe_rebuild_tag_vocabulary",
                 new=AsyncMock(side_effect=ThreadTagsError("state unavailable")),
@@ -979,7 +1040,10 @@ class TestMaybeGenerateThreadSummary:
         send_summary = AsyncMock(return_value="$summary")
 
         with (
-            patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=_make_thread_history(2))),
+            patch(
+                "mindroom.thread_summary._load_thread_history",
+                new=AsyncMock(return_value=_make_due_second_summary_history()),
+            ),
             patch(
                 "mindroom.thread_summary._generate_summary",
                 new=AsyncMock(
@@ -1002,7 +1066,7 @@ class TestMaybeGenerateThreadSummary:
             set_by="@bot:localhost",
         )
         assert send_summary.await_args.kwargs["initial_enrichment_complete"] is True
-        assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 2
+        assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 12
 
     async def test_tag_read_failure_marks_enrichment_retryable(self) -> None:
         """A transient tag-state read failure must not durably suppress later retries."""
@@ -1013,7 +1077,10 @@ class TestMaybeGenerateThreadSummary:
         send_summary = AsyncMock(return_value="$summary")
 
         with (
-            patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=_make_thread_history(2))),
+            patch(
+                "mindroom.thread_summary._load_thread_history",
+                new=AsyncMock(return_value=_make_due_second_summary_history()),
+            ),
             patch(
                 "mindroom.thread_summary._generate_summary",
                 new=AsyncMock(
@@ -1043,7 +1110,10 @@ class TestMaybeGenerateThreadSummary:
         send_summary = AsyncMock(return_value="$summary")
 
         with (
-            patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=_make_thread_history(2))),
+            patch(
+                "mindroom.thread_summary._load_thread_history",
+                new=AsyncMock(return_value=_make_due_second_summary_history()),
+            ),
             patch(
                 "mindroom.thread_summary._generate_summary",
                 new=AsyncMock(
@@ -1074,7 +1144,7 @@ class TestMaybeGenerateThreadSummary:
         client = _mock_client()
         config = _mock_config()
         rp = _mock_runtime_paths()
-        thread_history = _make_thread_history(5)
+        thread_history = _make_due_second_summary_history()
         snapshot = _TagVocabularySnapshot(
             built_at=datetime(2026, 7, 13, tzinfo=UTC),
             tags=(_TagUsage(tag="bug", count=2),),
@@ -1154,7 +1224,7 @@ class TestMaybeGenerateThreadSummary:
             config,
             rp,
             model_name="qwen",
-            tag_vocabulary="(no reusable short tags in use yet)",
+            tag_vocabulary=None,
             trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS,
         )
         content = client.room_send.call_args.kwargs["content"]
@@ -1504,8 +1574,8 @@ class TestMaybeGenerateThreadSummary:
         # Count is recorded to prevent retry storms
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 5
 
-    async def test_failed_initial_generation_retries_enrichment_at_next_threshold(self) -> None:
-        """Attempt throttling must not masquerade as a durably completed first enrichment."""
+    async def test_failed_first_summary_does_not_skip_to_initial_enrichment(self) -> None:
+        """A failed first summary must keep the next attempt summary-only."""
         client = _mock_client()
         client.user_id = None
         config = _mock_config()
@@ -1514,7 +1584,7 @@ class TestMaybeGenerateThreadSummary:
         generate = AsyncMock(
             side_effect=[
                 None,
-                _ThreadEnrichment(summary="🧵 Login failure investigation", tags=["bug"]),
+                "🧵 Login failure investigation",
             ],
         )
 
@@ -1527,8 +1597,8 @@ class TestMaybeGenerateThreadSummary:
             await self._maybe_generate(client, config, rp)
 
         assert [call.kwargs["tag_vocabulary"] for call in generate.await_args_list] == [
-            "(no reusable short tags in use yet)",
-            "(no reusable short tags in use yet)",
+            None,
+            None,
         ]
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 15
 
@@ -1548,7 +1618,10 @@ class TestMaybeGenerateThreadSummary:
 
         with (
             pytest.raises(asyncio.CancelledError),
-            patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=_make_thread_history(2))),
+            patch(
+                "mindroom.thread_summary._load_thread_history",
+                new=AsyncMock(return_value=_make_due_second_summary_history()),
+            ),
             patch(
                 "mindroom.thread_summary._generate_summary",
                 new=AsyncMock(
@@ -1567,7 +1640,7 @@ class TestMaybeGenerateThreadSummary:
             await self._maybe_generate(client, config, rp)
 
         set_tags.assert_awaited_once_with(client, "!room:x", "$thread1", ["bug"], set_by="@bot:localhost")
-        assert _thread_summary_cache_key("!room:x", "$thread1") not in _last_summary_counts
+        assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 2
 
     async def test_generation_exception_records_count(self) -> None:
         """Exception in _generate_summary records count to prevent retry storms."""

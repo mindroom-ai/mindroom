@@ -401,8 +401,9 @@ MindRoom always omits temperature for Vertex Claude thread summaries because the
 Use `room_thread_summary_models` when automatic summaries in a specific room should use a different model from `defaults.thread_summary_model`.
 Keys can be managed room aliases such as `lobby` or raw Matrix room IDs such as `!room:example.org`.
 
-The first automatic summary call also returns one to three topic tags when the thread has no existing tags.
-This initial enrichment uses the same summary model, room override, temperature, prompt, and background task as the summary.
+When a thread has no trusted prior summary, its first automatic summary call is summary-only so a useful thread title appears early.
+The next scheduled automatic summary refresh also returns one to three topic tags when the thread has no existing tags, whether the prior summary was automatic or manual.
+This delayed initial enrichment uses the same summary model, room override, temperature, prompt, and background task as the refreshed summary.
 After initial enrichment completes, later summary refreshes do not regenerate or replace tags.
 
 `defaults.worker_grantable_credentials` is a list of credential service names.

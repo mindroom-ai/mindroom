@@ -387,8 +387,9 @@ defaults:
 
 Automatic thread summaries use `defaults.thread_summary_temperature` when the selected provider supports runtime temperature overrides.
 MindRoom always omits temperature for Vertex Claude thread summaries because the provider rejects that field on this path.
-The first automatic summary call also returns one to three tags when the thread has no existing tags.
-Initial tags therefore use the same summary model, room override, temperature, prompt, and background task.
+When a thread has no trusted prior summary, its first automatic summary call is summary-only so a useful thread title appears early.
+The next scheduled automatic summary refresh also returns one to three tags when the thread has no existing tags, whether the prior summary was automatic or manual.
+Initial tags therefore use the same summary model, room override, temperature, prompt, and background task as the refreshed summary.
 After initial enrichment completes, later summary refreshes never regenerate tags.
 
 ## Room Configuration

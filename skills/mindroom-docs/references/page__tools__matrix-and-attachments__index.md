@@ -360,11 +360,12 @@ The summarizer posts one `m.notice` summary after a successful response brings a
 Set `room_thread_summary_models` to override the automatic summary model for a managed room alias or raw Matrix room ID.
 MindRoom uses `defaults.thread_summary_temperature` for automatic summaries when the provider supports runtime temperature overrides, and always omits temperature for Vertex Claude summaries.
 The `thread_summary` tool complements that automatic behavior by letting an agent publish a manual summary immediately and advance the stored summary baseline.
-The first automatic summary uses one structured model call to produce both the summary and up to three normalized topic tags.
+When no trusted prior summary exists, the first automatic summary is summary-only so a useful thread title appears early.
+The next scheduled refresh uses one structured model call to update the summary and produce up to three normalized topic tags, whether the prior summary was automatic or manual.
 The background task bypasses inherited per-turn history memoization so the model sees fresh authoritative full history including the delivered response.
 Existing tags win, including tags observed after the model call finishes.
 MindRoom serializes automatic and tool-driven tag mutations per thread within one running process, and persisted removal tombstones prevent a later automatic batch from repopulating a deliberately untagged thread.
-The initial tags use the same summary model, room override, temperature, prompt, lock, and background lifecycle as the summary.
+The initial tags use the same summary model, room override, temperature, prompt, lock, and background lifecycle as the refreshed summary.
 Expected Matrix write failures are isolated so a failed tag write does not block the summary and a failed summary write does not undo tags.
 Failed initial tag reads or all-failed tag writes leave the summary's durable enrichment marker incomplete, so the next summary threshold retries structured enrichment.
 Once existing tags, prior tag-state history, or newly written tags mark initial enrichment complete, later summary refreshes use a summary-only schema and never regenerate or replace tags.
