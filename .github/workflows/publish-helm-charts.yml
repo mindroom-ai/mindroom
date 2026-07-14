@@ -324,6 +324,11 @@ jobs:
           grep -F '"livekit_service_url":"https://matrix.example.com/livekit/jwt"' "$render_dir/matrixrtc.yaml"
           grep -F 'proxy_pass http://matrixrtc-auth:8080/;' "$render_dir/matrixrtc.yaml"
           grep -F 'proxy_pass http://livekit:7880/;' "$render_dir/matrixrtc.yaml"
+          grep -F 'add_header Access-Control-Allow-Methods "GET, OPTIONS" always;' "$render_dir/matrixrtc.yaml"
+          if grep -F 'proxy_set_header Accept-Encoding' "$render_dir/matrixrtc.yaml"; then
+            echo "MatrixRTC WebSocket proxy unexpectedly forces Accept-Encoding" >&2
+            exit 1
+          fi
           if helm template mindroom-client "$CLIENT_CHART_DIR" \
             --namespace mindroom \
             --set matrix.homeserverUrl=https://matrix.example.com \

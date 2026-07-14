@@ -144,7 +144,7 @@ server {
     default_type application/json;
     add_header Cache-Control "no-store, max-age=0" always;
     add_header Access-Control-Allow-Origin "*" always;
-    add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS" always;
+    add_header Access-Control-Allow-Methods "GET, OPTIONS" always;
     add_header Access-Control-Allow-Headers "X-Requested-With, Content-Type, Authorization" always;
     return 200 '{{ include "mindroom-client.matrixClientWellKnown" . }}';
   }
@@ -170,7 +170,6 @@ server {
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header Accept-Encoding gzip;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
     proxy_send_timeout 120s;
