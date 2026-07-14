@@ -22,7 +22,7 @@ import nio
 
 from mindroom.authorization import is_authorized_sender, is_sender_allowed_for_agent_reply
 from mindroom.config.voice import normalize_speech_base_url
-from mindroom.credentials_sync import get_api_key_for_provider
+from mindroom.credentials_sync import get_api_key_for_provider, get_api_key_for_service
 from mindroom.entity_resolution import configured_call_agent_name_for_room
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import MatrixID
@@ -860,10 +860,18 @@ class CallManager:
     ) -> _ResolvedVoiceBackend | None:
         """Resolve backend-specific credentials without affecting call lifecycle."""
         if self._config.calls.backend == "realtime":
-            api_key = get_api_key_for_provider("openai", self._runtime_paths)
+            api_key = get_api_key_for_service(
+                self._config.calls.credentials_service,
+                self._runtime_paths,
+            )
             if not api_key:
                 if warn_if_unavailable:
-                    logger.warning("call_join_skipped_no_openai_key", room_id=room_id, agent=self._agent_name)
+                    logger.warning(
+                        "call_join_skipped_no_openai_key",
+                        room_id=room_id,
+                        agent=self._agent_name,
+                        credentials_service=self._config.calls.credentials_service,
+                    )
                 return None
             return _ResolvedVoiceBackend(realtime_api_key=api_key)
 

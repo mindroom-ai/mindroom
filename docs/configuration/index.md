@@ -520,6 +520,7 @@ calls:
   backend: realtime                # realtime (default) or cascaded
   agents: []                       # Shared agents allowed to join calls in their configured rooms (at most one per room)
   model: gpt-realtime-2.1          # OpenAI realtime speech-to-speech model
+  credentials_service: openai      # Credential service used by the realtime backend
   voice: null                      # Optional realtime voice preset
   stt: null                        # Cascaded SpeechServiceConfig; required with backend: cascaded
   tts: null                        # Cascaded SpeechServiceConfig; required with backend: cascaded

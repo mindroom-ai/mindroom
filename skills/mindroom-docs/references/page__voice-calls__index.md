@@ -34,12 +34,14 @@ calls:
   backend: realtime           # default; preserves OpenAI speech-to-speech
   agents: [assistant]        # shared agents that may join calls in their configured rooms
   model: gpt-realtime-2.1    # OpenAI realtime model
+  credentials_service: openai # strict credential service binding; defaults to openai
   voice: marin               # optional voice preset
   # livekit_service_url: https://rtc.example.org   # same-server .well-known override
 ```
 
 Voice calls require the `matrix_calls` extra (`pip install "mindroom[matrix_calls]"` or `uv sync --extra matrix_calls`).
-The realtime backend requires an `OPENAI_API_KEY` in your credentials and otherwise behaves as before.
+The realtime backend reads its API key only from `calls.credentials_service`, which defaults to the `openai` credential service seeded by `OPENAI_API_KEY`.
+Set a different service when voice and chat use different OpenAI credentials; a missing selected service does not fall back to another key.
 MindRoom enforces at most one calls-enabled agent per room.
 Calls only join rooms configured for that agent and only while the sole caller passes the normal room and per-agent reply permissions.
 Calls-enabled agents also join calls in ad-hoc rooms they accepted through their normal authorized-invite policy. This lets Matrix clients create a private, temporary voice room and invite one agent without adding that room to `config.yaml` first.
