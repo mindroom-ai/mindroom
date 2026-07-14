@@ -113,7 +113,7 @@ runtime-config.js straight from nginx and the Deployment bypasses the entrypoint
 {{- define "mindroom-client.defaultNginxConf" -}}
 {{- $base := include "mindroom-client.basePath" . -}}
 {{- $prefix := include "mindroom-client.pathPrefix" . -}}
-{{- $navigationFallbackExcludePaths := .Values.serviceWorker.navigationFallbackExcludePaths | toJson -}}
+{{- $navigationFallbackExcludePaths := default (list) .Values.serviceWorker.navigationFallbackExcludePaths | toJson -}}
 {{- $runtimeConfig := printf "window.__APP_BASE_PATH__ = \"%s\"; window.__ENABLE_SERVICE_WORKER__ = %t; window.__SERVICE_WORKER_NAVIGATION_FALLBACK_EXCLUDE_PATHS__ = %s;" $base .Values.serviceWorker.enabled $navigationFallbackExcludePaths -}}
 server {
   listen {{ .Values.nginx.port }};

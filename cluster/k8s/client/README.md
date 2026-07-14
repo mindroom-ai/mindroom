@@ -76,8 +76,7 @@ The chart serves `/runtime-config.js` directly from nginx because the image entr
 The client registers its service worker at `basePath/sw.js`, scoped to `basePath/`.
 Set `serviceWorker.enabled: false` to keep the client from registering it at all.
 
-When the client shares an origin with sibling applications, list their root-relative path prefixes
-so the PWA app-shell fallback leaves those navigations to the network:
+When the client shares an origin with sibling applications, list their root-relative path prefixes so the PWA app-shell fallback leaves those navigations to the network:
 
 ```yaml
 serviceWorker:
