@@ -695,9 +695,9 @@ def test_retry_policy_shrinks_budget_for_empty_result() -> None:
     assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=2, budget=16_000, error=error) is None
 
 
-def test_compaction_input_estimate_uses_conservative_character_and_byte_ratios() -> None:
-    assert estimate_compaction_input_tokens("structured: true") == 8
-    assert estimate_compaction_input_tokens("☃☃") == 2
+def test_compaction_input_estimate_uses_tiktoken() -> None:
+    assert estimate_compaction_input_tokens("structured: true") == 3
+    assert estimate_compaction_input_tokens("☃☃") == 4
 
 
 @pytest.mark.asyncio

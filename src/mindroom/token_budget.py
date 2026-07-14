@@ -7,6 +7,9 @@ Agno replay helpers and compaction serialization stay in their own modules.
 from __future__ import annotations
 
 import json
+from functools import lru_cache
+
+import tiktoken
 
 
 def estimate_text_tokens(value: str | list[str] | None) -> int:
@@ -20,16 +23,20 @@ def estimate_text_tokens(value: str | list[str] | None) -> int:
     return len(stable_serialize(value)) // 4
 
 
-def estimate_compaction_input_tokens(value: str) -> int:
-    """Conservatively estimate tokens for serialized compaction history.
+@lru_cache(maxsize=16)
+def _compaction_encoding(model_id: str | None) -> tiktoken.Encoding:
+    if model_id:
+        try:
+            return tiktoken.encoding_for_model(model_id)
+        except KeyError:
+            pass
+    return tiktoken.get_encoding("o200k_base")
 
-    Compaction serializes arbitrary history, including dense structured text and
-    Unicode. Use tighter character and UTF-8 byte ratios than the prose-oriented
-    generic estimate when enforcing the summary model's input budget.
-    """
-    character_estimate = (len(value) + 1) // 2
-    byte_estimate = (len(value.encode("utf-8")) + 2) // 3
-    return max(character_estimate, byte_estimate)
+
+def estimate_compaction_input_tokens(value: str, *, model_id: str | None = None) -> int:
+    """Estimate serialized compaction history with the closest tiktoken encoding."""
+    encoding = _compaction_encoding(model_id)
+    return len(encoding.encode(value, disallowed_special=()))
 
 
 def compute_compaction_input_budget(
