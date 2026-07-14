@@ -306,6 +306,8 @@ jobs:
             exit 1
           fi
           cat > "$render_dir/matrixrtc-values.yaml" <<'EOF'
+          matrix:
+            homeserverUrl: https://matrix.example.com
           matrixRTC:
             enabled: true
             livekitServiceUrl: https://matrix.example.com/livekit/jwt
@@ -324,11 +326,14 @@ jobs:
           grep -F 'proxy_pass http://livekit:7880/;' "$render_dir/matrixrtc.yaml"
           if helm template mindroom-client "$CLIENT_CHART_DIR" \
             --namespace mindroom \
+            --set matrix.homeserverUrl=https://matrix.example.com \
             --set matrixRTC.enabled=true \
-            > /dev/null 2>&1; then
+            > /dev/null 2> "$render_dir/matrixrtc-missing-livekit.err"; then
             echo "matrixRTC.enabled unexpectedly accepted a missing livekitServiceUrl" >&2
             exit 1
           fi
+          grep -F 'matrixRTC.livekitServiceUrl is required when matrixRTC.enabled=true' \
+            "$render_dir/matrixrtc-missing-livekit.err"
 
       - name: Package client chart
         run: |

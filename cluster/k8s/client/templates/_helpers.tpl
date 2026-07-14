@@ -181,7 +181,7 @@ server {
 {{- with .Values.nginx.serverSnippet }}
 
   # Additional server directives supplied through nginx.serverSnippet.
-{{ tpl . $ | nindent 2 }}
+{{ tpl . $ | indent 2 }}
 {{- end }}
 
   location = {{ $prefix }}/config.json {
