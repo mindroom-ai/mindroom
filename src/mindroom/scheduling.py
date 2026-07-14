@@ -1412,8 +1412,8 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     success_msg += f"**Will post:** {workflow_result.message}\n"
     if workflow_result.history_limit is not None:
         success_msg += f"**History:** {_history_limit_display(workflow_result.history_limit)}\n"
-    if new_thread:
-        success_msg += "**Delivery:** New room-level thread root\n"
+    delivery = "New room-level thread root" if new_thread else "Current room/thread scope"
+    success_msg += f"**Delivery:** {delivery}\n"
     success_msg += f"\n**Task ID:** `{task_id}`"
 
     return (task_id, success_msg)
