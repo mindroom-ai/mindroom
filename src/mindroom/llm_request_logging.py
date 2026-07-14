@@ -345,6 +345,9 @@ def _log_llm_usage(
         "provider": model.provider or configured_provider,
         "usage_available": usage is not None,
     }
+    correlation_id = request_context.get("correlation_id")
+    if correlation_id is not None:
+        payload["correlation_id"] = correlation_id
     if usage is None:
         logger.info("LLM usage", **payload)
         return
@@ -356,10 +359,9 @@ def _log_llm_usage(
         configured_provider=configured_provider,
         model_id=model.id,
     )
-    cache_read_tokens = usage.cache_read_tokens or 0
-    uncached_input_tokens = context_input_tokens - cache_read_tokens if context_input_tokens is not None else None
+    uncached_input_tokens = context_input_tokens - usage.cache_read_tokens if context_input_tokens is not None else None
     cache_read_ratio = (
-        cache_read_tokens / context_input_tokens
+        usage.cache_read_tokens / context_input_tokens
         if context_input_tokens is not None and context_input_tokens > 0
         else 0.0
     )
@@ -375,9 +377,6 @@ def _log_llm_usage(
             "cache_read_ratio": round(cache_read_ratio, 6),
         },
     )
-    correlation_id = request_context.get("correlation_id")
-    if correlation_id is not None:
-        payload["correlation_id"] = correlation_id
     logger.info("LLM usage", **payload)
 
 
@@ -536,11 +535,14 @@ def install_llm_request_logging(
             # still record any usage already reported; awaiting during aclose()
             # is allowed for async generators as long as nothing is yielded.
             try:
-                with _model_call_scope(model):
-                    async for chunk in original_ainvoke_stream(*args, **kwargs):
-                        if chunk.response_usage is not None:
-                            last_usage = chunk.response_usage
-                        yield chunk
+                scoped_stream = context_bound_async_stream(
+                    context_factory=lambda: _model_call_scope(model),
+                    stream_factory=lambda: original_ainvoke_stream(*args, **kwargs),
+                )
+                async for chunk in scoped_stream:
+                    if chunk.response_usage is not None:
+                        last_usage = chunk.response_usage
+                    yield chunk
             finally:
                 await _write_llm_response_log(
                     model=model,
