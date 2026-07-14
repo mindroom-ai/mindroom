@@ -667,6 +667,12 @@ router:
   model: "default"
   accept_invites: true
 
+# Managed room access
+matrix_room_access:
+  mode: single_user_private
+  room_admins:
+    - "__MINDROOM_OWNER_USER_ID_FROM_PAIRING__"
+
 # Timezone
 timezone: "America/Los_Angeles"
 

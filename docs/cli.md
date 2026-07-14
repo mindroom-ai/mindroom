@@ -697,7 +697,7 @@ On success (default `--persist-env`), this writes to `.env` next to `config.yaml
 - `MINDROOM_LOCAL_CLIENT_SECRET`
 - `MINDROOM_NAMESPACE`
 
-If your config still contains the owner placeholder token `__MINDROOM_OWNER_USER_ID_FROM_PAIRING__`, `connect` will auto-replace it when pairing returns a valid `owner_user_id`.
+If your config still contains the owner placeholder token `__MINDROOM_OWNER_USER_ID_FROM_PAIRING__`, `connect` will auto-replace it in authorization and managed-room admin settings when pairing returns a valid `owner_user_id`.
 
 Use `--no-persist-env` if you want to export variables only for the current shell session.
 

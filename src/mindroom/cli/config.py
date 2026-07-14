@@ -457,7 +457,7 @@ def config_init(
 
         # `connect` can run before `config init`, when no config exists to patch.
         # In that order, connect persists the owner MXID in .env so init can render
-        # authorization defaults without leaving pairing placeholders behind.
+        # owner access defaults without leaving pairing placeholders behind.
         if owner_user_id := _config_init_owner_user_id(target):
             from mindroom.cli.owner import replace_owner_placeholders_in_text  # noqa: PLC0415
 
@@ -973,6 +973,9 @@ router:
 {mindroom_user_block}
 matrix_room_access:
   mode: single_user_private
+  room_admins:
+    # Pairing with MindRoom Chat replaces this with the paired owner's Matrix user ID.
+    - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
 
 matrix_space:
   enabled: true

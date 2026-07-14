@@ -199,6 +199,8 @@ class TestConfigInit:
         assert "matrix_space:" in content
         assert "matrix_space:\n  enabled: true\n  name: MindRoom" in content
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER in content
+        config = yaml.safe_load(content)
+        assert config["matrix_room_access"]["room_admins"] == [OWNER_MATRIX_USER_ID_PLACEHOLDER]
 
     def test_init_defaults_to_openai_for_mindroom_chat(self, tmp_path: Path) -> None:
         """mindroom.chat should default to OpenAI without prompting for a provider."""
@@ -515,7 +517,7 @@ class TestConfigInit:
         self,
         tmp_path: Path,
     ) -> None:
-        """Running `connect` before `config init` should still fill owner authorization."""
+        """Running `connect` before `config init` should still fill owner access settings."""
         target = tmp_path / "config.yaml"
         env_path = tmp_path / ".env"
         env_path.write_text(
@@ -546,6 +548,7 @@ class TestConfigInit:
         config_content = target.read_text(encoding="utf-8")
         config = yaml.safe_load(config_content)
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in config_content
+        assert config["matrix_room_access"]["room_admins"] == ["@alice:mindroom.chat"]
         assert config["authorization"]["global_users"] == ["@alice:mindroom.chat"]
         assert config["authorization"]["agent_reply_permissions"]["*"] == ["@alice:mindroom.chat"]
 
@@ -995,7 +998,10 @@ class TestConfigInit:
         assert f"#   id: {OPENAI_GPT_TERRA}" in config_text
         assert "# openai_luna:" in config_text
         assert f"#   id: {OPENAI_GPT_LUNA}" in config_text
-        assert config["matrix_room_access"] == {"mode": "single_user_private"}
+        assert config["matrix_room_access"] == {
+            "mode": "single_user_private",
+            "room_admins": [OWNER_MATRIX_USER_ID_PLACEHOLDER],
+        }
 
     def test_init_anthropic_preset_uses_anthropic_models(self, tmp_path: Path) -> None:
         """Config init --provider anthropic prepopulates Anthropic defaults."""
@@ -3293,6 +3299,9 @@ class TestConnect:
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models: {}\nagents: {}\nrouter:\n  model: default\n"
+            "matrix_room_access:\n"
+            "  room_admins:\n"
+            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
             "authorization:\n"
             "  default_room_access: false\n"
             "  global_users:\n"
@@ -3340,6 +3349,8 @@ class TestConnect:
         updated_config = cfg.read_text()
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in updated_config
         assert "@alice:mindroom.chat" in updated_config
+        parsed_config = yaml.safe_load(updated_config)
+        assert parsed_config["matrix_room_access"]["room_admins"] == ["@alice:mindroom.chat"]
 
     def test_connect_path_overrides_env_and_config_target(
         self,
