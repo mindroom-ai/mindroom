@@ -21,7 +21,6 @@ from mindroom.thread_tag_vocabulary import (
 )
 from mindroom.thread_tags import (
     COERCED_TAG_MAX_LENGTH,
-    RESERVED_THREAD_TAGS,
     ThreadTagRecord,
     ThreadTagsError,
     ThreadTagsListing,
@@ -52,7 +51,7 @@ def _build_tag_thread_description(runtime_paths: RuntimePaths, room_id: str) -> 
         '"feature-request").\n'
         "Prefer existing tags; only introduce a new tag when none fit. "
         "1-3 tags per thread is typical; keep a thread to at most ~5 tags.\n"
-        "The resolved tag is reserved for user-controlled lifecycle state and cannot be added with this tool.\n"
+        "The resolved tag is lifecycle state, not a topic tag; use it only when intentionally resolving a thread.\n"
         f"{format_tag_vocabulary_for_description(snapshot)}"
     )
 
@@ -154,14 +153,6 @@ class ThreadTagsTools(Toolkit):
                 action="tag",
                 room_id=resolved_room_id,
                 message=str(exc),
-            )
-        if normalized_tag in RESERVED_THREAD_TAGS:
-            return self._payload(
-                "error",
-                action="tag",
-                room_id=resolved_room_id,
-                tag=normalized_tag,
-                message=f"Tag {normalized_tag!r} is reserved for user-controlled thread lifecycle state.",
             )
 
         thread_target = await resolve_canonical_tool_thread_target(

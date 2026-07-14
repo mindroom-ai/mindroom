@@ -2236,12 +2236,12 @@ class TestGenerateSummary:
 
         assert result is None
 
-    @pytest.mark.parametrize("generated_tags", [["!!!"], ["resolved"]], ids=["invalid", "reserved"])
+    @pytest.mark.parametrize("generated_tags", [["!!!"], ["resolved"]], ids=["invalid", "lifecycle"])
     async def test_initial_enrichment_preserves_summary_when_all_tags_are_unusable(
         self,
         generated_tags: list[str],
     ) -> None:
-        """Invalid or reserved tags should not discard the valid refreshed summary."""
+        """Invalid or automatic-excluded tags should not discard the valid refreshed summary."""
         mock_response = MagicMock(
             content=_ThreadEnrichment(
                 summary="🧵 Invalid tags",

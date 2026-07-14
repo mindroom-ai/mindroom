@@ -221,8 +221,8 @@ def test_load_snapshot_missing_file_returns_none(tmp_path: Path) -> None:
     assert load_tag_vocabulary_snapshot(_runtime_paths(tmp_path), _ROOM_A) is None
 
 
-def test_load_snapshot_omits_reserved_tags_from_model_vocabulary(tmp_path: Path) -> None:
-    """Existing snapshots must not advertise user-controlled lifecycle tags."""
+def test_load_snapshot_omits_automatic_tag_exclusions_from_model_vocabulary(tmp_path: Path) -> None:
+    """Existing snapshots must not advertise lifecycle state as topic tags."""
     runtime_paths = _runtime_paths(tmp_path)
     _write_snapshot_file(
         runtime_paths,

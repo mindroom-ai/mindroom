@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 from mindroom.constants import tracking_dir
 from mindroom.durable_write import write_json_file_durable
 from mindroom.logging_config import get_logger
-from mindroom.thread_tags import COERCED_TAG_MAX_LENGTH, RESERVED_THREAD_TAGS, list_tagged_threads
+from mindroom.thread_tags import AUTOMATIC_THREAD_TAG_EXCLUSIONS, COERCED_TAG_MAX_LENGTH, list_tagged_threads
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -142,7 +142,7 @@ def _parse_snapshot_payload(payload: object, *, room_id: str) -> _TagVocabularyS
         usage = _parse_tag_usage_entry(entry)
         if usage is None:
             return None
-        if usage.tag not in RESERVED_THREAD_TAGS:
+        if usage.tag not in AUTOMATIC_THREAD_TAG_EXCLUSIONS:
             usages.append(usage)
 
     return _TagVocabularySnapshot(built_at=built_at, tags=tuple(usages))
@@ -232,7 +232,7 @@ def _ranked_tag_usage(usage: Counter[str]) -> tuple[_TagUsage, ...]:
         (
             (tag, count)
             for tag, count in usage.items()
-            if len(tag) <= COERCED_TAG_MAX_LENGTH and tag not in RESERVED_THREAD_TAGS
+            if len(tag) <= COERCED_TAG_MAX_LENGTH and tag not in AUTOMATIC_THREAD_TAG_EXCLUSIONS
         ),
         key=lambda item: (-item[1], item[0]),
     )

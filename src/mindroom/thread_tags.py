@@ -21,7 +21,7 @@ from mindroom.matrix.client_thread_history import enumerate_room_thread_root_ids
 logger = get_logger(__name__)
 
 THREAD_TAGS_EVENT_TYPE = "com.mindroom.thread.tags"
-RESERVED_THREAD_TAGS = frozenset({"resolved"})
+AUTOMATIC_THREAD_TAG_EXCLUSIONS = frozenset({"resolved"})
 _POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
 _DEFAULT_STATE_EVENT_POWER_LEVEL = 50
 _DEFAULT_USER_POWER_LEVEL = 0
@@ -34,8 +34,8 @@ _COERCE_HYPHEN_RUN_RE = re.compile(r"-{2,}")
 COERCED_TAG_MAX_LENGTH = 25
 
 __all__ = [
+    "AUTOMATIC_THREAD_TAG_EXCLUSIONS",
     "COERCED_TAG_MAX_LENGTH",
-    "RESERVED_THREAD_TAGS",
     "THREAD_TAGS_EVENT_TYPE",
     "SetThreadTagsIfEmptyResult",
     "ThreadTagRecord",

@@ -285,7 +285,7 @@ RULES:
 - When the response schema includes tags, return 1-3 lowercase, hyphen-separated topic tags of at most 25 characters.
 - Strongly prefer tags from the existing room vocabulary; only coin a new tag when nothing listed fits.
 - Tags describe the durable topic, not transient state such as "in-progress" or "waiting".
-- Never return "resolved"; it is reserved for user-controlled lifecycle state.
+- Never return "resolved"; it is lifecycle state, not an automatic topic tag.
 - Fewer good tags beat more mediocre tags.
 
 BAD -> GOOD EXAMPLES:
