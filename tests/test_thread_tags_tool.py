@@ -104,7 +104,7 @@ def test_thread_tags_tool_registered_and_instantiates() -> None:
 @pytest.mark.asyncio
 async def test_thread_tags_tool_requires_runtime_context() -> None:
     """Tool calls should fail clearly outside Matrix runtime context."""
-    payload = json.loads(await ThreadTagsTools().tag_thread("resolved"))
+    payload = json.loads(await ThreadTagsTools().tag_thread("topic"))
 
     assert payload["status"] == "error"
     assert payload["tool"] == "thread_tags"
@@ -114,7 +114,7 @@ async def test_thread_tags_tool_requires_runtime_context() -> None:
 @pytest.mark.asyncio
 async def test_untag_thread_requires_runtime_context() -> None:
     """Untag should fail clearly outside Matrix runtime context."""
-    payload = json.loads(await ThreadTagsTools().untag_thread("resolved"))
+    payload = json.loads(await ThreadTagsTools().untag_thread("topic"))
 
     assert payload["status"] == "error"
     assert payload["tool"] == "thread_tags"
@@ -144,11 +144,11 @@ async def test_tag_thread_defaults_to_context_thread_id() -> None:
         ) as mock_normalize,
         patch(
             "mindroom.custom_tools.thread_tags.set_thread_tag",
-            new=AsyncMock(return_value=_state("$ctx-thread:localhost", resolved=_record())),
+            new=AsyncMock(return_value=_state("$ctx-thread:localhost", topic=_record())),
         ) as mock_set,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.tag_thread("resolved"))
+        payload = json.loads(await tool.tag_thread("topic"))
 
     assert payload["status"] == "ok"
     assert payload["action"] == "tag"
@@ -163,7 +163,7 @@ async def test_tag_thread_defaults_to_context_thread_id() -> None:
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
-        "resolved",
+        "topic",
         set_by=context.requester_id,
         note=None,
         data=None,
@@ -183,11 +183,11 @@ async def test_tag_thread_explicit_thread_id_overrides_same_room_context() -> No
         ) as mock_normalize,
         patch(
             "mindroom.custom_tools.thread_tags.set_thread_tag",
-            new=AsyncMock(return_value=_state("$explicit-thread:localhost", resolved=_record())),
+            new=AsyncMock(return_value=_state("$explicit-thread:localhost", topic=_record())),
         ) as mock_set,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.tag_thread("resolved", thread_id="$explicit-event:localhost"))
+        payload = json.loads(await tool.tag_thread("topic", thread_id="$explicit-event:localhost"))
 
     assert payload["status"] == "ok"
     assert payload["thread_id"] == "$explicit-thread:localhost"
@@ -201,7 +201,7 @@ async def test_tag_thread_explicit_thread_id_overrides_same_room_context() -> No
         context.client,
         context.room_id,
         "$explicit-thread:localhost",
-        "resolved",
+        "topic",
         set_by=context.requester_id,
         note=None,
         data=None,
@@ -221,11 +221,11 @@ async def test_tag_thread_explicit_same_room_id_keeps_context_thread_fallback() 
         ) as mock_normalize,
         patch(
             "mindroom.custom_tools.thread_tags.set_thread_tag",
-            new=AsyncMock(return_value=_state("$ctx-thread:localhost", resolved=_record())),
+            new=AsyncMock(return_value=_state("$ctx-thread:localhost", topic=_record())),
         ) as mock_set,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.tag_thread("resolved", room_id=context.room_id))
+        payload = json.loads(await tool.tag_thread("topic", room_id=context.room_id))
 
     assert payload["status"] == "ok"
     assert payload["thread_id"] == "$ctx-thread:localhost"
@@ -239,7 +239,7 @@ async def test_tag_thread_explicit_same_room_id_keeps_context_thread_fallback() 
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
-        "resolved",
+        "topic",
         set_by=context.requester_id,
         note=None,
         data=None,
@@ -263,7 +263,7 @@ async def test_untag_thread_defaults_to_context_thread_id() -> None:
         ) as mock_remove,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.untag_thread("resolved"))
+        payload = json.loads(await tool.untag_thread("topic"))
 
     assert payload["status"] == "ok"
     assert payload["action"] == "untag"
@@ -279,7 +279,7 @@ async def test_untag_thread_defaults_to_context_thread_id() -> None:
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
-        "resolved",
+        "topic",
         requester_user_id=context.requester_id,
     )
 
@@ -363,7 +363,7 @@ async def test_untag_thread_explicit_thread_id_overrides_same_room_context() -> 
         ) as mock_remove,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.untag_thread("resolved", thread_id="$explicit-event:localhost"))
+        payload = json.loads(await tool.untag_thread("topic", thread_id="$explicit-event:localhost"))
 
     assert payload["status"] == "ok"
     assert payload["thread_id"] == "$explicit-thread:localhost"
@@ -377,7 +377,7 @@ async def test_untag_thread_explicit_thread_id_overrides_same_room_context() -> 
         context.client,
         context.room_id,
         "$explicit-thread:localhost",
-        "resolved",
+        "topic",
         requester_user_id=context.requester_id,
     )
 
@@ -399,7 +399,7 @@ async def test_untag_thread_explicit_same_room_id_keeps_context_thread_fallback(
         ) as mock_remove,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.untag_thread("resolved", room_id=context.room_id))
+        payload = json.loads(await tool.untag_thread("topic", room_id=context.room_id))
 
     assert payload["status"] == "ok"
     assert payload["thread_id"] == "$ctx-thread:localhost"
@@ -413,7 +413,7 @@ async def test_untag_thread_explicit_same_room_id_keeps_context_thread_fallback(
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
-        "resolved",
+        "topic",
         requester_user_id=context.requester_id,
     )
 
@@ -510,9 +510,9 @@ async def test_thread_tags_explicit_room_target_requires_authorization(method_na
 
     with tool_runtime_context(context):
         if method_name == "tag_thread":
-            payload = json.loads(await tool.tag_thread("resolved", room_id="!other:localhost"))
+            payload = json.loads(await tool.tag_thread("topic", room_id="!other:localhost"))
         elif method_name == "untag_thread":
-            payload = json.loads(await tool.untag_thread("resolved", room_id="!other:localhost"))
+            payload = json.loads(await tool.untag_thread("topic", room_id="!other:localhost"))
         else:
             payload = json.loads(await tool.list_thread_tags(room_id="!other:localhost"))
 
@@ -525,8 +525,8 @@ async def test_thread_tags_explicit_room_target_requires_authorization(method_na
 @pytest.mark.parametrize(
     ("method_name", "args"),
     [
-        ("tag_thread", ("resolved",)),
-        ("untag_thread", ("resolved",)),
+        ("tag_thread", ("topic",)),
+        ("untag_thread", ("topic",)),
         ("list_thread_tags", ()),
     ],
 )
@@ -555,8 +555,8 @@ async def test_thread_tags_reject_blank_explicit_room_id(
 @pytest.mark.parametrize(
     ("method_name", "args"),
     [
-        ("tag_thread", ("resolved",)),
-        ("untag_thread", ("resolved",)),
+        ("tag_thread", ("topic",)),
+        ("untag_thread", ("topic",)),
         ("list_thread_tags", ()),
     ],
 )
@@ -591,7 +591,7 @@ async def test_thread_tags_cross_room_does_not_inherit_context_thread() -> None:
         patch("mindroom.custom_tools.thread_tags.room_access_allowed", return_value=True),
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.tag_thread("resolved", room_id="!other:localhost"))
+        payload = json.loads(await tool.tag_thread("topic", room_id="!other:localhost"))
 
     assert payload["status"] == "error"
     assert payload["action"] == "tag"
@@ -660,7 +660,7 @@ async def test_tag_thread_returns_error_when_normalization_fails() -> None:
         ),
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.tag_thread("resolved"))
+        payload = json.loads(await tool.tag_thread("topic"))
 
     assert payload["status"] == "error"
     assert payload["action"] == "tag"
@@ -685,7 +685,7 @@ async def test_tag_thread_surfaces_write_failures() -> None:
         ),
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.tag_thread("resolved"))
+        payload = json.loads(await tool.tag_thread("topic"))
 
     assert payload["status"] == "error"
     assert payload["thread_id"] == "$thread:localhost"
@@ -1479,7 +1479,7 @@ async def test_untag_thread_canonical_skips_normalization() -> None:
         tool_runtime_context(context),
     ):
         payload = json.loads(
-            await tool.untag_thread("resolved", thread_id="$orphaned-root:localhost", canonical=True),
+            await tool.untag_thread("topic", thread_id="$orphaned-root:localhost", canonical=True),
         )
 
     assert payload["status"] == "ok"
@@ -1490,7 +1490,7 @@ async def test_untag_thread_canonical_skips_normalization() -> None:
         context.client,
         context.room_id,
         "$orphaned-root:localhost",
-        "resolved",
+        "topic",
         requester_user_id=context.requester_id,
     )
 
@@ -1575,7 +1575,7 @@ def test_tag_thread_description_without_snapshot_keeps_guidance(tmp_path: Path) 
 
     assert description is not None
     assert "Prefer existing tags" in description
-    assert "resolved tag is lifecycle state" in description
+    assert "Thread lifecycle state cannot be changed" in description
     assert "No reusable short tags are in use yet" in description
 
 
@@ -1668,3 +1668,28 @@ async def test_tag_thread_rejects_tag_with_no_valid_characters() -> None:
     assert payload["status"] == "error"
     assert "at least one letter" in payload["message"]
     mock_set.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method_name", ["tag", "untag"])
+@pytest.mark.parametrize("tag", ["resolved", "Resolved", "resolved!"])
+async def test_thread_tag_mutations_reject_resolved_before_matrix_io(method_name: str, tag: str) -> None:
+    """Topic-tag mutations must reject normalized lifecycle state before Matrix I/O."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch("mindroom.custom_tools.thread_tags.set_thread_tag", new=AsyncMock()) as mock_set,
+        patch("mindroom.custom_tools.thread_tags.remove_thread_tag", new=AsyncMock()) as mock_remove,
+        tool_runtime_context(context),
+    ):
+        if method_name == "tag":
+            payload = json.loads(await tool.tag_thread(tag))
+        else:
+            payload = json.loads(await tool.untag_thread(tag))
+
+    assert payload["status"] == "error"
+    assert payload["action"] == method_name
+    assert "thread lifecycle state" in payload["message"]
+    mock_set.assert_not_awaited()
+    mock_remove.assert_not_awaited()

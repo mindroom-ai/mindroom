@@ -1,17 +1,18 @@
 # Matrix & Attachments
 
-Use these tools to work inside the active Matrix room and thread, send follow-up messages, manage thread tags, summaries, and model overrides, and reuse files that belong to the current conversation.
+Use these tools to work inside the active Matrix room and thread, send follow-up messages, manage thread tags, resolution, summaries, and model overrides, and reuse files that belong to the current conversation.
 
 ## What This Page Covers
 
 This page documents the built-in tools in the `matrix-and-attachments` group.
-Use these tools when you need to send or inspect Matrix messages, manage thread tags, summaries, or model overrides, or handle attachment IDs that are scoped to the current room and thread.
+Use these tools when you need to send or inspect Matrix messages, manage thread tags, resolution, summaries, or model overrides, or handle attachment IDs that are scoped to the current room and thread.
 
 ## Tools On This Page
 
 - [`matrix_message`] - Send, reply, react, read, edit, or inspect Matrix conversation context.
 - [`matrix_voice_message`] - Generate speech from text and send it as a Matrix voice note.
 - [`thread_tags`] - Add, remove, and inspect shared tags on a Matrix thread.
+- [`thread_resolution`] - Explicitly resolve or reopen the active Matrix thread.
 - [`thread_summary`] - Set or update a Matrix thread summary from the current room and thread context.
 - [`thread_model`] - Show, switch, or reset the model override for the current Matrix thread.
 - [`matrix_api`] - Use a low-level Matrix event and state API with explicit room and event IDs.
@@ -22,7 +23,7 @@ Use these tools when you need to send or inspect Matrix messages, manage thread 
 These tools depend on the active `ToolRuntimeContext`, so they only work when an agent is running in a Matrix-connected conversation.
 `matrix_message` implies `attachments` through `Config.IMPLIED_TOOLS`, so enabling `matrix_message` makes the `attachments` toolkit available even when you do not list it separately.
 Attachment IDs are context-scoped `att_*` values, and the runtime only exposes IDs from the current conversation plus any IDs registered during the current tool run.
-Current source in this worktree exposes `matrix_message`, `matrix_voice_message`, `thread_tags`, `thread_summary`, `thread_model`, `matrix_api`, and `attachments` in this area.
+Current source in this worktree exposes `matrix_message`, `matrix_voice_message`, `thread_tags`, `thread_resolution`, `thread_summary`, `thread_model`, `matrix_api`, and `attachments` in this area.
 
 ## [`matrix_message`]
 
@@ -162,7 +163,8 @@ list_thread_tags(exclude_tag="resolved", include_untagged=True)
 - This tool writes shared room state, so it is stricter than `matrix_message` about Matrix permissions.
 - Tag writes and removals return the updated canonical tag state for the target thread.
 - `tag_thread()`, `untag_thread()`, and every `list_thread_tags()` tag filter share one normalizer: valid canonical IDs up to 50 characters are preserved, while other free-form input is coerced to a short lowercase hyphenated tag.
-- `resolved` is lifecycle state rather than a topic tag, so automatic enrichment and the popular-tag vocabulary omit it; use `tag_thread("resolved")` only when intentionally resolving a thread.
+- `resolved` is lifecycle state rather than a topic tag, so `tag_thread()` and `untag_thread()` reject it.
+- Use the separately configured `thread_resolution` tool when an agent should be allowed to resolve or reopen threads.
 - `list_thread_tags()` can inspect the active thread or an explicitly provided `thread_id`.
 - `list_thread_tags(include_tag=..., exclude_tag=...)` filters which threads are returned: `include_tag` keeps only threads with that tag, `exclude_tag` removes threads with that tag.
 - Both filters can be combined.
@@ -174,6 +176,43 @@ list_thread_tags(exclude_tag="resolved", include_untagged=True)
 - Callers must check `truncated` before claiming the unresolved list is complete.
 - The `tag_thread()` description includes up to 20 of the current room's most-used tags that are short enough for model output, from a cache-stable daily snapshot, so agents prefer existing vocabulary.
 - The vocabulary is room-scoped, so tags from other rooms are never included.
+
+## [`thread_resolution`]
+
+`thread_resolution` gives an agent explicit permission to resolve or reopen its active Matrix thread.
+
+### What It Does
+
+`thread_resolution` exposes `resolve_thread()` and `reopen_thread()`.
+Both functions require an active thread and always target its canonical thread root.
+`resolve_thread()` adds the `resolved` lifecycle tag, while `reopen_thread()` removes it.
+
+### Configuration
+
+This tool has no tool-specific inline configuration fields.
+It is not included in starter configs or default tool sets, so thread resolution remains a human operation unless an operator grants this capability explicitly.
+The `self_config` tool cannot grant `thread_resolution` to its own agent.
+
+### Example
+
+```yaml
+agents:
+  triage:
+    tools:
+      - thread_tags
+      - thread_resolution
+```
+
+```python
+resolve_thread()
+reopen_thread()
+```
+
+### Notes
+
+- Resolution uses the same `com.mindroom.thread.tags` state as thread-card filtering and does not restore the removed experimental resolution event type.
+- The generic `thread_tags` tool can still list and filter by `resolved`, but it cannot add or remove that lifecycle state.
+- Low-level Matrix state APIs remain separate broad capabilities and should only be granted to agents that need raw Matrix access.
 
 ## [`thread_summary`]
 
