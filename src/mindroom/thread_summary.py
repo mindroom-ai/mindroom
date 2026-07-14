@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 from mindroom import model_loading
 from mindroom.ai_runtime import cached_agent_run
-from mindroom.entity_resolution import resolve_room_scoped_model_override
+from mindroom.entity_resolution import current_internal_sender_ids, resolve_room_scoped_model_override
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.message_builder import build_message_content
@@ -31,7 +31,7 @@ from mindroom.thread_tags import coerce_tag_name, get_thread_tags, set_thread_ta
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Collection, Sequence
 
     import nio
 
@@ -173,21 +173,53 @@ def _next_threshold(
     return last_summarized_count + subsequent_interval
 
 
-def _is_thread_summary_message(message: ResolvedVisibleMessage) -> bool:
-    """Return whether a visible thread message is itself a summary notice."""
-    return isinstance(message.content.get("io.mindroom.thread_summary"), dict)
+def _thread_summary_metadata(
+    message: ResolvedVisibleMessage,
+    *,
+    trusted_sender_ids: Collection[str],
+) -> dict[str, object] | None:
+    """Return trusted summary metadata emitted by a current runtime-owned sender."""
+    if message.sender not in trusted_sender_ids:
+        return None
+    metadata = message.content.get("io.mindroom.thread_summary")
+    return metadata if isinstance(metadata, dict) else None
 
 
-def _count_non_summary_thread_messages(thread_history: Sequence[ResolvedVisibleMessage]) -> int:
-    """Count visible thread messages while excluding summary notices."""
-    return sum(1 for message in thread_history if not _is_thread_summary_message(message))
+def _is_thread_summary_message(
+    message: ResolvedVisibleMessage,
+    *,
+    trusted_sender_ids: Collection[str],
+) -> bool:
+    """Return whether a visible thread message is a trusted summary notice."""
+    return _thread_summary_metadata(message, trusted_sender_ids=trusted_sender_ids) is not None
+
+
+def _count_non_summary_thread_messages(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    trusted_sender_ids: Collection[str],
+) -> int:
+    """Count visible thread messages while excluding trusted summary notices."""
+    return sum(
+        1
+        for message in thread_history
+        if not _is_thread_summary_message(message, trusted_sender_ids=trusted_sender_ids)
+    )
 
 
 def thread_summary_message_count_hint(
     thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    trusted_sender_ids: Collection[str],
 ) -> int:
     """Return a lower-bound post-response thread size without refetching history."""
-    return _count_non_summary_thread_messages(thread_history) + 1
+    return (
+        _count_non_summary_thread_messages(
+            thread_history,
+            trusted_sender_ids=trusted_sender_ids,
+        )
+        + 1
+    )
 
 
 def _next_thread_summary_threshold(
@@ -238,14 +270,18 @@ async def _load_thread_history(
     )
 
 
-def _recover_last_summary_count(thread_history: Sequence[ResolvedVisibleMessage]) -> int:
+def _recover_last_summary_count(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    trusted_sender_ids: Collection[str],
+) -> int:
     """Recover the highest durable summary count from authoritative thread history."""
     best_count = 0
     for message in thread_history:
-        meta = message.content.get("io.mindroom.thread_summary")
-        if not isinstance(meta, dict):
+        metadata = _thread_summary_metadata(message, trusted_sender_ids=trusted_sender_ids)
+        if metadata is None:
             continue
-        count = meta.get("message_count")
+        count = metadata.get("message_count")
         if not isinstance(count, int) or isinstance(count, bool):
             continue
         best_count = max(best_count, count)
@@ -254,11 +290,13 @@ def _recover_last_summary_count(thread_history: Sequence[ResolvedVisibleMessage]
 
 def _recover_initial_enrichment_complete(
     thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    trusted_sender_ids: Collection[str],
 ) -> bool:
     """Return whether durable summary metadata records completed initial tags."""
     for message in thread_history:
-        meta = message.content.get("io.mindroom.thread_summary")
-        if isinstance(meta, dict) and meta.get("initial_enrichment_complete") is True:
+        metadata = _thread_summary_metadata(message, trusted_sender_ids=trusted_sender_ids)
+        if metadata is not None and metadata.get("initial_enrichment_complete") is True:
             return True
     return False
 
@@ -267,7 +305,11 @@ _MAX_MESSAGES_BEFORE_TRUNCATION = 50
 _TRUNCATION_SAMPLE_SIZE = 3
 
 
-def _build_conversation_text(thread_history: Sequence[ResolvedVisibleMessage]) -> str:
+def _build_conversation_text(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    trusted_sender_ids: Collection[str],
+) -> str:
     """Build conversation text from thread history.
 
     Prior thread summary notices (``io.mindroom.thread_summary``) are excluded
@@ -278,7 +320,7 @@ def _build_conversation_text(thread_history: Sequence[ResolvedVisibleMessage]) -
     """
     lines: list[str] = []
     for msg in thread_history:
-        if _is_thread_summary_message(msg):
+        if _is_thread_summary_message(msg, trusted_sender_ids=trusted_sender_ids):
             continue
         sender = msg.sender or "unknown"
         body = msg.body or ""
@@ -325,6 +367,7 @@ async def _generate_summary(
     *,
     model_name: str | None = None,
     tag_vocabulary: str | None = None,
+    trusted_sender_ids: Collection[str] | None = None,
 ) -> str | _ThreadEnrichment | None:
     """Generate a summary and, on the first call, one-shot tags via one LLM run."""
     resolved_model_name = model_name or config.defaults.thread_summary_model or "default"
@@ -335,7 +378,14 @@ async def _generate_summary(
         model_name=resolved_model_name,
     )
 
-    conversation = escape(_build_conversation_text(thread_history))
+    if trusted_sender_ids is None:
+        trusted_sender_ids = current_internal_sender_ids(config, runtime_paths)
+    conversation = escape(
+        _build_conversation_text(
+            thread_history,
+            trusted_sender_ids=trusted_sender_ids,
+        ),
+    )
     prompt = config.render_prompt(
         "THREAD_SUMMARY_USER_PROMPT_TEMPLATE",
         conversation=conversation,
@@ -388,6 +438,7 @@ async def _timed_generate_summary(
     *,
     model_name: str | None = None,
     tag_vocabulary: str | None = None,
+    trusted_sender_ids: Collection[str],
 ) -> str | _ThreadEnrichment | None:
     """Run the summary generation attempt with timing instrumentation."""
     return await _generate_summary(
@@ -396,6 +447,7 @@ async def _timed_generate_summary(
         runtime_paths,
         model_name=model_name,
         tag_vocabulary=tag_vocabulary,
+        trusted_sender_ids=trusted_sender_ids,
     )
 
 
@@ -591,6 +643,8 @@ async def set_manual_thread_summary(
     thread_id: str,
     summary: str,
     *,
+    config: Config,
+    runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol,
 ) -> _ThreadSummaryWriteResult:
     """Write one validated manual summary for a canonical thread root."""
@@ -617,7 +671,10 @@ async def set_manual_thread_summary(
             msg = "Failed to fetch thread history for the target thread."
             raise ThreadSummaryWriteError(msg) from exc
 
-        message_count = _count_non_summary_thread_messages(thread_history)
+        message_count = _count_non_summary_thread_messages(
+            thread_history,
+            trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
+        )
         try:
             event_id = await send_thread_summary_event(
                 client,
@@ -667,16 +724,26 @@ async def maybe_generate_thread_summary(
                 thread_id=thread_id,
             )
             return
-        recovered_summary_count = _recover_last_summary_count(thread_history)
+        trusted_sender_ids = current_internal_sender_ids(config, runtime_paths)
+        recovered_summary_count = _recover_last_summary_count(
+            thread_history,
+            trusted_sender_ids=trusted_sender_ids,
+        )
         if recovered_summary_count > 0:
             update_last_summary_count(room_id, thread_id, recovered_summary_count)
 
         threshold = _next_thread_summary_threshold(room_id, thread_id, config)
-        message_count = _count_non_summary_thread_messages(thread_history)
+        message_count = _count_non_summary_thread_messages(
+            thread_history,
+            trusted_sender_ids=trusted_sender_ids,
+        )
         if message_count < threshold:
             return
 
-        initial_enrichment = not _recover_initial_enrichment_complete(thread_history)
+        initial_enrichment = not _recover_initial_enrichment_complete(
+            thread_history,
+            trusted_sender_ids=trusted_sender_ids,
+        )
         tag_vocabulary = None
         if initial_enrichment:
             tag_vocabulary = refreshed_tag_vocabulary or format_tag_vocabulary_with_counts(
@@ -695,6 +762,7 @@ async def maybe_generate_thread_summary(
                 runtime_paths,
                 model_name=model_name,
                 tag_vocabulary=tag_vocabulary,
+                trusted_sender_ids=trusted_sender_ids,
             )
         except Exception:
             logger.exception("Thread summary generation failed", room_id=room_id, thread_id=thread_id)

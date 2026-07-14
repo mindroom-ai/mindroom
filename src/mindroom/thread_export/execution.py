@@ -129,6 +129,7 @@ async def _fetch_thread_payload(
         thread_id=thread_id,
         messages=list(history),
         exported_at=datetime.now(UTC),
+        trusted_sender_ids=trusted_sender_ids,
     )
 
 

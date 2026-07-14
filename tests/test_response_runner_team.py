@@ -1004,7 +1004,13 @@ class TestAgentBot(AgentBotTestBase):
             ),
         )
 
-        assert thread_summary_message_count_hint(thread_history) == 5
+        assert (
+            thread_summary_message_count_hint(
+                thread_history,
+                trusted_sender_ids=frozenset({"@mindroom_general:localhost"}),
+            )
+            == 5
+        )
 
     @pytest.mark.asyncio
     async def test_generate_team_response_streams_into_placeholder_event(

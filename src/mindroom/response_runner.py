@@ -24,7 +24,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.storage import has_pending_force_compaction_scope, read_scope_state
@@ -1923,7 +1923,13 @@ class ResponseRunner:
                 interactive_target=resolved_target,
                 thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
                 thread_summary_thread_id=resolved_target.resolved_thread_id,
-                thread_summary_message_count_hint=thread_summary_message_count_hint(request.thread_history),
+                thread_summary_message_count_hint=thread_summary_message_count_hint(
+                    request.thread_history,
+                    trusted_sender_ids=current_internal_sender_ids(
+                        self.deps.runtime.config,
+                        self.deps.runtime_paths,
+                    ),
+                ),
                 thread_summary_entity_name=self.deps.agent_name,
                 memory_prompt=_memory_prompt,
                 memory_thread_history=_memory_thread_history,
@@ -2767,7 +2773,13 @@ class ResponseRunner:
                 interactive_target=resolved_target,
                 thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
                 thread_summary_thread_id=resolved_target.resolved_thread_id,
-                thread_summary_message_count_hint=thread_summary_message_count_hint(request.thread_history),
+                thread_summary_message_count_hint=thread_summary_message_count_hint(
+                    request.thread_history,
+                    trusted_sender_ids=current_internal_sender_ids(
+                        self.deps.runtime.config,
+                        self.deps.runtime_paths,
+                    ),
+                ),
                 thread_summary_entity_name=self.deps.agent_name,
                 memory_prompt=memory_prompt,
                 memory_thread_history=memory_thread_history,

@@ -51,6 +51,7 @@ from mindroom.dispatch_source import (
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
+from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.types import HistoryScope
@@ -839,6 +840,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         runtime_paths,
         model_name="default",
         tag_vocabulary="(no reusable short tags in use yet)",
+        trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
     )
     mock_send.assert_awaited_once_with(
         client,
@@ -935,6 +937,7 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         runtime_paths,
         model_name="qwen",
         tag_vocabulary="(no reusable short tags in use yet)",
+        trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
     )
 
 

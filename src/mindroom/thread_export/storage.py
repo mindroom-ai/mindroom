@@ -15,7 +15,7 @@ from uuid import uuid4
 import yaml
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Collection, Sequence
     from pathlib import Path
 
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -192,9 +192,15 @@ def _message_payload(message: ResolvedVisibleMessage) -> dict[str, object]:
     return payload
 
 
-def _latest_thread_summary(messages: list[ResolvedVisibleMessage]) -> str | None:
-    """Return the latest thread-summary notice text, when one exists."""
+def _latest_thread_summary(
+    messages: list[ResolvedVisibleMessage],
+    *,
+    trusted_sender_ids: Collection[str],
+) -> str | None:
+    """Return the latest trusted thread-summary notice text, when one exists."""
     for message in reversed(messages):
+        if message.sender not in trusted_sender_ids:
+            continue
         meta = message.content.get(_THREAD_SUMMARY_CONTENT_KEY)
         if isinstance(meta, dict):
             summary = meta.get("summary")
@@ -208,13 +214,14 @@ def thread_payload(
     thread_id: str,
     messages: list[ResolvedVisibleMessage],
     exported_at: datetime,
+    trusted_sender_ids: Collection[str],
 ) -> dict[str, object]:
     """Build one YAML document for a Matrix thread."""
     thread_block: dict[str, object] = {
         "id": thread_id,
         "source": "matrix",
     }
-    if summary := _latest_thread_summary(messages):
+    if summary := _latest_thread_summary(messages, trusted_sender_ids=trusted_sender_ids):
         thread_block["summary"] = summary
     thread_block["exported_at"] = exported_at.isoformat()
     thread_block["message_count"] = len(messages)
