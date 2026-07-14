@@ -66,6 +66,7 @@ def _reset_logging_after_test() -> Iterator[None]:
 @dataclass
 class _LoggingModel:
     id: str = "test-model"
+    provider: str | None = "OpenAI"
     system_prompt: str | None = None
     temperature: float | None = 0.7
     client: object | None = None

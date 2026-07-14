@@ -1956,6 +1956,7 @@ class TestUserIdPassthrough:
         class _DeferredLoggingModel:
             def __init__(self) -> None:
                 self.id = "test-model"
+                self.provider = "test"
                 self.system_prompt = None
                 self.temperature = 0.7
                 self.client = None

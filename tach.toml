@@ -150,6 +150,15 @@ visibility = [
 path = "mindroom.ai_run_metadata"
 depends_on = [
     "mindroom.constants",
+    "mindroom.model_usage",
+]
+
+[[modules]]
+path = "mindroom.model_usage"
+depends_on = []
+visibility = [
+    "mindroom.ai_run_metadata",
+    "mindroom.llm_request_logging",
 ]
 
 [[modules]]

@@ -8,6 +8,7 @@ from agno.models.metrics import Metrics
 from agno.run.base import RunStatus
 
 from mindroom.constants import AI_RUN_METADATA_KEY
+from mindroom.model_usage import context_input_tokens_from_counts
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -111,44 +112,6 @@ def _build_context_payload(
     ):
         payload["cache_write_input_tokens"] = cache_write_tokens
     return payload
-
-
-def _provider_reports_cache_tokens_outside_input(
-    *,
-    provider: str | None,
-    configured_provider: str | None,
-    model_id: str | None,
-) -> bool:
-    """Return whether cache tokens must be added to input tokens for context occupancy."""
-    provider_key = (provider or configured_provider or "").lower()
-    configured_provider_key = (configured_provider or "").lower()
-    model_key = (model_id or "").lower()
-    if "anthropic" in provider_key or "bedrock" in provider_key:
-        return True
-    if configured_provider_key == "vertexai_claude":
-        return True
-    return "vertex" in provider_key and "claude" in model_key
-
-
-def _context_input_tokens_from_counts(
-    *,
-    input_tokens: int | None,
-    cache_read_tokens: int | None,
-    cache_write_tokens: int | None,
-    provider: str | None,
-    configured_provider: str | None,
-    model_id: str | None,
-) -> int | None:
-    """Return full request-context tokens from provider usage counters."""
-    if input_tokens is None:
-        return None
-    if not _provider_reports_cache_tokens_outside_input(
-        provider=provider,
-        configured_provider=configured_provider,
-        model_id=model_id,
-    ):
-        return input_tokens
-    return input_tokens + (cache_read_tokens or 0) + (cache_write_tokens or 0)
 
 
 def _int_usage_value(usage_payload: dict[str, Any] | None, key: str) -> int | None:
@@ -263,7 +226,7 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912
     # Provider usage counters are authoritative for context occupancy; the
     # pre-flight `context_input_tokens` estimate is only a fallback when the
     # provider reported nothing (for example a request that failed early).
-    resolved_context_input_tokens = _context_input_tokens_from_counts(
+    resolved_context_input_tokens = context_input_tokens_from_counts(
         input_tokens=context_raw_input_tokens if explicit_context_scope else usage_input_tokens,
         cache_read_tokens=(
             context_cache_read_tokens

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from agno.models.message import Message, MessageMetrics
 from agno.models.response import ModelResponse
+from structlog.testing import capture_logs
 
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
 @dataclass
 class _FakeModel:
     id: str = "test-model"
+    provider: str | None = "OpenAI"
     system_prompt: str | None = None
     temperature: float | None = 0.7
     client: object | None = None
@@ -289,21 +291,141 @@ async def test_llm_request_logging_uses_model_name_when_context_is_unbound(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_llm_request_logging_disabled_creates_no_file(tmp_path: Path) -> None:
-    """Disabled request logging should leave the target log directory untouched."""
-    model = _FakeModel()
-    install_llm_request_logging(
-        model,
-        agent_name="default",
-        debug_config=DebugConfig(),
-        default_log_dir=tmp_path,
+async def test_llm_request_logging_disabled_still_emits_usage_telemetry(tmp_path: Path) -> None:
+    """Usage telemetry should stay enabled without writing full request logs."""
+    model = _FakeModel(
+        response_usage=MessageMetrics(
+            input_tokens=1_000,
+            output_tokens=50,
+            reasoning_tokens=20,
+            cache_read_tokens=800,
+            cache_write_tokens=100,
+        ),
     )
-    await model.ainvoke(
-        messages=[Message(role="user", content="hello")],
-        assistant_message=Message(role="assistant"),
-        tools=[],
-    )
+    with capture_logs() as logs:
+        install_llm_request_logging(
+            model,
+            agent_name="default",
+            debug_config=DebugConfig(),
+            default_log_dir=tmp_path,
+            configured_provider="openai",
+        )
+        with bind_llm_request_log_context(correlation_id="corr-1", full_prompt="private prompt"):
+            await model.ainvoke(
+                messages=[Message(role="user", content="hello")],
+                assistant_message=Message(role="assistant"),
+                tools=[],
+            )
+
     assert list(tmp_path.iterdir()) == []
+    assert logs == [
+        {
+            "event": "LLM usage",
+            "log_level": "info",
+            "model_name": "default",
+            "model_id": "test-model",
+            "provider": "OpenAI",
+            "usage_available": True,
+            "input_tokens": 1_000,
+            "context_input_tokens": 1_000,
+            "output_tokens": 50,
+            "reasoning_tokens": 20,
+            "cache_read_tokens": 800,
+            "cache_write_tokens": 100,
+            "uncached_input_tokens": 200,
+            "cache_read_ratio": 0.8,
+            "correlation_id": "corr-1",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_llm_usage_telemetry_normalizes_anthropic_cache_tokens(tmp_path: Path) -> None:
+    """Anthropic cache tokens should be added to raw input before calculating cache ratios."""
+    model = _FakeModel(
+        provider="Anthropic",
+        response_usage=MessageMetrics(input_tokens=200, cache_read_tokens=800, cache_write_tokens=100),
+    )
+    with capture_logs() as logs:
+        install_llm_request_logging(
+            model,
+            agent_name="claude",
+            debug_config=DebugConfig(),
+            default_log_dir=tmp_path,
+            configured_provider="anthropic",
+        )
+        await model.ainvoke(
+            messages=[Message(role="user", content="hello")],
+            assistant_message=Message(role="assistant"),
+            tools=[],
+        )
+
+    usage_log = logs[0]
+    assert usage_log["context_input_tokens"] == 1_100
+    assert usage_log["uncached_input_tokens"] == 300
+    assert usage_log["cache_read_ratio"] == 0.727273
+
+
+@pytest.mark.asyncio
+async def test_llm_usage_telemetry_reports_missing_provider_metrics(tmp_path: Path) -> None:
+    """Completed calls without provider metrics should remain visible in telemetry."""
+    model = _FakeModel()
+    with capture_logs() as logs:
+        install_llm_request_logging(
+            model,
+            agent_name="default",
+            debug_config=DebugConfig(),
+            default_log_dir=tmp_path,
+        )
+        await model.ainvoke(
+            messages=[Message(role="user", content="hello")],
+            assistant_message=Message(role="assistant"),
+            tools=[],
+        )
+
+    assert logs == [
+        {
+            "event": "LLM usage",
+            "log_level": "info",
+            "model_name": "default",
+            "model_id": "test-model",
+            "provider": "OpenAI",
+            "usage_available": False,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_llm_usage_telemetry_does_not_double_count_invoke_via_stream(tmp_path: Path) -> None:
+    """A model whose invoke method consumes its stream should emit one usage event."""
+
+    @dataclass
+    class _InvokeViaStreamModel(_FakeModel):
+        async def ainvoke(self, *args: object, **kwargs: object) -> ModelResponse:
+            response = ModelResponse(content="")
+            async for chunk in self.ainvoke_stream(*args, **kwargs):
+                response.content = f"{response.content or ''}{chunk.content or ''}"
+                if chunk.response_usage is not None:
+                    response.response_usage = chunk.response_usage
+            return response
+
+    model = _InvokeViaStreamModel(response_usage=MessageMetrics(input_tokens=100, cache_read_tokens=80))
+    with capture_logs() as logs:
+        install_llm_request_logging(
+            model,
+            agent_name="default",
+            debug_config=DebugConfig(),
+            default_log_dir=tmp_path,
+        )
+        response = await model.ainvoke(
+            messages=[Message(role="user", content="hello")],
+            assistant_message=Message(role="assistant"),
+            tools=[],
+        )
+
+    assert response.content == "ok!"
+    assert [entry["event"] for entry in logs] == ["LLM usage"]
+    assert logs[0]["cache_read_ratio"] == 0.8
 
 
 @pytest.mark.asyncio

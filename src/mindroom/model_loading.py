@@ -352,13 +352,13 @@ def get_model_instance(
         configured_id=model_id,
         effective_id=model.id,
     )
-    if config.debug.log_llm_requests:
-        install_llm_request_logging(
-            model,
-            agent_name=model_name,
-            debug_config=config.debug,
-            default_log_dir=runtime_paths.storage_root / "logs" / "llm_requests",
-        )
+    install_llm_request_logging(
+        model,
+        agent_name=model_name,
+        debug_config=config.debug,
+        default_log_dir=runtime_paths.storage_root / "logs" / "llm_requests",
+        configured_provider=provider,
+    )
     install_claude_prompt_cache_hook(model)
     install_claude_stream_retry_hook(model)
     return model
