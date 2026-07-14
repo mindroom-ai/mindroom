@@ -162,6 +162,7 @@ list_thread_tags(exclude_tag="resolved", include_untagged=True)
 - This tool writes shared room state, so it is stricter than `matrix_message` about Matrix permissions.
 - Tag writes and removals return the updated canonical tag state for the target thread.
 - `tag_thread()`, `untag_thread()`, and every `list_thread_tags()` tag filter share one normalizer: valid canonical IDs up to 50 characters are preserved, while other free-form input is coerced to a short lowercase hyphenated tag.
+- `resolved` is reserved for user-controlled lifecycle state, so automatic enrichment omits it and `tag_thread()` rejects it.
 - `list_thread_tags()` can inspect the active thread or an explicitly provided `thread_id`.
 - `list_thread_tags(include_tag=..., exclude_tag=...)` filters which threads are returned: `include_tag` keeps only threads with that tag, `exclude_tag` removes threads with that tag.
 - Both filters can be combined.

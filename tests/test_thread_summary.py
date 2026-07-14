@@ -2146,6 +2146,7 @@ class TestGenerateSummary:
         assert "It must remain accurate whether the thread has 5 messages or 50+." in instructions
         assert "Prefer stable noun phrases" in instructions
         assert "Do NOT include transient state." in instructions
+        assert 'Never return "resolved"' in instructions
         assert "approval or merge status" in instructions
         assert "round or attempt numbers" in instructions
         assert "test counts or pass/fail tallies" in instructions
@@ -2188,7 +2189,7 @@ class TestGenerateSummary:
         mock_response = MagicMock(
             content=_ThreadEnrichment(
                 summary="🧵 Login parser hardening",
-                tags=["Bug Fix", "bug-fix", "security"],
+                tags=["Bug Fix", "bug-fix", "resolved!"],
             ),
         )
 
@@ -2207,7 +2208,7 @@ class TestGenerateSummary:
 
         assert result == _ThreadEnrichment(
             summary="🧵 Login parser hardening",
-            tags=["bug-fix", "security"],
+            tags=["bug-fix"],
         )
         assert mock_model.temperature == 0.1
         assert agent_class.call_args.kwargs["output_schema"] is _ThreadEnrichment
@@ -2235,12 +2236,16 @@ class TestGenerateSummary:
 
         assert result is None
 
-    async def test_initial_enrichment_preserves_summary_when_all_tags_are_invalid(self) -> None:
-        """Invalid generated tags should not discard the valid refreshed summary."""
+    @pytest.mark.parametrize("generated_tags", [["!!!"], ["resolved"]], ids=["invalid", "reserved"])
+    async def test_initial_enrichment_preserves_summary_when_all_tags_are_unusable(
+        self,
+        generated_tags: list[str],
+    ) -> None:
+        """Invalid or reserved tags should not discard the valid refreshed summary."""
         mock_response = MagicMock(
             content=_ThreadEnrichment(
                 summary="🧵 Invalid tags",
-                tags=["!!!"],
+                tags=generated_tags,
             ),
         )
 
