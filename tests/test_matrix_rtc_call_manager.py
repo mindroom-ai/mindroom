@@ -202,7 +202,7 @@ def _state_response(*call_events: dict) -> nio.RoomGetStateResponse:
     return nio.RoomGetStateResponse(events, ROOM_ID)
 
 
-def _config(*, enabled: bool = True) -> Config:
+def _config(*, enabled: bool = True, credentials_service: str = "openai") -> Config:
     return Config(
         agents={
             "helper": AgentConfig(
@@ -216,6 +216,7 @@ def _config(*, enabled: bool = True) -> Config:
         authorization=AuthorizationConfig(global_users=["@alice:example.org"]),
         calls=CallsConfig(
             enabled=enabled,
+            credentials_service=credentials_service,
             agents=["helper"],
             livekit_service_url=SERVICE_URL,
         ),
@@ -1092,7 +1093,7 @@ def test_voice_backend_availability_requires_runtime_credentials(
         "mindroom.matrix_rtc.call_manager.get_api_key_for_service",
         lambda _service, _paths: None,
     )
-    manager = _manager(_client(), FakeBridge(), tmp_path)
+    manager = _manager(_client(), FakeBridge(), tmp_path, _config(credentials_service="openai-realtime"))
 
     with patch("mindroom.matrix_rtc.call_manager.logger.warning") as warning:
         assert manager.voice_backend_available is False
@@ -1103,6 +1104,7 @@ def test_voice_backend_availability_requires_runtime_credentials(
             "call_join_skipped_no_openai_key",
             room_id=ROOM_ID,
             agent="helper",
+            credentials_service="openai-realtime",
         )
 
 
@@ -1118,13 +1120,7 @@ def test_realtime_backend_uses_configured_credential_service(
         return "sk-realtime"
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.get_api_key_for_service", lookup)
-    config = _config()
-    config.calls = CallsConfig(
-        enabled=True,
-        agents=["helper"],
-        livekit_service_url=SERVICE_URL,
-        credentials_service="openai-realtime",
-    )
+    config = _config(credentials_service="openai-realtime")
     manager = _manager(_client(), FakeBridge(), tmp_path, config)
 
     backend = manager._resolve_voice_backend(ROOM_ID)

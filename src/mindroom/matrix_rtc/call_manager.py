@@ -866,7 +866,12 @@ class CallManager:
             )
             if not api_key:
                 if warn_if_unavailable:
-                    logger.warning("call_join_skipped_no_openai_key", room_id=room_id, agent=self._agent_name)
+                    logger.warning(
+                        "call_join_skipped_no_openai_key",
+                        room_id=room_id,
+                        agent=self._agent_name,
+                        credentials_service=self._config.calls.credentials_service,
+                    )
                 return None
             return _ResolvedVoiceBackend(realtime_api_key=api_key)
 
