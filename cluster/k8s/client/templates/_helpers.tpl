@@ -113,7 +113,8 @@ runtime-config.js straight from nginx and the Deployment bypasses the entrypoint
 {{- define "mindroom-client.defaultNginxConf" -}}
 {{- $base := include "mindroom-client.basePath" . -}}
 {{- $prefix := include "mindroom-client.pathPrefix" . -}}
-{{- $runtimeConfig := printf "window.__APP_BASE_PATH__ = \"%s\"; window.__ENABLE_SERVICE_WORKER__ = %t;" $base .Values.serviceWorker.enabled -}}
+{{- $navigationFallbackExcludePaths := default (list) .Values.serviceWorker.navigationFallbackExcludePaths | toJson -}}
+{{- $runtimeConfig := printf "window.__APP_BASE_PATH__ = \"%s\"; window.__ENABLE_SERVICE_WORKER__ = %t; window.__SERVICE_WORKER_NAVIGATION_FALLBACK_EXCLUDE_PATHS__ = %s;" $base .Values.serviceWorker.enabled $navigationFallbackExcludePaths -}}
 server {
   listen {{ .Values.nginx.port }};
 {{- if .Values.nginx.ipv6 }}
@@ -135,7 +136,7 @@ server {
   location = /runtime-config.js {
     default_type application/javascript;
     add_header Cache-Control "no-store, max-age=0" always;
-    return 200 '{{ $runtimeConfig }}';
+    return 200 {{ $runtimeConfig | quote }};
   }
 {{- if .Values.matrixRTC.enabled }}
 

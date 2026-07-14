@@ -4,6 +4,9 @@
 {{- if and .Values.rootServiceWorkerCleanup.enabled (eq (include "mindroom-client.basePath" .) "/") -}}
 {{- fail "rootServiceWorkerCleanup.enabled requires a basePath other than / because /sw.js is the client service worker at the origin root" -}}
 {{- end -}}
+{{- if contains "$" (.Values.serviceWorker.navigationFallbackExcludePaths | toJson) -}}
+{{- fail "serviceWorker.navigationFallbackExcludePaths cannot contain $ because nginx expands variables in return bodies" -}}
+{{- end -}}
 {{- if and .Values.config.create (not .Values.config.existingConfigMap) (not .Values.config.data) (not .Values.matrix.homeserverUrl) (not .Values.matrix.defaultServerName) -}}
 {{- fail "matrix.homeserverUrl or matrix.defaultServerName is required when the chart renders the default client config" -}}
 {{- end -}}
