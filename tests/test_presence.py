@@ -9,7 +9,7 @@ import nio
 import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
-from mindroom.config.calls import CallsConfig
+from mindroom.config.calls import CallAgentConfig, CallsConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -110,7 +110,7 @@ class TestBuildAgentStatusMessage:
                 "voice": AgentConfig(display_name="Voice"),
                 "text": AgentConfig(display_name="Text"),
             },
-            calls=CallsConfig(enabled=True, agents=["voice"]),
+            calls=CallsConfig(enabled=True, agents={"voice": CallAgentConfig()}),
         )
 
         assert "📞 Voice calls" in build_agent_status_message(
