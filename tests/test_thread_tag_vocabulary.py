@@ -329,14 +329,15 @@ async def test_maybe_rebuild_counts_ranks_and_persists_one_room(tmp_path: Path) 
     )
 
     assert rebuilt is not None
+    assert rebuilt.tags == (
+        _TagUsage(tag="bug", count=2),
+        _TagUsage(tag="docs", count=1),
+    )
     client.room_get_state.assert_awaited_once_with(_ROOM_A)
     snapshot = load_tag_vocabulary_snapshot(runtime_paths, _ROOM_A)
     assert snapshot is not None
     assert snapshot.built_at == now
-    assert snapshot.tags == (
-        _TagUsage(tag="bug", count=2),
-        _TagUsage(tag="docs", count=1),
-    )
+    assert snapshot.tags == rebuilt.tags
     assert load_tag_vocabulary_snapshot(runtime_paths, _ROOM_B) is None
 
 
