@@ -16,3 +16,21 @@
 {{- if and .Values.nginx.serverSnippet (or (not .Values.nginx.create) .Values.nginx.existingConfigMap) -}}
 {{- fail "nginx.serverSnippet requires the chart-managed nginx config" -}}
 {{- end -}}
+{{- if and .Values.matrixRTC.enabled (not .Values.matrix.homeserverUrl) -}}
+{{- fail "matrix.homeserverUrl is required when matrixRTC.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.matrixRTC.enabled (not .Values.matrixRTC.livekitServiceUrl) -}}
+{{- fail "matrixRTC.livekitServiceUrl is required when matrixRTC.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.matrixRTC.enabled (or (not .Values.nginx.create) .Values.nginx.existingConfigMap) -}}
+{{- fail "matrixRTC.enabled requires the chart-managed nginx config" -}}
+{{- end -}}
+{{- if and .Values.matrixRTC.proxy.enabled (not .Values.matrixRTC.enabled) -}}
+{{- fail "matrixRTC.proxy.enabled requires matrixRTC.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.matrixRTC.proxy.enabled (not .Values.matrixRTC.proxy.jwtServiceUpstream) -}}
+{{- fail "matrixRTC.proxy.jwtServiceUpstream is required when matrixRTC.proxy.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.matrixRTC.proxy.enabled (not .Values.matrixRTC.proxy.sfuUpstream) -}}
+{{- fail "matrixRTC.proxy.sfuUpstream is required when matrixRTC.proxy.enabled=true" -}}
+{{- end -}}

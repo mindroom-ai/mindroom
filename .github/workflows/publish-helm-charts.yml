@@ -279,6 +279,7 @@ jobs:
             --set matrix.defaultServerName=matrix.example.com \
             --set serviceWorker.enabled=false \
             > "$render_dir/base-path.yaml"
+          grep -F 'location = /mindroom/version.json' "$render_dir/base-path.yaml"
           helm template mindroom-client "$CLIENT_CHART_DIR" \
             --namespace mindroom \
             --set config.existingConfigMap=existing-client-config \
@@ -302,6 +303,30 @@ jobs:
             --set nginx.existingConfigMap=existing-client-nginx \
             > /dev/null 2>&1; then
             echo "nginx.serverSnippet unexpectedly accepted an external nginx ConfigMap" >&2
+            exit 1
+          fi
+          cat > "$render_dir/matrixrtc-values.yaml" <<'EOF'
+          matrixRTC:
+            enabled: true
+            livekitServiceUrl: https://matrix.example.com/livekit/jwt
+            proxy:
+              enabled: true
+              jwtServiceUpstream: http://matrixrtc-auth:8080
+              sfuUpstream: http://livekit:7880
+          EOF
+          helm template mindroom-client "$CLIENT_CHART_DIR" \
+            --namespace mindroom \
+            --values "$render_dir/matrixrtc-values.yaml" \
+            > "$render_dir/matrixrtc.yaml"
+          grep -F '"org.matrix.msc4143.rtc_foci"' "$render_dir/matrixrtc.yaml"
+          grep -F '"livekit_service_url":"https://matrix.example.com/livekit/jwt"' "$render_dir/matrixrtc.yaml"
+          grep -F 'proxy_pass http://matrixrtc-auth:8080/;' "$render_dir/matrixrtc.yaml"
+          grep -F 'proxy_pass http://livekit:7880/;' "$render_dir/matrixrtc.yaml"
+          if helm template mindroom-client "$CLIENT_CHART_DIR" \
+            --namespace mindroom \
+            --set matrixRTC.enabled=true \
+            > /dev/null 2>&1; then
+            echo "matrixRTC.enabled unexpectedly accepted a missing livekitServiceUrl" >&2
             exit 1
           fi
 

@@ -64,6 +64,21 @@ matrix:
   # Allow logging in to homeservers outside the configured entry.
   allowCustomHomeservers: false
 
+# Optional MatrixRTC discovery and same-origin proxy routes for voice and video calls.
+# LiveKit and the MatrixRTC authorization service must already exist.
+matrixRTC:
+  enabled: false
+  # Public MatrixRTC authorization service URL advertised through
+  # /.well-known/matrix/client, for example https://matrix.example.com/livekit/jwt.
+  livekitServiceUrl: ""
+  proxy:
+    # Proxy the conventional /livekit/jwt and /livekit/sfu paths through nginx.
+    enabled: false
+    # Internal MatrixRTC authorization service URL, for example http://matrixrtc-auth:8080.
+    jwtServiceUpstream: ""
+    # Internal LiveKit SFU URL, for example http://livekit:7880.
+    sfuUpstream: ""
+
 serviceWorker:
   # Register the client service worker, scoped to basePath.
   enabled: true

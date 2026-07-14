@@ -97,6 +97,13 @@ Path prefix prepended to client file locations; empty at the origin root.
 }
 {{- end -}}
 
+{{- define "mindroom-client.matrixClientWellKnown" -}}
+{{- $wellKnown := dict "m.homeserver" (dict "base_url" .Values.matrix.homeserverUrl) -}}
+{{- $focus := dict "type" "livekit" "livekit_service_url" .Values.matrixRTC.livekitServiceUrl -}}
+{{- $_ := set $wellKnown "org.matrix.msc4143.rtc_foci" (list $focus) -}}
+{{- $wellKnown | toJson -}}
+{{- end -}}
+
 {{/*
 The nginx server config serving the client under basePath.
 The image entrypoint normally writes runtime-config.js into the app directory,
@@ -130,6 +137,47 @@ server {
     add_header Cache-Control "no-store, max-age=0" always;
     return 200 '{{ $runtimeConfig }}';
   }
+{{- if .Values.matrixRTC.enabled }}
+
+  # MatrixRTC backend discovery for Matrix voice and video calls.
+  location = /.well-known/matrix/client {
+    default_type application/json;
+    add_header Cache-Control "no-store, max-age=0" always;
+    add_header Access-Control-Allow-Origin "*" always;
+    add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS" always;
+    add_header Access-Control-Allow-Headers "X-Requested-With, Content-Type, Authorization" always;
+    return 200 '{{ include "mindroom-client.matrixClientWellKnown" . }}';
+  }
+{{- end }}
+{{- if .Values.matrixRTC.proxy.enabled }}
+
+  # MatrixRTC authorization service. The trailing proxy_pass slash strips the
+  # public /livekit/jwt/ prefix before forwarding the request.
+  location ^~ /livekit/jwt/ {
+    proxy_pass {{ .Values.matrixRTC.proxy.jwtServiceUpstream | trimSuffix "/" }}/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+
+  # LiveKit WebSocket signaling. WebRTC media uses the networking configured
+  # for the separately managed LiveKit service.
+  location ^~ /livekit/sfu/ {
+    proxy_pass {{ .Values.matrixRTC.proxy.sfuUpstream | trimSuffix "/" }}/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Accept-Encoding gzip;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_send_timeout 120s;
+    proxy_read_timeout 120s;
+    proxy_buffering off;
+  }
+{{- end }}
 {{- with .Values.nginx.serverSnippet }}
 
   # Additional server directives supplied through nginx.serverSnippet.
@@ -138,6 +186,13 @@ server {
 
   location = {{ $prefix }}/config.json {
     alias /usr/share/nginx/html/config.json;
+    default_type application/json;
+    add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
+  }
+
+  # The client polls this manifest and reloads after a new build is published.
+  location = {{ $prefix }}/version.json {
+    alias /usr/share/nginx/html/version.json;
     default_type application/json;
     add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
   }

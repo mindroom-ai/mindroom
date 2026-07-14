@@ -34,6 +34,30 @@ matrix:
 When `defaultServerName` is set, the login form shows that server name instead of the URL, and the name must publish `/.well-known/matrix/client` pointing at `homeserverUrl`.
 Set `config.data` to a full JSON document when you need client options beyond the homeserver entry, or point `config.existingConfigMap` at a ConfigMap you manage yourself.
 
+## MatrixRTC Calls
+
+The chart can publish MatrixRTC discovery and optionally proxy the standard authorization and LiveKit signaling paths through its chart-managed nginx server.
+LiveKit and the MatrixRTC authorization service remain separately managed services.
+
+```yaml
+matrix:
+  homeserverUrl: https://matrix.example.com
+
+matrixRTC:
+  enabled: true
+  livekitServiceUrl: https://matrix.example.com/livekit/jwt
+  proxy:
+    enabled: true
+    jwtServiceUpstream: http://matrixrtc-auth:8080
+    sfuUpstream: http://livekit:7880
+```
+
+When enabled, nginx serves `/.well-known/matrix/client` with the configured homeserver and `org.matrix.msc4143.rtc_foci` announcement.
+Route that well-known path from the Matrix server-name origin to this Service when the client uses a different hostname.
+The optional proxy strips `/livekit/jwt/` and `/livekit/sfu/` before forwarding to the configured internal services, and the SFU route supports WebSocket signaling.
+The chart does not deploy either backend, expose LiveKit media ports, configure TURN, issue TLS certificates, or manage backend credentials.
+See [Voice Calls](../../../docs/voice-calls.md) for the MindRoom agent configuration and complete backend requirements.
+
 ## Base Path
 
 Set `basePath` to serve the client under a URL prefix instead of the origin root:
@@ -43,6 +67,7 @@ basePath: /mindroom
 ```
 
 The chart-managed nginx config serves the app shell, `config.json`, and the service worker under the base path, redirects `/` and the bare base path to `basePath/`, and resolves hashed build assets referenced from any route depth.
+It also serves `version.json` under the base path without caching so the client can detect and load a newly published build.
 The client always loads `/runtime-config.js` from the origin root, so route the full origin host to this Service even when `basePath` is not `/`.
 The chart serves `/runtime-config.js` directly from nginx because the image entrypoint would otherwise write it into the app directory, which the unprivileged read-only container forbids.
 
