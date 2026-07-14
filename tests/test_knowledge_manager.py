@@ -5069,7 +5069,67 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
     assert captured_request["storage_root"] == str(runtime_paths.storage_root)
     assert "runtime_paths" not in captured_request
     assert captured_request["config_data"]["knowledge_bases"]["docs"]["chunk_size"] == 1234
+    assert captured_request["runtime_knowledge_base"] is None
     assert captured_request["execution_identity"]["requester_id"] == "@alice:localhost"
+
+
+@pytest.mark.asyncio
+async def test_subprocess_applies_runtime_knowledge_base_after_authored_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A synthetic workspace index may coexist with an authored nested knowledge root."""
+    workspace = tmp_path / "workspace"
+    thread_exports = workspace / "thread_exports"
+    thread_exports.mkdir(parents=True)
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "models": {},
+            "knowledge_bases": {"threads": {"path": str(thread_exports)}},
+        },
+        runtime_paths,
+    )
+    base_id = "file_memory_agent_openclaw_test"
+    runtime_base = KnowledgeBaseConfig(
+        mode="semantic",
+        path=str(workspace),
+        include_patterns=["memory/**/*.md"],
+    )
+    effective_config = config.with_runtime_knowledge_base_overlay(base_id, runtime_base)
+    payload = knowledge_refresh_runner._serialize_subprocess_refresh_request(
+        base_id,
+        config=effective_config,
+        runtime_paths=runtime_paths,
+        execution_identity=None,
+        force_reindex=False,
+    )
+    raw_payload = json.loads(payload)
+    assert set(raw_payload["config_data"]["knowledge_bases"]) == {"threads"}
+    assert raw_payload["runtime_knowledge_base"]["path"] == str(workspace)
+
+    async def _fake_refresh(
+        refresh_base_id: str,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        **_kwargs: object,
+    ) -> knowledge_refresh_runner.KnowledgeRefreshResult:
+        assert refresh_base_id == base_id
+        assert set(config.knowledge_bases) == {"threads", base_id}
+        assert config.knowledge_bases[base_id] == runtime_base
+        return knowledge_refresh_runner.KnowledgeRefreshResult(
+            key=resolve_published_index_key(base_id, config=config, runtime_paths=runtime_paths),
+            indexed_count=0,
+            index_published=False,
+            availability=KnowledgeAvailability.READY,
+        )
+
+    monkeypatch.setattr(knowledge_refresh_runner, "refresh_knowledge_binding", _fake_refresh)
+
+    result = await knowledge_refresh_runner._run_subprocess_refresh_request(payload)
+
+    assert result.availability is KnowledgeAvailability.READY
 
 
 @pytest.mark.asyncio

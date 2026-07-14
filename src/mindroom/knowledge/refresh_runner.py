@@ -15,8 +15,9 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, TypedDict, cast
 
+from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_values
 from mindroom.file_locks import async_exclusive_file_lock
@@ -81,6 +82,7 @@ class _SubprocessRefreshRequest:
     config_data: dict[str, object]
     config_path: str
     storage_root: str
+    runtime_knowledge_base: dict[str, object] | None = None
     execution_identity: SerializedToolExecutionIdentity | None = None
     force_reindex: bool = False
 
@@ -280,11 +282,17 @@ def _serialize_subprocess_refresh_request(
     execution_identity: ToolExecutionIdentity | None,
     force_reindex: bool,
 ) -> bytes:
+    runtime_knowledge_base = config.runtime_knowledge_base_overlay(base_id)
     payload = _SubprocessRefreshRequest(
         base_id=base_id,
         config_data=config.authored_model_dump(),
         config_path=str(runtime_paths.config_path),
         storage_root=str(runtime_paths.storage_root),
+        runtime_knowledge_base=(
+            None
+            if runtime_knowledge_base is None
+            else cast("dict[str, object]", runtime_knowledge_base.model_dump(mode="json", exclude_unset=True))
+        ),
         execution_identity=None
         if execution_identity is None
         else serialize_tool_execution_identity(execution_identity),
@@ -960,6 +968,7 @@ def _load_subprocess_refresh_request(payload: bytes) -> _SubprocessRefreshReques
     raw_config_data = raw_payload.get("config_data")
     raw_config_path = raw_payload.get("config_path")
     raw_storage_root = raw_payload.get("storage_root")
+    raw_runtime_knowledge_base = raw_payload.get("runtime_knowledge_base")
     raw_execution_identity = raw_payload.get("execution_identity")
     raw_force_reindex = raw_payload.get("force_reindex", False)
     if not isinstance(raw_base_id, str) or not raw_base_id.strip():
@@ -974,6 +983,9 @@ def _load_subprocess_refresh_request(payload: bytes) -> _SubprocessRefreshReques
     if not isinstance(raw_storage_root, str) or not raw_storage_root.strip():
         msg = "Knowledge refresh subprocess request is missing storage_root"
         raise TypeError(msg)
+    if raw_runtime_knowledge_base is not None and not isinstance(raw_runtime_knowledge_base, dict):
+        msg = "Knowledge refresh subprocess request runtime_knowledge_base must be an object when present"
+        raise TypeError(msg)
     if raw_execution_identity is not None and not isinstance(raw_execution_identity, dict):
         msg = "Knowledge refresh subprocess request execution_identity must be an object when present"
         raise TypeError(msg)
@@ -982,6 +994,7 @@ def _load_subprocess_refresh_request(payload: bytes) -> _SubprocessRefreshReques
         config_data=raw_config_data,
         config_path=raw_config_path,
         storage_root=raw_storage_root,
+        runtime_knowledge_base=cast("dict[str, object] | None", raw_runtime_knowledge_base),
         execution_identity=raw_execution_identity,
         force_reindex=bool(raw_force_reindex),
     )
@@ -995,6 +1008,9 @@ async def _run_subprocess_refresh_request(payload: bytes) -> KnowledgeRefreshRes
         process_env=dict(os.environ),
     )
     config = Config.validate_with_runtime(request.config_data, runtime_paths, tolerate_plugin_load_errors=True)
+    if request.runtime_knowledge_base is not None:
+        base_config = KnowledgeBaseConfig.model_validate(request.runtime_knowledge_base)
+        config = config.with_runtime_knowledge_base_overlay(request.base_id, base_config)
     execution_identity = (
         None
         if request.execution_identity is None
