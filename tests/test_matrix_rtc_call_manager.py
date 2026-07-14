@@ -1102,6 +1102,41 @@ def test_voice_backend_availability_requires_runtime_credentials(
         )
 
 
+def test_realtime_backend_prefers_direct_openai_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Realtime calls bypass a shared provider credential when a direct key exists."""
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-direct\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_manager.get_api_key_for_provider",
+        lambda _provider, _paths: "sk-shared",
+    )
+    manager = _manager(_client(), FakeBridge(), tmp_path)
+
+    backend = manager._resolve_voice_backend(ROOM_ID)
+
+    assert backend is not None
+    assert backend.realtime_api_key == "sk-direct"
+
+
+def test_realtime_backend_falls_back_to_shared_provider_credential(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Realtime calls keep working for installs configured through credentials."""
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_manager.get_api_key_for_provider",
+        lambda _provider, _paths: "sk-shared",
+    )
+    manager = _manager(_client(), FakeBridge(), tmp_path)
+
+    backend = manager._resolve_voice_backend(ROOM_ID)
+
+    assert backend is not None
+    assert backend.realtime_api_key == "sk-shared"
+
+
 def test_build_call_instructions_appends_voice_guidance() -> None:
     """The exact chat prompt is retained, with voice guidance appended."""
     text = _build_call_instructions("CHAT SYSTEM PROMPT")
