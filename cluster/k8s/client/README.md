@@ -65,6 +65,23 @@ rootServiceWorkerCleanup:
 The cleanup worker requires a `basePath` other than `/`, because at the origin root `/sw.js` is the client's own service worker.
 Once stale clients have cycled through the cleanup worker, the flag can be disabled again.
 
+## Extending nginx
+
+Set `nginx.serverSnippet` to add directives to the chart-managed nginx server block without replacing the complete config.
+This is useful for extra same-origin discovery responses, health endpoints, or reverse-proxy locations.
+The snippet is evaluated as a Helm template before it is indented into the server block.
+
+```yaml
+nginx:
+  serverSnippet: |
+    location = /healthz {
+      default_type text/plain;
+      return 200 "{{ .Chart.Name }}";
+    }
+```
+
+The chart rejects `nginx.serverSnippet` when the nginx config is not chart-managed, because an external ConfigMap cannot receive the snippet.
+
 ## Custom nginx Config
 
 Point `nginx.existingConfigMap` at your own ConfigMap to take full control of the server config:

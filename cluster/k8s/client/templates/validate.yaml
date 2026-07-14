@@ -13,3 +13,6 @@
 {{- if and (not .Values.nginx.create) (not .Values.nginx.existingConfigMap) -}}
 {{- fail "nginx.existingConfigMap is required when nginx.create=false" -}}
 {{- end -}}
+{{- if and .Values.nginx.serverSnippet (or (not .Values.nginx.create) .Values.nginx.existingConfigMap) -}}
+{{- fail "nginx.serverSnippet requires the chart-managed nginx config" -}}
+{{- end -}}

@@ -130,6 +130,11 @@ server {
     add_header Cache-Control "no-store, max-age=0" always;
     return 200 '{{ $runtimeConfig }}';
   }
+{{- with .Values.nginx.serverSnippet }}
+
+  # Additional server directives supplied through nginx.serverSnippet.
+{{ tpl . $ | nindent 2 }}
+{{- end }}
 
   location = {{ $prefix }}/config.json {
     alias /usr/share/nginx/html/config.json;

@@ -284,6 +284,26 @@ jobs:
             --set config.existingConfigMap=existing-client-config \
             --set nginx.existingConfigMap=existing-client-nginx \
             > "$render_dir/existing-configmaps.yaml"
+          cat > "$render_dir/server-snippet-values.yaml" <<'EOF'
+          nginx:
+            serverSnippet: |
+              location = /chart-name {
+                return 200 "{{ .Chart.Name }}";
+              }
+          EOF
+          helm template mindroom-client "$CLIENT_CHART_DIR" \
+            --namespace mindroom \
+            --values "$render_dir/server-snippet-values.yaml" \
+            > "$render_dir/server-snippet.yaml"
+          grep -F 'return 200 "mindroom-client";' "$render_dir/server-snippet.yaml"
+          if helm template mindroom-client "$CLIENT_CHART_DIR" \
+            --namespace mindroom \
+            --values "$render_dir/server-snippet-values.yaml" \
+            --set nginx.existingConfigMap=existing-client-nginx \
+            > /dev/null 2>&1; then
+            echo "nginx.serverSnippet unexpectedly accepted an external nginx ConfigMap" >&2
+            exit 1
+          fi
 
       - name: Package client chart
         run: |

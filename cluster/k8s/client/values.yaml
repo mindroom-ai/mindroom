@@ -98,6 +98,9 @@ nginx:
   create: true
   existingConfigMap: ""
   key: default.conf
+  # Additional directives inserted into the chart-managed nginx server block.
+  # The snippet is evaluated as a Helm template before it is rendered.
+  serverSnippet: ""
   # Key in the nginx ConfigMap holding the root cleanup service worker script.
   # An existing ConfigMap must provide this key when rootServiceWorkerCleanup is enabled.
   cleanupWorkerKey: root-cleanup-sw.js
