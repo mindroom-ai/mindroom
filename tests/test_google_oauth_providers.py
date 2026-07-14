@@ -19,7 +19,7 @@ from mindroom.oauth.google_drive import _GOOGLE_DRIVE_OAUTH_SCOPES, google_drive
 from mindroom.oauth.google_gmail import _GOOGLE_GMAIL_OAUTH_SCOPES, google_gmail_oauth_provider
 from mindroom.oauth.google_sheets import _GOOGLE_SHEETS_OAUTH_SCOPES, google_sheets_oauth_provider
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
-from mindroom.oauth.service import build_oauth_connect_instruction
+from mindroom.oauth.service import build_oauth_connect_instruction, build_oauth_reconnect_instruction
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -232,6 +232,17 @@ def test_oauth_connection_required_payload_preserves_structured_fields() -> None
     }
 
 
+def test_oauth_connection_required_payload_marks_loopback_links() -> None:
+    """Agents and clients can distinguish links that must open on the host."""
+    exc = OAuthConnectionRequired(
+        "Google Drive is not connected for this agent.",
+        provider_id="google_drive",
+        connect_url="http://localhost:8765/api/oauth/google_drive/authorize?connect_token=opaque",
+    )
+
+    assert oauth_connection_required_payload(exc)["requires_host_browser"] is True
+
+
 def test_build_oauth_connect_instruction_formats_shared_message() -> None:
     """OAuth connection instructions should have one shared service formatter."""
     assert build_oauth_connect_instruction(
@@ -241,4 +252,30 @@ def test_build_oauth_connect_instruction_formats_shared_message() -> None:
         "Google Drive is not connected for this agent. "
         "Open this MindRoom link to connect it, then retry the request: "
         "/api/oauth/google_drive/connect?agent_name=general"
+    )
+
+
+def test_build_oauth_connect_instruction_explains_loopback_device_handoff() -> None:
+    """Loopback links tell mobile users which computer must open the URL."""
+    connect_url = "http://localhost:8765/api/oauth/google_drive/authorize?connect_token=opaque"
+
+    assert build_oauth_connect_instruction(google_drive_oauth_provider(), connect_url) == (
+        "Google Drive is not connected for this agent. "
+        "Open this MindRoom link in a browser on the computer where the MindRoom process is running, "
+        "not on a phone or another computer. If needed, open this conversation there or copy the complete "
+        "link into that browser. After connecting, retry the request: "
+        f"{connect_url}"
+    )
+
+
+def test_build_oauth_reconnect_instruction_explains_loopback_device_handoff() -> None:
+    """Expired loopback sessions retain the same device-handoff guidance."""
+    connect_url = "http://127.0.0.1:8765/api/oauth/google_drive/authorize?connect_token=opaque"
+
+    assert build_oauth_reconnect_instruction(google_drive_oauth_provider(), connect_url) == (
+        "Google Drive session for this agent expired or is no longer valid. "
+        "Open this MindRoom link in a browser on the computer where the MindRoom process is running, "
+        "not on a phone or another computer. If needed, open this conversation there or copy the complete "
+        "link into that browser. After reconnecting, retry the request: "
+        f"{connect_url}"
     )

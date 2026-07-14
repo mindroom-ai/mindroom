@@ -34,7 +34,8 @@ Google asks you to choose an account and approve only that provider's scopes.
 After the browser flow completes, the integration is ready for the selected agent and execution scope.
 
 If an agent tries a Google tool before it is connected, the tool result includes a MindRoom connect URL for that exact provider and agent scope.
-Open that URL, complete the Google flow, and retry the request.
+When that URL uses `localhost`, open it in a browser on the computer where the MindRoom process is running, not on a phone or another computer.
+If you made the request from another device, open the conversation on the MindRoom computer or copy the complete URL into a browser there, complete the Google flow, and retry the request.
 
 OAuth tokens are stored under provider token services such as `google_drive_oauth`.
 Editable tool settings are stored separately under services such as `google_drive`, `google_calendar`, `google_sheets`, and `gmail`.

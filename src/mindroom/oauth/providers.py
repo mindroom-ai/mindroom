@@ -45,6 +45,16 @@ _SUPPORTED_PKCE_CODE_CHALLENGE_METHODS = frozenset({None, "S256"})
 _OAUTH_LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
+def is_oauth_loopback_hostname(hostname: str | None) -> bool:
+    """Return whether a hostname is supported by the bundled loopback flow."""
+    return hostname is not None and hostname.casefold() in _OAUTH_LOOPBACK_HOSTNAMES
+
+
+def oauth_connect_url_requires_host_browser(connect_url: str | None) -> bool:
+    """Return whether an OAuth link must open beside the MindRoom process."""
+    return connect_url is not None and is_oauth_loopback_hostname(urlparse(connect_url).hostname)
+
+
 class OAuthProviderError(RuntimeError):
     """Base error for provider configuration and OAuth flow failures."""
 
@@ -99,6 +109,8 @@ def oauth_connection_required_payload(exc: OAuthConnectionRequired) -> dict[str,
     }
     if exc.reason is not None:
         payload["reason"] = exc.reason
+    if oauth_connect_url_requires_host_browser(exc.connect_url):
+        payload["requires_host_browser"] = True
     return payload
 
 
@@ -365,11 +377,6 @@ def _pkce_s256_code_challenge(code_verifier: str) -> str:
     """Return the RFC 7636 S256 challenge for one verifier."""
     digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-
-
-def is_oauth_loopback_hostname(hostname: str | None) -> bool:
-    """Return whether a hostname is supported by the bundled loopback flow."""
-    return hostname is not None and hostname.casefold() in _OAUTH_LOOPBACK_HOSTNAMES
 
 
 @dataclass(frozen=True, slots=True)

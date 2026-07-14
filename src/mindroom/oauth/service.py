@@ -11,7 +11,12 @@ from urllib.parse import urlencode, urlparse
 from mindroom.credentials import load_scoped_credentials, save_scoped_credentials, scoped_credentials_path
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.logging_config import get_logger
-from mindroom.oauth.providers import OAuthClaimValidationError, OAuthProviderError, OAuthTokenResult
+from mindroom.oauth.providers import (
+    OAuthClaimValidationError,
+    OAuthProviderError,
+    OAuthTokenResult,
+    oauth_connect_url_requires_host_browser,
+)
 from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
 
 if TYPE_CHECKING:
@@ -609,6 +614,13 @@ def build_oauth_connect_instruction(
     connect_url: str,
 ) -> str:
     """Return a concise user-facing connection instruction for a tool result."""
+    if oauth_connect_url_requires_host_browser(connect_url):
+        return (
+            f"{provider.display_name} is not connected for this agent. "
+            "Open this MindRoom link in a browser on the computer where the MindRoom process is running, "
+            "not on a phone or another computer. If needed, open this conversation there or copy the complete "
+            f"link into that browser. After connecting, retry the request: {connect_url}"
+        )
     return (
         f"{provider.display_name} is not connected for this agent. "
         f"Open this MindRoom link to connect it, then retry the request: {connect_url}"
@@ -620,6 +632,13 @@ def build_oauth_reconnect_instruction(
     connect_url: str,
 ) -> str:
     """Return a concise instruction for an expired or invalid OAuth session."""
+    if oauth_connect_url_requires_host_browser(connect_url):
+        return (
+            f"{provider.display_name} session for this agent expired or is no longer valid. "
+            "Open this MindRoom link in a browser on the computer where the MindRoom process is running, "
+            "not on a phone or another computer. If needed, open this conversation there or copy the complete "
+            f"link into that browser. After reconnecting, retry the request: {connect_url}"
+        )
     return (
         f"{provider.display_name} session for this agent expired or is no longer valid. "
         f"Reconnect it with this MindRoom link, then retry the request: {connect_url}"
