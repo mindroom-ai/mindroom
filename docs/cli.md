@@ -595,7 +595,7 @@ mindroom config init
 # Self-hosted Matrix with Anthropic
 mindroom config init --matrix-server self-hosted --provider anthropic
 
-# Hosted Matrix with Codex CLI ChatGPT subscription auth
+# Hosted Matrix with a Codex CLI ChatGPT login
 mindroom config init --matrix-server mindroom.chat --provider codex
 
 # Hosted Matrix with Ollama

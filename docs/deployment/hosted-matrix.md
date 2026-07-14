@@ -27,7 +27,7 @@ Watch the 2-minute setup video:
 - Python 3.12+
 - `uv` installed
 - A Matrix account that can sign in to `chat.mindroom.chat`
-- At least one AI provider API key, or a local Codex CLI ChatGPT subscription login
+- At least one AI provider API key, or a local Codex CLI ChatGPT login
 
 ## 1. Initialize Local Config
 
@@ -47,7 +47,7 @@ OPENAI_API_KEY=...
 # or OPENROUTER_API_KEY=...
 ```
 
-For Codex CLI subscription auth, run `codex login` instead of adding an API key.
+For Codex CLI ChatGPT authentication, run `codex login` instead of adding an API key.
 MindRoom reads `~/.codex/auth.json` by default.
 
 ## 3. Pair This Install

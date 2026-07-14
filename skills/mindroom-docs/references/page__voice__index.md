@@ -56,6 +56,7 @@ voice:
 ```
 
 Requires `OPENAI_API_KEY` environment variable.
+Codex ChatGPT OAuth does not authenticate this transcription request, even when the responding agent uses `provider: codex`.
 
 ### Self-Hosted Whisper
 
@@ -216,6 +217,7 @@ These are separate from voice message transcription and allow agents to generate
 
 Use `matrix_voice_message` when an agent should send a playable Opus Matrix voice note directly.
 It defaults to the current room and active thread, accepts `thread_id="room"` for room-level delivery, and can add readable text through `companion_message`.
+Codex ChatGPT OAuth does not authenticate OpenAI TTS; configure the selected TTS provider separately.
 
 See the [Tools documentation](https://docs.mindroom.chat/tools/) for configuration details.
 

@@ -8,7 +8,7 @@ Models define the AI providers and model IDs used by agents.
 - `bedrock_claude` - Anthropic Claude models on Amazon Bedrock
 - `azure` - OpenAI models through Azure OpenAI deployments
 - `openai` - GPT models and OpenAI-compatible endpoints
-- `codex` or `openai_codex` - OpenAI models available through a local Codex CLI ChatGPT subscription login
+- `codex` or `openai_codex` - OpenAI models available through a local Codex CLI ChatGPT login
 - `google` or `gemini` - Google Gemini models
 - `vertexai_claude` - Anthropic Claude models on Google Vertex AI
 - `ollama` - Local models via Ollama
@@ -63,10 +63,11 @@ models:
     provider: azure
     id: your-azure-openai-deployment
 
-  # OpenAI via Codex CLI subscription
+  # OpenAI via a Codex CLI ChatGPT login
   codex:
     provider: codex
     id: gpt-5.6
+    context_window: 258000
 
   # Google Gemini (both 'google' and 'gemini' work as provider names)
   gemini:
@@ -127,13 +128,24 @@ GPT 5.4 and newer models on the first-party `openai` provider use the Responses 
 This enables OpenAI's native deferred-tool search without disabling reasoning.
 Older GPT models and models configured with a custom `extra_kwargs.base_url` keep using Chat Completions for OpenAI-compatible endpoint support.
 
-## Codex Subscription Models
+## Codex Models with ChatGPT Login
 
 Use `provider: codex` when you want MindRoom to call models exposed through an authenticated local Codex CLI session instead of the regular OpenAI API.
 Run `codex login` first so `~/.codex/auth.json` contains ChatGPT OAuth tokens.
 MindRoom refreshes the access token when needed and sends requests to the Codex Responses endpoint.
-Use the MindRoom alias `gpt-5.6` for GPT-5.6 Sol, a direct Codex slug such as `gpt-5.6-terra`, or the LLM-plugin-style form `openai-codex/gpt-5.6`.
-If you keep Codex state outside `~/.codex`, pass `extra_kwargs.codex_home`.
+Codex is included across ChatGPT plans, including Free and Go, but model access and usage limits depend on the logged-in account and current rollout.
+See the [current Codex model catalog](https://developers.openai.com/codex/models) instead of assuming every account exposes the same slugs.
+MindRoom maps the `gpt-5.6` alias to GPT-5.6 Sol and passes other slugs through unchanged.
+
+| Model | Model ID | Best fit |
+|-------|----------|----------|
+| GPT-5.6 Sol | `gpt-5.6` or `gpt-5.6-sol` | Hard, open-ended work requiring the strongest reasoning |
+| GPT-5.6 Terra | `gpt-5.6-terra` | Balanced everyday work |
+| GPT-5.6 Luna | `gpt-5.6-luna` | Fast, repeatable, cost-sensitive work |
+
+Older or preview slugs can also work when the logged-in Codex account exposes them.
+The LLM-plugin-style form `openai-codex/gpt-5.6` is accepted as an alternative to the bare alias.
+If you keep Codex state outside `~/.codex`, pass `extra_kwargs.codex_home`; user-home prefixes such as `~/custom-codex` are expanded.
 For starter config generation, use `mindroom config init --provider codex`.
 
 ```yaml
@@ -147,14 +159,35 @@ models:
       reasoning_effort: medium
 ```
 
+The `258000` context window is the conservative effective budget used by the Codex ChatGPT surface, not the larger context window exposed by the separately billed OpenAI API.
 Set Codex reasoning effort through `extra_kwargs.reasoning_effort`.
 Agno maps this to the Responses API `reasoning.effort` field.
 Supported GPT-5.6 effort values are `low`, `medium`, `high`, `xhigh`, and `max`.
+Codex clients also show Ultra, but Ultra adds Codex-managed subagent orchestration and is not reproduced by this model adapter.
 The starter Codex profile uses `medium`.
+
+### Codex and Speech Features
+
+The Codex provider handles model inference only; the recommended GPT-5.6 models accept text and image input and return text.
+Other account-exposed models can have different modalities, such as the text-only GPT-5.3 Codex Spark preview.
+Codex ChatGPT OAuth does not authenticate OpenAI speech or Realtime APIs.
+ChatGPT and OpenAI API billing are [managed separately](https://help.openai.com/en/articles/9039756-managing-billing-settings-on-chatgpt-web-and-platform).
+
+| Capability | Available through `provider: codex` | Configuration |
+|------------|-------------------------------------|---------------|
+| Text and image input with text output | Yes | The normal model configuration above |
+| Matrix voice-message transcription | No | Configure [`voice.stt`](https://docs.mindroom.chat/voice/) with OpenAI API credentials or an OpenAI-compatible local endpoint |
+| Text-to-speech | No | Configure a [TTS tool](https://docs.mindroom.chat/voice/#text-to-speech-tools) or cascaded call speech service |
+| Realtime speech-to-speech calls | No | Configure the [realtime call backend](https://docs.mindroom.chat/voice-calls/) with a separate OpenAI API credential service |
+| Cascaded calls using Codex for reasoning | Yes | Keep the agent on Codex and configure separate STT and TTS services in the [cascaded backend](https://docs.mindroom.chat/voice-calls/#cascaded-cloud-example) |
+
+This adapter follows the local Codex CLI authentication-file and backend contracts, so upstream Codex changes can require a MindRoom update.
+Use `provider: openai` when you want the public OpenAI API contract and API billing instead.
+
 MindRoom sends a Codex prompt-cache key plus the Codex CLI session headers for each active agent session.
 By default, that key is derived from the current execution identity, so separate Matrix threads can run concurrently without sharing one global cache key.
 You can set `extra_kwargs.prompt_cache_key` to override that derived key for a model, but avoid a single low-cardinality value for many busy threads unless you intentionally want those requests routed together.
-Live testing against the Codex subscription endpoint reported `cached_tokens` only when the request included Codex CLI-style session headers tied to the prompt-cache key.
+Live testing against the Codex ChatGPT endpoint reported `cached_tokens` only when the request included Codex CLI-style session headers tied to the prompt-cache key.
 Repeated long requests then reported cache hits, while requests without those headers stayed at `cached_tokens: 0`, and `prompt_cache_retention` was rejected.
 Treat Codex prompt caching as best-effort rather than guaranteed.
 

@@ -1085,7 +1085,7 @@ def _provider_env_template(provider_preset: _ProviderPreset) -> str:  # noqa: PL
     """Return the provider-specific section of the starter .env file."""
     if provider_preset == "codex":
         return textwrap.dedent("""\
-        # Codex CLI subscription authentication
+        # Codex CLI ChatGPT authentication
         # Run `codex login` before starting MindRoom.
         # MindRoom reads ChatGPT OAuth tokens from ~/.codex/auth.json by default.
         # CODEX_HOME=~/.codex

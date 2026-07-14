@@ -9,7 +9,7 @@ MindRoom config, secrets, and runtime state stay in `~/.mindroom`, so the app an
 - macOS 13 Ventura or later.
 - An Apple silicon or 64-bit Intel Mac.
 - Network access for installing the `mindroom` package and pairing with hosted MindRoom.
-- A model provider credential in `~/.mindroom/.env`, unless you configure a local or subscription-backed provider.
+- A model provider credential in `~/.mindroom/.env`, unless you configure a local provider or a Codex ChatGPT login.
 
 ## Install
 

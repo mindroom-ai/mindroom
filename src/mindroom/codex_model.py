@@ -1,4 +1,4 @@
-"""OpenAI Codex subscription model support via the Codex CLI OAuth state."""
+"""OpenAI Codex model support via the Codex CLI ChatGPT OAuth state."""
 
 from __future__ import annotations
 
@@ -104,7 +104,8 @@ def _codex_auth_path(*, codex_home: str | Path | None) -> Path:
 
 
 def _codex_home_path(*, codex_home: str | Path | None) -> Path:
-    return Path(codex_home) if codex_home is not None else Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
+    configured_home = codex_home if codex_home is not None else os.environ.get("CODEX_HOME", "~/.codex")
+    return Path(configured_home).expanduser()
 
 
 def _read_codex_auth(auth_path: Path) -> dict[str, Any]:

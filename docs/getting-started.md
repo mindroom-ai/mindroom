@@ -37,7 +37,7 @@ uvx mindroom config init --provider anthropic
 # Use Azure OpenAI
 uvx mindroom config init --provider azure
 
-# Use Codex CLI ChatGPT subscription auth
+# Use a Codex CLI ChatGPT login
 uvx mindroom config init --provider codex
 
 # Use local Ollama
@@ -78,7 +78,7 @@ For hosted providers, set the credentials for the provider you selected:
 - `AZURE_OPENAI_API_KEY=...` and `AZURE_OPENAI_ENDPOINT=...`, or
 - `OPENAI_API_KEY=...`, or
 - `OPENROUTER_API_KEY=...`, or
-- For Codex CLI subscription auth: run `codex login`.
+- For Codex CLI ChatGPT authentication: run `codex login`.
 - For Vertex AI Claude: set `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION` and authenticate with `gcloud auth application-default login`.
 Skip this step for `--provider ollama` or `--provider llama.cpp` unless you also add a remote provider.
 

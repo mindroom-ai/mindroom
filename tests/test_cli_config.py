@@ -1094,7 +1094,7 @@ class TestConfigInit:
         assert "\n# OPENROUTER_API_KEY=your-openrouter-key-here" in f"\n{env_content}"
 
     def test_init_codex_preset_uses_codex_models(self, tmp_path: Path) -> None:
-        """Config init --provider codex uses Codex subscription defaults."""
+        """Config init --provider codex uses Codex ChatGPT-login defaults."""
         target = tmp_path / "config.yaml"
         result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "codex"])
         assert result.exit_code == 0

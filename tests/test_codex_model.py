@@ -22,7 +22,13 @@ from agno.utils.models.claude import format_messages as claude_format_messages
 from openai.types.responses import Response, ResponseOutputItemDoneEvent, ResponseTextDeltaEvent
 
 from mindroom import codex_model
-from mindroom.codex_model import _CODEX_BASE_URL, CodexResponses, _borrow_codex_key, normalize_codex_model_id
+from mindroom.codex_model import (
+    _CODEX_BASE_URL,
+    CodexResponses,
+    _borrow_codex_key,
+    _codex_home_path,
+    normalize_codex_model_id,
+)
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
@@ -71,6 +77,13 @@ def _write_codex_auth(codex_home: Path, access_token: str, refresh_value: str) -
 def test_normalize_codex_model_id_uses_endpoint_slug(configured_id: str, endpoint_id: str) -> None:
     """The public GPT-5.6 alias should resolve to the slug accepted by the Codex endpoint."""
     assert normalize_codex_model_id(configured_id) == endpoint_id
+
+
+def test_codex_home_expands_explicit_tilde(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Explicit Codex home paths should expand a user-home prefix like the default path."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert _codex_home_path(codex_home="~/custom-codex") == tmp_path / "custom-codex"
 
 
 def test_borrow_codex_key_uses_unexpired_chatgpt_access_token(tmp_path: Path) -> None:
