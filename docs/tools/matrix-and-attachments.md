@@ -367,11 +367,11 @@ The `thread_summary` tool complements that automatic behavior by letting an agen
 The first automatic summary uses one structured model call to produce both the summary and up to three normalized topic tags.
 The background task bypasses inherited per-turn history memoization so the model sees fresh authoritative full history including the delivered response.
 Existing tags win, including tags observed after the model call finishes.
-MindRoom serializes automatic and tool-driven tag mutations per thread within one running process, so a manual mutation that starts first completes before the automatic empty-state check.
+MindRoom serializes automatic and tool-driven tag mutations per thread within one running process, and persisted removal tombstones prevent a later automatic batch from repopulating a deliberately untagged thread.
 The initial tags use the same summary model, room override, temperature, prompt, lock, and background lifecycle as the summary.
 Expected Matrix write failures are isolated so a failed tag write does not block the summary and a failed summary write does not undo tags.
 Failed initial tag reads or all-failed tag writes leave the summary's durable enrichment marker incomplete, so the next summary threshold retries structured enrichment.
-Once existing or newly written tags mark initial enrichment complete, later summary refreshes use a summary-only schema and never regenerate or replace tags.
+Once existing tags, prior tag-state history, or newly written tags mark initial enrichment complete, later summary refreshes use a summary-only schema and never regenerate or replace tags.
 Each room has its own vocabulary snapshot built only from that room's tag state.
 The first successful post-response check after 04:00 in the configured timezone refreshes a stale room snapshot for the day.
 The refresh reads Matrix tag state and writes a durable local snapshot under `mindroom_data/tracking/thread_tag_vocabulary/`.

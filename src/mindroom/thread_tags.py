@@ -141,12 +141,21 @@ class ThreadTagsListing:
 
 
 @dataclass(frozen=True, slots=True)
+class _RoomThreadTagsSnapshot:
+    """Merged current tags plus thread roots with durable tag-state history."""
+
+    tag_state: dict[str, ThreadTagsState]
+    observed_thread_root_ids: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
 class SetThreadTagsIfEmptyResult:
     """Outcome of one conditional automatic-tag batch."""
 
     had_existing_tags: bool
     applied_tags: tuple[str, ...]
     failed_tags: tuple[str, ...]
+    skipped_due_to_prior_mutation: bool = False
 
 
 def _thread_tag_mutation_lock(room_id: str, thread_root_id: str) -> asyncio.Lock:
@@ -464,6 +473,7 @@ def _collect_thread_tag_state_entry(
     legacy_tags_by_thread: dict[str, dict[str, ThreadTagRecord]],
     per_tag_records_by_thread: dict[str, dict[str, ThreadTagRecord]],
     per_tag_tombstones_by_thread: dict[str, set[str]],
+    observed_thread_root_ids: set[str],
 ) -> None:
     """Parse one thread-tag state entry from either room state or hook state maps."""
     if not isinstance(content, Mapping):
@@ -474,6 +484,8 @@ def _collect_thread_tag_state_entry(
     if parsed_state_key is None:
         if not isinstance(state_key, str):
             return
+        if isinstance(typed_content.get("tags"), Mapping):
+            observed_thread_root_ids.add(state_key)
 
         legacy_state = _parse_thread_tags_state(room_id, state_key, typed_content)
         if legacy_state is not None:
@@ -481,6 +493,7 @@ def _collect_thread_tag_state_entry(
         return
 
     thread_root_id, tag = parsed_state_key
+    observed_thread_root_ids.add(thread_root_id)
     if not typed_content:
         per_tag_tombstones_by_thread.setdefault(thread_root_id, set()).add(tag)
         return
@@ -703,11 +716,11 @@ def _assert_user_can_write_thread_tags(
     )
 
 
-async def _get_room_thread_tags_states(
+async def _get_room_thread_tags_snapshot(
     client: nio.AsyncClient,
     room_id: str,
-) -> dict[str, ThreadTagsState]:
-    """Fetch and merge all current thread-tag state for one room."""
+) -> _RoomThreadTagsSnapshot:
+    """Fetch current thread tags and durable tag-state history for one room."""
     response = await client.room_get_state(room_id)
     if not isinstance(response, nio.RoomGetStateResponse):
         msg = f"Failed to fetch room state for thread tags in {room_id}: {response}"
@@ -716,6 +729,7 @@ async def _get_room_thread_tags_states(
     legacy_tags_by_thread: dict[str, dict[str, ThreadTagRecord]] = {}
     per_tag_records_by_thread: dict[str, dict[str, ThreadTagRecord]] = {}
     per_tag_tombstones_by_thread: dict[str, set[str]] = {}
+    observed_thread_root_ids: set[str] = set()
     for event in response.events:
         if event.get("type") != THREAD_TAGS_EVENT_TYPE:
             continue
@@ -726,14 +740,27 @@ async def _get_room_thread_tags_states(
             legacy_tags_by_thread=legacy_tags_by_thread,
             per_tag_records_by_thread=per_tag_records_by_thread,
             per_tag_tombstones_by_thread=per_tag_tombstones_by_thread,
+            observed_thread_root_ids=observed_thread_root_ids,
         )
 
-    return _merge_thread_tag_room_state(
-        room_id,
-        legacy_tags_by_thread=legacy_tags_by_thread,
-        per_tag_records_by_thread=per_tag_records_by_thread,
-        per_tag_tombstones_by_thread=per_tag_tombstones_by_thread,
+    return _RoomThreadTagsSnapshot(
+        tag_state=_merge_thread_tag_room_state(
+            room_id,
+            legacy_tags_by_thread=legacy_tags_by_thread,
+            per_tag_records_by_thread=per_tag_records_by_thread,
+            per_tag_tombstones_by_thread=per_tag_tombstones_by_thread,
+        ),
+        observed_thread_root_ids=frozenset(observed_thread_root_ids),
     )
+
+
+async def _get_room_thread_tags_states(
+    client: nio.AsyncClient,
+    room_id: str,
+) -> dict[str, ThreadTagsState]:
+    """Fetch and merge all current thread-tag state for one room."""
+    snapshot = await _get_room_thread_tags_snapshot(client, room_id)
+    return snapshot.tag_state
 
 
 async def _assert_thread_tags_write_allowed(
@@ -917,12 +944,20 @@ async def set_thread_tags_if_empty(
     normalized_set_by = _require_non_empty_string(set_by, field_name="set_by")
 
     async with _thread_tag_mutation_lock(room_id, normalized_thread_root_id):
-        existing_state = await get_thread_tags(client, room_id, normalized_thread_root_id)
+        snapshot = await _get_room_thread_tags_snapshot(client, room_id)
+        existing_state = snapshot.tag_state.get(normalized_thread_root_id)
         if existing_state is not None and existing_state.tags:
             return SetThreadTagsIfEmptyResult(
                 had_existing_tags=True,
                 applied_tags=(),
                 failed_tags=(),
+            )
+        if normalized_thread_root_id in snapshot.observed_thread_root_ids:
+            return SetThreadTagsIfEmptyResult(
+                had_existing_tags=False,
+                applied_tags=(),
+                failed_tags=(),
+                skipped_due_to_prior_mutation=True,
             )
 
         applied_tags: list[str] = []

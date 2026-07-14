@@ -425,6 +425,116 @@ async def test_manual_tag_started_first_prevents_automatic_tag_batch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_manual_remove_started_first_prevents_automatic_tag_batch() -> None:
+    """A completed concurrent removal should preserve the manual choice to leave a thread untagged."""
+    thread_root_id = "$manual-remove-first-root:localhost"
+    manual_state_key = _thread_tag_state_key(thread_root_id, "manual")
+    current_events = {
+        manual_state_key: _tag_record_content(set_by="@manual:localhost"),
+    }
+    manual_client = _tag_writer_client("@manual:localhost", current_events)
+    automatic_client = _tag_writer_client("@automatic:localhost", current_events)
+    manual_remove_entered = asyncio.Event()
+    release_manual_remove = asyncio.Event()
+    automatic_started = asyncio.Event()
+    manual_task: asyncio.Task[ThreadTagsState] | None = None
+    automatic_task: asyncio.Task[SetThreadTagsIfEmptyResult] | None = None
+
+    async def blocked_manual_remove(**kwargs: object) -> object:
+        manual_remove_entered.set()
+        await release_manual_remove.wait()
+        current_events[kwargs["state_key"]] = kwargs["content"]
+        return nio.RoomPutStateResponse.from_dict(
+            {"event_id": "$manual-remove"},
+            room_id="!room:localhost",
+        )
+
+    async def run_automatic_batch() -> SetThreadTagsIfEmptyResult:
+        automatic_started.set()
+        return await set_thread_tags_if_empty(
+            automatic_client,
+            "!room:localhost",
+            thread_root_id,
+            ["auto"],
+            set_by="@automatic:localhost",
+        )
+
+    manual_client.room_put_state.side_effect = blocked_manual_remove
+    try:
+        manual_task = asyncio.create_task(
+            remove_thread_tag(
+                manual_client,
+                "!room:localhost",
+                thread_root_id,
+                "manual",
+                requester_user_id="@manual:localhost",
+            ),
+        )
+        await asyncio.wait_for(manual_remove_entered.wait(), timeout=1)
+
+        automatic_task = asyncio.create_task(run_automatic_batch())
+        await asyncio.wait_for(automatic_started.wait(), timeout=1)
+        automatic_client.room_get_state.assert_not_awaited()
+        automatic_client.room_put_state.assert_not_awaited()
+
+        release_manual_remove.set()
+        await asyncio.gather(manual_task, automatic_task)
+    finally:
+        release_manual_remove.set()
+        pending_tasks = [task for task in (manual_task, automatic_task) if task is not None]
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+    assert manual_task.result().tags == {}
+    assert automatic_task.result() == SetThreadTagsIfEmptyResult(
+        had_existing_tags=False,
+        applied_tags=(),
+        failed_tags=(),
+        skipped_due_to_prior_mutation=True,
+    )
+    automatic_client.room_get_state.assert_awaited_once_with("!room:localhost")
+    automatic_client.room_put_state.assert_not_awaited()
+    assert current_events == {manual_state_key: {}}
+
+
+@pytest.mark.asyncio
+async def test_completed_manual_removal_survives_the_model_inference_gap() -> None:
+    """A durable tombstone should prevent auto tags even when no mutation call remains active."""
+    thread_root_id = "$removed-during-inference-root:localhost"
+    manual_state_key = _thread_tag_state_key(thread_root_id, "manual")
+    current_events = {
+        manual_state_key: _tag_record_content(set_by="@manual:localhost"),
+    }
+    manual_client = _tag_writer_client("@manual:localhost", current_events)
+    automatic_client = _tag_writer_client("@automatic:localhost", current_events)
+
+    removed_state = await remove_thread_tag(
+        manual_client,
+        "!room:localhost",
+        thread_root_id,
+        "manual",
+        requester_user_id="@manual:localhost",
+    )
+    result = await set_thread_tags_if_empty(
+        automatic_client,
+        "!room:localhost",
+        thread_root_id,
+        ["auto"],
+        set_by="@automatic:localhost",
+    )
+
+    assert removed_state.tags == {}
+    assert result == SetThreadTagsIfEmptyResult(
+        had_existing_tags=False,
+        applied_tags=(),
+        failed_tags=(),
+        skipped_due_to_prior_mutation=True,
+    )
+    automatic_client.room_put_state.assert_not_awaited()
+    assert current_events == {manual_state_key: {}}
+
+
+@pytest.mark.asyncio
 async def test_automatic_batch_serializes_manual_write_until_all_tags_finish() -> None:
     """A manual write must not interleave with an automatic read-and-batch transaction."""
     current_events: dict[str, dict[str, object]] = {}

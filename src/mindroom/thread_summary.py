@@ -476,6 +476,13 @@ async def _apply_initial_tags(
             thread_id=thread_id,
         )
         return False
+    if result.skipped_due_to_prior_mutation:
+        logger.info(
+            "Skipping automatic tags because another tag mutation completed first",
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        return True
     if result.had_existing_tags:
         logger.info(
             "Skipping automatic tags because the thread already has tags",

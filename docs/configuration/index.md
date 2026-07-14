@@ -407,7 +407,7 @@ Keys can be managed room aliases such as `lobby` or raw Matrix room IDs such as 
 
 The first automatic summary call also returns one to three topic tags when the thread has no existing tags.
 This initial enrichment uses the same summary model, room override, temperature, prompt, and background task as the summary.
-Later summary refreshes do not regenerate or replace tags.
+After initial enrichment completes, later summary refreshes do not regenerate or replace tags.
 
 `defaults.worker_grantable_credentials` is a list of credential service names.
 Use built-in names like `openai`, `azure`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.

@@ -829,8 +829,28 @@ class TestMaybeGenerateThreadSummary:
         assert send.await_args.args[4] == 5
         assert send.await_args.kwargs["initial_enrichment_complete"] is True
 
-    async def test_existing_manual_tags_win_after_initial_inference(self) -> None:
-        """A final tag-state read should discard generated tags when manual tags exist."""
+    @pytest.mark.parametrize(
+        "tag_result",
+        [
+            SetThreadTagsIfEmptyResult(
+                had_existing_tags=True,
+                applied_tags=(),
+                failed_tags=(),
+            ),
+            SetThreadTagsIfEmptyResult(
+                had_existing_tags=False,
+                applied_tags=(),
+                failed_tags=(),
+                skipped_due_to_prior_mutation=True,
+            ),
+        ],
+        ids=["existing-tags", "prior-manual-mutation"],
+    )
+    async def test_existing_manual_tags_win_after_initial_inference(
+        self,
+        tag_result: SetThreadTagsIfEmptyResult,
+    ) -> None:
+        """Existing tags or a concurrent manual mutation should suppress generated tags."""
         client = _mock_client()
         client.user_id = "@bot:localhost"
         config = _mock_config(first_threshold=1)
@@ -852,13 +872,7 @@ class TestMaybeGenerateThreadSummary:
             ) as send,
             patch(
                 "mindroom.thread_summary.set_thread_tags_if_empty",
-                new=AsyncMock(
-                    return_value=SetThreadTagsIfEmptyResult(
-                        had_existing_tags=True,
-                        applied_tags=(),
-                        failed_tags=(),
-                    ),
-                ),
+                new=AsyncMock(return_value=tag_result),
             ) as set_tags,
         ):
             await self._maybe_generate(client, config, rp)
