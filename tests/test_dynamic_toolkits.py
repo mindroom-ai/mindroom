@@ -838,11 +838,16 @@ def test_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machi
     assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
 
 
-def test_codex_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machinery(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("provider", "model_id"), [("codex", "gpt-5.6"), ("openai", "gpt-5.6")])
+def test_openai_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machinery(
+    tmp_path: Path,
+    provider: str,
+    model_id: str,
+) -> None:
     """OpenAI-native tool search attaches all deferred toolkits and drops the manager machinery."""
     raw = _base_config_data()
-    raw["models"]["codex_gpt"] = {"provider": "codex", "id": "gpt-5.6"}  # type: ignore[index]
-    raw["agents"]["code"]["model"] = "codex_gpt"  # type: ignore[index]
+    raw["models"]["native_gpt"] = {"provider": provider, "id": model_id}  # type: ignore[index]
+    raw["agents"]["code"]["model"] = "native_gpt"  # type: ignore[index]
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
         {"sleep": {"defer": True}},
         {"calculator": {"defer": True, "initial": True}},
@@ -916,20 +921,23 @@ def test_eager_tool_filter_drops_fully_filtered_deferred_toolkit(tmp_path: Path)
 
 
 @pytest.mark.parametrize(
-    ("provider", "model_id"),
+    ("provider", "model_id", "extra_kwargs"),
     [
-        ("openai", "gpt-4o-mini"),
-        # The plain openai provider speaks Chat Completions, where tool search
-        # is unavailable even on ids the Codex provider would gate native.
-        ("openai", "gpt-5.6"),
-        ("codex", "gpt-4.1"),
-        ("anthropic", "claude-opus-4-1"),
+        ("openai", "gpt-4o-mini", None),
+        ("openai", "gpt-5.6", {"base_url": "http://localhost:9292/v1"}),
+        ("codex", "gpt-4.1", None),
+        ("anthropic", "claude-opus-4-1", None),
     ],
 )
-def test_unsupported_models_keep_homegrown_dynamic_tools_path(tmp_path: Path, provider: str, model_id: str) -> None:
+def test_unsupported_models_keep_homegrown_dynamic_tools_path(
+    tmp_path: Path,
+    provider: str,
+    model_id: str,
+    extra_kwargs: dict[str, object] | None,
+) -> None:
     """Unsupported providers and models keep the load_tool machinery."""
     raw = _base_config_data()
-    raw["models"]["default"] = {"provider": provider, "id": model_id}  # type: ignore[index]
+    raw["models"]["default"] = {"provider": provider, "id": model_id, "extra_kwargs": extra_kwargs}  # type: ignore[index]
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
         {"sleep": {"defer": True}},
         {"calculator": {"defer": True, "initial": True}},

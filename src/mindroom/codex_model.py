@@ -12,27 +12,18 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
-from agno.models.openai import OpenAIResponses
 from agno.models.response import ModelResponse
 from agno.utils.http import get_default_async_client, get_default_sync_client
 from openai import AsyncOpenAI, OpenAI
-from openai.types.responses import ResponseOutputItemDoneEvent
 
 from mindroom.file_locks import advisory_file_lock
 from mindroom.model_defaults import CODEX_GPT, CODEX_GPT_ENDPOINT
-from mindroom.openai_tool_search import (
-    formatted_input_with_tool_search_items,
-    model_deferred_tool_names,
-    record_tool_search_items,
-    request_params_with_deferred_tool_search,
-)
+from mindroom.openai_responses_model import MindRoomOpenAIResponses
 from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
 
 if TYPE_CHECKING:
     from agno.models.message import Message
     from agno.run.agent import RunOutput
-    from agno.tools.function import Function
-    from openai.types.responses import Response, ResponseStreamEvent
     from pydantic import BaseModel
 
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -261,7 +252,7 @@ def _merge_codex_extra_body(request_params: dict[str, Any], codex_extra_body: di
 
 
 @dataclass
-class CodexResponses(OpenAIResponses):
+class CodexResponses(MindRoomOpenAIResponses):
     """Agno Responses model backed by the local Codex CLI ChatGPT OAuth credentials."""
 
     id: str = CODEX_GPT
@@ -319,7 +310,6 @@ class CodexResponses(OpenAIResponses):
             tools=tools,
             tool_choice=tool_choice,
         )
-        request_params = request_params_with_deferred_tool_search(request_params, model_deferred_tool_names(self))
         request_params.setdefault("instructions", self._instructions_text())
         prompt_cache_key = self._prompt_cache_key()
         if prompt_cache_key:
@@ -337,34 +327,6 @@ class CodexResponses(OpenAIResponses):
         for param_name in _CODEX_UNSUPPORTED_REQUEST_PARAMS:
             request_params.pop(param_name, None)
         return request_params
-
-    def _format_messages(
-        self,
-        messages: list[Message],
-        compress_tool_results: bool = False,
-        tools: list[Function | dict[str, Any]] | None = None,
-    ) -> list[Any]:
-        """Reinsert captured tool_search items that Agno's formatter drops from history."""
-        formatted_input = super()._format_messages(messages, compress_tool_results, tools=tools)
-        return formatted_input_with_tool_search_items(messages, formatted_input)
-
-    def _parse_provider_response(self, response: Response, **kwargs: object) -> ModelResponse:
-        """Capture tool_search output items that Agno's response parser drops."""
-        model_response = super()._parse_provider_response(response, **kwargs)
-        record_tool_search_items(model_response, response.output)
-        return model_response
-
-    def _parse_provider_response_delta(
-        self,
-        stream_event: ResponseStreamEvent,
-        assistant_message: Message,
-        tool_use: dict[str, Any],
-    ) -> tuple[ModelResponse, dict[str, Any]]:
-        """Capture streamed tool_search output items that Agno's delta parser drops."""
-        model_response, tool_use = super()._parse_provider_response_delta(stream_event, assistant_message, tool_use)
-        if isinstance(stream_event, ResponseOutputItemDoneEvent):
-            record_tool_search_items(model_response, [stream_event.item])
-        return model_response, tool_use
 
     def invoke(
         self,
