@@ -50,7 +50,7 @@ _OPENAI_API_BASE_URL = "https://api.openai.com/v1"
 _GPT_VERSION_PATTERN = re.compile(r"gpt-(\d+)(?:\.(\d+))?")
 
 
-def openai_native_tool_search_supported(provider: str, model_id: str, *, base_url: str | None = None) -> bool:
+def openai_native_tool_search_supported(provider: str, model_id: str, *, base_url: object = None) -> bool:
     """Return whether one authored provider/model pair supports server-side tool search.
 
     Tool search is a Responses-API feature on gpt-5.4 and later, so the gate
@@ -61,7 +61,11 @@ def openai_native_tool_search_supported(provider: str, model_id: str, *, base_ur
     canonical_provider = provider.strip().lower().replace("-", "_")
     if canonical_provider not in _NATIVE_TOOL_SEARCH_PROVIDERS:
         return False
-    if canonical_provider == "openai" and base_url is not None and base_url.rstrip("/") != _OPENAI_API_BASE_URL:
+    if (
+        canonical_provider == "openai"
+        and base_url is not None
+        and (not isinstance(base_url, str) or base_url.rstrip("/") != _OPENAI_API_BASE_URL)
+    ):
         return False
     version_match = _GPT_VERSION_PATTERN.search(model_id)
     if version_match is None:
