@@ -6,7 +6,7 @@ import asyncio
 from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Protocol, Self, cast
+from typing import TYPE_CHECKING, Literal, Protocol, Self, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -616,6 +616,47 @@ async def test_post_response_effects_skip_thread_summary_for_suppressed_delivery
     queue_thread_summary.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("terminal_status", "run_succeeded"),
+    [
+        ("error", False),
+        ("cancelled", False),
+        ("completed", False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_post_response_effects_skip_thread_summary_for_unsuccessful_turn(
+    terminal_status: Literal["error", "cancelled", "completed"],
+    run_succeeded: bool,
+) -> None:
+    """Visible failed or cancelled turns must not enqueue thread enrichment."""
+    should_queue_thread_summary = MagicMock(return_value=True)
+    queue_thread_summary = MagicMock()
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status=terminal_status,
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body="Turn did not complete",
+        ),
+        ResponseOutcome(
+            run_succeeded=run_succeeded,
+            thread_summary_room_id="!room:localhost",
+            thread_summary_thread_id="$thread",
+            thread_summary_message_count_hint=2,
+        ),
+        PostResponseEffectsDeps(
+            logger=MagicMock(),
+            should_queue_thread_summary=should_queue_thread_summary,
+            queue_thread_summary=queue_thread_summary,
+        ),
+    )
+
+    should_queue_thread_summary.assert_not_called()
+    queue_thread_summary.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_post_response_effects_skip_memory_persistence_for_failed_run() -> None:
     """Failed runs should not enqueue memory persistence for incomplete content."""
@@ -749,6 +790,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         )
         for i in range(5)
     ]
+    conversation_cache.get_fresh_strict_thread_history = AsyncMock(return_value=thread_history)
     scheduled_tasks: list[asyncio.Task[None]] = []
 
     def schedule_background_task(
@@ -764,10 +806,8 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
 
     with (
         patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
-        patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=thread_history)) as mock_fetch,
         patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="Summary")) as mock_generate,
         patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")) as mock_send,
-        patch("mindroom.thread_summary._recover_last_summary_count", new=AsyncMock(return_value=0)),
     ):
         await apply_post_response_effects(
             FinalDeliveryOutcome(
@@ -788,8 +828,18 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         assert scheduled_tasks
         await asyncio.gather(*scheduled_tasks)
 
-    mock_fetch.assert_awaited_once_with(conversation_cache, "!room:localhost", "$thread")
-    mock_generate.assert_awaited_once_with(thread_history, config, runtime_paths, model_name="default")
+    conversation_cache.get_fresh_strict_thread_history.assert_awaited_once_with(
+        "!room:localhost",
+        "$thread",
+        caller_label="thread_summary_background",
+    )
+    mock_generate.assert_awaited_once_with(
+        thread_history,
+        config,
+        runtime_paths,
+        model_name="default",
+        tag_vocabulary="(no reusable short tags in use yet)",
+    )
     mock_send.assert_awaited_once_with(
         client,
         "!room:localhost",
@@ -798,6 +848,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         5,
         "default",
         conversation_cache,
+        initial_enrichment_complete=None,
     )
 
 
@@ -839,6 +890,7 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         )
         for i in range(5)
     ]
+    conversation_cache.get_fresh_strict_thread_history = AsyncMock(return_value=thread_history)
     scheduled_tasks: list[asyncio.Task[None]] = []
 
     def schedule_background_task(
@@ -854,12 +906,8 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
 
     with (
         patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
-        patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=thread_history)),
         patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="Summary")) as mock_generate,
         patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")),
-        patch("mindroom.thread_summary._recover_last_summary_count", new=AsyncMock(return_value=0)),
-        patch("mindroom.entity_resolution.matrix_state.get_room_alias_from_id", return_value=None),
-        patch("mindroom.entity_resolution.matrix_state.matrix_state_for_runtime", return_value=MagicMock(rooms={})),
     ):
         await apply_post_response_effects(
             FinalDeliveryOutcome(
@@ -881,7 +929,13 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         assert scheduled_tasks
         await asyncio.gather(*scheduled_tasks)
 
-    mock_generate.assert_awaited_once_with(thread_history, config, runtime_paths, model_name="qwen")
+    mock_generate.assert_awaited_once_with(
+        thread_history,
+        config,
+        runtime_paths,
+        model_name="qwen",
+        tag_vocabulary="(no reusable short tags in use yet)",
+    )
 
 
 @pytest.mark.asyncio

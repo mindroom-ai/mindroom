@@ -308,7 +308,7 @@ async def test_maybe_rebuild_counts_ranks_and_persists_one_room(tmp_path: Path) 
         now=now,
     )
 
-    assert rebuilt
+    assert rebuilt is not None
     client.room_get_state.assert_awaited_once_with(_ROOM_A)
     snapshot = load_tag_vocabulary_snapshot(runtime_paths, _ROOM_A)
     assert snapshot is not None
@@ -332,8 +332,8 @@ async def test_maybe_rebuild_keeps_disjoint_room_vocabularies(tmp_path: Path) ->
     runtime_paths = _runtime_paths(tmp_path)
     now = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
 
-    assert await maybe_rebuild_tag_vocabulary(client, _ROOM_A, _config(), runtime_paths, now=now)
-    assert await maybe_rebuild_tag_vocabulary(client, _ROOM_B, _config(), runtime_paths, now=now)
+    assert await maybe_rebuild_tag_vocabulary(client, _ROOM_A, _config(), runtime_paths, now=now) is not None
+    assert await maybe_rebuild_tag_vocabulary(client, _ROOM_B, _config(), runtime_paths, now=now) is not None
 
     room_a = load_tag_vocabulary_snapshot(runtime_paths, _ROOM_A)
     room_b = load_tag_vocabulary_snapshot(runtime_paths, _ROOM_B)
@@ -353,12 +353,15 @@ async def test_maybe_rebuild_persists_only_model_reproducible_top_tags(
     client = _client_with_room_state({_ROOM_A: events})
     runtime_paths = _runtime_paths(tmp_path)
 
-    assert await maybe_rebuild_tag_vocabulary(
-        client,
-        _ROOM_A,
-        _config(),
-        runtime_paths,
-        now=datetime(2026, 7, 12, 12, 0, tzinfo=UTC),
+    assert (
+        await maybe_rebuild_tag_vocabulary(
+            client,
+            _ROOM_A,
+            _config(),
+            runtime_paths,
+            now=datetime(2026, 7, 12, 12, 0, tzinfo=UTC),
+        )
+        is not None
     )
 
     snapshot = load_tag_vocabulary_snapshot(runtime_paths, _ROOM_A)
@@ -375,19 +378,22 @@ async def test_maybe_rebuild_runs_once_per_room_boundary(tmp_path: Path) -> None
     runtime_paths = _runtime_paths(tmp_path)
     now = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
 
-    assert await maybe_rebuild_tag_vocabulary(client, _ROOM_A, _config(), runtime_paths, now=now)
+    assert await maybe_rebuild_tag_vocabulary(client, _ROOM_A, _config(), runtime_paths, now=now) is not None
     client.room_get_state.reset_mock()
 
-    assert not await maybe_rebuild_tag_vocabulary(client, _ROOM_A, _config(), runtime_paths, now=now)
+    assert await maybe_rebuild_tag_vocabulary(client, _ROOM_A, _config(), runtime_paths, now=now) is None
     client.room_get_state.assert_not_awaited()
 
     next_day = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
-    assert await maybe_rebuild_tag_vocabulary(
-        client,
-        _ROOM_A,
-        _config(),
-        runtime_paths,
-        now=next_day,
+    assert (
+        await maybe_rebuild_tag_vocabulary(
+            client,
+            _ROOM_A,
+            _config(),
+            runtime_paths,
+            now=next_day,
+        )
+        is not None
     )
     client.room_get_state.assert_awaited_once_with(_ROOM_A)
 
@@ -405,13 +411,14 @@ async def test_maybe_rebuild_trusts_fresh_room_snapshot_on_disk(tmp_path: Path) 
         tags=[{"tag": "bug", "count": 2}],
     )
 
-    assert not await maybe_rebuild_tag_vocabulary(
+    refresh = await maybe_rebuild_tag_vocabulary(
         client,
         _ROOM_A,
         _config(),
         runtime_paths,
         now=now,
     )
+    assert refresh is not None
     client.room_get_state.assert_not_awaited()
     snapshot = load_tag_vocabulary_snapshot(runtime_paths, _ROOM_A)
     assert snapshot is not None
@@ -432,7 +439,6 @@ async def test_failed_room_read_preserves_snapshot_and_backs_off(tmp_path: Path)
         built_at=stale_time,
         tags=[{"tag": "previous", "count": 2}],
     )
-    assert claim_vocabulary_check(_ROOM_A, _config(), runtime_paths, now=now)
 
     with pytest.raises(ThreadTagsError):
         await maybe_rebuild_tag_vocabulary(
@@ -447,17 +453,27 @@ async def test_failed_room_read_preserves_snapshot_and_backs_off(tmp_path: Path)
     assert snapshot is not None
     assert snapshot.built_at == stale_time
     assert snapshot.tags == (_TagUsage(tag="previous", count=2),)
-    assert not claim_vocabulary_check(
+    client.room_get_state.reset_mock()
+    retry_refresh = await maybe_rebuild_tag_vocabulary(
+        client,
         _ROOM_A,
         _config(),
         runtime_paths,
         now=now + _REBUILD_FAILURE_RETRY_DELAY - timedelta(seconds=1),
     )
-    assert claim_vocabulary_check(
-        _ROOM_A,
-        _config(),
-        runtime_paths,
-        now=now + _REBUILD_FAILURE_RETRY_DELAY,
+    assert retry_refresh is None
+    client.room_get_state.assert_not_awaited()
+
+    client.room_get_state = AsyncMock(return_value=nio.RoomGetStateResponse(events=[], room_id=_ROOM_A))
+    assert (
+        await maybe_rebuild_tag_vocabulary(
+            client,
+            _ROOM_A,
+            _config(),
+            runtime_paths,
+            now=now + _REBUILD_FAILURE_RETRY_DELAY,
+        )
+        is not None
     )
 
 
@@ -489,11 +505,13 @@ def test_format_for_description_without_tags_falls_back(
     snapshot: _TagVocabularySnapshot | None,
 ) -> None:
     """An absent or empty snapshot formats as the coin-new-tags fallback."""
-    assert format_tag_vocabulary_for_description(snapshot) == ("No tags are in use yet; coin sensible new ones.")
+    assert format_tag_vocabulary_for_description(snapshot) == (
+        "No reusable short tags are in use yet; coin sensible new ones."
+    )
 
 
 def test_format_with_counts_lists_ranked_tags() -> None:
-    """The sidecar prompt format lists ranked tags with usage counts."""
+    """The initial-enrichment prompt lists ranked tags with usage counts."""
     snapshot = _TagVocabularySnapshot(
         built_at=datetime(2026, 7, 12, 5, 0, tzinfo=UTC),
         tags=(_TagUsage(tag="bug", count=3), _TagUsage(tag="docs", count=1)),
@@ -504,4 +522,4 @@ def test_format_with_counts_lists_ranked_tags() -> None:
 
 def test_format_with_counts_without_tags_falls_back() -> None:
     """An absent snapshot formats as the empty-vocabulary placeholder."""
-    assert format_tag_vocabulary_with_counts(None) == "(no tags in use yet)"
+    assert format_tag_vocabulary_with_counts(None) == "(no reusable short tags in use yet)"

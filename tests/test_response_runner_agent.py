@@ -2225,6 +2225,10 @@ class TestAgentBot(AgentBotTestBase):
         async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
             return None
 
+        async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+            kwargs["turn_recorder"].mark_completed()
+            return "ok"
+
         scheduled_tasks: list[asyncio.Task[None]] = []
         scheduled_names: list[str] = []
 
@@ -2258,7 +2262,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch("mindroom.response_runner.typing_indicator", _noop_typing_indicator),
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
-            patch("mindroom.response_runner.ai_response", new_callable=AsyncMock, return_value="ok"),
+            patch("mindroom.response_runner.ai_response", new_callable=AsyncMock, side_effect=fake_ai_response),
             patch(
                 "mindroom.delivery_gateway.send_message_result",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$response")),
@@ -2314,7 +2318,6 @@ class TestAgentBot(AgentBotTestBase):
             config=config,
             runtime_paths=bot.runtime_paths,
             conversation_cache=bot._conversation_cache,
-            message_count_hint=5,
             entity_name=bot.agent_name,
         )
         assert "thread_summary_!test:localhost_$thread" in scheduled_names
@@ -2342,6 +2345,7 @@ class TestAgentBot(AgentBotTestBase):
                     runs_before=20,
                 ),
             )
+            kwargs["turn_recorder"].mark_completed()
             return "ok"
 
         scheduled_tasks: list[asyncio.Task[None]] = []
@@ -2428,7 +2432,6 @@ class TestAgentBot(AgentBotTestBase):
             config=config,
             runtime_paths=bot.runtime_paths,
             conversation_cache=bot._conversation_cache,
-            message_count_hint=1,
             entity_name=bot.agent_name,
         )
         mock_send_compaction_lifecycle_start.assert_awaited_once()

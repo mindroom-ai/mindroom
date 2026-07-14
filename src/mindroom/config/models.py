@@ -422,13 +422,6 @@ class DefaultsConfig(BaseModel):
         ge=1,
         description="Additional message count required between automatic thread summaries after the first one.",
     )
-    thread_auto_tag_model: str | None = Field(
-        default=None,
-        description=(
-            "Model config name for the one-shot thread auto-tagger (e.g., 'haiku'). "
-            "Falls back to thread_summary_model, then 'default'."
-        ),
-    )
 
     @model_validator(mode="before")
     @classmethod

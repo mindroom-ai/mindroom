@@ -390,7 +390,6 @@ defaults:
   worker_grantable_credentials: null  # Default: null (deny by default; list credential service names to make available inside isolated workers, e.g. [openai, github_private])
   allow_self_config: false         # Default: false (allow agents to modify their own config via a tool)
   thread_summary_model: null       # Default: null (uses the default model)
-  thread_auto_tag_model: null      # Default: null (uses thread_summary_model, then default)
   thread_summary_temperature: 0.2  # Default: 0.2 (set null to omit temperature and use provider defaults)
   thread_summary_first_threshold: 1  # Default: 1 (first automatic thread summary after first message)
   thread_summary_subsequent_interval: 10  # Default: 10 (messages between later automatic thread summaries)
@@ -406,9 +405,9 @@ MindRoom always omits temperature for Vertex Claude thread summaries because the
 Use `room_thread_summary_models` when automatic summaries in a specific room should use a different model from `defaults.thread_summary_model`.
 Keys can be managed room aliases such as `lobby` or raw Matrix room IDs such as `!room:example.org`.
 
-`defaults.thread_auto_tag_model` selects the model for automatic one-shot thread tagging.
-When unset, it falls back to `defaults.thread_summary_model`, then the `default` model.
-Set it to a cheaper configured model to limit the extra inference cost.
+The first automatic summary call also returns one to three topic tags when the thread has no existing tags.
+This initial enrichment uses the same summary model, room override, temperature, prompt, and background task as the summary.
+Later summary refreshes do not regenerate or replace tags.
 
 `defaults.worker_grantable_credentials` is a list of credential service names.
 Use built-in names like `openai`, `azure`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.

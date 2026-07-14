@@ -8,9 +8,9 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from html import escape
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-import nio
 from agno.agent import Agent
 from pydantic import BaseModel, Field
 
@@ -21,10 +21,19 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.model_instance_checks import isinstance_of_loaded
+from mindroom.thread_tag_vocabulary import (
+    claim_vocabulary_check,
+    format_tag_vocabulary_with_counts,
+    load_tag_vocabulary_snapshot,
+    maybe_rebuild_tag_vocabulary,
+)
+from mindroom.thread_tags import coerce_tag_name, get_thread_tags, set_thread_tag
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    import nio
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -34,6 +43,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _VERTEXAI_CLAUDE_CLASS = ("agno.models.vertexai.claude", "Claude")
 THREAD_SUMMARY_MAX_LENGTH = 300
+_MAX_INITIAL_TAGS = 3
 _MARKDOWN_LINK_RE = re.compile(r"!\[([^\]]*)\]\([^)]+\)|\[([^\]]+)\]\([^)]+\)")
 _MARKDOWN_CODE_BLOCK_RE = re.compile(r"```(?:[^\n`]*)\n?(.*?)```", re.DOTALL)
 _MARKDOWN_DOUBLE_EMPHASIS_RE = re.compile(r"(\*\*|__)(.*?)\1", re.DOTALL)
@@ -70,6 +80,16 @@ class _ThreadSummary(BaseModel):
     summary: str = Field(
         max_length=THREAD_SUMMARY_MAX_LENGTH,
         description="One-line summary of the thread conversation",
+    )
+
+
+class _ThreadEnrichment(_ThreadSummary):
+    """Structured first-summary response with one-shot topic tags."""
+
+    tags: list[str] = Field(
+        min_length=1,
+        max_length=_MAX_INITIAL_TAGS,
+        description="1-3 durable topic tags, most relevant first",
     )
 
 
@@ -153,21 +173,21 @@ def _next_threshold(
     return last_summarized_count + subsequent_interval
 
 
-def is_thread_summary_message(message: ResolvedVisibleMessage) -> bool:
+def _is_thread_summary_message(message: ResolvedVisibleMessage) -> bool:
     """Return whether a visible thread message is itself a summary notice."""
     return isinstance(message.content.get("io.mindroom.thread_summary"), dict)
 
 
-def count_non_summary_thread_messages(thread_history: Sequence[ResolvedVisibleMessage]) -> int:
+def _count_non_summary_thread_messages(thread_history: Sequence[ResolvedVisibleMessage]) -> int:
     """Count visible thread messages while excluding summary notices."""
-    return sum(1 for message in thread_history if not is_thread_summary_message(message))
+    return sum(1 for message in thread_history if not _is_thread_summary_message(message))
 
 
 def thread_summary_message_count_hint(
     thread_history: Sequence[ResolvedVisibleMessage],
 ) -> int:
     """Return a lower-bound post-response thread size without refetching history."""
-    return count_non_summary_thread_messages(thread_history) + 1
+    return _count_non_summary_thread_messages(thread_history) + 1
 
 
 def _next_thread_summary_threshold(
@@ -187,14 +207,20 @@ def should_queue_thread_summary(
     room_id: str,
     thread_id: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     *,
     message_count_hint: int | None,
 ) -> bool:
-    """Return whether the lower-bound hint is close enough to justify a live recheck."""
+    """Return whether summary generation or room-vocabulary upkeep is due."""
     if message_count_hint is None:
         return True
     threshold = _next_thread_summary_threshold(room_id, thread_id, config)
-    return message_count_hint >= threshold - _PREQUEUE_CONCURRENCY_MARGIN
+    return message_count_hint >= threshold - _PREQUEUE_CONCURRENCY_MARGIN or claim_vocabulary_check(
+        room_id,
+        config,
+        runtime_paths,
+        now=datetime.now(UTC),
+    )
 
 
 async def _load_thread_history(
@@ -202,9 +228,9 @@ async def _load_thread_history(
     room_id: str,
     thread_id: str,
 ) -> list[ResolvedVisibleMessage]:
-    """Load thread history through the explicit conversation-cache seam."""
+    """Load fresh authoritative history without inherited turn memoization."""
     return list(
-        await conversation_cache.get_thread_history(
+        await conversation_cache.get_fresh_strict_thread_history(
             room_id,
             thread_id,
             caller_label="thread_summary_background",
@@ -212,43 +238,29 @@ async def _load_thread_history(
     )
 
 
-async def _recover_last_summary_count(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-) -> int:
-    """Recover the last summarized message count from existing summary events in the thread.
-
-    Scans recent room messages for events with ``io.mindroom.thread_summary``
-    metadata that belong to *thread_id* and returns the highest
-    ``message_count`` found, or 0.
-    """
-    response = await client.room_messages(
-        room_id,
-        start=None,
-        limit=100,
-        message_filter={"types": ["m.room.message"]},
-        direction=nio.MessageDirection.back,
-    )
-    if not isinstance(response, nio.RoomMessagesResponse):
-        return 0
-
+def _recover_last_summary_count(thread_history: Sequence[ResolvedVisibleMessage]) -> int:
+    """Recover the highest durable summary count from authoritative thread history."""
     best_count = 0
-    for event in response.chunk:
-        content = event.source.get("content", {})
-        meta = content.get("io.mindroom.thread_summary")
+    for message in thread_history:
+        meta = message.content.get("io.mindroom.thread_summary")
         if not isinstance(meta, dict):
             continue
-        relates_to = content.get("m.relates_to")
-        if not isinstance(relates_to, dict):
-            continue
-        if relates_to.get("event_id") != thread_id:
-            continue
         count = meta.get("message_count")
-        if not isinstance(count, int):
+        if not isinstance(count, int) or isinstance(count, bool):
             continue
         best_count = max(best_count, count)
     return best_count
+
+
+def _recover_initial_enrichment_complete(
+    thread_history: Sequence[ResolvedVisibleMessage],
+) -> bool:
+    """Return whether durable summary metadata records completed initial tags."""
+    for message in thread_history:
+        meta = message.content.get("io.mindroom.thread_summary")
+        if isinstance(meta, dict) and meta.get("initial_enrichment_complete") is True:
+            return True
+    return False
 
 
 _MAX_MESSAGES_BEFORE_TRUNCATION = 50
@@ -266,7 +278,7 @@ def _build_conversation_text(thread_history: Sequence[ResolvedVisibleMessage]) -
     """
     lines: list[str] = []
     for msg in thread_history:
-        if is_thread_summary_message(msg):
+        if _is_thread_summary_message(msg):
             continue
         sender = msg.sender or "unknown"
         body = msg.body or ""
@@ -312,8 +324,9 @@ async def _generate_summary(
     runtime_paths: RuntimePaths,
     *,
     model_name: str | None = None,
-) -> str | None:
-    """Generate a one-line summary of a thread conversation via LLM."""
+    tag_vocabulary: str | None = None,
+) -> str | _ThreadEnrichment | None:
+    """Generate a summary and, on the first call, one-shot tags via one LLM run."""
     resolved_model_name = model_name or config.defaults.thread_summary_model or "default"
     model = model_loading.get_model_instance(config, runtime_paths, resolved_model_name)
     _configure_summary_model_temperature(
@@ -322,15 +335,22 @@ async def _generate_summary(
         model_name=resolved_model_name,
     )
 
-    conversation = _build_conversation_text(thread_history)
-    session_hash = hashlib.sha256(conversation.encode()).hexdigest()[:8]
-
-    prompt = config.render_prompt("THREAD_SUMMARY_USER_PROMPT_TEMPLATE", conversation=conversation)
+    conversation = escape(_build_conversation_text(thread_history))
+    prompt = config.render_prompt(
+        "THREAD_SUMMARY_USER_PROMPT_TEMPLATE",
+        conversation=conversation,
+        tag_vocabulary=(
+            escape(tag_vocabulary)
+            if tag_vocabulary is not None
+            else "(tags are not requested for this summary refresh)"
+        ),
+    )
+    session_hash = hashlib.sha256(prompt.encode()).hexdigest()[:16]
     agent = Agent(
         name="ThreadSummarizer",
         instructions=config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS").splitlines(),
         model=model,
-        output_schema=_ThreadSummary,
+        output_schema=_ThreadEnrichment if tag_vocabulary is not None else _ThreadSummary,
         telemetry=False,
     )
     response = await cached_agent_run(
@@ -339,9 +359,25 @@ async def _generate_summary(
         session_id=f"thread_summary_{session_hash}",
     )
     content = response.content
+    if tag_vocabulary is not None:
+        if not isinstance(content, _ThreadEnrichment):
+            return None
+        normalized_tags: list[str] = []
+        for raw_tag in content.tags:
+            normalized_tag = coerce_tag_name(raw_tag)
+            if normalized_tag is not None and normalized_tag not in normalized_tags:
+                normalized_tags.append(normalized_tag)
+        if not normalized_tags:
+            return None
+        return _ThreadEnrichment(
+            summary=content.summary,
+            tags=normalized_tags[:_MAX_INITIAL_TAGS],
+        )
+    if isinstance(content, _ThreadEnrichment):
+        return None
     if isinstance(content, _ThreadSummary):
         return content.summary
-    return str(content) if content else None
+    return None
 
 
 @timed("maybe_generate_thread_summary")
@@ -351,9 +387,124 @@ async def _timed_generate_summary(
     runtime_paths: RuntimePaths,
     *,
     model_name: str | None = None,
-) -> str | None:
+    tag_vocabulary: str | None = None,
+) -> str | _ThreadEnrichment | None:
     """Run the summary generation attempt with timing instrumentation."""
-    return await _generate_summary(thread_history, config, runtime_paths, model_name=model_name)
+    return await _generate_summary(
+        thread_history,
+        config,
+        runtime_paths,
+        model_name=model_name,
+        tag_vocabulary=tag_vocabulary,
+    )
+
+
+async def _apply_initial_tags(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    tags: Sequence[str],
+) -> bool:
+    """Apply generated tags only when no manual or concurrent tags exist."""
+    set_by = client.user_id
+    if not tags or not set_by:
+        return False
+    try:
+        existing_state = await get_thread_tags(client, room_id, thread_id)
+    except Exception:
+        logger.exception(
+            "Failed to check existing thread tags; skipping automatic tags",
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        return False
+    if existing_state is not None and existing_state.tags:
+        logger.info(
+            "Skipping automatic tags because the thread already has tags",
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        return True
+
+    applied_tags: list[str] = []
+    for tag in tags:
+        try:
+            await set_thread_tag(client, room_id, thread_id, tag, set_by=set_by)
+        except Exception:
+            logger.exception(
+                "Failed to write automatic thread tag",
+                room_id=room_id,
+                thread_id=thread_id,
+                tag=tag,
+            )
+            continue
+        applied_tags.append(tag)
+    if applied_tags:
+        logger.info(
+            "Automatically tagged thread",
+            room_id=room_id,
+            thread_id=thread_id,
+            tags=applied_tags,
+        )
+    return bool(applied_tags)
+
+
+async def _refresh_tag_vocabulary(
+    client: nio.AsyncClient,
+    room_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> str | None:
+    """Refresh vocabulary and return text when the check already loaded a snapshot."""
+    try:
+        snapshot = await maybe_rebuild_tag_vocabulary(
+            client,
+            room_id,
+            config,
+            runtime_paths,
+            now=datetime.now(UTC),
+        )
+    except Exception:
+        logger.exception("Tag vocabulary rebuild failed", room_id=room_id)
+        return None
+    if snapshot is None:
+        return None
+    return format_tag_vocabulary_with_counts(snapshot)
+
+
+async def _deliver_generated_summary(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    generated: str | _ThreadEnrichment,
+    normalized_summary: str,
+    message_count: int,
+    model_name: str,
+    conversation_cache: ConversationCacheProtocol,
+) -> None:
+    """Apply initial tags, then independently deliver the generated summary."""
+    initial_enrichment_complete: bool | None = None
+    if isinstance(generated, _ThreadEnrichment):
+        initial_enrichment_complete = await _apply_initial_tags(
+            client,
+            room_id,
+            thread_id,
+            generated.tags,
+        )
+
+    try:
+        await send_thread_summary_event(
+            client,
+            room_id,
+            thread_id,
+            normalized_summary,
+            message_count,
+            model_name,
+            conversation_cache,
+            initial_enrichment_complete=initial_enrichment_complete,
+        )
+    except Exception:
+        logger.exception("Thread summary send failed", room_id=room_id, thread_id=thread_id)
 
 
 async def send_thread_summary_event(
@@ -364,6 +515,8 @@ async def send_thread_summary_event(
     message_count: int,
     model_name: str,
     conversation_cache: ConversationCacheProtocol,
+    *,
+    initial_enrichment_complete: bool | None = None,
 ) -> str | None:
     """Send a thread summary as a standard Matrix notice event."""
     normalized_summary = normalize_thread_summary_text(summary)
@@ -395,19 +548,23 @@ async def send_thread_summary_event(
             error=str(exc),
         )
         latest_thread_event_id = None
+    summary_metadata: dict[str, object] = {
+        "version": 1,
+        "summary": truncated_summary,
+        "message_count": message_count,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "model": model_name,
+    }
+    if initial_enrichment_complete is not None:
+        summary_metadata["initial_enrichment_complete"] = initial_enrichment_complete
+
     content = build_message_content(
         truncated_summary,
         thread_event_id=thread_id,
         latest_thread_event_id=latest_thread_event_id or thread_id,
         extra_content={
             "msgtype": "m.notice",
-            "io.mindroom.thread_summary": {
-                "version": 1,
-                "summary": truncated_summary,
-                "message_count": message_count,
-                "generated_at": datetime.now(UTC).isoformat(),
-                "model": model_name,
-            },
+            "io.mindroom.thread_summary": summary_metadata,
         },
     )
     delivered = await send_message_result(client, room_id, content)
@@ -460,7 +617,7 @@ async def set_manual_thread_summary(
             msg = "Failed to fetch thread history for the target thread."
             raise ThreadSummaryWriteError(msg) from exc
 
-        message_count = count_non_summary_thread_messages(thread_history)
+        message_count = _count_non_summary_thread_messages(thread_history)
         try:
             event_id = await send_thread_summary_event(
                 client,
@@ -494,29 +651,37 @@ async def maybe_generate_thread_summary(
     runtime_paths: RuntimePaths,
     *,
     conversation_cache: ConversationCacheProtocol,
-    message_count_hint: int | None = None,
     entity_name: str | None = None,
 ) -> None:
-    """Generate and send a thread summary if the message count crosses a threshold."""
+    """Generate a summary and one-shot initial tags when a threshold is crossed."""
+    refreshed_tag_vocabulary = await _refresh_tag_vocabulary(client, room_id, config, runtime_paths)
     async with _thread_summary_lock(room_id, thread_id):
-        cache_key = _thread_summary_cache_key(room_id, thread_id)
-        # Recover from existing summary events on cache miss (e.g., after restart)
-        if cache_key not in _last_summary_counts:
-            recovered = await _recover_last_summary_count(client, room_id, thread_id)
-            if recovered > 0:
-                update_last_summary_count(room_id, thread_id, recovered)
+        # This background task inherits the response turn's ContextVars, so it
+        # must bypass per-turn memoization to observe the delivered response.
+        try:
+            thread_history = await _load_thread_history(conversation_cache, room_id, thread_id)
+        except Exception:
+            logger.exception(
+                "Authoritative thread history load failed",
+                room_id=room_id,
+                thread_id=thread_id,
+            )
+            return
+        recovered_summary_count = _recover_last_summary_count(thread_history)
+        if recovered_summary_count > 0:
+            update_last_summary_count(room_id, thread_id, recovered_summary_count)
 
         threshold = _next_thread_summary_threshold(room_id, thread_id, config)
-
-        # message_count_hint comes from a pre-send snapshot and is only a
-        # lower bound. Other agents or humans can post before this background
-        # task runs, so a stale hint must never suppress the live re-fetch.
-        thread_history = await _load_thread_history(conversation_cache, room_id, thread_id)
-        message_count = count_non_summary_thread_messages(thread_history)
-        if message_count_hint is not None:
-            message_count = max(message_count, message_count_hint)
+        message_count = _count_non_summary_thread_messages(thread_history)
         if message_count < threshold:
             return
+
+        initial_enrichment = not _recover_initial_enrichment_complete(thread_history)
+        tag_vocabulary = None
+        if initial_enrichment:
+            tag_vocabulary = refreshed_tag_vocabulary or format_tag_vocabulary_with_counts(
+                load_tag_vocabulary_snapshot(runtime_paths, room_id),
+            )
         try:
             model_name = _resolve_thread_summary_model_name(
                 config,
@@ -524,19 +689,26 @@ async def maybe_generate_thread_summary(
                 room_id,
                 entity_name=entity_name,
             )
-            summary = await _timed_generate_summary(thread_history, config, runtime_paths, model_name=model_name)
+            generated = await _timed_generate_summary(
+                thread_history,
+                config,
+                runtime_paths,
+                model_name=model_name,
+                tag_vocabulary=tag_vocabulary,
+            )
         except Exception:
             logger.exception("Thread summary generation failed", room_id=room_id, thread_id=thread_id)
             # Record current count to prevent retry storms until next threshold
             update_last_summary_count(room_id, thread_id, message_count)
             return
 
-        if summary is None:
+        if generated is None:
             logger.warning("Thread summary generation returned None", room_id=room_id, thread_id=thread_id)
             # Record current count to prevent retry storms until next threshold
             update_last_summary_count(room_id, thread_id, message_count)
             return
 
+        summary = generated.summary if isinstance(generated, _ThreadEnrichment) else generated
         normalized_summary = normalize_thread_summary_text(summary)
         if not normalized_summary:
             logger.warning(
@@ -547,15 +719,16 @@ async def maybe_generate_thread_summary(
             update_last_summary_count(room_id, thread_id, message_count)
             return
 
-        # Record count before sending — the LLM cost is already incurred, so don't
-        # retry on Matrix send failure (avoids cost amplification loop).
-        update_last_summary_count(room_id, thread_id, message_count)
-        await send_thread_summary_event(
+        await _deliver_generated_summary(
             client,
             room_id,
             thread_id,
+            generated,
             normalized_summary,
             message_count,
             model_name,
             conversation_cache,
         )
+        # Record after the delivery attempt so cancellation cannot leave a
+        # partially delivered initial enrichment marked complete.
+        update_last_summary_count(room_id, thread_id, message_count)

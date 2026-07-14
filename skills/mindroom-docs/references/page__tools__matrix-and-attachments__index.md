@@ -161,7 +161,7 @@ list_thread_tags(exclude_tag="resolved", include_untagged=True)
 
 - This tool writes shared room state, so it is stricter than `matrix_message` about Matrix permissions.
 - Tag writes and removals return the updated canonical tag state for the target thread.
-- `tag_thread()`, `untag_thread()`, and every `list_thread_tags()` tag filter normalize free-form tag input to the same lowercase hyphenated form.
+- `tag_thread()`, `untag_thread()`, and every `list_thread_tags()` tag filter share one normalizer: valid canonical IDs up to 50 characters are preserved, while other free-form input is coerced to a short lowercase hyphenated tag.
 - `list_thread_tags()` can inspect the active thread or an explicitly provided `thread_id`.
 - `list_thread_tags(include_tag=..., exclude_tag=...)` filters which threads are returned: `include_tag` keeps only threads with that tag, `exclude_tag` removes threads with that tag.
 - Both filters can be combined.
@@ -356,19 +356,21 @@ matrix_message(action="reply", message="Sharing the plan here.", attachment_ids=
 ## Related Matrix Runtime Features
 
 Automatic thread summaries are still implemented in `src/mindroom/thread_summary.py` as bot runtime behavior.
-The summarizer posts one `m.notice` summary after a thread reaches the configured first threshold (one message by default), and then again every ten additional messages by default, using `defaults.thread_summary_model` or `default`.
+The summarizer posts one `m.notice` summary after a successful response brings a thread to the configured first threshold (one message by default), and then again every ten additional messages by default, using `defaults.thread_summary_model` or `default`.
 Set `room_thread_summary_models` to override the automatic summary model for a managed room alias or raw Matrix room ID.
 MindRoom uses `defaults.thread_summary_temperature` for automatic summaries when the provider supports runtime temperature overrides, and always omits temperature for Vertex Claude summaries.
 The `thread_summary` tool complements that automatic behavior by letting an agent publish a manual summary immediately and advance the stored summary baseline.
-Automatic thread tagging runs as a post-response background effect even when the responding agent does not have the `thread_tags` tool.
-After the first delivered reply in a new untagged thread, MindRoom verifies authoritative full history before asking the configured model for up to three normalized tags.
-Threads with more than three non-summary visible messages are never retroactively tagged.
-Existing tags win, including tags added while the model call is running.
-The model comes from `defaults.thread_auto_tag_model`, falling back to `defaults.thread_summary_model` and then `default`.
+The first automatic summary uses one structured model call to produce both the summary and up to three normalized topic tags.
+The background task bypasses inherited per-turn history memoization so the model sees fresh authoritative full history including the delivered response.
+Existing tags win, including tags observed after the model call finishes.
+The initial tags use the same summary model, room override, temperature, prompt, lock, and background lifecycle as the summary.
+Expected Matrix write failures are isolated so a failed tag write does not block the summary and a failed summary write does not undo tags.
+Failed initial tag reads or all-failed tag writes leave the summary's durable enrichment marker incomplete, so the next summary threshold retries structured enrichment.
+Once existing or newly written tags mark initial enrichment complete, later summary refreshes use a summary-only schema and never regenerate or replace tags.
 Each room has its own vocabulary snapshot built only from that room's tag state.
-The first qualifying post-response task after 04:00 in the configured timezone refreshes that room's snapshot for the day.
+The first successful post-response check after 04:00 in the configured timezone refreshes a stale room snapshot for the day.
 The refresh reads Matrix tag state and writes a durable local snapshot under `mindroom_data/tracking/thread_tag_vocabulary/`.
-Automatic tagging can add one model call and up to three Matrix state writes for an eligible new thread, so configure a cheap model when that cost matters.
+Initial enrichment uses the summary call that would already run and can add up to three Matrix state writes.
 
 ## Related Docs
 

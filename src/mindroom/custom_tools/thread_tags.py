@@ -26,6 +26,7 @@ from mindroom.thread_tags import (
     ThreadTagsListing,
     coerce_tag_name,
     list_tagged_threads,
+    normalize_tag_name,
     remove_thread_tag,
     set_thread_tag,
 )
@@ -44,9 +45,10 @@ def _build_tag_thread_description(runtime_paths: RuntimePaths, room_id: str) -> 
     snapshot = load_tag_vocabulary_snapshot(runtime_paths, room_id)
     return (
         "Add or update one tag on the current or specified Matrix thread.\n"
-        "Tags label a thread's durable topic on the room's thread cards. Input is normalized: "
-        f"lowercased, spaces and underscores become hyphens, max {COERCED_TAG_MAX_LENGTH} characters "
-        '(e.g. "feature-request").\n'
+        "Tags label a thread's durable topic on the room's thread cards. Existing canonical IDs up to 50 "
+        "characters are preserved; other input is lowercased, spaces and underscores become hyphens, and "
+        f"new free-form tags are capped at {COERCED_TAG_MAX_LENGTH} characters (e.g. "
+        '"feature-request").\n'
         "Prefer existing tags; only introduce a new tag when none fit. "
         "1-3 tags per thread is typical; keep a thread to at most ~5 tags.\n"
         f"{format_tag_vocabulary_for_description(snapshot)}"
@@ -70,8 +72,12 @@ def _serialized_tags_for_output(
     return {tag: serialized[tag]} if tag in serialized else {}
 
 
-def _coerce_tool_tag(tag: str) -> str:
-    """Canonicalize one model-facing tag input or raise a shared validation error."""
+def _normalize_tool_tag(tag: str) -> str:
+    """Preserve canonical IDs and otherwise coerce free-form model input."""
+    try:
+        return normalize_tag_name(tag)
+    except ThreadTagsError:
+        pass
     normalized_tag = coerce_tag_name(tag)
     if normalized_tag is None:
         msg = "tag must contain at least one letter, digit, or hyphen after normalization."
@@ -139,7 +145,7 @@ class ThreadTagsTools(Toolkit):
             )
 
         try:
-            normalized_tag = _coerce_tool_tag(tag)
+            normalized_tag = _normalize_tool_tag(tag)
         except ThreadTagsError as exc:
             return self._payload(
                 "error",
@@ -230,7 +236,7 @@ class ThreadTagsTools(Toolkit):
             )
 
         try:
-            normalized_tag = _coerce_tool_tag(tag)
+            normalized_tag = _normalize_tool_tag(tag)
         except ThreadTagsError as exc:
             return self._payload(
                 "error",
@@ -388,9 +394,9 @@ class ThreadTagsTools(Toolkit):
             )
 
         try:
-            normalized_tag = _coerce_tool_tag(tag) if tag is not None else None
-            normalized_include_tag = _coerce_tool_tag(include_tag) if include_tag is not None else None
-            normalized_exclude_tag = _coerce_tool_tag(exclude_tag) if exclude_tag is not None else None
+            normalized_tag = _normalize_tool_tag(tag) if tag is not None else None
+            normalized_include_tag = _normalize_tool_tag(include_tag) if include_tag is not None else None
+            normalized_exclude_tag = _normalize_tool_tag(exclude_tag) if exclude_tag is not None else None
         except ThreadTagsError as exc:
             return self._payload(
                 "error",

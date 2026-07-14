@@ -44,7 +44,7 @@ _MAX_TRACKED_ROOM_SCOPES = 2048
 type _VocabularyScopeKey = tuple[Path, str]
 
 # These in-memory maps keep the per-response pre-queue check free of file IO.
-# Reservations prevent old/done threads from creating a daily rebuild herd.
+# Reservations prevent unrelated thread responses from creating a daily rebuild herd.
 _last_confirmed_fresh_boundaries: OrderedDict[_VocabularyScopeKey, datetime] = OrderedDict()
 _reserved_rebuild_boundaries: OrderedDict[_VocabularyScopeKey, datetime] = OrderedDict()
 _rebuild_retry_not_before: OrderedDict[_VocabularyScopeKey, datetime] = OrderedDict()
@@ -264,24 +264,24 @@ async def maybe_rebuild_tag_vocabulary(
     runtime_paths: RuntimePaths,
     *,
     now: datetime,
-) -> bool:
-    """Rebuild one room's vocabulary when it predates the daily boundary."""
+) -> _TagVocabularySnapshot | None:
+    """Return a snapshot when this check reads or rebuilds one."""
     scope_key = _scope_key(runtime_paths, room_id)
     boundary = _most_recent_rebuild_boundary(now, config.timezone)
     try:
         async with _rebuild_lock(scope_key):
             confirmed_boundary = _last_confirmed_fresh_boundaries.get(scope_key)
             if confirmed_boundary is not None and confirmed_boundary >= boundary:
-                return False
+                return None
             retry_not_before = _rebuild_retry_not_before.get(scope_key)
             if retry_not_before is not None and retry_not_before > now:
-                return False
+                return None
 
             snapshot = load_tag_vocabulary_snapshot(runtime_paths, room_id)
             if not _snapshot_is_stale(snapshot, now=now, timezone_name=config.timezone):
                 _remember_boundary(_last_confirmed_fresh_boundaries, scope_key, boundary)
                 _rebuild_retry_not_before.pop(scope_key, None)
-                return False
+                return snapshot
 
             usage = await _count_tag_usage(client, room_id)
             rebuilt = _TagVocabularySnapshot(built_at=now, tags=_ranked_tag_usage(usage))
@@ -294,7 +294,7 @@ async def maybe_rebuild_tag_vocabulary(
                 tag_count=len(rebuilt.tags),
                 top_tags=[usage.tag for usage in rebuilt.tags],
             )
-            return True
+            return rebuilt
     except Exception:
         _remember_boundary(
             _rebuild_retry_not_before,
@@ -309,13 +309,13 @@ async def maybe_rebuild_tag_vocabulary(
 def format_tag_vocabulary_for_description(snapshot: _TagVocabularySnapshot | None) -> str:
     """Format the ranked tag list without counts for the tag_thread description."""
     if snapshot is None or not snapshot.tags:
-        return "No tags are in use yet; coin sensible new ones."
+        return "No reusable short tags are in use yet; coin sensible new ones."
     ranked_tags = ", ".join(usage.tag for usage in snapshot.tags[:_VOCABULARY_DESCRIPTION_TAG_LIMIT])
     return f"Most-used short tags in this room, ranked (rebuilt once a day): {ranked_tags}"
 
 
 def format_tag_vocabulary_with_counts(snapshot: _TagVocabularySnapshot | None) -> str:
-    """Format the ranked tag list with usage counts for the auto-tagger prompt."""
+    """Format the ranked tag list with usage counts for initial enrichment."""
     if snapshot is None or not snapshot.tags:
-        return "(no tags in use yet)"
+        return "(no reusable short tags in use yet)"
     return "\n".join(f"- {usage.tag} ({usage.count})" for usage in snapshot.tags[:_VOCABULARY_DESCRIPTION_TAG_LIMIT])
