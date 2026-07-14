@@ -677,20 +677,6 @@ def test_oauth_provider_rejects_client_config_suffix_for_tool_config_service() -
         )
 
 
-def test_oauth_provider_rejects_public_loopback_client_without_pkce() -> None:
-    with pytest.raises(ValueError, match="public loopback client requires S256 PKCE"):
-        OAuthProvider(
-            id="public_mail",
-            display_name="Public Mail",
-            authorization_url="https://auth.example.test/authorize",
-            token_url="https://auth.example.test/token",
-            scopes=("mail.read",),
-            credential_service="public_mail_oauth",
-            client_config_services=("public_mail_oauth_client",),
-            loopback_client_id="bundled-public-client",
-        )
-
-
 def test_connect_generates_authorization_url_with_opaque_state(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
@@ -804,7 +790,7 @@ def test_connect_generates_pkce_challenge_for_pkce_provider(tmp_path: Path) -> N
         ("GET", "/api/oauth/public_mail/authorize?agent_name=general"),
     ],
 )
-def test_oauth_entrypoints_reject_bundled_client_from_remote_request(
+def test_oauth_entrypoints_reject_runtime_bootstrapped_client_from_remote_request(
     tmp_path: Path,
     method: str,
     path: str,
@@ -814,6 +800,14 @@ def test_oauth_entrypoints_reject_bundled_client_from_remote_request(
         {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"},
     )
     api_app = _make_test_app(runtime_paths, _config_payload())
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "public_mail_oauth_client",
+        {
+            "client_id": "provisioned-client-id",
+            "client_secret": "provisioned-client-secret",
+            RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
+        },
+    )
     provider = OAuthProvider(
         id="public_mail",
         display_name="Public Mail",
@@ -823,7 +817,6 @@ def test_oauth_entrypoints_reject_bundled_client_from_remote_request(
         credential_service="public_mail_oauth",
         client_config_services=("public_mail_oauth_client",),
         pkce_code_challenge_method="S256",
-        loopback_client_id="bundled-public-client",
     )
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
@@ -920,65 +913,6 @@ def test_provider_exchange_and_refresh_use_oauth_client(
     assert refreshed["token"] == "refreshed-access-token"
     assert refreshed["refresh_token"] == "refresh-token"
     assert refreshed["expires_at"] == 1300.0
-
-
-def test_provider_exchange_uses_public_auth_for_bundled_client(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime_paths = _runtime_paths(tmp_path, {})
-    provider = OAuthProvider(
-        id="public_mail",
-        display_name="Public Mail",
-        authorization_url="https://auth.example.test/authorize",
-        token_url="https://auth.example.test/token",
-        scopes=("mail.read",),
-        credential_service="public_mail_oauth",
-        client_config_services=("public_mail_oauth_client",),
-        pkce_code_challenge_method="S256",
-        loopback_client_id="bundled-public-client",
-    )
-    seen: dict[str, Any] = {}
-
-    class FakeOAuth2Client:
-        def __init__(self, **kwargs: object) -> None:
-            seen["init_kwargs"] = kwargs
-
-        async def __aenter__(self) -> FakeOAuth2Client:
-            return self
-
-        async def __aexit__(self, *_args: object) -> None:
-            return None
-
-        async def fetch_token(self, url: str, **kwargs: object) -> dict[str, Any]:
-            seen["fetch"] = {"url": url, **kwargs}
-            return {"access_token": "access-token", "scope": "mail.read"}
-
-    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
-
-    result = asyncio.run(
-        provider.exchange_code(
-            "auth-code",
-            runtime_paths,
-            code_verifier="pkce-verifier",
-        ),
-    )
-
-    assert seen["init_kwargs"] == {
-        "client_id": "bundled-public-client",
-        "client_secret": None,
-        "scope": ("mail.read",),
-        "redirect_uri": "http://localhost:8765/api/oauth/public_mail/callback",
-        "token_endpoint_auth_method": "none",
-        "timeout": 20.0,
-    }
-    assert seen["fetch"] == {
-        "url": "https://auth.example.test/token",
-        "code": "auth-code",
-        "grant_type": "authorization_code",
-        "code_verifier": "pkce-verifier",
-    }
-    assert result.token_data["client_id"] == "bundled-public-client"
 
 
 def test_provider_refresh_token_data_skips_unexpired_access_token(

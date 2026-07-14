@@ -132,8 +132,6 @@ def test_public_google_oauth_providers_preserve_shared_google_oauth_fields(provi
     )
     assert provider.extra_auth_params == GOOGLE_EXTRA_AUTH_PARAMS
     assert provider.pkce_code_challenge_method == "S256"
-    assert provider.loopback_client_id is None
-    assert provider.loopback_client_secret is None
     assert provider.runtime_bootstrapper is _google_runtime_bootstrapper
     assert provider.token_parser is _google_token_parser
 
@@ -169,8 +167,6 @@ def test_google_oauth_provider_helper_builds_common_google_provider_skeleton() -
     )
     assert provider.extra_auth_params == GOOGLE_EXTRA_AUTH_PARAMS
     assert provider.pkce_code_challenge_method == "S256"
-    assert provider.loopback_client_id is None
-    assert provider.loopback_client_secret is None
     assert provider.runtime_bootstrapper is _google_runtime_bootstrapper
     assert provider.status_capabilities == ("Example read/write",)
     assert provider.token_parser is _google_token_parser
@@ -224,12 +220,11 @@ def test_google_oauth_provider_bootstraps_client_for_paired_install(
     resolution = asyncio.run(provider.client_config_resolution_async(runtime_paths))
 
     assert resolution is not None
-    assert resolution.stored is False
+    assert resolution.custom is False
     assert resolution.service == "google_oauth_client"
     assert resolution.config.client_id == PROVISIONED_CLIENT_ID
     assert resolution.config.client_secret == PROVISIONED_CLIENT_SECRET
     assert resolution.config.redirect_uri == "http://localhost:8765/api/oauth/google_drive/callback"
-    assert resolution.config.token_endpoint_auth_method is None
 
 
 def test_google_oauth_provider_requires_pairing_or_custom_client_on_fresh_install(tmp_path: Path) -> None:

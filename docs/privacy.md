@@ -99,8 +99,8 @@ Information may be shared only as needed to:
 
 The MindRoom software running in your selected installation accesses Google user data only after you connect a Google integration and grant the requested permissions.
 Granting that access does not give the MindRoom project maintainers general access to your Google Account or automatically send them your OAuth tokens or Google data from a local or self-hosted installation.
-When a local installation uses the bundled desktop OAuth client, Google returns the authorization response directly to that installation's loopback callback.
-The bundled desktop flow uses a public client ID with PKCE and does not bundle or send a client secret.
+When a paired local installation uses MindRoom's desktop OAuth client, the provisioning service sends the app client configuration to that installation and Google returns the authorization response directly to its loopback callback.
+The local MindRoom process performs the token exchange with Google and stores the resulting tokens; the provisioning service does not receive the Google authorization code, tokens, or Google API data.
 Control of the OAuth app registration lets the project maintainers manage or disable the client, but it does not by itself reveal a user's OAuth tokens or Google data to them.
 
 Depending on the integrations you connect, this data can include your Google identity information, Gmail messages and metadata, Drive file metadata and contents, Calendar data, and Sheets spreadsheet values.

@@ -84,7 +84,7 @@ async def _google_runtime_bootstrapper(
 ) -> OAuthRuntimeEndpoints:
     """Fetch the installed-app client config through an authenticated local pairing."""
     resolution = _provider.client_config_resolution(runtime_paths)
-    if resolution is not None and resolution.stored:
+    if resolution is not None and resolution.custom:
         return _google_runtime_endpoints()
 
     manager = get_runtime_credentials_manager(runtime_paths)

@@ -106,18 +106,18 @@ async def _client_config_resolution_for_request(
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
     *,
-    reject_remote_bundled: bool,
+    reject_remote_provisioned: bool,
 ) -> OAuthClientConfigResolution | None:
     """Resolve an OAuth client that can return to the requesting browser host."""
     try:
         resolution = await provider.client_config_resolution_async(runtime_paths)
     except OAuthProviderError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    if resolution is None or resolution.stored or is_oauth_loopback_hostname(request.url.hostname):
+    if resolution is None or resolution.custom or is_oauth_loopback_hostname(request.url.hostname):
         return resolution
-    if reject_remote_bundled:
+    if reject_remote_provisioned:
         detail = (
-            "The built-in OAuth client is available only when MindRoom is opened on localhost. "
+            "The provisioned OAuth client is available only when MindRoom is opened on localhost. "
             "Set MINDROOM_PUBLIC_URL (or MINDROOM_BASE_URL) and configure a custom OAuth client for remote access."
         )
         raise HTTPException(status_code=503, detail=detail)
@@ -136,7 +136,7 @@ async def _issue_authorization_url(
         request,
         provider,
         runtime_paths,
-        reject_remote_bundled=True,
+        reject_remote_provisioned=True,
     )
     if connect_token:
         try:
@@ -470,7 +470,7 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
             request,
             provider,
             runtime_paths,
-            reject_remote_bundled=False,
+            reject_remote_provisioned=False,
         )
     )
     has_client_config = client_config_resolution is not None
@@ -512,7 +512,7 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
         client_config_redirect_uri_supported=client_config_redirect_uri_supported,
         connected=connected,
         has_client_config=has_client_config,
-        has_custom_client_config=(client_config_resolution is not None and client_config_resolution.stored),
+        has_custom_client_config=(client_config_resolution is not None and client_config_resolution.custom),
         has_service_account_config=has_service_account_config,
         email=_claim_str(credentials, "email"),
         hosted_domain=_claim_str(credentials, "hd"),
