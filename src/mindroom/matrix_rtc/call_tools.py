@@ -87,7 +87,7 @@ class CallAgentTooling:
 
     tools: tuple[Any, ...]
     instructions: str
-    execution_identity: ToolExecutionIdentity | None = None
+    execution_identity: ToolExecutionIdentity
     responder: Callable[[str, Callable[[list[str]], None] | None], Awaitable[CallAgentResponse]] | None = None
     finalize_spoken_response: Callable[[str | None, str, bool], Awaitable[None] | None] | None = None
 

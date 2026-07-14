@@ -245,6 +245,16 @@ def _call_execution_identity(
     )
 
 
+def _call_execution_identity_from_tool_kwargs(kwargs: dict[str, object]) -> ToolExecutionIdentity:
+    return _call_execution_identity(
+        runtime_paths=cast("RuntimePaths", kwargs["runtime_paths"]),
+        requester_id=cast("str", kwargs["requester_id"]),
+        room_id=cast("str", kwargs["room_id"]),
+        agent_name=cast("str", kwargs["agent_name"]),
+        session_id=cast("str | None", kwargs["session_id"]),
+    )
+
+
 def _cascaded_config(*, local: bool = False) -> Config:
     config = _config()
     if local:
@@ -359,8 +369,12 @@ def _stub_join_externals(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.request_sfu_grant", fake_grant)
 
-    async def fake_tools(**_kwargs: object) -> CallAgentTooling:
-        return CallAgentTooling(tools=(), instructions="You are Helper.")
+    async def fake_tools(**kwargs: object) -> CallAgentTooling:
+        return CallAgentTooling(
+            tools=(),
+            instructions="You are Helper.",
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+        )
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
 
@@ -426,13 +440,7 @@ async def test_manager_joins_requester_private_agent_in_owned_rooms(
         return CallAgentTooling(
             tools=(),
             instructions="Private helper",
-            execution_identity=_call_execution_identity(
-                runtime_paths=cast("RuntimePaths", kwargs["runtime_paths"]),
-                requester_id=requester_id,
-                room_id=cast("str", kwargs["room_id"]),
-                agent_name=cast("str", kwargs["agent_name"]),
-                session_id=cast("str | None", kwargs["session_id"]),
-            ),
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
         )
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
@@ -599,7 +607,12 @@ async def test_manager_selects_cascaded_backend_with_independent_speech_services
     async def fake_tools(**kwargs: object) -> CallAgentTooling:
         assert kwargs["enable_responder"] is True
         assert str(kwargs["session_id"]).startswith(f"{ROOM_ID}:call:")
-        return CallAgentTooling(tools=(), instructions="", responder=respond)
+        return CallAgentTooling(
+            tools=(),
+            instructions="",
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+            responder=respond,
+        )
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
     client = _client()
@@ -639,8 +652,13 @@ async def test_cascaded_agent_start_failure_tears_down_and_retries(
     ) -> CallAgentResponse:
         return CallAgentResponse("answer")
 
-    async def fake_tools(**_kwargs: object) -> CallAgentTooling:
-        return CallAgentTooling(tools=(), instructions="", responder=respond)
+    async def fake_tools(**kwargs: object) -> CallAgentTooling:
+        return CallAgentTooling(
+            tools=(),
+            instructions="",
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+            responder=respond,
+        )
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
     client = _client()
@@ -936,7 +954,11 @@ async def test_manager_restarts_when_sole_requester_changes(
 
     async def fake_tools(**kwargs: object) -> CallAgentTooling:
         requesters.append(str(kwargs["requester_id"]))
-        return CallAgentTooling(tools=(), instructions="You are Helper.")
+        return CallAgentTooling(
+            tools=(),
+            instructions="You are Helper.",
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+        )
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
     config = _config()
@@ -1692,7 +1714,11 @@ async def test_manager_passes_same_agent_tools_and_prompt(
 
     async def fake_build_call_tools(**kwargs: object) -> CallAgentTooling:
         tool_kwargs.update(kwargs)
-        return CallAgentTooling(tools=(sentinel_tool,), instructions="CHAT PROMPT")
+        return CallAgentTooling(
+            tools=(sentinel_tool,),
+            instructions="CHAT PROMPT",
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+        )
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_build_call_tools)
     client = _client()
@@ -2383,7 +2409,11 @@ async def test_cascaded_retries_reuse_logical_call_session_id(
 
     async def fake_tools(**kwargs: object) -> CallAgentTooling:
         session_ids.append(cast("str", kwargs["session_id"]))
-        return CallAgentTooling(tools=(), instructions="")
+        return CallAgentTooling(
+            tools=(),
+            instructions="",
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+        )
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
     client = _client()

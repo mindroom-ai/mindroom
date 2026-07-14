@@ -32,7 +32,7 @@ The agent leaves the call and clears its membership state event when the caller 
 calls:
   enabled: true
   backend: realtime           # default; preserves OpenAI speech-to-speech
-  agents: [assistant]        # shared agents that may join calls in their configured rooms
+  agents: [assistant]         # agents that may join calls in their configured rooms
   model: gpt-realtime-2.1    # OpenAI realtime model
   credentials_service: openai # strict credential service binding; defaults to openai
   voice: marin               # optional voice preset
@@ -46,7 +46,8 @@ MindRoom enforces at most one calls-enabled agent per room.
 Calls only join rooms configured for that agent and only while the sole caller passes the normal room and per-agent reply permissions.
 Calls-enabled agents also join calls in ad-hoc rooms they accepted through their normal authorized-invite policy. This lets Matrix clients create a private, temporary voice room and invite one agent without adding that room to `config.yaml` first.
 Calls-enabled agents advertise `📞 Voice calls` in their Matrix presence status only when their MatrixRTC runtime is available, so clients can show the call action only where it will be answered.
-Requester-private agents are not currently supported for calls.
+Requester-private agents use the sole authorized caller's verified Matrix user ID to resolve their workspace, memory, credentials, history, knowledge, and tool execution scope.
+The same caller scope applies in configured rooms and authorized ad-hoc invite rooms.
 
 ## Cascaded cloud example
 
@@ -159,7 +160,8 @@ Calls in unencrypted rooms need none of this and work with plain SFU media.
 ## Transcripts and memory
 
 Every call writes a markdown transcript incrementally.
-File-memory agents keep it under `calls/` in their canonical workspace, where their file tools can read it later; other agents keep it under `<storage>/calls/<agent>/`.
+Shared file-memory agents keep it under `calls/` in their canonical workspace, where their file tools can read it later; other shared agents keep it under `<storage>/calls/<agent>/`.
+Requester-private file-memory agents keep transcripts in their requester-scoped workspace, while other requester-private agents keep them in their requester-scoped state archive.
 When the call ends, file memory stores a relative transcript reference, Mem0 stores the transcript as recallable context, and disabled memory leaves only the transcript file.
 
 ## Limitations
