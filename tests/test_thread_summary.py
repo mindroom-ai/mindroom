@@ -2235,8 +2235,8 @@ class TestGenerateSummary:
 
         assert result is None
 
-    async def test_initial_enrichment_rejects_all_invalid_tags(self) -> None:
-        """An initial response with no usable canonical tag must remain retryable."""
+    async def test_initial_enrichment_preserves_summary_when_all_tags_are_invalid(self) -> None:
+        """Invalid generated tags should not discard the valid refreshed summary."""
         mock_response = MagicMock(
             content=_ThreadEnrichment(
                 summary="🧵 Invalid tags",
@@ -2256,7 +2256,7 @@ class TestGenerateSummary:
                 tag_vocabulary="- bug (2)",
             )
 
-        assert result is None
+        assert result == "🧵 Invalid tags"
 
     async def test_later_summary_rejects_unrequested_enrichment_output(self) -> None:
         """A later summary call must never revive automatic tagging."""

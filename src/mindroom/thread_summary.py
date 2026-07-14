@@ -418,7 +418,7 @@ async def _generate_summary(
             if normalized_tag is not None and normalized_tag not in normalized_tags:
                 normalized_tags.append(normalized_tag)
         if not normalized_tags:
-            return None
+            return content.summary
         return _ThreadEnrichment(
             summary=content.summary,
             tags=normalized_tags[:_MAX_INITIAL_TAGS],
