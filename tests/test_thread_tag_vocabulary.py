@@ -110,27 +110,27 @@ def _config(timezone: str = "UTC") -> Config:
 
 
 class TestMostRecentRebuildBoundary:
-    """The daily rebuild boundary is a fixed early-morning local hour."""
+    """The daily rebuild boundary is local midnight."""
 
-    def test_after_boundary_hour_returns_today(self) -> None:
-        """Past the boundary hour, the boundary is today's."""
+    def test_midday_returns_today_at_midnight(self) -> None:
+        """During the day, the boundary is today's midnight."""
         now = datetime(2026, 7, 12, 15, 30, tzinfo=UTC)
 
         boundary = _most_recent_rebuild_boundary(now, "UTC")
 
         assert boundary == datetime(2026, 7, 12, _REBUILD_BOUNDARY_HOUR, 0, tzinfo=UTC)
 
-    def test_before_boundary_hour_returns_yesterday(self) -> None:
-        """Before the boundary hour, the boundary is yesterday's."""
-        now = datetime(2026, 7, 12, 3, 59, tzinfo=UTC)
+    def test_exact_midnight_returns_itself(self) -> None:
+        """At midnight, the new day's boundary is already active."""
+        now = datetime(2026, 7, 12, 0, 0, tzinfo=UTC)
 
         boundary = _most_recent_rebuild_boundary(now, "UTC")
 
-        assert boundary == datetime(2026, 7, 11, _REBUILD_BOUNDARY_HOUR, 0, tzinfo=UTC)
+        assert boundary == now
 
     def test_boundary_uses_local_timezone(self) -> None:
         """The boundary is computed in the configured local timezone."""
-        now = datetime(2026, 7, 12, 8, 0, tzinfo=UTC)
+        now = datetime(2026, 7, 12, 6, 0, tzinfo=UTC)
 
         boundary = _most_recent_rebuild_boundary(now, "America/Los_Angeles")
 
@@ -152,7 +152,7 @@ class TestSnapshotIsStale:
     def test_snapshot_before_boundary_is_stale(self) -> None:
         """A snapshot built before the current boundary is stale."""
         snapshot = _TagVocabularySnapshot(
-            built_at=datetime(2026, 7, 12, 3, 0, tzinfo=UTC),
+            built_at=datetime(2026, 7, 11, 23, 59, tzinfo=UTC),
             tags=(),
         )
 
@@ -165,7 +165,7 @@ class TestSnapshotIsStale:
     def test_snapshot_after_boundary_is_fresh(self) -> None:
         """A snapshot built after the current boundary is fresh."""
         snapshot = _TagVocabularySnapshot(
-            built_at=datetime(2026, 7, 12, 5, 0, tzinfo=UTC),
+            built_at=datetime(2026, 7, 12, 0, 1, tzinfo=UTC),
             tags=(),
         )
 
@@ -206,7 +206,7 @@ def test_room_scope_boundary_maps_are_lru_bounded(tmp_path: Path) -> None:
     """Room-scoped freshness state evicts its oldest entry at the shared bound."""
     runtime_paths = _runtime_paths(tmp_path)
     boundaries: OrderedDict[tuple[Path, str], datetime] = OrderedDict()
-    boundary = datetime(2026, 7, 12, 4, 0, tzinfo=UTC)
+    boundary = datetime(2026, 7, 12, 0, 0, tzinfo=UTC)
 
     for index in range(_MAX_TRACKED_ROOM_SCOPES + 1):
         _remember_boundary(boundaries, (runtime_paths.storage_root, f"!room{index}:localhost"), boundary)

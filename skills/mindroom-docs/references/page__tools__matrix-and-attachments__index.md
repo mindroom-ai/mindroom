@@ -370,7 +370,7 @@ Expected Matrix write failures are isolated so a failed tag write does not block
 Failed initial tag reads or all-failed tag writes leave the summary's durable enrichment marker incomplete, so the next summary threshold retries structured enrichment.
 Once existing tags, prior tag-state history, or newly written tags mark initial enrichment complete, later summary refreshes use a summary-only schema and never regenerate or replace tags.
 Each room has its own vocabulary snapshot built only from that room's tag state.
-The first successful post-response check after 04:00 in the configured timezone refreshes a stale room snapshot for the day.
+The first successful post-response check after midnight in the configured timezone refreshes a stale room snapshot for the day.
 The refresh reads Matrix tag state and writes a durable local snapshot under `mindroom_data/tracking/thread_tag_vocabulary/`.
 Initial enrichment uses the summary call that would already run and can add up to three Matrix state writes.
 

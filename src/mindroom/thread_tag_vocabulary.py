@@ -2,8 +2,8 @@
 
 The `tag_thread` tool description embeds the most-used short tags for the
 current room so agents converge on a shared vocabulary without leaking tag
-names between rooms. The ranked list is rebuilt at most once per day at a
-fixed early-morning boundary instead of on every tag change.
+names between rooms. The ranked list is rebuilt at most once per day at local
+midnight instead of on every tag change.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _VOCABULARY_DESCRIPTION_TAG_LIMIT = 20
-_REBUILD_BOUNDARY_HOUR = 4
+_REBUILD_BOUNDARY_HOUR = 0
 _VOCABULARY_DIRECTORY = "thread_tag_vocabulary"
 _SNAPSHOT_VERSION = 1
 _REBUILD_FAILURE_RETRY_DELAY = timedelta(minutes=5)
@@ -166,12 +166,9 @@ def load_tag_vocabulary_snapshot(
 
 
 def _most_recent_rebuild_boundary(now: datetime, timezone_name: str) -> datetime:
-    """Return the most recent daily rebuild boundary at or before *now*."""
+    """Return the most recent local-midnight rebuild boundary."""
     local_now = now.astimezone(ZoneInfo(timezone_name))
-    boundary = local_now.replace(hour=_REBUILD_BOUNDARY_HOUR, minute=0, second=0, microsecond=0)
-    if local_now < boundary:
-        boundary -= timedelta(days=1)
-    return boundary
+    return local_now.replace(hour=_REBUILD_BOUNDARY_HOUR, minute=0, second=0, microsecond=0)
 
 
 def _snapshot_is_stale(
