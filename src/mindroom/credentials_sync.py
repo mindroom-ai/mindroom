@@ -392,8 +392,6 @@ def get_api_key_for_provider(provider: str, runtime_paths: RuntimePaths) -> str 
         The API key if found, None otherwise
 
     """
-    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
-
     # Special case for Ollama - return None as it doesn't use API keys
     if provider == "ollama":
         return None
@@ -402,7 +400,12 @@ def get_api_key_for_provider(provider: str, runtime_paths: RuntimePaths) -> str 
     if provider == "gemini":
         provider = "google"
 
-    return creds_manager.get_api_key(provider)
+    return get_api_key_for_service(provider, runtime_paths)
+
+
+def get_api_key_for_service(service: str, runtime_paths: RuntimePaths) -> str | None:
+    """Get an API key from one explicitly named shared credential service."""
+    return get_runtime_shared_credentials_manager(runtime_paths).get_api_key(service)
 
 
 def get_embedder_api_key(

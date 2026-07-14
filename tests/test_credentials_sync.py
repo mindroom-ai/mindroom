@@ -15,6 +15,7 @@ from mindroom.credentials_sync import (
     _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY,
     _ENV_TO_SERVICE_MAP,
     get_api_key_for_provider,
+    get_api_key_for_service,
     get_embedder_api_key,
     get_ollama_host,
     get_secret_from_env,
@@ -837,6 +838,18 @@ class TestCredentialsSync:
 
         # Test non-existent provider
         assert get_api_key_for_provider("anthropic", runtime_paths=runtime_paths) is None
+
+    def test_get_api_key_for_service_is_strict(self, credentials_manager: CredentialsManager) -> None:
+        """A named service resolves only that service's API key."""
+        credentials_manager.save_credentials("openai", {"api_key": "shared-key"})
+        credentials_manager.save_credentials("openai-realtime", {"api_key": "realtime-key"})
+        runtime_paths = _runtime_paths(
+            credentials_manager.storage_root,
+            shared_credentials_dir=credentials_manager.base_path,
+        )
+
+        assert get_api_key_for_service("openai-realtime", runtime_paths) == "realtime-key"
+        assert get_api_key_for_service("missing", runtime_paths) is None
 
     def test_get_ollama_host(self, credentials_manager: CredentialsManager) -> None:
         """Test getting Ollama host configuration."""

@@ -326,6 +326,10 @@ def _stub_join_externals(monkeypatch: pytest.MonkeyPatch) -> None:
         "mindroom.matrix_rtc.call_manager.get_api_key_for_provider",
         lambda _provider, _paths: "sk-test",
     )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_manager.get_api_key_for_service",
+        lambda _service, _paths: "sk-test",
+    )
 
     async def fake_grant(*_args: object, **_kwargs: object) -> SfuGrant:
         return GRANT
@@ -905,7 +909,7 @@ async def test_manager_reconciles_active_calls_after_sync(tmp_path: Path) -> Non
 @pytest.mark.asyncio
 async def test_manager_skips_join_without_openai_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Manager skips join without openai key."""
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.get_api_key_for_provider", lambda _provider, _paths: None)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.get_api_key_for_service", lambda _service, _paths: None)
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = FakeBridge()
@@ -919,18 +923,18 @@ async def test_manager_skips_join_without_openai_key(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
-async def test_manager_reads_openai_key_from_shared_credentials(
+async def test_manager_reads_key_from_configured_credentials_service(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Voice calls use the same dashboard-backed key source as model loading."""
-    requested_providers: list[str] = []
+    """Voice calls use their selected dashboard-backed credential service."""
+    requested_services: list[str] = []
 
-    def fake_api_key(provider: str, _paths: object) -> str:
-        requested_providers.append(provider)
+    def fake_api_key(service: str, _paths: object) -> str:
+        requested_services.append(service)
         return "sk-dashboard"
 
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.get_api_key_for_provider", fake_api_key)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.get_api_key_for_service", fake_api_key)
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = FakeBridge()
@@ -938,7 +942,7 @@ async def test_manager_reads_openai_key_from_shared_credentials(
 
     await manager.on_room_event(_room(), _member_unknown_event())
 
-    assert requested_providers == ["openai"]
+    assert requested_services == ["openai"]
     assert bridge.agent_options is not None
     assert bridge.agent_options.api_key == "sk-dashboard"
 
@@ -1085,8 +1089,8 @@ def test_voice_backend_availability_requires_runtime_credentials(
 ) -> None:
     """Presence readiness is false when the realtime backend cannot authenticate."""
     monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_manager.get_api_key_for_provider",
-        lambda _provider, _paths: None,
+        "mindroom.matrix_rtc.call_manager.get_api_key_for_service",
+        lambda _service, _paths: None,
     )
     manager = _manager(_client(), FakeBridge(), tmp_path)
 
@@ -1102,32 +1106,42 @@ def test_voice_backend_availability_requires_runtime_credentials(
         )
 
 
-def test_realtime_backend_prefers_direct_openai_key(
+def test_realtime_backend_uses_configured_credential_service(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Realtime calls bypass a shared provider credential when a direct key exists."""
-    (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-direct\n", encoding="utf-8")
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_manager.get_api_key_for_provider",
-        lambda _provider, _paths: "sk-shared",
+    """Realtime calls use the strictly configured credential service."""
+    selected_services: list[str] = []
+
+    def lookup(service: str, _paths: object) -> str:
+        selected_services.append(service)
+        return "sk-realtime"
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.get_api_key_for_service", lookup)
+    config = _config()
+    config.calls = CallsConfig(
+        enabled=True,
+        agents=["helper"],
+        livekit_service_url=SERVICE_URL,
+        credentials_service="openai-realtime",
     )
-    manager = _manager(_client(), FakeBridge(), tmp_path)
+    manager = _manager(_client(), FakeBridge(), tmp_path, config)
 
     backend = manager._resolve_voice_backend(ROOM_ID)
 
     assert backend is not None
-    assert backend.realtime_api_key == "sk-direct"
+    assert backend.realtime_api_key == "sk-realtime"
+    assert selected_services == ["openai-realtime"]
 
 
-def test_realtime_backend_falls_back_to_shared_provider_credential(
+def test_realtime_backend_defaults_to_openai_credential_service(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Realtime calls keep working for installs configured through credentials."""
+    """Existing installs keep using the shared OpenAI credential by default."""
     monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_manager.get_api_key_for_provider",
-        lambda _provider, _paths: "sk-shared",
+        "mindroom.matrix_rtc.call_manager.get_api_key_for_service",
+        lambda service, _paths: "sk-shared" if service == "openai" else None,
     )
     manager = _manager(_client(), FakeBridge(), tmp_path)
 
@@ -2835,6 +2849,13 @@ def test_calls_config_rejects_unknown_agents() -> None:
     """Call configuration may reference only declared agents."""
     with pytest.raises(ValueError, match=r"calls\.agents references unknown agent"):
         Config(models={}, calls=CallsConfig(enabled=True, agents=["missing"]))
+
+
+def test_calls_config_validates_realtime_credentials_service() -> None:
+    """Realtime credential bindings use safe normalized service names."""
+    assert CallsConfig(credentials_service=" openai-realtime ").credentials_service == "openai-realtime"
+    with pytest.raises(ValueError, match="Service name can only include"):
+        CallsConfig(credentials_service="../openai")
 
 
 def test_calls_config_rejects_requester_private_agents() -> None:
