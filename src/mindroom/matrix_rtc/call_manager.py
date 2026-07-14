@@ -600,6 +600,14 @@ class CallManager:
                 requester_id=members[0].user_id,
                 cascaded=self._config.calls.backend == "cascaded",
             )
+            transcript = CallTranscript.start(
+                agent_name=self._agent_name,
+                config=self._config,
+                runtime_paths=self._runtime_paths,
+                execution_identity=tooling.execution_identity,
+                room_id=room_id,
+                room_display_name=room.display_name or room_id,
+            )
         except Exception as error:
             logger.warning(
                 "call_join_skipped_agent_materialization_failed",
@@ -618,13 +626,6 @@ class CallManager:
                 error=str(error),
             )
             return "skip"
-        transcript = CallTranscript.start(
-            agent_name=self._agent_name,
-            config=self._config,
-            storage_path=self._runtime_paths.storage_root,
-            room_id=room_id,
-            room_display_name=room.display_name or room_id,
-        )
         bridge = self._bridge_factory(
             f"{self._client.user_id}:{device_id}",
             room.encrypted,
@@ -651,7 +652,6 @@ class CallManager:
                     on_stopped=lambda: transcript.finalize(
                         config=self._config,
                         runtime_paths=self._runtime_paths,
-                        storage_path=self._runtime_paths.storage_root,
                     ),
                     on_failure=lambda message: self._send_call_failure_notice(room_id, message),
                 ),

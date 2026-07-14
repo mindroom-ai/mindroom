@@ -573,16 +573,6 @@ class Config(BaseModel):
             msg = f"calls.agents references unknown agent(s): {', '.join(unknown_agents)}"
             raise ValueError(msg)
 
-        private_agents = sorted(
-            agent_name for agent_name in self.calls.agents if self.agents[agent_name].private is not None
-        )
-        if private_agents:
-            msg = (
-                "calls.agents cannot reference requester-private agent(s): "
-                f"{', '.join(private_agents)}; call agents must currently be shared agents"
-            )
-            raise ValueError(msg)
-
         agents_by_room: dict[str, list[str]] = {}
         for agent_name in self.calls.agents:
             for room in self.agents[agent_name].rooms:

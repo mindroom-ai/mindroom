@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import time
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
@@ -49,6 +49,7 @@ from mindroom.matrix_rtc.voice_agent import (
 )
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
 from mindroom.model_loading import get_model_instance
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, build_tool_execution_identity
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -57,6 +58,7 @@ if TYPE_CHECKING:
 
     from agno.models.openai.chat import OpenAIChat
 
+    from mindroom.constants import RuntimePaths
     from mindroom.matrix_rtc.events import CallMember
 
 BOT_USER = "@helper:example.org"
@@ -223,6 +225,26 @@ def _config(*, enabled: bool = True, credentials_service: str = "openai") -> Con
     )
 
 
+def _call_execution_identity(
+    *,
+    runtime_paths: RuntimePaths,
+    requester_id: str,
+    room_id: str = ROOM_ID,
+    agent_name: str = "helper",
+    session_id: str | None = None,
+) -> ToolExecutionIdentity:
+    return build_tool_execution_identity(
+        channel="matrix",
+        agent_name=agent_name,
+        runtime_paths=runtime_paths,
+        requester_id=requester_id,
+        room_id=room_id,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=session_id or room_id,
+    )
+
+
 def _cascaded_config(*, local: bool = False) -> Config:
     config = _config()
     if local:
@@ -386,6 +408,62 @@ async def test_manager_joins_call_in_authorized_ad_hoc_invited_room(tmp_path: Pa
     await manager.on_room_event(_room(), _member_unknown_event())
 
     assert bridge.connected_grant == GRANT
+
+
+@pytest.mark.parametrize("invited_room", [False, True])
+@pytest.mark.asyncio
+async def test_manager_joins_requester_private_agent_in_owned_rooms(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    invited_room: bool,
+) -> None:
+    """Private call agents use verified caller state in configured and accepted-invite rooms."""
+    seen_requesters: list[str] = []
+
+    async def fake_tools(**kwargs: object) -> CallAgentTooling:
+        requester_id = cast("str", kwargs["requester_id"])
+        seen_requesters.append(requester_id)
+        return CallAgentTooling(
+            tools=(),
+            instructions="Private helper",
+            execution_identity=_call_execution_identity(
+                runtime_paths=cast("RuntimePaths", kwargs["runtime_paths"]),
+                requester_id=requester_id,
+                room_id=cast("str", kwargs["room_id"]),
+                agent_name=cast("str", kwargs["agent_name"]),
+                session_id=cast("str | None", kwargs["session_id"]),
+            ),
+        )
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
+    config = Config(
+        agents={
+            "helper": AgentConfig(
+                display_name="Helper",
+                rooms=[] if invited_room else [ROOM_ID],
+                private=AgentPrivateConfig(per="user_agent"),
+            ),
+        },
+        models={},
+        authorization=AuthorizationConfig(global_users=["@alice:example.org"]),
+        calls=CallsConfig(enabled=True, agents=["helper"], livekit_service_url=SERVICE_URL),
+    )
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(
+        client,
+        bridge,
+        tmp_path,
+        config,
+        invited_rooms_by_agent={"helper": {ROOM_ID}} if invited_room else None,
+    )
+
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    assert bridge.connected_grant == GRANT
+    assert seen_requesters == ["@alice:example.org"]
+    await manager.shutdown()
 
 
 @pytest.mark.asyncio
@@ -2854,19 +2932,21 @@ def test_calls_config_validates_realtime_credentials_service() -> None:
         CallsConfig(credentials_service="../openai")
 
 
-def test_calls_config_rejects_requester_private_agents() -> None:
-    """Call transcript and memory lifecycle currently require shared agents."""
-    with pytest.raises(ValueError, match=r"calls\.agents cannot reference requester-private agent"):
-        Config(
-            models={},
-            agents={
-                "private": AgentConfig(
-                    display_name="Private",
-                    private=AgentPrivateConfig(per="user_agent"),
-                ),
-            },
-            calls=CallsConfig(enabled=True, agents=["private"]),
-        )
+@pytest.mark.parametrize("private_scope", ["user", "user_agent"])
+def test_calls_config_accepts_requester_private_agents(private_scope: Literal["user", "user_agent"]) -> None:
+    """Both requester-private partition modes may opt into voice calls."""
+    config = Config(
+        models={},
+        agents={
+            "private": AgentConfig(
+                display_name="Private",
+                private=AgentPrivateConfig(per=private_scope),
+            ),
+        },
+        calls=CallsConfig(enabled=True, agents=["private"]),
+    )
+
+    assert config.calls.agents == ["private"]
 
 
 def test_calls_config_rejects_agents_sharing_a_room() -> None:
