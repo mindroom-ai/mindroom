@@ -1668,7 +1668,12 @@ def create_agent(
     runtime_model_config = config.models.get(active_model_name or agent_config.model or "default")
     native_deferred_tools = runtime_model_config is not None and (
         native_tool_search_supported(runtime_model_config.provider, runtime_model_config.id)
-        or openai_native_tool_search_supported(runtime_model_config.provider, runtime_model_config.id)
+        or openai_native_tool_search_supported(
+            runtime_model_config.provider,
+            runtime_model_config.id,
+            base_url=(runtime_model_config.extra_kwargs or {}).get("base_url")
+            or runtime_paths.env_value("OPENAI_BASE_URL"),
+        )
     )
 
     tool_assembly = _assemble_agent_toolkits(

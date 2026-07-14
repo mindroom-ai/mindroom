@@ -125,6 +125,12 @@ models:
       base_url: http://localhost:8080/v1
 ```
 
+## OpenAI API Models
+
+GPT 5.4 and newer models on the first-party `openai` provider use the Responses API.
+This enables OpenAI's native deferred-tool search without disabling reasoning.
+Older GPT models and models configured with a custom `extra_kwargs.base_url` keep using Chat Completions for OpenAI-compatible endpoint support.
+
 ## Codex Subscription Models
 
 Use `provider: codex` when you want MindRoom to call models exposed through an authenticated local Codex CLI session instead of the regular OpenAI API.
