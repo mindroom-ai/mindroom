@@ -595,7 +595,12 @@ def _build_summary_input(
     remaining = max_input_tokens - estimate_compaction_input_tokens(empty_input) - _WRAPPER_OVERHEAD_TOKENS
 
     if remaining <= 0:
-        return summary_block, []
+        return _build_oversized_summary_input(
+            summary_block=summary_block,
+            compacted_runs=compacted_runs[:1],
+            history_settings=history_settings,
+            max_input_tokens=max_input_tokens,
+        )
 
     included_runs: list[RunOutput | TeamRunOutput] = []
     serialized_runs: list[str] = []
@@ -738,11 +743,7 @@ def _truncate_excerpt(text: str, max_chars: int) -> str:
 
 
 def _remaining_excerpt_budget(max_input_tokens: int, summary_block: str) -> int:
-    return (
-        max_input_tokens
-        - estimate_compaction_input_tokens(_compose_summary_input(summary_block, ""))
-        - _WRAPPER_OVERHEAD_TOKENS
-    )
+    return max_input_tokens - estimate_compaction_input_tokens(_compose_summary_input(summary_block, ""))
 
 
 def _compose_summary_input(summary_block: str, serialized_runs: str) -> str:
