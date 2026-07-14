@@ -974,7 +974,7 @@ router:
 matrix_room_access:
   mode: single_user_private
   room_admins:
-    # Pairing with MindRoom Chat replaces this with the paired owner's Matrix user ID.
+    # MindRoom Chat pairing writes the paired owner's Matrix user ID here.
     - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
 
 matrix_space:
