@@ -1061,6 +1061,29 @@ async def test_sessions_spawn_rejects_invalid_tag(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_sessions_spawn_rejects_resolved_tag_before_matrix_send(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spawn metadata must not create lifecycle state through generic tagging."""
+    send_mock = AsyncMock(return_value="$event")
+    tag_mock = AsyncMock()
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    monkeypatch.setattr(subagents_module, "set_thread_tag", tag_mock)
+    ctx = _make_context(tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await SubAgentsTools().sessions_spawn(task="do thing", summary=TEST_SUMMARY, tag="resolved"),
+        )
+
+    assert payload["status"] == "error"
+    assert "lifecycle state" in payload["message"]
+    send_mock.assert_not_awaited()
+    tag_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_sessions_spawn_validates_before_matrix_send(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

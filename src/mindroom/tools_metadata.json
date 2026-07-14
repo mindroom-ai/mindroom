@@ -621,6 +621,31 @@
       "dependencies": [
         "agno"
       ],
+      "description": "Explicitly resolve or reopen the active Matrix thread",
+      "display_name": "Thread Resolution",
+      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "function_names": [
+        "reopen_thread",
+        "resolve_thread"
+      ],
+      "helper_text": null,
+      "icon": "CircleCheckBig",
+      "icon_color": "text-emerald-500",
+      "name": "thread_resolution",
+      "requires_room_context": true,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "communication",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
       "description": "Set or update Matrix thread summaries with room/thread context defaults",
       "display_name": "Thread Summary",
       "docs_url": "https://github.com/mindroom-ai/mindroom",

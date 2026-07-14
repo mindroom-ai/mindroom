@@ -27,7 +27,7 @@ from mindroom.thread_tag_vocabulary import (
     load_tag_vocabulary_snapshot,
     maybe_rebuild_tag_vocabulary,
 )
-from mindroom.thread_tags import coerce_tag_name, set_thread_tags_if_empty
+from mindroom.thread_tags import AUTOMATIC_THREAD_TAG_EXCLUSIONS, coerce_tag_name, set_thread_tags_if_empty
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
@@ -415,7 +415,11 @@ async def _generate_summary(
         normalized_tags: list[str] = []
         for raw_tag in content.tags:
             normalized_tag = coerce_tag_name(raw_tag)
-            if normalized_tag is not None and normalized_tag not in normalized_tags:
+            if (
+                normalized_tag is not None
+                and normalized_tag not in AUTOMATIC_THREAD_TAG_EXCLUSIONS
+                and normalized_tag not in normalized_tags
+            ):
                 normalized_tags.append(normalized_tag)
         if not normalized_tags:
             return content.summary

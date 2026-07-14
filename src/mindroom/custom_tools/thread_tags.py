@@ -21,6 +21,7 @@ from mindroom.thread_tag_vocabulary import (
 )
 from mindroom.thread_tags import (
     COERCED_TAG_MAX_LENGTH,
+    RESOLVED_THREAD_TAG,
     ThreadTagRecord,
     ThreadTagsError,
     ThreadTagsListing,
@@ -51,6 +52,8 @@ def _build_tag_thread_description(runtime_paths: RuntimePaths, room_id: str) -> 
         '"feature-request").\n'
         "Prefer existing tags; only introduce a new tag when none fit. "
         "1-3 tags per thread is typical; keep a thread to at most ~5 tags.\n"
+        "Thread lifecycle state cannot be changed with this tool. "
+        "Use the optional thread_resolution tool when it is explicitly configured.\n"
         f"{format_tag_vocabulary_for_description(snapshot)}"
     )
 
@@ -81,6 +84,18 @@ def _normalize_tool_tag(tag: str) -> str:
     normalized_tag = coerce_tag_name(tag)
     if normalized_tag is None:
         msg = "tag must contain at least one letter, digit, or hyphen after normalization."
+        raise ThreadTagsError(msg)
+    return normalized_tag
+
+
+def _normalize_topic_tool_tag(tag: str) -> str:
+    """Normalize one topic tag and reject thread lifecycle state."""
+    normalized_tag = _normalize_tool_tag(tag)
+    if normalized_tag == RESOLVED_THREAD_TAG:
+        msg = (
+            f"Tag {RESOLVED_THREAD_TAG!r} is thread lifecycle state and cannot be changed with thread_tags. "
+            "Use thread_resolution when that capability is explicitly configured."
+        )
         raise ThreadTagsError(msg)
     return normalized_tag
 
@@ -122,7 +137,7 @@ class ThreadTagsTools(Toolkit):
         note: str | None = None,
         data: dict[str, object] | None = None,
     ) -> str:
-        """Add or update one tag on the current or specified Matrix thread."""
+        """Add or update one topic tag; lifecycle state requires thread_resolution."""
         context = get_tool_runtime_context()
         if context is None:
             return self._context_error()
@@ -145,7 +160,7 @@ class ThreadTagsTools(Toolkit):
             )
 
         try:
-            normalized_tag = _normalize_tool_tag(tag)
+            normalized_tag = _normalize_topic_tool_tag(tag)
         except ThreadTagsError as exc:
             return self._payload(
                 "error",
@@ -213,7 +228,7 @@ class ThreadTagsTools(Toolkit):
         room_id: str | None = None,
         canonical: bool = False,
     ) -> str:
-        """Remove one tag, normalizing free-form input exactly like tag_thread."""
+        """Remove one topic tag; lifecycle state requires thread_resolution."""
         context = get_tool_runtime_context()
         if context is None:
             return self._context_error()
@@ -236,7 +251,7 @@ class ThreadTagsTools(Toolkit):
             )
 
         try:
-            normalized_tag = _normalize_tool_tag(tag)
+            normalized_tag = _normalize_topic_tool_tag(tag)
         except ThreadTagsError as exc:
             return self._payload(
                 "error",

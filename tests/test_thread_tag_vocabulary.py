@@ -221,6 +221,24 @@ def test_load_snapshot_missing_file_returns_none(tmp_path: Path) -> None:
     assert load_tag_vocabulary_snapshot(_runtime_paths(tmp_path), _ROOM_A) is None
 
 
+def test_load_snapshot_omits_automatic_tag_exclusions_from_model_vocabulary(tmp_path: Path) -> None:
+    """Existing snapshots must not advertise lifecycle state as topic tags."""
+    runtime_paths = _runtime_paths(tmp_path)
+    _write_snapshot_file(
+        runtime_paths,
+        _ROOM_A,
+        built_at=datetime(2026, 7, 12, 5, 0, tzinfo=UTC),
+        tags=[{"tag": "resolved", "count": 5}, {"tag": "bug", "count": 3}],
+    )
+
+    snapshot = load_tag_vocabulary_snapshot(runtime_paths, _ROOM_A)
+
+    assert snapshot is not None
+    assert snapshot.tags == (_TagUsage(tag="bug", count=3),)
+    assert "resolved" not in format_tag_vocabulary_for_description(snapshot)
+    assert "resolved" not in format_tag_vocabulary_with_counts(snapshot)
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -290,9 +308,11 @@ async def test_maybe_rebuild_counts_ranks_and_persists_one_room(tmp_path: Path) 
     client = _client_with_room_state(
         {
             _ROOM_A: [
+                _tag_state_event("$t1", "resolved"),
                 _tag_state_event("$t1", "bug"),
                 _tag_state_event("$t1", "docs"),
                 _tag_state_event("$t2", "bug"),
+                _tag_state_event("$t2", "resolved"),
             ],
             _ROOM_B: [_tag_state_event("$t3", "private")],
         },
@@ -309,14 +329,15 @@ async def test_maybe_rebuild_counts_ranks_and_persists_one_room(tmp_path: Path) 
     )
 
     assert rebuilt is not None
+    assert rebuilt.tags == (
+        _TagUsage(tag="bug", count=2),
+        _TagUsage(tag="docs", count=1),
+    )
     client.room_get_state.assert_awaited_once_with(_ROOM_A)
     snapshot = load_tag_vocabulary_snapshot(runtime_paths, _ROOM_A)
     assert snapshot is not None
     assert snapshot.built_at == now
-    assert snapshot.tags == (
-        _TagUsage(tag="bug", count=2),
-        _TagUsage(tag="docs", count=1),
-    )
+    assert snapshot.tags == rebuilt.tags
     assert load_tag_vocabulary_snapshot(runtime_paths, _ROOM_B) is None
 
 

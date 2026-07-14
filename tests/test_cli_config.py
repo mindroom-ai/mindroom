@@ -247,6 +247,7 @@ class TestConfigInit:
             "thread_tags",
             "thread_summary",
         ]
+        assert "thread_resolution" not in mind["tools"]
         assert mind["skills"] == ["mindroom-docs"]
         assert "knowledge_bases" not in config
         assert config["memory"]["backend"] == "file"
