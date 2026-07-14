@@ -7,7 +7,6 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 import yaml
 
 from mindroom.agents import create_agent
@@ -301,40 +300,50 @@ class TestUpdateOwnConfig:
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert saved["agents"]["coder"]["tools"] == ["self_config_plugin_tool"]
 
-    @pytest.mark.parametrize("privileged_tool", ["config_manager", "thread_resolution"])
-    def test_update_tools_blocks_privileged_tool(self, privileged_tool: str) -> None:
+    def test_update_tools_blocks_privileged_tool(self) -> None:
         """Self-config should not allow assigning privileged global-config tools."""
         _, config_path = _make_config(
             agents={"coder": AgentConfig(display_name="Coder", role="Code", tools=["self_config"])},
         )
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
-            result = tool.update_own_config(tools=[privileged_tool])
+            result = tool.update_own_config(tools=["config_manager"])
             assert "Error" in result
             assert "privileged tools" in result
-            assert privileged_tool in result
+            assert "config_manager" in result
 
             reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].tool_names == ["self_config"]
         finally:
             config_path.unlink(missing_ok=True)
 
-    @pytest.mark.parametrize("privileged_tool", ["config_manager", "thread_resolution"])
-    def test_update_include_default_tools_blocks_when_defaults_contain_privileged(
-        self,
-        privileged_tool: str,
-    ) -> None:
+    def test_update_tools_allows_thread_resolution(self) -> None:
+        """Self-config may opt its own agent into thread resolution."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code", tools=["self_config"])},
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            result = tool.update_own_config(tools=["self_config", "thread_resolution"])
+
+            assert "Successfully" in result
+            reloaded = load_config_yaml(config_path)
+            assert reloaded.agents["coder"].tool_names == ["self_config", "thread_resolution"]
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_include_default_tools_blocks_when_defaults_contain_privileged(self) -> None:
         """Setting include_default_tools=True should be blocked if defaults.tools has privileged tools."""
         _, config_path = _make_config(
             agents={"coder": AgentConfig(display_name="Coder", role="Code", include_default_tools=False)},
-            defaults=DefaultsConfig(tools=[privileged_tool]),
+            defaults=DefaultsConfig(tools=["config_manager"]),
         )
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
             result = tool.update_own_config(include_default_tools=True)
             assert "Error" in result
             assert "privileged tools" in result
-            assert privileged_tool in result
+            assert "config_manager" in result
 
             reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].include_default_tools is False

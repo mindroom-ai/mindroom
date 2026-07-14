@@ -194,8 +194,8 @@ Both functions require an active thread and always target its canonical thread r
 ### Configuration
 
 This tool has no tool-specific inline configuration fields.
-It is not included in starter configs or default tool sets, so thread resolution remains a human operation unless an operator grants this capability explicitly.
-The `self_config` tool cannot grant `thread_resolution` to its own agent.
+It is not included in starter configs or default tool sets, so ordinary agents cannot resolve threads.
+Operators may grant it directly, and agents explicitly granted `self_config` may add it to their own tool list.
 
 ### Example
 
