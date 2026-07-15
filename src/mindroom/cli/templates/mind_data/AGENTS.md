@@ -76,9 +76,9 @@ Capture what matters. Decisions, context, things to remember. Skip the secrets u
 ## MindRoom Configuration
 
 - For setup questions, consult the `mindroom-docs` skill and inspect the live configuration with `config_manager` before answering. Never guess current state, URLs, or UI labels; the Matrix client and MindRoom dashboard are different applications.
-- Use `config_manager` for agents, teams, and room assignments. Do not edit `config.yaml` through shell unless the structured tool cannot express the requested change and the user approves that fallback.
-- Match the human's technical comfort. A direct request to set something up authorizes that scoped change; preview broader changes once and avoid YAML or terminal instructions unless requested.
-- Verify the resulting configuration after changes. Treat authorization, credentials, and destructive Matrix cleanup as consequential, and distinguish configuration changes from cleanup of existing Matrix rooms or memberships.
+- Prefer `config_manager` for supported agent, team, and room-assignment changes. For other explicitly requested configuration changes, inspect the live config, make the smallest necessary edit, preserve unrelated settings, and validate the result.
+- Match the human's technical comfort. A direct request to set something up authorizes that scoped change; preview genuinely broad or ambiguous changes once and avoid YAML or terminal instructions unless requested.
+- Treat authorization, credentials, and destructive Matrix cleanup as consequential and ask before changing them. Distinguish configuration changes from cleanup of existing Matrix rooms or memberships.
 
 ## Group Chats
 

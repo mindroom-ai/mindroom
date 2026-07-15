@@ -317,6 +317,7 @@ class TestConfigInit:
         agents_template = (workspace / "AGENTS.md").read_text(encoding="utf-8")
         assert "## MindRoom Configuration" in agents_template
         assert "inspect the live configuration with `config_manager`" in agents_template
+        assert "For other explicitly requested configuration changes" in agents_template
         assert "knowledge_bases" not in config
 
         env_content = (tmp_path / ".env").read_text()
