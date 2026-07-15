@@ -267,9 +267,9 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
             return MindRoomOpenAIResponses(id=model_id, **extra_kwargs)
 
-        from agno.models.openai import OpenAIChat  # noqa: PLC0415
+        from mindroom.openai_responses_model import MindRoomOpenAIChat  # noqa: PLC0415
 
-        return OpenAIChat(id=model_id, **extra_kwargs)
+        return MindRoomOpenAIChat(id=model_id, **extra_kwargs)
 
     if canonical_provider == "azure":
         # The concrete module, not agno.models.azure: the package init wraps

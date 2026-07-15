@@ -1,11 +1,11 @@
-"""OpenAI Responses model with native deferred-tool search replay."""
+"""OpenAI models with cross-provider tool-call replay support."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from agno.models.openai import OpenAIResponses
+from agno.models.openai import OpenAIChat, OpenAIResponses
 from openai.types.responses import ResponseOutputItemDoneEvent
 
 from mindroom.openai_tool_search import (
@@ -21,6 +21,51 @@ if TYPE_CHECKING:
     from agno.tools.function import Function
     from openai.types.responses import Response, ResponseStreamEvent
     from pydantic import BaseModel
+
+
+def _messages_with_openai_tool_arguments(messages: list[Message]) -> list[Message]:
+    """Fill arguments omitted by providers that represent empty tool input as an object."""
+    normalized_messages: list[Message] = []
+    for message in messages:
+        if not message.tool_calls:
+            normalized_messages.append(message)
+            continue
+
+        changed = False
+        normalized_tool_calls: list[dict[str, Any]] = []
+        for tool_call in message.tool_calls:
+            function = tool_call["function"]
+            if "arguments" in function:
+                normalized_tool_calls.append(tool_call)
+                continue
+            normalized_tool_calls.append(
+                {
+                    **tool_call,
+                    "function": {**function, "arguments": "{}"},
+                },
+            )
+            changed = True
+
+        normalized_messages.append(
+            message.model_copy(update={"tool_calls": normalized_tool_calls}) if changed else message,
+        )
+    return normalized_messages
+
+
+@dataclass
+class MindRoomOpenAIChat(OpenAIChat):
+    """OpenAI Chat model that can replay tool calls from other providers."""
+
+    def _format_all_messages(
+        self,
+        messages: list[Message],
+        compress_tool_results: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Supply the arguments string required by OpenAI for every tool call."""
+        return super()._format_all_messages(
+            _messages_with_openai_tool_arguments(messages),
+            compress_tool_results,
+        )
 
 
 @dataclass
@@ -50,6 +95,7 @@ class MindRoomOpenAIResponses(OpenAIResponses):
         tools: list[Function | dict[str, Any]] | None = None,
     ) -> list[Any]:
         """Reinsert captured tool-search items that Agno drops from history."""
+        messages = _messages_with_openai_tool_arguments(messages)
         formatted_input = super()._format_messages(messages, compress_tool_results, tools=tools)
         return formatted_input_with_tool_search_items(messages, formatted_input)
 

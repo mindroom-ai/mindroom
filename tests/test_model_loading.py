@@ -10,7 +10,7 @@ from agno.models.openai import OpenAIChat
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.model_loading import get_model_instance
-from mindroom.openai_responses_model import MindRoomOpenAIResponses
+from mindroom.openai_responses_model import MindRoomOpenAIChat, MindRoomOpenAIResponses
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -39,6 +39,8 @@ def test_first_party_openai_gpt_5_4_and_newer_use_responses(tmp_path: Path) -> N
     compatible = get_model_instance(config, runtime_paths_for(config), "compatible")
 
     assert isinstance(current, MindRoomOpenAIResponses)
+    assert isinstance(older, MindRoomOpenAIChat)
+    assert isinstance(compatible, MindRoomOpenAIChat)
     assert isinstance(older, OpenAIChat)
     assert isinstance(compatible, OpenAIChat)
 

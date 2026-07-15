@@ -33,7 +33,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.model_loading import get_model_instance
-from mindroom.openai_responses_model import MindRoomOpenAIResponses
+from mindroom.openai_responses_model import MindRoomOpenAIChat, MindRoomOpenAIResponses
 from mindroom.openai_tool_search import (
     _DEFERRED_TOOL_NAMES_ATTR,
     install_openai_deferred_tool_search,
@@ -685,6 +685,44 @@ def test_tool_search_items_replay_to_non_openai_provider_without_crashing() -> N
 
     claude_wire, _system = claude_format_messages([assistant])
     assert claude_wire[0]["role"] == "assistant"
+
+
+def test_openai_chat_supplies_missing_tool_arguments_without_mutating_history() -> None:
+    """Chat Completions replay must repair zero-argument calls from another provider."""
+    assistant = Message(
+        role="assistant",
+        tool_calls=[
+            {
+                "id": "toolu_1",
+                "type": "function",
+                "function": {"name": "get_status"},
+            },
+        ],
+    )
+
+    formatted = MindRoomOpenAIChat(id="gpt-5.6", api_key="test-key")._format_all_messages([assistant])
+
+    assert formatted[0]["tool_calls"][0]["function"]["arguments"] == "{}"
+    assert "arguments" not in assistant.tool_calls[0]["function"]
+
+
+def test_openai_responses_supplies_missing_tool_arguments_without_mutating_history() -> None:
+    """Responses replay must repair zero-argument calls from another provider."""
+    assistant = Message(
+        role="assistant",
+        tool_calls=[
+            {
+                "id": "toolu_1",
+                "type": "function",
+                "function": {"name": "get_status"},
+            },
+        ],
+    )
+
+    formatted = MindRoomOpenAIResponses(id="gpt-5.6", api_key="test-key")._format_messages([assistant])
+
+    assert formatted[0]["arguments"] == "{}"
+    assert "arguments" not in assistant.tool_calls[0]["function"]
 
 
 def test_claude_server_tool_history_replays_to_codex_without_injection() -> None:
