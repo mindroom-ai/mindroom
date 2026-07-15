@@ -1131,13 +1131,14 @@ class KnowledgeManager:
                 # it from its completeness accounting: the trailing
                 # source-signature comparison then decides whether the
                 # surviving corpus is publishable or another refresh is needed.
+                relative_path = self._relative_path(file_path)
                 logger.warning(
                     "Knowledge file vanished during refresh; skipping",
                     base_id=self.base_id,
-                    path=self._relative_path(file_path),
+                    path=relative_path,
                 )
                 if vanished_files is not None:
-                    vanished_files.add(self._relative_path(file_path))
+                    vanished_files.add(relative_path)
                 return False
 
         concurrency = min(_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES, len(files))

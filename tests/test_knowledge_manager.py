@@ -3976,6 +3976,35 @@ async def test_corpus_changing_config_mismatch_returns_no_index(
 
 
 @pytest.mark.asyncio
+async def test_skip_hidden_change_on_directory_base_returns_no_index(tmp_path: Path) -> None:
+    """Toggling skip_hidden on a directory base changes corpus membership, so old content must not be served."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("old corpus index", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    changed_config = config.model_copy(deep=True)
+    changed_config.knowledge_bases["docs"].skip_hidden = False
+    scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
+    scheduler.schedule_refresh = MagicMock()
+    resolution = resolve_agent_knowledge_access(
+        "helper",
+        changed_config,
+        runtime_paths,
+        refresh_scheduler=scheduler,
+    )
+
+    assert resolution.knowledge is None
+    assert {base_id: detail.availability for (base_id, detail) in resolution.unavailable.items()} == {
+        "docs": KnowledgeAvailability.CONFIG_MISMATCH,
+    }
+    scheduler.schedule_refresh.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_failed_refresh_after_config_change_preserves_published_settings(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

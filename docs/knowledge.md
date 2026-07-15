@@ -116,8 +116,10 @@ knowledge_bases:
 | `include_extensions` | list | `null` | Exact set of file extensions to index instead of the default text-like set (semantic mode only) |
 | `extra_extensions` | list | `[]` | File extensions to index in addition to the default text-like set (semantic mode only) |
 | `exclude_extensions` | list | `[]` | File extensions to exclude after include filtering (semantic mode only) |
+| `skip_hidden` | bool | `true` | Skip hidden files and folders (path components starting with `.`) during indexing, such as the dot-prefixed temp files of writers that update knowledge folders in place. Git-backed bases ignore this field and use `git.skip_hidden` instead |
 | `git` | object | `null` | Optional Git repository sync settings |
 
+Set `skip_hidden: false` if your knowledge folder intentionally contains dot-prefixed files or directories that should be indexed.
 Use smaller `chunk_size` values when your embedding server has lower token or batch limits.
 `chunk_size` and `chunk_overlap` only affect semantic mode.
 If chunking is too large, semantic indexing retries will fail with embedder 500 errors.

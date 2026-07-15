@@ -7,6 +7,7 @@ for vector collections, so their stability is the invariant pinned here.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mindroom.knowledge.indexing_config import IndexingSettings, storage_key_for_base
@@ -84,11 +85,21 @@ def test_indexing_settings_from_metadata_rejects_invalid_payloads() -> None:
 
 
 def test_indexing_settings_from_metadata_defaults_optional_filter_keys() -> None:
-    """Older payloads without include/exclude patterns still parse."""
+    """Older payloads without include/exclude patterns or skip_hidden still parse."""
     metadata = _settings().to_metadata()
     del metadata["include_patterns"]
     del metadata["exclude_patterns"]
+    del metadata["skip_hidden"]
     parsed = IndexingSettings.from_metadata(metadata)
     assert parsed is not None
     assert parsed.include_patterns == ""
     assert parsed.exclude_patterns == ""
+    assert parsed.skip_hidden == ""
+
+
+def test_skip_hidden_changes_corpus_key_but_not_query_key() -> None:
+    """Indexes published before hidden-path filtering ('' from old metadata) must rebuild, not stay queryable."""
+    legacy = _settings()
+    current = replace(legacy, skip_hidden="True")
+    assert legacy.corpus_compatibility_key() != current.corpus_compatibility_key()
+    assert legacy.query_compatibility_key() == current.query_compatibility_key()
