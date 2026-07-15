@@ -134,7 +134,7 @@ def _google_drive_download_tool(
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         creds=_ValidCredentials(),
         download_file=True,
-        download_dir=download_dir or tmp_path,
+        tool_output_workspace_root=download_dir or tmp_path,
     )
     service = _FakeDriveService()
     tool.service = service
@@ -228,6 +228,23 @@ def test_google_drive_model_functions_do_not_collide_with_local_file_tools(tmp_p
         "google_drive_search_files",
         "google_drive_read_file",
     } <= function_names
+
+
+def test_google_drive_download_uses_namespaced_model_function(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
+    tool = get_tool_by_name(
+        "google_drive",
+        runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        tool_config_overrides={"download_file": True},
+        disable_sandbox_proxy=True,
+        tool_output_workspace_root=tmp_path,
+        worker_target=None,
+    )
+
+    assert "google_drive_download_file" in tool.functions
+    assert "download_file" not in tool.functions
+    assert tool.download_dir == tmp_path
 
 
 def test_google_drive_connect_instruction_uses_redirect_uri_public_origin(tmp_path: Path) -> None:
@@ -751,6 +768,30 @@ def test_google_drive_download_adds_export_extension_inside_download_dir(
     assert service.files_resource.export_media_kwargs == {
         "fileId": "shared-drive-file-id",
         "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }
+    assert service.files_resource.get_media_kwargs is None
+
+
+def test_google_drive_download_exports_complete_spreadsheet_as_xlsx(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
+    service.files_resource.file_metadata = {
+        "name": "hardware-baseline",
+        "mimeType": "application/vnd.google-apps.spreadsheet",
+        "webViewLink": "https://drive.google.com/spreadsheets/d/example",
+    }
+    tool._download_bytes = lambda _request: b"xlsx workbook"
+
+    result = json.loads(tool.download_file("shared-drive-file-id"))
+
+    assert result["status"] == "exported"
+    assert Path(result["path"]) == tmp_path / "hardware-baseline.xlsx"
+    assert (tmp_path / "hardware-baseline.xlsx").read_bytes() == b"xlsx workbook"
+    assert service.files_resource.export_media_kwargs == {
+        "fileId": "shared-drive-file-id",
+        "mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     }
     assert service.files_resource.get_media_kwargs is None
 

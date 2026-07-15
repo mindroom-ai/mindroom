@@ -53,6 +53,14 @@ if TYPE_CHECKING:
             description="Allow reading Google Drive file contents.",
         ),
         ConfigField(
+            name="download_file",
+            label="Download Files",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Allow downloading or exporting Google Drive files.",
+        ),
+        ConfigField(
             name="max_read_size",
             label="Max Read Size",
             type="number",
@@ -65,6 +73,7 @@ if TYPE_CHECKING:
         ToolManagedInitArg.RUNTIME_PATHS,
         ToolManagedInitArg.CREDENTIALS_MANAGER,
         ToolManagedInitArg.WORKER_TARGET,
+        ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
     ),
     dependencies=[
         "google-api-python-client",
@@ -77,6 +86,7 @@ if TYPE_CHECKING:
         "google_drive_list_files",
         "google_drive_search_files",
         "google_drive_read_file",
+        "google_drive_download_file",
     ),
 )
 def google_drive_tools() -> type[GoogleDriveTools]:

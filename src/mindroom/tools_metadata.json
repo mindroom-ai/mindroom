@@ -7901,6 +7901,18 @@
         },
         {
           "authored_override": true,
+          "default": false,
+          "description": "Allow downloading or exporting Google Drive files.",
+          "label": "Download Files",
+          "name": "download_file",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
           "default": 10485760,
           "description": "Maximum non-Google-Workspace file size to read in bytes.",
           "label": "Max Read Size",
@@ -7926,7 +7938,8 @@
       "function_names": [
         "google_drive_list_files",
         "google_drive_search_files",
-        "google_drive_read_file"
+        "google_drive_read_file",
+        "google_drive_download_file"
       ],
       "helper_text": null,
       "icon": "SiGoogledrive",

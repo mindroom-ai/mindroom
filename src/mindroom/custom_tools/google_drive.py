@@ -30,6 +30,7 @@ _MODEL_FUNCTION_NAME_ALIASES = {
     "list_files": "google_drive_list_files",
     "search_files": "google_drive_search_files",
     "read_file": "google_drive_read_file",
+    "download_file": "google_drive_download_file",
 }
 
 
@@ -83,6 +84,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         runtime_paths: RuntimePaths,
         credentials_manager: CredentialsManager | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
+        tool_output_workspace_root: Path | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         provided_creds = kwargs.pop("creds", None)
@@ -95,6 +97,11 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                 kwargs.pop("max_read_size")
             else:
                 kwargs["max_read_size"] = max_read_size
+        if kwargs.get("download_file") is True:
+            if tool_output_workspace_root is None:
+                msg = "Google Drive downloads require an agent workspace"
+                raise RuntimeError(msg)
+            kwargs["download_dir"] = tool_output_workspace_root
         self._runtime_paths = runtime_paths
         self._creds_manager = credentials_manager
         defer_to_original_auth = self._apply_runtime_original_auth_kwargs(kwargs)
