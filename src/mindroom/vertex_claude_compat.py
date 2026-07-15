@@ -101,12 +101,16 @@ class MindroomVertexAIClaude(VertexAIClaude):
     @staticmethod
     def _replay_trim_candidates(messages: list[Message]) -> list[int]:
         """Return safe history-user cuts plus the drop-all-history cut."""
+        first_history_index = next(
+            (index for index, message in enumerate(messages) if message.from_history),
+            None,
+        )
+        if first_history_index is None:
+            return []
         history_user_starts = [
             index for index, message in enumerate(messages) if message.from_history and message.role == "user"
         ]
-        if not any(message.from_history for message in messages):
-            return []
-        return [*history_user_starts, len(messages)]
+        return [cut for cut in [*history_user_starts, len(messages)] if cut > first_history_index]
 
     @staticmethod
     def _messages_after_history_cut(messages: list[Message], cut: int) -> list[Message]:
