@@ -20,7 +20,8 @@ Use this skill when the user asks how MindRoom works, how to configure it, or wh
 4. Use `llms-full.txt` only when the answer spans many sections and page-level references are insufficient.
 5. For setup or administration requests, inspect the available capabilities before claiming the change cannot be performed. Discover and use `config_manager` for changes it supports, then use the documented config-file workflow for other requested changes.
 6. Keep the Matrix homeserver, Matrix client, and MindRoom dashboard distinct.
-   Do not assume deployment URLs.
+   Use the runtime context for the active homeserver instead of assuming one.
+   MindRoom Chat at `https://chat.mindroom.chat` supports custom homeservers.
    For questions about the MindRoom-hosted service, load `page__deployment__hosted-matrix__index.md`; for dashboard questions, load the dashboard page reference.
 7. Answer with concrete steps and include the exact reference filenames used.
 

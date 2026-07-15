@@ -268,6 +268,33 @@ def test_agent_identity_prompt_can_be_overridden_from_config() -> None:
     assert "OpenAI-compatible API" in openai_compat_agent.role
 
 
+def test_default_mind_role_includes_effective_matrix_homeserver(tmp_path: Path) -> None:
+    """The default Mind should receive the homeserver resolved from its runtime environment."""
+    (tmp_path / ".env").write_text("MATRIX_HOMESERVER=https://from-env-file.example\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MATRIX_HOMESERVER": "https://matrix.self-hosted.example"},
+    )
+    config = _bind_runtime_paths(
+        Config(
+            agents={
+                "mind": AgentConfig(display_name="Mind", role="Setup assistant", tools=[]),
+                "general": AgentConfig(display_name="General", role="General assistant", tools=[]),
+            },
+            models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
+        ),
+        runtime_paths,
+    )
+
+    mind = _create_agent_for_test("mind", config)
+    general = _create_agent_for_test("general", config)
+
+    assert "## MindRoom Runtime" in mind.role
+    assert "Active Matrix homeserver: `https://matrix.self-hosted.example`" in mind.role
+    assert "## MindRoom Runtime" not in general.role
+
+
 def test_agent_identity_prompt_uses_persisted_current_matrix_id(tmp_path: Path) -> None:
     """Agent identity prompt should describe the live persisted Matrix account ID."""
     runtime_paths = _runtime_paths(tmp_path)

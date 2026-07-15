@@ -221,6 +221,14 @@ def _get_datetime_context(
     )
 
 
+def _get_mind_runtime_context(agent_name: str, runtime_paths: constants.RuntimePaths) -> str:
+    """Render live installation facts for the default Mind agent."""
+    if agent_name != _DEFAULT_MIND_AGENT_NAME:
+        return ""
+    homeserver = constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)
+    return f"\n## MindRoom Runtime\n- Active Matrix homeserver: `{homeserver}`\n"
+
+
 def _load_context_files(
     context_files: list[Path | str],
     runtime_paths: constants.RuntimePaths,
@@ -1431,8 +1439,8 @@ def _build_agent_role_context(
         datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE"),
     )
 
-    # Combine identity and datetime contexts
-    full_context = identity_context + datetime_context
+    # Combine identity, datetime, and live installation contexts.
+    full_context = identity_context + datetime_context + _get_mind_runtime_context(agent_name, runtime_paths)
 
     if not disable_runtime_capabilities:
         workspace = agent_runtime.workspace
