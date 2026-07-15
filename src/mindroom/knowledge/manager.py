@@ -1002,7 +1002,22 @@ class KnowledgeManager:
     ) -> bool:
         """Index one file while the caller owns the operation lock."""
         relative_path = self._relative_path(resolved_path)
-        source_mtime_ns, source_size, source_digest = await asyncio.to_thread(self._file_signature, resolved_path)
+        try:
+            source_mtime_ns, source_size, source_digest = await asyncio.to_thread(
+                self._file_signature,
+                resolved_path,
+            )
+        except FileNotFoundError:
+            # Live source folders (e.g. thread exports) delete files while a
+            # refresh runs; a file vanishing between listing and indexing is
+            # not a refresh failure. Skip it — the trailing source-signature
+            # comparison or the next scheduled refresh reconciles the index.
+            logger.warning(
+                "Knowledge file vanished during refresh; skipping",
+                base_id=self.base_id,
+                path=relative_path,
+            )
+            return False
         metadata = {
             _SOURCE_PATH_KEY: relative_path,
             _SOURCE_MTIME_NS_KEY: source_mtime_ns,

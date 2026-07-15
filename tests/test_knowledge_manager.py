@@ -1427,6 +1427,44 @@ def test_knowledge_file_listing_rejects_symlinked_directory_escape(tmp_path: Pat
     assert list_knowledge_files(config, "docs", docs_path) == []
 
 
+def test_knowledge_file_listing_skips_hidden_files_for_directory_bases(tmp_path: Path) -> None:
+    """Dot-prefixed entries (e.g. in-place writers' atomic-write temp files) stay out of directory bases."""
+    docs_path = tmp_path / "docs"
+    (docs_path / ".staging").mkdir(parents=True)
+    (docs_path / "kept.md").write_text("kept", encoding="utf-8")
+    (docs_path / ".hidden.md").write_text("hidden", encoding="utf-8")
+    (docs_path / ".staging" / "nested.md").write_text("nested", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+
+    assert list_knowledge_files(config, "docs", docs_path) == [(docs_path / "kept.md").resolve()]
+
+    config.knowledge_bases["docs"].skip_hidden = False
+    assert list_knowledge_files(config, "docs", docs_path) == sorted(
+        [
+            (docs_path / "kept.md").resolve(),
+            (docs_path / ".hidden.md").resolve(),
+            (docs_path / ".staging" / "nested.md").resolve(),
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_index_file_locked_tolerates_files_vanishing_during_refresh(tmp_path: Path) -> None:
+    """A file deleted between listing and indexing is skipped instead of failing the refresh.
+
+    Live source folders such as thread exports delete files while a refresh
+    runs (stale-thread cleanup); the per-file stat used to raise
+    FileNotFoundError and abort the whole reindex subprocess.
+    """
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
+
+    vanished = (docs_path / "gone.md").resolve()
+    assert await manager._index_file_locked(vanished, upsert=True) is False
+
+
 def test_knowledge_file_listing_filters_unsupported_extensions_before_filesystem_safety_checks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
