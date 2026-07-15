@@ -34,9 +34,9 @@ _EXACT_COUNT_BLOCK_TYPES = frozenset({"document", "image"})
 _VERTEX_TOOL_SEARCH_HISTORY_BLOCK_TYPES = frozenset(
     {SERVER_TOOL_USE_BLOCK_TYPE, TOOL_SEARCH_RESULT_BLOCK_TYPE},
 )
-# Vertex generation reports 213 input tokens for the native regex search tool
-# on both Claude Haiku 4.5 and Sonnet 4.6. Keep a small margin because the
-# count-tokens endpoint cannot count that server-side prefix itself.
+# Before any tools are discovered, Vertex generation reports 213 input tokens
+# for the native regex search tool on both Claude Haiku 4.5 and Sonnet 4.6.
+# Keep a small margin because count_tokens cannot count that server-tool prefix.
 _VERTEX_TOOL_SEARCH_TOKEN_RESERVE = 256
 
 
@@ -192,7 +192,9 @@ def _request_for_vertex_token_count(request_kwargs: dict[str, Any]) -> tuple[dic
     count-tokens endpoint rejects the search tool, ``defer_loading``, and the
     two server-search history block types. Count eager and previously selected
     definitions, preserve search traces as text, and reserve the fixed
-    server-side search prefix separately.
+    server-side search prefix separately. Definitions selected by a new search
+    are generated inside the server-tool loop and cannot be known by any
+    preflight count; they become countable on the following request.
     """
     count_messages, referenced_tool_names = _messages_for_vertex_token_count(request_kwargs.get("messages"))
     count_tools, has_native_search = _tools_for_vertex_token_count(
