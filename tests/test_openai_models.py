@@ -65,6 +65,26 @@ def _messages_with_sparse_stream_placeholder() -> list[Message]:
     ]
 
 
+def _legacy_combined_tool_results() -> Message:
+    """Recreate the combined tool-result shape handled by Agno's normalizer."""
+    return Message(
+        role="tool",
+        content=["first result", "second result"],
+        tool_calls=[
+            {
+                "tool_call_id": "toolu_1",
+                "tool_name": "first_tool",
+                "content": "first result",
+            },
+            {
+                "tool_call_id": "toolu_2",
+                "tool_name": "second_tool",
+                "content": "second result",
+            },
+        ],
+    )
+
+
 def _sparse_tool_call_delta() -> ChoiceDeltaToolCall:
     """Return one valid call at stream index one, leaving index zero empty in Agno."""
     return ChoiceDeltaToolCall(
@@ -132,6 +152,34 @@ def test_openai_responses_supplies_missing_tool_arguments_without_mutating_histo
 
     assert formatted[0]["arguments"] == "{}"
     assert "arguments" not in assistant.tool_calls[0]["function"]
+
+
+@pytest.mark.parametrize(("model_cls", "_agno_cls"), _CHAT_WIRE_PAIRS)
+def test_chat_models_leave_combined_tool_results_for_agno_normalization(
+    model_cls: type[OpenAIChat],
+    _agno_cls: type[OpenAIChat],
+) -> None:
+    """Argument repair must not consume non-assistant combined tool results."""
+    tool_results = _legacy_combined_tool_results()
+
+    formatted = model_cls(id="gpt-5.6", api_key="test-key")._format_all_messages([tool_results])
+
+    assert formatted == [
+        {"role": "tool", "content": "first result", "tool_call_id": "toolu_1"},
+        {"role": "tool", "content": "second result", "tool_call_id": "toolu_2"},
+    ]
+
+
+def test_openai_responses_leaves_combined_tool_results_for_agno_normalization() -> None:
+    """Responses replay must preserve Agno's combined-result normalization path."""
+    tool_results = _legacy_combined_tool_results()
+
+    formatted = MindRoomOpenAIResponses(id="gpt-5.6", api_key="test-key")._format_messages([tool_results])
+
+    assert formatted == [
+        {"type": "function_call_output", "call_id": "toolu_1", "output": "first result"},
+        {"type": "function_call_output", "call_id": "toolu_2", "output": "second result"},
+    ]
 
 
 @pytest.mark.parametrize(("model_cls", "_agno_cls"), _CHAT_WIRE_PAIRS)
