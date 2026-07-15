@@ -11,8 +11,8 @@ from agno.models.openai import OpenAIChat
 from agno.models.openai.like import OpenAILike
 from agno.models.openrouter import OpenRouter
 
+from mindroom.azure_openai_model import MindRoomAzureOpenAI
 from mindroom.openai_models import (
-    MindRoomAzureOpenAI,
     MindRoomDeepSeek,
     MindRoomLlamaCpp,
     MindRoomOpenAIChat,

@@ -5,11 +5,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+from mindroom.azure_openai_model import MindRoomAzureOpenAI
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.model_loading import get_model_instance
 from mindroom.openai_models import (
-    MindRoomAzureOpenAI,
     MindRoomDeepSeek,
     MindRoomLlamaCpp,
     MindRoomOpenAIChat,

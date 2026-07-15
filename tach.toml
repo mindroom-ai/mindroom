@@ -296,6 +296,7 @@ depends_on = [
     "mindroom.llm_request_logging",
     "mindroom.logging_config",
     "mindroom.tool_system.dependencies",
+    "mindroom.azure_openai_model",
     "mindroom.claude_prompt_cache",
     "mindroom.claude_stream_retry",
     "mindroom.codex_model",

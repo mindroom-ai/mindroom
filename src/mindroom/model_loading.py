@@ -272,7 +272,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
         return MindRoomOpenAIChat(id=model_id, **extra_kwargs)
 
     if canonical_provider == "azure":
-        from mindroom.openai_models import MindRoomAzureOpenAI  # noqa: PLC0415
+        from mindroom.azure_openai_model import MindRoomAzureOpenAI  # noqa: PLC0415
 
         return MindRoomAzureOpenAI(id=model_id, **extra_kwargs)
 

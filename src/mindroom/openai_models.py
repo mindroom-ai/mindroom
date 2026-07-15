@@ -5,9 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-# The concrete module, not agno.models.azure: the package init wraps
-# this import in a try/except stub whose fallback is not a Model.
-from agno.models.azure.openai_chat import AzureOpenAI
 from agno.models.deepseek import DeepSeek
 from agno.models.llama_cpp import LlamaCpp
 from agno.models.openai import OpenAIChat, OpenAIResponses
@@ -61,7 +58,7 @@ def _messages_with_openai_tool_arguments(messages: list[Message]) -> list[Messag
     return normalized_messages
 
 
-class _ChatToolArgumentsCompat:
+class ChatToolArgumentsCompat:
     """Repair replayed tool calls before OpenAI Chat Completions formatting.
 
     Mix in ahead of an ``OpenAIChat`` subclass; ``_format_all_messages`` is the
@@ -84,32 +81,27 @@ class _ChatToolArgumentsCompat:
 
 
 @dataclass
-class MindRoomOpenAIChat(_ChatToolArgumentsCompat, OpenAIChat):
+class MindRoomOpenAIChat(ChatToolArgumentsCompat, OpenAIChat):
     """OpenAI Chat model that can replay tool calls from other providers."""
 
 
 @dataclass
-class MindRoomOpenAILike(_ChatToolArgumentsCompat, OpenAILike):
+class MindRoomOpenAILike(ChatToolArgumentsCompat, OpenAILike):
     """OpenAI-compatible endpoint model that can replay tool calls from other providers."""
 
 
 @dataclass
-class MindRoomAzureOpenAI(_ChatToolArgumentsCompat, AzureOpenAI):
-    """Azure OpenAI model that can replay tool calls from other providers."""
-
-
-@dataclass
-class MindRoomOpenRouter(_ChatToolArgumentsCompat, OpenRouter):
+class MindRoomOpenRouter(ChatToolArgumentsCompat, OpenRouter):
     """OpenRouter model that can replay tool calls from other providers."""
 
 
 @dataclass
-class MindRoomDeepSeek(_ChatToolArgumentsCompat, DeepSeek):
+class MindRoomDeepSeek(ChatToolArgumentsCompat, DeepSeek):
     """DeepSeek model that can replay tool calls from other providers."""
 
 
 @dataclass
-class MindRoomLlamaCpp(_ChatToolArgumentsCompat, LlamaCpp):
+class MindRoomLlamaCpp(ChatToolArgumentsCompat, LlamaCpp):
     """llama.cpp server model that can replay tool calls from other providers."""
 
 

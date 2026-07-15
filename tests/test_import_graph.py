@@ -209,6 +209,12 @@ def test_primary_runtime_does_not_import_provider_sdks() -> None:
     _assert_probe_clean("mindroom.orchestrator", _PROVIDER_SDK_ROOTS)
 
 
+def test_openai_wire_models_import_only_the_openai_sdk() -> None:
+    """Agno's azure package init pulls the anthropic SDK; only the azure branch should pay that."""
+    non_openai_roots = tuple(root for root in _PROVIDER_SDK_ROOTS if root != "openai")
+    _assert_probe_clean("mindroom.openai_models", non_openai_roots)
+
+
 def test_builtin_tool_manifest_does_not_import_runtime_catalog() -> None:
     """Built-in registration may write registry state without loading catalog behavior."""
     _assert_probe_clean(
