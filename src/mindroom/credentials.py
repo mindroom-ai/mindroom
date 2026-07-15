@@ -150,7 +150,19 @@ def _ensure_private_directory(path: Path, *, harden_existing: bool = False) -> N
             if directory_path not in directories_to_chmod:
                 directories_to_chmod.append(directory_path)
     for directory_path in directories_to_chmod:
-        directory_path.chmod(0o700)
+        _set_private_permissions(directory_path, 0o700)
+
+
+def _set_private_permissions(path: Path, mode: int) -> None:
+    """Set a private mode or fail with actionable ownership guidance."""
+    try:
+        path.chmod(mode)
+    except PermissionError as exc:
+        msg = (
+            f"Cannot secure credential path '{path}' with mode {mode:#05o}. "
+            "Ensure the MindRoom OS user owns this path and can change its permissions."
+        )
+        raise PermissionError(msg) from exc
 
 
 def _credential_owned_directory_chain(path: Path) -> list[Path]:
@@ -166,7 +178,7 @@ def _harden_existing_credential_files(path: Path) -> None:
     """Make existing credential payloads owner-readable only."""
     for credentials_path in path.glob("*_credentials.json"):
         if credentials_path.is_file():
-            credentials_path.chmod(0o600)
+            _set_private_permissions(credentials_path, 0o600)
 
 
 def _atomic_write_private_file(path: Path, payload: bytes) -> None:

@@ -138,6 +138,29 @@ class TestCredentialsManager:
         assert stat.S_IMODE(existing_path.stat().st_mode) == 0o600
         assert stat.S_IMODE(manager.get_credentials_path("new").stat().st_mode) == 0o600
 
+    def test_credentials_hardening_permission_error_is_actionable(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Permission failures should identify the path, mode, and ownership fix."""
+        credentials_dir = tmp_path / "credentials"
+        credentials_dir.mkdir()
+        original_chmod = Path.chmod
+
+        def deny_credentials_chmod(path: Path, mode: int) -> None:
+            if path == credentials_dir:
+                raise PermissionError
+            original_chmod(path, mode)
+
+        monkeypatch.setattr(Path, "chmod", deny_credentials_chmod)
+
+        with pytest.raises(
+            PermissionError,
+            match=rf"{credentials_dir}.*0o700.*MindRoom OS user owns",
+        ):
+            CredentialsManager(credentials_dir)
+
     def test_encrypted_save_and_load_credentials_round_trip(
         self,
         tmp_path: Path,
