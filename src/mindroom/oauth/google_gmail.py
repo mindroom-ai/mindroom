@@ -11,9 +11,7 @@ if TYPE_CHECKING:
 
 _GOOGLE_GMAIL_OAUTH_SCOPES = (
     *google_oauth.GOOGLE_IDENTITY_SCOPES,
-    "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/gmail.compose",
 )
 
 

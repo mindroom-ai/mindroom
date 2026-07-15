@@ -4117,8 +4117,20 @@ def test_status_rejects_stored_oauth_token_missing_claims_when_identity_policy_c
 
 
 def test_required_scope_check_accepts_google_scope_supersets() -> None:
-    calendar_provider = _fake_provider(scopes=("https://www.googleapis.com/auth/calendar.readonly",))
-    gmail_provider = _fake_provider(scopes=("https://www.googleapis.com/auth/gmail.readonly",))
+    calendar_provider = _fake_provider(
+        scopes=(
+            "https://www.googleapis.com/auth/calendar.events",
+            "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+            "https://www.googleapis.com/auth/calendar.freebusy",
+            "https://www.googleapis.com/auth/calendar.settings.readonly",
+        ),
+    )
+    gmail_provider = _fake_provider(
+        scopes=(
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.compose",
+        ),
+    )
     drive_provider = _fake_provider(scopes=("https://www.googleapis.com/auth/drive.file",))
     sheets_provider = _fake_provider(scopes=("https://www.googleapis.com/auth/spreadsheets.readonly",))
 

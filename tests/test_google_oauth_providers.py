@@ -14,6 +14,7 @@ from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth.google import (
     _GOOGLE_PROVISIONED_CLIENT_FETCHED_AT_KEY,
     _GOOGLE_PROVISIONED_CLIENT_TTL_SECONDS,
+    GOOGLE_IDENTITY_SCOPES,
     _google_oauth_provider,
     _google_runtime_bootstrapper,
     _google_token_parser,
@@ -112,6 +113,21 @@ def test_public_google_oauth_providers_preserve_service_specific_fields(
     assert provider.tool_config_service == expected["tool_config_service"]
     assert provider.client_config_services == expected["client_config_services"]
     assert provider.status_capabilities == expected["status_capabilities"]
+
+
+def test_google_providers_request_minimum_functionality_preserving_scopes() -> None:
+    """Google providers avoid broader or redundant scopes without removing tool operations."""
+    assert google_gmail_oauth_provider().scopes == (
+        *GOOGLE_IDENTITY_SCOPES,
+        "https://www.googleapis.com/auth/gmail.modify",
+    )
+    assert google_calendar_oauth_provider().scopes == (
+        *GOOGLE_IDENTITY_SCOPES,
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+        "https://www.googleapis.com/auth/calendar.freebusy",
+        "https://www.googleapis.com/auth/calendar.settings.readonly",
+    )
 
 
 @pytest.mark.parametrize(

@@ -43,7 +43,13 @@ _GOOGLE_SERVICE_ACCOUNT_PROVIDER_IDS = frozenset(
 )
 _SCOPE_IMPLICATIONS = {
     "https://www.googleapis.com/auth/calendar": frozenset(
-        {"https://www.googleapis.com/auth/calendar.readonly"},
+        {
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/calendar.events",
+            "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+            "https://www.googleapis.com/auth/calendar.freebusy",
+            "https://www.googleapis.com/auth/calendar.settings.readonly",
+        },
     ),
     "https://www.googleapis.com/auth/drive": frozenset(
         {
@@ -52,7 +58,10 @@ _SCOPE_IMPLICATIONS = {
         },
     ),
     "https://www.googleapis.com/auth/gmail.modify": frozenset(
-        {"https://www.googleapis.com/auth/gmail.readonly"},
+        {
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.compose",
+        },
     ),
     "https://www.googleapis.com/auth/spreadsheets": frozenset(
         {"https://www.googleapis.com/auth/spreadsheets.readonly"},

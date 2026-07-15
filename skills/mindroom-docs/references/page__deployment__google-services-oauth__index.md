@@ -10,9 +10,29 @@ Public, unpaired, and organization-managed deployments can configure their own G
 | Tool | Provider ID | Callback path | Token service | Client config service | Settings service | Scopes |
 | --- | --- | --- | --- | --- | --- | --- |
 | Google Drive | `google_drive` | `/api/oauth/google_drive/callback` | `google_drive_oauth` | `google_drive_oauth_client` | `google_drive` | Drive read-only plus OpenID email/profile |
-| Google Calendar | `google_calendar` | `/api/oauth/google_calendar/callback` | `google_calendar_oauth` | `google_calendar_oauth_client` | `google_calendar` | Calendar read/write plus OpenID email/profile |
+| Google Calendar | `google_calendar` | `/api/oauth/google_calendar/callback` | `google_calendar_oauth` | `google_calendar_oauth_client` | `google_calendar` | Calendar events, calendar-list read-only, free/busy, and settings read-only plus OpenID email/profile |
 | Google Sheets | `google_sheets` | `/api/oauth/google_sheets/callback` | `google_sheets_oauth` | `google_sheets_oauth_client` | `google_sheets` | Sheets read/write, plus OpenID email/profile |
-| Gmail | `google_gmail` | `/api/oauth/google_gmail/callback` | `google_gmail_oauth` | `google_gmail_oauth_client` | `gmail` | Gmail readonly, modify, compose plus OpenID email/profile |
+| Gmail | `google_gmail` | `/api/oauth/google_gmail/callback` | `google_gmail_oauth` | `google_gmail_oauth_client` | `gmail` | Gmail modify plus OpenID email/profile |
+
+## Scope Rationale
+
+MindRoom requests only the scopes required by the operations currently exposed to agents.
+
+- `drive.readonly` lets an agent search, list, and read existing files across the connected account without granting Drive write access.
+  The narrower `drive.file` scope cannot preserve account-wide search because it is limited to files created by or explicitly shared with the app.
+- `calendar.events` lets an agent read events and, when `allow_update` is enabled, create, update, delete, move, and respond to events without granting calendar sharing or calendar deletion access.
+- `calendar.calendarlist.readonly` lets an agent list subscribed calendars without adding, removing, or editing subscriptions.
+- `calendar.freebusy` lets an agent check availability without exposing event details through that operation.
+- `calendar.settings.readonly` lets an agent infer working hours and locale without changing Calendar settings.
+- `spreadsheets` lets an agent read and, when enabled, create or update arbitrary spreadsheets named by the user.
+  A read-only scope would remove the existing create and update operations.
+- `gmail.modify` is the narrowest single Gmail scope that preserves mailbox search and reading, drafts and sending, replies, labels, archiving, and other mailbox organization.
+  MindRoom does not request `mail.google.com`, and `gmail.modify` does not permit bypassing the trash for permanent message deletion.
+- OpenID email and profile scopes identify the connected account and enforce optional account-domain restrictions.
+
+Google API data is used only for the user-facing agent operation requested by the user.
+Relevant results may be sent to the AI model provider configured by the installation solely to generate that requested response, as disclosed before connection and in the [Privacy Policy](https://docs.mindroom.chat/privacy/).
+MindRoom does not use Google user data to train or improve generalized, foundational, or frontier AI models.
 
 ## Custom Google Cloud Setup
 

@@ -142,11 +142,17 @@ def test_google_calendar_allow_update_enables_write_methods(tmp_path: Path) -> N
     assert "https://www.googleapis.com/auth/calendar" in tool.scopes
 
 
-def test_google_calendar_provider_uses_write_scope_for_method_gated_tools() -> None:
+def test_google_calendar_provider_uses_narrow_scopes_for_every_tool_operation() -> None:
     provider = google_calendar_oauth_provider()
 
     assert provider.scopes == _GOOGLE_CALENDAR_OAUTH_SCOPES
-    assert "https://www.googleapis.com/auth/calendar" in provider.scopes
+    assert set(provider.scopes[3:]) == {
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+        "https://www.googleapis.com/auth/calendar.freebusy",
+        "https://www.googleapis.com/auth/calendar.settings.readonly",
+    }
+    assert "https://www.googleapis.com/auth/calendar" not in provider.scopes
 
 
 def test_google_calendar_service_account_env_uses_upstream_auth(tmp_path: Path) -> None:
