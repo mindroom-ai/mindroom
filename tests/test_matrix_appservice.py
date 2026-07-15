@@ -74,6 +74,20 @@ def test_resolve_managed_account_auth_names_the_configured_file_variable(tmp_pat
         resolve_managed_account_auth(runtime_paths)
 
 
+def test_resolve_managed_account_auth_rejects_empty_token_file(tmp_path: Path) -> None:
+    """An empty mounted secret file is a misconfiguration, not a missing variable."""
+    token_file = tmp_path / "appservice-token"
+    token_file.write_text("\n", encoding="utf-8")
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        MATRIX_MANAGED_ACCOUNT_AUTH="appservice",
+        MATRIX_APPSERVICE_TOKEN_FILE=str(token_file),
+    )
+
+    with pytest.raises(PermanentMatrixStartupError, match="empty file"):
+        resolve_managed_account_auth(runtime_paths)
+
+
 def test_resolve_managed_account_auth_reads_token_file(tmp_path: Path) -> None:
     """Appservice tokens can come from mounted secret files."""
     token_file = tmp_path / "appservice-token"
@@ -141,6 +155,27 @@ async def test_register_appservice_user_adopts_server_assigned_user_id(tmp_path:
         )
 
     assert user_id == "@mindroom_agent:example.com"
+
+
+@pytest.mark.asyncio
+async def test_register_appservice_user_rejects_malformed_user_id(tmp_path: Path) -> None:
+    """A structurally invalid returned user ID must fail permanently, not retry forever."""
+    response = httpx.Response(200, json={"user_id": "@broken"})
+
+    with (
+        patch(
+            "mindroom.matrix.appservice.httpx.AsyncClient",
+            _recording_client([], response),
+        ),
+        pytest.raises(PermanentMatrixStartupError, match="invalid user ID"),
+    ):
+        await register_appservice_user(
+            "https://matrix.example.com",
+            username="mindroom_agent",
+            expected_user_id="@mindroom_agent:example.com",
+            token=APPSERVICE_TOKEN,
+            runtime_paths=_runtime_paths(tmp_path),
+        )
 
 
 @pytest.mark.asyncio

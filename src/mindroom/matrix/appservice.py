@@ -9,6 +9,7 @@ import httpx
 
 from mindroom.constants import RuntimePaths, runtime_env_path, runtime_matrix_ssl_verify
 from mindroom.matrix.client_session import create_authenticated_client, matrix_startup_error
+from mindroom.matrix.identity import parse_current_matrix_user_id
 from mindroom.runtime_env_policy import (
     MATRIX_APPSERVICE_TOKEN_ENV,
     MATRIX_APPSERVICE_TOKEN_FILE_ENV,
@@ -53,7 +54,8 @@ def _appservice_token_from_env(runtime_paths: RuntimePaths) -> _ConfiguredToken 
         msg = f"{MATRIX_APPSERVICE_TOKEN_FILE_ENV} is not readable: {file_path}"
         raise matrix_startup_error(msg, permanent=True) from exc
     if not file_token:
-        return None
+        msg = f"{MATRIX_APPSERVICE_TOKEN_FILE_ENV} points to an empty file: {file_path}"
+        raise matrix_startup_error(msg, permanent=True)
     return _ConfiguredToken(file_token, MATRIX_APPSERVICE_TOKEN_FILE_ENV)
 
 
@@ -167,10 +169,13 @@ async def register_appservice_user(
 
     body = _success_response_body("registration", response)
     returned_user_id = body.get("user_id")
-    if not isinstance(returned_user_id, str) or not returned_user_id.startswith("@"):
-        msg = f"Matrix application-service registration returned an invalid user ID: {returned_user_id!r}"
+    msg = f"Matrix application-service registration returned an invalid user ID: {returned_user_id!r}"
+    if not isinstance(returned_user_id, str):
         raise matrix_startup_error(msg, permanent=True)
-    return returned_user_id
+    try:
+        return parse_current_matrix_user_id(returned_user_id)
+    except ValueError as exc:
+        raise matrix_startup_error(msg, permanent=True) from exc
 
 
 async def login_appservice_user(
