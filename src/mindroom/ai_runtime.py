@@ -302,8 +302,8 @@ def scrub_queued_notice_session_context(
 
 
 def is_empty_completed_run(response: RunOutput | TeamRunOutput) -> bool:
-    """Return whether one completed run has no visible content."""
-    if response.status is not RunStatus.completed:
+    """Return whether one run completed with no tool calls and no visible content."""
+    if response.status is not RunStatus.completed or response.tools:
         return False
     content = response.content
     if content is None:

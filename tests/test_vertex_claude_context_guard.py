@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from agno.exceptions import ModelProviderError
@@ -50,14 +50,13 @@ async def test_fit_request_messages_drops_oldest_replay_and_keeps_current_tool_l
     async def _count(messages: list[Message], **_kwargs: object) -> int:
         return 110 if len(messages) > 4 else 70
 
-    model._count_request_input_tokens = AsyncMock(side_effect=_count)  # type: ignore[method-assign]
-
-    fitted = await model._fit_request_messages(
-        _tool_loop_messages(),
-        tools=None,
-        response_format=None,
-        compress_tool_results=False,
-    )
+    with patch.object(model, "_count_request_input_tokens", new=AsyncMock(side_effect=_count)):
+        fitted = await model._fit_request_messages(
+            _tool_loop_messages(),
+            tools=None,
+            response_format=None,
+            compress_tool_results=False,
+        )
 
     assert [(message.role, message.content) for message in fitted] == [
         ("system", "instructions"),
@@ -72,26 +71,29 @@ async def test_fit_request_messages_leaves_fitting_request_unchanged() -> None:
     """Requests inside the exact budget are passed through unchanged."""
     model = _model()
     messages = _tool_loop_messages()
-    model._count_request_input_tokens = AsyncMock(return_value=80)  # type: ignore[method-assign]
+    counter = AsyncMock(return_value=80)
 
-    fitted = await model._fit_request_messages(
-        messages,
-        tools=None,
-        response_format=None,
-        compress_tool_results=False,
-    )
+    with patch.object(model, "_count_request_input_tokens", new=counter):
+        fitted = await model._fit_request_messages(
+            messages,
+            tools=None,
+            response_format=None,
+            compress_tool_results=False,
+        )
 
     assert fitted is messages
-    model._count_request_input_tokens.assert_awaited_once()
+    counter.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_fit_request_messages_rejects_current_turn_that_cannot_fit() -> None:
     """The guard fails visibly instead of sending an oversized current turn."""
     model = _model()
-    model._count_request_input_tokens = AsyncMock(return_value=90)  # type: ignore[method-assign]
 
-    with pytest.raises(ModelProviderError, match="current turn"):
+    with (
+        patch.object(model, "_count_request_input_tokens", new=AsyncMock(return_value=90)),
+        pytest.raises(ModelProviderError, match="current turn"),
+    ):
         await model._fit_request_messages(
             _tool_loop_messages(),
             tools=None,

@@ -9,7 +9,7 @@ import pytest
 from agno.db.base import BaseDb, SessionType
 from agno.models.message import Message
 from agno.models.response import ToolExecution
-from agno.run.agent import RunCompletedEvent, RunContentEvent, RunOutput, ToolCallCompletedEvent
+from agno.run.agent import RunCompletedEvent, RunContentEvent, RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
@@ -104,19 +104,19 @@ def _completed_team_run_output(run_id: str, content: str | None) -> TeamRunOutpu
 
 
 def test_is_empty_completed_run_detects_contentless_completed_runs() -> None:
-    """Completed runs with no visible content are empty."""
+    """Completed runs with no tool calls and no visible content are empty."""
     assert is_empty_completed_run(_completed_run("r1", None))
     assert is_empty_completed_run(_completed_run("r1", ""))
     assert is_empty_completed_run(_completed_run("r1", "  \n"))
 
 
-def test_is_empty_completed_run_ignores_content_and_other_statuses() -> None:
-    """Real responses and non-completed statuses are not empty."""
+def test_is_empty_completed_run_ignores_runs_with_content_tools_or_other_status() -> None:
+    """Real responses, tool-only runs, and non-completed statuses are not empty."""
     assert not is_empty_completed_run(_completed_run("r1", "hello"))
 
     tool_run = _completed_run("r1", None)
     tool_run.tools = [ToolExecution(tool_name="run_shell_command", tool_args={"cmd": "pwd"}, result="/app")]
-    assert is_empty_completed_run(tool_run)
+    assert not is_empty_completed_run(tool_run)
 
     errored = _completed_run("r1", None)
     errored.status = RunStatus.error
@@ -288,44 +288,6 @@ async def test_ai_response_returns_fallback_notice_when_retry_is_also_empty(tmp_
 
 
 @pytest.mark.asyncio
-async def test_ai_response_finalizes_tool_backed_empty_run_without_tools(tmp_path: Path) -> None:
-    """Completed tools are reused in one tool-disabled finalization attempt."""
-    tool_run = _completed_run("run-tool-empty", None)
-    tool_run.tools = [
-        ToolExecution(
-            tool_name="lookup",
-            tool_args={"query": "status"},
-            result="ready",
-        ),
-    ]
-    first_agent = _mock_agent(tool_run)
-    recovered_agent = _mock_agent(_completed_run("run-good", "Recovered"))
-
-    with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
-        mock_prepare.side_effect = [
-            _prepared_prompt_result(first_agent),
-            _prepared_prompt_result(recovered_agent),
-        ]
-
-        result = await ai_response(
-            make_turn_context("general", session_id="session-1"),
-            prompt="Check status",
-            runtime_paths=_runtime_paths(tmp_path),
-            config=_config(),
-        )
-
-    assert result == "Recovered"
-    assert first_agent.arun.call_count == 1
-    assert recovered_agent.arun.call_count == 1
-    finalization_call = mock_prepare.call_args_list[1]
-    assert "TOOLS COMPLETED WITHOUT A FINAL ANSWER" in finalization_call.kwargs["prompt"]
-    assert '"result":"ready"' in finalization_call.kwargs["prompt"]
-    tool_filter = finalization_call.kwargs["tool_function_filter"]
-    assert tool_filter is not None
-    assert not tool_filter(ToolExecution(tool_name="unused"))
-
-
-@pytest.mark.asyncio
 async def test_ai_response_fallback_notice_stays_out_of_the_turn_recorder(tmp_path: Path) -> None:
     """The delivery-only notice must never be recorded as model text it could replay from history."""
     recorder = TurnRecorder(user_message="test")
@@ -385,47 +347,6 @@ async def test_stream_agent_response_retries_once_after_empty_completed_stream(t
     assert contents == ["Recovered"]
     empty_agent.arun.assert_called_once()
     recovered_agent.arun.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_stream_agent_response_finalizes_tool_backed_empty_run_without_tools(tmp_path: Path) -> None:
-    """The streamed path reuses completed results in a tool-disabled attempt."""
-    execution = ToolExecution(tool_name="lookup", tool_args={"query": "status"}, result="ready")
-
-    async def tool_empty_stream() -> AsyncIterator[object]:
-        yield ToolCallCompletedEvent(tool=execution)
-        yield RunCompletedEvent(content=None)
-
-    async def recovered_stream() -> AsyncIterator[object]:
-        yield RunContentEvent(content="Recovered")
-        yield RunCompletedEvent(content="Recovered")
-
-    first_agent = _mock_streaming_agent(tool_empty_stream())
-    recovered_agent = _mock_streaming_agent(recovered_stream())
-
-    with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
-        mock_prepare.side_effect = [
-            _prepared_prompt_result(first_agent),
-            _prepared_prompt_result(recovered_agent),
-        ]
-
-        chunks = [
-            chunk
-            async for chunk in stream_agent_response(
-                make_turn_context("general", session_id="session-1"),
-                prompt="Check status",
-                runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
-            )
-        ]
-
-    contents = [cast("str", chunk.content) for chunk in chunks if isinstance(chunk, RunContentEvent)]
-    assert contents == ["Recovered"]
-    assert first_agent.arun.call_count == 1
-    assert recovered_agent.arun.call_count == 1
-    finalization_call = mock_prepare.call_args_list[1]
-    assert '"result":"ready"' in finalization_call.kwargs["prompt"]
-    assert finalization_call.kwargs["tool_function_filter"] is not None
 
 
 @pytest.mark.asyncio
