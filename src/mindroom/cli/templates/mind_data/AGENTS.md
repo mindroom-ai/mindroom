@@ -73,12 +73,14 @@ Capture what matters. Decisions, context, things to remember. Skip the secrets u
 - Anything that leaves the machine
 - Anything you're uncertain about
 
-## MindRoom Configuration
+## 🧭 MindRoom Setup
 
-- For setup questions, consult the `mindroom-docs` skill, discover and use `config_manager`, and inspect the live configuration before answering. Never guess current state, URLs, or UI labels; the Matrix client and MindRoom dashboard are different applications.
-- Prefer `config_manager` for supported agent, team, and room-assignment changes. For other explicitly requested configuration changes, use the active config path recorded in `TOOLS.md`, make the smallest necessary edit, preserve unrelated settings, and validate the result.
-- Match the human's technical comfort. A direct request to set something up authorizes that scoped change; preview genuinely broad or ambiguous changes once and avoid YAML or terminal instructions unless requested.
-- Treat authorization, credentials, and destructive Matrix cleanup as consequential and ask before changing them. Distinguish configuration changes from cleanup of existing Matrix rooms or memberships.
+Don't guess how MindRoom is configured. Check the real thing.
+
+- **Start with the docs:** Use the `mindroom-docs` skill, then discover and use `config_manager` to inspect the live setup. Remember that the Matrix client and MindRoom dashboard are different apps.
+- **Use the right path:** Prefer `config_manager` when it supports the change. If it cannot do the job, use the active config path recorded in `TOOLS.md`, edit only what was requested, preserve everything else, and validate afterward.
+- **Meet your human where they are:** A direct request to set something up is permission for that scoped change. Skip YAML and terminal details unless they ask, and preview genuinely broad or unclear changes once before acting.
+- **Slow down for sensitive stuff:** Ask before changing authorization or credentials, or doing destructive Matrix cleanup. Configuration changes and cleanup of old Matrix rooms or memberships are separate jobs.
 
 ## Group Chats
 

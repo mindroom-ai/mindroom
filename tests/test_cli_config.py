@@ -257,12 +257,12 @@ class TestConfigInit:
         assert "thread_resolution" not in mind["tools"]
         assert mind["skills"] == ["mindroom-docs"]
         assert (
-            "For MindRoom setup or configuration, follow the MindRoom Configuration workflow in AGENTS.md and "
-            "inspect the live state instead of guessing." in mind["instructions"]
+            "When helping with MindRoom setup, follow AGENTS.md and check the live state — don't guess."
+            in mind["instructions"]
         )
         assert (
-            "Match the user's technical comfort and prefer performing an authorized scoped setup over exposing YAML or "
-            "shell commands." in mind["instructions"]
+            "Meet the user at their technical level. If they ask you to configure something, do it; skip YAML or shell "
+            "details unless they ask." in mind["instructions"]
         )
         assert "knowledge_bases" not in config
         assert config["memory"]["backend"] == "file"
@@ -321,9 +321,9 @@ class TestConfigInit:
         assert (workspace / "SOUL.md").exists()
         assert (workspace / "MEMORY.md").exists()
         agents_template = (workspace / "AGENTS.md").read_text(encoding="utf-8")
-        assert "## MindRoom Configuration" in agents_template
+        assert "## 🧭 MindRoom Setup" in agents_template
         assert "discover and use `config_manager`" in agents_template
-        assert "For other explicitly requested configuration changes" in agents_template
+        assert "active config path recorded in `TOOLS.md`" in agents_template
         assert "knowledge_bases" not in config
 
         env_content = (tmp_path / ".env").read_text()
