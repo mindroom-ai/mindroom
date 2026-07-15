@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _EXACT_COUNT_THRESHOLD_RATIO = 0.5
+_IMAGE_BLOCK_ESTIMATE_TOKENS = 1600
 
 
 def _strip_vertex_claude_tool_strict(
@@ -61,6 +63,60 @@ def _strip_vertex_claude_tool_strict(
         sanitized.append(next_tool)
 
     return sanitized if changed else tools
+
+
+def _blocks_with_flat_media_cost(blocks: list[Any]) -> tuple[list[Any], int]:
+    """Return blocks with base64 payloads emptied plus their surcharge tokens."""
+    stripped_blocks: list[Any] = []
+    surcharge = 0
+    for block in blocks:
+        if not isinstance(block, dict):
+            stripped_blocks.append(block)
+            continue
+        stripped = block
+        source = block.get("source")
+        data = source.get("data") if isinstance(source, dict) else None
+        if isinstance(data, str) and data:
+            surcharge += _IMAGE_BLOCK_ESTIMATE_TOKENS if block.get("type") == "image" else len(data) // 4
+            stripped = {**block, "source": {**source, "data": ""}}
+        nested = block.get("content")
+        if isinstance(nested, list):
+            stripped_nested, nested_surcharge = _blocks_with_flat_media_cost(nested)
+            if nested_surcharge:
+                stripped = {**stripped, "content": stripped_nested}
+                surcharge += nested_surcharge
+        stripped_blocks.append(stripped)
+    return stripped_blocks, surcharge
+
+
+def _media_flat_costed_for_estimate(request_kwargs: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """Replace base64 media payloads with flat token surcharges before estimating.
+
+    Feeding multi-megabyte base64 blobs through the tokenizer would stall the
+    event loop and grossly overstate real media cost (Claude bills an image at
+    roughly 1.6k tokens, not base64-length/4). Images take Anthropic's
+    documented per-image ceiling; other base64 sources (PDF documents) keep a
+    length-proportional surcharge without paying the tokenizer encode.
+    """
+    messages = request_kwargs.get("messages")
+    if not isinstance(messages, list):
+        return request_kwargs, 0
+    stripped_messages: list[Any] = []
+    surcharge = 0
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            stripped_messages.append(message)
+            continue
+        stripped_content, message_surcharge = _blocks_with_flat_media_cost(content)
+        if message_surcharge:
+            stripped_messages.append({**message, "content": stripped_content})
+            surcharge += message_surcharge
+        else:
+            stripped_messages.append(message)
+    if not surcharge:
+        return request_kwargs, 0
+    return {**request_kwargs, "messages": stripped_messages}, surcharge
 
 
 @dataclass
@@ -107,16 +163,22 @@ class MindroomVertexAIClaude(VertexAIClaude):
         response_format: dict[str, Any] | type[Any] | None,
         compress_tool_results: bool,
     ) -> int:
-        """Estimate the full provider-shaped payload without a network call."""
+        """Estimate the full provider-shaped payload without a network call.
+
+        CPU-bound (message formatting plus a tokenizer encode); async callers
+        must off-load it to a worker thread.
+        """
         request_kwargs = self._request_input_kwargs(
             messages,
             tools=tools,
             response_format=response_format,
             compress_tool_results=compress_tool_results,
         )
-        return estimate_compaction_input_tokens(stable_serialize(request_kwargs)) + count_schema_tokens(
-            response_format,
-            self.id,
+        estimate_kwargs, media_surcharge = _media_flat_costed_for_estimate(request_kwargs)
+        return (
+            estimate_compaction_input_tokens(stable_serialize(estimate_kwargs))
+            + media_surcharge
+            + count_schema_tokens(response_format, self.id)
         )
 
     async def _count_request_input_tokens(
@@ -128,7 +190,8 @@ class MindroomVertexAIClaude(VertexAIClaude):
         compress_tool_results: bool,
     ) -> int:
         """Count the provider-shaped payload using Vertex's exact tokenizer."""
-        request_kwargs = self._request_input_kwargs(
+        request_kwargs = await asyncio.to_thread(
+            self._request_input_kwargs,
             messages,
             tools=tools,
             response_format=response_format,
@@ -173,7 +236,8 @@ class MindroomVertexAIClaude(VertexAIClaude):
             msg = "Vertex Claude context window leaves no room for input after the configured output reserve."
             raise ModelProviderError(message=msg, model_name=self.name, model_id=self.id)
 
-        estimated_tokens = self._estimate_request_input_tokens(
+        estimated_tokens = await asyncio.to_thread(
+            self._estimate_request_input_tokens,
             messages,
             tools=tools,
             response_format=response_format,

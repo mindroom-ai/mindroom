@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from agno.exceptions import ModelProviderError
+from agno.media import Image
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.models.vertexai.claude import Claude as VertexAIClaude
@@ -82,6 +84,35 @@ def test_estimate_request_input_tokens_uses_full_provider_payload() -> None:
     assert all(key in serialized_payload for key in ('"messages"', '"model"', '"system"', '"tools"'))
 
 
+def test_estimate_flat_costs_base64_media_instead_of_tokenizing_it() -> None:
+    """Base64 image payloads never reach the tokenizer and cost a flat surcharge."""
+    model = _model()
+    image_bytes = b"\x89PNG\r\n\x1a\n" + b"fake pixel data"
+    image_base64 = base64.b64encode(image_bytes).decode()
+    messages = [
+        Message(role="user", content="what is in this picture?", images=[Image(content=image_bytes)]),
+    ]
+
+    with (
+        patch(
+            "mindroom.vertex_claude_compat.estimate_compaction_input_tokens",
+            return_value=30,
+        ) as estimator,
+        patch("mindroom.vertex_claude_compat.count_schema_tokens", return_value=0),
+    ):
+        estimated_tokens = model._estimate_request_input_tokens(
+            messages,
+            tools=None,
+            response_format=None,
+            compress_tool_results=False,
+        )
+
+    serialized_payload = estimator.call_args.args[0]
+    assert image_base64 not in serialized_payload
+    assert '"media_type":"image/png"' in serialized_payload
+    assert estimated_tokens == 30 + 1600
+
+
 @pytest.mark.asyncio
 async def test_fit_request_messages_drops_oldest_replay_and_keeps_current_tool_loop() -> None:
     """Exact counting trims history while preserving the full current turn."""
@@ -109,6 +140,46 @@ async def test_fit_request_messages_drops_oldest_replay_and_keeps_current_tool_l
         ("tool", "large result"),
     ]
     assert counter.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_fit_request_messages_trims_minimally_across_multiple_history_turns() -> None:
+    """The binary search settles on the earliest cut that fits, keeping newer turns."""
+    model = _model()
+    messages = [
+        Message(role="system", content="instructions"),
+        Message(role="user", content="turn one", from_history=True),
+        Message(role="assistant", content="answer one", from_history=True),
+        Message(role="user", content="turn two", from_history=True),
+        Message(role="assistant", content="answer two", from_history=True),
+        Message(role="user", content="turn three", from_history=True),
+        Message(role="assistant", content="answer three", from_history=True),
+        Message(role="user", content="current question"),
+    ]
+    tokens_by_message_count = {8: 110, 6: 90, 4: 75, 2: 60}
+
+    async def _count(candidate: list[Message], **_kwargs: object) -> int:
+        return tokens_by_message_count[len(candidate)]
+
+    counter = AsyncMock(side_effect=_count)
+    with (
+        patch.object(model, "_estimate_request_input_tokens", return_value=40),
+        patch.object(model, "_count_request_input_tokens", new=counter),
+    ):
+        fitted = await model._fit_request_messages(
+            messages,
+            tools=None,
+            response_format=None,
+            compress_tool_results=False,
+        )
+
+    assert [(message.role, message.content) for message in fitted] == [
+        ("system", "instructions"),
+        ("user", "turn three"),
+        ("assistant", "answer three"),
+        ("user", "current question"),
+    ]
+    assert counter.await_count == 3
 
 
 @pytest.mark.asyncio
