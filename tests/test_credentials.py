@@ -161,6 +161,28 @@ class TestCredentialsManager:
         ):
             CredentialsManager(credentials_dir)
 
+    def test_primary_manager_hardens_existing_worker_credentials(self, tmp_path: Path) -> None:
+        """Root initialization should secure dormant worker credential stores."""
+        storage_root = tmp_path / "mindroom_data"
+        worker_root = storage_root / "workers" / "worker-existing"
+        worker_credentials = worker_root / "credentials"
+        worker_shared_credentials = worker_root / ".shared_credentials"
+        worker_credentials.mkdir(parents=True, mode=0o755)
+        worker_shared_credentials.mkdir(mode=0o755)
+        credentials_path = worker_credentials / "google_credentials.json"
+        shared_credentials_path = worker_shared_credentials / "openai_credentials.json"
+        credentials_path.write_text('{"token":"worker"}', encoding="utf-8")
+        shared_credentials_path.write_text('{"api_key":"shared"}', encoding="utf-8")
+        credentials_path.chmod(0o644)
+        shared_credentials_path.chmod(0o644)
+
+        CredentialsManager(storage_root / "credentials")
+
+        assert stat.S_IMODE(worker_credentials.stat().st_mode) == 0o700
+        assert stat.S_IMODE(worker_shared_credentials.stat().st_mode) == 0o700
+        assert stat.S_IMODE(credentials_path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(shared_credentials_path.stat().st_mode) == 0o600
+
     def test_encrypted_save_and_load_credentials_round_trip(
         self,
         tmp_path: Path,

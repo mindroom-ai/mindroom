@@ -177,8 +177,25 @@ def _credential_owned_directory_chain(path: Path) -> list[Path]:
 def _harden_existing_credential_files(path: Path) -> None:
     """Make existing credential payloads owner-readable only."""
     for credentials_path in path.glob("*_credentials.json"):
-        if credentials_path.is_file():
+        if not credentials_path.is_symlink() and credentials_path.is_file():
             _set_private_permissions(credentials_path, 0o600)
+
+
+def _existing_worker_credential_paths(storage_root: Path) -> tuple[Path, ...]:
+    """Return real credential directories belonging to existing workers."""
+    workers_root = storage_root / "workers"
+    if workers_root.is_symlink() or not workers_root.is_dir():
+        return ()
+
+    paths: list[Path] = []
+    for worker_root in workers_root.iterdir():
+        if worker_root.is_symlink() or not worker_root.is_dir():
+            continue
+        for directory_name in ("credentials", _WORKER_SHARED_CREDENTIALS_DIRNAME):
+            credential_path = worker_root / directory_name
+            if not credential_path.is_symlink() and credential_path.is_dir():
+                paths.append(credential_path)
+    return tuple(paths)
 
 
 def _atomic_write_private_file(path: Path, payload: bytes) -> None:
@@ -241,6 +258,8 @@ class CredentialsManager:
         )
 
         credential_paths = {self.base_path, self.shared_base_path}
+        if self.current_worker_key is None and self.base_path.name == "credentials":
+            credential_paths.update(_existing_worker_credential_paths(self.storage_root))
         for credential_path in credential_paths:
             _ensure_private_directory(credential_path, harden_existing=True)
             _harden_existing_credential_files(credential_path)
