@@ -69,7 +69,7 @@ def test_persist_local_provisioning_env_writes_credentials_only(tmp_path: Path) 
 
 
 def test_persist_local_provisioning_env_writes_owner_when_available(tmp_path: Path) -> None:
-    """Persisted owner MXID lets a later config init replace authorization placeholders."""
+    """Persisted owner MXID lets a later config init replace owner access placeholders."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("models: {}\nagents: {}\nrouter:\n  model: default\n")
 
