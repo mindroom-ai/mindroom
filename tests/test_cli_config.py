@@ -324,9 +324,10 @@ class TestConfigInit:
         assert "## 🧭 MindRoom Setup" in agents_template
         assert "discover and use `config_manager`" in agents_template
         assert "active config path recorded in `TOOLS.md`" in agents_template
-        assert "`https://mindroom.chat` is the hosted Matrix homeserver" in agents_template
-        assert "`https://chat.mindroom.chat` is MindRoom Chat" in agents_template
-        assert "The MindRoom dashboard is a separate app" in agents_template
+        assert "The Matrix homeserver, Matrix client, and MindRoom dashboard are separate services" in agents_template
+        assert "MindRoom Chat is the MindRoom-focused Matrix client" in agents_template
+        assert "Use the live configuration and deployment docs for their URLs" in agents_template
+        assert "mindroom.chat" not in agents_template
         assert "knowledge_bases" not in config
 
         env_content = (tmp_path / ".env").read_text()
