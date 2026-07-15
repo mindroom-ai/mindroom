@@ -67,7 +67,7 @@ _MARKABLE_BLOCK_TYPES = frozenset({"text", "tool_result", "document", "image"})
 
 _TOOL_SEARCH_TOOL_TYPE = "tool_search_tool_regex_20251119"
 _TOOL_SEARCH_TOOL_NAME = "tool_search_tool_regex"
-_NATIVE_TOOL_SEARCH_PROVIDERS = frozenset({"anthropic"})
+_NATIVE_TOOL_SEARCH_PROVIDERS = frozenset({"anthropic", "vertexai_claude"})
 
 _SERVER_TOOL_USE_BLOCK_TYPE = "server_tool_use"
 _TOOL_SEARCH_RESULT_BLOCK_TYPE = "tool_search_tool_result"
@@ -80,9 +80,9 @@ _TOOL_SEARCH_RESULT_INPUT_KEYS = frozenset({"type", "tool_use_id", "content", "c
 def native_tool_search_supported(provider: str, model_id: str) -> bool:
     """Return whether one authored provider/model pair supports server-side tool search.
 
-    Anthropic's direct API supports the search tool on every Claude model since
-    Opus 4.5 / Sonnet 4.5 / Haiku 4.5. Vertex's token-count endpoint rejects
-    that tool type, so Vertex keeps MindRoom's provider-agnostic fallback.
+    Every Claude model since Opus 4.5 / Sonnet 4.5 / Haiku 4.5 supports the
+    search tool, so gating denylists the closed pre-4.5 set and new model
+    releases take the native path without a code change.
     """
     canonical_provider = provider.strip().lower().replace("-", "_")
     if canonical_provider not in _NATIVE_TOOL_SEARCH_PROVIDERS:

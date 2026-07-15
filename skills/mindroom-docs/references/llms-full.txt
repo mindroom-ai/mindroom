@@ -3144,8 +3144,7 @@ No flags means the tool is eager and appears in every request.
 
 ## Native Server-Side Tool Search
 
-Claude models since Opus 4.5 / Sonnet 4.5 / Haiku 4.5 on the direct `anthropic` provider, and GPT models 5.4 or newer on the first-party `openai`, `codex`, and `openai_codex` providers, use the provider's server-side tool search automatically.
-Vertex Claude uses MindRoom's runtime fallback because Vertex does not accept Anthropic's beta tool-search schema.
+Claude models since Opus 4.5 / Sonnet 4.5 / Haiku 4.5 on the `anthropic` and `vertexai_claude` providers, and GPT models 5.4 or newer on the first-party `openai`, `codex`, and `openai_codex` providers, use the provider's server-side tool search automatically.
 On this path every deferred tool ships in every request tagged `defer_loading: true` together with the provider's tool-search entry, so deferred schemas stay out of the model's rendered context until the model searches for them.
 Tool discovery never invalidates the prompt cache: Anthropic expands discovered tool references inline in the message stream, and OpenAI loads discovered tools at the end of the context window.
 The `dynamic_tools` manager, its prompt blocks, and session loaded-tool state are not used on this path; all deferred toolkits are attached at agent build, so discovered calls execute directly.

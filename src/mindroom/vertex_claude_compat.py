@@ -26,6 +26,7 @@ logger = get_logger(__name__)
 
 _EXACT_COUNT_THRESHOLD_RATIO = 0.5
 _EXACT_COUNT_BLOCK_TYPES = frozenset({"document", "image"})
+_TOOL_SEARCH_TOOL_TYPE_PREFIX = "tool_search_tool_"
 
 
 def _strip_vertex_claude_tool_strict(
@@ -92,6 +93,46 @@ def _request_requires_exact_count(request_kwargs: dict[str, Any]) -> bool:
         if isinstance(content, list) and _blocks_require_exact_count(content):
             return True
     return False
+
+
+def _request_kwargs_for_vertex_token_count(request_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return a conservative payload accepted by Vertex token counting.
+
+    Vertex generation supports Anthropic's native tool search, but its token-count
+    endpoint rejects both the server tool and ``defer_loading``. Remove only those
+    annotations while retaining every custom tool definition. Counting all deferred
+    definitions overestimates the rendered prompt, which is safe for context fitting.
+    """
+    tools = request_kwargs.get("tools")
+    if not isinstance(tools, list):
+        return request_kwargs
+
+    changed = False
+    countable_tools: list[Any] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            countable_tools.append(tool)
+            continue
+        tool_type = tool.get("type")
+        if isinstance(tool_type, str) and tool_type.startswith(_TOOL_SEARCH_TOOL_TYPE_PREFIX):
+            changed = True
+            continue
+        if "defer_loading" in tool:
+            countable_tool = dict(tool)
+            countable_tool.pop("defer_loading", None)
+            countable_tools.append(countable_tool)
+            changed = True
+            continue
+        countable_tools.append(tool)
+
+    if not changed:
+        return request_kwargs
+    countable_kwargs = dict(request_kwargs)
+    if countable_tools:
+        countable_kwargs["tools"] = countable_tools
+    else:
+        countable_kwargs.pop("tools", None)
+    return countable_kwargs
 
 
 @dataclass
@@ -172,7 +213,8 @@ class MindroomVertexAIClaude(VertexAIClaude):
             response_format=response_format,
             compress_tool_results=compress_tool_results,
         )
-        response = await self.get_async_client().messages.count_tokens(**request_kwargs)
+        countable_kwargs = _request_kwargs_for_vertex_token_count(request_kwargs)
+        response = await self.get_async_client().messages.count_tokens(**countable_kwargs)
         return response.input_tokens + count_schema_tokens(response_format, self.id)
 
     @staticmethod

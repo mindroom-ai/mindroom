@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -12,7 +13,10 @@ from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 
-from mindroom.vertex_claude_compat import MindroomVertexAIClaude
+from mindroom.vertex_claude_compat import (
+    MindroomVertexAIClaude,
+    _request_kwargs_for_vertex_token_count,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -138,6 +142,71 @@ def test_estimate_requires_exact_count_for_base64_documents() -> None:
 
     assert estimated_tokens is None
     estimator.assert_not_called()
+
+
+def test_vertex_token_count_payload_strips_only_native_search_annotations() -> None:
+    """Vertex counting keeps full tool schemas without unsupported search metadata."""
+    request_kwargs = {
+        "model": "claude-fable-5",
+        "messages": [{"role": "user", "content": "hello"}],
+        "tools": [
+            {"type": "tool_search_tool_regex_20251119", "name": "tool_search_tool_regex"},
+            {
+                "name": "lookup",
+                "description": "Look up a value.",
+                "input_schema": {"type": "object"},
+                "defer_loading": True,
+            },
+            {"name": "eager", "input_schema": {"type": "object"}},
+        ],
+    }
+
+    countable_kwargs = _request_kwargs_for_vertex_token_count(request_kwargs)
+
+    assert countable_kwargs["tools"] == [
+        {
+            "name": "lookup",
+            "description": "Look up a value.",
+            "input_schema": {"type": "object"},
+        },
+        {"name": "eager", "input_schema": {"type": "object"}},
+    ]
+    assert request_kwargs["tools"][1]["defer_loading"] is True
+
+
+@pytest.mark.asyncio
+async def test_exact_count_sanitizes_native_tool_search_for_vertex() -> None:
+    """Exact counting must not send generation-only tool-search fields to Vertex."""
+    model = _model()
+    request_kwargs = {
+        "model": model.id,
+        "messages": [{"role": "user", "content": "hello"}],
+        "tools": [
+            {"type": "tool_search_tool_regex_20251119", "name": "tool_search_tool_regex"},
+            {"name": "lookup", "input_schema": {"type": "object"}, "defer_loading": True},
+        ],
+    }
+    count_tokens = AsyncMock(return_value=SimpleNamespace(input_tokens=17))
+    client = SimpleNamespace(messages=SimpleNamespace(count_tokens=count_tokens))
+
+    with (
+        patch.object(model, "_request_input_kwargs", return_value=request_kwargs),
+        patch.object(model, "get_async_client", return_value=client),
+        patch("mindroom.vertex_claude_compat.count_schema_tokens", return_value=3),
+    ):
+        tokens = await model._count_request_input_tokens(
+            [Message(role="user", content="hello")],
+            tools=None,
+            response_format=None,
+            compress_tool_results=False,
+        )
+
+    assert tokens == 20
+    count_tokens.assert_awaited_once_with(
+        model=model.id,
+        messages=[{"role": "user", "content": "hello"}],
+        tools=[{"name": "lookup", "input_schema": {"type": "object"}}],
+    )
 
 
 @pytest.mark.asyncio
