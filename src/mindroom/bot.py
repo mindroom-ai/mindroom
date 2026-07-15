@@ -958,7 +958,7 @@ class AgentBot:
 
     async def ensure_user_account(self) -> None:
         """Verify that orchestrator account preparation supplied this bot's account."""
-        if self.agent_user.user_id and self.agent_user.password:
+        if self.agent_user.user_id:
             return
         msg = f"Matrix account for {self.agent_name!r} was not prepared before bot startup"
         raise PermanentMatrixStartupError(msg)

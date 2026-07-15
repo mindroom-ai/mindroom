@@ -223,3 +223,25 @@ async def test_appservice_error_never_includes_token(tmp_path: Path) -> None:
 
     assert "M_UNKNOWN_TOKEN" in str(excinfo.value)
     assert APPSERVICE_TOKEN not in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_appservice_rate_limit_remains_retryable(tmp_path: Path) -> None:
+    """Rate limiting should not bypass the orchestrator's startup retry loop."""
+    response = httpx.Response(429, json={"errcode": "M_LIMIT_EXCEEDED", "error": "Slow down"})
+
+    with (
+        patch(
+            "mindroom.matrix.appservice.httpx.AsyncClient",
+            _recording_client([], response),
+        ),
+        pytest.raises(ValueError, match="M_LIMIT_EXCEEDED") as excinfo,
+    ):
+        await login_appservice_user(
+            "https://matrix.example.com",
+            user_id="@mindroom_agent:example.com",
+            token=APPSERVICE_TOKEN,
+            runtime_paths=_runtime_paths(tmp_path),
+        )
+
+    assert not isinstance(excinfo.value, PermanentMatrixStartupError)

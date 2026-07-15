@@ -148,6 +148,19 @@ class TestAgentBot(AgentBotTestBase):
         assert bot_no_stream.enable_streaming is False
 
     @pytest.mark.asyncio
+    async def test_ensure_user_account_accepts_passwordless_managed_account(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Appservice-managed accounts are prepared without a password."""
+        mock_agent_user.password = None
+        config = self.create_mock_config(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+
+        await bot.ensure_user_account()
+
+    @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
     @patch("mindroom.bot.login_agent_user")
     @patch("mindroom.bot.AgentBot.ensure_user_account")

@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 _ManagedAccountAuthMode = Literal["password", "appservice"]
 
 _APPSERVICE_LOGIN_TYPE = "m.login.application_service"
+_TRANSIENT_APPSERVICE_STATUS_CODES = frozenset({408, 425, 429})
 
 
 @dataclass(frozen=True)
@@ -120,7 +121,8 @@ async def _post(
 def _raise_appservice_error(action: str, response: httpx.Response) -> None:
     errcode, detail = _response_error(response)
     message = f"Matrix application-service {action} failed: {errcode or response.status_code}: {detail}"
-    raise matrix_startup_error(message, permanent=response.status_code < 500)
+    permanent = response.status_code < 500 and response.status_code not in _TRANSIENT_APPSERVICE_STATUS_CODES
+    raise matrix_startup_error(message, permanent=permanent)
 
 
 async def register_appservice_user(
