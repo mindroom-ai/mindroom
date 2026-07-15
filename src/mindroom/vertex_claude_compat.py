@@ -12,6 +12,7 @@ from agno.utils.tokens import count_schema_tokens
 
 from mindroom.claude_prompt_cache import prepare_claude_request_kwargs
 from mindroom.logging_config import get_logger
+from mindroom.token_budget import estimate_compaction_input_tokens, stable_serialize
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -21,6 +22,8 @@ if TYPE_CHECKING:
     from agno.run.agent import RunOutput
 
 logger = get_logger(__name__)
+
+_EXACT_COUNT_THRESHOLD_RATIO = 0.5
 
 
 def _strip_vertex_claude_tool_strict(
@@ -66,15 +69,15 @@ class MindroomVertexAIClaude(VertexAIClaude):
 
     context_window: int | None = None
 
-    async def _count_request_input_tokens(
+    def _request_input_kwargs(
         self,
         messages: list[Message],
         *,
         tools: list[dict[str, Any]] | None,
         response_format: dict[str, Any] | type[Any] | None,
         compress_tool_results: bool,
-    ) -> int:
-        """Count the same provider-shaped payload used by the real request."""
+    ) -> dict[str, Any]:
+        """Build the provider-shaped payload used for input token counting."""
         anthropic_messages, system_prompt = format_messages(
             messages,
             compress_tool_results=compress_tool_results,
@@ -94,7 +97,43 @@ class MindroomVertexAIClaude(VertexAIClaude):
             request_kwargs["tools"] = format_tools_for_model(sanitized_tools)
         if self.thinking:
             request_kwargs["thinking"] = self.thinking
-        request_kwargs = prepare_claude_request_kwargs(self, request_kwargs)
+        return prepare_claude_request_kwargs(self, request_kwargs)
+
+    def _estimate_request_input_tokens(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[dict[str, Any]] | None,
+        response_format: dict[str, Any] | type[Any] | None,
+        compress_tool_results: bool,
+    ) -> int:
+        """Estimate the full provider-shaped payload without a network call."""
+        request_kwargs = self._request_input_kwargs(
+            messages,
+            tools=tools,
+            response_format=response_format,
+            compress_tool_results=compress_tool_results,
+        )
+        return estimate_compaction_input_tokens(stable_serialize(request_kwargs)) + count_schema_tokens(
+            response_format,
+            self.id,
+        )
+
+    async def _count_request_input_tokens(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[dict[str, Any]] | None,
+        response_format: dict[str, Any] | type[Any] | None,
+        compress_tool_results: bool,
+    ) -> int:
+        """Count the provider-shaped payload using Vertex's exact tokenizer."""
+        request_kwargs = self._request_input_kwargs(
+            messages,
+            tools=tools,
+            response_format=response_format,
+            compress_tool_results=compress_tool_results,
+        )
         response = await self.get_async_client().messages.count_tokens(**request_kwargs)
         return response.input_tokens + count_schema_tokens(response_format, self.id)
 
@@ -133,6 +172,15 @@ class MindroomVertexAIClaude(VertexAIClaude):
         if input_budget <= 0:
             msg = "Vertex Claude context window leaves no room for input after the configured output reserve."
             raise ModelProviderError(message=msg, model_name=self.name, model_id=self.id)
+
+        estimated_tokens = self._estimate_request_input_tokens(
+            messages,
+            tools=tools,
+            response_format=response_format,
+            compress_tool_results=compress_tool_results,
+        )
+        if estimated_tokens < input_budget * _EXACT_COUNT_THRESHOLD_RATIO:
+            return messages
 
         async def _count(candidate: list[Message]) -> int:
             return await self._count_request_input_tokens(

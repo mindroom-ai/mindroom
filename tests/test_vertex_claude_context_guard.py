@@ -48,6 +48,40 @@ def _tool_loop_messages() -> list[Message]:
     ]
 
 
+def test_estimate_request_input_tokens_uses_full_provider_payload() -> None:
+    """Local estimation includes formatted messages, system, tools, and schema."""
+    model = _model()
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "description": "Look up a value.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+    ]
+    response_format = {"type": "object", "properties": {"answer": {"type": "string"}}}
+
+    with (
+        patch(
+            "mindroom.vertex_claude_compat.estimate_compaction_input_tokens",
+            return_value=30,
+        ) as estimator,
+        patch("mindroom.vertex_claude_compat.count_schema_tokens", return_value=5),
+    ):
+        estimated_tokens = model._estimate_request_input_tokens(
+            _tool_loop_messages(),
+            tools=tools,
+            response_format=response_format,
+            compress_tool_results=False,
+        )
+
+    serialized_payload = estimator.call_args.args[0]
+    assert estimated_tokens == 35
+    assert all(key in serialized_payload for key in ('"messages"', '"model"', '"system"', '"tools"'))
+
+
 @pytest.mark.asyncio
 async def test_fit_request_messages_drops_oldest_replay_and_keeps_current_tool_loop() -> None:
     """Exact counting trims history while preserving the full current turn."""
@@ -57,7 +91,10 @@ async def test_fit_request_messages_drops_oldest_replay_and_keeps_current_tool_l
         return 110 if len(messages) > 4 else 70
 
     counter = AsyncMock(side_effect=_count)
-    with patch.object(model, "_count_request_input_tokens", new=counter):
+    with (
+        patch.object(model, "_estimate_request_input_tokens", return_value=40),
+        patch.object(model, "_count_request_input_tokens", new=counter),
+    ):
         fitted = await model._fit_request_messages(
             _tool_loop_messages(),
             tools=None,
@@ -120,13 +157,38 @@ async def test_async_invocations_delegate_with_fitted_messages() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fit_request_messages_leaves_fitting_request_unchanged() -> None:
-    """Requests inside the exact budget are passed through unchanged."""
+async def test_fit_request_messages_skips_exact_count_below_half_budget() -> None:
+    """Small requests avoid the Vertex token-count network call."""
+    model = _model()
+    messages = _tool_loop_messages()
+    counter = AsyncMock()
+
+    with (
+        patch.object(model, "_estimate_request_input_tokens", return_value=39),
+        patch.object(model, "_count_request_input_tokens", new=counter),
+    ):
+        fitted = await model._fit_request_messages(
+            messages,
+            tools=None,
+            response_format=None,
+            compress_tool_results=False,
+        )
+
+    assert fitted is messages
+    counter.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fit_request_messages_counts_exactly_at_half_budget() -> None:
+    """Requests at the threshold use Vertex's exact tokenizer."""
     model = _model()
     messages = _tool_loop_messages()
     counter = AsyncMock(return_value=80)
 
-    with patch.object(model, "_count_request_input_tokens", new=counter):
+    with (
+        patch.object(model, "_estimate_request_input_tokens", return_value=40),
+        patch.object(model, "_count_request_input_tokens", new=counter),
+    ):
         fitted = await model._fit_request_messages(
             messages,
             tools=None,
@@ -144,6 +206,7 @@ async def test_fit_request_messages_rejects_current_turn_that_cannot_fit() -> No
     model = _model()
 
     with (
+        patch.object(model, "_estimate_request_input_tokens", return_value=40),
         patch.object(model, "_count_request_input_tokens", new=AsyncMock(return_value=90)),
         pytest.raises(ModelProviderError, match="current turn"),
     ):
