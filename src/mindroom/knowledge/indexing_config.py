@@ -33,7 +33,7 @@ class _QueryCompatibilityKey(NamedTuple):
     base_id: str
     storage_root: str
     knowledge_path: str
-    mode: str
+    mode: KnowledgeBaseMode
     embedder_provider: str
     embedder_model: str
     embedder_host: str
@@ -46,7 +46,7 @@ class _CorpusCompatibilityKey(NamedTuple):
     base_id: str
     storage_root: str
     knowledge_path: str
-    mode: str
+    mode: KnowledgeBaseMode
     repo_identity: str
     git_branch: str
     git_lfs: str
