@@ -927,6 +927,7 @@ def test_eager_tool_filter_drops_fully_filtered_deferred_toolkit(tmp_path: Path)
         ("openai", "gpt-5.6", {"base_url": "http://localhost:9292/v1"}),
         ("codex", "gpt-4.1", None),
         ("anthropic", "claude-opus-4-1", None),
+        ("vertexai_claude", "claude-sonnet-4-6", {"project_id": "test-project", "region": "global"}),
     ],
 )
 def test_unsupported_models_keep_homegrown_dynamic_tools_path(
