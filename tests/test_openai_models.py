@@ -45,6 +45,26 @@ def _assistant_with_argumentless_tool_call() -> Message:
     )
 
 
+def _legacy_gemini_combined_tool_results() -> Message:
+    """Older Gemini histories bundle multiple tool results into one tool message."""
+    return Message(
+        role="tool",
+        content=["first result", "second result"],
+        tool_calls=[
+            {
+                "tool_call_id": "toolu_1",
+                "tool_name": "first_tool",
+                "content": "first result",
+            },
+            {
+                "tool_call_id": "toolu_2",
+                "tool_name": "second_tool",
+                "content": "second result",
+            },
+        ],
+    )
+
+
 @pytest.mark.parametrize(("model_cls", "_agno_cls"), _CHAT_WIRE_PAIRS)
 def test_chat_models_supply_missing_tool_arguments_without_mutating_history(
     model_cls: type[OpenAIChat],
@@ -85,3 +105,31 @@ def test_openai_responses_supplies_missing_tool_arguments_without_mutating_histo
 
     assert formatted[0]["arguments"] == "{}"
     assert "arguments" not in assistant.tool_calls[0]["function"]
+
+
+@pytest.mark.parametrize(("model_cls", "_agno_cls"), _CHAT_WIRE_PAIRS)
+def test_chat_models_leave_legacy_combined_tool_results_for_agno_normalization(
+    model_cls: type[OpenAIChat],
+    _agno_cls: type[OpenAIChat],
+) -> None:
+    """Argument repair must not interpret old Gemini tool-result bundles as function calls."""
+    tool_results = _legacy_gemini_combined_tool_results()
+
+    formatted = model_cls(id="gpt-5.6", api_key="test-key")._format_all_messages([tool_results])
+
+    assert formatted == [
+        {"role": "tool", "content": "first result", "tool_call_id": "toolu_1"},
+        {"role": "tool", "content": "second result", "tool_call_id": "toolu_2"},
+    ]
+
+
+def test_openai_responses_leaves_legacy_combined_tool_results_for_agno_normalization() -> None:
+    """Responses replay must preserve Agno's existing old-Gemini normalization path."""
+    tool_results = _legacy_gemini_combined_tool_results()
+
+    formatted = MindRoomOpenAIResponses(id="gpt-5.6", api_key="test-key")._format_messages([tool_results])
+
+    assert formatted == [
+        {"type": "function_call_output", "call_id": "toolu_1", "output": "first result"},
+        {"type": "function_call_output", "call_id": "toolu_2", "output": "second result"},
+    ]

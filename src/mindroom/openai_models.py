@@ -33,7 +33,7 @@ def _messages_with_openai_tool_arguments(messages: list[Message]) -> list[Messag
     """Fill arguments omitted by providers that represent empty tool input as an object."""
     normalized_messages: list[Message] = []
     for message in messages:
-        if not message.tool_calls:
+        if message.role != "assistant" or not message.tool_calls:
             normalized_messages.append(message)
             continue
 
