@@ -97,7 +97,8 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                 kwargs.pop("max_read_size")
             else:
                 kwargs["max_read_size"] = max_read_size
-        if kwargs.get("download_file") is True:
+        self._download_function_enabled = kwargs.get("download_file") is True
+        if self._download_function_enabled:
             if tool_output_workspace_root is None:
                 msg = "Google Drive downloads require an agent workspace"
                 raise RuntimeError(msg)
@@ -130,6 +131,11 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
 
     def _should_fallback_to_original_auth(self) -> bool:
         return google_service_account_configured(self.service_account_path, self._runtime_paths)
+
+    def _download_guidance(self) -> str:
+        if self._download_function_enabled:
+            return " Use google_drive_download_file instead."
+        return ""
 
     def _get_file_metadata(self, file_id: str, fields: str) -> dict[str, Any]:
         service = cast("Any", self.service)
@@ -190,7 +196,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             elif mime_type.startswith(WorkspaceType.WORKSPACE_PREFIX):
                 return json.dumps(
                     {
-                        "error": f"Cannot read {mime_type} as text. Use google_drive_download_file instead.",
+                        "error": f"Cannot read {mime_type} as text.{self._download_guidance()}",
                         "file": metadata,
                     },
                 )
@@ -205,8 +211,8 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                 if file_size > self.max_read_size:
                     return json.dumps(
                         {
-                            "error": f"File is {file_size} bytes, exceeds max_read_size ({self.max_read_size}). "
-                            "Use google_drive_download_file instead.",
+                            "error": f"File is {file_size} bytes, exceeds max_read_size ({self.max_read_size})."
+                            f"{self._download_guidance()}",
                             "file": metadata,
                         },
                     )

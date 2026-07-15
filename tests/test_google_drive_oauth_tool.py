@@ -8,8 +8,8 @@ import json
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+import pytest
 from agno.agent import Agent
 from agno.agent._tools import parse_tools
 from agno.models.base import Model
@@ -23,9 +23,6 @@ from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.oauth.google_drive import _GOOGLE_DRIVE_OAUTH_SCOPES
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
-
-if TYPE_CHECKING:
-    import pytest
 
 
 class MinimalModel(Model):
@@ -247,6 +244,18 @@ def test_google_drive_download_uses_namespaced_model_function(tmp_path: Path) ->
     assert "google_drive_download_file" in tool.async_functions
     assert "download_file" not in tool.async_functions
     assert tool.download_dir == tmp_path / "google-drive-downloads"
+
+
+def test_google_drive_download_requires_agent_workspace(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
+
+    with pytest.raises(RuntimeError, match="Google Drive downloads require an agent workspace"):
+        GoogleDriveTools(
+            runtime_paths=runtime_paths,
+            credentials_manager=CredentialsManager(tmp_path / "credentials"),
+            creds=_ValidCredentials(),
+            download_file=True,
+        )
 
 
 def test_google_drive_connect_instruction_uses_redirect_uri_public_origin(tmp_path: Path) -> None:
@@ -594,10 +603,7 @@ def test_google_drive_read_metadata_supports_shared_drive_files(tmp_path: Path) 
 
     result = json.loads(tool.read_file("shared-drive-folder-id"))
 
-    assert (
-        result["error"]
-        == "Cannot read application/vnd.google-apps.folder as text. Use google_drive_download_file instead."
-    )
+    assert result["error"] == "Cannot read application/vnd.google-apps.folder as text."
     assert service.files_resource.get_kwargs == {
         "fileId": "shared-drive-folder-id",
         "fields": tool.READ_METADATA_FIELDS,
@@ -651,7 +657,22 @@ def test_google_drive_large_file_error_names_exposed_download_function(tmp_path:
 
     result = json.loads(tool.read_file("shared-drive-file-id"))
 
-    assert result["error"] == ("File is 5 bytes, exceeds max_read_size (4). Use google_drive_download_file instead.")
+    assert result["error"] == "File is 5 bytes, exceeds max_read_size (4)."
+    assert service.files_resource.get_media_kwargs is None
+
+
+def test_google_drive_read_error_names_enabled_download_function(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
+
+    result = json.loads(tool.read_file("shared-drive-folder-id"))
+
+    assert (
+        result["error"]
+        == "Cannot read application/vnd.google-apps.folder as text. Use google_drive_download_file instead."
+    )
     assert service.files_resource.get_media_kwargs is None
 
 
