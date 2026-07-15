@@ -5,8 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
-from agno.models.openai import OpenAIChat
-
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.model_loading import get_model_instance
@@ -41,8 +39,6 @@ def test_first_party_openai_gpt_5_4_and_newer_use_responses(tmp_path: Path) -> N
     assert isinstance(current, MindRoomOpenAIResponses)
     assert isinstance(older, MindRoomOpenAIChat)
     assert isinstance(compatible, MindRoomOpenAIChat)
-    assert isinstance(older, OpenAIChat)
-    assert isinstance(compatible, OpenAIChat)
 
 
 def test_vertexai_claude_gets_explicit_timeout_so_large_outputs_can_run_non_streaming(tmp_path: Path) -> None:
