@@ -1,0 +1,338 @@
+"""Exact request fitting for Vertex Claude."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from agno.exceptions import ModelProviderError
+from agno.media import Image
+from agno.models.message import Message
+from agno.models.response import ModelResponse
+from agno.models.vertexai.claude import Claude as VertexAIClaude
+
+from mindroom.vertex_claude_compat import MindroomVertexAIClaude
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+
+def _model() -> MindroomVertexAIClaude:
+    return MindroomVertexAIClaude(
+        id="claude-sonnet-4-6",
+        project_id="demo-project",
+        region="us-central1",
+        cache_system_prompt=False,
+        context_window=100,
+        max_tokens=20,
+    )
+
+
+def _tool_loop_messages() -> list[Message]:
+    return [
+        Message(role="system", content="instructions"),
+        Message(role="user", content="old question", from_history=True),
+        Message(role="assistant", content="old answer", from_history=True),
+        Message(role="user", content="current question"),
+        Message(
+            role="assistant",
+            tool_calls=[
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                },
+            ],
+        ),
+        Message(role="tool", tool_call_id="call-1", content="large result"),
+    ]
+
+
+def test_estimate_request_input_tokens_uses_full_provider_payload() -> None:
+    """Local estimation includes formatted messages, system, tools, and schema."""
+    model = _model()
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "description": "Look up a value.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+    ]
+    response_format = {"type": "object", "properties": {"answer": {"type": "string"}}}
+
+    with (
+        patch(
+            "mindroom.vertex_claude_compat.estimate_compaction_input_tokens",
+            return_value=30,
+        ) as estimator,
+        patch("mindroom.vertex_claude_compat.count_schema_tokens", return_value=5),
+    ):
+        estimated_tokens = model._estimate_request_input_tokens(
+            _tool_loop_messages(),
+            tools=tools,
+            response_format=response_format,
+            compress_tool_results=False,
+        )
+
+    serialized_payload = estimator.call_args.args[0]
+    assert estimated_tokens == 35
+    assert all(key in serialized_payload for key in ('"messages"', '"model"', '"system"', '"tools"'))
+
+
+def test_estimate_requires_exact_count_for_images() -> None:
+    """Images bypass local estimation regardless of their encoded size."""
+    model = _model()
+    image_bytes = b"\x89PNG\r\n\x1a\n" + b"fake pixel data"
+    messages = [
+        Message(role="user", content="what is in this picture?", images=[Image(content=image_bytes)]),
+    ]
+
+    with patch("mindroom.vertex_claude_compat.estimate_compaction_input_tokens") as estimator:
+        estimated_tokens = model._estimate_request_input_tokens(
+            messages,
+            tools=None,
+            response_format=None,
+            compress_tool_results=False,
+        )
+
+    assert estimated_tokens is None
+    estimator.assert_not_called()
+
+
+def test_estimate_requires_exact_count_for_base64_documents() -> None:
+    """Compressed documents bypass byte-size heuristics and use Vertex counting."""
+    model = _model()
+    request_kwargs = {
+        "model": model.id,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": "compressed-pdf-data",
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+
+    with (
+        patch.object(model, "_request_input_kwargs", return_value=request_kwargs),
+        patch("mindroom.vertex_claude_compat.estimate_compaction_input_tokens") as estimator,
+    ):
+        estimated_tokens = model._estimate_request_input_tokens(
+            [Message(role="user", content="summarize")],
+            tools=None,
+            response_format=None,
+            compress_tool_results=False,
+        )
+
+    assert estimated_tokens is None
+    estimator.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_fit_request_messages_drops_oldest_replay_and_keeps_current_tool_loop() -> None:
+    """Exact counting trims history while preserving the full current turn."""
+    model = _model()
+
+    async def _count(messages: list[Message], **_kwargs: object) -> int:
+        return 110 if len(messages) > 4 else 70
+
+    counter = AsyncMock(side_effect=_count)
+    with (
+        patch.object(model, "_estimate_request_input_tokens", return_value=40),
+        patch.object(model, "_count_request_input_tokens", new=counter),
+    ):
+        fitted = await model._fit_request_messages(
+            _tool_loop_messages(),
+            tools=None,
+            response_format=None,
+            compress_tool_results=False,
+        )
+
+    assert [(message.role, message.content) for message in fitted] == [
+        ("system", "instructions"),
+        ("user", "current question"),
+        ("assistant", None),
+        ("tool", "large result"),
+    ]
+    assert counter.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_fit_request_messages_trims_minimally_across_multiple_history_turns() -> None:
+    """The binary search settles on the earliest cut that fits, keeping newer turns."""
+    model = _model()
+    messages = [
+        Message(role="system", content="instructions"),
+        Message(role="user", content="turn one", from_history=True),
+        Message(role="assistant", content="answer one", from_history=True),
+        Message(role="user", content="turn two", from_history=True),
+        Message(role="assistant", content="answer two", from_history=True),
+        Message(role="user", content="turn three", from_history=True),
+        Message(role="assistant", content="answer three", from_history=True),
+        Message(role="user", content="current question"),
+    ]
+    tokens_by_message_count = {8: 110, 6: 90, 4: 75, 2: 60}
+
+    async def _count(candidate: list[Message], **_kwargs: object) -> int:
+        return tokens_by_message_count[len(candidate)]
+
+    counter = AsyncMock(side_effect=_count)
+    with (
+        patch.object(model, "_estimate_request_input_tokens", return_value=40),
+        patch.object(model, "_count_request_input_tokens", new=counter),
+    ):
+        fitted = await model._fit_request_messages(
+            messages,
+            tools=None,
+            response_format=None,
+            compress_tool_results=False,
+        )
+
+    assert [(message.role, message.content) for message in fitted] == [
+        ("system", "instructions"),
+        ("user", "turn three"),
+        ("assistant", "answer three"),
+        ("user", "current question"),
+    ]
+    assert counter.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_async_invocations_delegate_with_fitted_messages() -> None:
+    """Both async provider paths send the fitted message list."""
+    model = _model()
+    fitted = [Message(role="user", content="fitted")]
+    fit = AsyncMock(return_value=fitted)
+    regular_calls: list[list[Message]] = []
+    stream_calls: list[list[Message]] = []
+
+    async def _ainvoke(
+        _model: VertexAIClaude,
+        messages: list[Message],
+        _assistant_message: Message,
+        **_kwargs: object,
+    ) -> ModelResponse:
+        regular_calls.append(messages)
+        return ModelResponse(content="regular")
+
+    async def _ainvoke_stream(
+        _model: VertexAIClaude,
+        messages: list[Message],
+        _assistant_message: Message,
+        **_kwargs: object,
+    ) -> AsyncIterator[ModelResponse]:
+        stream_calls.append(messages)
+        yield ModelResponse(content="stream")
+
+    assistant_message = Message(role="assistant")
+    with (
+        patch.object(model, "_fit_request_messages", new=fit),
+        patch.object(VertexAIClaude, "ainvoke", new=_ainvoke),
+        patch.object(VertexAIClaude, "ainvoke_stream", new=_ainvoke_stream),
+    ):
+        regular_response = await model.ainvoke(_tool_loop_messages(), assistant_message)
+        stream_responses = [
+            response async for response in model.ainvoke_stream(_tool_loop_messages(), assistant_message)
+        ]
+
+    assert regular_response.content == "regular"
+    assert [response.content for response in stream_responses] == ["stream"]
+    assert regular_calls == [fitted]
+    assert stream_calls == [fitted]
+    assert fit.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_fit_request_messages_skips_exact_count_below_half_budget() -> None:
+    """Small requests avoid the Vertex token-count network call."""
+    model = _model()
+    messages = _tool_loop_messages()
+    counter = AsyncMock()
+
+    with (
+        patch.object(model, "_estimate_request_input_tokens", return_value=39),
+        patch.object(model, "_count_request_input_tokens", new=counter),
+    ):
+        fitted = await model._fit_request_messages(
+            messages,
+            tools=None,
+            response_format=None,
+            compress_tool_results=False,
+        )
+
+    assert fitted is messages
+    counter.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fit_request_messages_counts_exactly_at_half_budget() -> None:
+    """Requests at the threshold use Vertex's exact tokenizer."""
+    model = _model()
+    messages = _tool_loop_messages()
+    counter = AsyncMock(return_value=80)
+
+    with (
+        patch.object(model, "_estimate_request_input_tokens", return_value=40),
+        patch.object(model, "_count_request_input_tokens", new=counter),
+    ):
+        fitted = await model._fit_request_messages(
+            messages,
+            tools=None,
+            response_format=None,
+            compress_tool_results=False,
+        )
+
+    assert fitted is messages
+    counter.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_fit_request_messages_counts_media_exactly() -> None:
+    """Media requests always use Vertex's exact tokenizer."""
+    model = _model()
+    messages = _tool_loop_messages()
+    counter = AsyncMock(return_value=80)
+
+    with (
+        patch.object(model, "_estimate_request_input_tokens", return_value=None),
+        patch.object(model, "_count_request_input_tokens", new=counter),
+    ):
+        fitted = await model._fit_request_messages(
+            messages,
+            tools=None,
+            response_format=None,
+            compress_tool_results=False,
+        )
+
+    assert fitted is messages
+    counter.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_fit_request_messages_rejects_current_turn_that_cannot_fit() -> None:
+    """The guard fails visibly instead of sending an oversized current turn."""
+    model = _model()
+
+    with (
+        patch.object(model, "_estimate_request_input_tokens", return_value=40),
+        patch.object(model, "_count_request_input_tokens", new=AsyncMock(return_value=90)),
+        pytest.raises(ModelProviderError, match="current turn"),
+    ):
+        await model._fit_request_messages(
+            _tool_loop_messages(),
+            tools=None,
+            response_format=None,
+            compress_tool_results=False,
+        )

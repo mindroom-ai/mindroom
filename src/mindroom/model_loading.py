@@ -291,7 +291,11 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if canonical_provider == "vertexai_claude":
         from mindroom.vertex_claude_compat import MindroomVertexAIClaude  # noqa: PLC0415
 
-        return MindroomVertexAIClaude(id=model_id, **extra_kwargs)
+        return MindroomVertexAIClaude(
+            id=model_id,
+            context_window=model_config.context_window,
+            **extra_kwargs,
+        )
 
     if canonical_provider == "llama_cpp":
         from agno.models.llama_cpp import LlamaCpp  # noqa: PLC0415

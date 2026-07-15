@@ -2,9 +2,30 @@
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
+from agno.exceptions import ModelProviderError
 from agno.models.vertexai.claude import Claude as VertexAIClaude
+from agno.utils.models.claude import format_messages, format_tools_for_model
+from agno.utils.tokens import count_schema_tokens
+
+from mindroom.claude_prompt_cache import prepare_claude_request_kwargs
+from mindroom.logging_config import get_logger
+from mindroom.token_budget import estimate_compaction_input_tokens, stable_serialize
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from agno.models.message import Message
+    from agno.models.response import ModelResponse
+    from agno.run.agent import RunOutput
+
+logger = get_logger(__name__)
+
+_EXACT_COUNT_THRESHOLD_RATIO = 0.5
+_EXACT_COUNT_BLOCK_TYPES = frozenset({"document", "image"})
 
 
 def _strip_vertex_claude_tool_strict(
@@ -44,8 +65,261 @@ def _strip_vertex_claude_tool_strict(
     return sanitized if changed else tools
 
 
+def _blocks_require_exact_count(blocks: list[Any]) -> bool:
+    """Return whether content includes media that cannot be estimated safely."""
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") in _EXACT_COUNT_BLOCK_TYPES:
+            return True
+        source = block.get("source")
+        data = source.get("data") if isinstance(source, dict) else None
+        if data:
+            return True
+        nested = block.get("content")
+        if isinstance(nested, list) and _blocks_require_exact_count(nested):
+            return True
+    return False
+
+
+def _request_requires_exact_count(request_kwargs: dict[str, Any]) -> bool:
+    """Return whether any provider-formatted message contains media."""
+    messages = request_kwargs.get("messages")
+    if not isinstance(messages, list):
+        return False
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list) and _blocks_require_exact_count(content):
+            return True
+    return False
+
+
+@dataclass
 class MindroomVertexAIClaude(VertexAIClaude):
     """Vertex Claude model with Mindroom-specific provider compatibility fixes."""
+
+    context_window: int | None = None
+
+    def _request_input_kwargs(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[dict[str, Any]] | None,
+        response_format: dict[str, Any] | type[Any] | None,
+        compress_tool_results: bool,
+    ) -> dict[str, Any]:
+        """Build the provider-shaped payload used for input token counting."""
+        anthropic_messages, system_prompt = format_messages(
+            messages,
+            compress_tool_results=compress_tool_results,
+            append_trailing_user_message=self.append_trailing_user_message,
+            trailing_user_message_content=self.trailing_user_message_content,
+            enable_citations=self.citations and not self._output_format_enabled(response_format),
+        )
+        request_kwargs: dict[str, Any] = {
+            "messages": anthropic_messages,
+            "model": self.id,
+        }
+        system = self._build_system(system_prompt)
+        if system:
+            request_kwargs["system"] = system
+        sanitized_tools = _strip_vertex_claude_tool_strict(tools)
+        if sanitized_tools:
+            request_kwargs["tools"] = format_tools_for_model(sanitized_tools)
+        if self.thinking:
+            request_kwargs["thinking"] = self.thinking
+        return prepare_claude_request_kwargs(self, request_kwargs)
+
+    def _estimate_request_input_tokens(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[dict[str, Any]] | None,
+        response_format: dict[str, Any] | type[Any] | None,
+        compress_tool_results: bool,
+    ) -> int | None:
+        """Estimate text payloads; return ``None`` when exact counting is required.
+
+        CPU-bound (message formatting plus a tokenizer encode); async callers
+        must off-load it to a worker thread.
+        """
+        request_kwargs = self._request_input_kwargs(
+            messages,
+            tools=tools,
+            response_format=response_format,
+            compress_tool_results=compress_tool_results,
+        )
+        if _request_requires_exact_count(request_kwargs):
+            return None
+        return estimate_compaction_input_tokens(stable_serialize(request_kwargs)) + count_schema_tokens(
+            response_format,
+            self.id,
+        )
+
+    async def _count_request_input_tokens(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[dict[str, Any]] | None,
+        response_format: dict[str, Any] | type[Any] | None,
+        compress_tool_results: bool,
+    ) -> int:
+        """Count the provider-shaped payload using Vertex's exact tokenizer."""
+        request_kwargs = await asyncio.to_thread(
+            self._request_input_kwargs,
+            messages,
+            tools=tools,
+            response_format=response_format,
+            compress_tool_results=compress_tool_results,
+        )
+        response = await self.get_async_client().messages.count_tokens(**request_kwargs)
+        return response.input_tokens + count_schema_tokens(response_format, self.id)
+
+    @staticmethod
+    def _replay_trim_candidates(messages: list[Message]) -> list[int]:
+        """Return safe history-user cuts plus the drop-all-history cut."""
+        first_history_index = next(
+            (index for index, message in enumerate(messages) if message.from_history),
+            None,
+        )
+        if first_history_index is None:
+            return []
+        history_user_starts = [
+            index for index, message in enumerate(messages) if message.from_history and message.role == "user"
+        ]
+        return [cut for cut in [*history_user_starts, len(messages)] if cut > first_history_index]
+
+    @staticmethod
+    def _messages_after_history_cut(messages: list[Message], cut: int) -> list[Message]:
+        """Drop only replay messages older than one safe history boundary."""
+        return [message for index, message in enumerate(messages) if not message.from_history or index >= cut]
+
+    async def _fit_request_messages(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[dict[str, Any]] | None,
+        response_format: dict[str, Any] | type[Any] | None,
+        compress_tool_results: bool,
+    ) -> list[Message]:
+        """Drop the oldest replay turns until the exact request fits."""
+        if self.context_window is None:
+            return messages
+        output_reserve = self.max_tokens or 0
+        input_budget = self.context_window - output_reserve
+        if input_budget <= 0:
+            msg = "Vertex Claude context window leaves no room for input after the configured output reserve."
+            raise ModelProviderError(message=msg, model_name=self.name, model_id=self.id)
+
+        estimated_tokens = await asyncio.to_thread(
+            self._estimate_request_input_tokens,
+            messages,
+            tools=tools,
+            response_format=response_format,
+            compress_tool_results=compress_tool_results,
+        )
+        if estimated_tokens is not None and estimated_tokens < input_budget * _EXACT_COUNT_THRESHOLD_RATIO:
+            return messages
+
+        async def _count(candidate: list[Message]) -> int:
+            return await self._count_request_input_tokens(
+                candidate,
+                tools=tools,
+                response_format=response_format,
+                compress_tool_results=compress_tool_results,
+            )
+
+        original_tokens = await _count(messages)
+        if original_tokens <= input_budget:
+            return messages
+
+        replay_cuts = self._replay_trim_candidates(messages)
+        if not replay_cuts:
+            msg = f"Vertex Claude request uses {original_tokens} input tokens; limit is {input_budget}."
+            raise ModelProviderError(message=msg, model_name=self.name, model_id=self.id)
+
+        best_messages: list[Message] | None = None
+        best_tokens: int | None = None
+        low = 0
+        high = len(replay_cuts) - 1
+        while low <= high:
+            midpoint = (low + high) // 2
+            candidate = self._messages_after_history_cut(messages, replay_cuts[midpoint])
+            candidate_tokens = await _count(candidate)
+            if candidate_tokens <= input_budget:
+                best_messages = candidate
+                best_tokens = candidate_tokens
+                high = midpoint - 1
+            else:
+                low = midpoint + 1
+
+        if best_messages is None or best_tokens is None:
+            msg = f"Vertex Claude current turn uses more than the {input_budget}-token input limit."
+            raise ModelProviderError(message=msg, model_name=self.name, model_id=self.id)
+
+        logger.warning(
+            "vertex_claude_request_history_trimmed",
+            input_tokens=original_tokens,
+            fitted_input_tokens=best_tokens,
+            input_budget=input_budget,
+            dropped_message_count=len(messages) - len(best_messages),
+        )
+        return best_messages
+
+    async def ainvoke(
+        self,
+        messages: list[Message],
+        assistant_message: Message,
+        response_format: dict[str, Any] | type[Any] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        run_response: RunOutput | None = None,
+        compress_tool_results: bool = False,
+    ) -> ModelResponse:
+        """Fit every async request, including requests after tool results."""
+        fitted_messages = await self._fit_request_messages(
+            messages,
+            tools=tools,
+            response_format=response_format,
+            compress_tool_results=compress_tool_results,
+        )
+        return await super().ainvoke(
+            fitted_messages,
+            assistant_message,
+            response_format=response_format,
+            tools=tools,
+            tool_choice=tool_choice,
+            run_response=run_response,
+            compress_tool_results=compress_tool_results,
+        )
+
+    async def ainvoke_stream(
+        self,
+        messages: list[Message],
+        assistant_message: Message,
+        response_format: dict[str, Any] | type[Any] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        run_response: RunOutput | None = None,
+        compress_tool_results: bool = False,
+    ) -> AsyncIterator[ModelResponse]:
+        """Fit every async streaming request, including tool-loop requests."""
+        fitted_messages = await self._fit_request_messages(
+            messages,
+            tools=tools,
+            response_format=response_format,
+            compress_tool_results=compress_tool_results,
+        )
+        async for response in super().ainvoke_stream(
+            fitted_messages,
+            assistant_message,
+            response_format=response_format,
+            tools=tools,
+            tool_choice=tool_choice,
+            run_response=run_response,
+            compress_tool_results=compress_tool_results,
+        ):
+            yield response
 
     def _prepare_request_kwargs(
         self,

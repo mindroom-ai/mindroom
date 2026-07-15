@@ -33,7 +33,7 @@ Each model configuration supports the following fields:
 | `host` | No | `null` | Host URL for self-hosted models (e.g., Ollama) |
 | `api_key` | No | `null` | API key (usually read from environment variables) |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters |
-| `context_window` | No | `null` | Context window size in tokens. MindRoom needs it on the active runtime model to enforce replay budgets, and an explicit `compaction.model` also needs its own `context_window` for destructive compaction |
+| `context_window` | No | `null` | Context window size in tokens; MindRoom needs it on the active runtime model to enforce replay budgets, an explicit `compaction.model` also needs its own `context_window` for destructive compaction, and on `vertexai_claude` models it additionally enables request-time fitting that trims replayed history when a request would exceed the window |
 
 ## Configuration Examples
 
@@ -246,6 +246,10 @@ For starter config generation, use `mindroom config init --provider bedrock_clau
 When `context_window` is set, MindRoom uses it to budget persisted replay and required destructive compaction.
 MindRoom always applies a final replay-fit step when the active runtime model has a known `context_window`.
 That replay-fit step reduces or disables persisted replay for the current run when needed.
+On `vertexai_claude` models, a known `context_window` also enables a request-time guard inside the provider call.
+Before each request, including follow-up requests after tool results, MindRoom estimates the full provider payload and checks it against Vertex's exact token counter when it approaches the window.
+When a request would exceed the window, MindRoom drops the oldest replayed history turns for that request only and logs a warning.
+When the current turn alone cannot fit, the request fails with a clear provider error instead of being sent oversized.
 Automatic destructive compaction is enabled by default through `defaults.compaction`.
 Set `enabled: false` in `defaults.compaction` or a per-agent/per-team `compaction` override to disable automatic pre-reply compaction.
 It runs only when history exceeds the hard replay budget for the next reply.

@@ -388,15 +388,7 @@ class _PromptCacheMessagesProxy:
         self._model = model
 
     def _prepared(self, request_kwargs: dict[str, Any]) -> dict[str, Any]:
-        prepared_kwargs = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
-        prepared_kwargs = _request_kwargs_with_deferred_tool_search(
-            prepared_kwargs,
-            _model_deferred_tool_names(self._model),
-        )
-        if not self._model.cache_system_prompt:
-            return prepared_kwargs
-        cache_control = _prompt_cache_control(extended_cache_time=self._model.extended_cache_time is True)
-        return _request_kwargs_with_prompt_cache_ladder(prepared_kwargs, cache_control)
+        return prepare_claude_request_kwargs(self._model, request_kwargs)
 
     def create(self, **request_kwargs: object) -> object:
         return self._messages_namespace.create(**self._prepared(request_kwargs))
@@ -406,6 +398,22 @@ class _PromptCacheMessagesProxy:
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._messages_namespace, name)
+
+
+def prepare_claude_request_kwargs(
+    model: AnthropicClaude,
+    request_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply MindRoom's wire transformations to one Claude request payload."""
+    prepared_kwargs = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+    prepared_kwargs = _request_kwargs_with_deferred_tool_search(
+        prepared_kwargs,
+        _model_deferred_tool_names(model),
+    )
+    if not model.cache_system_prompt:
+        return prepared_kwargs
+    cache_control = _prompt_cache_control(extended_cache_time=model.extended_cache_time is True)
+    return _request_kwargs_with_prompt_cache_ladder(prepared_kwargs, cache_control)
 
 
 class _PromptCacheBetaProxy:
