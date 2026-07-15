@@ -238,6 +238,7 @@ class TestConfigInit:
             "shell",
             "coding",
             "memory",
+            {"name": "config_manager", "defer": True},
             "duckduckgo",
             "website",
             "browser",
@@ -249,8 +250,20 @@ class TestConfigInit:
             "thread_tags",
             "thread_summary",
         ]
+        config_manager_entry = next(
+            entry for entry in load_config_yaml(target).agents["mind"].tools if entry.name == "config_manager"
+        )
+        assert config_manager_entry.defer is True
         assert "thread_resolution" not in mind["tools"]
         assert mind["skills"] == ["mindroom-docs"]
+        assert (
+            "When helping with MindRoom setup, follow AGENTS.md and check the live state — don't guess."
+            in mind["instructions"]
+        )
+        assert (
+            "Meet the user at their technical level. If they ask you to configure something, do it; skip YAML or shell "
+            "details unless they ask." in mind["instructions"]
+        )
         assert "knowledge_bases" not in config
         assert config["memory"]["backend"] == "file"
         assert config["memory"]["embedder"]["provider"] == "sentence_transformers"
@@ -285,6 +298,8 @@ class TestConfigInit:
         assert (workspace / "HEARTBEAT.md").exists()
         assert (workspace / "MEMORY.md").exists()
         assert not (workspace / "BOOT.md").exists()
+        tools_notes = (workspace / "TOOLS.md").read_text(encoding="utf-8")
+        assert f"- Active config file: {json.dumps(str(target.resolve()))}" in tools_notes
 
     def test_init_respects_storage_path_override(
         self,
@@ -305,6 +320,13 @@ class TestConfigInit:
         assert (workspace / "memory").exists()
         assert (workspace / "SOUL.md").exists()
         assert (workspace / "MEMORY.md").exists()
+        agents_template = (workspace / "AGENTS.md").read_text(encoding="utf-8")
+        assert "## 🧭 MindRoom Setup" in agents_template
+        assert "discover and use `config_manager`" in agents_template
+        assert "active config path recorded in `TOOLS.md`" in agents_template
+        assert "`https://mindroom.chat` is the hosted Matrix homeserver" in agents_template
+        assert "`https://chat.mindroom.chat` is MindRoom Chat" in agents_template
+        assert "The MindRoom dashboard is a separate app" in agents_template
         assert "knowledge_bases" not in config
 
         env_content = (tmp_path / ".env").read_text()

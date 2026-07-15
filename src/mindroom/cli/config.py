@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import platform
@@ -149,11 +150,32 @@ def _default_mind_workspace(storage_root: Path) -> Path:
     return agent_workspace_root_path(storage_root, "mind")
 
 
-def _ensure_mind_workspace(workspace_path: Path, *, force: bool) -> None:
+_MIND_CONFIG_PATH_NOTE_START = "<!-- mindroom:config-path:start -->"
+_MIND_CONFIG_PATH_NOTE_END = "<!-- mindroom:config-path:end -->"
+
+
+def _ensure_mind_workspace(workspace_path: Path, *, config_path: Path, force: bool) -> None:
     """Create the default Mind workspace files used by starter configs."""
     from mindroom.workspaces import ensure_workspace_template  # noqa: PLC0415
 
     ensure_workspace_template(workspace_path, template="mind", force=force)
+    tools_path = workspace_path / "TOOLS.md"
+    content = tools_path.read_text(encoding="utf-8")
+    note = (
+        f"{_MIND_CONFIG_PATH_NOTE_START}\n"
+        "## MindRoom Installation\n\n"
+        f"- Active config file: {json.dumps(str(config_path.resolve()))}\n"
+        f"{_MIND_CONFIG_PATH_NOTE_END}"
+    )
+    start = content.find(_MIND_CONFIG_PATH_NOTE_START)
+    end = content.find(_MIND_CONFIG_PATH_NOTE_END, start)
+    if start >= 0 and end >= 0:
+        end += len(_MIND_CONFIG_PATH_NOTE_END)
+        updated = f"{content[:start]}{note}{content[end:]}"
+    else:
+        updated = f"{content.rstrip()}\n\n{note}\n"
+    if updated != content:
+        tools_path.write_text(updated, encoding="utf-8")
 
 
 def _write_env_file(
@@ -471,7 +493,7 @@ def config_init(
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
 
-    _ensure_mind_workspace(_default_mind_workspace(storage_root), force=force)
+    _ensure_mind_workspace(_default_mind_workspace(storage_root), config_path=target, force=force)
 
     env_changed = _write_env_file(
         env_path,
@@ -949,6 +971,8 @@ agents:
       - shell
       - coding
       - memory
+      - name: config_manager
+        defer: true
       - duckduckgo
       - website
       - browser
@@ -967,6 +991,8 @@ agents:
       - MEMORY.md is curated long-term memory; daily files are short-lived notes and logs.
       - Ask before external or destructive actions.
       - Before answering prior-history questions, use search_memories first.
+      - When helping with MindRoom setup, follow AGENTS.md and check the live state — don't guess.
+      - Meet the user at their technical level. If they ask you to configure something, do it; skip YAML or shell details unless they ask.
 
 router:
   model: default
