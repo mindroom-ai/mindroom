@@ -246,7 +246,7 @@ def test_google_drive_download_uses_namespaced_model_function(tmp_path: Path) ->
     assert "download_file" not in tool.functions
     assert "google_drive_download_file" in tool.async_functions
     assert "download_file" not in tool.async_functions
-    assert tool.download_dir == tmp_path
+    assert tool.download_dir == tmp_path / "google-drive-downloads"
 
 
 def test_google_drive_connect_instruction_uses_redirect_uri_public_origin(tmp_path: Path) -> None:
@@ -643,8 +643,8 @@ def test_google_drive_download_media_supports_shared_drive_files(
     result = json.loads(tool.download_file("shared-drive-file-id"))
 
     assert result["status"] == "downloaded"
-    assert Path(result["path"]) == tmp_path / "notes.txt"
-    assert (tmp_path / "notes.txt").read_text() == "hello"
+    assert Path(result["path"]) == tmp_path / "google-drive-downloads" / "notes.txt"
+    assert (tmp_path / "google-drive-downloads" / "notes.txt").read_text() == "hello"
     assert service.files_resource.get_media_kwargs == {
         "fileId": "shared-drive-file-id",
         "supportsAllDrives": True,
@@ -731,10 +731,11 @@ def test_google_drive_download_rejects_symlink_escape(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     download_dir = tmp_path / "downloads"
-    download_dir.mkdir()
+    target_dir = download_dir / "google-drive-downloads"
+    target_dir.mkdir(parents=True)
     outside_path = tmp_path / "outside.txt"
     outside_path.write_text("outside")
-    (download_dir / "notes.txt").symlink_to(outside_path)
+    (target_dir / "notes.txt").symlink_to(outside_path)
     tool, service = _google_drive_download_tool(tmp_path, monkeypatch, download_dir=download_dir)
     service.files_resource.file_metadata = {
         "name": "notes.txt",
@@ -765,8 +766,8 @@ def test_google_drive_download_adds_export_extension_inside_download_dir(
     result = json.loads(tool.download_file("shared-drive-file-id"))
 
     assert result["status"] == "exported"
-    assert Path(result["path"]) == tmp_path / "proposal.docx"
-    assert (tmp_path / "proposal.docx").read_bytes() == b"docx"
+    assert Path(result["path"]) == tmp_path / "google-drive-downloads" / "proposal.docx"
+    assert (tmp_path / "google-drive-downloads" / "proposal.docx").read_bytes() == b"docx"
     assert service.files_resource.export_media_kwargs == {
         "fileId": "shared-drive-file-id",
         "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -789,8 +790,8 @@ def test_google_drive_download_exports_complete_spreadsheet_as_xlsx(
     result = json.loads(tool.download_file("shared-drive-file-id"))
 
     assert result["status"] == "exported"
-    assert Path(result["path"]) == tmp_path / "hardware-baseline.xlsx"
-    assert (tmp_path / "hardware-baseline.xlsx").read_bytes() == b"xlsx workbook"
+    assert Path(result["path"]) == tmp_path / "google-drive-downloads" / "hardware-baseline.xlsx"
+    assert (tmp_path / "google-drive-downloads" / "hardware-baseline.xlsx").read_bytes() == b"xlsx workbook"
     assert service.files_resource.export_media_kwargs == {
         "fileId": "shared-drive-file-id",
         "mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -813,9 +814,9 @@ def test_google_drive_download_preserves_existing_export_extension(
     result = json.loads(tool.download_file("shared-drive-file-id"))
 
     assert result["status"] == "exported"
-    assert Path(result["path"]) == tmp_path / "proposal.docx"
-    assert (tmp_path / "proposal.docx").read_bytes() == b"docx"
-    assert not (tmp_path / "proposal.docx.docx").exists()
+    assert Path(result["path"]) == tmp_path / "google-drive-downloads" / "proposal.docx"
+    assert (tmp_path / "google-drive-downloads" / "proposal.docx").read_bytes() == b"docx"
+    assert not (tmp_path / "google-drive-downloads" / "proposal.docx.docx").exists()
     assert service.files_resource.export_media_kwargs == {
         "fileId": "shared-drive-file-id",
         "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
