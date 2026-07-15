@@ -52,6 +52,11 @@ class IndexingSettings:
     include_extensions: str
     exclude_extensions: str
     extra_extensions: str = ""
+    #: Effective hidden-path filtering for non-Git bases; "" for Git bases,
+    #: whose filtering is already identified by git_skip_hidden. Optional in
+    #: persisted metadata so pre-existing indexes (built while hidden paths
+    #: were still indexed) parse but no longer match the corpus key.
+    skip_hidden: str = ""
 
     @classmethod
     def from_metadata(cls, settings: Mapping[str, str]) -> IndexingSettings | None:
@@ -76,7 +81,7 @@ class IndexingSettings:
             "include_extensions",
             "exclude_extensions",
         }
-        optional_keys = {"include_patterns", "exclude_patterns", "extra_extensions"}
+        optional_keys = {"include_patterns", "exclude_patterns", "extra_extensions", "skip_hidden"}
         if not required_keys.issubset(settings) or set(settings) - required_keys - optional_keys:
             return None
         mode = settings["mode"]
@@ -104,6 +109,7 @@ class IndexingSettings:
             include_extensions=settings["include_extensions"],
             exclude_extensions=settings["exclude_extensions"],
             extra_extensions=settings.get("extra_extensions", ""),
+            skip_hidden=settings.get("skip_hidden", ""),
         )
 
     def to_metadata(self) -> dict[str, str]:
@@ -130,6 +136,7 @@ class IndexingSettings:
             "include_extensions": self.include_extensions,
             "exclude_extensions": self.exclude_extensions,
             "extra_extensions": self.extra_extensions,
+            "skip_hidden": self.skip_hidden,
         }
 
     def query_compatibility_key(self) -> tuple[str, str, str, str, str, str, str, str]:
@@ -147,7 +154,7 @@ class IndexingSettings:
 
     def corpus_compatibility_key(
         self,
-    ) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str, str]:
+    ) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str, str, str]:
         """Return fields that must match for safe source-corpus reuse."""
         return (
             self.base_id,
@@ -165,6 +172,7 @@ class IndexingSettings:
             self.include_extensions,
             self.exclude_extensions,
             self.extra_extensions,
+            self.skip_hidden,
         )
 
 
@@ -270,4 +278,5 @@ def indexing_settings_key(config: Config, storage_path: Path, base_id: str, know
         include_extensions=include_extensions,
         exclude_extensions=exclude_extensions,
         extra_extensions=extra_extensions,
+        skip_hidden=str(base_config.skip_hidden) if git_config is None else "",
     )

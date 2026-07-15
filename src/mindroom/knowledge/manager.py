@@ -1109,30 +1109,14 @@ class KnowledgeManager:
         knowledge: Knowledge | None = None,
         indexed_files: set[str] | None = None,
         indexed_signatures: dict[str, _FileSignature | None] | None = None,
+        vanished_files: set[str] | None = None,
     ) -> int:
         """Reindex resolved files with bounded concurrency while holding the operation lock."""
         if not files:
             return 0
 
-        concurrency = min(_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES, len(files))
-        if concurrency <= 1:
-            indexed_count = 0
-            for file_path in files:
-                indexed_count += int(
-                    await self._index_file_locked(
-                        file_path,
-                        upsert=True,
-                        knowledge=knowledge,
-                        indexed_files=indexed_files,
-                        indexed_signatures=indexed_signatures,
-                    ),
-                )
-            return indexed_count
-
-        semaphore = asyncio.Semaphore(concurrency)
-
-        async def _index_one(file_path: Path) -> bool:
-            async with semaphore:
+        async def _index_or_skip_vanished(file_path: Path) -> bool:
+            try:
                 return await self._index_file_locked(
                     file_path,
                     upsert=True,
@@ -1140,6 +1124,35 @@ class KnowledgeManager:
                     indexed_files=indexed_files,
                     indexed_signatures=indexed_signatures,
                 )
+            except FileNotFoundError:
+                # Live source folders (e.g. thread exports) delete files while
+                # a refresh runs; a file vanishing between listing and indexing
+                # is not an indexing failure. Record it so the caller can drop
+                # it from its completeness accounting: the trailing
+                # source-signature comparison then decides whether the
+                # surviving corpus is publishable or another refresh is needed.
+                relative_path = self._relative_path(file_path)
+                logger.warning(
+                    "Knowledge file vanished during refresh; skipping",
+                    base_id=self.base_id,
+                    path=relative_path,
+                )
+                if vanished_files is not None:
+                    vanished_files.add(relative_path)
+                return False
+
+        concurrency = min(_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES, len(files))
+        if concurrency <= 1:
+            indexed_count = 0
+            for file_path in files:
+                indexed_count += int(await _index_or_skip_vanished(file_path))
+            return indexed_count
+
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def _index_one(file_path: Path) -> bool:
+            async with semaphore:
+                return await _index_or_skip_vanished(file_path)
 
         results = await asyncio.gather(*(_index_one(file_path) for file_path in files))
         return sum(int(indexed) for indexed in results)
@@ -1164,6 +1177,7 @@ class KnowledgeManager:
             candidate_publish_state = _CandidatePublishState()
             candidate_indexed_files: set[str] = set()
             candidate_indexed_signatures: dict[str, _FileSignature | None] = {}
+            candidate_vanished_files: set[str] = set()
 
             try:
                 indexed_count = await self._reindex_files_locked(
@@ -1171,15 +1185,21 @@ class KnowledgeManager:
                     knowledge=candidate_knowledge,
                     indexed_files=candidate_indexed_files,
                     indexed_signatures=candidate_indexed_signatures,
+                    vanished_files=candidate_vanished_files,
                 )
-                if indexed_count != len(files):
+                # Files deleted mid-refresh by a live source (e.g. thread
+                # exports) are not indexing failures: drop them from the
+                # completeness accounting and let the live source-signature
+                # comparison below decide whether the surviving corpus still
+                # matches the folder.
+                if indexed_count != len(files) - len(candidate_vanished_files):
                     summary = f"Indexed {indexed_count} of {len(files)} managed knowledge files"
                     if self._last_file_index_error is not None:
                         summary = f"{summary} (first error: {self._last_file_index_error})"
                     self._last_refresh_error = summary
                     return indexed_count
 
-                expected_paths = {self._relative_path(file_path) for file_path in files}
+                expected_paths = {self._relative_path(file_path) for file_path in files} - candidate_vanished_files
                 candidate_signatures = {
                     relative_path: signature
                     for relative_path, signature in candidate_indexed_signatures.items()

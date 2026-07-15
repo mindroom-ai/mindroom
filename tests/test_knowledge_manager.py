@@ -1427,6 +1427,80 @@ def test_knowledge_file_listing_rejects_symlinked_directory_escape(tmp_path: Pat
     assert list_knowledge_files(config, "docs", docs_path) == []
 
 
+def test_knowledge_file_listing_skips_hidden_files_for_directory_bases(tmp_path: Path) -> None:
+    """Dot-prefixed entries (e.g. in-place writers' atomic-write temp files) stay out of directory bases."""
+    docs_path = tmp_path / "docs"
+    (docs_path / ".staging").mkdir(parents=True)
+    (docs_path / "kept.md").write_text("kept", encoding="utf-8")
+    (docs_path / ".hidden.md").write_text("hidden", encoding="utf-8")
+    (docs_path / ".staging" / "nested.md").write_text("nested", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+
+    assert list_knowledge_files(config, "docs", docs_path) == [(docs_path / "kept.md").resolve()]
+
+    config.knowledge_bases["docs"].skip_hidden = False
+    assert list_knowledge_files(config, "docs", docs_path) == sorted(
+        [
+            (docs_path / "kept.md").resolve(),
+            (docs_path / ".hidden.md").resolve(),
+            (docs_path / ".staging" / "nested.md").resolve(),
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_reindex_files_locked_records_files_vanishing_during_refresh(tmp_path: Path) -> None:
+    """A file deleted between listing and indexing is skipped instead of failing the refresh.
+
+    Live source folders such as thread exports delete files while a refresh
+    runs (stale-thread cleanup); the per-file stat used to raise
+    FileNotFoundError and abort the whole reindex subprocess.
+    """
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
+
+    vanished = (docs_path / "gone.md").resolve()
+    vanished_files: set[str] = set()
+    indexed = await manager._reindex_files_locked([vanished], vanished_files=vanished_files)
+    assert indexed == 0
+    assert vanished_files == {"gone.md"}
+
+
+@pytest.mark.asyncio
+async def test_reindex_publishes_surviving_files_when_one_vanishes_mid_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file deleted between listing and indexing must not mark the refresh incomplete.
+
+    The surviving corpus matches the live folder, so the refresh publishes it;
+    only genuine indexing failures may abort the pass.
+    """
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "kept.md").write_text("survives the refresh", encoding="utf-8")
+    doomed = (docs_path / "doomed.md").resolve()
+    doomed.write_text("deleted mid-refresh", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
+
+    original_signature = KnowledgeManager._file_signature
+
+    def vanishing_signature(self: KnowledgeManager, file_path: Path) -> object:
+        if file_path == doomed:
+            doomed.unlink(missing_ok=True)
+        return original_signature(self, file_path)
+
+    monkeypatch.setattr(KnowledgeManager, "_file_signature", vanishing_signature)
+
+    assert await manager.reindex_all() == 1
+    assert manager._last_refresh_error is None
+    assert "kept.md" in manager._indexed_files
+    assert "doomed.md" not in manager._indexed_files
+
+
 def test_knowledge_file_listing_filters_unsupported_extensions_before_filesystem_safety_checks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2988,6 +3062,7 @@ async def test_refresh_discards_candidate_when_sources_change_before_publish(
         knowledge: object | None = None,
         indexed_files: set[str] | None = None,
         indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
+        vanished_files: set[str] | None = None,
     ) -> int:
         indexed_count = await original_reindex_files_locked(
             self,
@@ -2995,6 +3070,7 @@ async def test_refresh_discards_candidate_when_sources_change_before_publish(
             knowledge=knowledge,
             indexed_files=indexed_files,
             indexed_signatures=indexed_signatures,
+            vanished_files=vanished_files,
         )
         (docs_path / "late.md").write_text("late addition", encoding="utf-8")
         return indexed_count
@@ -3896,6 +3972,35 @@ async def test_corpus_changing_config_mismatch_returns_no_index(
 
     assert knowledge is None
     assert unavailable == {"docs": KnowledgeAvailability.CONFIG_MISMATCH}
+    scheduler.schedule_refresh.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_skip_hidden_change_on_directory_base_returns_no_index(tmp_path: Path) -> None:
+    """Toggling skip_hidden on a directory base changes corpus membership, so old content must not be served."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("old corpus index", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    changed_config = config.model_copy(deep=True)
+    changed_config.knowledge_bases["docs"].skip_hidden = False
+    scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
+    scheduler.schedule_refresh = MagicMock()
+    resolution = resolve_agent_knowledge_access(
+        "helper",
+        changed_config,
+        runtime_paths,
+        refresh_scheduler=scheduler,
+    )
+
+    assert resolution.knowledge is None
+    assert {base_id: detail.availability for (base_id, detail) in resolution.unavailable.items()} == {
+        "docs": KnowledgeAvailability.CONFIG_MISMATCH,
+    }
     scheduler.schedule_refresh.assert_called_once()
 
 

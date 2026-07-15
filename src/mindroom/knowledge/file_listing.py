@@ -149,7 +149,8 @@ def _include_knowledge_relative_path(config: Config, base_id: str, relative_path
         return False
 
     git_config = base_config.git
-    if git_config is not None and git_config.skip_hidden and _is_hidden_relative_path(path_obj):
+    skip_hidden = git_config.skip_hidden if git_config is not None else base_config.skip_hidden
+    if skip_hidden and _is_hidden_relative_path(path_obj):
         return False
 
     if git_config is None:
