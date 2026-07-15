@@ -14,17 +14,25 @@ from uuid import uuid4
 
 import yaml
 
+# libyaml-backed classes parse ~20x faster than the pure-Python ones; export passes
+# re-read every thread document in a room, so the difference dominates pass cost.
+try:
+    from yaml import CSafeDumper, CSafeLoader
+except ImportError:
+    from yaml import SafeDumper, SafeLoader
+
+    _YAML_SAFE_DUMPER = SafeDumper
+    _YAML_SAFE_LOADER = SafeLoader
+else:
+    _YAML_SAFE_DUMPER = CSafeDumper
+    _YAML_SAFE_LOADER = CSafeLoader
+
 if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
     from pathlib import Path
 
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.thread_export.models import ThreadExportRoom
-
-# libyaml-backed classes parse ~20x faster than the pure-Python ones; export passes
-# re-read every thread document in a room, so the difference dominates pass cost.
-_YAML_SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
-_YAML_SAFE_DUMPER = getattr(yaml, "CSafeDumper", yaml.SafeDumper)
 
 _EXPORT_SCHEMA_VERSION = 1
 _ROOM_INDEX_FILENAME = "index.json"
