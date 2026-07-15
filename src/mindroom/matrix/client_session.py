@@ -202,6 +202,10 @@ def _create_matrix_client(
         homeserver,
         user_id or "",
         store_path=store_path,
+        # Agents trust devices on first use and never verify interactively;
+        # accept a peer device's re-registered olm identity (trust reset)
+        # instead of keeping stale keys that silently break E2EE and calls.
+        config=nio.AsyncClientConfig(replace_rotated_device_keys=True),
         ssl=ssl_context,  # ty: ignore[invalid-argument-type]
     )
     if user_id:
