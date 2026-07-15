@@ -116,7 +116,8 @@ class KnowledgeBaseConfig(BaseModel):
         default=True,
         description=(
             "Skip hidden files/folders (paths with components starting with '.') during indexing; "
-            "writers that update knowledge folders in place use dot-prefixed temp files"
+            "writers that update knowledge folders in place use dot-prefixed temp files. "
+            "Git-backed bases ignore this field and use git.skip_hidden instead"
         ),
     )
     git: KnowledgeGitConfig | None = Field(
