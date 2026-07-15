@@ -33,7 +33,7 @@ Each model configuration supports the following fields:
 | `host` | No | `null` | Host URL for self-hosted models (e.g., Ollama) |
 | `api_key` | No | `null` | API key (usually read from environment variables) |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters |
-| `context_window` | No | `null` | Context window size in tokens. MindRoom needs it on the active runtime model to enforce replay budgets, an explicit `compaction.model` also needs its own `context_window` for destructive compaction, and on `vertexai_claude` models it additionally enables request-time fitting that trims replayed history when a request would exceed the window |
+| `context_window` | No | `null` | Context window size in tokens; MindRoom needs it on the active runtime model to enforce replay budgets, an explicit `compaction.model` also needs its own `context_window` for destructive compaction, and on `vertexai_claude` models it additionally enables request-time fitting that trims replayed history when a request would exceed the window |
 
 ## Configuration Examples
 
