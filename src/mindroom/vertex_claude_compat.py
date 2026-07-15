@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _EXACT_COUNT_THRESHOLD_RATIO = 0.5
-_IMAGE_BLOCK_ESTIMATE_TOKENS = 1600
+_EXACT_COUNT_BLOCK_TYPES = frozenset({"document", "image"})
 
 
 def _strip_vertex_claude_tool_strict(
@@ -65,58 +65,33 @@ def _strip_vertex_claude_tool_strict(
     return sanitized if changed else tools
 
 
-def _blocks_with_flat_media_cost(blocks: list[Any]) -> tuple[list[Any], int]:
-    """Return blocks with base64 payloads emptied plus their surcharge tokens."""
-    stripped_blocks: list[Any] = []
-    surcharge = 0
+def _blocks_require_exact_count(blocks: list[Any]) -> bool:
+    """Return whether content includes media that cannot be estimated safely."""
     for block in blocks:
         if not isinstance(block, dict):
-            stripped_blocks.append(block)
             continue
-        stripped = block
+        if block.get("type") in _EXACT_COUNT_BLOCK_TYPES:
+            return True
         source = block.get("source")
         data = source.get("data") if isinstance(source, dict) else None
-        if isinstance(data, str) and data:
-            surcharge += _IMAGE_BLOCK_ESTIMATE_TOKENS if block.get("type") == "image" else len(data) // 4
-            stripped = {**block, "source": {**source, "data": ""}}
+        if data:
+            return True
         nested = block.get("content")
-        if isinstance(nested, list):
-            stripped_nested, nested_surcharge = _blocks_with_flat_media_cost(nested)
-            if nested_surcharge:
-                stripped = {**stripped, "content": stripped_nested}
-                surcharge += nested_surcharge
-        stripped_blocks.append(stripped)
-    return stripped_blocks, surcharge
+        if isinstance(nested, list) and _blocks_require_exact_count(nested):
+            return True
+    return False
 
 
-def _media_flat_costed_for_estimate(request_kwargs: dict[str, Any]) -> tuple[dict[str, Any], int]:
-    """Replace base64 media payloads with flat token surcharges before estimating.
-
-    Feeding multi-megabyte base64 blobs through the tokenizer would stall the
-    event loop and grossly overstate real media cost (Claude bills an image at
-    roughly 1.6k tokens, not base64-length/4). Images take Anthropic's
-    documented per-image ceiling; other base64 sources (PDF documents) keep a
-    length-proportional surcharge without paying the tokenizer encode.
-    """
+def _request_requires_exact_count(request_kwargs: dict[str, Any]) -> bool:
+    """Return whether any provider-formatted message contains media."""
     messages = request_kwargs.get("messages")
     if not isinstance(messages, list):
-        return request_kwargs, 0
-    stripped_messages: list[Any] = []
-    surcharge = 0
+        return False
     for message in messages:
         content = message.get("content") if isinstance(message, dict) else None
-        if not isinstance(content, list):
-            stripped_messages.append(message)
-            continue
-        stripped_content, message_surcharge = _blocks_with_flat_media_cost(content)
-        if message_surcharge:
-            stripped_messages.append({**message, "content": stripped_content})
-            surcharge += message_surcharge
-        else:
-            stripped_messages.append(message)
-    if not surcharge:
-        return request_kwargs, 0
-    return {**request_kwargs, "messages": stripped_messages}, surcharge
+        if isinstance(content, list) and _blocks_require_exact_count(content):
+            return True
+    return False
 
 
 @dataclass
@@ -162,8 +137,8 @@ class MindroomVertexAIClaude(VertexAIClaude):
         tools: list[dict[str, Any]] | None,
         response_format: dict[str, Any] | type[Any] | None,
         compress_tool_results: bool,
-    ) -> int:
-        """Estimate the full provider-shaped payload without a network call.
+    ) -> int | None:
+        """Estimate text payloads; return ``None`` when exact counting is required.
 
         CPU-bound (message formatting plus a tokenizer encode); async callers
         must off-load it to a worker thread.
@@ -174,11 +149,11 @@ class MindroomVertexAIClaude(VertexAIClaude):
             response_format=response_format,
             compress_tool_results=compress_tool_results,
         )
-        estimate_kwargs, media_surcharge = _media_flat_costed_for_estimate(request_kwargs)
-        return (
-            estimate_compaction_input_tokens(stable_serialize(estimate_kwargs))
-            + media_surcharge
-            + count_schema_tokens(response_format, self.id)
+        if _request_requires_exact_count(request_kwargs):
+            return None
+        return estimate_compaction_input_tokens(stable_serialize(request_kwargs)) + count_schema_tokens(
+            response_format,
+            self.id,
         )
 
     async def _count_request_input_tokens(
@@ -243,7 +218,7 @@ class MindroomVertexAIClaude(VertexAIClaude):
             response_format=response_format,
             compress_tool_results=compress_tool_results,
         )
-        if estimated_tokens < input_budget * _EXACT_COUNT_THRESHOLD_RATIO:
+        if estimated_tokens is not None and estimated_tokens < input_budget * _EXACT_COUNT_THRESHOLD_RATIO:
             return messages
 
         async def _count(candidate: list[Message]) -> int:

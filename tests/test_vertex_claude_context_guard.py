@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -84,22 +83,15 @@ def test_estimate_request_input_tokens_uses_full_provider_payload() -> None:
     assert all(key in serialized_payload for key in ('"messages"', '"model"', '"system"', '"tools"'))
 
 
-def test_estimate_flat_costs_base64_media_instead_of_tokenizing_it() -> None:
-    """Base64 image payloads never reach the tokenizer and cost a flat surcharge."""
+def test_estimate_requires_exact_count_for_images() -> None:
+    """Images bypass local estimation regardless of their encoded size."""
     model = _model()
     image_bytes = b"\x89PNG\r\n\x1a\n" + b"fake pixel data"
-    image_base64 = base64.b64encode(image_bytes).decode()
     messages = [
         Message(role="user", content="what is in this picture?", images=[Image(content=image_bytes)]),
     ]
 
-    with (
-        patch(
-            "mindroom.vertex_claude_compat.estimate_compaction_input_tokens",
-            return_value=30,
-        ) as estimator,
-        patch("mindroom.vertex_claude_compat.count_schema_tokens", return_value=0),
-    ):
+    with patch("mindroom.vertex_claude_compat.estimate_compaction_input_tokens") as estimator:
         estimated_tokens = model._estimate_request_input_tokens(
             messages,
             tools=None,
@@ -107,10 +99,45 @@ def test_estimate_flat_costs_base64_media_instead_of_tokenizing_it() -> None:
             compress_tool_results=False,
         )
 
-    serialized_payload = estimator.call_args.args[0]
-    assert image_base64 not in serialized_payload
-    assert '"media_type":"image/png"' in serialized_payload
-    assert estimated_tokens == 30 + 1600
+    assert estimated_tokens is None
+    estimator.assert_not_called()
+
+
+def test_estimate_requires_exact_count_for_base64_documents() -> None:
+    """Compressed documents bypass byte-size heuristics and use Vertex counting."""
+    model = _model()
+    request_kwargs = {
+        "model": model.id,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": "compressed-pdf-data",
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+
+    with (
+        patch.object(model, "_request_input_kwargs", return_value=request_kwargs),
+        patch("mindroom.vertex_claude_compat.estimate_compaction_input_tokens") as estimator,
+    ):
+        estimated_tokens = model._estimate_request_input_tokens(
+            [Message(role="user", content="summarize")],
+            tools=None,
+            response_format=None,
+            compress_tool_results=False,
+        )
+
+    assert estimated_tokens is None
+    estimator.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -258,6 +285,28 @@ async def test_fit_request_messages_counts_exactly_at_half_budget() -> None:
 
     with (
         patch.object(model, "_estimate_request_input_tokens", return_value=40),
+        patch.object(model, "_count_request_input_tokens", new=counter),
+    ):
+        fitted = await model._fit_request_messages(
+            messages,
+            tools=None,
+            response_format=None,
+            compress_tool_results=False,
+        )
+
+    assert fitted is messages
+    counter.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_fit_request_messages_counts_media_exactly() -> None:
+    """Media requests always use Vertex's exact tokenizer."""
+    model = _model()
+    messages = _tool_loop_messages()
+    counter = AsyncMock(return_value=80)
+
+    with (
+        patch.object(model, "_estimate_request_input_tokens", return_value=None),
         patch.object(model, "_count_request_input_tokens", new=counter),
     ):
         fitted = await model._fit_request_messages(
