@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 from agno.knowledge.embedder.base import Embedder
 from agno.vectordb.chroma import ChromaDb
@@ -25,6 +25,40 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 _INDEXING_MODES: set[str] = {"semantic", "files"}
+
+
+class _QueryCompatibilityKey(NamedTuple):
+    """Fields that must match for safe vector queries against a published index."""
+
+    base_id: str
+    storage_root: str
+    knowledge_path: str
+    mode: str
+    embedder_provider: str
+    embedder_model: str
+    embedder_host: str
+    embedder_dimensions: str
+
+
+class _CorpusCompatibilityKey(NamedTuple):
+    """Fields that must match for safe source-corpus reuse of a published index."""
+
+    base_id: str
+    storage_root: str
+    knowledge_path: str
+    mode: str
+    repo_identity: str
+    git_branch: str
+    git_lfs: str
+    git_skip_hidden: str
+    git_include_patterns: str
+    git_exclude_patterns: str
+    include_patterns: str
+    exclude_patterns: str
+    include_extensions: str
+    exclude_extensions: str
+    extra_extensions: str
+    skip_hidden: str
 
 
 @dataclass(frozen=True)
@@ -139,40 +173,38 @@ class IndexingSettings:
             "skip_hidden": self.skip_hidden,
         }
 
-    def query_compatibility_key(self) -> tuple[str, str, str, str, str, str, str, str]:
+    def query_compatibility_key(self) -> _QueryCompatibilityKey:
         """Return fields that must match for safe vector queries."""
-        return (
-            self.base_id,
-            self.storage_root,
-            self.knowledge_path,
-            self.mode,
-            self.embedder_provider,
-            self.embedder_model,
-            self.embedder_host,
-            self.embedder_dimensions,
+        return _QueryCompatibilityKey(
+            base_id=self.base_id,
+            storage_root=self.storage_root,
+            knowledge_path=self.knowledge_path,
+            mode=self.mode,
+            embedder_provider=self.embedder_provider,
+            embedder_model=self.embedder_model,
+            embedder_host=self.embedder_host,
+            embedder_dimensions=self.embedder_dimensions,
         )
 
-    def corpus_compatibility_key(
-        self,
-    ) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str, str, str]:
+    def corpus_compatibility_key(self) -> _CorpusCompatibilityKey:
         """Return fields that must match for safe source-corpus reuse."""
-        return (
-            self.base_id,
-            self.storage_root,
-            self.knowledge_path,
-            self.mode,
-            self.repo_identity,
-            self.git_branch,
-            self.git_lfs,
-            self.git_skip_hidden,
-            self.git_include_patterns,
-            self.git_exclude_patterns,
-            self.include_patterns,
-            self.exclude_patterns,
-            self.include_extensions,
-            self.exclude_extensions,
-            self.extra_extensions,
-            self.skip_hidden,
+        return _CorpusCompatibilityKey(
+            base_id=self.base_id,
+            storage_root=self.storage_root,
+            knowledge_path=self.knowledge_path,
+            mode=self.mode,
+            repo_identity=self.repo_identity,
+            git_branch=self.git_branch,
+            git_lfs=self.git_lfs,
+            git_skip_hidden=self.git_skip_hidden,
+            git_include_patterns=self.git_include_patterns,
+            git_exclude_patterns=self.git_exclude_patterns,
+            include_patterns=self.include_patterns,
+            exclude_patterns=self.exclude_patterns,
+            include_extensions=self.include_extensions,
+            exclude_extensions=self.exclude_extensions,
+            extra_extensions=self.extra_extensions,
+            skip_hidden=self.skip_hidden,
         )
 
 
