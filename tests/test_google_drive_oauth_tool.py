@@ -244,6 +244,8 @@ def test_google_drive_download_uses_namespaced_model_function(tmp_path: Path) ->
 
     assert "google_drive_download_file" in tool.functions
     assert "download_file" not in tool.functions
+    assert "google_drive_download_file" in tool.async_functions
+    assert "download_file" not in tool.async_functions
     assert tool.download_dir == tmp_path
 
 
