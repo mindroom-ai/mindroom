@@ -238,6 +238,7 @@ class TestConfigInit:
             "shell",
             "coding",
             "memory",
+            "config_manager",
             "duckduckgo",
             "website",
             "browser",
@@ -251,6 +252,8 @@ class TestConfigInit:
         ]
         assert "thread_resolution" not in mind["tools"]
         assert mind["skills"] == ["mindroom-docs"]
+        assert any("inspect the live state instead of guessing" in instruction for instruction in mind["instructions"])
+        assert any("technical comfort" in instruction for instruction in mind["instructions"])
         assert "knowledge_bases" not in config
         assert config["memory"]["backend"] == "file"
         assert config["memory"]["embedder"]["provider"] == "sentence_transformers"
@@ -305,6 +308,9 @@ class TestConfigInit:
         assert (workspace / "memory").exists()
         assert (workspace / "SOUL.md").exists()
         assert (workspace / "MEMORY.md").exists()
+        agents_template = (workspace / "AGENTS.md").read_text(encoding="utf-8")
+        assert "## MindRoom Configuration" in agents_template
+        assert "inspect the live configuration with `config_manager`" in agents_template
         assert "knowledge_bases" not in config
 
         env_content = (tmp_path / ".env").read_text()

@@ -948,6 +948,7 @@ agents:
       - shell
       - coding
       - memory
+      - config_manager
       - duckduckgo
       - website
       - browser
@@ -966,6 +967,8 @@ agents:
       - MEMORY.md is curated long-term memory; daily files are short-lived notes and logs.
       - Ask before external or destructive actions.
       - Before answering prior-history questions, use search_memories first.
+      - For MindRoom setup or configuration, follow the MindRoom Configuration workflow in AGENTS.md and inspect the live state instead of guessing.
+      - Match the user's technical comfort and prefer performing an authorized scoped setup over exposing YAML or shell commands.
 
 router:
   model: default
