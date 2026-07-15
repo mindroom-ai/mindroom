@@ -2408,6 +2408,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.cli.config"
 depends_on = [
+    "mindroom.cli.env_file",
     "mindroom.cli.owner",
     "mindroom.config.main",
     "mindroom.config.yaml_includes",
@@ -2431,6 +2432,7 @@ depends_on = [
 path = "mindroom.cli.env_file"
 depends_on = []
 visibility = [
+    "mindroom.cli.config",
     "mindroom.cli.connect",
     "mindroom.cli.local_stack",
 ]

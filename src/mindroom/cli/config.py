@@ -18,6 +18,7 @@ from rich.console import Console
 from rich.syntax import Syntax
 
 from mindroom import constants
+from mindroom.cli.env_file import write_private_env_text
 from mindroom.model_defaults import (
     CONFIG_INIT_MODEL_ALTERNATIVES,
     CONFIG_INIT_MODEL_PRESETS,
@@ -165,7 +166,7 @@ def _write_env_file(
 ) -> bool:
     """Create or update .env and return whether the file changed."""
     if not env_path.exists():
-        env_path.write_text(_env_template(matrix_server, selected_preset, storage_root), encoding="utf-8")
+        write_private_env_text(env_path, _env_template(matrix_server, selected_preset, storage_root))
         console.print(f"[green]Env file created:[/green] {env_path}")
         return True
 
@@ -181,7 +182,7 @@ def _write_env_file(
             )
         return False
 
-    env_path.write_text(_env_template(matrix_server, selected_preset, storage_root), encoding="utf-8")
+    write_private_env_text(env_path, _env_template(matrix_server, selected_preset, storage_root))
     console.print(f"[green]Env file overwritten:[/green] {env_path}")
     return True
 
@@ -209,7 +210,7 @@ def _append_missing_env_defaults(
 
     appended_lines = [f"# {title}", *(f"{key}={value}" for key, value in missing_defaults)]
     appended_content = "\n".join(appended_lines)
-    env_path.write_text(f"{current_content}{separator}{appended_content}\n", encoding="utf-8")
+    write_private_env_text(env_path, f"{current_content}{separator}{appended_content}\n")
     console.print(f"[green]Env file updated:[/green] {env_path}")
     return True
 

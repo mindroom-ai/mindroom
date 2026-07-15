@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import stat
 from typing import TYPE_CHECKING
 
 import httpx
@@ -66,6 +67,7 @@ def test_persist_local_provisioning_env_writes_credentials_only(tmp_path: Path) 
     assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in content
     assert "MINDROOM_NAMESPACE=a1b2c3d4" in content
     assert "MINDROOM_OWNER_USER_ID=" not in content
+    assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
 
 
 def test_persist_local_provisioning_env_writes_owner_when_available(tmp_path: Path) -> None:

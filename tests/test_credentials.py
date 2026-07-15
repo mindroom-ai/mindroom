@@ -123,6 +123,21 @@ class TestCredentialsManager:
         loaded_creds = credentials_manager.load_credentials("test_service")
         assert loaded_creds == test_creds
 
+    def test_plaintext_credentials_storage_is_private(self, tmp_path: Path) -> None:
+        """Plaintext credential storage should only be accessible to the owning OS user."""
+        credentials_dir = tmp_path / "credentials"
+        credentials_dir.mkdir(mode=0o755)
+        existing_path = credentials_dir / "existing_credentials.json"
+        existing_path.write_text('{"token":"existing"}', encoding="utf-8")
+        existing_path.chmod(0o644)
+
+        manager = CredentialsManager(credentials_dir)
+        manager.save_credentials("new", {"token": "new"})
+
+        assert stat.S_IMODE(credentials_dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE(existing_path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(manager.get_credentials_path("new").stat().st_mode) == 0o600
+
     def test_encrypted_save_and_load_credentials_round_trip(
         self,
         tmp_path: Path,
