@@ -65,12 +65,12 @@ _MAX_CACHE_MARKERS = 4
 _MESSAGE_RUNG_COUNT = 2
 _MARKABLE_BLOCK_TYPES = frozenset({"text", "tool_result", "document", "image"})
 
-_TOOL_SEARCH_TOOL_TYPE = "tool_search_tool_regex_20251119"
+TOOL_SEARCH_TOOL_TYPE = "tool_search_tool_regex_20251119"
 _TOOL_SEARCH_TOOL_NAME = "tool_search_tool_regex"
 _NATIVE_TOOL_SEARCH_PROVIDERS = frozenset({"anthropic", "vertexai_claude"})
 
-_SERVER_TOOL_USE_BLOCK_TYPE = "server_tool_use"
-_TOOL_SEARCH_RESULT_BLOCK_TYPE = "tool_search_tool_result"
+SERVER_TOOL_USE_BLOCK_TYPE = "server_tool_use"
+TOOL_SEARCH_RESULT_BLOCK_TYPE = "tool_search_tool_result"
 # The request schema for replayed tool-search results accepts only these keys
 # (ToolSearchToolResultBlockParam); response blocks additionally carry
 # citations/parsed_output/text, which the API rejects as extra inputs.
@@ -218,7 +218,7 @@ def _mark_last_tool(tools: object, cache_control: dict[str, str]) -> tuple[objec
     for tool_index in range(len(tools) - 1, -1, -1):
         tool_dict = _as_dict(tools[tool_index])
         if tool_dict is not None and (
-            tool_dict.get("defer_loading") is True or tool_dict.get("type") == _TOOL_SEARCH_TOOL_TYPE
+            tool_dict.get("defer_loading") is True or tool_dict.get("type") == TOOL_SEARCH_TOOL_TYPE
         ):
             continue
         if tool_dict is None or _block_has_cache_marker(tool_dict):
@@ -242,7 +242,7 @@ def _tool_search_result_ids(content: list[Any]) -> set[str]:
     result_ids: set[str] = set()
     for block in content:
         block_dict = _as_dict(block)
-        if block_dict is None or block_dict.get("type") != _TOOL_SEARCH_RESULT_BLOCK_TYPE:
+        if block_dict is None or block_dict.get("type") != TOOL_SEARCH_RESULT_BLOCK_TYPE:
             continue
         tool_use_id = block_dict.get("tool_use_id")
         if isinstance(tool_use_id, str):
@@ -287,14 +287,14 @@ def _request_kwargs_with_replay_safe_tool_search_results(request_kwargs: dict[st
                 continue
             block_id = block_dict.get("id")
             if (
-                block_dict.get("type") == _SERVER_TOOL_USE_BLOCK_TYPE
+                block_dict.get("type") == SERVER_TOOL_USE_BLOCK_TYPE
                 and block_dict.get("name") == _TOOL_SEARCH_TOOL_NAME
                 and (not isinstance(block_id, str) or block_id not in paired_result_ids)
             ):
                 content_changed = True
                 continue
             if (
-                block_dict.get("type") == _TOOL_SEARCH_RESULT_BLOCK_TYPE
+                block_dict.get("type") == TOOL_SEARCH_RESULT_BLOCK_TYPE
                 and not block_dict.keys() <= _TOOL_SEARCH_RESULT_INPUT_KEYS
             ):
                 prepared_block = {
@@ -348,7 +348,7 @@ def _request_kwargs_with_deferred_tool_search(
     deferred_tools.sort(key=lambda tool: str(tool.get("name")))
     prepared_kwargs = dict(request_kwargs)
     prepared_kwargs["tools"] = [
-        {"type": _TOOL_SEARCH_TOOL_TYPE, "name": _TOOL_SEARCH_TOOL_NAME},
+        {"type": TOOL_SEARCH_TOOL_TYPE, "name": _TOOL_SEARCH_TOOL_NAME},
         *non_deferred_tools,
         *deferred_tools,
     ]

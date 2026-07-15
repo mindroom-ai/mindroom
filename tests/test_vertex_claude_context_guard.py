@@ -13,6 +13,11 @@ from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 
+from mindroom.claude_prompt_cache import (
+    SERVER_TOOL_USE_BLOCK_TYPE,
+    TOOL_SEARCH_RESULT_BLOCK_TYPE,
+    TOOL_SEARCH_TOOL_TYPE,
+)
 from mindroom.vertex_claude_compat import (
     _VERTEX_TOOL_SEARCH_TOKEN_RESERVE,
     MindroomVertexAIClaude,
@@ -149,13 +154,13 @@ def test_vertex_token_count_request_preserves_native_tool_search_as_countable_te
     """Only the count payload is adapted for Vertex's older request schema."""
     large_schema_description = "large schema " * 10_000
     search_use = {
-        "type": "server_tool_use",
+        "type": SERVER_TOOL_USE_BLOCK_TYPE,
         "id": "srvtoolu-1",
         "name": "tool_search_tool_regex",
         "input": {"pattern": "weather"},
     }
     search_result = {
-        "type": "tool_search_tool_result",
+        "type": TOOL_SEARCH_RESULT_BLOCK_TYPE,
         "tool_use_id": "srvtoolu-1",
         "content": {
             "type": "tool_search_tool_search_result",
@@ -175,7 +180,7 @@ def test_vertex_token_count_request_preserves_native_tool_search_as_countable_te
             },
         ],
         "tools": [
-            {"type": "tool_search_tool_regex_20251119", "name": "tool_search_tool_regex"},
+            {"type": TOOL_SEARCH_TOOL_TYPE, "name": "tool_search_tool_regex"},
             {"name": "always_tool", "input_schema": {"type": "object"}},
             {
                 "name": "weather_lookup",
@@ -221,7 +226,7 @@ def test_vertex_token_count_request_preserves_native_tool_search_as_countable_te
             ),
         },
     ]
-    assert request_kwargs["tools"][0]["type"] == "tool_search_tool_regex_20251119"
+    assert request_kwargs["tools"][0]["type"] == TOOL_SEARCH_TOOL_TYPE
     assert request_kwargs["messages"][0]["content"][1] is search_use
     assert request_kwargs["messages"][0]["content"][2] is search_result
 
@@ -235,7 +240,7 @@ def test_vertex_token_count_adapts_search_history_without_current_search_tool() 
                 "role": "assistant",
                 "content": [
                     {
-                        "type": "server_tool_use",
+                        "type": SERVER_TOOL_USE_BLOCK_TYPE,
                         "id": "srvtoolu-1",
                         "name": "tool_search_tool_regex",
                         "input": {"pattern": "weather"},
@@ -278,7 +283,7 @@ async def test_exact_count_uses_vertex_compatible_tool_search_payload() -> None:
         "model": model.id,
         "messages": [{"role": "user", "content": "hello"}],
         "tools": [
-            {"type": "tool_search_tool_regex_20251119", "name": "tool_search_tool_regex"},
+            {"type": TOOL_SEARCH_TOOL_TYPE, "name": "tool_search_tool_regex"},
             {"name": "always_tool", "input_schema": {"type": "object"}},
             {"name": "deferred_tool", "input_schema": {"type": "object"}, "defer_loading": True},
         ],

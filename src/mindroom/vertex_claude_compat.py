@@ -11,7 +11,12 @@ from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.utils.models.claude import format_messages, format_tools_for_model
 from agno.utils.tokens import count_schema_tokens
 
-from mindroom.claude_prompt_cache import prepare_claude_request_kwargs
+from mindroom.claude_prompt_cache import (
+    SERVER_TOOL_USE_BLOCK_TYPE,
+    TOOL_SEARCH_RESULT_BLOCK_TYPE,
+    TOOL_SEARCH_TOOL_TYPE,
+    prepare_claude_request_kwargs,
+)
 from mindroom.logging_config import get_logger
 from mindroom.token_budget import estimate_compaction_input_tokens, stable_serialize
 
@@ -26,8 +31,9 @@ logger = get_logger(__name__)
 
 _EXACT_COUNT_THRESHOLD_RATIO = 0.5
 _EXACT_COUNT_BLOCK_TYPES = frozenset({"document", "image"})
-_VERTEX_TOOL_SEARCH_TYPE = "tool_search_tool_regex_20251119"
-_VERTEX_TOOL_SEARCH_HISTORY_BLOCK_TYPES = frozenset({"server_tool_use", "tool_search_tool_result"})
+_VERTEX_TOOL_SEARCH_HISTORY_BLOCK_TYPES = frozenset(
+    {SERVER_TOOL_USE_BLOCK_TYPE, TOOL_SEARCH_RESULT_BLOCK_TYPE},
+)
 # Vertex generation reports 213 input tokens for the native regex search tool
 # on both Claude Haiku 4.5 and Sonnet 4.6. Keep a small margin because the
 # count-tokens endpoint cannot count that server-side prefix itself.
@@ -105,7 +111,7 @@ def _referenced_tool_names(search_result_block: object) -> set[str]:
     if not isinstance(search_result_block, dict):
         return set()
     block_dict = cast("dict[str, Any]", search_result_block)
-    if block_dict.get("type") != "tool_search_tool_result":
+    if block_dict.get("type") != TOOL_SEARCH_RESULT_BLOCK_TYPE:
         return set()
     search_result = block_dict.get("content")
     references = search_result.get("tool_references") if isinstance(search_result, dict) else None
@@ -151,7 +157,7 @@ def _messages_for_vertex_token_count(messages: object) -> tuple[list[Any] | None
 
 def _is_vertex_tool_search(tool: object) -> bool:
     """Return whether one wire tool is Vertex's unsupported count entry."""
-    return isinstance(tool, dict) and cast("dict[str, Any]", tool).get("type") == _VERTEX_TOOL_SEARCH_TYPE
+    return isinstance(tool, dict) and cast("dict[str, Any]", tool).get("type") == TOOL_SEARCH_TOOL_TYPE
 
 
 def _tools_for_vertex_token_count(
