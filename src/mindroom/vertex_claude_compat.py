@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from agno.exceptions import ModelProviderError
 from agno.models.vertexai.claude import Claude as VertexAIClaude
@@ -26,6 +26,12 @@ logger = get_logger(__name__)
 
 _EXACT_COUNT_THRESHOLD_RATIO = 0.5
 _EXACT_COUNT_BLOCK_TYPES = frozenset({"document", "image"})
+_VERTEX_TOOL_SEARCH_TYPE = "tool_search_tool_regex_20251119"
+_VERTEX_TOOL_SEARCH_HISTORY_BLOCK_TYPES = frozenset({"server_tool_use", "tool_search_tool_result"})
+# Vertex generation reports 213 input tokens for the native regex search tool
+# on both Claude Haiku 4.5 and Sonnet 4.6. Keep a small margin because the
+# count-tokens endpoint cannot count that server-side prefix itself.
+_VERTEX_TOOL_SEARCH_TOKEN_RESERVE = 256
 
 
 def _strip_vertex_claude_tool_strict(
@@ -92,6 +98,61 @@ def _request_requires_exact_count(request_kwargs: dict[str, Any]) -> bool:
         if isinstance(content, list) and _blocks_require_exact_count(content):
             return True
     return False
+
+
+def _request_for_vertex_token_count(request_kwargs: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """Build a countable equivalent of a native tool-search request.
+
+    Vertex generation accepts Anthropic's native tool-search schema, but its
+    count-tokens endpoint rejects the search tool, ``defer_loading``, and the
+    two server-search history block types. Deferred definitions are absent
+    from the model context until selected, so omit them from the count payload.
+    Preserve prior search traces as text and reserve the fixed server-side
+    search prefix separately.
+    """
+    tools = request_kwargs.get("tools")
+    if not isinstance(tools, list) or not any(
+        isinstance(tool, dict) and tool.get("type") == _VERTEX_TOOL_SEARCH_TYPE for tool in tools
+    ):
+        return request_kwargs, 0
+
+    count_kwargs = dict(request_kwargs)
+    count_tools = [
+        tool
+        for tool in tools
+        if not (
+            isinstance(tool, dict)
+            and (tool.get("type") == _VERTEX_TOOL_SEARCH_TYPE or tool.get("defer_loading") is True)
+        )
+    ]
+    if count_tools:
+        count_kwargs["tools"] = count_tools
+    else:
+        count_kwargs.pop("tools", None)
+
+    messages = request_kwargs.get("messages")
+    if isinstance(messages, list):
+        count_messages = list(messages)
+        for message_index, message in enumerate(messages):
+            if not isinstance(message, dict):
+                continue
+            message_dict = cast("dict[str, Any]", message)
+            content = message_dict.get("content")
+            if not isinstance(content, list):
+                continue
+            count_content = [
+                {"type": "text", "text": stable_serialize(block)}
+                if isinstance(block, dict) and block.get("type") in _VERTEX_TOOL_SEARCH_HISTORY_BLOCK_TYPES
+                else block
+                for block in content
+            ]
+            if count_content != content:
+                count_message = dict(message_dict)
+                count_message["content"] = count_content
+                count_messages[message_index] = count_message
+        count_kwargs["messages"] = count_messages
+
+    return count_kwargs, _VERTEX_TOOL_SEARCH_TOKEN_RESERVE
 
 
 @dataclass
@@ -172,8 +233,9 @@ class MindroomVertexAIClaude(VertexAIClaude):
             response_format=response_format,
             compress_tool_results=compress_tool_results,
         )
-        response = await self.get_async_client().messages.count_tokens(**request_kwargs)
-        return response.input_tokens + count_schema_tokens(response_format, self.id)
+        count_kwargs, tool_search_reserve = _request_for_vertex_token_count(request_kwargs)
+        response = await self.get_async_client().messages.count_tokens(**count_kwargs)
+        return response.input_tokens + tool_search_reserve + count_schema_tokens(response_format, self.id)
 
     @staticmethod
     def _replay_trim_candidates(messages: list[Message]) -> list[int]:

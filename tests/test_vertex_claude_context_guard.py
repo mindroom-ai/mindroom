@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -12,7 +13,11 @@ from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 
-from mindroom.vertex_claude_compat import MindroomVertexAIClaude
+from mindroom.vertex_claude_compat import (
+    _VERTEX_TOOL_SEARCH_TOKEN_RESERVE,
+    MindroomVertexAIClaude,
+    _request_for_vertex_token_count,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -138,6 +143,122 @@ def test_estimate_requires_exact_count_for_base64_documents() -> None:
 
     assert estimated_tokens is None
     estimator.assert_not_called()
+
+
+def test_vertex_token_count_request_preserves_native_tool_search_as_countable_text() -> None:
+    """Only the count payload is adapted for Vertex's older request schema."""
+    search_use = {
+        "type": "server_tool_use",
+        "id": "srvtoolu-1",
+        "name": "tool_search_tool_regex",
+        "input": {"pattern": "weather"},
+    }
+    search_result = {
+        "type": "tool_search_tool_result",
+        "tool_use_id": "srvtoolu-1",
+        "content": {
+            "type": "tool_search_tool_search_result",
+            "tool_references": [{"type": "tool_reference", "tool_name": "weather_lookup"}],
+        },
+    }
+    request_kwargs = {
+        "model": "claude-sonnet-4-6",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Searching."},
+                    search_use,
+                    search_result,
+                ],
+            },
+        ],
+        "tools": [
+            {"type": "tool_search_tool_regex_20251119", "name": "tool_search_tool_regex"},
+            {"name": "always_tool", "input_schema": {"type": "object"}},
+            {
+                "name": "weather_lookup",
+                "input_schema": {"type": "object"},
+                "defer_loading": True,
+            },
+        ],
+    }
+
+    count_kwargs, reserve = _request_for_vertex_token_count(request_kwargs)
+
+    assert reserve == _VERTEX_TOOL_SEARCH_TOKEN_RESERVE
+    assert count_kwargs["tools"] == [{"name": "always_tool", "input_schema": {"type": "object"}}]
+    assert count_kwargs["messages"][0]["content"] == [
+        {"type": "text", "text": "Searching."},
+        {
+            "type": "text",
+            "text": (
+                '{"id":"srvtoolu-1","input":{"pattern":"weather"},'
+                '"name":"tool_search_tool_regex","type":"server_tool_use"}'
+            ),
+        },
+        {
+            "type": "text",
+            "text": (
+                '{"content":{"tool_references":[{"tool_name":"weather_lookup",'
+                '"type":"tool_reference"}],"type":"tool_search_tool_search_result"},'
+                '"tool_use_id":"srvtoolu-1","type":"tool_search_tool_result"}'
+            ),
+        },
+    ]
+    assert request_kwargs["tools"][0]["type"] == "tool_search_tool_regex_20251119"
+    assert request_kwargs["messages"][0]["content"][1] is search_use
+    assert request_kwargs["messages"][0]["content"][2] is search_result
+
+
+def test_vertex_token_count_request_leaves_regular_requests_unchanged() -> None:
+    """Requests without native search keep their original count payload."""
+    request_kwargs = {
+        "model": "claude-sonnet-4-6",
+        "messages": [{"role": "user", "content": "hello"}],
+        "tools": [{"name": "lookup", "input_schema": {"type": "object"}}],
+    }
+
+    count_kwargs, reserve = _request_for_vertex_token_count(request_kwargs)
+
+    assert count_kwargs is request_kwargs
+    assert reserve == 0
+
+
+@pytest.mark.asyncio
+async def test_exact_count_uses_vertex_compatible_tool_search_payload() -> None:
+    """Exact counting includes the native-search reserve after sanitization."""
+    model = _model()
+    request_kwargs = {
+        "model": model.id,
+        "messages": [{"role": "user", "content": "hello"}],
+        "tools": [
+            {"type": "tool_search_tool_regex_20251119", "name": "tool_search_tool_regex"},
+            {"name": "always_tool", "input_schema": {"type": "object"}},
+            {"name": "deferred_tool", "input_schema": {"type": "object"}, "defer_loading": True},
+        ],
+    }
+    count_tokens = AsyncMock(return_value=SimpleNamespace(input_tokens=700))
+    client = SimpleNamespace(messages=SimpleNamespace(count_tokens=count_tokens))
+
+    with (
+        patch.object(model, "_request_input_kwargs", return_value=request_kwargs),
+        patch.object(model, "get_async_client", return_value=client),
+        patch("mindroom.vertex_claude_compat.count_schema_tokens", return_value=5),
+    ):
+        input_tokens = await model._count_request_input_tokens(
+            [Message(role="user", content="hello")],
+            tools=None,
+            response_format=None,
+            compress_tool_results=False,
+        )
+
+    assert input_tokens == 700 + _VERTEX_TOOL_SEARCH_TOKEN_RESERVE + 5
+    count_tokens.assert_awaited_once_with(
+        model=model.id,
+        messages=request_kwargs["messages"],
+        tools=[{"name": "always_tool", "input_schema": {"type": "object"}}],
+    )
 
 
 @pytest.mark.asyncio
