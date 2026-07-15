@@ -97,8 +97,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                 kwargs.pop("max_read_size")
             else:
                 kwargs["max_read_size"] = max_read_size
-        self._download_function_enabled = kwargs.get("download_file") is True
-        if self._download_function_enabled:
+        if kwargs.get("download_file") is True:
             if tool_output_workspace_root is None:
                 msg = "Google Drive downloads require an agent workspace"
                 raise RuntimeError(msg)
@@ -133,7 +132,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         return google_service_account_configured(self.service_account_path, self._runtime_paths)
 
     def _download_guidance(self) -> str:
-        if self._download_function_enabled:
+        if "google_drive_download_file" in self.functions:
             return " Use google_drive_download_file instead."
         return ""
 
