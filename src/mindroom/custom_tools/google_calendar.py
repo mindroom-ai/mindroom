@@ -67,6 +67,9 @@ class GoogleCalendarTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin,
             defer_to_original_auth=defer_to_original_auth,
         )
 
+        # Agno's toolkit still validates its legacy broad scope markers during
+        # construction. Those markers are not used for MindRoom's OAuth flow:
+        # the credentials injected below carry the provider's granular scopes.
         super().__init__(**kwargs)
         self.creds = creds
 

@@ -84,7 +84,7 @@ GOOGLE_EXTRA_AUTH_PARAMS = {
                 "credential_service": "google_gmail_oauth",
                 "tool_config_service": "gmail",
                 "client_config_services": ("google_gmail_oauth_client",),
-                "status_capabilities": ("Gmail read/modify/compose",),
+                "status_capabilities": ("Gmail read, send, draft, and mailbox management",),
             },
         ),
         (
