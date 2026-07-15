@@ -8,8 +8,8 @@ import json
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import pytest
 from agno.agent import Agent
 from agno.agent._tools import parse_tools
 from agno.models.base import Model
@@ -23,6 +23,9 @@ from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.oauth.google_drive import _GOOGLE_DRIVE_OAUTH_SCOPES
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+
+if TYPE_CHECKING:
+    import pytest
 
 
 class MinimalModel(Model):
@@ -246,16 +249,35 @@ def test_google_drive_download_uses_namespaced_model_function(tmp_path: Path) ->
     assert tool.download_dir == tmp_path / "google-drive-downloads"
 
 
-def test_google_drive_download_requires_agent_workspace(tmp_path: Path) -> None:
+def test_google_drive_download_disabled_without_workspace(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
+    tool = get_tool_by_name(
+        "google_drive",
+        runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        tool_config_overrides={"download_file": True},
+        disable_sandbox_proxy=True,
+        tool_output_workspace_root=None,
+        worker_target=None,
+    )
 
-    with pytest.raises(RuntimeError, match="Google Drive downloads require an agent workspace"):
-        GoogleDriveTools(
-            runtime_paths=runtime_paths,
-            credentials_manager=CredentialsManager(tmp_path / "credentials"),
-            creds=_ValidCredentials(),
-            download_file=True,
-        )
+    assert "google_drive_download_file" not in tool.functions
+    assert "google_drive_download_file" not in tool.async_functions
+    assert "google_drive_list_files" in tool.functions
+
+
+def test_google_drive_download_confines_truthy_non_bool_flag(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=_ValidCredentials(),
+        download_file="true",
+        tool_output_workspace_root=tmp_path,
+    )
+
+    assert "google_drive_download_file" in tool.functions
+    assert tool.download_dir == tmp_path / "google-drive-downloads"
 
 
 def test_google_drive_connect_instruction_uses_redirect_uri_public_origin(tmp_path: Path) -> None:

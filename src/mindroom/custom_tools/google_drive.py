@@ -97,11 +97,12 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                 kwargs.pop("max_read_size")
             else:
                 kwargs["max_read_size"] = max_read_size
-        if kwargs.get("download_file") is True:
+        if kwargs.get("download_file"):
             if tool_output_workspace_root is None:
-                msg = "Google Drive downloads require an agent workspace"
-                raise RuntimeError(msg)
-            kwargs["download_dir"] = tool_output_workspace_root / "google-drive-downloads"
+                logger.warning("Google Drive downloads are disabled because this agent has no workspace")
+                kwargs["download_file"] = False
+            else:
+                kwargs["download_dir"] = tool_output_workspace_root / "google-drive-downloads"
         self._runtime_paths = runtime_paths
         self._creds_manager = credentials_manager
         defer_to_original_auth = self._apply_runtime_original_auth_kwargs(kwargs)
