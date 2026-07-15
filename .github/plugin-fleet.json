@@ -1,0 +1,59 @@
+{
+  "include": [
+    {
+      "plugin_repository": "mindroom-ai/agent-vault-bridge-plugin",
+      "plugin_ref": "main",
+      "artifact_name": "agent-vault-bridge-plugin"
+    },
+    {
+      "plugin_repository": "mindroom-ai/deep-research-plugin",
+      "plugin_ref": "main",
+      "artifact_name": "deep-research-plugin"
+    },
+    {
+      "plugin_repository": "mindroom-ai/location-enrich-plugin",
+      "plugin_ref": "main",
+      "artifact_name": "location-enrich-plugin"
+    },
+    {
+      "plugin_repository": "mindroom-ai/openviking-plugin",
+      "plugin_ref": "main",
+      "artifact_name": "openviking-plugin"
+    },
+    {
+      "plugin_repository": "mindroom-ai/ping-hook-plugin",
+      "plugin_ref": "main",
+      "artifact_name": "ping-hook-plugin"
+    },
+    {
+      "plugin_repository": "mindroom-ai/restart-resume-plugin",
+      "plugin_ref": "main",
+      "artifact_name": "restart-resume-plugin"
+    },
+    {
+      "plugin_repository": "mindroom-ai/shell-guard-plugin",
+      "plugin_ref": "main",
+      "artifact_name": "shell-guard-plugin"
+    },
+    {
+      "plugin_repository": "mindroom-ai/thread-export-plugin",
+      "plugin_ref": "main",
+      "artifact_name": "thread-export-plugin"
+    },
+    {
+      "plugin_repository": "mindroom-ai/thread-goal-plugin",
+      "plugin_ref": "main",
+      "artifact_name": "thread-goal-plugin"
+    },
+    {
+      "plugin_repository": "mindroom-ai/thread-snooze-plugin",
+      "plugin_ref": "main",
+      "artifact_name": "thread-snooze-plugin"
+    },
+    {
+      "plugin_repository": "mindroom-ai/voice-enrich-plugin",
+      "plugin_ref": "main",
+      "artifact_name": "voice-enrich-plugin"
+    }
+  ]
+}
