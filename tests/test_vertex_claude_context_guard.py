@@ -25,8 +25,8 @@ def _model() -> MindroomVertexAIClaude:
 def _tool_loop_messages() -> list[Message]:
     return [
         Message(role="system", content="instructions"),
-        Message(role="user", content="old question"),
-        Message(role="assistant", content="old answer"),
+        Message(role="user", content="old question", from_history=True),
+        Message(role="assistant", content="old answer", from_history=True),
         Message(role="user", content="current question"),
         Message(
             role="assistant",

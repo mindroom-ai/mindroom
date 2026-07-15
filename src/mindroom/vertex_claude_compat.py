@@ -22,8 +22,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_PROMPT_ROLES = frozenset({"system", "developer", "instructions"})
-
 
 def _strip_vertex_claude_tool_strict(
     tools: list[dict[str, Any]] | None,
@@ -101,14 +99,19 @@ class MindroomVertexAIClaude(VertexAIClaude):
         return response.input_tokens + count_schema_tokens(response_format, self.id)
 
     @staticmethod
-    def _replay_trim_candidates(messages: list[Message]) -> tuple[list[Message], list[int]]:
-        """Return the leading prompt messages and safe user-turn suffix starts."""
-        prefix_end = 0
-        while prefix_end < len(messages) and messages[prefix_end].role in _PROMPT_ROLES:
-            prefix_end += 1
-        prefix = messages[:prefix_end]
-        user_starts = [index for index in range(prefix_end, len(messages)) if messages[index].role == "user"]
-        return prefix, user_starts
+    def _replay_trim_candidates(messages: list[Message]) -> list[int]:
+        """Return safe history-user cuts plus the drop-all-history cut."""
+        history_user_starts = [
+            index for index, message in enumerate(messages) if message.from_history and message.role == "user"
+        ]
+        if not any(message.from_history for message in messages):
+            return []
+        return [*history_user_starts, len(messages)]
+
+    @staticmethod
+    def _messages_after_history_cut(messages: list[Message], cut: int) -> list[Message]:
+        """Drop only replay messages older than one safe history boundary."""
+        return [message for index, message in enumerate(messages) if not message.from_history or index >= cut]
 
     async def _fit_request_messages(
         self,
@@ -139,18 +142,18 @@ class MindroomVertexAIClaude(VertexAIClaude):
         if original_tokens <= input_budget:
             return messages
 
-        prefix, user_starts = self._replay_trim_candidates(messages)
-        if not user_starts:
+        replay_cuts = self._replay_trim_candidates(messages)
+        if not replay_cuts:
             msg = f"Vertex Claude request uses {original_tokens} input tokens; limit is {input_budget}."
             raise ModelProviderError(message=msg, model_name=self.name, model_id=self.id)
 
         best_messages: list[Message] | None = None
         best_tokens: int | None = None
         low = 0
-        high = len(user_starts) - 1
+        high = len(replay_cuts) - 1
         while low <= high:
             midpoint = (low + high) // 2
-            candidate = [*prefix, *messages[user_starts[midpoint] :]]
+            candidate = self._messages_after_history_cut(messages, replay_cuts[midpoint])
             candidate_tokens = await _count(candidate)
             if candidate_tokens <= input_budget:
                 best_messages = candidate
