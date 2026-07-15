@@ -161,6 +161,47 @@ async def test_login_appservice_user_returns_per_user_device_client(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_register_appservice_user_rejects_invalid_success_json(tmp_path: Path) -> None:
+    """A malformed successful registration response should become an actionable startup error."""
+    response = httpx.Response(200, content=b"not-json")
+
+    with (
+        patch(
+            "mindroom.matrix.appservice.httpx.AsyncClient",
+            _recording_client([], response),
+        ),
+        pytest.raises(PermanentMatrixStartupError, match="registration returned invalid JSON"),
+    ):
+        await register_appservice_user(
+            "https://matrix.example.com",
+            username="mindroom_agent",
+            expected_user_id="@mindroom_agent:example.com",
+            token=APPSERVICE_TOKEN,
+            runtime_paths=_runtime_paths(tmp_path),
+        )
+
+
+@pytest.mark.asyncio
+async def test_login_appservice_user_rejects_invalid_success_json(tmp_path: Path) -> None:
+    """A malformed successful login response should become an actionable startup error."""
+    response = httpx.Response(200, content=b"not-json")
+
+    with (
+        patch(
+            "mindroom.matrix.appservice.httpx.AsyncClient",
+            _recording_client([], response),
+        ),
+        pytest.raises(PermanentMatrixStartupError, match="login returned invalid JSON"),
+    ):
+        await login_appservice_user(
+            "https://matrix.example.com",
+            user_id="@mindroom_agent:example.com",
+            token=APPSERVICE_TOKEN,
+            runtime_paths=_runtime_paths(tmp_path),
+        )
+
+
+@pytest.mark.asyncio
 async def test_appservice_error_never_includes_token(tmp_path: Path) -> None:
     """Authentication failures must not leak the appservice bearer token."""
     captured: list[tuple[str, dict[str, str], dict[str, object]]] = []

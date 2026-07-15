@@ -58,10 +58,7 @@ def resolve_managed_account_auth(runtime_paths: RuntimePaths) -> ManagedAccountA
     token = _appservice_token_from_env(runtime_paths)
     if raw_mode == "password":
         if token:
-            msg = (
-                f"{MATRIX_APPSERVICE_TOKEN_ENV} is set but "
-                f"{MATRIX_MANAGED_ACCOUNT_AUTH_ENV} is not 'appservice'"
-            )
+            msg = f"{MATRIX_APPSERVICE_TOKEN_ENV} is set but {MATRIX_MANAGED_ACCOUNT_AUTH_ENV} is not 'appservice'"
             raise matrix_startup_error(msg, permanent=True)
         return ManagedAccountAuth(mode="password")
 
@@ -87,6 +84,18 @@ def _response_error(response: httpx.Response) -> tuple[str | None, str]:
         errcode if isinstance(errcode, str) else None,
         error if isinstance(error, str) and error else f"HTTP {response.status_code}",
     )
+
+
+def _success_response_body(action: str, response: httpx.Response) -> dict[str, object]:
+    try:
+        body = response.json()
+    except ValueError as exc:
+        msg = f"Matrix application-service {action} returned invalid JSON"
+        raise matrix_startup_error(msg, permanent=True) from exc
+    if not isinstance(body, dict):
+        msg = f"Matrix application-service {action} returned a non-object JSON response"
+        raise matrix_startup_error(msg, permanent=True)
+    return body
 
 
 async def _post(
@@ -140,8 +149,8 @@ async def register_appservice_user(
             return expected_user_id
         _raise_appservice_error("registration", response)
 
-    body = response.json()
-    returned_user_id = body.get("user_id") if isinstance(body, dict) else None
+    body = _success_response_body("registration", response)
+    returned_user_id = body.get("user_id")
     if not isinstance(returned_user_id, str) or returned_user_id != expected_user_id:
         msg = (
             "Matrix application-service registration returned an unexpected user ID: "
@@ -173,10 +182,10 @@ async def login_appservice_user(
     if not response.is_success:
         _raise_appservice_error("login", response)
 
-    body = response.json()
-    returned_user_id = body.get("user_id") if isinstance(body, dict) else None
-    access_token = body.get("access_token") if isinstance(body, dict) else None
-    device_id = body.get("device_id") if isinstance(body, dict) else None
+    body = _success_response_body("login", response)
+    returned_user_id = body.get("user_id")
+    access_token = body.get("access_token")
+    device_id = body.get("device_id")
     if returned_user_id != user_id or not isinstance(access_token, str) or not isinstance(device_id, str):
         msg = f"Matrix application-service login returned incomplete credentials for {user_id}"
         raise matrix_startup_error(msg, permanent=True)
