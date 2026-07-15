@@ -1240,8 +1240,8 @@ async def test_apply_config_change_returns_invalid_plugin_manifest_error(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_apply_config_change_preserves_call_agent_override_authorship(tmp_path: Path) -> None:
-    """Confirmed edits preserve inherited fields and explicitly cleared defaults."""
+async def test_apply_config_change_preserves_call_profile_authorship(tmp_path: Path) -> None:
+    """Confirmed edits preserve complete profiles and agent assignments."""
     config_path = tmp_path / "runtime-config.yaml"
     config_path.write_text(
         yaml.safe_dump(
@@ -1252,8 +1252,18 @@ async def test_apply_config_change_preserves_call_agent_override_authorship(tmp_
                 },
                 "calls": {
                     "enabled": True,
-                    "voice": "marin",
-                    "agents": {"inherited": {}, "cleared": {"voice": None}},
+                    "profiles": {
+                        "openai-realtime": {
+                            "backend": "realtime",
+                            "model": "gpt-realtime-2.1",
+                            "credentials_service": "openai-voice",
+                            "voice": "marin",
+                        },
+                    },
+                    "agents": {
+                        "inherited": "openai-realtime",
+                        "cleared": "openai-realtime",
+                    },
                 },
             },
         ),
@@ -1268,7 +1278,18 @@ async def test_apply_config_change_preserves_call_agent_override_authorship(tmp_
 
     saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert "Configuration updated successfully" in response
-    assert saved["calls"]["agents"] == {"cleared": {"voice": None}, "inherited": {}}
+    assert saved["calls"]["profiles"] == {
+        "openai-realtime": {
+            "backend": "realtime",
+            "model": "gpt-realtime-2.1",
+            "credentials_service": "openai-voice",
+            "voice": "marin",
+        },
+    }
+    assert saved["calls"]["agents"] == {
+        "cleared": "openai-realtime",
+        "inherited": "openai-realtime",
+    }
 
 
 @pytest.mark.asyncio

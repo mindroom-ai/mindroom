@@ -58,7 +58,7 @@ from livekit import rtc  # noqa: E402
 
 from mindroom.config.agent import AgentConfig  # noqa: E402
 from mindroom.config.auth import AuthorizationConfig  # noqa: E402
-from mindroom.config.calls import CallAgentConfig, CallsConfig  # noqa: E402
+from mindroom.config.calls import CallsConfig, CascadedCallProfile, RealtimeCallProfile  # noqa: E402
 from mindroom.config.main import Config  # noqa: E402
 from mindroom.config.memory import MemoryConfig  # noqa: E402
 from mindroom.config.models import ModelConfig  # noqa: E402
@@ -131,13 +131,21 @@ def call_config(openai_key: str) -> CallsConfig:
     if CALL_BACKEND == "realtime":
         return CallsConfig(
             enabled=True,
-            agents={AGENT: CallAgentConfig()},
+            profiles={
+                "voice": RealtimeCallProfile(
+                    backend="realtime",
+                    model="gpt-realtime-2.1",
+                    credentials_service="openai",
+                    voice="marin",
+                ),
+            },
+            agents={AGENT: "voice"},
             livekit_service_url=SERVICE_URL,
         )
     return CallsConfig(
         enabled=True,
-        agents={
-            AGENT: CallAgentConfig(
+        profiles={
+            "voice": CascadedCallProfile(
                 backend="cascaded",
                 stt=SpeechServiceConfig(
                     provider="openai",
@@ -152,6 +160,7 @@ def call_config(openai_key: str) -> CallsConfig:
                 ),
             ),
         },
+        agents={AGENT: "voice"},
         livekit_service_url=SERVICE_URL,
     )
 

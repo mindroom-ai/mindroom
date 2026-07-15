@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from mindroom.credentials import validate_service_name
 from mindroom.model_defaults import OPENAI_TRANSCRIPTION
 
 _RESERVED_SPEECH_OPTION_NAMES = frozenset({"api_key", "base_url", "client", "model"})
@@ -31,6 +32,10 @@ class SpeechServiceConfig(BaseModel):
     )
     model: str = Field(description="Provider speech model name")
     api_key: str | None = Field(default=None, description="Optional service-specific API key")
+    credentials_service: str | None = Field(
+        default=None,
+        description="Optional named credential service containing the speech API key",
+    )
     host: str | None = Field(default=None, description="Optional service root or /v1 base URL")
     extra_kwargs: dict[str, Any] = Field(
         default_factory=dict,
@@ -45,6 +50,12 @@ class SpeechServiceConfig(BaseModel):
             return value
         normalized = value.strip()
         return normalized or None
+
+    @field_validator("credentials_service")
+    @classmethod
+    def _validate_credentials_service(cls, value: str | None) -> str | None:
+        """Normalize an explicitly selected speech credential service."""
+        return None if value is None else validate_service_name(value)
 
     @field_validator("host")
     @classmethod
@@ -70,10 +81,13 @@ class SpeechServiceConfig(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def validate_compatible_endpoint(self) -> Self:
-        """OpenAI-compatible services need an explicit endpoint."""
+    def _validate_connection(self) -> Self:
+        """Require an explicit endpoint and credential source where applicable."""
         if self.provider == "openai_compatible" and self.host is None:
             msg = "OpenAI-compatible speech services require host"
+            raise ValueError(msg)
+        if self.provider == "openai" and self.api_key is None and self.credentials_service is None:
+            msg = "OpenAI speech services require credentials_service or api_key"
             raise ValueError(msg)
         return self
 
@@ -82,6 +96,7 @@ class VoiceSTTConfig(SpeechServiceConfig):
     """Voice-message STT configuration with its historical model default."""
 
     model: str = Field(default=OPENAI_TRANSCRIPTION, description="STT model name")
+    credentials_service: str | None = Field(default="openai", description="Named speech credential service")
 
 
 class _VoiceLLMConfig(BaseModel):

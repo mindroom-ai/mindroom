@@ -1,7 +1,7 @@
 # Voice Calls
 
 MindRoom agents can join Element Call voice calls in their rooms and talk with you in real time.
-The default `realtime` backend preserves the OpenAI realtime speech-to-speech path.
+The `realtime` backend provides OpenAI realtime speech-to-speech.
 The `cascaded` backend combines independently configured speech-to-text and text-to-speech services with the agent's normal MindRoom response path.
 
 ## How it works
@@ -31,35 +31,38 @@ The agent leaves the call and clears its membership state event when the caller 
 ```yaml
 calls:
   enabled: true
-  backend: realtime                # shared default; preserves OpenAI speech-to-speech
-  model: gpt-realtime-2.1          # shared OpenAI realtime model
-  credentials_service: openai      # shared strict credential service binding
-  voice: marin                     # optional shared voice preset
+  profiles:
+    openai-realtime:
+      backend: realtime
+      model: gpt-realtime-2.1
+      credentials_service: openai-voice
+      voice: marin
   agents:
-    assistant: {}                  # enable this agent and inherit every top-level default
+    assistant: openai-realtime
   # livekit_service_url: https://rtc.example.org   # same-server .well-known override
 ```
 
 Voice calls require the `matrix_calls` extra (`pip install "mindroom[matrix_calls]"` or `uv sync --extra matrix_calls`).
-The top-level `backend`, `model`, `credentials_service`, `voice`, `stt`, and `tts` fields are shared defaults for every calls-enabled agent.
-`calls.agents` maps each enabled agent name to its optional overrides, and an empty entry inherits every top-level default.
-Migrate the former list form `agents: [assistant]` to the mapping form `agents: {assistant: {}}`.
-An override replaces the corresponding top-level field only for that agent, so one agent can use the shared OpenAI Realtime defaults while another uses its own cascaded STT and TTS pipeline.
-Omitted override fields inherit, while explicit `null` clears an inherited `voice`, `stt`, or `tts` value; an effective cascaded profile must still provide both STT and TTS.
+`calls.profiles` defines reusable, complete voice pipelines.
+`calls.agents` maps each enabled agent to exactly one profile name.
+Realtime profiles contain only realtime settings.
+Cascaded profiles require complete STT and TTS settings, and each speech leg selects its own credential service.
+There are no inherited backend defaults or credential fallbacks.
 `enabled` and `livekit_service_url` remain global and cannot be overridden per agent.
-The realtime backend reads its API key only from the agent's effective `credentials_service`, which defaults to the `openai` credential service seeded by `OPENAI_API_KEY`.
-Set a different service when voice and chat use different OpenAI credentials; a missing selected service does not fall back to another key.
+Set a dedicated credential service when voice and chat use different OpenAI credentials.
+A missing selected service does not fall back to another key.
 For example, these two agents use independent voice pipelines:
 
 ```yaml
 calls:
   enabled: true
-  backend: realtime
-  model: gpt-realtime-2.1
-  voice: marin
-  agents:
-    concierge: {}
-    local_assistant:
+  profiles:
+    openai-realtime:
+      backend: realtime
+      model: gpt-realtime-2.1
+      credentials_service: openai-voice
+      voice: marin
+    local-cascaded:
       backend: cascaded
       stt:
         provider: openai_compatible
@@ -71,6 +74,9 @@ calls:
         host: http://127.0.0.1:9001
         extra_kwargs:
           voice: af_heart
+  agents:
+    concierge: openai-realtime
+    local_assistant: local-cascaded
 ```
 
 MindRoom enforces at most one calls-enabled agent per room.
@@ -88,25 +94,27 @@ The agent can therefore use Anthropic, Gemini, OpenAI, or any other MindRoom mod
 ```yaml
 calls:
   enabled: true
-  backend: cascaded
-  stt:
-    provider: openai
-    model: gpt-4o-transcribe
-    api_key: your-stt-key
-    extra_kwargs:
-      language: en
-  tts:
-    provider: openai
-    model: tts-1
-    api_key: your-tts-key
-    extra_kwargs:
-      voice: ash
+  profiles:
+    openai-cascaded:
+      backend: cascaded
+      stt:
+        provider: openai
+        model: gpt-4o-transcribe
+        credentials_service: openai-voice
+        extra_kwargs:
+          language: en
+      tts:
+        provider: openai
+        model: tts-1
+        credentials_service: openai-voice
+        extra_kwargs:
+          voice: ash
   agents:
-    assistant: {}
+    assistant: openai-cascaded
 ```
 
-Each speech component has its own `provider`, `model`, `host`, `api_key`, and `extra_kwargs`.
-For OpenAI, omit a component's `api_key` to use the configured `OPENAI_API_KEY`.
+Each speech component has its own `provider`, `model`, `credentials_service`, `host`, and `extra_kwargs`.
+The two speech legs may select the same named credential or different ones.
 The current OpenAI model catalog documents [`gpt-4o-transcribe`](https://developers.openai.com/api/docs/models/gpt-4o-transcribe) for transcription and [`tts-1`](https://developers.openai.com/api/docs/models/tts-1) for text-to-speech.
 
 ## Completely local example
@@ -134,21 +142,23 @@ agents:
 
 calls:
   enabled: true
-  backend: cascaded
-  stt:
-    provider: openai_compatible
-    model: whisper-large-v3
-    host: http://127.0.0.1:9000
-    extra_kwargs:
-      language: en
-  tts:
-    provider: openai_compatible
-    model: tts-1
-    host: http://127.0.0.1:9001
-    extra_kwargs:
-      voice: ash
+  profiles:
+    local-cascaded:
+      backend: cascaded
+      stt:
+        provider: openai_compatible
+        model: whisper-large-v3
+        host: http://127.0.0.1:9000
+        extra_kwargs:
+          language: en
+      tts:
+        provider: openai_compatible
+        model: tts-1
+        host: http://127.0.0.1:9001
+        extra_kwargs:
+          voice: ash
   agents:
-    assistant: {}
+    assistant: local-cascaded
 ```
 
 `host` accepts either the service root or its `/v1` base URL.

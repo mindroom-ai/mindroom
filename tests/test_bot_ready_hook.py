@@ -14,7 +14,7 @@ import pytest
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
-from mindroom.config.calls import CallAgentConfig, CallsConfig
+from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
@@ -239,7 +239,15 @@ def test_call_admission_reads_live_invites_from_managed_agents(tmp_path: Path) -
     bot.config.agents["other"] = AgentConfig(display_name="Other")
     bot.config.calls = CallsConfig(
         enabled=True,
-        agents={"code": CallAgentConfig(), "other": CallAgentConfig()},
+        profiles={
+            "voice": RealtimeCallProfile(
+                backend="realtime",
+                model="gpt-realtime",
+                credentials_service="openai",
+                voice="marin",
+            ),
+        },
+        agents={"code": "voice", "other": "voice"},
     )
     bot.orchestrator = MagicMock(agent_bots={"code": bot, "other": other})
     bot._room_lifecycle.invited_rooms.add("!code-call:localhost")

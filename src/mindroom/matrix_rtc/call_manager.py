@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
@@ -22,7 +22,7 @@ import nio
 
 from mindroom.authorization import is_authorized_sender, is_sender_allowed_for_agent_reply
 from mindroom.config.voice import normalize_speech_base_url
-from mindroom.credentials_sync import get_api_key_for_provider, get_api_key_for_service
+from mindroom.credentials_sync import get_api_key_for_service
 from mindroom.entity_resolution import configured_call_agent_name_for_room
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import MatrixID
@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from collections.abc import Set as AbstractSet
 
-    from mindroom.config.calls import ResolvedCallAgentConfig
+    from mindroom.config.calls import CallProfile, CascadedCallProfile, RealtimeCallProfile
     from mindroom.config.main import Config
     from mindroom.config.voice import SpeechServiceConfig
     from mindroom.constants import RuntimePaths
@@ -168,7 +168,7 @@ class CallManager:
     ) -> None:
         self._agent_name = agent_name
         self._config = config
-        self._call_config: ResolvedCallAgentConfig = config.calls.resolve_agent_config(agent_name)
+        self._call_config: CallProfile = config.calls.resolve_agent_config(agent_name)
         self._client = client
         self._runtime_paths = runtime_paths
         self._ssl_verify = ssl_verify
@@ -862,8 +862,9 @@ class CallManager:
     ) -> _ResolvedVoiceBackend | None:
         """Resolve backend-specific credentials without affecting call lifecycle."""
         if self._call_config.backend == "realtime":
+            realtime_config = cast("RealtimeCallProfile", self._call_config)
             api_key = get_api_key_for_service(
-                self._call_config.credentials_service,
+                realtime_config.credentials_service,
                 self._runtime_paths,
             )
             if not api_key:
@@ -872,24 +873,20 @@ class CallManager:
                         "call_join_skipped_no_openai_key",
                         room_id=room_id,
                         agent=self._agent_name,
-                        credentials_service=self._call_config.credentials_service,
+                        credentials_service=realtime_config.credentials_service,
                     )
                 return None
             return _ResolvedVoiceBackend(realtime_api_key=api_key)
 
-        stt_config = self._call_config.stt
-        tts_config = self._call_config.tts
-        if stt_config is None or tts_config is None:
-            msg = "Cascaded call configuration requires STT and TTS"
-            raise ValueError(msg)
+        cascaded_config = cast("CascadedCallProfile", self._call_config)
         stt = self._resolve_speech_service(
-            stt_config,
+            cascaded_config.stt,
             component="stt",
             room_id=room_id,
             warn_if_unavailable=warn_if_unavailable,
         )
         tts = self._resolve_speech_service(
-            tts_config,
+            cascaded_config.tts,
             component="tts",
             room_id=room_id,
             warn_if_unavailable=warn_if_unavailable,
@@ -916,14 +913,15 @@ class CallManager:
             self._schedule_call_failure_notice(room.room_id, message)
 
         if self._call_config.backend == "realtime":
+            realtime_config = cast("RealtimeCallProfile", self._call_config)
             if backend.realtime_api_key is None:
                 msg = "Realtime call API key was not resolved"
                 raise RuntimeError(msg)
             return VoiceAgentOptions(
                 instructions=_build_call_instructions(tooling.instructions),
-                model=self._call_config.model,
+                model=realtime_config.model,
                 api_key=backend.realtime_api_key,
-                voice=self._call_config.voice,
+                voice=realtime_config.voice,
                 greeting_instructions="Briefly greet the caller and let them know you joined the call.",
                 tools=tooling.tools,
                 on_conversation_turn=transcript.record,
@@ -959,10 +957,11 @@ class CallManager:
         if base_url is None and service.provider == "openai":
             base_url = _OPENAI_SPEECH_BASE_URL
         api_key = service.api_key
-        if api_key is None and service.provider == "openai_compatible":
-            api_key = LOCAL_OPENAI_API_KEY_DEFAULT
         if api_key is None:
-            api_key = get_api_key_for_provider(service.provider, self._runtime_paths)
+            if service.credentials_service is not None:
+                api_key = get_api_key_for_service(service.credentials_service, self._runtime_paths)
+            elif service.provider == "openai_compatible":
+                api_key = LOCAL_OPENAI_API_KEY_DEFAULT
         if not api_key and warn_if_unavailable:
             logger.warning(
                 "call_join_skipped_no_speech_key",
@@ -970,6 +969,7 @@ class CallManager:
                 agent=self._agent_name,
                 component=component,
                 provider=service.provider,
+                credentials_service=service.credentials_service,
             )
         if not api_key:
             return None

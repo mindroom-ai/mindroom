@@ -511,6 +511,7 @@ voice:
   stt:
     provider: openai               # Default: openai
     model: gpt-4o-transcribe       # Default: gpt-4o-transcribe
+    credentials_service: openai    # Named credential service for speech
     api_key: null
     host: null
   intelligence:
@@ -519,15 +520,24 @@ voice:
 # Voice calls via Element Call / MatrixRTC (optional)
 calls:
   enabled: false                   # Default: false
-  backend: realtime                # Shared default: realtime or cascaded
-  model: gpt-realtime-2.1          # Shared default OpenAI realtime speech-to-speech model
-  credentials_service: openai      # Shared default credential service for realtime calls
-  voice: null                      # Optional shared default realtime voice preset
-  stt: null                        # Shared default; effective cascaded profiles require STT
-  tts: null                        # Shared default; effective cascaded profiles require TTS
-  agents:                          # Enabled agents and optional per-agent overrides (at most one per room)
-    assistant:
-      voice: marin                 # Override any shared field for only this agent
+  profiles:                        # Complete reusable backend-specific profiles
+    openai-realtime:
+      backend: realtime
+      model: gpt-realtime-2.1
+      credentials_service: openai
+      voice: marin
+    openai-cascaded:
+      backend: cascaded
+      stt:
+        provider: openai
+        model: gpt-4o-transcribe
+        credentials_service: openai
+      tts:
+        provider: openai
+        model: tts-1
+        credentials_service: openai
+  agents:                          # Profile name by enabled agent (at most one agent per room)
+    assistant: openai-realtime
   livekit_service_url: null        # Optional override for .well-known discovery
 
 # Internal MindRoom user account (optional, omit for hosted/public profiles)

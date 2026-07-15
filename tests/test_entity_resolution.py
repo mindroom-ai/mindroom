@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
-from mindroom.config.calls import CallAgentConfig, CallsConfig
+from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.entity_resolution import (
@@ -38,7 +38,15 @@ def _call_config(tmp_path: Path, **accept_invites_by_agent: bool) -> Config:
             },
             calls=CallsConfig(
                 enabled=True,
-                agents={name: CallAgentConfig() for name in accept_invites_by_agent},
+                profiles={
+                    "voice": RealtimeCallProfile(
+                        backend="realtime",
+                        model="gpt-realtime",
+                        credentials_service="openai",
+                        voice="marin",
+                    ),
+                },
+                agents=dict.fromkeys(accept_invites_by_agent, "voice"),
             ),
         ),
         runtime_paths=runtime_paths,

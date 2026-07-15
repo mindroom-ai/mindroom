@@ -17,7 +17,7 @@ The lab (`mindroom.lab.mindroom.chat`, incus container on the `mindroom` host) i
 | mindroom-ai/mindroom | [#1452](https://github.com/mindroom-ai/mindroom/pull/1452) | **merged** 2026-07-10 | `src/mindroom/matrix_rtc/` package: call manager/session, Element Call wire formats, lk-jwt exchange, frame-key rotation, livekit-agents media bridge (`matrix_calls` extra), in-call tools, transcripts + memory references, PL0 power-level fix, `calls:` config, docs, tests + live smoke harness |
 | mindroom-ai/mindroom | [#1485](https://github.com/mindroom-ai/mindroom/pull/1485) | **merged** 2026-07-10 | Complete the LiveKit `AudioInput` startup contract, add media-plane diagnostics and regression coverage, and extend the consolidated live speaking harness with an existing-account mode |
 | mindroom-ai/mindroom | [#1484](https://github.com/mindroom-ai/mindroom/pull/1484) | **merged** 2026-07-10 | Add provider-independent cascaded calls while preserving the existing OpenAI Realtime backend |
-| mindroom-ai/mindroom | [#1524](https://github.com/mindroom-ai/mindroom/pull/1524) | **open** | Keep top-level backend, model, voice, credentials, STT, and TTS settings as shared defaults while allowing each agent mapping entry to override them; the production config must migrate from the former agent list before redeploying |
+| mindroom-ai/mindroom | [#1524](https://github.com/mindroom-ai/mindroom/pull/1524) | **merged** 2026-07-14 | Added per-agent call settings; the inherited defaults are superseded by complete named profiles so backend and credential selection stay explicit |
 | mindroom-ai/mindroom-nio | [#5](https://github.com/mindroom-ai/mindroom-nio/pull/5) | **merged**, released as [0.27.0](https://github.com/mindroom-ai/mindroom-nio/releases/tag/0.27.0) on PyPI; pin bumped in #1452 | Surface unknown decrypted olm to-device events as `UnknownToDeviceEvent` (required to receive Element Call frame keys in encrypted rooms) |
 | basnijholt/dotfiles | [#69](https://github.com/basnijholt/dotfiles/pull/69) | **merged**, deployed to prod + mindroom LXC | LiveKit SFU + lk-jwt-service on `hetzner-matrix`, Caddy path routing under `mindroom.chat/livekit/*`, `rtc_foci` in well-known, agenix `livekit-keys.age`, `--extra matrix_calls` in the LXC uv wrapper |
 | mindroom-ai/mindroom-tuwunel | none needed | — | Fork already implements the OpenID `request_token` + federation userinfo routes the stack needs; MSC4140 delayed events are missing (upstream [tuwunel#178](https://github.com/matrix-construct/tuwunel/issues/178)) but that only causes stale rosters after client crashes, not join failures |
@@ -66,7 +66,7 @@ The lab (`mindroom.lab.mindroom.chat`, incus container on the `mindroom` host) i
 ## Deployed agent backend (mindroom-chat on the `mindroom` LXC)
 
 - `/srv/mindroom` main = host-local main + merge of `matrix-rtc-voice-calls` (merge `33f2ddcc6` + crash fix `33b92df46`; rollback branch `backup-pre-rtc-20260709`, deploy branch `rtc-deploy`).
-- Mind is the production calls agent; before the next redeploy, rename its config key to `mind` everywhere and set `calls: {enabled: true, agents: {mind: {}}}`, where the empty entry inherits the top-level call defaults.
+- Mind is the production calls agent; assign `mind` to one complete named profile under `calls.profiles` before the next redeploy.
 - Real `OPENAI_API_KEY` in `~/.mindroom-chat/.env` (was the old placeholder; backup `.env.bak-20260709-openai-key`).
 - `--extra matrix_calls` in the shared uv wrapper (dotfiles, merged via #69): the service's own `uv run` sync prunes manually-synced extras, so the extra must be part of the requested set.
 - Call-membership PL0 reconciled across all 26 managed rooms at boot.
@@ -106,8 +106,8 @@ LiveKit DTLS-timeout warnings in earlier server logs were teardown noise from sh
   Deploy also caught a real bug (fixed on the PR branch, commit `33b92df46`): `matrix_calls_dependencies_available` crashed agent startup via `find_spec("livekit.rtc")` raising when livekit was absent.
   Verified: `mindroom-chat` healthy, Mind up, livekit importable in the service venv, call-membership PL0 reconciled across 26 managed rooms.
 - [x] Merge + release mindroom-nio#5, bump the pin in mindroom — done 2026-07-09: mindroom-nio 0.27.0 on PyPI, pin `>=0.27.0` in #1452, the real-olm E2EE round-trip test now runs (40/40 matrix_rtc tests pass).
-- [ ] Rename Mind's production agent key to `mind` everywhere and migrate its call profile to `calls: {enabled: true, agents: {mind: {}}}`, using the top-level call settings as its defaults.
-- [ ] Redeploy `mindroom-chat` from current main to pick up mindroom-nio 0.27.0, the AgentSession startup fix, and global call defaults with per-agent overrides, then live-validate encrypted-room hearing and voice startup.
+- [ ] Rename Mind's production agent key to `mind` everywhere and assign it to one complete named call profile.
+- [ ] Redeploy `mindroom-chat` from current main to pick up mindroom-nio 0.27.0, the AgentSession startup fix, and named call profiles, then live-validate encrypted-room hearing and voice startup.
 - [ ] Decide on the Mind prompt-truncation follow-ups (raise `defaults.max_preload_chars` beyond 50k so USER.md/memory survive; optionally harden the voice-call addendum against gpt-realtime's "can't reveal memories" reflexes).
 - [ ] Lab deployment (separate RTC backend on the `mindroom` incus host) once prod is done.
 - [x] Merge the provider-independent cascaded voice follow-up — merged as #1484 on 2026-07-10.
