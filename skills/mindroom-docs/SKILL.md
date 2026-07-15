@@ -19,7 +19,7 @@ Use this skill when the user asks how MindRoom works, how to configure it, or wh
 3. Use `llms.txt` for high-level navigation only.
 4. Use `llms-full.txt` only when the answer spans many sections and page-level references are insufficient.
 5. For setup or administration requests, inspect the available capabilities before claiming the change cannot be performed. Discover and use `config_manager` for changes it supports, then use the documented config-file workflow for other requested changes.
-6. For dashboard questions, load the dashboard page reference and distinguish the MindRoom dashboard from Matrix clients such as Cinny or Element.
+6. Keep the hosted apps distinct: `https://mindroom.chat` is the Matrix homeserver, `https://chat.mindroom.chat` is the MindRoom Chat client, and the MindRoom dashboard is a separate app. For dashboard questions, load the dashboard page reference.
 7. Answer with concrete steps and include the exact reference filenames used.
 
 ## Rules
