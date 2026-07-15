@@ -252,8 +252,14 @@ class TestConfigInit:
         ]
         assert "thread_resolution" not in mind["tools"]
         assert mind["skills"] == ["mindroom-docs"]
-        assert any("inspect the live state instead of guessing" in instruction for instruction in mind["instructions"])
-        assert any("technical comfort" in instruction for instruction in mind["instructions"])
+        assert (
+            "For MindRoom setup or configuration, follow the MindRoom Configuration workflow in AGENTS.md and "
+            "inspect the live state instead of guessing." in mind["instructions"]
+        )
+        assert (
+            "Match the user's technical comfort and prefer performing an authorized scoped setup over exposing YAML or "
+            "shell commands." in mind["instructions"]
+        )
         assert "knowledge_bases" not in config
         assert config["memory"]["backend"] == "file"
         assert config["memory"]["embedder"]["provider"] == "sentence_transformers"
