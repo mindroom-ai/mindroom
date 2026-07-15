@@ -107,7 +107,9 @@ They can only call provisioning-service endpoints that accept local client crede
 The Google app client configuration lets the local process exchange OAuth codes directly with Google; the provisioning service does not receive the resulting Google authorization code or tokens.
 Treat the local provisioning credentials as secrets because anyone who obtains them can use the same provisioning capabilities, including retrieving the Google desktop app client configuration.
 Revoke them from `Settings -> Local MindRoom` in the chat UI.
-After a confirmed provisioning-credential leak, the service operator should also treat the Google app client configuration as exposed and rotate that OAuth client secret.
+The distributed Google desktop client secret is not confidential in the installed-app model because every paired install can retrieve it.
+Provisioning keeps that client out of published artifacts, gates casual retrieval, and enables centralized rotation.
+Rotate the Google OAuth client in response to observed client abuse or as an operational rotation, not merely because one pairing credential leaked.
 
 ## Trust Model (Hosted Server vs Message Privacy)
 

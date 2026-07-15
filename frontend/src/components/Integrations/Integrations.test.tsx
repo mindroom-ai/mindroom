@@ -659,7 +659,7 @@ describe("Integrations", () => {
     });
   });
 
-  it("offers a custom client without blocking bundled OAuth", async () => {
+  it("offers a custom client without blocking provisioned OAuth", async () => {
     mockGoogleDriveLoadStatus.mockResolvedValueOnce({
       status: "available",
       connected: false,

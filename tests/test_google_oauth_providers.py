@@ -259,6 +259,70 @@ def test_google_oauth_provider_requires_pairing_or_custom_client_on_fresh_instal
     assert resolution is None
 
 
+def test_google_oauth_provider_explains_unpaired_public_profile(tmp_path: Path) -> None:
+    """A seeded provisioning URL without pairing credentials uses the fresh-install guidance."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_PROVISIONING_URL": "https://provisioning.example"},
+    )
+
+    with pytest.raises(OAuthProviderError, match=r"Pair this local install.*custom Google OAuth client"):
+        asyncio.run(google_drive_oauth_provider().client_config_resolution_async(runtime_paths))
+
+
+@pytest.mark.parametrize("service", ["google_drive_oauth_client", "google_oauth_client"])
+def test_google_oauth_provider_preserves_custom_client_without_provisioning_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    service: str,
+) -> None:
+    """Provider-specific and shared custom clients always take precedence over provisioning."""
+    requests = _install_provisioning_transport(monkeypatch)
+    runtime_paths = _paired_runtime_paths(tmp_path)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        service,
+        {
+            "client_id": "custom-client.apps.googleusercontent.com",
+            "client_secret": "custom-client-secret",
+        },
+    )
+
+    resolution = asyncio.run(google_drive_oauth_provider().client_config_resolution_async(runtime_paths))
+
+    assert resolution is not None
+    assert resolution.custom is True
+    assert resolution.service == service
+    assert requests == []
+
+
+def test_google_oauth_provider_keeps_cached_client_after_unpairing(tmp_path: Path) -> None:
+    """A previously provisioned client remains usable if pairing environment values disappear."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_PROVISIONING_URL": "https://provisioning.example"},
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "google_oauth_client",
+        {
+            "client_id": PROVISIONED_CLIENT_ID,
+            "client_secret": PROVISIONED_CLIENT_SECRET,
+            RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
+            _GOOGLE_PROVISIONED_CLIENT_FETCHED_AT_KEY: 0.0,
+        },
+    )
+
+    resolution = asyncio.run(google_drive_oauth_provider().client_config_resolution_async(runtime_paths))
+
+    assert resolution is not None
+    assert resolution.custom is False
+    assert resolution.service == "google_oauth_client"
+    assert resolution.config.client_id == PROVISIONED_CLIENT_ID
+
+
 @pytest.mark.parametrize("hostname", ["localhost", "127.0.0.1", "[::1]"])
 def test_google_oauth_provider_allows_http_provisioning_only_on_loopback(
     tmp_path: Path,

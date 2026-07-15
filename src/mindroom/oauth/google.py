@@ -57,12 +57,12 @@ def _provisioning_client_credentials(runtime_paths: RuntimePaths) -> tuple[str, 
     provisioning_url = (runtime_paths.env_value("MINDROOM_PROVISIONING_URL") or "").strip().rstrip("/")
     client_id = (runtime_paths.env_value("MINDROOM_LOCAL_CLIENT_ID") or "").strip()
     client_secret = (runtime_paths.env_value("MINDROOM_LOCAL_CLIENT_SECRET") or "").strip()
-    if not provisioning_url and not client_id and not client_secret:
+    if not client_id and not client_secret:
         return None
     if not provisioning_url or not client_id or not client_secret:
         msg = (
             "Google OAuth bootstrap requires MINDROOM_PROVISIONING_URL, MINDROOM_LOCAL_CLIENT_ID, "
-            "and MINDROOM_LOCAL_CLIENT_SECRET. Run `mindroom connect --pair-code ...` again."
+            "and MINDROOM_LOCAL_CLIENT_SECRET. Run `mindroom connect --pair-code ...` to restore pairing."
         )
         raise OAuthProviderError(msg)
     parsed_url = httpx.URL(provisioning_url)
@@ -102,11 +102,11 @@ def _provisioned_google_client_is_fresh(credentials: Mapping[str, object] | None
 
 
 async def _google_runtime_bootstrapper(
-    _provider: OAuthProvider,
+    provider: OAuthProvider,
     runtime_paths: RuntimePaths,
 ) -> OAuthRuntimeEndpoints:
     """Fetch the installed-app client config through an authenticated local pairing."""
-    resolution = _provider.client_config_resolution(runtime_paths)
+    resolution = provider.client_config_resolution(runtime_paths)
     if resolution is not None and resolution.custom:
         return _google_runtime_endpoints()
 

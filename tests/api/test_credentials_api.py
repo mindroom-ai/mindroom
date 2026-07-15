@@ -13,6 +13,7 @@ from mindroom import constants
 from mindroom.api import credentials_oauth_policy, credentials_target, main
 from mindroom.api.main import app, initialize_api_app
 from mindroom.config.main import Config
+from mindroom.credential_policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.oauth import mcp_oauth_provider
@@ -635,6 +636,29 @@ class TestCredentialsAPI:
         assert response.status_code == 400
         assert "client_secret is required when client_id changes" in response.json()["detail"]
         assert manager.load_credentials("google_drive_oauth_client") == existing_credentials
+
+    def test_provisioned_oauth_client_config_rejects_redacted_resave(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Re-saving a provisioned client must not silently pin it as a custom client."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        existing_credentials = {
+            "client_id": "provisioned-client-id",
+            "client_secret": "provisioned-client-secret",
+            RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
+        }
+        manager.save_credentials("google_oauth_client", existing_credentials)
+
+        response = client.post(
+            "/api/credentials/google_oauth_client",
+            json={"credentials": {"client_id": "provisioned-client-id"}},
+        )
+
+        assert response.status_code == 400
+        assert "Provisioned OAuth client configuration does not need to be saved" in response.json()["detail"]
+        assert manager.load_credentials("google_oauth_client") == existing_credentials
 
     def test_oauth_client_config_save_rejects_missing_first_time_secret(
         self,

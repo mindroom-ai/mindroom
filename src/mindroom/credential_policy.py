@@ -7,6 +7,8 @@ from typing import Literal
 
 _WorkerScope = Literal["shared", "user", "user_agent"]
 
+RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY = "_oauth_client_runtime_bootstrap"
+
 OAUTH_CREDENTIAL_FIELDS = frozenset(
     {
         "_id_token",
