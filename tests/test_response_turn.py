@@ -546,11 +546,50 @@ def test_blocking_empty_run_grants_one_retry_then_notice() -> None:
 
     assert result == EMPTY_RESPONSE_NOTICE
     assert attempts == 2
-    assert [discard.run_id for discard in log.discards] == ["run-1"]
+    assert [discard.run_id for discard in log.discards] == ["run-1", "run-2"]
     assert log.released == 1
     assert recorder.completed_calls == [
         {"run_metadata": None, "assistant_text": "", "completed_tools": []},
     ]
+
+
+def test_blocking_tool_backed_empty_run_finalizes_without_tools() -> None:
+    """A tool-backed empty run carries results forward without rerunning tools."""
+    log = _AdapterLog()
+    attempts = 0
+    prompts: list[str] = []
+    tools_disabled: list[bool] = []
+    execution = ToolExecution(tool_name="lookup", tool_args={"query": "status"}, result="ready")
+
+    async def _attempt(_run: TurnRunState, continuation: DynamicContinuationRunState) -> CompletedAttempt:
+        nonlocal attempts
+        attempts += 1
+        prompts.append(continuation.active_prompt)
+        tools_disabled.append(continuation.tools_disabled)
+        if attempts == 1:
+            return CompletedAttempt(
+                is_empty=True,
+                run_id="run-tool-empty",
+                attempt_run_id="attempt-tool-empty",
+                tool_executions=(execution,),
+            )
+        return CompletedAttempt(response_text="Recovered", has_visible_content=True)
+
+    result = asyncio.run(
+        run_blocking_response_turn(
+            _ctx(),
+            _blocking_adapter(log, _attempt),
+            TurnSinks(),
+            continuation=_continuation("Check status"),
+        ),
+    )
+
+    assert result == "Recovered"
+    assert attempts == 2
+    assert tools_disabled == [False, True]
+    assert [discard.run_id for discard in log.discards] == ["run-tool-empty"]
+    assert '"result":"ready"' in prompts[1]
+    assert log.released == 1
 
 
 def test_blocking_empty_retry_borrows_continuation_slot_within_shared_budget() -> None:
@@ -933,7 +972,7 @@ def test_streaming_empty_run_retries_then_yields_notice_and_records() -> None:
 
     assert chunks == [f"notice:{EMPTY_RESPONSE_NOTICE}"]
     assert attempts == 2
-    assert [discard.run_id for discard in log.discards] == ["run-1"]
+    assert [discard.run_id for discard in log.discards] == ["run-1", "run-2"]
     # The notice-only turn still records an empty completion.
     assert recorder.completed_calls[-1]["assistant_text"] == ""
 

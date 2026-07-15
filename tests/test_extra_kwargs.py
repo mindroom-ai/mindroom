@@ -378,6 +378,7 @@ def test_vertexai_claude_provider() -> None:
             "vertex_claude_model": {
                 "provider": "vertexai_claude",
                 "id": "claude-sonnet-4@20250514",
+                "context_window": 200000,
                 "extra_kwargs": {
                     "project_id": "demo-project",
                     "region": "us-central1",
@@ -410,6 +411,7 @@ def test_vertexai_claude_provider() -> None:
     assert model.provider == "VertexAI"
     assert model.cache_system_prompt is True
     assert model.extended_cache_time is True
+    assert model.context_window == 200000
 
 
 def test_bedrock_claude_provider_uses_runtime_env() -> None:

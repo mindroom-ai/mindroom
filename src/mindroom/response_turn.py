@@ -38,6 +38,7 @@ from mindroom.constants import (
 )
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, continuation_decision_from_tools
 from mindroom.logging_config import get_logger
+from mindroom.token_budget import stable_serialize
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
@@ -150,6 +151,7 @@ class DynamicContinuationRunState:
     active_current_prompt_is_structured: bool
     active_run_id: str | None
     continuation_model_prompt_tail: str
+    tools_disabled: bool = False
 
     @classmethod
     def initial(
@@ -171,6 +173,7 @@ class DynamicContinuationRunState:
             active_current_prompt_is_structured=current_prompt_is_structured,
             active_run_id=run_id,
             continuation_model_prompt_tail=continuation_model_prompt_tail,
+            tools_disabled=False,
         )
 
     def advance(
@@ -178,6 +181,7 @@ class DynamicContinuationRunState:
         *,
         continuation_prompt: str,
         previous_run_id: str | None,
+        disable_tools: bool = False,
     ) -> DynamicContinuationRunState:
         """Return the continuation state for one more same-turn attempt."""
         return replace(
@@ -187,6 +191,7 @@ class DynamicContinuationRunState:
             active_current_timestamp_ms=None,
             active_current_prompt_is_structured=False,
             active_run_id=ai_runtime.next_retry_run_id(previous_run_id),
+            tools_disabled=disable_tools,
         )
 
 
@@ -509,14 +514,12 @@ def _settle_empty_run(
     *,
     continuation_count: int,
 ) -> bool:
-    """Discard one empty completed run; return whether one retry is granted.
+    """Discard one empty completed run and return whether a retry is granted.
 
     The one-shot retry borrows a continuation slot so the outer loop's
-    iteration budget stays authoritative; a granted retry closes the spent
-    entity's runtime state exactly like the continuation handoff.
+    iteration budget stays authoritative. Terminal empty attempts are still
+    discarded so they cannot remain in model history.
     """
-    if run.empty_response_retried or continuation_count >= DYNAMIC_TOOL_CONTINUATION_LIMIT:
-        return False
     discard_empty_run(
         run.scope_context,
         EmptyRunDiscard(
@@ -525,9 +528,33 @@ def _settle_empty_run(
             output_tokens=resolution.output_tokens,
         ),
     )
+    if run.empty_response_retried or continuation_count >= DYNAMIC_TOOL_CONTINUATION_LIMIT:
+        return False
     run.empty_response_retried = True
     release_attempt_entity(run.scope_context)
     return True
+
+
+def _tool_result_recovery_prompt(
+    original_prompt: str,
+    tool_executions: tuple[ToolExecution, ...],
+) -> str:
+    """Build a tool-disabled finalization prompt from already completed calls."""
+    completed_calls = [
+        {
+            "tool_name": tool.tool_name,
+            "tool_args": tool.tool_args,
+            "result": tool.result,
+        }
+        for tool in tool_executions
+    ]
+    return (
+        f"{original_prompt}\n\n"
+        "[SYSTEM NOTICE - TOOLS COMPLETED WITHOUT A FINAL ANSWER]\n"
+        "The previous model step completed the tool calls below but returned no visible answer. "
+        "Answer the original request using these results. Do not call tools again.\n\n"
+        f"{stable_serialize(completed_calls)}"
+    )
 
 
 def _advance_turn_continuation(
@@ -538,6 +565,7 @@ def _advance_turn_continuation(
     continuation: DynamicContinuationRunState,
     *,
     next_prompt: str | None,
+    disable_tools: bool = False,
 ) -> DynamicContinuationRunState:
     """Close the spent attempt entity and prepare run state for one more continuation."""
     completed_tools_for_turn = run.turn_state.completed_tools_for(resolution.completed_tools)
@@ -545,6 +573,7 @@ def _advance_turn_continuation(
     advanced = continuation.advance(
         continuation_prompt=next_prompt or continuation.original_prompt,
         previous_run_id=resolution.attempt_run_id,
+        disable_tools=disable_tools,
     )
     run.turn_state = _reset_turn_state_for_dynamic_continuation(
         turn_recorder=sinks.turn_recorder,
@@ -712,7 +741,80 @@ def _settle_completed_attempt(
     continuation_count: int,
 ) -> _CompletionSettle:
     """Settle one completed attempt into a record/deliver plan or a continuation."""
+    decision = continuation_decision_from_tools(
+        resolution.tool_executions,
+        original_prompt=continuation.original_prompt,
+        continuation_count=continuation_count,
+    )
+    if decision.should_continue:
+        return _CompletionSettle(
+            keep_going=True,
+            continuation=_advance_turn_continuation(
+                sinks,
+                release_attempt_entity,
+                run,
+                resolution,
+                continuation,
+                next_prompt=decision.next_prompt,
+            ),
+            recorded_text="",
+            recorded_tools=(),
+            response_text="",
+        )
+    if decision.limit_message is not None:
+        if decision.continuation is not None:
+            logger.warning(
+                "Dynamic tool continuation limit reached",
+                entity=ctx.entity_label,
+                function_name=decision.continuation.function_name,
+                tool_name=decision.continuation.tool_name,
+                status=decision.continuation.status,
+            )
+        recorded_text = resolution.replayable_text
+        response_text = resolution.response_text
+        if not resolution.has_visible_content:
+            recorded_text = decision.limit_message
+            response_text = decision.limit_message
+        return _CompletionSettle(
+            keep_going=False,
+            continuation=continuation,
+            recorded_text=recorded_text,
+            recorded_tools=resolution.completed_tools,
+            response_text=response_text,
+        )
     if resolution.is_empty:
+        if (
+            resolution.tool_executions
+            and not run.empty_response_retried
+            and continuation_count < DYNAMIC_TOOL_CONTINUATION_LIMIT
+        ):
+            discard_empty_run(
+                run.scope_context,
+                EmptyRunDiscard(
+                    session_id=resolution.session_id or ctx.session_id,
+                    run_id=resolution.run_id,
+                    output_tokens=resolution.output_tokens,
+                ),
+            )
+            run.empty_response_retried = True
+            return _CompletionSettle(
+                keep_going=True,
+                continuation=_advance_turn_continuation(
+                    sinks,
+                    release_attempt_entity,
+                    run,
+                    resolution,
+                    continuation,
+                    next_prompt=_tool_result_recovery_prompt(
+                        continuation.original_prompt,
+                        resolution.tool_executions,
+                    ),
+                    disable_tools=True,
+                ),
+                recorded_text="",
+                recorded_tools=(),
+                response_text="",
+            )
         retry_granted = _settle_empty_run(
             ctx,
             discard_empty_run,
@@ -738,40 +840,8 @@ def _settle_completed_attempt(
             recorded_tools=(),
             response_text=ai_runtime.EMPTY_RESPONSE_NOTICE,
         )
-    decision = continuation_decision_from_tools(
-        resolution.tool_executions,
-        original_prompt=continuation.original_prompt,
-        continuation_count=continuation_count,
-    )
-    if decision.should_continue:
-        return _CompletionSettle(
-            keep_going=True,
-            continuation=_advance_turn_continuation(
-                sinks,
-                release_attempt_entity,
-                run,
-                resolution,
-                continuation,
-                next_prompt=decision.next_prompt,
-            ),
-            recorded_text="",
-            recorded_tools=(),
-            response_text="",
-        )
     recorded_text = resolution.replayable_text
     response_text = resolution.response_text
-    if decision.limit_message is not None:
-        if decision.continuation is not None:
-            logger.warning(
-                "Dynamic tool continuation limit reached",
-                entity=ctx.entity_label,
-                function_name=decision.continuation.function_name,
-                tool_name=decision.continuation.tool_name,
-                status=decision.continuation.status,
-            )
-        if not resolution.has_visible_content:
-            recorded_text = decision.limit_message
-            response_text = decision.limit_message
     return _CompletionSettle(
         keep_going=False,
         continuation=continuation,

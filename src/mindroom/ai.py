@@ -1309,6 +1309,11 @@ async def _prepare_agent_run_context(
     )
 
 
+def _disabled_tool_function_filter(_function: Function) -> bool:
+    """Hide every tool while finalizing an already completed tool step."""
+    return False
+
+
 async def ai_response(  # noqa: C901
     ctx: ResponseTurnContext,
     prompt: str,
@@ -1458,7 +1463,9 @@ async def ai_response(  # noqa: C901
                 thread_history=thread_history,
                 knowledge=knowledge,
                 include_interactive_questions=include_interactive_questions,
-                tool_function_filter=tool_function_filter,
+                tool_function_filter=(
+                    _disabled_tool_function_filter if continuation_state.tools_disabled else tool_function_filter
+                ),
                 include_openai_compat_guidance=include_openai_compat_guidance,
                 execution_identity=execution_identity,
                 compaction_lifecycle=compaction_lifecycle,
@@ -1912,7 +1919,9 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 thread_history=thread_history,
                 knowledge=knowledge,
                 include_interactive_questions=include_interactive_questions,
-                tool_function_filter=tool_function_filter,
+                tool_function_filter=(
+                    _disabled_tool_function_filter if continuation_state.tools_disabled else tool_function_filter
+                ),
                 include_openai_compat_guidance=include_openai_compat_guidance,
                 execution_identity=execution_identity,
                 compaction_lifecycle=compaction_lifecycle,
@@ -2112,7 +2121,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             CompletedAttempt(
                 replayable_text=state.assistant_text or state.canonical_final_body_candidate or "",
                 has_visible_content=bool(state.assistant_text or state.canonical_final_body_candidate),
-                is_empty=_stream_completed_without_visible_output(state) and not state.completed_tool_executions,
+                is_empty=_stream_completed_without_visible_output(state),
                 session_id=state.completed_run_event.session_id if state.completed_run_event is not None else None,
                 run_id=state.completed_run_event.run_id if state.completed_run_event is not None else None,
                 attempt_run_id=attempt.attempt_run_id,
