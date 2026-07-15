@@ -495,6 +495,17 @@ See the [Hooks](hooks.md) page for full documentation including:
 - Error handling without cooldowns or circuit breakers
 - Testing patterns
 
+## Compatibility checks
+
+Validate a plugin against the installed MindRoom version before deployment:
+
+```bash
+mindroom plugins check ./my-plugin
+```
+
+The command strictly loads the manifest, tools, hooks, OAuth providers, and skills using isolated temporary runtime paths.
+It reports each discovered surface and exits nonzero without leaving plugin registrations active when validation fails.
+
 ## Live development (hot reload)
 
 Plugins hot-reload automatically.
