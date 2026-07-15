@@ -971,7 +971,8 @@ def _wire_tool(name: str) -> dict[str, object]:
         ("anthropic", "claude-opus-4-8", True),
         ("anthropic", "claude-sonnet-5", True),
         ("Anthropic", "claude-sonnet-4-5-20250929", True),
-        ("vertexai_claude", "claude-haiku-4-5@20251001", True),
+        # Vertex token counting rejects Anthropic's beta tool-search type even for new Claude models.
+        ("vertexai_claude", "claude-haiku-4-5@20251001", False),
         # Unreleased Claude models default to the native path (denylist gating).
         ("anthropic", "claude-opus-4-9", True),
         ("anthropic", "claude-fable-6", True),
@@ -984,7 +985,7 @@ def _wire_tool(name: str) -> dict[str, object]:
     ],
 )
 def test_native_tool_search_supported_gating(provider: str, model_id: str, *, expected: bool) -> None:
-    """Claude-family providers qualify unless the model predates tool search."""
+    """Only supported direct-Anthropic models qualify for native tool search."""
     assert native_tool_search_supported(provider, model_id) is expected
 
 
