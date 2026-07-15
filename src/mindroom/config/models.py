@@ -538,7 +538,7 @@ class ModelConfig(BaseModel):
     context_window: int | None = Field(
         default=None,
         ge=1,
-        description="Context window size in tokens. MindRoom needs it on the active runtime model to enforce replay budgets, and an explicit compaction.model also needs its own context_window for destructive compaction",
+        description="Context window size in tokens. MindRoom needs it on the active runtime model to enforce replay budgets, an explicit compaction.model also needs its own context_window for destructive compaction, and on vertexai_claude models it additionally enables request-time fitting that trims replayed history when a request would exceed the window",
     )
 
 
