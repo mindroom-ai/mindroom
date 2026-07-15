@@ -147,6 +147,7 @@ def test_estimate_requires_exact_count_for_base64_documents() -> None:
 
 def test_vertex_token_count_request_preserves_native_tool_search_as_countable_text() -> None:
     """Only the count payload is adapted for Vertex's older request schema."""
+    large_schema_description = "large schema " * 10_000
     search_use = {
         "type": "server_tool_use",
         "id": "srvtoolu-1",
@@ -178,6 +179,13 @@ def test_vertex_token_count_request_preserves_native_tool_search_as_countable_te
             {"name": "always_tool", "input_schema": {"type": "object"}},
             {
                 "name": "weather_lookup",
+                "description": large_schema_description,
+                "input_schema": {"type": "object"},
+                "defer_loading": True,
+            },
+            {
+                "name": "unused_lookup",
+                "description": "Never selected.",
                 "input_schema": {"type": "object"},
                 "defer_loading": True,
             },
@@ -187,7 +195,14 @@ def test_vertex_token_count_request_preserves_native_tool_search_as_countable_te
     count_kwargs, reserve = _request_for_vertex_token_count(request_kwargs)
 
     assert reserve == _VERTEX_TOOL_SEARCH_TOKEN_RESERVE
-    assert count_kwargs["tools"] == [{"name": "always_tool", "input_schema": {"type": "object"}}]
+    assert count_kwargs["tools"] == [
+        {"name": "always_tool", "input_schema": {"type": "object"}},
+        {
+            "name": "weather_lookup",
+            "description": large_schema_description,
+            "input_schema": {"type": "object"},
+        },
+    ]
     assert count_kwargs["messages"][0]["content"] == [
         {"type": "text", "text": "Searching."},
         {
@@ -209,6 +224,36 @@ def test_vertex_token_count_request_preserves_native_tool_search_as_countable_te
     assert request_kwargs["tools"][0]["type"] == "tool_search_tool_regex_20251119"
     assert request_kwargs["messages"][0]["content"][1] is search_use
     assert request_kwargs["messages"][0]["content"][2] is search_result
+
+
+def test_vertex_token_count_adapts_search_history_without_current_search_tool() -> None:
+    """Replayed search blocks remain countable after the current tool surface changes."""
+    request_kwargs = {
+        "model": "claude-sonnet-4-6",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "server_tool_use",
+                        "id": "srvtoolu-1",
+                        "name": "tool_search_tool_regex",
+                        "input": {"pattern": "weather"},
+                    },
+                ],
+            },
+        ],
+    }
+
+    count_kwargs, reserve = _request_for_vertex_token_count(request_kwargs)
+
+    assert reserve == 0
+    assert count_kwargs["messages"][0]["content"][0] == {
+        "type": "text",
+        "text": (
+            '{"id":"srvtoolu-1","input":{"pattern":"weather"},"name":"tool_search_tool_regex","type":"server_tool_use"}'
+        ),
+    }
 
 
 def test_vertex_token_count_request_leaves_regular_requests_unchanged() -> None:
