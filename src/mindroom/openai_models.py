@@ -27,20 +27,29 @@ if TYPE_CHECKING:
     from pydantic import BaseModel
 
 
-# Agno now preserves empty arguments, but existing histories retain the old shape.
-# Remove this only after migrating them or dropping support for pre-fix histories.
+# Agno 2.6.12 omits arguments for empty Anthropic tool inputs; agno-agi/agno#8970 proposes the source fix.
+# Remove this repair only after upgrading to a release with that fix and migrating or dropping older histories.
 def _messages_with_openai_tool_arguments(messages: list[Message]) -> list[Message]:
-    """Fill arguments omitted by providers that represent empty tool input as an object."""
+    """Repair function calls and remove sparse-stream placeholders from replay."""
     normalized_messages: list[Message] = []
+    removed_tool_call_ids: set[str] = set()
     for message in messages:
-        if not message.tool_calls:
+        if message.role == "tool" and message.tool_call_id in removed_tool_call_ids:
+            continue
+        if message.role != "assistant" or not message.tool_calls:
             normalized_messages.append(message)
             continue
 
         changed = False
         normalized_tool_calls: list[dict[str, Any]] = []
         for tool_call in message.tool_calls:
-            function = tool_call["function"]
+            function = tool_call.get("function")
+            if not isinstance(function, dict):
+                tool_call_id = tool_call.get("id")
+                if isinstance(tool_call_id, str):
+                    removed_tool_call_ids.add(tool_call_id)
+                changed = True
+                continue
             if "arguments" in function:
                 normalized_tool_calls.append(tool_call)
                 continue
@@ -67,6 +76,11 @@ class ChatToolArgumentsCompat:
     ``OpenAIChat`` field defaults over provider-specific ones (base URL, name)
     during dataclass field collection.
     """
+
+    def parse_tool_calls(self, tool_calls_data: list[Any]) -> list[dict[str, Any]]:
+        """Drop empty slots created when a streamed tool-call index starts above zero."""
+        parsed = super().parse_tool_calls(tool_calls_data)  # ty: ignore[unresolved-attribute]
+        return [tool_call for tool_call in parsed if isinstance(tool_call.get("function"), dict)]
 
     def _format_all_messages(
         self,

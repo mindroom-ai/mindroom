@@ -10,6 +10,7 @@ from agno.models.message import Message
 from agno.models.openai import OpenAIChat
 from agno.models.openai.like import OpenAILike
 from agno.models.openrouter import OpenRouter
+from openai.types.chat.chat_completion_chunk import ChoiceDeltaToolCall, ChoiceDeltaToolCallFunction
 
 from mindroom.azure_openai_model import MindRoomAzureOpenAI
 from mindroom.openai_models import (
@@ -43,6 +44,72 @@ def _assistant_with_argumentless_tool_call() -> Message:
             },
         ],
     )
+
+
+def _messages_with_sparse_stream_placeholder() -> list[Message]:
+    """Recreate history left by a tool-call stream whose first index was one."""
+    return [
+        Message(
+            role="assistant",
+            tool_calls=[
+                {"id": "phantom-call"},
+                {
+                    "id": "call_abcdefghijklmnopqrstuvwx",
+                    "type": "function",
+                    "function": {"name": "get_status", "arguments": "{}"},
+                },
+            ],
+        ),
+        Message(role="tool", content="tool unavailable", tool_call_id="phantom-call"),
+        Message(role="tool", content="ready", tool_call_id="call_abcdefghijklmnopqrstuvwx"),
+    ]
+
+
+def _legacy_combined_tool_results() -> Message:
+    """Recreate the combined tool-result shape handled by Agno's normalizer."""
+    return Message(
+        role="tool",
+        content=["first result", "second result"],
+        tool_calls=[
+            {
+                "tool_call_id": "toolu_1",
+                "tool_name": "first_tool",
+                "content": "first result",
+            },
+            {
+                "tool_call_id": "toolu_2",
+                "tool_name": "second_tool",
+                "content": "second result",
+            },
+        ],
+    )
+
+
+def _sparse_tool_call_delta() -> ChoiceDeltaToolCall:
+    """Return one valid call at stream index one, leaving index zero empty in Agno."""
+    return ChoiceDeltaToolCall(
+        index=1,
+        id="call_abcdefghijklmnopqrstuvwx",
+        type="function",
+        function=ChoiceDeltaToolCallFunction(name="get_status", arguments="{}"),
+    )
+
+
+@pytest.mark.parametrize(("model_cls", "_agno_cls"), _CHAT_WIRE_PAIRS)
+def test_chat_models_drop_sparse_stream_placeholders(
+    model_cls: type[OpenAIChat],
+    _agno_cls: type[OpenAIChat],
+) -> None:
+    """A missing lower stream index must not become an id-only assistant tool call."""
+    parsed = model_cls(id="gpt-5.6", api_key="test-key").parse_tool_calls([_sparse_tool_call_delta()])
+
+    assert parsed == [
+        {
+            "id": "call_abcdefghijklmnopqrstuvwx",
+            "type": "function",
+            "function": {"name": "get_status", "arguments": "{}"},
+        },
+    ]
 
 
 @pytest.mark.parametrize(("model_cls", "_agno_cls"), _CHAT_WIRE_PAIRS)
@@ -85,3 +152,74 @@ def test_openai_responses_supplies_missing_tool_arguments_without_mutating_histo
 
     assert formatted[0]["arguments"] == "{}"
     assert "arguments" not in assistant.tool_calls[0]["function"]
+
+
+@pytest.mark.parametrize(("model_cls", "_agno_cls"), _CHAT_WIRE_PAIRS)
+def test_chat_models_leave_combined_tool_results_for_agno_normalization(
+    model_cls: type[OpenAIChat],
+    _agno_cls: type[OpenAIChat],
+) -> None:
+    """Argument repair must not consume non-assistant combined tool results."""
+    tool_results = _legacy_combined_tool_results()
+
+    formatted = model_cls(id="gpt-5.6", api_key="test-key")._format_all_messages([tool_results])
+
+    assert formatted == [
+        {"role": "tool", "content": "first result", "tool_call_id": "toolu_1"},
+        {"role": "tool", "content": "second result", "tool_call_id": "toolu_2"},
+    ]
+
+
+def test_openai_responses_leaves_combined_tool_results_for_agno_normalization() -> None:
+    """Responses replay must preserve Agno's combined-result normalization path."""
+    tool_results = _legacy_combined_tool_results()
+
+    formatted = MindRoomOpenAIResponses(id="gpt-5.6", api_key="test-key")._format_messages([tool_results])
+
+    assert formatted == [
+        {"type": "function_call_output", "call_id": "toolu_1", "output": "first result"},
+        {"type": "function_call_output", "call_id": "toolu_2", "output": "second result"},
+    ]
+
+
+@pytest.mark.parametrize(("model_cls", "_agno_cls"), _CHAT_WIRE_PAIRS)
+def test_chat_models_remove_persisted_sparse_placeholder_and_orphan_result(
+    model_cls: type[OpenAIChat],
+    _agno_cls: type[OpenAIChat],
+) -> None:
+    """Replay must retain real calls while removing a saved placeholder pair."""
+    messages = _messages_with_sparse_stream_placeholder()
+
+    formatted = model_cls(id="gpt-5.6", api_key="test-key")._format_all_messages(messages)
+
+    assert formatted == [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_abcdefghijklmnopqrstuvwx",
+                    "type": "function",
+                    "function": {"name": "get_status", "arguments": "{}"},
+                },
+            ],
+        },
+        {"role": "tool", "content": "ready", "tool_call_id": "call_abcdefghijklmnopqrstuvwx"},
+    ]
+
+
+def test_openai_responses_removes_persisted_sparse_placeholder_and_orphan_result() -> None:
+    """Responses replay must retain real calls while removing a saved placeholder pair."""
+    messages = _messages_with_sparse_stream_placeholder()
+
+    formatted = MindRoomOpenAIResponses(id="gpt-5.6", api_key="test-key")._format_messages(messages)
+
+    assert len(formatted) == 2
+    assert formatted[0]["type"] == "function_call"
+    assert formatted[0]["name"] == "get_status"
+    assert formatted[0]["arguments"] == "{}"
+    assert formatted[1] == {
+        "type": "function_call_output",
+        "call_id": formatted[0]["call_id"],
+        "output": "ready",
+    }
