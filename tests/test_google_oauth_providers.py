@@ -10,7 +10,10 @@ import httpx
 import pytest
 
 from mindroom.constants import resolve_runtime_paths
+from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth.google import (
+    _GOOGLE_PROVISIONED_CLIENT_FETCHED_AT_KEY,
+    _GOOGLE_PROVISIONED_CLIENT_TTL_SECONDS,
     _google_oauth_provider,
     _google_runtime_bootstrapper,
     _google_token_parser,
@@ -19,7 +22,12 @@ from mindroom.oauth.google_calendar import _GOOGLE_CALENDAR_OAUTH_SCOPES, google
 from mindroom.oauth.google_drive import _GOOGLE_DRIVE_OAUTH_SCOPES, google_drive_oauth_provider
 from mindroom.oauth.google_gmail import _GOOGLE_GMAIL_OAUTH_SCOPES, google_gmail_oauth_provider
 from mindroom.oauth.google_sheets import _GOOGLE_SHEETS_OAUTH_SCOPES, google_sheets_oauth_provider
-from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError, oauth_connection_required_payload
+from mindroom.oauth.providers import (
+    RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
+    OAuthConnectionRequired,
+    OAuthProviderError,
+    oauth_connection_required_payload,
+)
 from mindroom.oauth.service import build_oauth_connect_instruction, build_oauth_reconnect_instruction
 
 if TYPE_CHECKING:
@@ -175,6 +183,10 @@ def test_google_oauth_provider_helper_builds_common_google_provider_skeleton() -
 def _install_provisioning_transport(
     monkeypatch: pytest.MonkeyPatch,
     provisioning_url: str = "https://provisioning.example",
+    *,
+    client_id: str = PROVISIONED_CLIENT_ID,
+    client_secret: str = PROVISIONED_CLIENT_SECRET,
+    status_code: int = 200,
 ) -> list[httpx.Request]:
     """Install a provisioning transport that validates paired-client authentication."""
     requests: list[httpx.Request] = []
@@ -185,10 +197,10 @@ def _install_provisioning_transport(
         assert request.headers["X-Local-MindRoom-Client-Id"] == "local-client"
         assert request.headers["X-Local-MindRoom-Client-Secret"] == "local-secret"
         return httpx.Response(
-            200,
+            status_code,
             json={
-                "client_id": PROVISIONED_CLIENT_ID,
-                "client_secret": PROVISIONED_CLIENT_SECRET,
+                "client_id": client_id,
+                "client_secret": client_secret,
             },
         )
 
@@ -311,6 +323,64 @@ def test_google_oauth_provider_bootstrapped_client_authorization_uses_pkce(
     assert params["code_challenge_method"] == ["S256"]
     assert params["state"] == ["test-state"]
     assert len(requests) == 1
+
+
+def test_google_oauth_provider_refreshes_stale_provisioned_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale provisioned client is refreshed after the app secret rotates."""
+    now = 1000.0 + _GOOGLE_PROVISIONED_CLIENT_TTL_SECONDS
+    rotated_client_secret = "rotated-client-secret"  # noqa: S105
+    monkeypatch.setattr("mindroom.oauth.google.time.time", lambda: now)
+    requests = _install_provisioning_transport(
+        monkeypatch,
+        client_id="rotated-client.apps.googleusercontent.com",
+        client_secret=rotated_client_secret,
+    )
+    runtime_paths = _paired_runtime_paths(tmp_path)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "google_oauth_client",
+        {
+            "client_id": PROVISIONED_CLIENT_ID,
+            "client_secret": PROVISIONED_CLIENT_SECRET,
+            RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
+            _GOOGLE_PROVISIONED_CLIENT_FETCHED_AT_KEY: 1000.0,
+        },
+    )
+
+    asyncio.run(google_drive_oauth_provider().runtime_endpoints(runtime_paths))
+
+    assert len(requests) == 1
+    assert manager.load_credentials("google_oauth_client") == {
+        "client_id": "rotated-client.apps.googleusercontent.com",
+        "client_secret": rotated_client_secret,
+        RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
+        _GOOGLE_PROVISIONED_CLIENT_FETCHED_AT_KEY: now,
+    }
+
+
+def test_google_oauth_provider_keeps_stale_client_when_refresh_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provisioning outage does not discard the last usable cached client."""
+    requests = _install_provisioning_transport(monkeypatch, status_code=503)
+    runtime_paths = _paired_runtime_paths(tmp_path)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    stale_credentials = {
+        "client_id": PROVISIONED_CLIENT_ID,
+        "client_secret": PROVISIONED_CLIENT_SECRET,
+        RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
+        _GOOGLE_PROVISIONED_CLIENT_FETCHED_AT_KEY: 0.0,
+    }
+    manager.save_credentials("google_oauth_client", stale_credentials)
+
+    asyncio.run(google_drive_oauth_provider().runtime_endpoints(runtime_paths))
+
+    assert len(requests) == 1
+    assert manager.load_credentials("google_oauth_client") == stale_credentials
 
 
 def test_oauth_connection_required_payload_preserves_structured_fields() -> None:

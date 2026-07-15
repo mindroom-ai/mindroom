@@ -105,7 +105,9 @@ Use `worker_scope: user_agent` when each requester should get separate per-agent
 
 They can only call provisioning-service endpoints that accept local client credentials, including agent registration and retrieval of the Google desktop app client configuration.
 The Google app client configuration lets the local process exchange OAuth codes directly with Google; the provisioning service does not receive the resulting Google authorization code or tokens.
+Treat the local provisioning credentials as secrets because anyone who obtains them can use the same provisioning capabilities, including retrieving the Google desktop app client configuration.
 Revoke them from `Settings -> Local MindRoom` in the chat UI.
+After a confirmed provisioning-credential leak, the service operator should also treat the Google app client configuration as exposed and rotate that OAuth client secret.
 
 ## Trust Model (Hosted Server vs Message Privacy)
 

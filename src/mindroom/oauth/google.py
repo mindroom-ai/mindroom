@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast
 
@@ -34,6 +35,8 @@ _GOOGLE_AUTHORIZATION_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 _GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"  # noqa: S105
 _GOOGLE_CLIENT_CONFIG_SERVICE = "google_oauth_client"
 _GOOGLE_PROVISIONING_PATH = "/v1/local-mindroom/oauth/google-client"
+_GOOGLE_PROVISIONED_CLIENT_FETCHED_AT_KEY = "_oauth_client_runtime_bootstrap_fetched_at"
+_GOOGLE_PROVISIONED_CLIENT_TTL_SECONDS = 60 * 60
 GOOGLE_IDENTITY_SCOPES = (
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
@@ -85,18 +88,33 @@ def _valid_provisioned_google_client(payload: object) -> tuple[str, str] | None:
     return client_id.strip(), client_secret.strip()
 
 
+def _provisioned_google_client_is_fresh(credentials: Mapping[str, object] | None) -> bool:
+    """Return whether cached provisioned credentials are complete and recent."""
+    if not credentials or credentials.get(RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY) is not True:
+        return False
+    if _valid_provisioned_google_client(credentials) is None:
+        return False
+    fetched_at = credentials.get(_GOOGLE_PROVISIONED_CLIENT_FETCHED_AT_KEY)
+    if isinstance(fetched_at, bool) or not isinstance(fetched_at, int | float):
+        return False
+    age = time.time() - fetched_at
+    return 0 <= age < _GOOGLE_PROVISIONED_CLIENT_TTL_SECONDS
+
+
 async def _google_runtime_bootstrapper(
     _provider: OAuthProvider,
     runtime_paths: RuntimePaths,
 ) -> OAuthRuntimeEndpoints:
     """Fetch the installed-app client config through an authenticated local pairing."""
     resolution = _provider.client_config_resolution(runtime_paths)
-    if resolution is not None:
+    if resolution is not None and resolution.custom:
         return _google_runtime_endpoints()
 
     manager = get_runtime_credentials_manager(runtime_paths)
     existing = manager.load_credentials(_GOOGLE_CLIENT_CONFIG_SERVICE)
     if existing and existing.get(RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY) is not True:
+        return _google_runtime_endpoints()
+    if _provisioned_google_client_is_fresh(existing):
         return _google_runtime_endpoints()
 
     provisioning_credentials = _provisioning_client_credentials(runtime_paths)
@@ -126,6 +144,7 @@ async def _google_runtime_bootstrapper(
         "client_id": client_id,
         "client_secret": client_secret,
         RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
+        _GOOGLE_PROVISIONED_CLIENT_FETCHED_AT_KEY: time.time(),
     }
     if existing != credentials:
         manager.save_credentials(_GOOGLE_CLIENT_CONFIG_SERVICE, credentials)
