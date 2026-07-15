@@ -3756,7 +3756,7 @@ Use these tools when you need database access, dataframe-style analysis, Google 
 - [`csv`] - Pre-registered CSV reading and DuckDB-backed SQL queries over CSV files.
 - [`pandas`] - In-memory dataframe creation and dataframe method execution.
 - [`google_bigquery`] - BigQuery dataset inspection and SQL queries.
-- [`google_drive`] - Google Drive file listing, metadata search, and file reading through the per-service Google Drive OAuth provider.
+- [`google_drive`] - Google Drive file listing, metadata search, file reading, and workspace downloads through the per-service Google Drive OAuth provider.
 - [`google_sheets`] - Google Sheets access through the per-service Google Sheets OAuth provider, with read support verified by default and create/update support when enabled.
 - [`openbb`] - Stock prices, company search, news, profiles, and price targets through OpenBB.
 - [`yfinance`] - Yahoo Finance market data, fundamentals, news, and history.
@@ -4176,14 +4176,16 @@ run_sql_query("SELECT event_name, COUNT(*) AS total FROM events GROUP BY 1 ORDER
 
 ## [`google_drive`]
 
-`google_drive` is the Google Drive toolkit for listing, searching, and reading files from the connected user's Drive account.
+`google_drive` is the Google Drive toolkit for listing, searching, reading, and downloading files from the connected user's Drive account.
 
 ### What It Does
 
-MindRoom exposes `google_drive_list_files()`, `google_drive_search_files()`, and `google_drive_read_file()` through the Google Drive OAuth provider.
+MindRoom exposes `google_drive_list_files()`, `google_drive_search_files()`, `google_drive_read_file()`, and (when enabled) `google_drive_download_file()` through the Google Drive OAuth provider.
 `google_drive_list_files()` returns recent Drive files visible to the connected account.
 `google_drive_search_files()` searches Drive metadata.
 `google_drive_read_file()` reads Google Workspace files and non-Google files up to the configured `max_read_size`.
+`google_drive_download_file()` downloads a Drive file, exporting Google Workspace files to their best native format, for example a complete Google Sheets workbook as `.xlsx`.
+Downloads always land in the `google-drive-downloads/` directory inside the agent workspace, so the destination cannot be redirected elsewhere.
 When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnectionRequired` instead of falling back to a local token flow.
 
 ### Configuration
@@ -4193,6 +4195,7 @@ When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnec
 | `list_files` | `boolean` | `no` | `true` | Enable recent file listing. |
 | `search_files` | `boolean` | `no` | `true` | Enable Drive metadata search. |
 | `read_file` | `boolean` | `no` | `true` | Enable file content reads. |
+| `download_file` | `boolean` | `no` | `false` | Enable file downloads and Workspace exports into the agent workspace. |
 | `max_read_size` | `number` | `no` | `10485760` | Maximum non-Google-Workspace file size to read in bytes. |
 
 ### Example
@@ -4202,6 +4205,7 @@ agents:
   assistant:
     tools:
       - google_drive:
+          download_file: true
           max_read_size: 10485760
 ```
 
@@ -4209,11 +4213,13 @@ agents:
 google_drive_list_files()
 google_drive_search_files("name contains 'budget'")
 google_drive_read_file("1AbCdEfGhIjKlMnOpQrStUvWxYz")
+google_drive_download_file("1AbCdEfGhIjKlMnOpQrStUvWxYz")
 ```
 
 ### Notes
 
 - `google_drive` uses the per-service `google_drive` OAuth provider and always runs in the primary MindRoom runtime.
+- Downloads require an agent workspace; when the agent has none (for example the default `mem0` memory backend without a `private` workspace), `download_file` is ignored and a warning is logged.
 - The provider requests Drive read-only access plus OpenID email/profile scopes.
 - Configure Google OAuth through [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/).
 
