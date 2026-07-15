@@ -238,7 +238,7 @@ class TestConfigInit:
             "shell",
             "coding",
             "memory",
-            "config_manager",
+            {"name": "config_manager", "defer": True},
             "duckduckgo",
             "website",
             "browser",
@@ -250,6 +250,10 @@ class TestConfigInit:
             "thread_tags",
             "thread_summary",
         ]
+        config_manager_entry = next(
+            entry for entry in load_config_yaml(target).agents["mind"].tools if entry.name == "config_manager"
+        )
+        assert config_manager_entry.defer is True
         assert "thread_resolution" not in mind["tools"]
         assert mind["skills"] == ["mindroom-docs"]
         assert (
@@ -294,6 +298,8 @@ class TestConfigInit:
         assert (workspace / "HEARTBEAT.md").exists()
         assert (workspace / "MEMORY.md").exists()
         assert not (workspace / "BOOT.md").exists()
+        tools_notes = (workspace / "TOOLS.md").read_text(encoding="utf-8")
+        assert f"- Active config file: {json.dumps(str(target.resolve()))}" in tools_notes
 
     def test_init_respects_storage_path_override(
         self,
@@ -316,7 +322,7 @@ class TestConfigInit:
         assert (workspace / "MEMORY.md").exists()
         agents_template = (workspace / "AGENTS.md").read_text(encoding="utf-8")
         assert "## MindRoom Configuration" in agents_template
-        assert "inspect the live configuration with `config_manager`" in agents_template
+        assert "discover and use `config_manager`" in agents_template
         assert "For other explicitly requested configuration changes" in agents_template
         assert "knowledge_bases" not in config
 
