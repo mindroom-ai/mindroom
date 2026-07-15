@@ -305,22 +305,17 @@ def test_google_oauth_provider_keeps_cached_client_after_unpairing(tmp_path: Pat
         process_env={"MINDROOM_PROVISIONING_URL": "https://provisioning.example"},
     )
     manager = get_runtime_credentials_manager(runtime_paths)
-    manager.save_credentials(
-        "google_oauth_client",
-        {
-            "client_id": PROVISIONED_CLIENT_ID,
-            "client_secret": PROVISIONED_CLIENT_SECRET,
-            RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
-            _GOOGLE_PROVISIONED_CLIENT_FETCHED_AT_KEY: 0.0,
-        },
-    )
+    stale_credentials = {
+        "client_id": PROVISIONED_CLIENT_ID,
+        "client_secret": PROVISIONED_CLIENT_SECRET,
+        RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
+        _GOOGLE_PROVISIONED_CLIENT_FETCHED_AT_KEY: 0.0,
+    }
+    manager.save_credentials("google_oauth_client", stale_credentials)
 
-    resolution = asyncio.run(google_drive_oauth_provider().client_config_resolution_async(runtime_paths))
+    asyncio.run(google_drive_oauth_provider().runtime_endpoints(runtime_paths))
 
-    assert resolution is not None
-    assert resolution.custom is False
-    assert resolution.service == "google_oauth_client"
-    assert resolution.config.client_id == PROVISIONED_CLIENT_ID
+    assert manager.load_credentials("google_oauth_client") == stale_credentials
 
 
 @pytest.mark.parametrize("hostname", ["localhost", "127.0.0.1", "[::1]"])
