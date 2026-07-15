@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from agno.exceptions import ModelProviderError
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.utils.models.claude import format_messages, format_tools_for_model
 from agno.utils.tokens import count_schema_tokens
 
-from mindroom.claude_prompt_cache import prepare_claude_request_kwargs
+from mindroom.claude_prompt_cache import (
+    SERVER_TOOL_USE_BLOCK_TYPE,
+    TOOL_SEARCH_RESULT_BLOCK_TYPE,
+    TOOL_SEARCH_TOOL_TYPE,
+    prepare_claude_request_kwargs,
+)
 from mindroom.logging_config import get_logger
 from mindroom.token_budget import estimate_compaction_input_tokens, stable_serialize
 
@@ -26,6 +31,13 @@ logger = get_logger(__name__)
 
 _EXACT_COUNT_THRESHOLD_RATIO = 0.5
 _EXACT_COUNT_BLOCK_TYPES = frozenset({"document", "image"})
+_VERTEX_TOOL_SEARCH_HISTORY_BLOCK_TYPES = frozenset(
+    {SERVER_TOOL_USE_BLOCK_TYPE, TOOL_SEARCH_RESULT_BLOCK_TYPE},
+)
+# Before any tools are discovered, Vertex generation reports 213 input tokens
+# for the native regex search tool on both Claude Haiku 4.5 and Sonnet 4.6.
+# Keep a small margin because count_tokens cannot count that server-tool prefix.
+_VERTEX_TOOL_SEARCH_TOKEN_RESERVE = 256
 
 
 def _strip_vertex_claude_tool_strict(
@@ -92,6 +104,115 @@ def _request_requires_exact_count(request_kwargs: dict[str, Any]) -> bool:
         if isinstance(content, list) and _blocks_require_exact_count(content):
             return True
     return False
+
+
+def _referenced_tool_names(search_result_block: object) -> set[str]:
+    """Return tool names selected by one native search-result block."""
+    if not isinstance(search_result_block, dict):
+        return set()
+    block_dict = cast("dict[str, Any]", search_result_block)
+    if block_dict.get("type") != TOOL_SEARCH_RESULT_BLOCK_TYPE:
+        return set()
+    search_result = block_dict.get("content")
+    references = search_result.get("tool_references") if isinstance(search_result, dict) else None
+    if not isinstance(references, list):
+        return set()
+    names: set[str] = set()
+    for reference in references:
+        tool_name = reference.get("tool_name") if isinstance(reference, dict) else None
+        if isinstance(tool_name, str):
+            names.add(tool_name)
+    return names
+
+
+def _messages_for_vertex_token_count(messages: object) -> tuple[list[Any] | None, set[str]]:
+    """Convert native search history to text and collect selected tool names."""
+    referenced_tool_names: set[str] = set()
+    count_messages: list[Any] | None = None
+    if not isinstance(messages, list):
+        return count_messages, referenced_tool_names
+    for message_index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            continue
+        message_dict = cast("dict[str, Any]", message)
+        content = message_dict.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            referenced_tool_names.update(_referenced_tool_names(block))
+        count_content = [
+            {"type": "text", "text": stable_serialize(block)}
+            if isinstance(block, dict) and block.get("type") in _VERTEX_TOOL_SEARCH_HISTORY_BLOCK_TYPES
+            else block
+            for block in content
+        ]
+        if count_content != content:
+            if count_messages is None:
+                count_messages = list(messages)
+            count_message = dict(message_dict)
+            count_message["content"] = count_content
+            count_messages[message_index] = count_message
+    return count_messages, referenced_tool_names
+
+
+def _is_vertex_tool_search(tool: object) -> bool:
+    """Return whether one wire tool is Vertex's unsupported count entry."""
+    return isinstance(tool, dict) and cast("dict[str, Any]", tool).get("type") == TOOL_SEARCH_TOOL_TYPE
+
+
+def _tools_for_vertex_token_count(
+    tools: object,
+    referenced_tool_names: set[str],
+) -> tuple[list[Any] | None, bool]:
+    """Keep eager and selected tools in a schema accepted by token counting."""
+    if not isinstance(tools, list):
+        return None, False
+    has_native_search = any(_is_vertex_tool_search(tool) for tool in tools)
+    count_tools: list[Any] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            count_tools.append(tool)
+            continue
+        tool_dict = cast("dict[str, Any]", tool)
+        if _is_vertex_tool_search(tool_dict):
+            continue
+        if tool_dict.get("defer_loading") is not True:
+            count_tools.append(tool_dict)
+        elif not has_native_search or tool_dict.get("name") in referenced_tool_names:
+            count_tool = dict(tool_dict)
+            count_tool.pop("defer_loading", None)
+            count_tools.append(count_tool)
+    return (count_tools if count_tools != tools else None), has_native_search
+
+
+def _request_for_vertex_token_count(request_kwargs: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """Build a countable equivalent of a native tool-search request.
+
+    Vertex generation accepts Anthropic's native tool-search schema, but its
+    count-tokens endpoint rejects the search tool, ``defer_loading``, and the
+    two server-search history block types. Count eager and previously selected
+    definitions, preserve search traces as text, and reserve the fixed
+    server-side search prefix separately. Definitions selected by a new search
+    are generated inside the server-tool loop and cannot be known by any
+    preflight count; they become countable on the following request.
+    """
+    count_messages, referenced_tool_names = _messages_for_vertex_token_count(request_kwargs.get("messages"))
+    count_tools, has_native_search = _tools_for_vertex_token_count(
+        request_kwargs.get("tools"),
+        referenced_tool_names,
+    )
+
+    if count_messages is None and count_tools is None:
+        return request_kwargs, 0
+    count_kwargs = dict(request_kwargs)
+    if count_messages is not None:
+        count_kwargs["messages"] = count_messages
+    if count_tools:
+        count_kwargs["tools"] = count_tools
+    elif count_tools is not None:
+        count_kwargs.pop("tools", None)
+    reserve = _VERTEX_TOOL_SEARCH_TOKEN_RESERVE if has_native_search else 0
+    return count_kwargs, reserve
 
 
 @dataclass
@@ -172,8 +293,9 @@ class MindroomVertexAIClaude(VertexAIClaude):
             response_format=response_format,
             compress_tool_results=compress_tool_results,
         )
-        response = await self.get_async_client().messages.count_tokens(**request_kwargs)
-        return response.input_tokens + count_schema_tokens(response_format, self.id)
+        count_kwargs, tool_search_reserve = _request_for_vertex_token_count(request_kwargs)
+        response = await self.get_async_client().messages.count_tokens(**count_kwargs)
+        return response.input_tokens + tool_search_reserve + count_schema_tokens(response_format, self.id)
 
     @staticmethod
     def _replay_trim_candidates(messages: list[Message]) -> list[int]:
