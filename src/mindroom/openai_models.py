@@ -30,6 +30,8 @@ if TYPE_CHECKING:
     from pydantic import BaseModel
 
 
+# Agno now preserves empty arguments, but existing histories retain the old shape.
+# Remove this only after migrating them or dropping support for pre-fix histories.
 def _messages_with_openai_tool_arguments(messages: list[Message]) -> list[Message]:
     """Fill arguments omitted by providers that represent empty tool input as an object."""
     normalized_messages: list[Message] = []
