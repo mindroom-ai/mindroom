@@ -9,7 +9,7 @@ Discovered tools load at the END of the context window (the opposite
 mechanism from Anthropic's inline tool_reference expansion, with the same
 effect), so tool discovery never invalidates the cached prompt prefix.
 
-:class:`~mindroom.openai_responses_model.MindRoomOpenAIResponses` owns the wire
+:class:`~mindroom.openai_models.MindRoomOpenAIResponses` owns the wire
 seams and calls into this module: :func:`request_params_with_deferred_tool_search` tags the
 registered tools and injects the search entry with a deterministic order
 (search tool, then non-deferred tools, then deferred sorted by name) so the
@@ -78,7 +78,7 @@ def install_openai_deferred_tool_search(model: object, *, deferred_tool_names: f
     """Register wire tool names for OpenAI server-side tool search on one model.
 
     Every request built by
-    :class:`~mindroom.openai_responses_model.MindRoomOpenAIResponses` sends the
+    :class:`~mindroom.openai_models.MindRoomOpenAIResponses` sends the
     named tools with ``defer_loading: true`` plus the hosted
     ``tool_search`` entry, so their schemas stay out of the rendered context
     and tool discovery never invalidates the prompt cache. No-op for

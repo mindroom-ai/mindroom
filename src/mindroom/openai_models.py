@@ -1,11 +1,18 @@
-"""OpenAI models with cross-provider tool-call replay support."""
+"""OpenAI and OpenAI-compatible models with cross-provider tool-call replay support."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+# The concrete module, not agno.models.azure: the package init wraps
+# this import in a try/except stub whose fallback is not a Model.
+from agno.models.azure.openai_chat import AzureOpenAI
+from agno.models.deepseek import DeepSeek
+from agno.models.llama_cpp import LlamaCpp
 from agno.models.openai import OpenAIChat, OpenAIResponses
+from agno.models.openai.like import OpenAILike
+from agno.models.openrouter import OpenRouter
 from openai.types.responses import ResponseOutputItemDoneEvent
 
 from mindroom.openai_tool_search import (
@@ -52,9 +59,15 @@ def _messages_with_openai_tool_arguments(messages: list[Message]) -> list[Messag
     return normalized_messages
 
 
-@dataclass
-class MindRoomOpenAIChat(OpenAIChat):
-    """OpenAI Chat model that can replay tool calls from other providers."""
+class _ChatToolArgumentsCompat:
+    """Repair replayed tool calls before OpenAI Chat Completions formatting.
+
+    Mix in ahead of an ``OpenAIChat`` subclass; ``_format_all_messages`` is the
+    single choke point for all four request paths.  Deliberately not a
+    dataclass and not an ``OpenAIChat`` subclass: either would re-apply
+    ``OpenAIChat`` field defaults over provider-specific ones (base URL, name)
+    during dataclass field collection.
+    """
 
     def _format_all_messages(
         self,
@@ -62,10 +75,40 @@ class MindRoomOpenAIChat(OpenAIChat):
         compress_tool_results: bool = False,
     ) -> list[dict[str, Any]]:
         """Supply the arguments string required by OpenAI for every tool call."""
-        return super()._format_all_messages(
+        return super()._format_all_messages(  # ty: ignore[unresolved-attribute]  # resolved by the OpenAIChat sibling base
             _messages_with_openai_tool_arguments(messages),
             compress_tool_results,
         )
+
+
+@dataclass
+class MindRoomOpenAIChat(_ChatToolArgumentsCompat, OpenAIChat):
+    """OpenAI Chat model that can replay tool calls from other providers."""
+
+
+@dataclass
+class MindRoomOpenAILike(_ChatToolArgumentsCompat, OpenAILike):
+    """OpenAI-compatible endpoint model that can replay tool calls from other providers."""
+
+
+@dataclass
+class MindRoomAzureOpenAI(_ChatToolArgumentsCompat, AzureOpenAI):
+    """Azure OpenAI model that can replay tool calls from other providers."""
+
+
+@dataclass
+class MindRoomOpenRouter(_ChatToolArgumentsCompat, OpenRouter):
+    """OpenRouter model that can replay tool calls from other providers."""
+
+
+@dataclass
+class MindRoomDeepSeek(_ChatToolArgumentsCompat, DeepSeek):
+    """DeepSeek model that can replay tool calls from other providers."""
+
+
+@dataclass
+class MindRoomLlamaCpp(_ChatToolArgumentsCompat, LlamaCpp):
+    """llama.cpp server model that can replay tool calls from other providers."""
 
 
 @dataclass

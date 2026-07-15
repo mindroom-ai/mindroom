@@ -8,7 +8,15 @@ from unittest.mock import patch
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.model_loading import get_model_instance
-from mindroom.openai_responses_model import MindRoomOpenAIChat, MindRoomOpenAIResponses
+from mindroom.openai_models import (
+    MindRoomAzureOpenAI,
+    MindRoomDeepSeek,
+    MindRoomLlamaCpp,
+    MindRoomOpenAIChat,
+    MindRoomOpenAILike,
+    MindRoomOpenAIResponses,
+    MindRoomOpenRouter,
+)
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -39,6 +47,30 @@ def test_first_party_openai_gpt_5_4_and_newer_use_responses(tmp_path: Path) -> N
     assert isinstance(current, MindRoomOpenAIResponses)
     assert isinstance(older, MindRoomOpenAIChat)
     assert isinstance(compatible, MindRoomOpenAIChat)
+
+
+def test_openai_wire_providers_use_replay_compatible_models(tmp_path: Path) -> None:
+    """Every OpenAI-wire chat provider must use the tool-call replay-compatible subclass."""
+    expected = {
+        "azure": MindRoomAzureOpenAI,
+        "openrouter": MindRoomOpenRouter,
+        "zai": MindRoomOpenAILike,
+        "deepseek": MindRoomDeepSeek,
+        "llama_cpp": MindRoomLlamaCpp,
+    }
+    config = bind_runtime_paths(
+        Config(
+            models={
+                provider: ModelConfig(provider=provider, id="some-model", extra_kwargs={"api_key": "dummy-key"})
+                for provider in expected
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+
+    for provider, model_cls in expected.items():
+        model = get_model_instance(config, runtime_paths_for(config), provider)
+        assert isinstance(model, model_cls), provider
 
 
 def test_vertexai_claude_gets_explicit_timeout_so_large_outputs_can_run_non_streaming(tmp_path: Path) -> None:

@@ -199,7 +199,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
         return Ollama(id=model_id, host=host, **extra_kwargs)
 
     if canonical_provider == "openrouter":
-        from agno.models.openrouter import OpenRouter  # noqa: PLC0415
+        from mindroom.openai_models import MindRoomOpenRouter  # noqa: PLC0415
 
         api_key = extra_kwargs.pop("api_key", None)
         if not api_key:
@@ -210,7 +210,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
         # truncates long replies mid-sentence; None keeps the cap out of the
         # request so the provider's own model limit applies.
         extra_kwargs.setdefault("max_tokens", None)
-        return OpenRouter(id=model_id, api_key=api_key, **extra_kwargs)
+        return MindRoomOpenRouter(id=model_id, api_key=api_key, **extra_kwargs)
 
     if canonical_provider == "zai":
         # OpenAILike neither reads a provider env var nor rejects a missing key,
@@ -227,9 +227,9 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
         extra_kwargs.setdefault("base_url", ZAI_BASE_URL_DEFAULT)
         extra_kwargs.setdefault("name", "ZAI")
         extra_kwargs.setdefault("provider", "ZAI")
-        from agno.models.openai.like import OpenAILike  # noqa: PLC0415
+        from mindroom.openai_models import MindRoomOpenAILike  # noqa: PLC0415
 
-        return OpenAILike(id=model_id, **extra_kwargs)
+        return MindRoomOpenAILike(id=model_id, **extra_kwargs)
 
     if canonical_provider in {"codex", "openai_codex"}:
         from mindroom.codex_model import (  # noqa: PLC0415
@@ -263,20 +263,18 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
         base_url = extra_kwargs.get("base_url") or runtime_paths.env_value("OPENAI_BASE_URL")
         if openai_native_tool_search_supported(canonical_provider, model_id, base_url=base_url):
-            from mindroom.openai_responses_model import MindRoomOpenAIResponses  # noqa: PLC0415
+            from mindroom.openai_models import MindRoomOpenAIResponses  # noqa: PLC0415
 
             return MindRoomOpenAIResponses(id=model_id, **extra_kwargs)
 
-        from mindroom.openai_responses_model import MindRoomOpenAIChat  # noqa: PLC0415
+        from mindroom.openai_models import MindRoomOpenAIChat  # noqa: PLC0415
 
         return MindRoomOpenAIChat(id=model_id, **extra_kwargs)
 
     if canonical_provider == "azure":
-        # The concrete module, not agno.models.azure: the package init wraps
-        # this import in a try/except stub whose fallback is not a Model.
-        from agno.models.azure.openai_chat import AzureOpenAI  # noqa: PLC0415
+        from mindroom.openai_models import MindRoomAzureOpenAI  # noqa: PLC0415
 
-        return AzureOpenAI(id=model_id, **extra_kwargs)
+        return MindRoomAzureOpenAI(id=model_id, **extra_kwargs)
 
     if canonical_provider == "anthropic":
         from agno.models.anthropic import Claude  # noqa: PLC0415
@@ -298,9 +296,9 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
         )
 
     if canonical_provider == "llama_cpp":
-        from agno.models.llama_cpp import LlamaCpp  # noqa: PLC0415
+        from mindroom.openai_models import MindRoomLlamaCpp  # noqa: PLC0415
 
-        return LlamaCpp(id=model_id, **extra_kwargs)
+        return MindRoomLlamaCpp(id=model_id, **extra_kwargs)
 
     if canonical_provider == "cerebras":
         from agno.models.cerebras import Cerebras  # noqa: PLC0415
@@ -313,9 +311,9 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
         return Groq(id=model_id, **extra_kwargs)
 
     if canonical_provider == "deepseek":
-        from agno.models.deepseek import DeepSeek  # noqa: PLC0415
+        from mindroom.openai_models import MindRoomDeepSeek  # noqa: PLC0415
 
-        return DeepSeek(id=model_id, **extra_kwargs)
+        return MindRoomDeepSeek(id=model_id, **extra_kwargs)
 
     msg = f"Unsupported AI provider: {provider}"
     raise ValueError(msg)

@@ -18,7 +18,7 @@ from openai import AsyncOpenAI, OpenAI
 
 from mindroom.file_locks import advisory_file_lock
 from mindroom.model_defaults import CODEX_GPT, CODEX_GPT_ENDPOINT
-from mindroom.openai_responses_model import MindRoomOpenAIResponses
+from mindroom.openai_models import MindRoomOpenAIResponses
 from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
 
 if TYPE_CHECKING:
