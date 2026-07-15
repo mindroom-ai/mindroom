@@ -189,7 +189,10 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                 export_mime = self.TEXT_EXPORT_TYPES[mime_type]
             elif mime_type.startswith(WorkspaceType.WORKSPACE_PREFIX):
                 return json.dumps(
-                    {"error": f"Cannot read {mime_type} as text. Use download_file instead.", "file": metadata},
+                    {
+                        "error": f"Cannot read {mime_type} as text. Use google_drive_download_file instead.",
+                        "file": metadata,
+                    },
                 )
             else:
                 export_mime = None
@@ -202,7 +205,8 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                 if file_size > self.max_read_size:
                     return json.dumps(
                         {
-                            "error": f"File is {file_size} bytes, exceeds max_read_size ({self.max_read_size}). Use download_file instead.",
+                            "error": f"File is {file_size} bytes, exceeds max_read_size ({self.max_read_size}). "
+                            "Use google_drive_download_file instead.",
                             "file": metadata,
                         },
                     )

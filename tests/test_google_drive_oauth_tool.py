@@ -594,7 +594,10 @@ def test_google_drive_read_metadata_supports_shared_drive_files(tmp_path: Path) 
 
     result = json.loads(tool.read_file("shared-drive-folder-id"))
 
-    assert result["error"] == "Cannot read application/vnd.google-apps.folder as text. Use download_file instead."
+    assert (
+        result["error"]
+        == "Cannot read application/vnd.google-apps.folder as text. Use google_drive_download_file instead."
+    )
     assert service.files_resource.get_kwargs == {
         "fileId": "shared-drive-folder-id",
         "fields": tool.READ_METADATA_FIELDS,
@@ -627,6 +630,29 @@ def test_google_drive_read_media_supports_shared_drive_files(tmp_path: Path) -> 
         "supportsAllDrives": True,
     }
     assert service.files_resource.export_media_kwargs is None
+
+
+def test_google_drive_large_file_error_names_exposed_download_function(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=_ValidCredentials(),
+        max_read_size=4,
+    )
+    service = _FakeDriveService()
+    service.files_resource.file_metadata = {
+        "name": "notes.txt",
+        "mimeType": "text/plain",
+        "size": "5",
+        "webViewLink": "https://drive.google.com/file/d/example",
+    }
+    tool.service = service
+
+    result = json.loads(tool.read_file("shared-drive-file-id"))
+
+    assert result["error"] == ("File is 5 bytes, exceeds max_read_size (4). Use google_drive_download_file instead.")
+    assert service.files_resource.get_media_kwargs is None
 
 
 def test_google_drive_download_media_supports_shared_drive_files(
