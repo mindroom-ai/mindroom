@@ -105,7 +105,6 @@ async def test_register_appservice_user_uses_passwordless_spec_flow(tmp_path: Pa
             "https://matrix.example.com/_matrix/client/v3/register",
             {"Authorization": f"Bearer {APPSERVICE_TOKEN}"},
             {
-                "type": "m.login.application_service",
                 "username": "mindroom_agent",
                 "inhibit_login": True,
             },

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, NoReturn
 
 import httpx
 
@@ -118,7 +118,7 @@ async def _post(
         )
 
 
-def _raise_appservice_error(action: str, response: httpx.Response) -> None:
+def _raise_appservice_error(action: str, response: httpx.Response) -> NoReturn:
     errcode, detail = _response_error(response)
     message = f"Matrix application-service {action} failed: {errcode or response.status_code}: {detail}"
     permanent = response.status_code < 500 and response.status_code not in _TRANSIENT_APPSERVICE_STATUS_CODES
@@ -139,7 +139,6 @@ async def register_appservice_user(
         "/_matrix/client/v3/register",
         token=token,
         payload={
-            "type": _APPSERVICE_LOGIN_TYPE,
             "username": username,
             "inhibit_login": True,
         },
