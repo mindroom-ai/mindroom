@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, NoReturn
+from typing import TYPE_CHECKING, Literal, NamedTuple, NoReturn
 
 import httpx
 
@@ -32,21 +32,29 @@ class ManagedAccountAuth:
     appservice_token: str | None = None
 
 
-def _appservice_token_from_env(runtime_paths: RuntimePaths) -> str | None:
+class _ConfiguredToken(NamedTuple):
+    token: str
+    source_env: str
+
+
+def _appservice_token_from_env(runtime_paths: RuntimePaths) -> _ConfiguredToken | None:
     token = (runtime_paths.env_value(MATRIX_APPSERVICE_TOKEN_ENV) or "").strip()
     file_path = runtime_env_path(runtime_paths, MATRIX_APPSERVICE_TOKEN_FILE_ENV)
     if token and file_path is not None:
         msg = f"Set only one of {MATRIX_APPSERVICE_TOKEN_ENV} or {MATRIX_APPSERVICE_TOKEN_FILE_ENV}"
         raise matrix_startup_error(msg, permanent=True)
     if token:
-        return token
+        return _ConfiguredToken(token, MATRIX_APPSERVICE_TOKEN_ENV)
     if file_path is None:
         return None
     try:
-        return file_path.read_text(encoding="utf-8").strip() or None
+        file_token = file_path.read_text(encoding="utf-8").strip()
     except OSError as exc:
         msg = f"{MATRIX_APPSERVICE_TOKEN_FILE_ENV} is not readable: {file_path}"
         raise matrix_startup_error(msg, permanent=True) from exc
+    if not file_token:
+        return None
+    return _ConfiguredToken(file_token, MATRIX_APPSERVICE_TOKEN_FILE_ENV)
 
 
 def resolve_managed_account_auth(runtime_paths: RuntimePaths) -> ManagedAccountAuth:
@@ -56,20 +64,20 @@ def resolve_managed_account_auth(runtime_paths: RuntimePaths) -> ManagedAccountA
         msg = f"{MATRIX_MANAGED_ACCOUNT_AUTH_ENV} must be 'password' or 'appservice', got {raw_mode!r}"
         raise matrix_startup_error(msg, permanent=True)
 
-    token = _appservice_token_from_env(runtime_paths)
+    configured = _appservice_token_from_env(runtime_paths)
     if raw_mode == "password":
-        if token:
-            msg = f"{MATRIX_APPSERVICE_TOKEN_ENV} is set but {MATRIX_MANAGED_ACCOUNT_AUTH_ENV} is not 'appservice'"
+        if configured is not None:
+            msg = f"{configured.source_env} is set but {MATRIX_MANAGED_ACCOUNT_AUTH_ENV} is not 'appservice'"
             raise matrix_startup_error(msg, permanent=True)
         return ManagedAccountAuth(mode="password")
 
-    if not token:
+    if configured is None:
         msg = (
             f"{MATRIX_MANAGED_ACCOUNT_AUTH_ENV}=appservice requires "
             f"{MATRIX_APPSERVICE_TOKEN_ENV} or {MATRIX_APPSERVICE_TOKEN_FILE_ENV}"
         )
         raise matrix_startup_error(msg, permanent=True)
-    return ManagedAccountAuth(mode="appservice", appservice_token=token)
+    return ManagedAccountAuth(mode="appservice", appservice_token=configured.token)
 
 
 def _response_error(response: httpx.Response) -> tuple[str | None, str]:
@@ -133,12 +141,19 @@ async def register_appservice_user(
     token: str,
     runtime_paths: RuntimePaths,
 ) -> str:
-    """Register a passwordless user inside the application service namespace."""
+    """Register a passwordless user and return the server-assigned user ID.
+
+    Mirrors password-mode registration: the caller adopts whatever user ID the
+    homeserver assigns (e.g. its real server name when ``MATRIX_SERVER_NAME``
+    is unset). ``expected_user_id`` is only the fallback when the account
+    already exists.
+    """
     response = await _post(
         homeserver,
         "/_matrix/client/v3/register",
         token=token,
         payload={
+            "type": _APPSERVICE_LOGIN_TYPE,
             "username": username,
             "inhibit_login": True,
         },
@@ -152,11 +167,8 @@ async def register_appservice_user(
 
     body = _success_response_body("registration", response)
     returned_user_id = body.get("user_id")
-    if not isinstance(returned_user_id, str) or returned_user_id != expected_user_id:
-        msg = (
-            "Matrix application-service registration returned an unexpected user ID: "
-            f"expected {expected_user_id}, got {returned_user_id!r}"
-        )
+    if not isinstance(returned_user_id, str) or not returned_user_id.startswith("@"):
+        msg = f"Matrix application-service registration returned an invalid user ID: {returned_user_id!r}"
         raise matrix_startup_error(msg, permanent=True)
     return returned_user_id
 

@@ -64,6 +64,16 @@ def test_resolve_managed_account_auth_requires_explicit_appservice_mode(tmp_path
         resolve_managed_account_auth(runtime_paths)
 
 
+def test_resolve_managed_account_auth_names_the_configured_file_variable(tmp_path: Path) -> None:
+    """The password-mode conflict error names the variable that actually provided the token."""
+    token_file = tmp_path / "appservice-token"
+    token_file.write_text(f"{APPSERVICE_TOKEN}\n", encoding="utf-8")
+    runtime_paths = _runtime_paths(tmp_path, MATRIX_APPSERVICE_TOKEN_FILE=str(token_file))
+
+    with pytest.raises(PermanentMatrixStartupError, match="MATRIX_APPSERVICE_TOKEN_FILE is set"):
+        resolve_managed_account_auth(runtime_paths)
+
+
 def test_resolve_managed_account_auth_reads_token_file(tmp_path: Path) -> None:
     """Appservice tokens can come from mounted secret files."""
     token_file = tmp_path / "appservice-token"
@@ -105,11 +115,52 @@ async def test_register_appservice_user_uses_passwordless_spec_flow(tmp_path: Pa
             "https://matrix.example.com/_matrix/client/v3/register",
             {"Authorization": f"Bearer {APPSERVICE_TOKEN}"},
             {
+                "type": "m.login.application_service",
                 "username": "mindroom_agent",
                 "inhibit_login": True,
             },
         ),
     ]
+
+
+@pytest.mark.asyncio
+async def test_register_appservice_user_adopts_server_assigned_user_id(tmp_path: Path) -> None:
+    """The server's user ID wins when it differs from the locally derived one."""
+    response = httpx.Response(200, json={"user_id": "@mindroom_agent:example.com"})
+
+    with patch(
+        "mindroom.matrix.appservice.httpx.AsyncClient",
+        _recording_client([], response),
+    ):
+        user_id = await register_appservice_user(
+            "https://matrix.example.com",
+            username="mindroom_agent",
+            expected_user_id="@mindroom_agent:matrix.internal.cluster",
+            token=APPSERVICE_TOKEN,
+            runtime_paths=_runtime_paths(tmp_path),
+        )
+
+    assert user_id == "@mindroom_agent:example.com"
+
+
+@pytest.mark.asyncio
+async def test_register_appservice_user_treats_existing_account_as_registered(tmp_path: Path) -> None:
+    """M_USER_IN_USE means the account already exists and registration is idempotent."""
+    response = httpx.Response(400, json={"errcode": "M_USER_IN_USE", "error": "User ID already taken."})
+
+    with patch(
+        "mindroom.matrix.appservice.httpx.AsyncClient",
+        _recording_client([], response),
+    ):
+        user_id = await register_appservice_user(
+            "https://matrix.example.com",
+            username="mindroom_agent",
+            expected_user_id="@mindroom_agent:example.com",
+            token=APPSERVICE_TOKEN,
+            runtime_paths=_runtime_paths(tmp_path),
+        )
+
+    assert user_id == "@mindroom_agent:example.com"
 
 
 @pytest.mark.asyncio
