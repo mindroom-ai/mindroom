@@ -21,6 +21,11 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.thread_export.models import ThreadExportRoom
 
+# libyaml-backed classes parse ~20x faster than the pure-Python ones; export passes
+# re-read every thread document in a room, so the difference dominates pass cost.
+_YAML_SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+_YAML_SAFE_DUMPER = getattr(yaml, "CSafeDumper", yaml.SafeDumper)
+
 _EXPORT_SCHEMA_VERSION = 1
 _ROOM_INDEX_FILENAME = "index.json"
 _THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
@@ -244,7 +249,7 @@ def _thread_index_entry_at(directory_fd: int, filename: str) -> tuple[int, dict[
     if text is None:
         return None
     try:
-        payload = yaml.safe_load(text)
+        payload = yaml.load(text, Loader=_YAML_SAFE_LOADER)  # noqa: S506 - safe loader variant
     except yaml.YAMLError:
         return None
     if not isinstance(payload, dict):
@@ -448,7 +453,7 @@ def _existing_payload_matches(room_fd: int, filename: str, payload: dict[str, ob
     if text is None:
         return False
     try:
-        existing = yaml.safe_load(text)
+        existing = yaml.load(text, Loader=_YAML_SAFE_LOADER)  # noqa: S506 - safe loader variant
     except yaml.YAMLError:
         return False
     if not isinstance(existing, dict):
@@ -478,8 +483,9 @@ def write_thread_payload(
         filename = f"{_safe_path_segment(thread_id)}.yaml"
         if _existing_payload_matches(room_fd, filename, payload):
             return False
-        text = yaml.safe_dump(
+        text = yaml.dump(
             payload,
+            Dumper=_YAML_SAFE_DUMPER,
             default_flow_style=False,
             sort_keys=False,
             allow_unicode=True,
