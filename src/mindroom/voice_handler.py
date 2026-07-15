@@ -26,7 +26,7 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
 )
-from mindroom.credentials_sync import get_secret_from_env
+from mindroom.credentials_sync import get_api_key_for_service
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.entity_resolution import EntityIdentityRegistry, entity_identity_registry
 from mindroom.logging_config import get_logger
@@ -478,10 +478,12 @@ async def _transcribe_audio(
         )
 
         api_key = config.voice.stt.api_key
-        if api_key is None and config.voice.stt.provider == "openai_compatible":
-            api_key = LOCAL_OPENAI_API_KEY_DEFAULT
         if api_key is None:
-            api_key = get_secret_from_env("OPENAI_API_KEY", runtime_paths)
+            credentials_service = config.voice.stt.credentials_service
+            if credentials_service is not None:
+                api_key = get_api_key_for_service(credentials_service, runtime_paths)
+            elif config.voice.stt.provider == "openai_compatible":
+                api_key = LOCAL_OPENAI_API_KEY_DEFAULT
         if not api_key:
             logger.error("No OpenAI-compatible STT API key configured for voice transcription")
             return None

@@ -174,8 +174,8 @@ class TestVoiceHandler:
         assert mime_type == "audio/unknown"
 
     @pytest.mark.asyncio
-    async def test_transcribe_audio_uses_configured_stt_host_and_openai_credential(self) -> None:
-        """OpenAI proxy requests keep their provider credential and TLS verification."""
+    async def test_transcribe_audio_uses_configured_stt_host_and_named_credential(self) -> None:
+        """OpenAI proxy requests use their named credential and TLS verification."""
         config = _runtime_bound_config(
             Config(
                 voice=VoiceConfig(
@@ -183,6 +183,7 @@ class TestVoiceHandler:
                     stt=VoiceSTTConfig(
                         host="https://stt.example.test/v1",
                         model="whisper-1",
+                        credentials_service="openai-voice",
                         extra_kwargs={"language": "nl", "temperature": 0},
                     ),
                 ),
@@ -227,7 +228,7 @@ class TestVoiceHandler:
 
         with (
             patch("mindroom.voice_handler.httpx.AsyncClient", FakeAsyncClient),
-            patch("mindroom.voice_handler.get_secret_from_env", return_value="openai-provider-key") as get_secret,
+            patch("mindroom.voice_handler.get_api_key_for_service", return_value="openai-provider-key") as get_key,
         ):
             transcription = await voice_handler._transcribe_audio(
                 b"audio-bytes",
@@ -237,7 +238,7 @@ class TestVoiceHandler:
             )
 
         assert transcription == "transcribed text"
-        get_secret.assert_called_once_with("OPENAI_API_KEY", runtime_paths_for(config))
+        get_key.assert_called_once_with("openai-voice", runtime_paths_for(config))
         assert len(client_init_kwargs) == 1
         assert client_init_kwargs[0].get("verify", True) is not False
         assert post_calls == [
