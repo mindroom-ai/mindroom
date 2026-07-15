@@ -20,7 +20,7 @@ Set it explicitly when the homeserver is served from a subdomain such as `https:
 ## Config Rendering and Secrets
 
 The chart renders the complete `tuwunel.toml` into a ConfigMap and never writes secret material into it.
-Tuwunel natively reads `registration_token_file` and `client_secret_file`, so the rendered config references file paths backed by Secret volume mounts instead of inline values.
+Tuwunel natively reads `registration_token_file`, `client_secret_file`, and application-service registration files from a directory, so the rendered config references paths backed by Secret volume mounts instead of inline values.
 The alternative of an init container substituting secrets into a config template at pod start was rejected: it adds a moving part, hides the effective config from `helm template` and GitOps diffs, and is unnecessary because Tuwunel's native `*_file` options already keep secrets out of the config file.
 A `checksum/config` pod annotation rolls the Deployment whenever the rendered config changes.
 
@@ -30,6 +30,7 @@ Secret files are mounted at fixed paths that the rendered config references:
 |-------|--------------|
 | `tuwunel.registrationToken` | `/etc/tuwunel/secrets/registration-token/<key>` |
 | `tuwunel.oidc.clientSecret` | `/etc/tuwunel/secrets/oidc/<key>` |
+| `tuwunel.appserviceRegistration` | `/etc/tuwunel/appservices/<key>` |
 
 ## Registration Token
 
@@ -45,6 +46,24 @@ tuwunel:
 
 Without it, the rendered config leaves registration at Tuwunel's default of disabled.
 MindRoom provisions agent accounts through registration, so a paired runtime deployment needs the token configured on both charts.
+
+## Passwordless MindRoom Accounts
+
+For deployments that disable password login, store a complete Matrix application-service registration YAML file in a Secret and mount it through `tuwunel.appserviceRegistration`:
+
+```yaml
+tuwunel:
+  serverName: example.com
+  appserviceRegistration:
+    existingSecret: matrix-appservice
+    key: registration.yaml
+  extraConfig: |
+    login_with_password = false
+```
+
+The registration should use `url: null`, a dedicated `as_token`, and an exclusive anchored user namespace that matches only MindRoom-managed accounts.
+The same Secret can expose the `as_token` under a separate key for the runtime chart's `matrix.appserviceToken` setting.
+Application-service registration bypasses normal registration controls, so `tuwunel.registrationToken` is unnecessary in this mode.
 
 ## OIDC Login
 
@@ -77,7 +96,7 @@ config:
   key: tuwunel.toml
 ```
 
-The Secret mounts from `tuwunel.registrationToken` and `tuwunel.oidc` still apply, so a custom config can reference the chart's standard secret file paths from the table above.
+The Secret mounts from `tuwunel.registrationToken`, `tuwunel.oidc`, and `tuwunel.appserviceRegistration` still apply, so a custom config can reference the chart's standard secret file paths from the table above.
 Config changes in an existing ConfigMap do not roll the pod automatically; restart the Deployment or annotate the pod template yourself.
 
 ## Pairing With mindroom-runtime

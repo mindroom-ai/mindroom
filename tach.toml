@@ -1145,6 +1145,15 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.matrix.appservice"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.matrix.client_session",
+    "mindroom.runtime_env_policy",
+]
+visibility = ["mindroom.matrix.users"]
+
+[[modules]]
 path = "mindroom.matrix.provisioning"
 depends_on = [
     "mindroom.constants",
@@ -1189,6 +1198,7 @@ path = "mindroom.matrix.users"
 depends_on = [
     "mindroom.config.main",
     "mindroom.constants",
+    "mindroom.matrix.appservice",
     "mindroom.matrix.client_session",
     "mindroom.matrix.cross_signing",
     "mindroom.matrix.provisioning",
@@ -1999,6 +2009,7 @@ depends_on = ["mindroom.constants", "mindroom.matrix.to_device"]
 visibility = [
     "mindroom.bot",
     "mindroom.cli.doctor",
+    "mindroom.matrix.appservice",
     "mindroom.matrix.client",
     "mindroom.matrix.provisioning",
     "mindroom.matrix.rooms",
@@ -3502,6 +3513,7 @@ from = ["mindroom.matrix.client_room_admin"]
 [[interfaces]]
 expose = [
     "PermanentMatrixStartupError",
+    "create_authenticated_client",
     "login",
     "matrix_client",
     "matrix_startup_error",

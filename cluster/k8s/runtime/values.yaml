@@ -247,9 +247,14 @@ matrix:
   homeserverUrl: ""
   serverName: ""
   startupTimeoutSeconds: ""
+  # Authentication used only to create/login MindRoom-managed Matrix accounts.
+  managedAccountAuth: password
   registrationToken:
     existingSecret: ""
     key: MATRIX_REGISTRATION_TOKEN
+  appserviceToken:
+    existingSecret: ""
+    key: MATRIX_APPSERVICE_TOKEN
 
 resources:
   requests:

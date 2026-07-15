@@ -887,6 +887,77 @@ def test_runtime_chart_default_configmap_source_wires_runtime_and_worker_configm
     assert mindroom_env["MINDROOM_KUBERNETES_WORKER_CONFIG_PATH"]["value"] == "/app/config.yaml"
 
 
+def test_runtime_chart_mounts_appservice_token_for_passwordless_managed_accounts() -> None:
+    """Appservice mode should mount its token as a file and select appservice auth explicitly."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "matrix.managedAccountAuth=appservice",
+        "matrix.appserviceToken.existingSecret=matrix-appservice",
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    pod_spec = deployment["spec"]["template"]["spec"]
+    container = _container(deployment, "mindroom")
+    env = _env_by_name(container)
+
+    assert env["MATRIX_MANAGED_ACCOUNT_AUTH"]["value"] == "appservice"
+    assert env["MATRIX_APPSERVICE_TOKEN_FILE"]["value"] == ("/etc/mindroom/matrix-appservice/MATRIX_APPSERVICE_TOKEN")
+    assert {
+        "name": "matrix-appservice-token",
+        "mountPath": "/etc/mindroom/matrix-appservice",
+        "readOnly": True,
+    } in container["volumeMounts"]
+    assert {
+        "name": "matrix-appservice-token",
+        "secret": {
+            "secretName": "matrix-appservice",
+            "items": [{"key": "MATRIX_APPSERVICE_TOKEN", "path": "MATRIX_APPSERVICE_TOKEN"}],
+        },
+    } in pod_spec["volumes"]
+
+
+def test_runtime_chart_rejects_appservice_mode_without_token_secret() -> None:
+    """Appservice mode should fail Helm rendering before a tokenless deployment reaches startup."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "matrix.managedAccountAuth=appservice",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert "matrix.appserviceToken.existingSecret is required" in completed.stderr
+
+
+def test_tuwunel_chart_mounts_secret_appservice_registration() -> None:
+    """Tuwunel should load appservice YAML from a Secret without exposing tokens in its ConfigMap."""
+    docs = _render_chart(
+        Path("cluster/k8s/tuwunel"),
+        "tuwunel.serverName=example.com",
+        "tuwunel.appserviceRegistration.existingSecret=matrix-appservice",
+        release_name="matrix",
+    )
+    config_map = _resource(docs, "ConfigMap", "matrix-mindroom-tuwunel-config")
+    deployment = _resource(docs, "Deployment", "matrix-mindroom-tuwunel")
+    pod_spec = deployment["spec"]["template"]["spec"]
+    container = _container(deployment, "tuwunel")
+
+    assert 'appservice_dir = "/etc/tuwunel/appservices"' in config_map["data"]["tuwunel.toml"]
+    assert {
+        "name": "appservice-registration",
+        "mountPath": "/etc/tuwunel/appservices",
+        "readOnly": True,
+    } in container["volumeMounts"]
+    assert {
+        "name": "appservice-registration",
+        "secret": {
+            "secretName": "matrix-appservice",
+            "items": [{"key": "registration.yaml", "path": "registration.yaml"}],
+        },
+    } in pod_spec["volumes"]
+
+
 def test_runtime_chart_file_config_source_uses_bundle_path_without_configmap() -> None:
     """File config mode should point runtime and workers at the bundle file without rendering a ConfigMap."""
     config_path = "/app/agent_data/content-bundles/team-config/content/environments/prod/agent-config.yaml"

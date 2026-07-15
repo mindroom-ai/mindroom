@@ -29,6 +29,9 @@
 {{- if and .Values.tuwunel.registrationToken.existingSecret (not .Values.tuwunel.registrationToken.key) -}}
 {{- fail "tuwunel.registrationToken.key is required when tuwunel.registrationToken.existingSecret is set" -}}
 {{- end -}}
+{{- if and .Values.tuwunel.appserviceRegistration.existingSecret (not .Values.tuwunel.appserviceRegistration.key) -}}
+{{- fail "tuwunel.appserviceRegistration.key is required when tuwunel.appserviceRegistration.existingSecret is set" -}}
+{{- end -}}
 {{- if and (not .Values.storage.create) (not .Values.storage.existingClaim) -}}
 {{- fail "storage.existingClaim or storage.create=true is required" -}}
 {{- end -}}

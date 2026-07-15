@@ -35,11 +35,35 @@ _PROJECTION_MATRIX_ENV_NAMES = (
     "GOOGLE_DELEGATED_USER",
     runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_env_json"],
     runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"],
+    runtime_env_policy.MATRIX_APPSERVICE_TOKEN_ENV,
+    runtime_env_policy.MATRIX_APPSERVICE_TOKEN_FILE_ENV,
+    runtime_env_policy.MATRIX_MANAGED_ACCOUNT_AUTH_ENV,
     runtime_env_policy.SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
     runtime_env_policy.SHARED_CREDENTIALS_PATH_ENV,
     "OPENAI_API_KEY",
 )
 _PROJECTION_MATRIX_EXPECTATIONS = {
+    runtime_env_policy.MATRIX_APPSERVICE_TOKEN_ENV: {
+        "public_worker_startup_env": False,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": False,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": False,
+    },
+    runtime_env_policy.MATRIX_APPSERVICE_TOKEN_FILE_ENV: {
+        "public_worker_startup_env": False,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": False,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": False,
+    },
+    runtime_env_policy.MATRIX_MANAGED_ACCOUNT_AUTH_ENV: {
+        "public_worker_startup_env": False,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": False,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": False,
+    },
     runtime_env_policy.CONTROL_STATE_PATH_ENV: {
         "public_worker_startup_env": False,
         "isolated_worker_runtime_env": False,

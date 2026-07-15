@@ -1,6 +1,21 @@
 {{- if not (or (eq .Values.eventCache.backend "postgres") (eq .Values.eventCache.backend "sqlite")) -}}
 {{- fail "eventCache.backend must be either postgres or sqlite" -}}
 {{- end -}}
+{{- if not (or (eq .Values.matrix.managedAccountAuth "password") (eq .Values.matrix.managedAccountAuth "appservice")) -}}
+{{- fail "matrix.managedAccountAuth must be either password or appservice" -}}
+{{- end -}}
+{{- if and (eq .Values.matrix.managedAccountAuth "appservice") (not .Values.matrix.appserviceToken.existingSecret) -}}
+{{- fail "matrix.appserviceToken.existingSecret is required when matrix.managedAccountAuth=appservice" -}}
+{{- end -}}
+{{- if and (eq .Values.matrix.managedAccountAuth "appservice") (not .Values.matrix.appserviceToken.key) -}}
+{{- fail "matrix.appserviceToken.key is required when matrix.managedAccountAuth=appservice" -}}
+{{- end -}}
+{{- if and (eq .Values.matrix.managedAccountAuth "password") .Values.matrix.appserviceToken.existingSecret -}}
+{{- fail "matrix.appserviceToken requires matrix.managedAccountAuth=appservice" -}}
+{{- end -}}
+{{- if and (eq .Values.matrix.managedAccountAuth "appservice") .Values.matrix.registrationToken.existingSecret -}}
+{{- fail "matrix.registrationToken cannot be set when matrix.managedAccountAuth=appservice" -}}
+{{- end -}}
 {{- $configSource := include "mindroom-runtime.configSource" . -}}
 {{- if not (or (eq $configSource "configMap") (eq $configSource "file")) -}}
 {{- fail "config.source must be either configMap or file" -}}

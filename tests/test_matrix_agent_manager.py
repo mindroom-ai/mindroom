@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 DEFAULT_INTERNAL_USERNAME = MindRoomUserConfig().username
+APPSERVICE_TOKEN = "as-secret"  # noqa: S105
 
 
 def _create_olm_store_file(
@@ -147,6 +148,9 @@ def _clear_matrix_registration_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MINDROOM_PROVISIONING_URL", raising=False)
     monkeypatch.delenv("MINDROOM_LOCAL_CLIENT_ID", raising=False)
     monkeypatch.delenv("MINDROOM_LOCAL_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("MATRIX_MANAGED_ACCOUNT_AUTH", raising=False)
+    monkeypatch.delenv("MATRIX_APPSERVICE_TOKEN", raising=False)
+    monkeypatch.delenv("MATRIX_APPSERVICE_TOKEN_FILE", raising=False)
 
 
 @pytest.fixture
@@ -1075,6 +1079,34 @@ class TestAgentUserCreation:
         mock_register.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_create_agent_user_appservice_mode_stores_no_password(self, tmp_path: Path) -> None:
+        """Application-service accounts must not generate or persist passwords."""
+        runtime_paths = _runtime_paths(
+            tmp_path,
+            MATRIX_MANAGED_ACCOUNT_AUTH="appservice",
+            MATRIX_APPSERVICE_TOKEN=APPSERVICE_TOKEN,
+        )
+
+        with patch("mindroom.matrix.users.appservice.register_appservice_user", new_callable=AsyncMock) as register:
+            register.return_value = "@mindroom_calculator:localhost"
+            agent_user = await create_agent_user(
+                "http://localhost:8008",
+                "calculator",
+                "CalculatorAgent",
+                runtime_paths,
+            )
+
+        assert agent_user.password is None
+        assert MatrixState.load(runtime_paths=runtime_paths).accounts["agent_calculator"].password is None
+        register.assert_awaited_once_with(
+            "http://localhost:8008",
+            username="mindroom_calculator",
+            expected_user_id="@mindroom_calculator:localhost",
+            token=APPSERVICE_TOKEN,
+            runtime_paths=runtime_paths,
+        )
+
+    @pytest.mark.asyncio
     @patch("mindroom.matrix.users.matrix_client")
     @patch("mindroom.matrix.users._save_agent_credentials")
     @patch("mindroom.matrix.users._get_agent_credentials")
@@ -1341,6 +1373,43 @@ class TestAgentLogin:
                 agent_user.password,
                 runtime_paths=runtime_paths,
             )
+
+    @pytest.mark.asyncio
+    async def test_login_agent_user_appservice_mode_uses_no_password(self, tmp_path: Path) -> None:
+        """Application-service mode creates and persists a per-user device session."""
+        agent_user = AgentMatrixUser(
+            agent_name="calculator",
+            user_id="@mindroom_calculator:localhost",
+            display_name="CalculatorAgent",
+            password=None,
+        )
+        runtime_paths = _runtime_paths(
+            tmp_path,
+            MATRIX_MANAGED_ACCOUNT_AUTH="appservice",
+            MATRIX_APPSERVICE_TOKEN=APPSERVICE_TOKEN,
+        )
+
+        with patch("mindroom.matrix.users.appservice.login_appservice_user", new_callable=AsyncMock) as login_as:
+            mock_client = AsyncMock()
+            mock_client.user_id = "@mindroom_calculator:localhost"
+            mock_client.access_token = "new_token"  # noqa: S105
+            mock_client.device_id = "new_device"
+            login_as.return_value = mock_client
+
+            client = await login_agent_user("http://localhost:8008", agent_user, runtime_paths)
+
+        assert client is mock_client
+        assert agent_user.access_token == "new_token"  # noqa: S105
+        assert agent_user.device_id == "new_device"
+        account = MatrixState.load(runtime_paths=runtime_paths).accounts["agent_calculator"]
+        assert account.password is None
+        assert account.access_token == "new_token"  # noqa: S105
+        login_as.assert_awaited_once_with(
+            "http://localhost:8008",
+            user_id="@mindroom_calculator:localhost",
+            token=APPSERVICE_TOKEN,
+            runtime_paths=runtime_paths,
+        )
 
     @pytest.mark.asyncio
     async def test_login_agent_user_rejects_password_user_id_mismatch(self, tmp_path: Path) -> None:

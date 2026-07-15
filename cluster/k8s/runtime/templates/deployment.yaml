@@ -360,12 +360,18 @@ spec:
             - name: MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS
               value: {{ .Values.matrix.startupTimeoutSeconds | quote }}
             {{- end }}
+            - name: MATRIX_MANAGED_ACCOUNT_AUTH
+              value: {{ .Values.matrix.managedAccountAuth | quote }}
             {{- if .Values.matrix.registrationToken.existingSecret }}
             - name: MATRIX_REGISTRATION_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.matrix.registrationToken.existingSecret }}
                   key: {{ .Values.matrix.registrationToken.key }}
+            {{- end }}
+            {{- if .Values.matrix.appserviceToken.existingSecret }}
+            - name: MATRIX_APPSERVICE_TOKEN_FILE
+              value: {{ printf "/etc/mindroom/matrix-appservice/%s" .Values.matrix.appserviceToken.key | quote }}
             {{- end }}
             {{- range $entry := .Values.providerCredentials }}
             - name: {{ include "mindroom-runtime.providerCredentialEnvName" (list $ $entry) }}
@@ -435,6 +441,11 @@ spec:
             {{- end }}
             - name: {{ include "mindroom-runtime.storageVolumeName" . }}
               mountPath: {{ .Values.storage.mountPath }}
+            {{- if .Values.matrix.appserviceToken.existingSecret }}
+            - name: matrix-appservice-token
+              mountPath: /etc/mindroom/matrix-appservice
+              readOnly: true
+            {{- end }}
             {{- if .Values.stateStorage.enabled }}
             {{- if .Values.stateStorage.mountPath }}
             - name: {{ include "mindroom-runtime.stateStorageVolumeName" . }}
@@ -532,6 +543,14 @@ spec:
         - name: {{ include "mindroom-runtime.storageVolumeName" . }}
           persistentVolumeClaim:
             claimName: {{ include "mindroom-runtime.storageClaimName" . }}
+        {{- if .Values.matrix.appserviceToken.existingSecret }}
+        - name: matrix-appservice-token
+          secret:
+            secretName: {{ .Values.matrix.appserviceToken.existingSecret }}
+            items:
+              - key: {{ .Values.matrix.appserviceToken.key }}
+                path: {{ .Values.matrix.appserviceToken.key }}
+        {{- end }}
         {{- if .Values.stateStorage.enabled }}
         - name: {{ include "mindroom-runtime.stateStorageVolumeName" . }}
           persistentVolumeClaim:

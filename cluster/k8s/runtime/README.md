@@ -424,6 +424,26 @@ When `approvedEgress.enabled` is true, the chart automatically points worker pro
 When `egressProxy.networkPolicy.create` is true, workers can egress only to DNS, the selected proxy pods, and `egressProxy.networkPolicy.extraEgress`.
 For externally managed proxies, NetworkPolicy targets pods rather than Services, so `proxyPodSelector` must match the existing proxy Deployment labels.
 
+## Matrix Managed Account Authentication
+
+`matrix.managedAccountAuth` selects how MindRoom creates and logs in its router, agent, team, and internal-user Matrix accounts.
+The default `password` mode uses `matrix.registrationToken` when the homeserver requires token-gated registration.
+The `appservice` mode creates passwordless accounts and requires `matrix.appserviceToken`:
+
+```yaml
+matrix:
+  homeserverUrl: http://matrix.example.svc.cluster.local:8008
+  serverName: example.com
+  managedAccountAuth: appservice
+  appserviceToken:
+    existingSecret: matrix-appservice
+    key: MATRIX_APPSERVICE_TOKEN
+```
+
+The chart mounts the appservice token as a Secret file and sets `MATRIX_APPSERVICE_TOKEN_FILE`.
+Do not configure `matrix.registrationToken` in appservice mode.
+The homeserver must register the matching application service and grant it an exclusive namespace containing every MindRoom-managed user ID.
+
 ## Existing Platform Example
 
 ```yaml

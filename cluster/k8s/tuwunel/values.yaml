@@ -57,6 +57,10 @@ tuwunel:
     # Reference the same Secret from the mindroom-runtime chart's matrix.registrationToken.
     existingSecret: ""
     key: MATRIX_REGISTRATION_TOKEN
+  appserviceRegistration:
+    # Existing Secret containing a complete Matrix application-service registration YAML file.
+    existingSecret: ""
+    key: registration.yaml
   wellKnown:
     # Homeserver base URL served in /.well-known/matrix/client.
     # Leave empty to default to the effective clientBaseUrl.

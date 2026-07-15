@@ -15005,6 +15005,9 @@ MindRoom uses `mindroom-nio` for Matrix communication with SSL context handling 
 | `MATRIX_HOMESERVER` | `http://localhost:8008` | Matrix homeserver URL |
 | `MATRIX_SERVER_NAME` | (from homeserver) | Federation server name |
 | `MATRIX_SSL_VERIFY` | `true` | Set to `false` for dev/self-signed certs |
+| `MATRIX_MANAGED_ACCOUNT_AUTH` | `password` | Authentication for accounts created and operated by MindRoom: `password` or `appservice` |
+| `MATRIX_APPSERVICE_TOKEN` | -- | Application-service token used when managed account auth is `appservice` |
+| `MATRIX_APPSERVICE_TOKEN_FILE` | -- | File alternative to `MATRIX_APPSERVICE_TOKEN` |
 
 Streaming behavior is configured in `config.yaml` with `defaults.enable_streaming` (default: `true`).
 
@@ -15019,6 +15022,12 @@ Provisioning may request localparts such as `mindroom_assistant` or `mindroom_ro
 For example, a persisted Matrix account such as `@assistant_live:example.com` can become the live assistant account even if the original provisioning request used `mindroom_assistant`.
 
 Users are automatically created during orchestrator startup and credentials are persisted in `mindroom_data/matrix_state.yaml`.
+
+Password mode generates a separate password for every managed account and uses normal Matrix registration and login.
+Application-service mode registers passwordless accounts inside an exclusive application-service namespace, then obtains a normal per-user device token for encryption and sync.
+Set `MATRIX_MANAGED_ACCOUNT_AUTH=appservice` and provide exactly one of `MATRIX_APPSERVICE_TOKEN` or `MATRIX_APPSERVICE_TOKEN_FILE`.
+The application-service token is used only for account registration and fresh device login; normal agent traffic uses each account's own persisted device token.
+Existing passwords are removed from `matrix_state.yaml` after a successful application-service login.
 
 ## Room Management
 

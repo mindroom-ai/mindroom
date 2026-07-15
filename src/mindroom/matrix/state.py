@@ -16,7 +16,7 @@ class MatrixAccount(BaseModel):
     """Represents a Matrix account (user or agent)."""
 
     username: str
-    password: str
+    password: str | None = None
     requested_username: str | None = None
     domain: str | None = None
     device_id: str | None = None
@@ -71,7 +71,7 @@ class MatrixState(BaseModel):
         self,
         key: str,
         username: str,
-        password: str,
+        password: str | None,
         *,
         requested_username: str | None = None,
         domain: str | None = None,

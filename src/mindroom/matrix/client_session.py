@@ -215,6 +215,19 @@ def _create_matrix_client(
     return client
 
 
+def create_authenticated_client(
+    homeserver: str,
+    user_id: str,
+    device_id: str,
+    access_token: str,
+    runtime_paths: RuntimePaths,
+) -> nio.AsyncClient:
+    """Create a Matrix client from newly issued login credentials."""
+    client = _create_matrix_client(homeserver, runtime_paths, user_id, access_token)
+    client.restore_login(user_id, device_id, access_token)
+    return client
+
+
 @asynccontextmanager
 async def matrix_client(
     homeserver: str,
@@ -280,6 +293,7 @@ async def restore_login(
 
 __all__ = [
     "PermanentMatrixStartupError",
+    "create_authenticated_client",
     "login",
     "matrix_client",
     "matrix_startup_error",
