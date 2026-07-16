@@ -117,7 +117,7 @@ def get_user_friendly_error_message(error: Exception, agent_name: str | None = N
     if isinstance(error, ModelSafeguardRefusalError):
         return (
             f"{agent_prefix}⚠️ This model's safeguards blocked the request. "
-            "Choose a different model or revise the prompt, then try again."
+            "Choose a different model (`!model list`) or revise the prompt, then try again."
         )
 
     # Only distinguish the most important error types

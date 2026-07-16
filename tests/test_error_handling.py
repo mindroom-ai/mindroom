@@ -74,7 +74,7 @@ def test_model_safeguard_refusal_gives_actionable_guidance() -> None:
 
     assert message == (
         "[mind] ⚠️ This model's safeguards blocked the request. "
-        "Choose a different model or revise the prompt, then try again."
+        "Choose a different model (`!model list`) or revise the prompt, then try again."
     )
     assert "stop_reason" not in message
 
