@@ -56,7 +56,11 @@ from mindroom.history.summary_call import (
 )
 from mindroom.history.types import HistoryPolicy, HistoryScope, HistoryScopeState, ResolvedHistorySettings
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
-from mindroom.token_budget import estimate_compaction_input_tokens
+from mindroom.token_budget import (
+    compaction_token_estimator,
+    compute_compaction_input_budget,
+    configured_model_max_output_tokens,
+)
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 from tests.conftest import FakeModel, bind_runtime_paths, prepare_history_for_run_for_test
 
@@ -646,7 +650,7 @@ def test_retry_policy_gives_up_on_non_retryable_errors() -> None:
 
 
 def test_retry_policy_gives_up_after_max_attempts() -> None:
-    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=2, budget=16_000, error=TimeoutError()) is None
+    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=2, budget=8_000, error=TimeoutError()) is None
 
 
 def test_retry_policy_clamps_to_floor_and_stops_there() -> None:
@@ -675,7 +679,7 @@ async def test_generate_compaction_summary_empty_result_raises_typed_error_with_
     """An empty summary response raises the typed error carrying response diagnostics."""
     with pytest.raises(
         _CompactionSummaryEmptyResultError,
-        match=r"returned no result \(output_tokens=0, has_reasoning=False\)",
+        match=r"empty or near-empty result \(output_tokens=0, has_reasoning=False, normalized_bytes=0\)",
     ):
         await generate_compaction_summary(
             model=_RecordingClaude(
@@ -688,16 +692,57 @@ async def test_generate_compaction_summary_empty_result_raises_typed_error_with_
         )
 
 
+@pytest.mark.asyncio
+async def test_generate_compaction_summary_rejects_near_empty_result() -> None:
+    with pytest.raises(_CompactionSummaryEmptyResultError, match=r"normalized_bytes=2"):
+        await generate_compaction_summary(
+            model=_RecordingClaude(
+                id="claude-sonnet-5",
+                response=ModelResponse(content="ok", output_tokens=1),
+            ),
+            summary_input="conversation payload",
+            summary_prompt="Summarize the conversation.",
+        )
+
+
 def test_retry_policy_shrinks_budget_for_empty_result() -> None:
     """Empty results may be a provider's response to an oversized request."""
     error = _CompactionSummaryEmptyResultError("summary generation returned no result")
     assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) == 8_000
-    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=2, budget=16_000, error=error) is None
+    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=2, budget=8_000, error=error) == 4_000
+    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=3, budget=4_000, error=error) is None
 
 
-def test_compaction_input_estimate_uses_tiktoken() -> None:
-    assert estimate_compaction_input_tokens("structured: true") == 3
-    assert estimate_compaction_input_tokens("☃☃") == 4
+def test_compaction_input_estimate_uses_tiktoken_for_known_model() -> None:
+    estimator = compaction_token_estimator(provider="openai", model_id="gpt-4o")
+
+    assert estimator.method == "tiktoken:o200k_base"
+    assert estimator.confidence == "high"
+    assert estimator.estimate("structured: true") == 3
+    assert estimator.estimate("☃☃") == 4
+
+
+def test_compaction_input_estimate_uses_conservative_claude_fallback() -> None:
+    estimator = compaction_token_estimator(provider="anthropic", model_id="claude-sonnet-5")
+
+    assert estimator.method == "utf8_bytes_claude_conservative"
+    assert estimator.confidence == "low"
+    assert estimator.estimate("structured: true") == len(b"structured: true")
+    assert estimator.estimate("☃☃") == 6
+
+
+def test_compaction_budget_reserves_loaded_model_output_cap() -> None:
+    model = _RecordingClaude(id="claude-sonnet-5", max_tokens=64_000)
+
+    assert configured_model_max_output_tokens(model) == 64_000
+    assert (
+        compute_compaction_input_budget(
+            100_000,
+            reserve_tokens=16_384,
+            model_max_output_tokens=configured_model_max_output_tokens(model),
+        )
+        == 24_000
+    )
 
 
 @pytest.mark.asyncio
@@ -718,7 +763,7 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
 
     async def flaky_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
         attempts.append(summary_input)
-        if len(attempts) == 1:
+        if len(attempts) <= 2:
             msg = "summary generation returned no result (output_tokens=0, has_reasoning=False)"
             raise _CompactionSummaryEmptyResultError(msg)
         return SessionSummary(summary="recovered summary", updated_at=datetime.now(UTC))
@@ -743,10 +788,12 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
         )
 
     assert outcome is not None
-    # Chunk 1 fails empty, is rebuilt smaller, then chunk 2 compacts run-2.
-    assert len(attempts) == 3
-    assert estimate_compaction_input_tokens(attempts[1]) < estimate_compaction_input_tokens(attempts[0])
-    assert attempts[2] != attempts[1]
+    # Chunk 1 fails twice, succeeds on a bounded third attempt, then chunk 2 compacts run-2.
+    assert len(attempts) == 4
+    estimator = compaction_token_estimator(provider="fake", model_id="summary-model")
+    assert estimator.estimate(attempts[1]) < estimator.estimate(attempts[0])
+    assert estimator.estimate(attempts[2]) < estimator.estimate(attempts[1])
+    assert attempts[3] != attempts[2]
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
     assert persisted.summary is not None

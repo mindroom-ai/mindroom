@@ -18,8 +18,9 @@ It enforces the call-side half of the compaction invariants
    ``SummaryRetryPolicy`` decides which error classes warrant a smaller retry
    (timeouts and the named context-length fragments), the shrink schedule
    (halving), and the give-up floor — no inline string matching at call sites.
-   Empty-text success responses also retry with less input because some providers
-   surface rejected or oversized requests as an empty successful response.
+   Empty or near-empty success responses also retry with less input because some
+   providers surface rejected or oversized requests as a successful response
+   carrying no useful summary.
 
 5. Output-capped summaries use an explicit retry signal.
    ``generate_compaction_summary`` refuses to return a likely truncated summary,
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
+_MIN_COMPACTION_SUMMARY_BYTES = 16
 
 _RETRYABLE_PROVIDER_ERROR_FRAGMENTS = (
     "timed out",
@@ -91,6 +93,7 @@ class SummaryRetryPolicy:
     """
 
     max_attempts: int = 2
+    empty_result_max_attempts: int = 3
     shrink_divisor: int = 2
     floor_tokens: int = 1_000
 
@@ -103,9 +106,11 @@ class SummaryRetryPolicy:
 
     def retry_budget(self, *, attempt: int, budget: int, error: Exception) -> int | None:
         """Return the input budget for the next attempt, or None when the policy gives up."""
-        if attempt >= self.max_attempts:
+        is_empty_result = isinstance(error, _CompactionSummaryEmptyResultError)
+        max_attempts = self.empty_result_max_attempts if is_empty_result else self.max_attempts
+        if attempt >= max_attempts:
             return None
-        if not isinstance(error, _CompactionSummaryEmptyResultError) and not self.should_shrink(error):
+        if not is_empty_result and not self.should_shrink(error):
             return None
         smaller_budget = max(self.floor_tokens, budget // self.shrink_divisor)
         if smaller_budget >= budget:
@@ -266,11 +271,15 @@ async def generate_compaction_summary(
         raise exc.original from exc
     raw_text = response.content if isinstance(response.content, str) else ""
     normalized_text = _normalize_compaction_summary_text(raw_text)
-    if not normalized_text:
+    normalized_bytes = len(normalized_text.encode("utf-8"))
+    output_tokens = _response_output_tokens(response)
+    is_near_empty = output_tokens is not None and normalized_bytes < _MIN_COMPACTION_SUMMARY_BYTES
+    if not normalized_text or is_near_empty:
         msg = (
-            "summary generation returned no result "
-            f"(output_tokens={_response_output_tokens(response)}, "
-            f"has_reasoning={bool(response.reasoning_content or response.redacted_reasoning_content)})"
+            "summary generation returned an empty or near-empty result "
+            f"(output_tokens={output_tokens}, "
+            f"has_reasoning={bool(response.reasoning_content or response.redacted_reasoning_content)}, "
+            f"normalized_bytes={normalized_bytes})"
         )
         raise _CompactionSummaryEmptyResultError(msg)
     if _summary_response_likely_truncated(response, output_token_limit=summary_output_limit):

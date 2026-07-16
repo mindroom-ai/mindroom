@@ -114,7 +114,7 @@ async def test_rewrite_passes_full_summary_input_budget_into_chunk_construction(
             storage=storage,
             persisted_session=working_session,
             working_session=working_session,
-            summary_model=FakeModel(id="summary-model", provider="fake"),
+            summary_model=FakeModel(id="gpt-4o", provider="openai"),
             summary_model_name="summary-model",
             session_id="session-1",
             scope=scope,

@@ -7,7 +7,6 @@ from collections.abc import Awaitable, Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from functools import partial
 from html import escape
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
@@ -40,7 +39,12 @@ from mindroom.history.types import (
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
-from mindroom.token_budget import estimate_compaction_input_tokens, estimate_text_tokens, stable_serialize
+from mindroom.token_budget import (
+    compaction_token_estimator,
+    estimate_compaction_input_tokens,
+    estimate_text_tokens,
+    stable_serialize,
+)
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
 
 if TYPE_CHECKING:
@@ -344,7 +348,15 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
     before_persist_callback: Callable[[Sequence[RunOutput | TeamRunOutput]], Awaitable[None]] | None = None,
 ) -> _CompactionRewriteResult | None:
     final_summary_text = _current_summary_text(working_session) or ""
-    token_estimator = partial(estimate_compaction_input_tokens, model_id=summary_model.id)
+    estimator = compaction_token_estimator(provider=summary_model.provider, model_id=summary_model.id)
+    token_estimator = estimator.estimate
+    logger.info(
+        "Compaction token estimator selected",
+        provider=summary_model.provider,
+        model=summary_model.id,
+        token_estimator_method=estimator.method,
+        token_estimate_confidence=estimator.confidence,
+    )
     total_compacted_run_count = 0
     all_compacted_run_ids: list[str] = []
     all_compacted_run_id_set: set[str] = set()
@@ -375,6 +387,8 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
                 scope=scope.key,
                 candidate_runs=len(compactable_runs),
                 summary_input_budget=summary_input_budget,
+                token_estimator_method=estimator.method,
+                token_estimate_confidence=estimator.confidence,
             )
             if total_compacted_run_count == 0:
                 return None
@@ -392,6 +406,8 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
             history_settings=history_settings,
             summary_prompt=summary_prompt,
             token_estimator=token_estimator,
+            token_estimator_method=estimator.method,
+            token_estimate_confidence=estimator.confidence,
         )
         included_runs = new_summary.included_runs
         generated_summary = new_summary.summary
@@ -507,6 +523,8 @@ async def _generate_compaction_summary_with_retry(
     history_settings: ResolvedHistorySettings,
     summary_prompt: str,
     token_estimator: Callable[[str], int],
+    token_estimator_method: str,
+    token_estimate_confidence: str,
 ) -> _GeneratedSummaryChunk:
     """Generate one summary chunk, shrinking the input per the retry policy when safe."""
     summary_input = initial_summary_input
@@ -526,6 +544,8 @@ async def _generate_compaction_summary_with_retry(
             included_runs=len(included_runs),
             estimated_input_tokens=estimated_input_tokens,
             summary_input_budget=budget,
+            token_estimator_method=token_estimator_method,
+            token_estimate_confidence=token_estimate_confidence,
             timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
         )
         try:
@@ -545,6 +565,8 @@ async def _generate_compaction_summary_with_retry(
                 included_runs=len(included_runs),
                 estimated_input_tokens=estimated_input_tokens,
                 summary_input_budget=budget,
+                token_estimator_method=token_estimator_method,
+                token_estimate_confidence=token_estimate_confidence,
                 timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
                 duration_ms=duration_ms,
                 error=str(exc) or type(exc).__name__,
@@ -562,6 +584,18 @@ async def _generate_compaction_summary_with_retry(
                 # feasibility gate. If no run fits the smaller budget, fall through
                 # to raise instead of resending the original input.
                 if rebuilt_runs:
+                    logger.info(
+                        "Compaction summary chunk retry scheduled",
+                        session_id=session_id,
+                        scope=scope.key,
+                        attempt=attempt,
+                        next_attempt=attempt + 1,
+                        previous_input_budget=budget,
+                        next_input_budget=retry_budget,
+                        token_estimator_method=token_estimator_method,
+                        token_estimate_confidence=token_estimate_confidence,
+                        error_type=type(exc).__name__,
+                    )
                     summary_input = rebuilt_input
                     included_runs = rebuilt_runs
                     budget = retry_budget
@@ -578,6 +612,8 @@ async def _generate_compaction_summary_with_retry(
             included_runs=len(included_runs),
             estimated_input_tokens=estimated_input_tokens,
             summary_input_budget=budget,
+            token_estimator_method=token_estimator_method,
+            token_estimate_confidence=token_estimate_confidence,
             timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
             duration_ms=duration_ms,
         )
