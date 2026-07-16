@@ -177,7 +177,7 @@ class PlaywrightMCPBrowserProvider:
                 raise PlaywrightActionOutcomeUnknownError(str(exc)) from exc
             raise
         finally:
-            _remove_screenshot_output(screenshot_output)
+            await _remove_screenshot_output(screenshot_output)
 
     @property
     def running(self) -> bool:
@@ -589,9 +589,13 @@ def _provider_result_with_screenshot(
     )
 
 
-def _remove_screenshot_output(screenshot_output: _ScreenshotOutput | None) -> None:
-    if screenshot_output is not None:
-        screenshot_output.path.unlink(missing_ok=True)
+async def _remove_screenshot_output(screenshot_output: _ScreenshotOutput | None) -> None:
+    if screenshot_output is None:
+        return
+    # Playwright MCP may finish replacing its output file just after returning the stdio tool result.
+    screenshot_output.path.unlink(missing_ok=True)
+    await asyncio.sleep(0.1)
+    screenshot_output.path.unlink(missing_ok=True)
 
 
 def _validated_browser_image(content: bytes, mime_type: str) -> BrowserImage:

@@ -210,18 +210,27 @@ async def test_provider_removes_only_its_transient_screenshot(
     unrelated = tmp_path / "page-keep.png"
     unrelated.write_bytes(b"keep")
     provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
+    late_writes: list[asyncio.Task[None]] = []
 
     async def take_screenshot(tool_name: str, arguments: dict[str, object]) -> CallToolResult:
         assert tool_name == "browser_take_screenshot"
         filename = arguments["filename"]
         assert isinstance(filename, str)
-        (tmp_path / filename).write_bytes(image_bytes)
+        screenshot_path = tmp_path / filename
+        screenshot_path.write_bytes(image_bytes)
+
+        async def finish_mcp_write() -> None:
+            await asyncio.sleep(0.01)
+            screenshot_path.write_bytes(image_bytes)
+
+        late_writes.append(asyncio.create_task(finish_mcp_write()))
         return _text_result(f"Screenshot saved as {filename}")
 
     call_tool = AsyncMock(side_effect=take_screenshot)
     monkeypatch.setattr(provider, "_call_tool", call_tool)
 
     result = await provider.execute("screenshot", {})
+    await asyncio.gather(*late_writes)
 
     assert result.image is not None
     assert result.image.content == image_bytes
