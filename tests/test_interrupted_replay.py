@@ -121,7 +121,7 @@ def test_build_interrupted_replay_run_creates_completed_agent_run_with_summary_a
     """Interrupted snapshots should replay through the normal completed history lane."""
     snapshot = InterruptedReplaySnapshot(
         user_message="Please continue",
-        partial_text="Half done",
+        partial_text="Text emitted before interruption",
         completed_tools=(
             ToolTraceEntry(
                 type="tool_call_completed",
@@ -158,7 +158,7 @@ def test_build_interrupted_replay_run_creates_completed_agent_run_with_summary_a
         ("user", "Please continue"),
         (
             "assistant",
-            "Half done\n\n"
+            "Text emitted before interruption\n\n"
             "(turn stopped before completion; "
             "1 tool call(s) had finished; "
             "1 tool call(s) were still running)\n\n"
@@ -175,7 +175,7 @@ def test_interrupted_replay_content_retains_safe_matrix_tool_previews_without_ra
     """Replay should retain redacted Matrix previews without restoring provider-like tool logs."""
     snapshot = InterruptedReplaySnapshot(
         user_message="Please continue",
-        partial_text="Half done",
+        partial_text="Text emitted before interruption",
         completed_tools=(
             ToolTraceEntry(
                 type="tool_call_completed",
@@ -199,7 +199,7 @@ def test_interrupted_replay_content_retains_safe_matrix_tool_previews_without_ra
     content = _assistant_text(run)
     assert "[tool:" not in content
     assert "[interrupted]" not in content
-    assert content.startswith("Half done")
+    assert content.startswith("Text emitted before interruption")
     assert "turn stopped before completion" in content
     assert "get_attachment" in content
     assert "attachment_id=abc, mindroom_output_path=scratch/voice.m4a" in content
@@ -283,7 +283,7 @@ def test_build_interrupted_replay_run_tracks_replay_and_seen_event_metadata(orig
     """Interrupted replay runs should preserve the event-consumption metadata used by prompt prep."""
     snapshot = InterruptedReplaySnapshot(
         user_message="Please continue",
-        partial_text="Half done",
+        partial_text="Text emitted before interruption",
         completed_tools=(),
         interrupted_tools=(),
         run_metadata={
@@ -317,7 +317,7 @@ def test_build_interrupted_replay_run_preserves_coalesced_source_metadata() -> N
     """Interrupted replay runs should round-trip the same coalesced metadata as completed runs."""
     snapshot = build_interrupted_replay_snapshot(
         user_message="Please continue",
-        partial_text="Half done",
+        partial_text="Text emitted before interruption",
         completed_tools=(),
         interrupted_tools=(),
         run_metadata={
@@ -381,7 +381,7 @@ def test_persist_interrupted_replay_snapshot_preserves_newer_persisted_runs(tmp_
 
         snapshot = build_interrupted_replay_snapshot(
             user_message="Please continue",
-            partial_text="Half done",
+            partial_text="Text emitted before interruption",
             completed_tools=(),
             interrupted_tools=(),
             run_metadata=None,
@@ -411,7 +411,7 @@ def test_turn_recorder_tracks_text_tools_and_metadata() -> None:
         run_metadata={"matrix_event_id": "e1", "matrix_seen_event_ids": ["e1"]},
     )
 
-    recorder.set_assistant_text("Half done")
+    recorder.set_assistant_text("Text emitted before interruption")
     recorder.set_completed_tools(
         [
             ToolTraceEntry(
@@ -436,7 +436,7 @@ def test_turn_recorder_tracks_text_tools_and_metadata() -> None:
     snapshot = recorder.interrupted_snapshot()
 
     assert snapshot.user_message == "Please continue"
-    assert snapshot.partial_text == "Half done"
+    assert snapshot.partial_text == "Text emitted before interruption"
     assert snapshot.run_metadata == {"matrix_event_id": "e1", "matrix_seen_event_ids": ["e1"]}
     assert [tool.tool_name for tool in snapshot.completed_tools] == ["run_shell_command"]
     assert [tool.tool_name for tool in snapshot.interrupted_tools] == ["save_file"]
@@ -459,11 +459,11 @@ def test_turn_recorder_record_helpers_capture_completed_and_interrupted_turns() 
 
     recorder.record_completed(
         run_metadata={"matrix_event_id": "e1", "matrix_seen_event_ids": ["e1"]},
-        assistant_text="Half done",
+        assistant_text="Text emitted before interruption",
         completed_tools=[completed_tool],
     )
     assert recorder.outcome == "completed"
-    assert recorder.assistant_text == "Half done"
+    assert recorder.assistant_text == "Text emitted before interruption"
     assert [tool.tool_name for tool in recorder.completed_tools] == ["run_shell_command"]
     assert recorder.interrupted_tools == []
 
