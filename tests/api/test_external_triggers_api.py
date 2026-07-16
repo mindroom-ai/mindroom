@@ -1,4 +1,4 @@
-"""API tests for signed external trigger ingress."""
+"""API tests for authenticated external trigger ingress."""
 
 from __future__ import annotations
 

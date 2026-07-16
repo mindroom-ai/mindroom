@@ -87,7 +87,7 @@ No new Matrix room is created for a trigger.
 
 Reusable triggers use Ed25519 signatures and caller-chosen stable event IDs.
 
-Single-use triggers use a random bearer capability, store only its hash, and use the immutable trigger record ID for replay protection.
+Single-use triggers use a random bearer capability, store only its hash, and use the immutable trigger record UID for replay protection.
 
 Single-use triggers are consumed only after Matrix delivery succeeds, so a failed delivery can be retried without minting a new callback.
 

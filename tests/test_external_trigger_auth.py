@@ -1,4 +1,4 @@
-"""Tests for external trigger Ed25519 request authentication."""
+"""Tests for external trigger request authentication."""
 
 from __future__ import annotations
 

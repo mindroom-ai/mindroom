@@ -1,4 +1,4 @@
-"""Public signed API endpoint for external trigger delivery."""
+"""Public API endpoint for authenticated external trigger delivery."""
 
 from __future__ import annotations
 

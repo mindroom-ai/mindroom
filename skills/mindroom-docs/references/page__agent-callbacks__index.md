@@ -32,7 +32,7 @@ Callbacks use the existing `external_trigger_policy`, which is enabled by defaul
 `mint_callback(label)` returns a script path and an instruction like this:
 
 ```text
-When finished, run: bash /path/to/cb_1234.sh "<short result summary>"
+When finished, run: bash /path/to/callback_1234.sh "<short result summary>"
 ```
 
 The script needs only Bash and curl.
@@ -46,6 +46,8 @@ After successful Matrix delivery, the external trigger is consumed and the scrip
 If delivery fails, the script remains so the background agent can retry it.
 
 Changing the request's `event_id` cannot make the trigger deliver more than once.
+
+Unused callbacks do not expire automatically, so delete abandoned records with `external_trigger_manager` if they are no longer needed.
 
 ## Network Access
 
