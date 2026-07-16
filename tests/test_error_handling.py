@@ -155,6 +155,7 @@ def test_context_window_overflow_classification(error: Exception | str) -> None:
         ModelProviderError(message="Internal server error", status_code=500),
         ModelProviderError(message="Output token limit reached at max_tokens", status_code=500),
         ModelProviderError(message="Output exceeds the context window", status_code=500),
+        RuntimeError("prompt is too long while validating a local template"),
     ],
 )
 def test_context_window_overflow_counterexamples(error: Exception) -> None:
@@ -173,6 +174,23 @@ def test_wrapped_context_overflow_keeps_user_diagnostic() -> None:
 
     assert "input token count (250001)" in message
     assert "temporarily unavailable" not in message
+
+
+def test_structured_context_overflow_hides_wrapper_metadata() -> None:
+    """Only the provider diagnostic from a structured overflow is user-visible."""
+    error = ModelProviderError(
+        message=(
+            "{'type': 'error', 'error': {'type': 'invalid_request_error', "
+            "'message': 'prompt is too long: 250001 tokens > 200000 maximum'}, "
+            "'request_id': 'provider-request-id'}"
+        ),
+        status_code=500,
+    )
+
+    message = get_user_friendly_error_message(error)
+
+    assert "prompt is too long: 250001 tokens > 200000 maximum" in message
+    assert "provider-request-id" not in message
 
 
 def test_unstructured_overloaded_text_is_not_misclassified() -> None:

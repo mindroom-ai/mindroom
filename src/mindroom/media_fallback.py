@@ -30,7 +30,12 @@ _INLINE_MEDIA_FALLBACK_MARKER = "[Inline media unavailable for this model]"
 _PAYLOAD_TOO_LARGE_STATUS = 413
 _RATE_LIMIT_STATUS = 429
 _SERVER_ERROR_STATUS = 500
-_OVERSIZED_REQUEST_MARKERS = ("payload too large", "content_too_large", "request too large")
+_OVERSIZED_REQUEST_MARKERS = (
+    "payload too large",
+    "content_too_large",
+    "request too large",
+    "request entity too large",
+)
 
 
 @dataclass(frozen=True, slots=True)
