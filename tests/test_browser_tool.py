@@ -617,6 +617,7 @@ async def test_desktop_browser_screenshot_can_return_sendable_attachment(
         requester_id="@alice:example.org",
         agent_name="computer",
         client=object(),
+        attachment_ids=(),
         runtime_attachment_ids=[],
         runtime_media_attachments={},
     )

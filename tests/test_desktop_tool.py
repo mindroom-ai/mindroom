@@ -116,6 +116,7 @@ async def test_screenshot_can_return_turn_scoped_sendable_attachment(monkeypatch
         requester_id="@alice:example.org",
         agent_name="computer",
         client=object(),
+        attachment_ids=(),
         runtime_attachment_ids=[],
         runtime_media_attachments={},
     )

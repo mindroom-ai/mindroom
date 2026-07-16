@@ -479,12 +479,16 @@ def register_tool_runtime_media_attachment(
 ) -> None:
     """Register an encrypted media handle for attachment sends during this turn only."""
     existing = context.runtime_media_attachments.get(attachment.attachment_id)
-    if existing is not None and existing != attachment:
+    if existing is not None:
+        if existing == attachment:
+            return
+        msg = f"Runtime attachment ID collision: {attachment.attachment_id}"
+        raise ValueError(msg)
+    if attachment_id_available_in_tool_runtime_context(context, attachment.attachment_id):
         msg = f"Runtime attachment ID collision: {attachment.attachment_id}"
         raise ValueError(msg)
     context.runtime_media_attachments[attachment.attachment_id] = attachment
-    if attachment.attachment_id not in context.runtime_attachment_ids:
-        context.runtime_attachment_ids.append(attachment.attachment_id)
+    context.runtime_attachment_ids.append(attachment.attachment_id)
 
 
 def get_tool_runtime_media_attachment(

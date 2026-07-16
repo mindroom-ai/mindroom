@@ -671,6 +671,56 @@ async def test_send_context_attachments_reuses_ephemeral_encrypted_media(tmp_pat
     assert payload["missing_attachment_ids"] == []
 
 
+@pytest.mark.parametrize("existing_registry", ["attachment_ids", "runtime_attachment_ids"])
+def test_runtime_media_registration_rejects_attachment_id_namespace_collisions(
+    tmp_path: Path,
+    existing_registry: str,
+) -> None:
+    """Runtime media must not shadow another attachment registry entry."""
+    attachment = RuntimeEncryptedMediaAttachment(
+        attachment_id="att_collision",
+        filename="desktop-screenshot.png",
+        url="mxc://example.org/screenshot",
+        key="key",
+        iv="iv",
+        sha256="hash",
+        mime_type="image/png",
+        size=123,
+    )
+    context = _tool_context(
+        tmp_path,
+        attachment_ids=(attachment.attachment_id,) if existing_registry == "attachment_ids" else (),
+    )
+    if existing_registry == "runtime_attachment_ids":
+        context.runtime_attachment_ids.append(attachment.attachment_id)
+
+    with pytest.raises(ValueError, match="Runtime attachment ID collision"):
+        register_tool_runtime_media_attachment(context, attachment)
+
+    assert context.runtime_media_attachments == {}
+
+
+def test_runtime_media_registration_is_idempotent(tmp_path: Path) -> None:
+    """The same runtime media handle may be registered repeatedly without duplication."""
+    context = _tool_context(tmp_path)
+    attachment = RuntimeEncryptedMediaAttachment(
+        attachment_id="att_screenshot",
+        filename="desktop-screenshot.png",
+        url="mxc://example.org/screenshot",
+        key="key",
+        iv="iv",
+        sha256="hash",
+        mime_type="image/png",
+        size=123,
+    )
+
+    register_tool_runtime_media_attachment(context, attachment)
+    register_tool_runtime_media_attachment(context, attachment)
+
+    assert context.runtime_media_attachments == {attachment.attachment_id: attachment}
+    assert context.runtime_attachment_ids == [attachment.attachment_id]
+
+
 @pytest.mark.asyncio
 async def test_send_context_attachments_reuses_latest_thread_event_id_for_multiple_files(tmp_path: Path) -> None:
     """Threaded attachment batches should resolve the latest event once and advance it locally."""
