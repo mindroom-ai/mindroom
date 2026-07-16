@@ -24,7 +24,7 @@ from mindroom.config.main import (
 from mindroom.config.models import AgentLearningMode, ToolConfigEntry
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.catalog import ToolCategory, ToolStatus, resolved_tool_metadata_for_runtime
+from mindroom.tool_system.catalog import SetupType, ToolCategory, ToolStatus, resolved_tool_metadata_for_runtime
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -79,6 +79,36 @@ def validate_knowledge_bases(
     if not available:
         return f"Error: Unknown knowledge bases: {invalid}. No knowledge bases are configured."
     return f"Error: Unknown knowledge bases: {invalid}. Available knowledge bases: {available}."
+
+
+def _oauth_onboarding_guidance(
+    previous_tools: list[str],
+    updated_tools: list[str],
+    tool_metadata: dict[str, ToolMetadata],
+) -> str:
+    """Tell the calling agent how to finish setup for newly enabled OAuth tools."""
+    previous_tool_names = set(previous_tools)
+    added_oauth_tools = [
+        tool_name
+        for tool_name in updated_tools
+        if tool_name not in previous_tool_names
+        and (metadata := tool_metadata.get(tool_name)) is not None
+        and metadata.setup_type is SetupType.OAUTH
+        and metadata.auth_provider is not None
+    ]
+    if not added_oauth_tools:
+        return ""
+
+    tool_list = ", ".join(f"`{tool_name}`" for tool_name in added_oauth_tools)
+    return (
+        "\n\n**Next action - connect OAuth:** "
+        f"Before replying to the user, call a harmless read or list operation from each newly enabled OAuth tool: {tool_list}. "
+        "If a result has `oauth_connection_required: true`, present its exact `connect_url` directly to the user. "
+        "Do not send the user to the dashboard when `connect_url` is available. "
+        "If `requires_host_browser` is true, explain that the localhost link must be opened in a browser on the "
+        "computer where MindRoom is running. "
+        "After the user connects, retry the operation."
+    )
 
 
 class _InfoType(str, Enum):
@@ -644,6 +674,11 @@ class ConfigManagerTools(Toolkit):
 
             # Add to config
             config.agents[agent_name] = new_agent
+            oauth_guidance = _oauth_onboarding_guidance(
+                [],
+                config.resolve_entity(agent_name).available_tools,
+                tool_metadata,
+            )
 
             # Save config
             validate_and_persist_config_payload(config.authored_model_dump(), self.runtime_paths)
@@ -660,6 +695,7 @@ class ConfigManagerTools(Toolkit):
                 f"- Model: {model}\n"
                 f"- Rooms: {rooms_str}\n\n"
                 f"The agent is now available and can be mentioned with @{agent_name}"
+                f"{oauth_guidance}"
             )
         except (ValidationError, ConfigRuntimeValidationError) as exc:
             return format_invalid_config_message(exc, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
@@ -696,6 +732,7 @@ class ConfigManagerTools(Toolkit):
                 return f"Error: Agent '{agent_name}' not found. Use manage_agent with operation='create' to create it."
 
             agent = config.agents[agent_name]
+            previous_tools = config.resolve_entity(agent_name).available_tools
 
             # Validate tools if provided
             if tools is not None:
@@ -763,8 +800,16 @@ class ConfigManagerTools(Toolkit):
             # Save config
             validate_and_persist_config_payload(config.authored_model_dump(), self.runtime_paths)
 
-            return f"✅ Successfully updated agent '{agent_name}'!\n\n**Changes:**\n" + "\n".join(
-                f"- {c}" for c in changes
+            oauth_guidance = _oauth_onboarding_guidance(
+                previous_tools,
+                config.resolve_entity(agent_name).available_tools,
+                tool_metadata,
+            )
+
+            return (
+                f"✅ Successfully updated agent '{agent_name}'!\n\n**Changes:**\n"
+                + "\n".join(f"- {c}" for c in changes)
+                + oauth_guidance
             )
         except (ValidationError, ConfigRuntimeValidationError) as exc:
             return format_invalid_config_message(exc, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)

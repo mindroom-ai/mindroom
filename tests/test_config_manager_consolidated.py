@@ -357,6 +357,60 @@ class TestConsolidatedConfigManager:
         finally:
             config_path.unlink(missing_ok=True)
 
+    def test_manage_agent_create_prompts_direct_oauth_connection(self, tmp_path: Path) -> None:
+        """Creating an agent with OAuth tools should direct the caller through the tool result."""
+        config_path = _minimal_config_path(tmp_path)
+        cm = _config_manager(config_path)
+
+        result = cm.manage_agent(
+            operation="create",
+            agent_name="drive_agent",
+            display_name="Drive Agent",
+            role="Read Drive files",
+            tools=["google_drive"],
+        )
+
+        assert "call a harmless read or list operation" in result
+        assert "`google_drive`" in result
+        assert "present its exact `connect_url` directly" in result
+        assert "Do not send the user to the dashboard" in result
+        assert "`requires_host_browser`" in result
+        assert "computer where MindRoom is running" in result
+
+    def test_manage_agent_update_only_prompts_for_new_oauth_tools(self, tmp_path: Path) -> None:
+        """An update should prompt only when it adds an interactive OAuth-backed tool."""
+        config_path = _minimal_config_path(tmp_path)
+        write_config_yaml(
+            Config(
+                agents={
+                    "test_agent": AgentConfig(
+                        display_name="Test Agent",
+                        role="Test role",
+                        tools=["google_drive"],
+                    ),
+                },
+                models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            ),
+            config_path,
+        )
+        cm = _config_manager(config_path)
+
+        non_oauth_result = cm.manage_agent(
+            operation="update",
+            agent_name="test_agent",
+            tools=["google_drive", "calculator"],
+        )
+        oauth_result = cm.manage_agent(
+            operation="update",
+            agent_name="test_agent",
+            tools=["google_drive", "calculator", "google_calendar"],
+        )
+
+        assert "Next action - connect OAuth" not in non_oauth_result
+        assert "Next action - connect OAuth" in oauth_result
+        assert "`google_calendar`" in oauth_result
+        assert "`google_drive`" not in oauth_result.split("**Next action - connect OAuth:**", maxsplit=1)[1]
+
     def test_manage_agent_create_returns_invalid_plugin_manifest_error(self, tmp_path: Path) -> None:
         """Write config-manager flows should keep runtime plugin validation in the invalid-config channel."""
         cm = _config_manager(_invalid_plugin_config_path(tmp_path, with_agent=False))

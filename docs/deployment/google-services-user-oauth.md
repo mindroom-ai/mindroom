@@ -29,14 +29,15 @@ agents:
 
 ## Connect
 
-Start MindRoom, open the dashboard, and select **Connect** for each Google integration you want to use.
-The dashboard explains which installation and credential scope will receive the connection before you continue.
+After enabling a Google tool for an agent, ask the agent to perform a harmless read or list operation with that tool.
+If the tool is disconnected, its result contains structured `OAuthConnectionRequired` data with `oauth_connection_required: true` and the exact `connect_url` for that provider, requester, agent, and execution scope.
+The agent should present that `connect_url` directly instead of sending you to the dashboard.
+If the result includes `requires_host_browser: true`, open the localhost link in a browser on the computer where the MindRoom process is running, not on a phone or another computer.
+If you made the request from another device, open the conversation on the MindRoom computer or copy the complete URL into a browser there.
 Google asks you to choose an account and approve only that provider's scopes.
-After the browser flow completes, the integration is ready for the selected agent and execution scope.
-
-If an agent tries a Google tool before it is connected, the tool result includes a MindRoom connect URL for that exact provider and agent scope.
-When that URL uses `localhost`, open it in a browser on the computer where the MindRoom process is running, not on a phone or another computer.
-If you made the request from another device, open the conversation on the MindRoom computer or copy the complete URL into a browser there, complete the Google flow, and retry the request.
+After the browser flow completes, retry the operation and the integration is ready for the selected agent and execution scope.
+As a manual alternative, open the dashboard and select **Connect** for the Google integration when a tool result does not provide a connect URL.
+The dashboard explains which installation and credential scope will receive the connection before you continue.
 
 OAuth tokens are stored under provider token services such as `google_drive_oauth`.
 Editable tool settings are stored separately under services such as `google_drive`, `google_calendar`, `google_sheets`, and `gmail`.

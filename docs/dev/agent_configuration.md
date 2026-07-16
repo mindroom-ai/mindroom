@@ -599,9 +599,15 @@ Some tools need additional setup:
 - **email** - Configure SMTP server details
 
 ### Tools requiring OAuth:
-- **gmail**, **google_calendar**, **google_drive**, **google_sheets** - Google OAuth (configure via dashboard)
+- **gmail**, **google_calendar**, **google_drive**, **google_sheets** - Google OAuth
 - **homeassistant** - Home Assistant OAuth or long-lived access token
-- **spotify** - Spotify OAuth (configure via dashboard)
+- **spotify** - Spotify OAuth
+
+After enabling an OAuth-backed tool, call a harmless read or list operation from that tool.
+If it returns structured `OAuthConnectionRequired` data with `oauth_connection_required: true`, present the exact agent-scoped `connect_url` directly and do not send the user to the dashboard.
+If `requires_host_browser` is true, explain that the localhost link must be opened in a browser on the computer where MindRoom is running.
+Retry the operation after the user connects.
+Use the dashboard only as a manual alternative when no `connect_url` is available.
 
 ### Tools requiring software:
 - **docker** - Install Docker on your system

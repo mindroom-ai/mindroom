@@ -40,6 +40,15 @@ See [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-con
 Configured MCP servers also appear here as dynamic tools named `mcp_<server_id>`.
 See [MCP](../mcp.md) for the `mcp_servers` config and naming rules.
 
+## OAuth Onboarding In Conversation
+
+After an agent enables an OAuth-backed tool, it should immediately call a harmless read or list operation from that tool.
+If the tool is disconnected, the result contains structured `OAuthConnectionRequired` data with `oauth_connection_required: true`, the exact agent-scoped `connect_url`, and `requires_host_browser: true` when the URL uses localhost.
+The agent should present `connect_url` directly instead of sending the user to the dashboard.
+When `requires_host_browser` is true, the agent should explain that the localhost link must be opened in a browser on the computer where MindRoom is running, not on a phone or another computer.
+After the user connects, the agent should retry the operation.
+The dashboard remains a manual alternative when a tool result does not provide a connect URL.
+
 ## Browse By Topic
 
 - [Execution & Coding](execution-and-coding.md) - Local files, shell, Python, coding helpers, and worker-routed execution tools.
