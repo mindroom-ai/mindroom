@@ -39,6 +39,7 @@ _OAUTH_TOKEN_SERVICE_SUFFIX = "_oauth"  # noqa: S105
 _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
     {
         "google_calendar",
+        "google_docs",
         "google_drive",
         "google_gmail",
         "google_sheets",

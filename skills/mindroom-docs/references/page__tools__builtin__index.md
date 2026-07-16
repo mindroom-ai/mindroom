@@ -9,7 +9,7 @@
 | Category | Tools | Link |
 |----------|-------|------|
 | **Execution & Coding** | file, shell, python, coding, docker, calculator, reasoning, sleep | [→ execution-and-coding](https://docs.mindroom.chat/tools/execution-and-coding/) |
-| **Data & Databases** | sql, postgres, neo4j, duckdb, csv, pandas, google_drive, google_sheets, yfinance | [→ data-and-databases](https://docs.mindroom.chat/tools/data-and-databases/) |
+| **Data & Databases** | sql, postgres, neo4j, duckdb, csv, pandas, google_drive, google_docs, google_sheets, yfinance | [→ data-and-databases](https://docs.mindroom.chat/tools/data-and-databases/) |
 | **Web Search** | duckduckgo, googlesearch, tavily, exa, serpapi, serper, searxng | [→ web-search](https://docs.mindroom.chat/tools/web-search/) |
 | **Web Scraping & Browser** | firecrawl, crawl4ai, browser, jina, website, trafilatura | [→ web-scraping-and-browser](https://docs.mindroom.chat/tools/web-scraping-and-browser/) |
 | **Research Sources** | arxiv, google_scholar, wikipedia, pubmed, hackernews | [→ research-sources](https://docs.mindroom.chat/tools/research-sources/) |

@@ -28,6 +28,7 @@ from mindroom.oauth import OAuthClaimValidationError, OAuthProvider
 from mindroom.oauth import registry as oauth_registry
 from mindroom.oauth import service as oauth_service
 from mindroom.oauth.google_calendar import google_calendar_oauth_provider
+from mindroom.oauth.google_docs import google_docs_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.providers import (
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
@@ -3583,6 +3584,30 @@ def test_google_status_reports_connected_with_service_account(tmp_path: Path) ->
     assert status_response.json()["client_config_service"] == "google_drive_oauth_client"
     assert status_response.json()["client_config_redirect_uri_supported"] is True
     assert status_response.json()["has_service_account_config"] is True
+    assert status_response.json()["connected"] is True
+
+
+def test_google_docs_status_reports_capabilities_with_service_account(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "GOOGLE_SERVICE_ACCOUNT_FILE": str(tmp_path / "google-service-account.json"),
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = google_docs_oauth_provider()
+
+    with TestClient(api_app, base_url="http://localhost:8765") as client:
+        _login(client)
+        status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
+
+    assert status_response.status_code == 200
+    assert status_response.json()["provider"] == "google_docs"
+    assert status_response.json()["credential_service"] == "google_docs_oauth"
+    assert status_response.json()["tool_config_service"] == "google_docs"
+    assert status_response.json()["client_config_service"] == "google_docs_oauth_client"
+    assert status_response.json()["capabilities"] == ["Docs create and read", "Docs text editing"]
     assert status_response.json()["connected"] is True
 
 

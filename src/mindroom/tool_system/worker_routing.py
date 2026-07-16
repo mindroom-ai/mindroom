@@ -41,6 +41,7 @@ _LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES = frozenset(
         "external_trigger_manager",
         "gmail",
         "google_calendar",
+        "google_docs",
         "google_drive",
         "google_sheets",
         "homeassistant",

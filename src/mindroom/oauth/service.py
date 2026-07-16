@@ -36,6 +36,7 @@ logger = get_logger(__name__)
 _GOOGLE_SERVICE_ACCOUNT_PROVIDER_IDS = frozenset(
     {
         "google_calendar",
+        "google_docs",
         "google_drive",
         "google_gmail",
         "google_sheets",

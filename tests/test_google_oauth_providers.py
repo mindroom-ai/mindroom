@@ -20,6 +20,7 @@ from mindroom.oauth.google import (
     _google_token_parser,
 )
 from mindroom.oauth.google_calendar import _GOOGLE_CALENDAR_OAUTH_SCOPES, google_calendar_oauth_provider
+from mindroom.oauth.google_docs import _GOOGLE_DOCS_OAUTH_SCOPES, google_docs_oauth_provider
 from mindroom.oauth.google_drive import _GOOGLE_DRIVE_OAUTH_SCOPES, google_drive_oauth_provider
 from mindroom.oauth.google_gmail import _GOOGLE_GMAIL_OAUTH_SCOPES, google_gmail_oauth_provider
 from mindroom.oauth.google_sheets import _GOOGLE_SHEETS_OAUTH_SCOPES, google_sheets_oauth_provider
@@ -46,6 +47,10 @@ GOOGLE_EXTRA_AUTH_PARAMS = {
     "include_granted_scopes": "true",
     "prompt": "consent",
 }
+GOOGLE_NARROW_EXTRA_AUTH_PARAMS = {
+    "access_type": "offline",
+    "prompt": "consent",
+}
 
 
 @pytest.mark.parametrize(
@@ -61,6 +66,18 @@ GOOGLE_EXTRA_AUTH_PARAMS = {
                 "tool_config_service": "google_calendar",
                 "client_config_services": ("google_calendar_oauth_client",),
                 "status_capabilities": ("Calendar event read/write",),
+            },
+        ),
+        (
+            google_docs_oauth_provider(),
+            {
+                "id": "google_docs",
+                "display_name": "Google Docs",
+                "scopes": _GOOGLE_DOCS_OAUTH_SCOPES,
+                "credential_service": "google_docs_oauth",
+                "tool_config_service": "google_docs",
+                "client_config_services": ("google_docs_oauth_client",),
+                "status_capabilities": ("Docs create and read", "Docs text editing"),
             },
         ),
         (
@@ -128,12 +145,17 @@ def test_google_providers_request_minimum_functionality_preserving_scopes() -> N
         "https://www.googleapis.com/auth/calendar.freebusy",
         "https://www.googleapis.com/auth/calendar.settings.readonly",
     )
+    assert google_docs_oauth_provider().scopes == (
+        *GOOGLE_IDENTITY_SCOPES,
+        "https://www.googleapis.com/auth/documents",
+    )
 
 
 @pytest.mark.parametrize(
     "provider",
     [
         google_calendar_oauth_provider(),
+        google_docs_oauth_provider(),
         google_drive_oauth_provider(),
         google_gmail_oauth_provider(),
         google_sheets_oauth_provider(),
@@ -154,7 +176,8 @@ def test_public_google_oauth_providers_preserve_shared_google_oauth_fields(provi
         f"{provider_prefix}_ALLOWED_HOSTED_DOMAINS",
         f"MINDROOM_OAUTH_{provider_prefix}_ALLOWED_HOSTED_DOMAINS",
     )
-    assert provider.extra_auth_params == GOOGLE_EXTRA_AUTH_PARAMS
+    expected_auth_params = GOOGLE_NARROW_EXTRA_AUTH_PARAMS if provider.id == "google_docs" else GOOGLE_EXTRA_AUTH_PARAMS
+    assert provider.extra_auth_params == expected_auth_params
     assert provider.pkce_code_challenge_method == "S256"
     assert provider.runtime_bootstrapper is _google_runtime_bootstrapper
     assert provider.token_parser is _google_token_parser
