@@ -46,12 +46,11 @@ def load_invited_rooms(path: Path) -> set[str]:
     return set(room_ids)
 
 
-def save_invited_rooms(path: Path, room_ids: set[str]) -> None:
+def save_invited_rooms(path: Path, room_ids: set[str]) -> bool:
     """Replace invited rooms atomically for one eligible entity.
 
-    Single-room updates should use ``remember_invited_room`` or
-    ``forget_invited_room`` so a stale in-memory snapshot cannot discard
-    changes written by another runtime component.
+    Callers replacing a cached set must first merge fresh durable state so a
+    stale in-memory snapshot cannot discard another runtime component's write.
     """
     temp_path = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
     try:
@@ -63,26 +62,19 @@ def save_invited_rooms(path: Path, room_ids: set[str]) -> None:
         safe_replace(temp_path, path)
     except OSError:
         logger.exception("failed_to_save_invited_rooms", path=str(path))
+        return False
     finally:
         temp_path.unlink(missing_ok=True)
+    return True
 
 
-def remember_invited_room(path: Path, room_id: str) -> set[str]:
-    """Add one room using fresh durable state and return the updated set."""
-    room_ids = load_invited_rooms(path)
-    if room_id not in room_ids:
-        room_ids.add(room_id)
-        save_invited_rooms(path, room_ids)
-    return room_ids
-
-
-def forget_invited_room(path: Path, room_id: str) -> set[str]:
-    """Remove one room using fresh durable state and return the updated set."""
+def remember_invited_room(path: Path, room_id: str) -> bool:
+    """Add one room using fresh durable state and report persistence success."""
     room_ids = load_invited_rooms(path)
     if room_id in room_ids:
-        room_ids.remove(room_id)
-        save_invited_rooms(path, room_ids)
-    return room_ids
+        return True
+    room_ids.add(room_id)
+    return save_invited_rooms(path, room_ids)
 
 
 def should_accept_invites(config: Config, agent_name: str) -> bool:

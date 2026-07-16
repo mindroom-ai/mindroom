@@ -15,10 +15,8 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import get_joined_rooms, join_room
 from mindroom.matrix.decrypt_failure import raise_notice_floor
 from mindroom.matrix.invited_rooms_store import (
-    forget_invited_room,
     invited_rooms_path,
     load_invited_rooms,
-    remember_invited_room,
     save_invited_rooms,
     should_accept_invites,
     should_persist_invited_rooms,
@@ -75,6 +73,7 @@ class BotRoomLifecycle:
     def __init__(self, deps: BotRoomLifecycleDeps) -> None:
         self.deps = deps
         self.invited_rooms = self.load_invited_rooms()
+        self._pending_forgotten_invited_rooms: set[str] = set()
         self._invite_join_locks: dict[str, asyncio.Lock] = {}
         self._welcome_locks: dict[str, asyncio.Lock] = {}
         self._handled_invite_room_ids: set[str] = set()
@@ -143,7 +142,21 @@ class BotRoomLifecycle:
         if not self.should_persist_invited_rooms():
             self.invited_rooms.discard(room_id)
             return
-        self.invited_rooms = forget_invited_room(self.invited_rooms_file_path(), room_id)
+        self._update_invited_room(room_id, remember=False)
+
+    def _update_invited_room(self, room_id: str, *, remember: bool) -> None:
+        """Merge one update with durable and in-memory state before saving."""
+        room_ids = load_invited_rooms(self.invited_rooms_file_path()) | self.invited_rooms
+        if remember:
+            self._pending_forgotten_invited_rooms.discard(room_id)
+            room_ids.add(room_id)
+        else:
+            self._pending_forgotten_invited_rooms.add(room_id)
+        room_ids.difference_update(self._pending_forgotten_invited_rooms)
+
+        if save_invited_rooms(self.invited_rooms_file_path(), room_ids):
+            self._pending_forgotten_invited_rooms.clear()
+        self.invited_rooms = room_ids
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this bot should preserve across restarts."""
@@ -294,6 +307,6 @@ class BotRoomLifecycle:
                 # don't post decrypt-failure notices for it.
                 raise_notice_floor(client.user_id, room.room_id)
             if self.should_persist_invited_rooms():
-                self.invited_rooms = remember_invited_room(self.invited_rooms_file_path(), room.room_id)
+                self._update_invited_room(room.room_id, remember=True)
             if self.deps.agent_name == ROUTER_AGENT_NAME:
                 await self.send_welcome_message_if_empty(room.room_id, event.sender)

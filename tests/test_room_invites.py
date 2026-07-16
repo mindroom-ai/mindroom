@@ -21,7 +21,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.hooks.matrix_admin import build_hook_matrix_admin
-from mindroom.matrix.invited_rooms_store import invited_rooms_path
+from mindroom.matrix.invited_rooms_store import invited_rooms_path, save_invited_rooms
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
@@ -322,6 +322,52 @@ async def test_router_invite_preserves_room_created_after_lifecycle_loaded(
     assert bot._room_lifecycle.invited_rooms == expected_rooms
     assert _invited_rooms_path(config, ROUTER_AGENT_NAME).read_text(encoding="utf-8") == (
         '[\n  "!hook-created:localhost",\n  "!later-invite:localhost"\n]\n'
+    )
+
+
+@pytest.mark.asyncio
+async def test_router_invite_keeps_memory_after_transient_persistence_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed save must not let the next invite erase the first room from memory."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        test_runtime_paths(tmp_path),
+    )
+    bot = AgentBot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot.client = AsyncMock()
+    bot.client.rooms = {}
+
+    attempts = 0
+
+    def fail_first_save(path: Path, room_ids: set[str]) -> bool:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return False
+        return save_invited_rooms(path, room_ids)
+
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.save_invited_rooms", fail_first_save)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", AsyncMock(return_value=True))
+    monkeypatch.setattr(bot._room_lifecycle, "send_welcome_message_if_empty", AsyncMock())
+
+    for room_id in ("!first:localhost", "!second:localhost"):
+        await bot._on_invite(
+            MagicMock(room_id=room_id, canonical_alias=None),
+            MagicMock(sender="@owner:localhost"),
+        )
+
+    expected_rooms = {"!first:localhost", "!second:localhost"}
+    assert bot._room_lifecycle.invited_rooms == expected_rooms
+    assert _invited_rooms_path(config, ROUTER_AGENT_NAME).read_text(encoding="utf-8") == (
+        '[\n  "!first:localhost",\n  "!second:localhost"\n]\n'
     )
 
 
