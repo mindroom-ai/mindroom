@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from mindroom.history.policy import context_budget_after_reserve
+from mindroom.model_usage import context_input_tokens_from_counts
 from mindroom.redaction import redact_sensitive_text
 from mindroom.token_budget import estimate_compaction_input_tokens, stable_serialize
 
@@ -59,6 +60,8 @@ class ActiveTurnContextGuard:
     context_window_tokens: int
     headroom_tokens: int
     prepared_context_tokens: int
+    configured_provider: str | None = None
+    model_id: str | None = None
     latest_actual_input_tokens: int | None = None
     latest_output_tokens: int = 0
     unaccounted_tool_tokens: int = 0
@@ -69,10 +72,27 @@ class ActiveTurnContextGuard:
         """Return effective provider-input ceiling after configured headroom."""
         return context_budget_after_reserve(self.context_window_tokens, self.headroom_tokens)
 
-    def observe_model_request(self, *, input_tokens: int | None, output_tokens: int | None) -> None:
+    def observe_model_request(
+        self,
+        *,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        cache_read_tokens: int | None = None,
+        cache_write_tokens: int | None = None,
+        provider: str | None = None,
+        model_id: str | None = None,
+    ) -> None:
         """Record latest provider usage and reset already-accounted tool growth."""
-        if isinstance(input_tokens, int) and input_tokens > 0:
-            self.latest_actual_input_tokens = input_tokens
+        context_input_tokens = context_input_tokens_from_counts(
+            input_tokens=input_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
+            provider=provider,
+            configured_provider=self.configured_provider,
+            model_id=model_id or self.model_id,
+        )
+        if context_input_tokens is not None and context_input_tokens > 0:
+            self.latest_actual_input_tokens = context_input_tokens
             self.unaccounted_tool_tokens = 0
         self.latest_output_tokens = output_tokens if isinstance(output_tokens, int) and output_tokens > 0 else 0
 
@@ -108,6 +128,8 @@ def build_active_turn_context_guard(
     context_window_tokens: int | None,
     headroom_tokens: int,
     prepared_context_tokens: int | None,
+    configured_provider: str | None = None,
+    model_id: str | None = None,
 ) -> ActiveTurnContextGuard | None:
     """Build a guard only when the active model has a usable input budget."""
     if context_window_tokens is None or context_window_tokens <= 0 or prepared_context_tokens is None:
@@ -116,6 +138,8 @@ def build_active_turn_context_guard(
         context_window_tokens=context_window_tokens,
         headroom_tokens=headroom_tokens,
         prepared_context_tokens=max(0, prepared_context_tokens),
+        configured_provider=configured_provider,
+        model_id=model_id,
     )
     return guard if guard.input_limit_tokens > 0 else None
 
@@ -160,6 +184,8 @@ def _observe_latest_message_usage(guard: ActiveTurnContextGuard, messages: list[
         guard.observe_model_request(
             input_tokens=message.metrics.input_tokens,
             output_tokens=message.metrics.output_tokens,
+            cache_read_tokens=message.metrics.cache_read_tokens,
+            cache_write_tokens=message.metrics.cache_write_tokens,
         )
         return
 

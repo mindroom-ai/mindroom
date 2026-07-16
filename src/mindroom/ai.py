@@ -1306,10 +1306,13 @@ async def _prepare_agent_run_context(
         note_prepared_history_timing(pipeline_timing, prepared_run.prepared_history)
 
     agent = prepared_run.agent
+    runtime_model_config = config.models.get(prepared_run.runtime_model_name)
     checkpoint_guard = build_active_turn_context_guard(
         context_window_tokens=prepared_run.runtime_context_window,
         headroom_tokens=config.resolve_entity(ctx.entity_label).compaction_config.reserve_tokens,
         prepared_context_tokens=prepared_run.prepared_history.prepared_context_tokens,
+        configured_provider=runtime_model_config.provider if runtime_model_config is not None else None,
+        model_id=runtime_model_config.id if runtime_model_config is not None else None,
     )
     if agent.model is not None:
         if checkpoint_guard is not None:
@@ -1704,6 +1707,10 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
                     checkpoint_guard.observe_model_request(
                         input_tokens=event.input_tokens,
                         output_tokens=event.output_tokens,
+                        cache_read_tokens=event.cache_read_tokens,
+                        cache_write_tokens=event.cache_write_tokens,
+                        provider=event.model_provider,
+                        model_id=event.model,
                     )
                 continue
 

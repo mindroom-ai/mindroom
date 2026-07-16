@@ -44,13 +44,20 @@ def _tool_boundary(
     *,
     input_tokens: int = 0,
     output_tokens: int = 0,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
 ) -> tuple[list[Message], list[Message]]:
     messages = [
         Message(role="user", content="work"),
         Message(
             role="assistant",
             content="calling tool",
-            metrics=MessageMetrics(input_tokens=input_tokens, output_tokens=output_tokens),
+            metrics=MessageMetrics(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_read_tokens=cache_read_tokens,
+                cache_write_tokens=cache_write_tokens,
+            ),
         ),
     ]
     results = [Message(role="tool", tool_call_id="call-1", tool_name="side_effect", content=result)]
@@ -72,11 +79,18 @@ def test_guard_uses_latest_actual_provider_input_at_completed_boundary() -> None
         context_window_tokens=1_000,
         headroom_tokens=100,
         prepared_context_tokens=100,
+        configured_provider="anthropic",
+        model_id="claude-sonnet-5",
     )
     assert guard is not None
     model = _FakeModel()
     install_active_turn_checkpoint_hook(model, guard)  # type: ignore[arg-type]
-    messages, results = _tool_boundary("created artifact.txt", input_tokens=850, output_tokens=10)
+    messages, results = _tool_boundary(
+        "created artifact.txt",
+        input_tokens=100,
+        output_tokens=10,
+        cache_read_tokens=750,
+    )
 
     model.format_function_call_results(messages, results)
 

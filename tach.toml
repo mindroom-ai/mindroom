@@ -160,6 +160,7 @@ depends_on = [
 path = "mindroom.model_usage"
 depends_on = []
 visibility = [
+    "mindroom.active_turn_checkpoint",
     "mindroom.ai_run_metadata",
     "mindroom.llm_request_logging",
 ]
@@ -178,6 +179,7 @@ visibility = ["mindroom.response_turn"]
 path = "mindroom.active_turn_checkpoint"
 depends_on = [
     "mindroom.history.policy",
+    "mindroom.model_usage",
     "mindroom.redaction",
     "mindroom.token_budget",
 ]
