@@ -87,7 +87,6 @@ jobs:
       - name: Run plugin tests
         if: ${{ hashFiles('plugin/tests/**/*.py') != '' }}
         env:
-          MINDROOM_DEEP_RESEARCH_INTEGRATION: "0"
           PYTHONDONTWRITEBYTECODE: "1"
         working-directory: plugin
         run: >-

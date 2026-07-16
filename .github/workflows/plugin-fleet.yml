@@ -42,7 +42,7 @@ jobs:
         run: |
           expected="$(mktemp)"
           actual="$(mktemp)"
-          jq -r '.include[].plugin_repository' .github/plugin-fleet.json | sort > "$expected"
+          jq -r '.[]' .github/plugin-fleet.json | sort > "$expected"
           gh api --paginate 'orgs/mindroom-ai/repos?per_page=100&type=public' \
             --jq '.[] | select(.archived == false and (.name | endswith("-plugin"))) | .full_name' \
             | sort > "$actual"
@@ -50,7 +50,9 @@ jobs:
 
       - name: Export plugin matrix
         id: matrix
-        run: echo "matrix=$(jq -c . .github/plugin-fleet.json)" >> "$GITHUB_OUTPUT"
+        run: |
+          matrix="$(jq -c '{include: map({plugin_repository: ., artifact_name: sub("^[^/]+/"; "")})}' .github/plugin-fleet.json)"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   compatibility:
     name: ${{ matrix.artifact_name }}
@@ -63,7 +65,7 @@ jobs:
     uses: ./.github/workflows/plugin-ci.yml
     with:
       plugin_repository: ${{ matrix.plugin_repository }}
-      plugin_ref: ${{ matrix.plugin_ref }}
+      plugin_ref: main
       artifact_name: ${{ matrix.artifact_name }}
       mindroom_repository: ${{ github.repository }}
       mindroom_ref: ${{ inputs.mindroom_ref || github.sha }}

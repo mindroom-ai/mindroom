@@ -185,15 +185,11 @@ def test_check_plugin_accepts_skill_only_plugin_and_keeps_builtin_tools(tmp_path
 def test_plugin_fleet_registry_is_sorted_and_unique() -> None:
     """The checked-in fleet registry should remain deterministic and collision-free."""
     registry_path = Path(__file__).resolve().parents[1] / ".github" / "plugin-fleet.json"
-    entries = json.loads(registry_path.read_text(encoding="utf-8"))["include"]
-    repositories = [entry["plugin_repository"] for entry in entries]
-    artifact_names = [entry["artifact_name"] for entry in entries]
+    repositories = json.loads(registry_path.read_text(encoding="utf-8"))
 
     assert repositories == sorted(repositories)
     assert len(repositories) == len(set(repositories))
-    assert len(artifact_names) == len(set(artifact_names))
-    assert all(entry["plugin_ref"] == "main" for entry in entries)
-    assert artifact_names == [repository.removeprefix("mindroom-ai/") for repository in repositories]
+    assert all(repository.count("/") == 1 for repository in repositories)
 
 
 def test_plugins_check_cli_reports_compatibility(tmp_path: Path) -> None:
