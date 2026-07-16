@@ -29,6 +29,8 @@ if TYPE_CHECKING:
 
     from httpx import Response
 
+    from mindroom.external_triggers.models import TriggerDeliveryReadiness
+
 _OWNER = "@owner:example.org"
 
 
@@ -47,7 +49,7 @@ class TriggerApiContext:
     client: TestClient
     private_key: Ed25519PrivateKey
     runtime_paths: constants.RuntimePaths
-    ready_snapshots: list[TriggerDeliverySnapshot]
+    ready_checks: list[TriggerDeliveryReadiness]
 
 
 def _public_key_b64(private_key: Ed25519PrivateKey) -> str:
@@ -157,18 +159,18 @@ def _create_record(runtime_paths: constants.RuntimePaths, config: Config, public
     )
 
 
-def _bind_runtime(ready_snapshots: list[TriggerDeliverySnapshot]) -> object:
+def _bind_runtime(ready_checks: list[TriggerDeliveryReadiness]) -> object:
     client = object()
 
-    async def is_trigger_snapshot_ready(snapshot: TriggerDeliverySnapshot) -> bool:
-        ready_snapshots.append(snapshot)
+    async def is_delivery_target_ready(readiness: TriggerDeliveryReadiness) -> bool:
+        ready_checks.append(readiness)
         return True
 
     api_main.bind_external_trigger_runtime(
         api_main.app,
         client=client,
         conversation_cache=object(),
-        is_trigger_snapshot_ready=is_trigger_snapshot_ready,
+        is_delivery_target_ready=is_delivery_target_ready,
     )
     return client
 
@@ -231,8 +233,8 @@ def _trigger_api_context(
     assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True
     _create_record(runtime_paths, config, _public_key_b64(private_key))
     api_main.unbind_external_trigger_runtime(api_main.app)
-    ready_snapshots: list[TriggerDeliverySnapshot] = []
-    _bind_runtime(ready_snapshots)
+    ready_checks: list[TriggerDeliveryReadiness] = []
+    _bind_runtime(ready_checks)
     monkeypatch.setattr("mindroom.api.external_triggers.is_external_trigger_owner_joined_target_room", _owner_joined)
 
     with TestClient(api_main.app) as client:
@@ -240,7 +242,7 @@ def _trigger_api_context(
             client=client,
             private_key=private_key,
             runtime_paths=runtime_paths,
-            ready_snapshots=ready_snapshots,
+            ready_checks=ready_checks,
         )
 
     api_main.unbind_external_trigger_runtime(api_main.app)
@@ -386,8 +388,9 @@ def test_delivery_uses_single_snapshot_for_auth_readiness_and_execute(
 
     assert response.status_code == 202
     assert response.json()["matrix_event_id"] == "$matrix-event"
-    assert trigger_api.ready_snapshots
-    assert execute_snapshots[0] is trigger_api.ready_snapshots[0]
+    assert trigger_api.ready_checks
+    assert trigger_api.ready_checks[0].target_agent == execute_snapshots[0].target.agent
+    assert trigger_api.ready_checks[0].resolved_room_id == execute_snapshots[0].resolved_room_id
     assert execute_snapshots[0].owner_user_id == _OWNER
 
 
@@ -410,8 +413,8 @@ def test_post_external_trigger_accepts_private_agent_target(
 
     assert response.status_code == 202
     assert response.json()["matrix_event_id"] == "$delivered"
-    assert private_trigger_api.ready_snapshots
-    assert execute_snapshots[0] is private_trigger_api.ready_snapshots[0]
+    assert private_trigger_api.ready_checks
+    assert private_trigger_api.ready_checks[0].target_agent == "research"
     assert execute_snapshots[0].owner_user_id == _OWNER
     assert execute_snapshots[0].target.agent == "research"
 
@@ -459,8 +462,8 @@ def test_policy_caps_apply_at_request_time(
 
     lowered_config = _write_runtime_config(config_path, max_body_bytes=1024)
     assert config_lifecycle._publish_runtime_config_into_app(lowered_config, runtime_paths, api_main.app)
-    ready_snapshots: list[TriggerDeliverySnapshot] = []
-    _bind_runtime(ready_snapshots)
+    ready_checks: list[TriggerDeliveryReadiness] = []
+    _bind_runtime(ready_checks)
     monkeypatch.setattr("mindroom.api.external_triggers.is_external_trigger_owner_joined_target_room", _owner_joined)
 
     with TestClient(api_main.app) as client:
@@ -482,7 +485,7 @@ def test_owner_permission_removed_blocks_delivery_before_replay_claim(
     runtime_paths = trigger_api.runtime_paths
     config = _write_runtime_config(runtime_paths.config_path, owner_authorized=False)
     assert config_lifecycle._publish_runtime_config_into_app(config, runtime_paths, api_main.app)
-    _bind_runtime(trigger_api.ready_snapshots)
+    _bind_runtime(trigger_api.ready_checks)
 
     response = _post_signed(trigger_api)
 

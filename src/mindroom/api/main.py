@@ -61,7 +61,7 @@ if TYPE_CHECKING:
     from starlette.types import ASGIApp, Receive, Scope, Send
 
     from mindroom.config.main import Config
-    from mindroom.external_triggers.store import TriggerDeliverySnapshot
+    from mindroom.external_triggers.models import TriggerDeliveryReadiness
 
 logger = get_logger(__name__)
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
@@ -529,7 +529,7 @@ def bind_external_trigger_runtime(
     client: object,
     conversation_cache: object,
     *,
-    is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]],
+    is_delivery_target_ready: Callable[[TriggerDeliveryReadiness], Awaitable[bool]],
 ) -> None:
     """Attach router Matrix delivery runtime to one API app."""
     api_state = config_lifecycle.require_api_state(api_app)
@@ -537,7 +537,7 @@ def bind_external_trigger_runtime(
         client=client,
         conversation_cache=conversation_cache,
         config_generation=api_state.snapshot.generation,
-        is_trigger_snapshot_ready=is_trigger_snapshot_ready,
+        is_delivery_target_ready=is_delivery_target_ready,
     )
 
 

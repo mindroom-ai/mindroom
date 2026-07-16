@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.external_triggers.store import TriggerDeliverySnapshot
+    from mindroom.external_triggers.models import TriggerDeliveryReadiness
 
 
 @dataclass
@@ -39,8 +39,8 @@ class ExternalTriggerRuntimeCoordinator:
         if router_bot is None or router_bot.client is None or not router_bot.running:
             return
 
-        async def is_trigger_snapshot_ready(snapshot: TriggerDeliverySnapshot) -> bool:
-            return await self.is_ready(snapshot, bots)
+        async def is_delivery_target_ready(readiness: TriggerDeliveryReadiness) -> bool:
+            return await self.is_ready(readiness, bots)
 
         from mindroom.api import main as api_main  # noqa: PLC0415
 
@@ -48,7 +48,7 @@ class ExternalTriggerRuntimeCoordinator:
             api_main.app,
             client=router_bot.client,
             conversation_cache=router_bot._conversation_cache,
-            is_trigger_snapshot_ready=is_trigger_snapshot_ready,
+            is_delivery_target_ready=is_delivery_target_ready,
         )
 
     def unbind(self) -> None:
@@ -71,14 +71,14 @@ class ExternalTriggerRuntimeCoordinator:
 
     async def is_ready(
         self,
-        snapshot: TriggerDeliverySnapshot,
+        readiness: TriggerDeliveryReadiness,
         bots: Mapping[str, AgentBot | TeamBot],
     ) -> bool:
-        """Return whether router and target clients are currently joined to one trigger room."""
-        if not snapshot.enabled:
+        """Return whether router and target clients are currently joined to one delivery room."""
+        if not readiness.enabled:
             return False
         router_bot = bots.get(ROUTER_AGENT_NAME)
-        target_bot = bots.get(snapshot.target.agent)
+        target_bot = bots.get(readiness.target_agent)
         if (
             router_bot is None
             or router_bot.client is None
@@ -91,7 +91,8 @@ class ExternalTriggerRuntimeCoordinator:
         router_joined_room_ids = frozenset(await get_joined_rooms(router_bot.client) or ())
         target_joined_room_ids = frozenset(await get_joined_rooms(target_bot.client) or ())
         return (
-            snapshot.resolved_room_id in router_joined_room_ids and snapshot.resolved_room_id in target_joined_room_ids
+            readiness.resolved_room_id in router_joined_room_ids
+            and readiness.resolved_room_id in target_joined_room_ids
         )
 
     async def sync_api_config_snapshot(

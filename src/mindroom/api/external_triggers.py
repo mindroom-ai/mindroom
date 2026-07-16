@@ -13,7 +13,11 @@ from mindroom.api import config_lifecycle
 from mindroom.authorization import is_authorized_sender, is_sender_allowed_for_agent_reply
 from mindroom.external_triggers.auth import TriggerAuthError, TriggerSignatureHeaders, verify_trigger_request
 from mindroom.external_triggers.executor import execute_external_trigger, is_external_trigger_owner_joined_target_room
-from mindroom.external_triggers.models import ExternalTriggerAcceptedResponse, ExternalTriggerPayload
+from mindroom.external_triggers.models import (
+    ExternalTriggerAcceptedResponse,
+    ExternalTriggerPayload,
+    TriggerDeliveryReadiness,
+)
 from mindroom.external_triggers.replay_store import (
     ExternalTriggerEventClaim,
     ExternalTriggerReplayStore,
@@ -287,8 +291,13 @@ async def _require_external_trigger_runtime(
     runtime = config_lifecycle.app_state(request.app).external_trigger_runtime
     if runtime is None or runtime.config_generation != snapshot.config_generation:
         raise HTTPException(status_code=503, detail="External trigger runtime is not available")
+    readiness = TriggerDeliveryReadiness(
+        enabled=snapshot.enabled,
+        target_agent=snapshot.target.agent,
+        resolved_room_id=snapshot.resolved_room_id,
+    )
     try:
-        is_trigger_ready = await runtime.is_trigger_snapshot_ready(snapshot)
+        is_trigger_ready = await runtime.is_delivery_target_ready(readiness)
     except Exception as exc:
         raise HTTPException(status_code=503, detail="External trigger target runtime is not available") from exc
     if not is_trigger_ready:
