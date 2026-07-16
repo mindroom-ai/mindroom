@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
+from typing import Literal
+from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, urlparse
 
 import nio
 import pytest
@@ -21,9 +23,13 @@ from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS, RuntimePath
 from mindroom.credential_policy import _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
 from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
 from mindroom.matrix.state import MatrixState
+from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
+from mindroom.oauth.google_drive import google_drive_oauth_provider
+from mindroom.oauth.service import lookup_oauth_connect_token
 from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, resolve_worker_key
 from tests.conftest import load_config_yaml, make_conversation_cache_mock, make_event_cache_mock, write_config_yaml
 from tests.identity_helpers import persist_entity_accounts
 
@@ -42,6 +48,37 @@ def _runtime_paths() -> RuntimePaths:
 def _config_manager(config_path: Path) -> ConfigManagerTools:
     """Construct ConfigManagerTools with explicit RuntimePaths."""
     return ConfigManagerTools(resolve_runtime_paths(config_path=config_path, process_env={}))
+
+
+def _caller_context(
+    config_manager: ConfigManagerTools,
+    config: Config,
+    *,
+    agent_name: str = "admin",
+    requester_id: str = "@alice:example.org",
+) -> ToolRuntimeContext:
+    """Build a live config-manager caller context with a stable human requester."""
+    return ToolRuntimeContext(
+        agent_name=agent_name,
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id="$thread",
+            reply_to_event_id="$request",
+        ),
+        requester_id=requester_id,
+        client=MagicMock(),
+        config=config,
+        runtime_paths=config_manager.runtime_paths,
+        event_cache=make_event_cache_mock(),
+        conversation_cache=make_conversation_cache_mock(),
+    )
+
+
+def _connect_url_from_result(result: str) -> str:
+    """Extract the first direct OAuth link from a config-manager result."""
+    marker = "`connect_url`: "
+    assert marker in result
+    return result.split(marker, maxsplit=1)[1].split(";", maxsplit=1)[0]
 
 
 def _invalid_plugin_config_path(tmp_path: Path, *, with_agent: bool = True) -> Path:
@@ -356,6 +393,304 @@ class TestConsolidatedConfigManager:
             assert config.agents["test_agent"].display_name == "Test Agent"
         finally:
             config_path.unlink(missing_ok=True)
+
+    @pytest.mark.parametrize("worker_scope", [None, "shared", "user", "user_agent"])
+    def test_manage_agent_create_returns_updated_agent_oauth_target(
+        self,
+        tmp_path: Path,
+        worker_scope: WorkerScope | None,
+    ) -> None:
+        """Create links should use the new agent and requester's effective execution scope."""
+        config = Config(
+            agents={"admin": AgentConfig(display_name="Admin", role="Configure agents")},
+            defaults=DefaultsConfig(tools=[], worker_scope=worker_scope),
+            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+        )
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(config, config_path)
+        cm = _config_manager(config_path)
+
+        with tool_runtime_context(_caller_context(cm, config)):
+            result = cm.manage_agent(
+                operation="create",
+                agent_name="research",
+                display_name="Research",
+                role="Read Drive files",
+                tools=["google_drive"],
+            )
+
+        connect_url = _connect_url_from_result(result)
+        query = parse_qs(urlparse(connect_url).query)
+        assert query["agent_name"] == ["research"]
+        assert query.get("execution_scope") == ([worker_scope] if worker_scope is not None else None)
+        assert "admin" not in connect_url
+        assert "`requires_host_browser`: true" in result
+        assert "Localhost links must be opened in a browser on the computer where MindRoom is running" in result
+        assert "direct links instead of sending them to the dashboard" in result
+        assert "After connection, have agent `research` retry" in result
+        assert "not guaranteed to be available to the current agent or in the current run" in result
+        assert "Before replying" not in result
+
+        connect_tokens = query.get("connect_token")
+        if worker_scope is None:
+            assert connect_tokens is None
+            return
+
+        connect_target = lookup_oauth_connect_token(
+            google_drive_oauth_provider(),
+            cm.runtime_paths,
+            connect_tokens[0],
+        )
+        expected_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="research",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="!room:example.org:$thread",
+        )
+        assert connect_target.agent_name == "research"
+        assert connect_target.requester_id == "@alice:example.org"
+        assert connect_target.worker_scope == worker_scope
+        assert connect_target.worker_key == resolve_worker_key(
+            worker_scope,
+            expected_identity,
+            agent_name="research",
+        )
+
+    @pytest.mark.parametrize("private_scope", ["user", "user_agent"])
+    def test_manage_agent_update_returns_private_target_oauth_link(
+        self,
+        tmp_path: Path,
+        private_scope: Literal["user", "user_agent"],
+    ) -> None:
+        """Updating another private agent should mint only that agent's requester-bound link."""
+        config = Config(
+            agents={
+                "admin": AgentConfig(display_name="Admin", role="Configure agents"),
+                "research": AgentConfig(
+                    display_name="Research",
+                    role="Research",
+                    tools=["calculator"],
+                    private={"per": private_scope},
+                ),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+        )
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(config, config_path)
+        cm = _config_manager(config_path)
+
+        with tool_runtime_context(_caller_context(cm, config)):
+            result = cm.manage_agent(
+                operation="update",
+                agent_name="research",
+                tools=["calculator", "google_drive"],
+            )
+
+        connect_url = _connect_url_from_result(result)
+        query = parse_qs(urlparse(connect_url).query)
+        assert query["agent_name"] == ["research"]
+        assert query["execution_scope"] == [private_scope]
+        connect_target = lookup_oauth_connect_token(
+            google_drive_oauth_provider(),
+            cm.runtime_paths,
+            query["connect_token"][0],
+        )
+        assert connect_target.agent_name == "research"
+        assert connect_target.requester_id == "@alice:example.org"
+        assert connect_target.worker_scope == private_scope
+
+    def test_manage_agent_update_does_not_mint_caller_link_when_requester_cannot_manage_target(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Target authorization failure should not fall back to the config-manager caller."""
+        config = Config(
+            agents={
+                "admin": AgentConfig(display_name="Admin", role="Configure agents"),
+                "research": AgentConfig(display_name="Research", role="Research"),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            authorization={"agent_reply_permissions": {"research": ["@bob:example.org"]}},
+        )
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(config, config_path)
+        cm = _config_manager(config_path)
+
+        with (
+            tool_runtime_context(_caller_context(cm, config)),
+            patch("mindroom.custom_tools.config_manager.oauth_connect_url") as connect_url,
+        ):
+            result = cm.manage_agent(
+                operation="update",
+                agent_name="research",
+                tools=["google_drive"],
+            )
+
+        connect_url.assert_not_called()
+        assert "not authorized to manage credentials for agent `research`" in result
+        assert "connect_url" not in result
+        assert "admin" not in result
+
+    def test_manage_agent_self_update_does_not_promise_same_run_tool_use(self, tmp_path: Path) -> None:
+        """Self-update should return the scoped link without claiming the new schema is callable now."""
+        config = Config(
+            agents={"research": AgentConfig(display_name="Research", role="Research", worker_scope="user_agent")},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+        )
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(config, config_path)
+        cm = _config_manager(config_path)
+
+        with tool_runtime_context(_caller_context(cm, config, agent_name="research")):
+            result = cm.manage_agent(
+                operation="update",
+                agent_name="research",
+                tools=["google_drive"],
+            )
+
+        assert "`connect_url`:" in result
+        assert "not guaranteed to be available to the current agent or in the current run" in result
+        assert "call a harmless" not in result
+
+    def test_manage_agent_oauth_guidance_respects_inherited_default_tools(self, tmp_path: Path) -> None:
+        """Effective default-tool changes should produce links only for agents that inherit them."""
+        config = Config(
+            agents={
+                "admin": AgentConfig(display_name="Admin", role="Configure agents"),
+                "research": AgentConfig(
+                    display_name="Research",
+                    role="Research",
+                    include_default_tools=False,
+                ),
+            },
+            defaults=DefaultsConfig(tools=["google_drive"], worker_scope="user_agent"),
+            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+        )
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(config, config_path)
+        cm = _config_manager(config_path)
+
+        with tool_runtime_context(_caller_context(cm, config)):
+            inherited_create = cm.manage_agent(
+                operation="create",
+                agent_name="inherited",
+                display_name="Inherited",
+                role="Use defaults",
+                tools=[],
+            )
+            excluded_create = cm.manage_agent(
+                operation="create",
+                agent_name="excluded",
+                display_name="Excluded",
+                role="Skip defaults",
+                tools=[],
+                include_default_tools=False,
+            )
+            inherited_update = cm.manage_agent(
+                operation="update",
+                agent_name="research",
+                include_default_tools=True,
+            )
+
+        assert "`connect_url`:" in inherited_create
+        assert "agent `inherited`" in inherited_create
+        assert "connect_url" not in excluded_create
+        assert "`connect_url`:" in inherited_update
+        assert "agent `research`" in inherited_update
+
+    def test_manage_agent_excludes_setup_type_oauth_without_auth_provider(self, tmp_path: Path) -> None:
+        """SetupType.OAUTH alone should not claim the structured generic-provider contract."""
+        config = Config(
+            agents={"admin": AgentConfig(display_name="Admin", role="Configure agents")},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+        )
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(config, config_path)
+        cm = _config_manager(config_path)
+
+        with tool_runtime_context(_caller_context(cm, config)):
+            result = cm.manage_agent(
+                operation="create",
+                agent_name="meetings",
+                display_name="Meetings",
+                role="Manage Zoom meetings",
+                tools=["zoom"],
+            )
+
+        assert "Successfully created" in result
+        assert "connect_url" not in result
+        assert "MindRoom-managed OAuth" not in result
+
+    def test_manage_agent_returns_target_link_for_oauth_mcp_tool(self, tmp_path: Path) -> None:
+        """Generic OAuth MCP metadata should use the same updated-agent target flow."""
+        mcp_server = MCPServerConfig(
+            transport="streamable-http",
+            url="https://mcp.example.test/mcp",
+            auth={
+                "type": "oauth",
+                "display_name": "Demo MCP",
+                "discovery": "manual",
+                "authorization_url": "https://auth.example.test/authorize",
+                "token_url": "https://auth.example.test/token",
+            },
+        )
+        config = Config(
+            agents={"admin": AgentConfig(display_name="Admin", role="Configure agents")},
+            defaults=DefaultsConfig(tools=[], worker_scope="user_agent"),
+            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            mcp_servers={"demo": mcp_server},
+        )
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(config, config_path)
+        cm = _config_manager(config_path)
+
+        with tool_runtime_context(_caller_context(cm, config)):
+            result = cm.manage_agent(
+                operation="create",
+                agent_name="research",
+                display_name="Research",
+                role="Use Demo MCP",
+                tools=["mcp_demo"],
+            )
+
+        query = parse_qs(urlparse(_connect_url_from_result(result)).query)
+        assert query["agent_name"] == ["research"]
+        assert query["execution_scope"] == ["user_agent"]
+        assert "/api/oauth/mcp_demo/authorize" in result
+
+    def test_manage_agent_oauth_link_failure_does_not_mask_saved_update(self, tmp_path: Path) -> None:
+        """Optional link generation must not report a persisted config change as failed."""
+        config = Config(
+            agents={
+                "admin": AgentConfig(display_name="Admin", role="Configure agents"),
+                "research": AgentConfig(display_name="Research", role="Research"),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+        )
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(config, config_path)
+        cm = _config_manager(config_path)
+
+        with (
+            tool_runtime_context(_caller_context(cm, config)),
+            patch("mindroom.custom_tools.config_manager.oauth_connect_url", side_effect=RuntimeError("disk failed")),
+        ):
+            result = cm.manage_agent(
+                operation="update",
+                agent_name="research",
+                tools=["google_drive"],
+            )
+
+        assert "Successfully updated" in result
+        assert load_config_yaml(config_path).agents["research"].tool_names == ["google_drive"]
 
     def test_manage_agent_create_returns_invalid_plugin_manifest_error(self, tmp_path: Path) -> None:
         """Write config-manager flows should keep runtime plugin validation in the invalid-config channel."""

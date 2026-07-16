@@ -3024,6 +3024,20 @@ See [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agen
 Configured MCP servers also appear here as dynamic tools named `mcp_<server_id>`.
 See [MCP](https://docs.mindroom.chat/mcp/) for the `mcp_servers` config and naming rules.
 
+## MindRoom-Managed OAuth Onboarding In Conversation
+
+This flow applies to tools whose MindRoom catalog metadata names an `auth_provider`, including the Google provider tools and OAuth MCP servers.
+It does not apply to every tool labeled `SetupType.OAUTH`; tools without `auth_provider` metadata use their own setup contract.
+When `config_manager` creates or updates an agent with one of these tools, it returns a connect URL scoped to the updated agent and current authorized requester when that binding is available.
+Present that URL directly instead of asking the configuring agent to call the new tool, because newly configured tools are not guaranteed to enter the current run's tool schema.
+When the current agent already has a MindRoom-managed provider tool, call an appropriate safe status, read, or list operation to check its connection.
+For an OAuth MCP server, use its generated `*_connection_status` or `*_list_tools` operation.
+If the operation is disconnected, its structured `OAuthConnectionRequired` result includes `oauth_connection_required: true`, a scoped `connect_url` when available, and `requires_host_browser: true` when the URL uses a supported loopback host.
+When `connect_url` is provided, present it directly instead of sending the user to the dashboard.
+When `requires_host_browser` is true, explain that the loopback URL (`localhost`, `127.0.0.1`, or `::1`) must be opened in a browser on the computer where MindRoom is running, not on a phone or another computer.
+After the user connects, have the target agent retry the safe operation or original request.
+The dashboard remains a manual alternative only when no `connect_url` is available.
+
 ## Browse By Topic
 
 - [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/) - Local files, shell, Python, coding helpers, and worker-routed execution tools.
@@ -11397,6 +11411,40 @@ See the [Hooks](https://docs.mindroom.chat/hooks/) page for full documentation i
 - Error handling without cooldowns or circuit breakers
 - Testing patterns
 
+## Installing plugins
+
+Vendor a plugin directly from GitHub into your local plugins directory:
+
+```bash
+mindroom plugins install ping-hook-plugin
+mindroom plugins install mindroom-ai/ping-hook-plugin@v1.2.0
+```
+
+Bare names install from the `mindroom-ai` organization, and `@ref` pins a branch, tag, or exact commit (the default follows the repository default branch).
+The command resolves the reference to an exact commit, downloads that commit's archive, validates it with the strict compatibility check, and only then moves it into `<config dir>/plugins/<name>`.
+Each vendored plugin carries a `.mindroom-plugin.lock.json` file recording the repository, the requested reference, and the exact installed commit.
+Plugin Python dependencies are not installed automatically; installs report a note when the plugin declares a `pyproject.toml`.
+
+After installing, reference the plugin from `config.yaml`:
+
+```yaml
+plugins:
+  - path: plugins/ping-hook-plugin
+```
+
+Update vendored plugins with:
+
+```bash
+mindroom plugins update ping-hook-plugin
+mindroom plugins update --all
+mindroom plugins update ping-hook-plugin --ref v1.3.0
+```
+
+Updates re-resolve the pinned reference, skip plugins already at the resolved commit, and atomically replace the plugin directory only after the new revision passes the strict check.
+A failed update leaves the installed version untouched.
+Both commands accept `--path` to target a specific config file's directory and `--plugins-dir` to override the vendor directory.
+Set `GITHUB_TOKEN` to authenticate GitHub requests, which raises API rate limits and allows private repositories.
+
 ## Compatibility checks
 
 Validate a plugin against the installed MindRoom version before deployment:
@@ -16401,14 +16449,17 @@ agents:
 
 ## Connect
 
-Start MindRoom, open the dashboard, and select **Connect** for each Google integration you want to use.
-The dashboard explains which installation and credential scope will receive the connection before you continue.
+When `config_manager` enables a Google provider tool, use the direct connect URL in its result when one is returned for the updated agent and requester scope.
+Do not ask the configuring agent to invoke a newly added tool in the same run, because the current provider-visible tool schema may not include it.
+Once a Google tool is available to the target agent, ask that agent to perform an appropriate safe status, read, or list operation with the tool.
+If the tool is disconnected, its result contains structured `OAuthConnectionRequired` data with `oauth_connection_required: true` and, when available, the exact `connect_url` for that provider, requester, agent, and execution scope.
+When `connect_url` is provided, the agent should present it directly instead of sending you to the dashboard.
+If the result includes `requires_host_browser: true`, open the loopback URL (`localhost`, `127.0.0.1`, or `::1`) in a browser on the computer where the MindRoom process is running, not on a phone or another computer.
+If you made the request from another device, open the conversation on the MindRoom computer or copy the complete URL into a browser there.
 Google asks you to choose an account and approve only that provider's scopes.
-After the browser flow completes, the integration is ready for the selected agent and execution scope.
-
-If an agent tries a Google tool before it is connected, the tool result includes a MindRoom connect URL for that exact provider and agent scope.
-When that URL uses `localhost`, open it in a browser on the computer where the MindRoom process is running, not on a phone or another computer.
-If you made the request from another device, open the conversation on the MindRoom computer or copy the complete URL into a browser there, complete the Google flow, and retry the request.
+After the browser flow completes, have the target agent retry the operation and the integration is ready for the selected agent and execution scope.
+As a manual alternative, open the dashboard and select **Connect** for the Google integration only when neither `config_manager` nor a tool result provides a `connect_url`.
+The dashboard explains which installation and credential scope will receive the connection before you continue.
 
 OAuth tokens are stored under provider token services such as `google_drive_oauth` and `google_docs_oauth`.
 Editable tool settings are stored separately under services such as `google_drive`, `google_docs`, `google_calendar`, `google_sheets`, and `gmail`.
@@ -17942,7 +17993,7 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │                     service.                                                           │
 │ local-stack-setup   Start local Synapse + MindRoom Chat using Docker only.             │
 │ config              Manage MindRoom configuration files.                               │
-│ plugins             Validate external MindRoom plugins.                                │
+│ plugins             Validate and vendor external MindRoom plugins.                     │
 │ desktop             Connect allowlisted local applications to cloud MindRoom over      │
 │                     Matrix E2EE.                                                       │
 │ avatars             Generate and sync managed avatar assets.                           │

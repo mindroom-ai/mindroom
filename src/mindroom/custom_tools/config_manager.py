@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -12,7 +13,10 @@ from agno.tools import Toolkit
 from pydantic import ValidationError
 
 from mindroom.api.config_lifecycle import validate_and_persist_config_payload
-from mindroom.authorization import responder_candidate_entities_from_cached_room
+from mindroom.authorization import (
+    is_sender_allowed_for_agent_credential_management,
+    responder_candidate_entities_from_cached_room,
+)
 from mindroom.commands.parsing import get_command_help
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import (
@@ -24,8 +28,15 @@ from mindroom.config.main import (
 from mindroom.config.models import AgentLearningMode, ToolConfigEntry
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
+from mindroom.oauth import oauth_connect_url_requires_host_browser
+from mindroom.oauth.registry import load_oauth_providers
+from mindroom.oauth.service import oauth_connect_url
 from mindroom.tool_system.catalog import ToolCategory, ToolStatus, resolved_tool_metadata_for_runtime
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    build_execution_identity_from_runtime_context,
+    get_tool_runtime_context,
+)
+from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -79,6 +90,112 @@ def validate_knowledge_bases(
     if not available:
         return f"Error: Unknown knowledge bases: {invalid}. No knowledge bases are configured."
     return f"Error: Unknown knowledge bases: {invalid}. Available knowledge bases: {available}."
+
+
+def _build_oauth_onboarding_guidance(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    previous_tools: list[str],
+    updated_tools: list[str],
+    tool_metadata: dict[str, ToolMetadata],
+) -> str:
+    """Return target-scoped connect links for newly enabled generic OAuth providers."""
+    previous_provider_ids = {
+        metadata.auth_provider
+        for tool_name in previous_tools
+        if (metadata := tool_metadata.get(tool_name)) is not None and metadata.auth_provider is not None
+    }
+    added_tools_by_provider: dict[str, list[str]] = {}
+    for tool_name in updated_tools:
+        metadata = tool_metadata.get(tool_name)
+        if metadata is None or metadata.auth_provider is None or metadata.auth_provider in previous_provider_ids:
+            continue
+        added_tools_by_provider.setdefault(metadata.auth_provider, []).append(tool_name)
+    if not added_tools_by_provider:
+        return ""
+
+    runtime_context = get_tool_runtime_context()
+    if runtime_context is None:
+        return ""
+    if not is_sender_allowed_for_agent_credential_management(
+        runtime_context.requester_id,
+        agent_name=agent_name,
+        config=config,
+    ):
+        return (
+            f"\n\nNo OAuth connect link was issued because the current requester is not authorized to manage "
+            f"credentials for agent `{agent_name}`."
+        )
+
+    caller_identity = build_execution_identity_from_runtime_context(runtime_context)
+    target_identity = replace(
+        caller_identity,
+        agent_name=agent_name,
+        transport_agent_name=agent_name,
+    )
+    agent = config.get_agent(agent_name)
+    worker_target = build_agent_toolkit_worker_target(
+        config.resolve_entity(agent_name).execution_scope,
+        agent_name,
+        is_private=agent.private is not None,
+        execution_identity=target_identity,
+        runtime_paths=runtime_paths,
+    )
+    providers = load_oauth_providers(config, runtime_paths)
+    link_lines: list[str] = []
+    any_requires_host_browser = False
+    for provider_id, tool_names in added_tools_by_provider.items():
+        provider = providers.get(provider_id)
+        if provider is None:
+            continue
+        connect_url = oauth_connect_url(provider, runtime_paths, worker_target=worker_target)
+        requires_host_browser = oauth_connect_url_requires_host_browser(connect_url)
+        any_requires_host_browser = any_requires_host_browser or requires_host_browser
+        tools_label = ", ".join(f"`{tool_name}`" for tool_name in tool_names)
+        link_lines.append(
+            f"- {tools_label}: `connect_url`: {connect_url}; "
+            f"`requires_host_browser`: {str(requires_host_browser).lower()}",
+        )
+    if not link_lines:
+        return ""
+
+    host_browser_guidance = ""
+    if any_requires_host_browser:
+        host_browser_guidance = (
+            " Localhost links must be opened in a browser on the computer where MindRoom is running."
+        )
+    return (
+        f"\n\n**Connect MindRoom-managed OAuth for agent `{agent_name}`:**\n"
+        + "\n".join(link_lines)
+        + "\nGive the user these direct links instead of sending them to the dashboard."
+        + host_browser_guidance
+        + f" After connection, have agent `{agent_name}` retry an appropriate safe status, read, or list operation. "
+        "Newly configured tools are not guaranteed to be available to the current agent or in the current run."
+    )
+
+
+def _oauth_onboarding_guidance(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    previous_tools: list[str],
+    updated_tools: list[str],
+    tool_metadata: dict[str, ToolMetadata],
+) -> str:
+    """Build optional OAuth guidance without changing a successful config write into an error."""
+    try:
+        return _build_oauth_onboarding_guidance(
+            config,
+            runtime_paths,
+            agent_name,
+            previous_tools,
+            updated_tools,
+            tool_metadata,
+        )
+    except Exception:
+        logger.exception("oauth_onboarding_guidance_failed", agent_name=agent_name)
+        return ""
 
 
 class _InfoType(str, Enum):
@@ -646,7 +763,19 @@ class ConfigManagerTools(Toolkit):
             config.agents[agent_name] = new_agent
 
             # Save config
-            validate_and_persist_config_payload(config.authored_model_dump(), self.runtime_paths)
+            persisted_config = validate_and_persist_config_payload(
+                config.authored_model_dump(),
+                self.runtime_paths,
+            )
+
+            oauth_guidance = _oauth_onboarding_guidance(
+                persisted_config,
+                self.runtime_paths,
+                agent_name,
+                [],
+                persisted_config.resolve_entity(agent_name).available_tools,
+                tool_metadata,
+            )
 
             # Build success message
             tools_str = ", ".join(tools) if tools else "None"
@@ -660,6 +789,7 @@ class ConfigManagerTools(Toolkit):
                 f"- Model: {model}\n"
                 f"- Rooms: {rooms_str}\n\n"
                 f"The agent is now available and can be mentioned with @{agent_name}"
+                f"{oauth_guidance}"
             )
         except (ValidationError, ConfigRuntimeValidationError) as exc:
             return format_invalid_config_message(exc, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
@@ -696,6 +826,7 @@ class ConfigManagerTools(Toolkit):
                 return f"Error: Agent '{agent_name}' not found. Use manage_agent with operation='create' to create it."
 
             agent = config.agents[agent_name]
+            previous_tools = config.resolve_entity(agent_name).available_tools
 
             # Validate tools if provided
             if tools is not None:
@@ -761,10 +892,24 @@ class ConfigManagerTools(Toolkit):
                 return "No changes made. All provided values are the same as current configuration."
 
             # Save config
-            validate_and_persist_config_payload(config.authored_model_dump(), self.runtime_paths)
+            persisted_config = validate_and_persist_config_payload(
+                config.authored_model_dump(),
+                self.runtime_paths,
+            )
 
-            return f"✅ Successfully updated agent '{agent_name}'!\n\n**Changes:**\n" + "\n".join(
-                f"- {c}" for c in changes
+            oauth_guidance = _oauth_onboarding_guidance(
+                persisted_config,
+                self.runtime_paths,
+                agent_name,
+                previous_tools,
+                persisted_config.resolve_entity(agent_name).available_tools,
+                tool_metadata,
+            )
+
+            return (
+                f"✅ Successfully updated agent '{agent_name}'!\n\n**Changes:**\n"
+                + "\n".join(f"- {c}" for c in changes)
+                + oauth_guidance
             )
         except (ValidationError, ConfigRuntimeValidationError) as exc:
             return format_invalid_config_message(exc, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)

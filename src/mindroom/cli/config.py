@@ -60,7 +60,7 @@ config_app = typer.Typer(
 )
 
 # Reusable option definitions
-_CONFIG_PATH_OPTION: Path | None = typer.Option(
+CONFIG_PATH_OPTION: Path | None = typer.Option(
     None,
     "--path",
     "-p",
@@ -517,7 +517,7 @@ def config_init(
 
 @config_app.command("show")
 def config_show(
-    path: Path | None = _CONFIG_PATH_OPTION,
+    path: Path | None = CONFIG_PATH_OPTION,
     raw: bool = typer.Option(
         False,
         "--raw",
@@ -551,7 +551,7 @@ def config_show(
 
 @config_app.command("edit")
 def config_edit(
-    path: Path | None = _CONFIG_PATH_OPTION,
+    path: Path | None = CONFIG_PATH_OPTION,
 ) -> None:
     """Open config.yaml in your default editor.
 
@@ -632,7 +632,7 @@ def config_validate(
 
 @config_app.command("resolve")
 def config_resolve(
-    path: Path | None = _CONFIG_PATH_OPTION,
+    path: Path | None = CONFIG_PATH_OPTION,
 ) -> None:
     """Print the fully merged config YAML with all !include tags resolved.
 
@@ -666,7 +666,7 @@ def config_resolve(
 
 @config_app.command("path")
 def config_path_cmd(
-    path: Path | None = _CONFIG_PATH_OPTION,
+    path: Path | None = CONFIG_PATH_OPTION,
 ) -> None:
     """Show the resolved config file path and search locations."""
     process_env = _config_discovery_env(path)

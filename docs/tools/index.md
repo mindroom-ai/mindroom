@@ -40,6 +40,20 @@ See [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-con
 Configured MCP servers also appear here as dynamic tools named `mcp_<server_id>`.
 See [MCP](../mcp.md) for the `mcp_servers` config and naming rules.
 
+## MindRoom-Managed OAuth Onboarding In Conversation
+
+This flow applies to tools whose MindRoom catalog metadata names an `auth_provider`, including the Google provider tools and OAuth MCP servers.
+It does not apply to every tool labeled `SetupType.OAUTH`; tools without `auth_provider` metadata use their own setup contract.
+When `config_manager` creates or updates an agent with one of these tools, it returns a connect URL scoped to the updated agent and current authorized requester when that binding is available.
+Present that URL directly instead of asking the configuring agent to call the new tool, because newly configured tools are not guaranteed to enter the current run's tool schema.
+When the current agent already has a MindRoom-managed provider tool, call an appropriate safe status, read, or list operation to check its connection.
+For an OAuth MCP server, use its generated `*_connection_status` or `*_list_tools` operation.
+If the operation is disconnected, its structured `OAuthConnectionRequired` result includes `oauth_connection_required: true`, a scoped `connect_url` when available, and `requires_host_browser: true` when the URL uses a supported loopback host.
+When `connect_url` is provided, present it directly instead of sending the user to the dashboard.
+When `requires_host_browser` is true, explain that the loopback URL (`localhost`, `127.0.0.1`, or `::1`) must be opened in a browser on the computer where MindRoom is running, not on a phone or another computer.
+After the user connects, have the target agent retry the safe operation or original request.
+The dashboard remains a manual alternative only when no `connect_url` is available.
+
 ## Browse By Topic
 
 - [Execution & Coding](execution-and-coding.md) - Local files, shell, Python, coding helpers, and worker-routed execution tools.
