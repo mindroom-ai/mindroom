@@ -1972,11 +1972,12 @@
         "pydantic",
         "pyyaml"
       ],
-      "description": "Build and manage MindRoom agents with expert knowledge of the system",
+      "description": "Inspect and control the full MindRoom configuration, including agents, plugins, and authorization",
       "display_name": "Config Manager",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
       "function_names": [
         "get_info",
+        "manage_config",
         "manage_agent",
         "manage_team"
       ],
