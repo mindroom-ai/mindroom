@@ -239,7 +239,7 @@ class CompactionOverrideConfig(BaseModel):
         default=None,
         gt=0,
         lt=1,
-        description="Soft replay trigger budget as a fraction of the context window",
+        description="Soft replay trigger budget as a fraction of the effective replay window",
     )
     replay_window_tokens: int | None = Field(
         default=None,
@@ -276,13 +276,16 @@ class CompactionConfig(BaseModel):
     threshold_tokens: int | None = Field(
         default=None,
         ge=1,
-        description="Soft replay trigger budget in tokens (defaults to 80% of context window when both thresholds are None)",
+        description=(
+            "Soft replay trigger budget in tokens "
+            "(defaults to 80% of the effective replay window when both thresholds are None)"
+        ),
     )
     threshold_percent: float | None = Field(
         default=None,
         gt=0,
         lt=1,
-        description="Soft replay trigger budget as a fraction of the context window",
+        description="Soft replay trigger budget as a fraction of the effective replay window",
     )
     replay_window_tokens: int | None = Field(
         default=None,

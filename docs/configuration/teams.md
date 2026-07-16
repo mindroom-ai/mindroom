@@ -107,9 +107,14 @@ When the active team model has a known `context_window`, MindRoom always compute
 Automatic destructive compaction is enabled by default through `defaults.compaction`, but it runs only when raw history exceeds the hard replay budget for the next reply.
 `threshold_tokens` and `threshold_percent` set a soft trigger budget for planning metadata and compaction notices.
 Crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting.
-Use `replay_window_tokens` to cap persisted replay and required-compaction planning below the model's real context window without lowering the provider request limit.
-Use `enabled: false` to disable automatic pre-reply compaction for a team.
-Replay safety uses the smaller of `replay_window_tokens` and the active team model window.
+
+You can tune team-scoped compaction behavior with these settings:
+
+- Use `replay_window_tokens` to cap persisted replay and required-compaction planning below the model's real context window without lowering the provider request limit.
+- Set `enabled: false` to disable automatic pre-reply compaction for a team.
+
+When the active team model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
+When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
 If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass.
 Manual `compact_context` remains available when a compaction model and context window are configured.
 Compaction uses an in-room lifecycle notice that is edited in place.

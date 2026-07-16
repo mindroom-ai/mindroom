@@ -188,6 +188,7 @@ agents:
 Automatic destructive compaction is enabled by default through `defaults.compaction`, but it runs only when raw history exceeds the hard replay budget for the next reply.
 `threshold_tokens` and `threshold_percent` set a soft trigger budget for planning metadata and compaction notices; crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting.
 `replay_window_tokens` can cap persisted replay and required-compaction planning below the model's real context window without lowering the provider request limit.
+If the active model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
 Set `enabled: false` in defaults or the agent override to disable automatic pre-reply compaction.
 Manual `compact_context` records a durable request that runs before the next reply in the same conversation scope.
 Manual `compact_context` remains available when a compaction model and context window are configured.

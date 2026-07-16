@@ -212,8 +212,10 @@ def _resolve_replay_window(
     configured_replay_window: int | None,
 ) -> int | None:
     """Cap persisted replay without changing the provider's real context window."""
-    if active_context_window is None or configured_replay_window is None:
+    if configured_replay_window is None:
         return active_context_window
+    if active_context_window is None:
+        return configured_replay_window
     return min(active_context_window, configured_replay_window)
 
 

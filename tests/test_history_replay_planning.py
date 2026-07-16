@@ -546,7 +546,10 @@ def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_su
             agents={
                 "test_agent": AgentConfig(
                     display_name="Test Agent",
-                    compaction=CompactionOverrideConfig(model="summary-model"),
+                    compaction=CompactionOverrideConfig(
+                        model="summary-model",
+                        replay_window_tokens=20_000,
+                    ),
                 ),
             },
             defaults=DefaultsConfig(tools=[]),
@@ -576,10 +579,20 @@ def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_su
     )
 
     assert execution_plan.compaction_context_window == 32_000
-    assert execution_plan.replay_window_tokens is None
+    assert execution_plan.replay_window_tokens == 20_000
     assert execution_plan.summary_input_budget_tokens is not None
-    assert execution_plan.replay_budget_tokens is None
+    assert execution_plan.trigger_threshold_tokens == 16_000
+    assert execution_plan.replay_budget_tokens == 8_000
+    assert execution_plan.hard_replay_budget_tokens == 8_000
     assert execution_plan.destructive_compaction_available is True
+
+    decision = classify_compaction_decision(
+        plan=execution_plan,
+        force_compact_before_next_run=False,
+        current_history_tokens=8_001,
+    )
+    assert decision.mode == "required"
+    assert decision.reason == "history_exceeds_hard_budget"
 
 
 def test_resolve_runtime_model_uses_room_override_for_team(

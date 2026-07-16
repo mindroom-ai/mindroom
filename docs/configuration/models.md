@@ -254,10 +254,16 @@ When the current turn alone cannot fit, the request fails with a clear provider 
 Automatic destructive compaction is enabled by default through `defaults.compaction`.
 Set `enabled: false` in `defaults.compaction` or a per-agent/per-team `compaction` override to disable automatic pre-reply compaction.
 It runs only when history exceeds the hard replay budget for the next reply.
-Use `threshold_tokens` or `threshold_percent` to set the soft trigger budget that appears in planning metadata and compaction notices.
-Crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting for that reply.
-Use `replay_window_tokens` to keep persisted replay and required compaction within a smaller operational window without presenting that smaller value as the provider's request limit.
-Use `reserve_tokens` to leave hard-budget headroom for the current prompt and output.
+
+You can tune compaction behavior with these settings:
+
+- Use `threshold_tokens` or `threshold_percent` to set the soft trigger budget. Crossing this soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting for that reply.
+- Use `replay_window_tokens` to keep persisted replay and required compaction within a smaller operational window without presenting that smaller value as the provider's request limit.
+- Use `reserve_tokens` to leave hard-budget headroom for the current prompt and output.
+
+When the active runtime model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
+When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
+
 Manual `compact_context` records a durable request that runs before the next reply in the same conversation scope.
 Manual `compact_context` remains available when a compaction model and context window are configured.
 It still uses the active runtime window for the final replay-fit step, but destructive compaction itself can be available whenever an explicit `compaction.model` has its own `context_window`.
