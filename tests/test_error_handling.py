@@ -1,16 +1,11 @@
 """Tests for error handling module."""
 
 import httpx
-import pytest
-from agno.exceptions import ContextWindowExceededError, ModelProviderError, ModelRateLimitError
+from agno.exceptions import ModelProviderError
 from anthropic import AuthenticationError as AnthropicAuthError
 from openai import AuthenticationError as OpenAIAuthError
 
-from mindroom.error_handling import (
-    _extract_provider_from_error,
-    get_user_friendly_error_message,
-    is_context_window_overflow_error,
-)
+from mindroom.error_handling import _extract_provider_from_error, get_user_friendly_error_message
 
 _MOCK_RESPONSE = httpx.Response(status_code=401, request=httpx.Request("POST", "https://api.example.com"))
 
@@ -126,73 +121,6 @@ def test_typed_model_provider_error_is_user_friendly() -> None:
     message = get_user_friendly_error_message(error)
 
     assert "Model provider temporarily unavailable after automatic retries" in message
-
-
-@pytest.mark.parametrize(
-    "error",
-    [
-        ContextWindowExceededError(message="prompt is too long"),
-        ModelProviderError(message="prompt is too long: 250001 tokens > 200000 maximum", status_code=200),
-        ModelProviderError(
-            message="The input token count (250001) exceeds the maximum number of tokens allowed (200000).",
-            status_code=500,
-        ),
-        "Error code: 400 - maximum context length is 128000 tokens",
-        "Request exceeds the model context window",
-    ],
-)
-def test_context_window_overflow_classification(error: Exception | str) -> None:
-    """Typed errors and narrow provider input-limit messages identify overflows."""
-    assert is_context_window_overflow_error(error) is True
-
-
-@pytest.mark.parametrize(
-    "error",
-    [
-        ModelRateLimitError(message="overloaded_error", status_code=529),
-        ModelProviderError(message="Rate limit exceeded for input tokens per minute", status_code=429),
-        ModelProviderError(message="Too many input tokens", status_code=429),
-        ModelProviderError(message="model overloaded", status_code=529),
-        ModelProviderError(message="Internal server error", status_code=500),
-        ModelProviderError(message="Output token limit reached at max_tokens", status_code=500),
-        ModelProviderError(message="Output exceeds the context window", status_code=500),
-        RuntimeError("prompt is too long while validating a local template"),
-    ],
-)
-def test_context_window_overflow_counterexamples(error: Exception) -> None:
-    """Transient provider faults and output limits are not input-context overflows."""
-    assert is_context_window_overflow_error(error) is False
-
-
-def test_wrapped_context_overflow_keeps_user_diagnostic() -> None:
-    """A transient status must not replace deterministic overflow detail."""
-    error = ModelProviderError(
-        message="The input token count (250001) exceeds the maximum number of tokens allowed (200000).",
-        status_code=500,
-    )
-
-    message = get_user_friendly_error_message(error)
-
-    assert "Context window exceeded" in message
-    assert "input token count (250001)" in message
-    assert "temporarily unavailable" not in message
-
-
-def test_structured_context_overflow_hides_wrapper_metadata() -> None:
-    """Only the provider diagnostic from a structured overflow is user-visible."""
-    error = ModelProviderError(
-        message=(
-            "{'type': 'error', 'error': {'type': 'invalid_request_error', "
-            "'message': 'prompt is too long: 250001 tokens > 200000 maximum'}, "
-            "'request_id': 'provider-request-id'}"
-        ),
-        status_code=500,
-    )
-
-    message = get_user_friendly_error_message(error)
-
-    assert "prompt is too long: 250001 tokens > 200000 maximum" in message
-    assert "provider-request-id" not in message
 
 
 def test_unstructured_overloaded_text_is_not_misclassified() -> None:

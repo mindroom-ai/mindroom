@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
-from agno.exceptions import ModelProviderError
+from agno.exceptions import ContextWindowExceededError
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.utils.models.claude import format_messages, format_tools_for_model
 from agno.utils.tokens import count_schema_tokens
@@ -331,7 +331,7 @@ class MindroomVertexAIClaude(VertexAIClaude):
         input_budget = self.context_window - output_reserve
         if input_budget <= 0:
             msg = "Vertex Claude context window leaves no room for input after the configured output reserve."
-            raise ModelProviderError(message=msg, model_name=self.name, model_id=self.id)
+            raise ContextWindowExceededError(message=msg, model_name=self.name, model_id=self.id)
 
         estimated_tokens = await asyncio.to_thread(
             self._estimate_request_input_tokens,
@@ -358,7 +358,7 @@ class MindroomVertexAIClaude(VertexAIClaude):
         replay_cuts = self._replay_trim_candidates(messages)
         if not replay_cuts:
             msg = f"Vertex Claude request uses {original_tokens} input tokens; limit is {input_budget}."
-            raise ModelProviderError(message=msg, model_name=self.name, model_id=self.id)
+            raise ContextWindowExceededError(message=msg, model_name=self.name, model_id=self.id)
 
         best_messages: list[Message] | None = None
         best_tokens: int | None = None
@@ -377,7 +377,7 @@ class MindroomVertexAIClaude(VertexAIClaude):
 
         if best_messages is None or best_tokens is None:
             msg = f"Vertex Claude current turn uses more than the {input_budget}-token input limit."
-            raise ModelProviderError(message=msg, model_name=self.name, model_id=self.id)
+            raise ContextWindowExceededError(message=msg, model_name=self.name, model_id=self.id)
 
         logger.warning(
             "vertex_claude_request_history_trimmed",
