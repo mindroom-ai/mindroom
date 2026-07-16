@@ -592,6 +592,10 @@ async def test_requester_agent_replay_and_sequence_are_enforced(transport: Async
     await bridge.on_to_device_event(_event(first))
     assert provider.calls == [("get_app_state", APP_ID), ("screenshot", (APP_ID, "state-1"))]
 
+    await bridge.on_to_device_event(_event(_command("status", request_id="request-2", sequence=2)))
+    assert "reused with different command content" in (_response(transport).error or "")
+    assert provider.calls == [("get_app_state", APP_ID), ("screenshot", (APP_ID, "state-1"))]
+
     await bridge.on_to_device_event(_event(_command(request_id="request-3", sequence=2)))
     assert "sequence" in (_response(transport).error or "")
 

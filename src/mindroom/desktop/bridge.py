@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -101,6 +103,12 @@ class _Execution:
     follow_up_app: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _CachedDesktopResponse:
+    command_fingerprint: str
+    response: DesktopResponse
+
+
 @dataclass
 class DesktopBridge:
     """Validate, execute, and answer pinned encrypted desktop commands."""
@@ -110,7 +118,7 @@ class DesktopBridge:
     policy: DesktopBridgePolicy
     clock: Callable[[], float] = time.time
     monotonic_clock: Callable[[], float] = time.monotonic
-    _responses: OrderedDict[str, DesktopResponse] = field(default_factory=OrderedDict, init=False)
+    _responses: OrderedDict[str, _CachedDesktopResponse] = field(default_factory=OrderedDict, init=False)
     _sequence_high_watermarks: OrderedDict[str, int] = field(default_factory=OrderedDict, init=False)
     _in_flight: set[str] = field(default_factory=set, init=False)
     _execution_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
@@ -143,15 +151,27 @@ class DesktopBridge:
 
         cached = self._responses.get(command.request_id)
         if cached is not None:
+            if cached.command_fingerprint != _command_fingerprint(command):
+                logger.warning(
+                    "desktop_command_request_id_reused",
+                    request_id=command.request_id,
+                    action=command.action,
+                    requester_id=command.requester_id,
+                    agent_name=command.agent_name,
+                )
+                await self._send_response(
+                    self._error_response(command, "Desktop request ID was reused with different command content."),
+                )
+                return
             logger.info(
                 "desktop_command_replayed",
                 request_id=command.request_id,
                 action=command.action,
                 requester_id=command.requester_id,
                 agent_name=command.agent_name,
-                ok=cached.ok,
+                ok=cached.response.ok,
             )
-            await self._send_response(cached)
+            await self._send_response(cached.response)
             return
         if command.request_id in self._in_flight:
             return
@@ -160,7 +180,7 @@ class DesktopBridge:
         try:
             async with self._execution_lock:
                 response = await self._process(command)
-            self._remember_response(response)
+            self._remember_response(command, response)
             logger.info(
                 "desktop_command_completed",
                 request_id=command.request_id,
@@ -536,8 +556,11 @@ class DesktopBridge:
             result={"action": command.action, "action_outcome": "unknown", "warning": warning},
         )
 
-    def _remember_response(self, response: DesktopResponse) -> None:
-        self._responses[response.request_id] = response
+    def _remember_response(self, command: DesktopCommand, response: DesktopResponse) -> None:
+        self._responses[response.request_id] = _CachedDesktopResponse(
+            command_fingerprint=_command_fingerprint(command),
+            response=response,
+        )
         self._responses.move_to_end(response.request_id)
         while len(self._responses) > _MAX_REPLAY_RESPONSES:
             self._responses.popitem(last=False)
@@ -583,6 +606,17 @@ def _reject_unexpected_parameters(parameters: dict[str, object], *, allowed: fro
     if unexpected:
         msg = f"Unexpected desktop parameters: {', '.join(unexpected)}."
         raise DesktopProtocolError(msg)
+
+
+def _command_fingerprint(command: DesktopCommand) -> str:
+    encoded = json.dumps(
+        command.to_content(),
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _required_int_parameter(parameters: dict[str, object], key: str) -> int:
