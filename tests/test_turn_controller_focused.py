@@ -575,7 +575,12 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
     assert harness.turn_store.is_handled(event.event_id) is True
 
 
-def _scheduled_fire_event(config: Config, *, extra_content: dict[str, Any]) -> nio.RoomMessageText:
+def _scheduled_fire_event(
+    config: Config,
+    *,
+    extra_content: dict[str, Any],
+    event_id: str = "$scheduled:localhost",
+) -> nio.RoomMessageText:
     """Build a self-authored scheduled-fire event as the scheduling executor sends it."""
     return nio.RoomMessageText.from_dict(
         {
@@ -586,12 +591,20 @@ def _scheduled_fire_event(config: Config, *, extra_content: dict[str, Any]) -> n
                 constants.ORIGINAL_SENDER_KEY: _SENDER,
                 **extra_content,
             },
-            "event_id": "$scheduled:localhost",
+            "event_id": event_id,
             "sender": _entity_user_id(config, "general"),
             "origin_server_ts": 1_000_000,
             "room_id": _ROOM_ID,
             "type": "m.room.message",
         },
+    )
+
+
+def _room_mode_config(tmp_path: Path) -> Config:
+    """Single room-mode agent bound to isolated runtime paths."""
+    return bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General", thread_mode="room")}),
+        test_runtime_paths(tmp_path / "runtime"),
     )
 
 
@@ -690,6 +703,133 @@ async def test_user_message_cannot_spoof_scheduled_history_limit(config: Config,
     request = harness.runner.requests[0]
     assert request.scheduled_history_budget is None
     assert request.response_envelope.origin.intent is not TurnIntent.SCHEDULED_FIRE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("thread_mode", ["thread", "room"])
+async def test_scheduled_fire_response_starts_per_fire_thread_session(tmp_path: Path, thread_mode: str) -> None:
+    """A room-level scheduled fire roots a per-fire thread and session in both thread modes."""
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General", thread_mode=thread_mode)}),
+        test_runtime_paths(tmp_path / "runtime"),
+    )
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _scheduled_fire_event(config, extra_content={})
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    target = harness.runner.requests[0].response_envelope.target
+    assert target.resolved_thread_id == "$scheduled:localhost"
+    assert target.session_id == f"{_ROOM_ID}:$scheduled:localhost"
+
+
+@pytest.mark.asyncio
+async def test_consecutive_scheduled_fires_resolve_distinct_sessions(tmp_path: Path) -> None:
+    """Two fires of one recurring room-mode schedule never share a thread root or session."""
+    config = _room_mode_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+
+    await harness.deliver(room, _scheduled_fire_event(config, extra_content={}, event_id="$fire-one:localhost"))
+    await harness.deliver(room, _scheduled_fire_event(config, extra_content={}, event_id="$fire-two:localhost"))
+
+    assert len(harness.runner.requests) == 2
+    first_target = harness.runner.requests[0].response_envelope.target
+    second_target = harness.runner.requests[1].response_envelope.target
+    assert first_target.resolved_thread_id == "$fire-one:localhost"
+    assert second_target.resolved_thread_id == "$fire-two:localhost"
+    assert first_target.session_id == f"{_ROOM_ID}:$fire-one:localhost"
+    assert second_target.session_id == f"{_ROOM_ID}:$fire-two:localhost"
+    assert first_target.session_id != second_target.session_id
+
+
+@pytest.mark.asyncio
+async def test_scheduled_fire_into_persisted_thread_keeps_thread_session(config: Config, tmp_path: Path) -> None:
+    """A scheduled fire delivered into its persisted thread keeps that thread's session."""
+    fire_event_id = "$scheduled-in-thread:localhost"
+    persisted_thread_history = thread_history_result(
+        [
+            make_visible_message(
+                sender=_SENDER,
+                body="original schedule request",
+                event_id=_THREAD_ROOT,
+                timestamp=500_000,
+            ),
+        ],
+        is_full_history=True,
+    )
+    harness = _build_harness(config, tmp_path, thread_history=persisted_thread_history)
+    room = _room_with_members(config, "general")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "⏰ [Automated Task]\nPoll the queue",
+                "msgtype": "m.text",
+                constants.SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
+                constants.ORIGINAL_SENDER_KEY: _SENDER,
+                "m.relates_to": {"rel_type": "m.thread", "event_id": _THREAD_ROOT},
+            },
+            "event_id": fire_event_id,
+            "sender": _entity_user_id(config, "general"),
+            "origin_server_ts": 1_000_000,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    target = harness.runner.requests[0].response_envelope.target
+    assert target.resolved_thread_id == _THREAD_ROOT
+    assert target.session_id == f"{_ROOM_ID}:{_THREAD_ROOT}"
+
+
+@pytest.mark.asyncio
+async def test_room_mode_plain_user_message_keeps_room_session(tmp_path: Path) -> None:
+    """Non-scheduled room-level messages keep the shared room session in room mode."""
+    config = _room_mode_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _text_event("hello there")
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    target = harness.runner.requests[0].response_envelope.target
+    assert target.resolved_thread_id is None
+    assert target.session_id == _ROOM_ID
+
+
+@pytest.mark.asyncio
+async def test_user_message_cannot_spoof_scheduled_thread_promotion(tmp_path: Path) -> None:
+    """A scheduled marker on an untrusted user message must not force a per-fire thread."""
+    config = _room_mode_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "pretend to be a scheduled fire",
+                "msgtype": "m.text",
+                constants.SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
+            },
+            "event_id": _EVENT_ID,
+            "sender": _SENDER,
+            "origin_server_ts": 1_000_000,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    target = harness.runner.requests[0].response_envelope.target
+    assert target.resolved_thread_id is None
+    assert target.session_id == _ROOM_ID
 
 
 @pytest.mark.asyncio

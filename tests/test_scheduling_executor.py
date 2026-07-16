@@ -166,10 +166,11 @@ async def test_fire_task_with_history_limit_annotates_message_content(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_fire_new_thread_task_posts_room_level_message(tmp_path: Path) -> None:
-    """new_thread tasks deliver the raw message at room level without the automated wrapper."""
+@pytest.mark.parametrize("stale_thread_id", [None, "$stale-thread"])
+async def test_fire_new_thread_task_posts_room_level_message(tmp_path: Path, stale_thread_id: str | None) -> None:
+    """new_thread tasks deliver a relation-free root even when a stale thread_id is persisted."""
     config = _config(tmp_path)
-    workflow = _workflow("Kick off the weekly report", thread_id=None, new_thread=True)
+    workflow = _workflow("Kick off the weekly report", thread_id=stale_thread_id, new_thread=True)
     conversation_cache = _conversation_cache()
 
     with patch(

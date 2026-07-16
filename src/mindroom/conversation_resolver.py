@@ -12,7 +12,13 @@ from nio.responses import RoomGetEventError
 from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, HOOK_SOURCE_KEY, SKIP_MENTIONS_KEY
 from mindroom.dispatch_handoff import DispatchEvent, DispatchPayloadMetadata, PreparedTextEvent
-from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MESSAGE_SOURCE_KIND, VOICE_SOURCE_KIND, source_kind_from_content
+from mindroom.dispatch_source import (
+    IMAGE_SOURCE_KIND,
+    MESSAGE_SOURCE_KIND,
+    SCHEDULED_SOURCE_KIND,
+    VOICE_SOURCE_KIND,
+    source_kind_from_content,
+)
 from mindroom.dispatch_thread_context import (
     DispatchThreadContext,
     context_with_dispatch_thread_context,
@@ -315,6 +321,17 @@ class ConversationResolver:
             trusted_user_relay=trusted_human_relay,
         )
 
+    def _is_trusted_scheduled_root(self, event_source: dict[str, Any]) -> bool:
+        """Return whether one relation-free event is a scheduled fire from a managed entity."""
+        content = event_source.get("content")
+        if not isinstance(content, dict) or source_kind_from_content(content) != SCHEDULED_SOURCE_KIND:
+            return False
+        sender = event_source.get("sender")
+        if not isinstance(sender, str):
+            return False
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        return registry.current_entity_name_for_user_id(sender) is not None
+
     def build_message_target(
         self,
         *,
@@ -332,16 +349,22 @@ class ConversationResolver:
             room_id=room_id,
         )
         thread_start_root_event_id = None
+        scheduled_fire_root = False
         if event_source is not None:
             event_info = EventInfo.from_event(event_source)
             if event_info.can_be_thread_root and reply_to_event_id is not None:
                 thread_start_root_event_id = reply_to_event_id
+                # A scheduled fire that is its own root owns a per-fire thread and
+                # session even in room mode; otherwise every recurring fire in a
+                # room-mode room shares one room-level session and its history
+                # accumulates across fires.
+                scheduled_fire_root = self._is_trusted_scheduled_root(event_source)
         return MessageTarget.resolve(
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             thread_start_root_event_id=thread_start_root_event_id,
-            room_mode=effective_thread_mode == "room",
+            room_mode=effective_thread_mode == "room" and not scheduled_fire_root,
         )
 
     def build_message_envelope(
