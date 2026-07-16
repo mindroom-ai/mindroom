@@ -647,8 +647,7 @@ def config_resolve(
         console.print("\nRun [cyan]mindroom config init[/cyan] to create one.")
         raise typer.Exit(1)
 
-    import yaml  # noqa: PLC0415
-
+    from mindroom import yaml_io  # noqa: PLC0415
     from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
     from mindroom.config.yaml_includes import load_yaml_config_source  # noqa: PLC0415
 
@@ -659,7 +658,7 @@ def config_resolve(
         raise typer.Exit(1) from None
 
     print(
-        yaml.safe_dump(data, default_flow_style=False, sort_keys=True, allow_unicode=True),
+        yaml_io.safe_dump(data, default_flow_style=False, sort_keys=True, allow_unicode=True),
         end="",
     )
 

@@ -19,6 +19,7 @@ from jinja2 import StrictUndefined, TemplateSyntaxError, UndefinedError
 from jinja2.sandbox import SandboxedEnvironment, SecurityError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from mindroom import yaml_io
 from mindroom.file_locks import advisory_file_lock
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
@@ -378,7 +379,7 @@ def _format_validation_error(exc: ValidationError) -> str:
 
 def _load_template_document(path: Path, text: str) -> dict[str, Any]:
     try:
-        document = yaml.safe_load(text)
+        document = yaml_io.safe_load(text)
     except yaml.YAMLError as exc:
         raise _template_value_error(path, str(exc)) from exc
     if not isinstance(document, dict):

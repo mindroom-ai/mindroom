@@ -509,7 +509,7 @@ class TestHelperFunctions:
 
         replacement_state = MatrixState.load(runtime_paths=runtime_paths)
         replacement_state.add_account("agent_other", "mindroom_other", "pw", domain=domain)
-        monkeypatch.setattr("mindroom.matrix.state.yaml.safe_dump", _partial_dump)
+        monkeypatch.setattr("mindroom.matrix.state.yaml_io.safe_dump", _partial_dump)
 
         with pytest.raises(_InterruptedWriteError):
             replacement_state.save(runtime_paths=runtime_paths)

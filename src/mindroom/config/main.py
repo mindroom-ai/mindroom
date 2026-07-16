@@ -20,6 +20,7 @@ from pydantic import (
     model_validator,
 )
 
+from mindroom import yaml_io
 from mindroom.agent_policy import (
     build_agent_policy_seeds,
     get_agent_delegation_closure,
@@ -116,7 +117,7 @@ def _persisted_entity_account_usernames(runtime_paths: RuntimePaths) -> dict[str
     state_file = matrix_state_file(runtime_paths=runtime_paths)
     if not state_file.exists():
         return {}
-    data = yaml.safe_load(state_file.read_text(encoding="utf-8")) or {}
+    data = yaml_io.safe_load(state_file.read_text(encoding="utf-8")) or {}
     if not isinstance(data, dict):
         return {}
     accounts = data.get("accounts")
