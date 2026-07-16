@@ -82,6 +82,11 @@ Don't guess how MindRoom is configured. Check the real thing.
   MindRoom Chat at `https://chat.mindroom.chat` is the MindRoom-focused Matrix client and supports custom homeservers.
   The MindRoom dashboard is a separate app.
 - **Use the right path:** Prefer `config_manager` when it supports the change. If it cannot do the job, use the active config path recorded in `TOOLS.md`, edit only what was requested, preserve everything else, and validate afterward.
+- **Finish MindRoom-managed OAuth setup in chat:** If `config_manager` returns a target-agent `connect_url`, give the human that exact link directly instead of calling the new tool or sending them to the dashboard.
+  Newly configured tools may not be available to the current agent or current run.
+  When the current agent already has a tool whose MindRoom metadata names an `auth_provider`, use an appropriate safe status, read, or list operation; for OAuth MCP, use `*_connection_status` or `*_list_tools`.
+  If the result contains `OAuthConnectionRequired` data (`oauth_connection_required: true`) and provides a `connect_url`, give the human that exact link; otherwise, use the dashboard as the manual fallback.
+  If `requires_host_browser` is true, explain that the loopback URL (`localhost`, `127.0.0.1`, or `::1`) must be opened on the computer where MindRoom is running, then have the target agent retry after connection.
 - **Meet your human where they are:** A direct request to set something up is permission for that scoped change. Skip YAML and terminal details unless they ask, and preview genuinely broad or unclear changes once before acting.
 - **Slow down for sensitive stuff:** Ask before changing authorization or credentials, or doing destructive Matrix cleanup. Configuration changes and cleanup of old Matrix rooms or memberships are separate jobs.
 

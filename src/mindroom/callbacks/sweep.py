@@ -29,12 +29,32 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Give an unfired notify callback one day of delivery retries past expiry
+# Give a notify callback with unused fires one day of delivery retries past expiry
 # before deleting it without a notice.
 _EXPIRY_NOTICE_GIVE_UP_SECONDS = 86400
+_CALLBACK_SWEEP_INTERVAL_SECONDS = 60.0
 
 
-async def sweep_expired_callbacks(api_app: FastAPI) -> None:
+async def run_callback_sweep_loop(
+    stop_event: asyncio.Event,
+    api_app: FastAPI,
+    *,
+    interval_seconds: float = _CALLBACK_SWEEP_INTERVAL_SECONDS,
+) -> None:
+    """Sweep callbacks at a fixed cadence independent of worker cleanup."""
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+            break
+        except TimeoutError:
+            pass
+        try:
+            await _sweep_expired_callbacks(api_app)
+        except Exception:
+            logger.exception("Callback expiry sweep failed")
+
+
+async def _sweep_expired_callbacks(api_app: FastAPI) -> None:
     """Notify and remove expired callback records using the app's committed runtime."""
     try:
         config, runtime_paths = config_lifecycle.read_app_committed_runtime_config(api_app)

@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from mindroom import constants
 from mindroom.api import config_lifecycle
 from mindroom.api import main as api_main
-from mindroom.callbacks.store import CallbackStore
+from mindroom.callbacks.store import CallbackDeliverySnapshot, CallbackRecord, CallbackStore
 from mindroom.config.main import Config
 
 if TYPE_CHECKING:
@@ -25,6 +25,10 @@ if TYPE_CHECKING:
     from mindroom.external_triggers.models import TriggerDeliveryReadiness
 
 _OWNER = "@owner:example.org"
+
+
+def _stored_record(store: CallbackStore, callback_id: str) -> CallbackRecord | None:
+    return next((record for record in store.list_records() if record.callback_id == callback_id), None)
 
 
 @dataclass(frozen=True)
@@ -203,11 +207,17 @@ def _fire(
     )
 
 
-def _mock_execute(monkeypatch: pytest.MonkeyPatch, *, event_id: str | None = "$matrix-event") -> list[object]:
-    executed_snapshots: list[object] = []
+def _mock_execute(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    event_id: str | None = "$matrix-event",
+) -> list[CallbackDeliverySnapshot]:
+    executed_snapshots: list[CallbackDeliverySnapshot] = []
 
     async def execute_callback_fire(**kwargs: object) -> str | None:
-        executed_snapshots.append(kwargs["snapshot"])
+        snapshot = kwargs["snapshot"]
+        assert isinstance(snapshot, CallbackDeliverySnapshot)
+        executed_snapshots.append(snapshot)
         return event_id
 
     monkeypatch.setattr("mindroom.api.callbacks.execute_callback_fire", execute_callback_fire)
@@ -359,7 +369,7 @@ def test_invalid_payload_returns_422(callback_api: CallbackApiContext) -> None:
 
     assert response.status_code == 422
     store = CallbackStore(callback_api.runtime_paths)
-    record = store.get_record(callback_api.callback_id)
+    record = _stored_record(store, callback_api.callback_id)
     assert record is not None
     assert record.uses_left == 1
 
@@ -375,7 +385,7 @@ def test_owner_permission_removed_blocks_delivery(callback_api: CallbackApiConte
 
     assert response.status_code == 403
     store = CallbackStore(runtime_paths)
-    record = store.get_record(callback_api.callback_id)
+    record = _stored_record(store, callback_api.callback_id)
     assert record is not None
     assert record.uses_left == 1
 
@@ -391,7 +401,7 @@ def test_owner_not_joined_blocks_delivery(
 
     assert response.status_code == 403
     store = CallbackStore(callback_api.runtime_paths)
-    record = store.get_record(callback_api.callback_id)
+    record = _stored_record(store, callback_api.callback_id)
     assert record is not None
     assert record.uses_left == 1
 
@@ -407,7 +417,7 @@ def test_delivery_failure_releases_claimed_use(
 
     assert response.status_code == 502
     store = CallbackStore(callback_api.runtime_paths)
-    record = store.get_record(callback_api.callback_id)
+    record = _stored_record(store, callback_api.callback_id)
     assert record is not None
     assert record.uses_left == 1
 
@@ -423,5 +433,5 @@ def test_private_agent_fire_stamps_trusted_owner(
 
     assert response.status_code == 200
     snapshot = executed[0]
-    assert getattr(snapshot, "owner_user_id", None) == _OWNER
-    assert getattr(snapshot, "target_agent", None) == "coder"
+    assert snapshot.owner_user_id == _OWNER
+    assert snapshot.target_agent == "coder"

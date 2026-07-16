@@ -15,6 +15,7 @@ from mindroom.credentials import CredentialsManager, get_runtime_credentials_man
 from mindroom.custom_tools import google_service
 from mindroom.custom_tools.gmail import GmailTools
 from mindroom.custom_tools.google_calendar import GoogleCalendarTools
+from mindroom.custom_tools.google_docs import GoogleDocsTools
 from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_service_account_configured
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools
@@ -56,7 +57,10 @@ def runtime_paths(tmp_path: Path) -> RuntimePaths:
 
 
 @pytest.mark.parametrize("worker_scope", ["user", "user_agent"])
-@pytest.mark.parametrize("tool_class", [GmailTools, GoogleCalendarTools, GoogleDriveTools, GoogleSheetsTools])
+@pytest.mark.parametrize(
+    "tool_class",
+    [GmailTools, GoogleCalendarTools, GoogleDocsTools, GoogleDriveTools, GoogleSheetsTools],
+)
 def test_google_wrappers_allow_isolating_worker_scopes(
     worker_scope: str,
     tool_class: type[Any],
@@ -88,7 +92,10 @@ def test_google_wrappers_allow_isolating_worker_scopes(
     assert isinstance(tool, tool_class)
 
 
-@pytest.mark.parametrize("tool_class", [GmailTools, GoogleCalendarTools, GoogleDriveTools, GoogleSheetsTools])
+@pytest.mark.parametrize(
+    "tool_class",
+    [GmailTools, GoogleCalendarTools, GoogleDocsTools, GoogleDriveTools, GoogleSheetsTools],
+)
 def test_google_service_cache_is_isolated_per_thread(
     tool_class: type[Any],
     runtime_paths: RuntimePaths,
@@ -173,6 +180,10 @@ def test_google_service_account_configured_checks_instance_and_runtime_values(
             list(GoogleCalendarTools._oauth_provider.scopes),
         ),
         (
+            GoogleDocsTools,
+            list(GoogleDocsTools._oauth_provider.scopes),
+        ),
+        (
             GoogleSheetsTools,
             list(GoogleSheetsTools._oauth_provider.scopes),
         ),
@@ -209,6 +220,7 @@ def test_google_wrapper_build_credentials_uses_provider_scopes(
     [
         ("gmail", "google_gmail_oauth"),
         ("google_calendar", "google_calendar_oauth"),
+        ("google_docs", "google_docs_oauth"),
         ("google_drive", "google_drive_oauth"),
         ("google_sheets", "google_sheets_oauth"),
     ],
@@ -240,7 +252,7 @@ def test_google_wrappers_load_provider_oauth_credentials(
         worker_target=None,
     )
 
-    assert isinstance(tool, (GmailTools, GoogleCalendarTools, GoogleDriveTools, GoogleSheetsTools))
+    assert isinstance(tool, (GmailTools, GoogleCalendarTools, GoogleDocsTools, GoogleDriveTools, GoogleSheetsTools))
     assert tool._load_token_data() is not None
 
 

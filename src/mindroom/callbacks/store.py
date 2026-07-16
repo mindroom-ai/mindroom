@@ -232,7 +232,11 @@ class CallbackStore:
             max_uses=min(max_uses, policy.max_uses_cap),
             uses_left=min(max_uses, policy.max_uses_cap),
             created_at=now,
-            expires_at=now + min(ttl_seconds or policy.default_ttl_seconds, policy.max_ttl_seconds),
+            expires_at=now
+            + min(
+                policy.default_ttl_seconds if ttl_seconds is None else ttl_seconds,
+                policy.max_ttl_seconds,
+            ),
         )
         self._validate_record_against_config(record, config)
         with advisory_file_lock(self._lock_path):
@@ -272,11 +276,6 @@ class CallbackStore:
         if owner_user_id is None:
             return records
         return [record for record in records if record.owner_user_id == owner_user_id]
-
-    def get_record(self, callback_id: str) -> CallbackRecord | None:
-        """Return one callback record if it exists."""
-        with advisory_file_lock(self._lock_path, exclusive=False):
-            return self._read_records().callbacks.get(callback_id)
 
     def delete_record(self, callback_id: str, *, actor_user_id: str, config: Config) -> CallbackRecord:
         """Delete one callback record as its owner or a trigger-family admin."""

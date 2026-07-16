@@ -32,10 +32,10 @@ def _build_callback_fire_text(target_text: str, label: str, payload: CallbackFir
     return "\n\n".join(sections)
 
 
-def _build_callback_expiry_text(target_text: str, label: str, created_at: int) -> str:
-    """Build the visible timeout message for one expired unfired callback."""
+def _build_callback_expiry_text(target_text: str, label: str, created_at: int, uses_left: int) -> str:
+    """Build the visible timeout message for one expired callback with unused fires."""
     created_text = datetime.fromtimestamp(created_at, tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
-    return f"{target_text} ⏰ Callback '{label}' expired without firing (created {created_text})"
+    return f"{target_text} ⏰ Callback '{label}' expired with {uses_left} unused fire(s) (created {created_text})"
 
 
 def _callback_content_metadata(snapshot: CallbackDeliverySnapshot, status: str) -> dict[str, Any]:
@@ -87,7 +87,12 @@ async def execute_callback_expiry_notice(
         room_id=snapshot.resolved_room_id,
         thread_event_id=snapshot.target_thread_id,
         entity_name=snapshot.target_agent,
-        build_text=lambda target_text: _build_callback_expiry_text(target_text, snapshot.label, created_at),
+        build_text=lambda target_text: _build_callback_expiry_text(
+            target_text,
+            snapshot.label,
+            created_at,
+            snapshot.uses_left,
+        ),
         extra_content=_callback_content_metadata(snapshot, "expired"),
         config=config,
         runtime_paths=runtime_paths,

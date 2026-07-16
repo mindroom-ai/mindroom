@@ -22,6 +22,7 @@ agents:
     worker_scope: user_agent
     tools:
       - google_drive
+      - google_docs
       - google_calendar
       - google_sheets
       - gmail
@@ -29,17 +30,20 @@ agents:
 
 ## Connect
 
-Start MindRoom, open the dashboard, and select **Connect** for each Google integration you want to use.
-The dashboard explains which installation and credential scope will receive the connection before you continue.
+When `config_manager` enables a Google provider tool, use the direct connect URL in its result when one is returned for the updated agent and requester scope.
+Do not ask the configuring agent to invoke a newly added tool in the same run, because the current provider-visible tool schema may not include it.
+Once a Google tool is available to the target agent, ask that agent to perform an appropriate safe status, read, or list operation with the tool.
+If the tool is disconnected, its result contains structured `OAuthConnectionRequired` data with `oauth_connection_required: true` and, when available, the exact `connect_url` for that provider, requester, agent, and execution scope.
+When `connect_url` is provided, the agent should present it directly instead of sending you to the dashboard.
+If the result includes `requires_host_browser: true`, open the loopback URL (`localhost`, `127.0.0.1`, or `::1`) in a browser on the computer where the MindRoom process is running, not on a phone or another computer.
+If you made the request from another device, open the conversation on the MindRoom computer or copy the complete URL into a browser there.
 Google asks you to choose an account and approve only that provider's scopes.
-After the browser flow completes, the integration is ready for the selected agent and execution scope.
+After the browser flow completes, have the target agent retry the operation and the integration is ready for the selected agent and execution scope.
+As a manual alternative, open the dashboard and select **Connect** for the Google integration only when neither `config_manager` nor a tool result provides a `connect_url`.
+The dashboard explains which installation and credential scope will receive the connection before you continue.
 
-If an agent tries a Google tool before it is connected, the tool result includes a MindRoom connect URL for that exact provider and agent scope.
-When that URL uses `localhost`, open it in a browser on the computer where the MindRoom process is running, not on a phone or another computer.
-If you made the request from another device, open the conversation on the MindRoom computer or copy the complete URL into a browser there, complete the Google flow, and retry the request.
-
-OAuth tokens are stored under provider token services such as `google_drive_oauth`.
-Editable tool settings are stored separately under services such as `google_drive`, `google_calendar`, `google_sheets`, and `gmail`.
+OAuth tokens are stored under provider token services such as `google_drive_oauth` and `google_docs_oauth`.
+Editable tool settings are stored separately under services such as `google_drive`, `google_docs`, `google_calendar`, `google_sheets`, and `gmail`.
 MindRoom does not mirror Google OAuth tokens into worker containers.
 
 ## Privacy and Access Scope
@@ -69,6 +73,7 @@ Enable the APIs for the tools you use and add the matching callback URLs.
 
 ```text
 http://localhost:8765/api/oauth/google_drive/callback
+http://localhost:8765/api/oauth/google_docs/callback
 http://localhost:8765/api/oauth/google_calendar/callback
 http://localhost:8765/api/oauth/google_sheets/callback
 http://localhost:8765/api/oauth/google_gmail/callback
@@ -77,6 +82,10 @@ http://localhost:8765/api/oauth/google_gmail/callback
 Replace the origin when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` points to a public deployment.
 For a shared custom client, store the configuration under `google_oauth_client`.
 Provider-specific services such as `google_drive_oauth_client` override the shared client.
+
+Google Docs requires the Google Docs API and the sensitive `https://www.googleapis.com/auth/documents` scope in the OAuth consent configuration.
+That scope authorizes viewing, editing, creating, and deleting Google Docs across the connected account, although MindRoom exposes create, read, insert, and replace operations rather than document deletion.
+Use a separate testing project while a production OAuth verification request is already under review, then submit a deliberate production verification follow-up after that review completes.
 
 When using standalone dashboard API-key auth, also set `MINDROOM_OWNER_USER_ID` to your Matrix user ID, such as `@alice:matrix.example.com`.
 Do not use `MINDROOM_OWNER_USER_ID` as the identity model for hosted multi-user private agents.

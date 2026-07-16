@@ -41,6 +41,15 @@ def _provider(provider_id: str) -> OAuthProvider:
     )
 
 
+def test_builtin_oauth_registry_includes_google_docs() -> None:
+    """The built-in provider registry should expose Google Docs independently from Drive."""
+    providers = {provider.id: provider for provider in oauth_registry._builtin_oauth_providers()}
+
+    assert providers["google_docs"].credential_service == "google_docs_oauth"
+    assert providers["google_docs"].tool_config_service == "google_docs"
+    assert providers["google_drive"].scopes[-1] == "https://www.googleapis.com/auth/drive.readonly"
+
+
 def test_load_oauth_provider_registry_caches_loaded_registry(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

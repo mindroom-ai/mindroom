@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     icon="Webhook",
     icon_color="text-amber-500",
     dependencies=["agno"],
-    docs_url="https://github.com/mindroom-ai/mindroom",
+    docs_url="https://docs.mindroom.chat/agent-callbacks/",
     function_names=(
         "mint_callback",
         "list_callbacks",

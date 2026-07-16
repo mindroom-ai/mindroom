@@ -328,6 +328,11 @@ class TestConfigInit:
         assert "MindRoom Chat at `https://chat.mindroom.chat`" in agents_template
         assert "supports custom homeservers" in agents_template
         assert "The MindRoom dashboard is a separate app" in agents_template
+        assert "If `config_manager` returns a target-agent `connect_url`" in agents_template
+        assert "Newly configured tools may not be available to the current agent or current run" in agents_template
+        assert "`*_connection_status` or `*_list_tools`" in agents_template
+        assert "otherwise, use the dashboard as the manual fallback" in agents_template
+        assert "loopback URL (`localhost`, `127.0.0.1`, or `::1`)" in agents_template
         assert "`https://mindroom.chat`" not in agents_template
         assert "knowledge_bases" not in config
 

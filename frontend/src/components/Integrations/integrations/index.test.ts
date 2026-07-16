@@ -16,6 +16,16 @@ describe("Generic OAuth integration provider", () => {
     (global.fetch as any).mockReset();
   });
 
+  it("registers Google Docs as a first-class OAuth integration", () => {
+    const config = integrationProviders.google_docs.getConfig();
+
+    expect(config.integration).toMatchObject({
+      id: "google_docs",
+      name: "Google Docs",
+      setup_type: "oauth",
+    });
+  });
+
   it("resolves connect when the OAuth popup posts a completion message", async () => {
     const authWindowState = { closed: false };
     const authWindow = {

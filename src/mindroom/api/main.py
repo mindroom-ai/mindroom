@@ -37,7 +37,7 @@ from mindroom.api.schedules import router as schedules_router
 from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.workers import router as workers_router
-from mindroom.callbacks.sweep import sweep_expired_callbacks
+from mindroom.callbacks.sweep import run_callback_sweep_loop
 from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.embedder_health import get_embedder_failure
 from mindroom.knowledge import KnowledgeRefreshScheduler, reconcile_knowledge_mode_transition_states
@@ -67,7 +67,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
-_CALLBACK_SWEEP_INTERVAL_SECONDS = 60.0
 _DASHBOARD_CORS_ALLOWED_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS"
 _DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS"
 _DASHBOARD_CORS_EXPOSE_HEADERS = (
@@ -249,19 +248,20 @@ async def _worker_cleanup_loop(
     *,
     idle_poll_interval_seconds: float = 1.0,
 ) -> None:
-    """Periodically clean idle workers and sweep expired callbacks."""
-    loop = asyncio.get_running_loop()
-    next_callback_sweep_at = loop.time() + _CALLBACK_SWEEP_INTERVAL_SECONDS
+    """Periodically clean idle workers using the app's current runtime paths."""
     while not stop_event.is_set():
         runtime_paths = _app_runtime_paths(api_app)
         interval_seconds = _worker_cleanup_interval_seconds(runtime_paths)
-        wait_seconds = interval_seconds if interval_seconds > 0 else idle_poll_interval_seconds
+        if interval_seconds <= 0:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=idle_poll_interval_seconds)
+                break
+            except TimeoutError:
+                continue
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=wait_seconds)
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
             break
         except TimeoutError:
-            pass
-        if interval_seconds > 0:
             try:
                 try:
                     runtime_config, runtime_paths = config_lifecycle.read_app_committed_runtime_config(api_app)
@@ -280,12 +280,6 @@ async def _worker_cleanup_loop(
                 )
             except Exception:
                 logger.exception("Background worker cleanup failed")
-        if loop.time() >= next_callback_sweep_at:
-            next_callback_sweep_at = loop.time() + _CALLBACK_SWEEP_INTERVAL_SECONDS
-            try:
-                await sweep_expired_callbacks(api_app)
-            except Exception:
-                logger.exception("Callback expiry sweep failed")
 
 
 def _api_runtime_paths(request: Request) -> constants.RuntimePaths:
@@ -508,16 +502,20 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     stop_event = asyncio.Event()
     watch_task = asyncio.create_task(_watch_config(stop_event, _app))
     worker_cleanup_task = asyncio.create_task(_worker_cleanup_loop(stop_event, _app))
+    callback_sweep_task = asyncio.create_task(run_callback_sweep_loop(stop_event, _app))
 
     yield
 
     stop_event.set()
     watch_task.cancel()
     worker_cleanup_task.cancel()
+    callback_sweep_task.cancel()
     with suppress(asyncio.CancelledError):
         await watch_task
     with suppress(asyncio.CancelledError):
         await worker_cleanup_task
+    with suppress(asyncio.CancelledError):
+        await callback_sweep_task
     if standalone_knowledge_source_watcher is not None:
         await standalone_knowledge_source_watcher.shutdown()
     if api_owned_knowledge_refresh_scheduler is not None:

@@ -76,6 +76,10 @@ def _mint(
     )
 
 
+def _stored_record(store: CallbackStore, callback_id: str) -> CallbackRecord | None:
+    return next((record for record in store.list_records() if record.callback_id == callback_id), None)
+
+
 def test_mint_record_stores_hash_only_and_returns_raw_token(tmp_path: Path) -> None:
     """The raw token is returned once and only its hash is persisted."""
     store = CallbackStore(_runtime_paths(tmp_path))
@@ -175,7 +179,7 @@ def test_claim_use_decrements_and_marks_consumed(tmp_path: Path) -> None:
     assert store.claim_use(record.callback_id, now=now) == 1
     assert store.claim_use(record.callback_id, now=now) == 0
 
-    tombstone = store.get_record(record.callback_id)
+    tombstone = _stored_record(store, record.callback_id)
     assert tombstone is not None
     assert tombstone.uses_left == 0
     assert tombstone.consumed_at == now
@@ -203,7 +207,7 @@ def test_release_use_restores_budget_and_clears_tombstone(tmp_path: Path) -> Non
 
     store.release_use(record.callback_id)
 
-    restored = store.get_record(record.callback_id)
+    restored = _stored_record(store, record.callback_id)
     assert restored is not None
     assert restored.uses_left == 1
     assert restored.consumed_at is None
@@ -227,7 +231,7 @@ def test_delete_record_requires_owner_or_admin(tmp_path: Path) -> None:
         store.delete_record(record.callback_id, actor_user_id="@stranger:example.org", config=config)
 
     store.delete_record(record.callback_id, actor_user_id="@admin:example.org", config=config)
-    assert store.get_record(record.callback_id) is None
+    assert _stored_record(store, record.callback_id) is None
 
 
 def test_list_expired_returns_only_past_expiry(tmp_path: Path) -> None:

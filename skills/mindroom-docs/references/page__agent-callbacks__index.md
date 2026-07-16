@@ -1,7 +1,3 @@
----
-icon: lucide/bell-ring
----
-
 # Agent Callbacks
 
 Agent callbacks let an orchestrating agent hand a spawned sub-agent a one-shot wake-up handle with a single tool call.
@@ -164,4 +160,4 @@ Revoke early with `revoke_callback(callback_id)`, which deletes the record and b
 | Timeout handling | Built-in best-effort expiry notice wakes the owner | None; pair with `schedule()` if needed |
 | Best for | Spawned sub-agent completion, progress pings | Campground watchers, CI hooks, nightly research |
 
-Use [External Triggers](external-triggers.md) for anything that outlives one task or needs stable signing identity.
+Use [External Triggers](https://docs.mindroom.chat/external-triggers/) for anything that outlives one task or needs stable signing identity.

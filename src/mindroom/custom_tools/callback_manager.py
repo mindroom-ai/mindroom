@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,8 +33,9 @@ def _expires_at_iso(expires_at: int) -> str:
 
 
 def _callback_base_url(context: ToolRuntimeContext) -> str:
-    base_url = context.runtime_paths.env_value("MINDROOM_URL") or _DEFAULT_BASE_URL
-    return base_url.strip().rstrip("/")
+    configured_url = context.runtime_paths.env_value("MINDROOM_URL")
+    base_url = configured_url.strip() if configured_url is not None else ""
+    return (base_url or _DEFAULT_BASE_URL).rstrip("/")
 
 
 class CallbackManagerTools(Toolkit):
@@ -103,7 +105,7 @@ class CallbackManagerTools(Toolkit):
     def mint_callback(
         self,
         label: str,
-        ttl_seconds: int = 86400,
+        ttl_seconds: int | None = None,
         max_uses: int = 1,
         on_expiry: str = "notify",
     ) -> str:
@@ -113,14 +115,14 @@ class CallbackManagerTools(Toolkit):
         line, and a one-sentence brief to paste into a spawned sub-agent's prompt. The
         sub-agent needs only bash + curl; when it runs the script, the completion message
         lands in this thread and wakes this agent. Unfired callbacks with
-        ``on_expiry="notify"`` post a timeout notice instead, so exactly one wake-up is
-        guaranteed.
+        ``on_expiry="notify"`` post a timeout notice instead.
 
         Args:
             label: Human tag shown in the wake-up message.
-            ttl_seconds: Callback lifetime, capped by ``callback_policy.max_ttl_seconds``.
+            ttl_seconds: Callback lifetime. Omit it to use the policy default; explicit
+                values are capped by ``callback_policy.max_ttl_seconds``.
             max_uses: Allowed fires (>1 allows progress pings), capped by policy.
-            on_expiry: "notify" posts a timeout notice when the callback expires unfired;
+            on_expiry: "notify" posts a timeout notice when the callback expires with unused fires;
                 "silent" just deletes it.
 
         """
@@ -149,6 +151,7 @@ class CallbackManagerTools(Toolkit):
             )
             callback_url = f"{_callback_base_url(context)}/api/callbacks/{record.callback_id}"
             expires_at_iso = _expires_at_iso(record.expires_at)
+            script_path: Path | None = None
             try:
                 script_path = write_callback_script(
                     _workspace_callbacks_dir(context),
@@ -160,18 +163,21 @@ class CallbackManagerTools(Toolkit):
                         expires_at_text=expires_at_iso,
                     ),
                 )
-            except (OSError, ValueError) as exc:
-                store.delete_record(record.callback_id, actor_user_id=context.requester_id, config=context.config)
-                msg = f"Failed to write callback script: {exc}"
+                record = store.set_script_path(record.callback_id, str(script_path))
+            except (CallbackStoreError, OSError, ValueError) as exc:
+                _delete_script_best_effort(str(script_path) if script_path is not None else None)
+                with suppress(CallbackStoreError):
+                    store.delete_record_unchecked(record.callback_id)
+                msg = f"Failed to materialize callback script: {exc}"
                 raise _CallbackManagerError(msg) from exc
-            record = store.set_script_path(record.callback_id, str(script_path))
             curl_snippet = (
-                f"curl -fsS -X POST '{callback_url}' "
-                f"-H 'Authorization: Bearer {token}' -H 'Content-Type: application/json' "
+                f"curl -fsS -X POST {shlex.quote(callback_url)} "
+                f"-H {shlex.quote(f'Authorization: Bearer {token}')} "
+                "-H 'Content-Type: application/json' "
                 '--data \'{"status":"done","message":"<one-line summary>"}\''
             )
             brief_snippet = (
-                f'When finished, run: bash {script_path} done "<one-line summary>" '
+                f'When finished, run: bash {shlex.quote(str(script_path))} done "<one-line summary>" '
                 "(use 'failed' or 'blocked' instead of 'done' when appropriate)."
             )
             return self._payload(

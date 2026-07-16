@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
+import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from mindroom.callbacks.store import CallbackStore
+from mindroom.callbacks.store import CallbackStore, CallbackStoreError
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.custom_tools.callback_manager import CallbackManagerTools
@@ -14,8 +17,9 @@ from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 
 if TYPE_CHECKING:
-    from pathlib import Path
     from typing import Any
+
+    import pytest
 
 
 class _Client:
@@ -106,7 +110,8 @@ def test_mint_callback_binds_current_context_and_writes_script(tmp_path: Path) -
 
     script_text = script_file.read_text(encoding="utf-8")
     assert f"/api/callbacks/{payload['callback_id']}" in script_text
-    assert "Authorization: Bearer mrcb_" in script_text
+    assert "CALLBACK_TOKEN=mrcb_" in script_text
+    assert "Authorization: Bearer $CALLBACK_TOKEN" in script_text
     assert payload["callback_id"] in payload["curl_snippet"]
     assert "Bearer mrcb_" in payload["curl_snippet"]
     assert payload["brief_snippet"].startswith(f"When finished, run: bash {script_file} done ")
@@ -117,6 +122,74 @@ def test_mint_callback_binds_current_context_and_writes_script(tmp_path: Path) -
     store_text = (control_state_root / "callbacks" / "records.json").read_text(encoding="utf-8")
     raw_token = payload["curl_snippet"].split("Bearer ")[1].split("'")[0]
     assert raw_token not in store_text
+
+
+def test_generated_script_needs_only_bash_and_curl_and_preserves_json_message(tmp_path: Path) -> None:
+    """The generated consumer script safely builds JSON without Python or jq."""
+    tool = CallbackManagerTools()
+    with tool_runtime_context(_context(tmp_path)):
+        payload = _payload(tool.mint_callback("quote-safe callback"))
+    script_path = Path(payload["script_path"])
+    script_text = script_path.read_text(encoding="utf-8")
+    assert "python3" not in script_text
+    assert "jq" not in script_text
+
+    fake_bin = tmp_path / "fake bin"
+    fake_bin.mkdir()
+    capture_path = tmp_path / "curl-args.txt"
+    fake_curl = fake_bin / "curl"
+    fake_curl.write_text('#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" > "$CAPTURE_ARGS"\n', encoding="utf-8")
+    fake_curl.chmod(0o700)
+    message = 'quoted "summary" with \\ slash'
+    completed = subprocess.run(
+        [script_path, "done", message],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "CAPTURE_ARGS": str(capture_path),
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        },
+    )
+
+    curl_args = capture_path.read_text(encoding="utf-8").splitlines()
+    body = curl_args[curl_args.index("--data") + 1]
+    assert json.loads(body) == {"status": "done", "message": message}
+    assert "OK: MindRoom notified (quote-safe callback)" in completed.stdout
+
+
+def test_mint_callback_uses_policy_default_ttl_when_omitted(tmp_path: Path) -> None:
+    """The tool leaves an omitted TTL to callback_policy.default_ttl_seconds."""
+    config = _config(callback_policy={"default_ttl_seconds": 120})
+    tool = CallbackManagerTools()
+    with tool_runtime_context(_context(tmp_path, config=config)):
+        payload = _payload(tool.mint_callback("policy default"))
+
+    assert payload["status"] == "ok"
+    [record] = CallbackStore(_runtime_paths(tmp_path)).list_records()
+    assert record.expires_at - record.created_at == 120
+
+
+def test_mint_callback_rolls_back_record_and_script_when_store_link_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A script-path persistence failure leaves no usable callback artifact behind."""
+
+    def fail_set_script_path(*_args: object, **_kwargs: object) -> None:
+        msg = "store write failed"
+        raise CallbackStoreError(msg)
+
+    monkeypatch.setattr(CallbackStore, "set_script_path", fail_set_script_path)
+    tool = CallbackManagerTools()
+    with tool_runtime_context(_context(tmp_path)):
+        payload = _payload(tool.mint_callback("rollback"))
+
+    assert payload["status"] == "error"
+    assert CallbackStore(_runtime_paths(tmp_path)).list_records() == []
+    callbacks_dir = tmp_path / "mindroom_data" / "agents" / "coder" / "workspace" / ".mindroom" / "callbacks"
+    assert list(callbacks_dir.glob("*.sh")) == []
 
 
 def test_mint_callback_requires_enabled_policy(tmp_path: Path) -> None:
@@ -195,7 +268,7 @@ def test_revoke_callback_deletes_record_and_script(tmp_path: Path) -> None:
     assert revoked["status"] == "ok"
     runtime_paths = _runtime_paths(tmp_path)
     store = CallbackStore(runtime_paths)
-    assert store.get_record(minted["callback_id"]) is None
+    assert store.list_records() == []
     assert not (
         tmp_path
         / "mindroom_data"

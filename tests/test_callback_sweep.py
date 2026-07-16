@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal, cast
+import asyncio
+from typing import TYPE_CHECKING, Literal
 
 import pytest
 import yaml
@@ -10,8 +11,8 @@ import yaml
 from mindroom import constants
 from mindroom.api import config_lifecycle
 from mindroom.api import main as api_main
-from mindroom.callbacks.store import CallbackRecord, CallbackStore
-from mindroom.callbacks.sweep import sweep_expired_callbacks
+from mindroom.callbacks.store import CallbackDeliverySnapshot, CallbackRecord, CallbackStore
+from mindroom.callbacks.sweep import _sweep_expired_callbacks, run_callback_sweep_loop
 from mindroom.config.main import Config
 
 if TYPE_CHECKING:
@@ -20,6 +21,10 @@ if TYPE_CHECKING:
     from mindroom.external_triggers.models import TriggerDeliveryReadiness
 
 _OWNER = "@owner:example.org"
+
+
+def _stored_record(store: CallbackStore, callback_id: str) -> CallbackRecord | None:
+    return next((record for record in store.list_records() if record.callback_id == callback_id), None)
 
 
 def _write_runtime_config(config_path: Path, *, enabled: bool = True) -> Config:
@@ -77,7 +82,7 @@ def _mint_expired(
     if script is not None:
         script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
         store.set_script_path(record.callback_id, str(script))
-    updated = store.get_record(record.callback_id)
+    updated = _stored_record(store, record.callback_id)
     assert updated is not None
     return updated
 
@@ -102,11 +107,17 @@ async def _owner_joined(*_args: object, **_kwargs: object) -> bool:
     return True
 
 
-def _mock_expiry_notice(monkeypatch: pytest.MonkeyPatch, *, event_id: str | None = "$notice") -> list[object]:
-    notices: list[object] = []
+def _mock_expiry_notice(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    event_id: str | None = "$notice",
+) -> list[CallbackDeliverySnapshot]:
+    notices: list[CallbackDeliverySnapshot] = []
 
     async def execute_callback_expiry_notice(**kwargs: object) -> str | None:
-        notices.append(kwargs["snapshot"])
+        snapshot = kwargs["snapshot"]
+        assert isinstance(snapshot, CallbackDeliverySnapshot)
+        notices.append(snapshot)
         return event_id
 
     monkeypatch.setattr("mindroom.callbacks.sweep.execute_callback_expiry_notice", execute_callback_expiry_notice)
@@ -127,11 +138,11 @@ async def test_sweep_notifies_and_deletes_expired_unfired_callback(
     notices = _mock_expiry_notice(monkeypatch)
     monkeypatch.setattr("mindroom.callbacks.sweep.time.time", lambda: float(record.expires_at + 1))
 
-    await sweep_expired_callbacks(api_main.app)
+    await _sweep_expired_callbacks(api_main.app)
 
     assert len(notices) == 1
-    assert cast("object", getattr(notices[0], "label", None)) == "expiring task"
-    assert CallbackStore(runtime_paths).get_record(record.callback_id) is None
+    assert notices[0].label == "expiring task"
+    assert _stored_record(CallbackStore(runtime_paths), record.callback_id) is None
     assert not script.exists()
     api_main.unbind_external_trigger_runtime(api_main.app)
 
@@ -150,12 +161,12 @@ async def test_sweep_deletes_silent_and_consumed_callbacks_without_notice(
     latest_expiry = max(silent.expires_at, consumed.expires_at)
     monkeypatch.setattr("mindroom.callbacks.sweep.time.time", lambda: float(latest_expiry + 1))
 
-    await sweep_expired_callbacks(api_main.app)
+    await _sweep_expired_callbacks(api_main.app)
 
     assert notices == []
     store = CallbackStore(runtime_paths)
-    assert store.get_record(silent.callback_id) is None
-    assert store.get_record(consumed.callback_id) is None
+    assert _stored_record(store, silent.callback_id) is None
+    assert _stored_record(store, consumed.callback_id) is None
     api_main.unbind_external_trigger_runtime(api_main.app)
 
 
@@ -170,10 +181,10 @@ async def test_sweep_keeps_notify_callback_when_runtime_is_unavailable(
     notices = _mock_expiry_notice(monkeypatch)
     monkeypatch.setattr("mindroom.callbacks.sweep.time.time", lambda: float(record.expires_at + 1))
 
-    await sweep_expired_callbacks(api_main.app)
+    await _sweep_expired_callbacks(api_main.app)
 
     assert notices == []
-    assert CallbackStore(runtime_paths).get_record(record.callback_id) is not None
+    assert _stored_record(CallbackStore(runtime_paths), record.callback_id) is not None
 
 
 @pytest.mark.asyncio
@@ -190,10 +201,10 @@ async def test_sweep_gives_up_on_notice_after_grace_window(
         lambda: float(record.expires_at + 86400 + 1),
     )
 
-    await sweep_expired_callbacks(api_main.app)
+    await _sweep_expired_callbacks(api_main.app)
 
     assert notices == []
-    assert CallbackStore(runtime_paths).get_record(record.callback_id) is None
+    assert _stored_record(CallbackStore(runtime_paths), record.callback_id) is None
 
 
 @pytest.mark.asyncio
@@ -209,10 +220,10 @@ async def test_sweep_is_inert_when_policy_disabled(
     notices = _mock_expiry_notice(monkeypatch)
     monkeypatch.setattr("mindroom.callbacks.sweep.time.time", lambda: float(record.expires_at + 1))
 
-    await sweep_expired_callbacks(api_main.app)
+    await _sweep_expired_callbacks(api_main.app)
 
     assert notices == []
-    assert CallbackStore(runtime_paths).get_record(record.callback_id) is not None
+    assert _stored_record(CallbackStore(runtime_paths), record.callback_id) is not None
 
 
 @pytest.mark.asyncio
@@ -227,8 +238,24 @@ async def test_sweep_keeps_record_when_notice_delivery_fails(
     notices = _mock_expiry_notice(monkeypatch, event_id=None)
     monkeypatch.setattr("mindroom.callbacks.sweep.time.time", lambda: float(record.expires_at + 1))
 
-    await sweep_expired_callbacks(api_main.app)
+    await _sweep_expired_callbacks(api_main.app)
 
     assert len(notices) == 1
-    assert CallbackStore(runtime_paths).get_record(record.callback_id) is not None
+    assert _stored_record(CallbackStore(runtime_paths), record.callback_id) is not None
     api_main.unbind_external_trigger_runtime(api_main.app)
+
+
+@pytest.mark.asyncio
+async def test_callback_sweep_loop_runs_on_its_own_interval(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Worker-cleanup configuration cannot delay the callback expiry cadence."""
+    stop_event = asyncio.Event()
+    swept_apps: list[object] = []
+
+    async def sweep_once(api_app: object) -> None:
+        swept_apps.append(api_app)
+        stop_event.set()
+
+    monkeypatch.setattr("mindroom.callbacks.sweep._sweep_expired_callbacks", sweep_once)
+    await run_callback_sweep_loop(stop_event, api_main.app, interval_seconds=0.001)
+
+    assert swept_apps == [api_main.app]
