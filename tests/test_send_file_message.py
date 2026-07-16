@@ -203,19 +203,27 @@ class TestSendRuntimeEncryptedMediaMessage:
         client.upload.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_refuses_to_expose_media_keys_in_unencrypted_room(self) -> None:
-        """An encrypted screenshot handle fails closed when the destination room is not encrypted."""
+    async def test_reuses_encrypted_media_in_unencrypted_room(self) -> None:
+        """An unencrypted room can receive the existing encrypted MXC object without another upload."""
         client = _mock_client(encrypted=False)
 
-        with patch("mindroom.matrix.client_delivery.send_message_result", new=AsyncMock()) as send_message:
+        with patch(
+            "mindroom.matrix.client_delivery.send_message_result",
+            new=AsyncMock(
+                side_effect=lambda _client, _room, content, **_kwargs: DeliveredMatrixEvent(
+                    event_id="$image:localhost",
+                    content_sent=content,
+                ),
+            ),
+        ) as send_message:
             event_id = await send_runtime_encrypted_media_message(
                 client,
                 "!room:localhost",
                 self._attachment(),
             )
 
-        assert event_id is None
-        send_message.assert_not_awaited()
+        assert event_id == "$image:localhost"
+        assert send_message.await_args.args[2]["file"] == self._attachment().encrypted_file_content()
         client.upload.assert_not_awaited()
 
 

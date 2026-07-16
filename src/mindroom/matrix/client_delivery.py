@@ -486,19 +486,6 @@ async def send_runtime_encrypted_media_message(
     conversation_cache: ConversationCacheProtocol | None = None,
 ) -> str | None:
     """Send an existing encrypted MXC object without writing or uploading plaintext bytes."""
-    room_encrypted = await _cached_or_remote_room_encrypted(
-        client,
-        room_id,
-        operation="send_runtime_encrypted_media_message",
-    )
-    if room_encrypted is not True:
-        logger.error(
-            "matrix_runtime_encrypted_media_requires_encrypted_room",
-            room_id=room_id,
-            attachment_id=attachment.attachment_id,
-        )
-        return None
-
     msgtype = _msgtype_for_mimetype(attachment.mime_type)
     content: dict[str, Any] = {
         "msgtype": msgtype,

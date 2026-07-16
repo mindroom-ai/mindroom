@@ -43,7 +43,8 @@ The observation actions are:
 
 Only `screenshot` accepts `return_attachment=true`.
 The option does not write plaintext pixels to attachment storage.
-It exposes the existing encrypted MXC object only inside the active tool context, and Matrix delivery refuses to send that handle to an unencrypted room.
+It exposes the existing encrypted MXC object only inside the active tool context and does not upload the image again.
+The media key is protected by the room event in an E2EE room and has the same visibility as other event content in an unencrypted room.
 
 The control actions are:
 
