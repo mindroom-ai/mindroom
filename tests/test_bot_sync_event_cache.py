@@ -1289,6 +1289,27 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert cached_event is None
 
     @pytest.mark.asyncio
+    async def test_live_redaction_callback_forgets_persisted_turn_state(self, bot: AgentBot) -> None:
+        """Live redaction callbacks should drop the handled turn's persisted runs too."""
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_agent:localhost")
+        redaction_event = MagicMock(spec=nio.RedactionEvent)
+        redaction_event.redacts = "$user_msg:localhost"
+        redaction_event.sender = "@user:localhost"
+
+        with (
+            patch.object(bot._conversation_cache, "apply_redaction", new_callable=AsyncMock) as mock_apply,
+            patch.object(bot._turn_store, "forget_redacted_turn") as mock_forget,
+        ):
+            await bot._on_redaction(room, redaction_event)
+
+        mock_apply.assert_awaited_once_with("!test:localhost", redaction_event)
+        mock_forget.assert_called_once_with(
+            room=room,
+            redacted_event_id="$user_msg:localhost",
+            redactor_user_id="@user:localhost",
+        )
+
+    @pytest.mark.asyncio
     async def test_sync_timeline_redaction_does_not_resurrect_point_lookup_cache(self, bot: AgentBot) -> None:
         """A sync batch that contains both a message and its redaction must leave no cached lookup entry."""
         support = await _bind_owned_runtime_support(bot)

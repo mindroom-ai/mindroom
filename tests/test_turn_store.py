@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import ast
 import threading
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from agno.db.base import SessionType
+from agno.run.agent import RunOutput
+from agno.session.agent import AgentSession
 
 from mindroom import constants
 from mindroom.bot import AgentBot
@@ -52,6 +55,128 @@ def _load_with_recovery(
             original_event_id=original_event_id,
             requester_user_id="@user:example.org",
         )
+
+
+@dataclass
+class _FakeAgentStorage:
+    session: AgentSession | None
+    upserted_session: AgentSession | None = None
+
+    def get_session(self, session_id: str, _session_type: object) -> AgentSession | None:
+        if self.session is None or self.session.session_id != session_id:
+            return None
+        return self.session
+
+    def upsert_session(self, session: AgentSession) -> None:
+        self.upserted_session = session
+
+    def close(self) -> None:
+        return None
+
+
+def _store_with_storage(tmp_path: Path, storage: _FakeAgentStorage) -> TurnStore:
+    state_writer = MagicMock()
+    state_writer.create_storage.return_value = storage
+    state_writer.session_type_for_scope.return_value = SessionType.AGENT
+    return TurnStore(
+        TurnStoreDeps(
+            agent_name="agent",
+            tracking_base_path=tmp_path,
+            state_writer=state_writer,
+            resolver=MagicMock(),
+            tool_runtime=MagicMock(),
+        ),
+    )
+
+
+def _owned_turn_record(target: MessageTarget) -> TurnRecord:
+    return TurnRecord.create(
+        ["$user_msg"],
+        response_event_id="$reply",
+        response_owner="agent",
+        requester_id="@user:example.org",
+        history_scope=HistoryScope(kind="agent", scope_id="agent"),
+        conversation_target=target,
+    )
+
+
+def test_forget_redacted_turn_removes_persisted_run(tmp_path: Path) -> None:
+    """Redacting a handled source message should delete that turn's persisted run."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    session = AgentSession(
+        session_id=target.session_id,
+        agent_id="agent",
+        runs=[
+            RunOutput(session_id=target.session_id, metadata={"matrix_event_id": "$user_msg"}),
+            RunOutput(session_id=target.session_id, metadata={"matrix_event_id": "$other"}),
+        ],
+    )
+    storage = _FakeAgentStorage(session)
+    store = _store_with_storage(tmp_path, storage)
+    store.record_turn(_owned_turn_record(target))
+
+    removed = store.forget_redacted_turn(
+        room=MagicMock(room_id="!room:example.org"),
+        redacted_event_id="$user_msg",
+        redactor_user_id="@user:example.org",
+    )
+
+    assert removed is True
+    assert storage.upserted_session is session
+    assert [run.metadata["matrix_event_id"] for run in session.runs or []] == ["$other"]
+
+
+def test_forget_redacted_turn_ignores_unhandled_event(tmp_path: Path) -> None:
+    """Redactions of events without a handled turn must not touch session storage."""
+    store = _store(tmp_path)
+
+    removed = store.forget_redacted_turn(
+        room=MagicMock(room_id="!room:example.org"),
+        redacted_event_id="$unknown",
+        redactor_user_id="@user:example.org",
+    )
+
+    assert removed is False
+    store.deps.state_writer.create_storage.assert_not_called()
+
+
+def test_forget_redacted_turn_ignores_turn_owned_by_other_entity(tmp_path: Path) -> None:
+    """Only the entity that owns the response removes its persisted runs."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    store = _store(tmp_path)
+    store.record_turn(replace(_owned_turn_record(target), response_owner="other"))
+
+    removed = store.forget_redacted_turn(
+        room=MagicMock(room_id="!room:example.org"),
+        redacted_event_id="$user_msg",
+        redactor_user_id="@user:example.org",
+    )
+
+    assert removed is False
+    store.deps.state_writer.create_storage.assert_not_called()
+
+
+def test_forget_redacted_turn_recovers_missing_response_context(tmp_path: Path) -> None:
+    """A ledger record without response context should repair from persisted run metadata."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    session = AgentSession(
+        session_id=target.session_id,
+        agent_id="agent",
+        runs=[RunOutput(session_id=target.session_id, metadata={"matrix_event_id": "$user_msg"})],
+    )
+    storage = _FakeAgentStorage(session)
+    store = _store_with_storage(tmp_path, storage)
+    store.record_turn(TurnRecord.create(["$user_msg"], response_event_id="$reply"))
+
+    with patch.object(store, "_load_persisted_turn_record", return_value=_owned_turn_record(target)):
+        removed = store.forget_redacted_turn(
+            room=MagicMock(room_id="!room:example.org"),
+            redacted_event_id="$user_msg",
+            redactor_user_id="@user:example.org",
+        )
+
+    assert removed is True
+    assert session.runs == []
 
 
 def test_turn_store_constructs_private_ledger_from_tracking_base_path(tmp_path: Path) -> None:

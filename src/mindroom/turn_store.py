@@ -241,6 +241,48 @@ class TurnStore:
         self._remove_stale_runs_for_turn_record(
             turn_record=turn_record,
             requester_user_id=requester_user_id,
+            reason="edited",
+        )
+
+    def forget_redacted_turn(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        redacted_event_id: str,
+        redactor_user_id: str,
+    ) -> bool:
+        """Remove persisted runs for one handled turn whose source message was redacted.
+
+        The disk-backed ledger is the trigger: redactions of events this entity
+        never handled (agent placeholders, reactions, other entities' turns)
+        exit without touching session storage.
+        """
+        ledger_record = self._ledger.get_turn_record(redacted_event_id)
+        if ledger_record is None:
+            return False
+        requester_user_id = ledger_record.requester_id or redactor_user_id
+        turn_record = ledger_record
+        if turn_record.conversation_target is None or turn_record.history_scope is None:
+            thread_id = (
+                ledger_record.conversation_target.resolved_thread_id
+                if ledger_record.conversation_target is not None
+                else None
+            )
+            turn_record = (
+                self.load_turn(
+                    room=room,
+                    thread_id=thread_id,
+                    original_event_id=redacted_event_id,
+                    requester_user_id=requester_user_id,
+                )
+                or turn_record
+            )
+        if turn_record.response_owner != self.deps.agent_name:
+            return False
+        return self._remove_stale_runs_for_turn_record(
+            turn_record=turn_record,
+            requester_user_id=turn_record.requester_id or redactor_user_id,
+            reason="redacted",
         )
 
     def _latest_matching_persisted_turn_record(
@@ -330,6 +372,7 @@ class TurnStore:
         *,
         turn_record: TurnRecord,
         requester_user_id: str,
+        reason: str,
     ) -> bool:
         """Remove persisted runs using the exact recorded target and history scope."""
         if turn_record.conversation_target is None or turn_record.history_scope is None:
@@ -360,7 +403,8 @@ class TurnStore:
             storage.close()
         if removed_any:
             self.deps.state_writer.deps.logger.info(
-                "Removed stale run for edited handled turn",
+                "Removed stale persisted runs for handled turn",
+                reason=reason,
                 source_event_ids=list(turn_record.source_event_ids),
                 session_id=session_id,
                 history_scope=turn_record.history_scope.key,

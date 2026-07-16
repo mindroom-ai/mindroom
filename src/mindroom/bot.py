@@ -1780,8 +1780,13 @@ class AgentBot:
                 await early_reservation_owner.release()
 
     async def _on_redaction(self, room: nio.MatrixRoom, event: nio.RedactionEvent) -> None:
-        """Keep cached thread history consistent when Matrix redactions arrive."""
+        """Keep cached history and persisted turn state consistent when Matrix redactions arrive."""
         await self._conversation_cache.apply_redaction(room.room_id, event)
+        self._turn_store.forget_redacted_turn(
+            room=room,
+            redacted_event_id=event.redacts,
+            redactor_user_id=event.sender,
+        )
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
