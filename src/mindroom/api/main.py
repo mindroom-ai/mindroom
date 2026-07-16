@@ -37,7 +37,6 @@ from mindroom.api.schedules import router as schedules_router
 from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.workers import router as workers_router
-from mindroom.callbacks.sweep import run_callback_sweep_loop
 from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.embedder_health import get_embedder_failure
 from mindroom.knowledge import KnowledgeRefreshScheduler, reconcile_knowledge_mode_transition_states
@@ -502,20 +501,16 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     stop_event = asyncio.Event()
     watch_task = asyncio.create_task(_watch_config(stop_event, _app))
     worker_cleanup_task = asyncio.create_task(_worker_cleanup_loop(stop_event, _app))
-    callback_sweep_task = asyncio.create_task(run_callback_sweep_loop(stop_event, _app))
 
     yield
 
     stop_event.set()
     watch_task.cancel()
     worker_cleanup_task.cancel()
-    callback_sweep_task.cancel()
     with suppress(asyncio.CancelledError):
         await watch_task
     with suppress(asyncio.CancelledError):
         await worker_cleanup_task
-    with suppress(asyncio.CancelledError):
-        await callback_sweep_task
     if standalone_knowledge_source_watcher is not None:
         await standalone_knowledge_source_watcher.shutdown()
     if api_owned_knowledge_refresh_scheduler is not None:

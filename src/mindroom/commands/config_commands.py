@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 from pydantic import ValidationError
 
+from mindroom import yaml_io
 from mindroom.api import config_lifecycle
 from mindroom.config.main import (
     Config,
@@ -135,7 +136,7 @@ def _parse_value(value_str: str) -> Any:  # noqa: ANN401
     #   {key: value}            -> {'key': 'value'}
     #   {"key": "value"}        -> {'key': 'value'}
     try:
-        return yaml.safe_load(value_str)
+        return yaml_io.safe_load(value_str)
     except yaml.YAMLError:
         pass
 

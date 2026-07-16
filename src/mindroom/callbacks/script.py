@@ -1,4 +1,4 @@
-"""Ready-to-run callback script generation for agent workspaces."""
+"""Ready-to-run callback script generation."""
 
 from __future__ import annotations
 
@@ -13,18 +13,14 @@ if TYPE_CHECKING:
 _GITIGNORE_CONTENT = "*\n"
 
 
-def build_callback_script(*, label: str, callback_url: str, token: str, expires_at_text: str) -> str:
-    """Render one self-contained callback script that needs only bash and curl."""
+def build_callback_script(*, callback_url: str, token: str) -> str:
+    """Render a callback script that needs only Bash and curl."""
     return f"""#!/usr/bin/env bash
-# MindRoom callback — expires {expires_at_text}
-# Usage: bash <this script> [done|failed|blocked|progress] [message words...]
+# Usage: bash <this script> "<short result summary>"
 set -euo pipefail
-CALLBACK_LABEL={shlex.quote(label)}
 CALLBACK_URL={shlex.quote(callback_url)}
 CALLBACK_TOKEN={shlex.quote(token)}
-STATUS="${{1:-done}}"
-shift || true
-MSG="${{*:-(no message)}}"
+MESSAGE="${{*:-Background task finished.}}"
 
 json_escape() {{
   local value="$1"
@@ -53,22 +49,22 @@ json_escape() {{
   printf '%s' "$escaped"
 }}
 
-BODY=$(printf '{{"status":"%s","message":"%s"}}' "$(json_escape "$STATUS")" "$(json_escape "$MSG")")
+BODY=$(printf '{{"message":"%s"}}' "$(json_escape "$MESSAGE")")
 if curl -fsS -X POST "$CALLBACK_URL" \\
   -H "Authorization: Bearer $CALLBACK_TOKEN" \\
   -H 'Content-Type: application/json' \\
   --data "$BODY"; then
-  echo
-  echo "OK: MindRoom notified ($CALLBACK_LABEL)"
+  rm -f -- "$0"
+  echo "MindRoom notified."
 else
-  echo "FAILED: could not notify MindRoom ($CALLBACK_LABEL); the callback may be expired or already used." >&2
+  echo "Could not notify MindRoom; retry this script later." >&2
   exit 1
 fi
 """
 
 
 def write_callback_script(callbacks_dir: Path, *, callback_id: str, script_text: str) -> Path:
-    """Create one callback script as mode 0700 and keep the directory gitignored."""
+    """Create one mode-0700 callback script in a gitignored directory."""
     callbacks_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     gitignore_path = callbacks_dir / ".gitignore"
     if not gitignore_path.exists():

@@ -20,6 +20,7 @@ from urllib.parse import quote, urljoin
 import httpx
 import yaml
 
+from mindroom import yaml_io
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
@@ -88,7 +89,7 @@ class AgentVaultAccessGrantsConfig:
             msg = f"could not read Agent Vault access grants config {str(path)!r}: {exc}"
             raise AgentVaultAccessGrantError(msg) from exc
         try:
-            payload = yaml.safe_load(raw_config)
+            payload = yaml_io.safe_load(raw_config)
         except yaml.YAMLError as exc:
             msg = f"could not parse Agent Vault access grants config {str(path)!r}: {exc}"
             raise AgentVaultAccessGrantError(msg) from exc

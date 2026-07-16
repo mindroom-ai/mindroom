@@ -495,6 +495,40 @@ See the [Hooks](hooks.md) page for full documentation including:
 - Error handling without cooldowns or circuit breakers
 - Testing patterns
 
+## Installing plugins
+
+Vendor a plugin directly from GitHub into your local plugins directory:
+
+```bash
+mindroom plugins install ping-hook-plugin
+mindroom plugins install mindroom-ai/ping-hook-plugin@v1.2.0
+```
+
+Bare names install from the `mindroom-ai` organization, and `@ref` pins a branch, tag, or exact commit (the default follows the repository default branch).
+The command resolves the reference to an exact commit, downloads that commit's archive, validates it with the strict compatibility check, and only then moves it into `<config dir>/plugins/<name>`.
+Each vendored plugin carries a `.mindroom-plugin.lock.json` file recording the repository, the requested reference, and the exact installed commit.
+Plugin Python dependencies are not installed automatically; installs report a note when the plugin declares a `pyproject.toml`.
+
+After installing, reference the plugin from `config.yaml`:
+
+```yaml
+plugins:
+  - path: plugins/ping-hook-plugin
+```
+
+Update vendored plugins with:
+
+```bash
+mindroom plugins update ping-hook-plugin
+mindroom plugins update --all
+mindroom plugins update ping-hook-plugin --ref v1.3.0
+```
+
+Updates re-resolve the pinned reference, skip plugins already at the resolved commit, and atomically replace the plugin directory only after the new revision passes the strict check.
+A failed update leaves the installed version untouched.
+Both commands accept `--path` to target a specific config file's directory and `--plugins-dir` to override the vendor directory.
+Set `GITHUB_TOKEN` to authenticate GitHub requests, which raises API rate limits and allows private repositories.
+
 ## Compatibility checks
 
 Validate a plugin against the installed MindRoom version before deployment:

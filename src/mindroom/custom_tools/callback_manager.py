@@ -1,35 +1,28 @@
-"""Local-only tool for minting one-shot completion callbacks."""
+"""Tool for handing a completion callback to a background agent."""
 
 from __future__ import annotations
 
 import shlex
 from contextlib import suppress
-from datetime import UTC, datetime
-from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 from pydantic import ValidationError
 
 from mindroom.callbacks.script import build_callback_script, write_callback_script
-from mindroom.callbacks.store import CallbackRecord, CallbackStore, CallbackStoreError
+from mindroom.callbacks.store import CallbackStore, CallbackStoreError
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import resolve_agent_owned_path
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from pathlib import Path
 
 _DEFAULT_BASE_URL = "http://127.0.0.1:8765"
-_ON_EXPIRY_MODES = ("notify", "silent")
 
 
 class _CallbackManagerError(RuntimeError):
-    """Raised when the manager tool cannot run in the current tool context."""
-
-
-def _expires_at_iso(expires_at: int) -> str:
-    return datetime.fromtimestamp(expires_at, tz=UTC).isoformat(timespec="seconds")
+    """Raised when a callback cannot be minted in the current context."""
 
 
 def _callback_base_url(context: ToolRuntimeContext) -> str:
@@ -39,24 +32,13 @@ def _callback_base_url(context: ToolRuntimeContext) -> str:
 
 
 class CallbackManagerTools(Toolkit):
-    """Mint, list, and revoke one-shot completion callbacks in the primary runtime."""
+    """Mint a script that wakes this agent when a background task finishes."""
 
     def __init__(self) -> None:
-        super().__init__(
-            name="callback_manager",
-            tools=[
-                self.mint_callback,
-                self.list_callbacks,
-                self.revoke_callback,
-            ],
-        )
+        super().__init__(name="callback_manager", tools=[self.mint_callback])
 
     @staticmethod
-    def _payload(status: str, **fields: object) -> str:
-        return custom_tool_payload("callback_manager", status, **fields)
-
-    @classmethod
-    def _context(cls) -> ToolRuntimeContext:
+    def _context() -> ToolRuntimeContext:
         context = get_tool_runtime_context()
         if context is None:
             msg = "Callback manager requires live Matrix tool context."
@@ -69,171 +51,55 @@ class CallbackManagerTools(Toolkit):
             raise _CallbackManagerError(msg)
         return context
 
-    @classmethod
-    def _with_store(cls, action: Callable[[ToolRuntimeContext, CallbackStore], str]) -> str:
-        try:
-            context = cls._context()
-            return action(context, CallbackStore(context.runtime_paths))
-        except (_CallbackManagerError, CallbackStoreError, ValidationError) as exc:
-            return cls._payload("error", message=str(exc))
+    def mint_callback(self, label: str) -> str:
+        """Create a single-use script for one background task.
 
-    @staticmethod
-    def _is_admin(context: ToolRuntimeContext) -> bool:
-        return context.requester_id in context.config.external_trigger_policy.admin_users
-
-    @staticmethod
-    def _record_payload(record: CallbackRecord) -> dict[str, object]:
-        return {
-            "callback_id": record.callback_id,
-            "label": record.label,
-            "owner_user_id": record.owner_user_id,
-            "target": {
-                "room_id": record.target_room_id,
-                "thread_id": record.target_thread_id,
-                "agent": record.target_agent,
-            },
-            "on_expiry": record.on_expiry,
-            "max_uses": record.max_uses,
-            "uses_left": record.uses_left,
-            "consumed": record.uses_left == 0,
-            "consumed_at": record.consumed_at,
-            "script_path": record.script_path,
-            "created_at": record.created_at,
-            "expires_at": _expires_at_iso(record.expires_at),
-        }
-
-    def mint_callback(
-        self,
-        label: str,
-        ttl_seconds: int | None = None,
-        max_uses: int = 1,
-        on_expiry: str = "notify",
-    ) -> str:
-        """Mint one ephemeral bearer-token callback bound to the current room and thread.
-
-        The result includes a ready-to-run script in this agent's workspace, a raw curl
-        line, and a one-sentence brief to paste into a spawned sub-agent's prompt. The
-        sub-agent needs only bash + curl; when it runs the script, the completion message
-        lands in this thread and wakes this agent. Unfired callbacks with
-        ``on_expiry="notify"`` post a timeout notice instead.
+        Give the returned instruction to the background agent.
+        When it runs the script, its result wakes this agent in the current thread.
 
         Args:
-            label: Human tag shown in the wake-up message.
-            ttl_seconds: Callback lifetime. Omit it to use the policy default; explicit
-                values are capped by ``callback_policy.max_ttl_seconds``.
-            max_uses: Allowed fires (>1 allows progress pings), capped by policy.
-            on_expiry: "notify" posts a timeout notice when the callback expires with unused fires;
-                "silent" just deletes it.
+            label: Short name for the background task shown in the wake-up message.
 
         """
-
-        def mint(context: ToolRuntimeContext, store: CallbackStore) -> str:
-            if not context.config.callback_policy.enabled:
-                msg = "Callbacks are disabled by callback_policy.enabled."
-                raise _CallbackManagerError(msg)
-            if on_expiry not in _ON_EXPIRY_MODES:
-                msg = "on_expiry must be 'notify' or 'silent'."
-                raise _CallbackManagerError(msg)
-            on_expiry_mode: Literal["notify", "silent"] = "notify" if on_expiry == "notify" else "silent"
+        record = None
+        store: CallbackStore | None = None
+        script_path: Path | None = None
+        try:
+            context = self._context()
+            store = CallbackStore(context.runtime_paths)
             record, token = store.mint_record(
                 owner_user_id=context.requester_id,
-                created_by_agent_name=context.agent_name,
-                created_in_room_id=context.room_id,
-                created_in_thread_id=context.resolved_thread_id or context.thread_id,
-                target_room_id=context.room_id,
-                target_thread_id=context.resolved_thread_id or context.thread_id,
-                target_agent=context.agent_name,
+                room_id=context.room_id,
+                thread_id=context.resolved_thread_id or context.thread_id,
+                agent_name=context.agent_name,
                 label=label,
-                ttl_seconds=ttl_seconds,
-                max_uses=max_uses,
-                on_expiry=on_expiry_mode,
-                config=context.config,
             )
             callback_url = f"{_callback_base_url(context)}/api/callbacks/{record.callback_id}"
-            expires_at_iso = _expires_at_iso(record.expires_at)
-            script_path: Path | None = None
-            try:
-                script_path = write_callback_script(
-                    _workspace_callbacks_dir(context),
-                    callback_id=record.callback_id,
-                    script_text=build_callback_script(
-                        label=record.label,
-                        callback_url=callback_url,
-                        token=token,
-                        expires_at_text=expires_at_iso,
-                    ),
-                )
-                record = store.set_script_path(record.callback_id, str(script_path))
-            except (CallbackStoreError, OSError, ValueError) as exc:
-                _delete_script_best_effort(str(script_path) if script_path is not None else None)
-                with suppress(CallbackStoreError):
-                    store.delete_record_unchecked(record.callback_id)
-                msg = f"Failed to materialize callback script: {exc}"
-                raise _CallbackManagerError(msg) from exc
-            curl_snippet = (
-                f"curl -fsS -X POST {shlex.quote(callback_url)} "
-                f"-H {shlex.quote(f'Authorization: Bearer {token}')} "
-                "-H 'Content-Type: application/json' "
-                '--data \'{"status":"done","message":"<one-line summary>"}\''
-            )
-            brief_snippet = (
-                f'When finished, run: bash {shlex.quote(str(script_path))} done "<one-line summary>" '
-                "(use 'failed' or 'blocked' instead of 'done' when appropriate)."
-            )
-            return self._payload(
-                "ok",
-                action="mint",
+            script_path = write_callback_script(
+                _workspace_callbacks_dir(context),
                 callback_id=record.callback_id,
-                script_path=str(script_path),
-                curl_snippet=curl_snippet,
-                brief_snippet=brief_snippet,
-                expires_at=expires_at_iso,
-                callback=self._record_payload(record),
+                script_text=build_callback_script(callback_url=callback_url, token=token),
             )
-
-        return self._with_store(mint)
-
-    def list_callbacks(self) -> str:
-        """List callbacks owned by the requester, or all callbacks for admins."""
-
-        def list_records(context: ToolRuntimeContext, store: CallbackStore) -> str:
-            owner_user_id = None if self._is_admin(context) else context.requester_id
-            records = store.list_records(owner_user_id=owner_user_id)
-            return self._payload(
+            instruction = f'When finished, run: bash {shlex.quote(str(script_path))} "<short result summary>"'
+            return custom_tool_payload(
+                "callback_manager",
                 "ok",
-                action="list",
-                callbacks=[self._record_payload(record) for record in records],
+                script_path=str(script_path),
+                instruction=instruction,
             )
-
-        return self._with_store(list_records)
-
-    def revoke_callback(self, callback_id: str) -> str:
-        """Revoke one callback owned by the requester (admins may revoke any owner's)."""
-
-        def revoke(context: ToolRuntimeContext, store: CallbackStore) -> str:
-            record = store.delete_record(
-                callback_id,
-                actor_user_id=context.requester_id,
-                config=context.config,
-            )
-            _delete_script_best_effort(record.script_path)
-            return self._payload("ok", action="revoke", callback_id=callback_id)
-
-        return self._with_store(revoke)
+        except (_CallbackManagerError, CallbackStoreError, OSError, ValidationError, ValueError) as exc:
+            if script_path is not None:
+                with suppress(OSError):
+                    script_path.unlink(missing_ok=True)
+            if record is not None and store is not None:
+                with suppress(CallbackStoreError):
+                    store.delete(record.callback_id)
+            return custom_tool_payload("callback_manager", "error", message=str(exc))
 
 
 def _workspace_callbacks_dir(context: ToolRuntimeContext) -> Path:
-    """Return the calling agent's workspace directory for callback scripts."""
     return resolve_agent_owned_path(
         ".mindroom/callbacks",
         agent_name=context.agent_name,
         base_storage_path=context.runtime_paths.storage_root,
     )
-
-
-def _delete_script_best_effort(script_path: str | None) -> None:
-    """Remove one generated callback script without failing the revoke."""
-    if script_path is None:
-        return
-    with suppress(OSError):
-        Path(script_path).unlink(missing_ok=True)

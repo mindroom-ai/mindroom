@@ -12,7 +12,7 @@ MindRoom verifies the signature, checks replay and size limits, checks that the 
 
 MindRoom does not run watcher code and does not poll external systems from the agent turn loop.
 
-For throwaway sub-agent completion handles, use [Agent Callbacks](agent-callbacks.md) instead: one tool call mints a TTL-bounded bearer-token callback with a built-in expiry notice, while external triggers stay the signed path for long-lived watchers.
+For background-agent completion, use [Agent Callbacks](agent-callbacks.md) instead: one tool call creates a single-use script that wakes the originating agent and thread.
 
 ## Use Cases
 

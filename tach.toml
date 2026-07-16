@@ -508,7 +508,6 @@ path = "mindroom.api.callbacks"
 depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.callbacks.executor",
-    "mindroom.callbacks.models",
     "mindroom.callbacks.store",
     "mindroom.external_triggers.executor",
     "mindroom.external_triggers.models",
@@ -519,16 +518,6 @@ path = "mindroom.callbacks.executor"
 depends_on = [
     "mindroom.constants",
     "mindroom.external_triggers.executor",
-]
-
-[[modules]]
-path = "mindroom.callbacks.sweep"
-depends_on = [
-    "mindroom.api.config_lifecycle",
-    "mindroom.callbacks.executor",
-    "mindroom.callbacks.store",
-    "mindroom.external_triggers.executor",
-    "mindroom.external_triggers.models",
 ]
 
 [[modules]]
@@ -659,7 +648,6 @@ depends_on = [
     "mindroom.api.skills",
     "mindroom.api.tools",
     "mindroom.api.workers",
-    "mindroom.callbacks.sweep",
     "mindroom.constants",
     "mindroom.credentials_sync",
     "mindroom.embedder_health",
@@ -2524,7 +2512,9 @@ visibility = ["mindroom.cli.main"]
 path = "mindroom.cli.plugins"
 depends_on = [
     "mindroom.cli.config",
+    "mindroom.constants",
     "mindroom.plugin_check",
+    "mindroom.plugin_install",
 ]
 visibility = ["mindroom.cli.main"]
 
@@ -2765,6 +2755,13 @@ depends_on = [
     "mindroom.oauth.registry",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.plugins",
+]
+visibility = ["mindroom.cli.plugins", "mindroom.plugin_install"]
+
+[[modules]]
+path = "mindroom.plugin_install"
+depends_on = [
+    "mindroom.plugin_check",
 ]
 visibility = ["mindroom.cli.plugins"]
 

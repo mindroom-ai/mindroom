@@ -14,19 +14,16 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="callback_manager",
     display_name="Callback Manager",
-    description="Mint one-shot completion callbacks that wake this agent when a sub-agent finishes",
+    description="Create a single-use script that wakes this agent when background work finishes",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
+    requires_room_context=True,
     icon="Webhook",
     icon_color="text-amber-500",
     dependencies=["agno"],
     docs_url="https://docs.mindroom.chat/agent-callbacks/",
-    function_names=(
-        "mint_callback",
-        "list_callbacks",
-        "revoke_callback",
-    ),
+    function_names=("mint_callback",),
 )
 def callback_manager_tools() -> type[CallbackManagerTools]:
     """Return callback manager tools."""

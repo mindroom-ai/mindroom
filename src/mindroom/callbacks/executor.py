@@ -1,9 +1,7 @@
-"""Matrix dispatch executor for accepted callbacks and expiry notices."""
+"""Matrix delivery for completed callbacks."""
 
 from __future__ import annotations
 
-import json
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
@@ -13,87 +11,39 @@ from mindroom.external_triggers.executor import deliver_entity_mention_message
 if TYPE_CHECKING:
     import nio
 
-    from mindroom.callbacks.models import CallbackFirePayload
-    from mindroom.callbacks.store import CallbackDeliverySnapshot
+    from mindroom.callbacks.store import CallbackRecord
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
 _CALLBACK_ID_KEY = "io.mindroom.callback.id"
-_CALLBACK_STATUS_KEY = "io.mindroom.callback.status"
 
 
-def _build_callback_fire_text(target_text: str, label: str, payload: CallbackFirePayload) -> str:
-    """Build the visible wake-up message for one callback fire."""
-    sections = [f"{target_text} 🤖 {label} → **{payload.status}**: {payload.message}"]
-    if payload.data:
-        data_json = json.dumps(payload.data, indent=2, sort_keys=True)
-        sections.append(f"```json\n{data_json}\n```")
-    return "\n\n".join(sections)
-
-
-def _build_callback_expiry_text(target_text: str, label: str, created_at: int, uses_left: int) -> str:
-    """Build the visible timeout message for one expired callback with unused fires."""
-    created_text = datetime.fromtimestamp(created_at, tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
-    return f"{target_text} ⏰ Callback '{label}' expired with {uses_left} unused fire(s) (created {created_text})"
-
-
-def _callback_content_metadata(snapshot: CallbackDeliverySnapshot, status: str) -> dict[str, Any]:
-    """Return Matrix content metadata stamping the callback owner as trusted requester."""
+def _callback_content_metadata(record: CallbackRecord) -> dict[str, Any]:
     return {
         SOURCE_KIND_KEY: EXTERNAL_TRIGGER_SOURCE_KIND,
-        ORIGINAL_SENDER_KEY: snapshot.owner_user_id,
-        _CALLBACK_ID_KEY: snapshot.callback_id,
-        _CALLBACK_STATUS_KEY: status,
+        ORIGINAL_SENDER_KEY: record.owner_user_id,
+        _CALLBACK_ID_KEY: record.callback_id,
     }
 
 
 async def execute_callback_fire(
     *,
     client: nio.AsyncClient,
-    snapshot: CallbackDeliverySnapshot,
-    payload: CallbackFirePayload,
+    record: CallbackRecord,
+    message: str,
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol,
 ) -> str | None:
-    """Post one authenticated callback payload to its bound Matrix target."""
+    """Wake the agent in the conversation that minted the callback."""
     return await deliver_entity_mention_message(
         client=client,
-        room_id=snapshot.resolved_room_id,
-        thread_event_id=snapshot.target_thread_id,
-        entity_name=snapshot.target_agent,
-        build_text=lambda target_text: _build_callback_fire_text(target_text, snapshot.label, payload),
-        extra_content=_callback_content_metadata(snapshot, payload.status),
-        config=config,
-        runtime_paths=runtime_paths,
-        conversation_cache=conversation_cache,
-        caller_label="callback",
-    )
-
-
-async def execute_callback_expiry_notice(
-    *,
-    client: nio.AsyncClient,
-    snapshot: CallbackDeliverySnapshot,
-    created_at: int,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    conversation_cache: ConversationCacheProtocol,
-) -> str | None:
-    """Post one expiry timeout notice to the callback's bound Matrix target."""
-    return await deliver_entity_mention_message(
-        client=client,
-        room_id=snapshot.resolved_room_id,
-        thread_event_id=snapshot.target_thread_id,
-        entity_name=snapshot.target_agent,
-        build_text=lambda target_text: _build_callback_expiry_text(
-            target_text,
-            snapshot.label,
-            created_at,
-            snapshot.uses_left,
-        ),
-        extra_content=_callback_content_metadata(snapshot, "expired"),
+        room_id=record.room_id,
+        thread_event_id=record.thread_id,
+        entity_name=record.agent_name,
+        build_text=lambda target_text: f"{target_text} ✅ {record.label}: {message}",
+        extra_content=_callback_content_metadata(record),
         config=config,
         runtime_paths=runtime_paths,
         conversation_cache=conversation_cache,

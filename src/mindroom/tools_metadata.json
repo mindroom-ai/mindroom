@@ -7401,19 +7401,17 @@
       "dependencies": [
         "agno"
       ],
-      "description": "Mint one-shot completion callbacks that wake this agent when a sub-agent finishes",
+      "description": "Create a single-use script that wakes this agent when background work finishes",
       "display_name": "Callback Manager",
       "docs_url": "https://docs.mindroom.chat/agent-callbacks/",
       "function_names": [
-        "mint_callback",
-        "list_callbacks",
-        "revoke_callback"
+        "mint_callback"
       ],
       "helper_text": null,
       "icon": "Webhook",
       "icon_color": "text-amber-500",
       "name": "callback_manager",
-      "requires_room_context": false,
+      "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
     },
