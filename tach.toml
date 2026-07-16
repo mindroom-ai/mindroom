@@ -178,7 +178,6 @@ visibility = ["mindroom.response_turn"]
 [[modules]]
 path = "mindroom.active_turn_checkpoint"
 depends_on = [
-    "mindroom.history.policy",
     "mindroom.model_usage",
     "mindroom.redaction",
     "mindroom.token_budget",

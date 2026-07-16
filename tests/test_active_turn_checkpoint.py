@@ -81,7 +81,8 @@ def test_guard_uses_latest_actual_provider_input_at_completed_boundary() -> None
     """Actual request usage wins and the normal Agno stop flag is set after tool completion."""
     guard = build_active_turn_context_guard(
         context_window_tokens=1_000,
-        headroom_tokens=100,
+        reserve_tokens=100,
+        model_max_tokens=None,
         prepared_context_tokens=100,
         configured_provider="anthropic",
         model_id="claude-sonnet-5",
@@ -104,11 +105,35 @@ def test_guard_uses_latest_actual_provider_input_at_completed_boundary() -> None
     assert guard.trigger.estimated_input_tokens >= guard.trigger.input_limit_tokens
 
 
+def test_guard_reserves_loaded_vertex_max_tokens_before_next_request() -> None:
+    """A loaded max_tokens above reserve stops the tool boundary before Vertex's input ceiling."""
+    guard = build_active_turn_context_guard(
+        context_window_tokens=1_000,
+        reserve_tokens=100,
+        model_max_tokens=450,
+        prepared_context_tokens=100,
+        configured_provider="vertexai_claude",
+        model_id="claude-sonnet-5",
+    )
+    assert guard is not None
+    model = _FakeModel()
+    install_active_turn_checkpoint_hook(model, guard)  # type: ignore[arg-type]
+    messages, results = _tool_boundary("latest result", input_tokens=500, output_tokens=10)
+
+    model.format_function_call_results(messages, results)
+
+    assert guard.input_limit_tokens == 550
+    assert results[0].stop_after_tool_call is True
+    assert guard.trigger is not None
+    assert guard.trigger.estimated_input_tokens < 900
+
+
 def test_guard_falls_back_to_conservative_cumulative_estimate() -> None:
     """Missing provider usage accumulates completed batches from prepared-context estimate."""
     guard = build_active_turn_context_guard(
         context_window_tokens=1_000,
-        headroom_tokens=200,
+        reserve_tokens=200,
+        model_max_tokens=None,
         prepared_context_tokens=300,
     )
     assert guard is not None
@@ -131,7 +156,8 @@ def test_guard_is_disabled_without_effective_context_limit() -> None:
     assert (
         build_active_turn_context_guard(
             context_window_tokens=None,
-            headroom_tokens=100,
+            reserve_tokens=100,
+            model_max_tokens=None,
             prepared_context_tokens=300,
         )
         is None
@@ -244,6 +270,8 @@ def test_checkpoint_content_stays_bounded_for_long_tool_sequence() -> None:
     assert len(checkpoint.content) < 30_000
     assert len(completed_work) + len(key_results) <= _MAX_TOOL_CONTEXT_CHARS
     assert "omitted to keep the checkpoint bounded" in checkpoint.content
+    assert "`tool-119`" in checkpoint.content
+    assert "`tool-0`" not in checkpoint.content
     assert "Pending steps:" in checkpoint.content
 
 

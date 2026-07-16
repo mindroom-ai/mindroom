@@ -244,7 +244,7 @@ class CompactionOverrideConfig(BaseModel):
     reserve_tokens: int | None = Field(
         default=None,
         ge=0,
-        description="Reserved headroom for output, tool definitions, and direct-agent checkpoint continuation",
+        description="Reserved headroom for output and tool definitions; direct-agent checkpoint continuation uses the larger of this value and the loaded model max_tokens",
     )
     model: str | None = Field(
         default=None,
@@ -282,7 +282,7 @@ class CompactionConfig(BaseModel):
     reserve_tokens: int = Field(
         default=16384,
         ge=0,
-        description="Reserved headroom for output, tool definitions, and direct-agent checkpoint continuation",
+        description="Reserved headroom for output and tool definitions; direct-agent checkpoint continuation uses the larger of this value and the loaded model max_tokens",
     )
     model: str | None = Field(
         default=None,

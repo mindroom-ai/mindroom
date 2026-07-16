@@ -5,10 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from mindroom.history.policy import context_budget_after_reserve
 from mindroom.model_usage import context_input_tokens_from_counts
 from mindroom.redaction import redact_sensitive_text
-from mindroom.token_budget import estimate_compaction_input_tokens, stable_serialize
+from mindroom.token_budget import effective_input_budget, estimate_compaction_input_tokens, stable_serialize
 
 if TYPE_CHECKING:
     from agno.models.base import Model
@@ -58,7 +57,8 @@ class ActiveTurnContextGuard:
     """Request-local context guard observed by model events and tool results."""
 
     context_window_tokens: int
-    headroom_tokens: int
+    reserve_tokens: int
+    model_max_tokens: int | None
     prepared_context_tokens: int
     configured_provider: str | None = None
     model_id: str | None = None
@@ -69,8 +69,12 @@ class ActiveTurnContextGuard:
 
     @property
     def input_limit_tokens(self) -> int:
-        """Return effective provider-input ceiling after configured headroom."""
-        return context_budget_after_reserve(self.context_window_tokens, self.headroom_tokens)
+        """Return effective provider-input ceiling after required output headroom."""
+        return effective_input_budget(
+            self.context_window_tokens,
+            configured_reserve_tokens=self.reserve_tokens,
+            model_max_tokens=self.model_max_tokens,
+        )
 
     def observe_model_request(
         self,
@@ -126,7 +130,8 @@ class ActiveTurnContextGuard:
 def build_active_turn_context_guard(
     *,
     context_window_tokens: int | None,
-    headroom_tokens: int,
+    reserve_tokens: int,
+    model_max_tokens: int | None,
     prepared_context_tokens: int | None,
     configured_provider: str | None = None,
     model_id: str | None = None,
@@ -136,7 +141,8 @@ def build_active_turn_context_guard(
         return None
     guard = ActiveTurnContextGuard(
         context_window_tokens=context_window_tokens,
-        headroom_tokens=headroom_tokens,
+        reserve_tokens=reserve_tokens,
+        model_max_tokens=model_max_tokens,
         prepared_context_tokens=max(0, prepared_context_tokens),
         configured_provider=configured_provider,
         model_id=model_id,
@@ -251,7 +257,8 @@ def _render_tool_checkpoint_sections(completed_tools: list[ToolTraceEntry]) -> t
 
     work_lines = [f"- {len(completed_tools)} tool call(s) completed before this checkpoint."]
     result_lines: list[str] = []
-    for index, tool in enumerate(completed_tools, start=1):
+    for index in range(len(completed_tools), 0, -1):
+        tool = completed_tools[index - 1]
         work_line = f"- [{index}] `{tool.tool_name}` completed"
         if tool.args_preview:
             work_line += f" with input preview {_quoted_preview(tool.args_preview)}"
@@ -263,9 +270,9 @@ def _render_tool_checkpoint_sections(completed_tools: list[ToolTraceEntry]) -> t
         candidate_work_lines = [*work_lines, work_line]
         candidate_result_lines = [*result_lines, result_line]
         if _joined_line_chars(candidate_work_lines, candidate_result_lines) > _MAX_TOOL_CONTEXT_CHARS:
-            omitted = len(completed_tools) - index + 1
+            omitted = index
             while True:
-                omission = f"- {omitted} additional completed tool call(s) omitted to keep the checkpoint bounded."
+                omission = f"- {omitted} older completed tool call(s) omitted to keep the checkpoint bounded."
                 candidate_work_lines = [*work_lines, omission]
                 candidate_result_lines = [*result_lines, omission]
                 if _joined_line_chars(candidate_work_lines, candidate_result_lines) <= _MAX_TOOL_CONTEXT_CHARS:

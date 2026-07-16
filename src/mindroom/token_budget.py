@@ -12,6 +12,18 @@ from functools import lru_cache
 import tiktoken
 
 
+def effective_input_budget(
+    context_window_tokens: int,
+    *,
+    configured_reserve_tokens: int,
+    model_max_tokens: int | None,
+) -> int:
+    """Return input capacity after the larger configured or model output reserve."""
+    configured_reserve = max(0, configured_reserve_tokens)
+    model_reserve = max(0, model_max_tokens or 0)
+    return max(0, context_window_tokens - max(configured_reserve, model_reserve))
+
+
 def estimate_text_tokens(value: str | list[str] | None) -> int:
     """Estimate token count using chars / 4."""
     if value is None:

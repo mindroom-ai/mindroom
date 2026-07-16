@@ -18,7 +18,7 @@ from mindroom.claude_prompt_cache import (
     prepare_claude_request_kwargs,
 )
 from mindroom.logging_config import get_logger
-from mindroom.token_budget import estimate_compaction_input_tokens, stable_serialize
+from mindroom.token_budget import effective_input_budget, estimate_compaction_input_tokens, stable_serialize
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -327,8 +327,11 @@ class MindroomVertexAIClaude(VertexAIClaude):
         """Drop the oldest replay turns until the exact request fits."""
         if self.context_window is None:
             return messages
-        output_reserve = self.max_tokens or 0
-        input_budget = self.context_window - output_reserve
+        input_budget = effective_input_budget(
+            self.context_window,
+            configured_reserve_tokens=0,
+            model_max_tokens=self.max_tokens,
+        )
         if input_budget <= 0:
             msg = "Vertex Claude context window leaves no room for input after the configured output reserve."
             raise ModelProviderError(message=msg, model_name=self.name, model_id=self.id)

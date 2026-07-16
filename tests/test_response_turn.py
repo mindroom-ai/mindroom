@@ -11,15 +11,20 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 from agno.models.message import Message
 from agno.models.response import ToolExecution
+from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
+from agno.session.agent import AgentSession
 
 from mindroom.active_turn_checkpoint import (
     ACTIVE_TURN_CHECKPOINT_LIMIT,
     ActiveTurnCheckpointRecord,
     ActiveTurnCheckpointTrigger,
     build_active_turn_context_guard,
+    install_active_turn_checkpoint_hook,
 )
+from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
+from mindroom.history.continuation_checkpoint import persist_continuation_checkpoint
 from mindroom.response_turn import (
     AttemptResolved,
     BlockingTurnAdapter,
@@ -44,6 +49,9 @@ from mindroom.tool_system.events import ToolTraceEntry
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
     from contextlib import AbstractContextManager
+    from pathlib import Path
+
+    from agno.db.base import BaseDb
 
     from mindroom.history.runtime import ScopeSessionContext
 
@@ -195,6 +203,7 @@ def _blocking_adapter(
     *,
     with_standalone_replay: bool = True,
     checkpoint_persisted: bool = True,
+    checkpoint_writer: Callable[[ActiveTurnCheckpointRecord], bool] | None = None,
     unexpected_error_text: Callable[[Exception], str] | None = None,
 ) -> BlockingTurnAdapter:
     def _persist(_scope: ScopeSessionContext | None, snapshot: StandaloneReplaySnapshot) -> None:
@@ -205,6 +214,8 @@ def _blocking_adapter(
         record: ActiveTurnCheckpointRecord,
     ) -> bool:
         log.checkpoints.append(record)
+        if checkpoint_writer is not None:
+            return checkpoint_writer(record)
         return checkpoint_persisted
 
     return BlockingTurnAdapter(
@@ -259,6 +270,53 @@ def _streaming_adapter(
 
 def _bump(log: _AdapterLog, attr: str) -> None:
     setattr(log, attr, getattr(log, attr) + 1)
+
+
+def _durable_checkpoint_writer(
+    tmp_path: Path,
+) -> tuple[BaseDb, Callable[[ActiveTurnCheckpointRecord], bool]]:
+    storage = create_state_storage(
+        "helper",
+        tmp_path,
+        subdir="sessions",
+        session_table="helper_sessions",
+    )
+    session = AgentSession(
+        session_id="session-1",
+        agent_id="helper",
+        runs=[],
+        metadata={},
+        created_at=1,
+        updated_at=1,
+    )
+    storage.upsert_session(session)
+
+    def _persist(record: ActiveTurnCheckpointRecord) -> bool:
+        assert record.session_id is not None
+        assert record.run_id is not None
+        session.upsert_run(
+            RunOutput(
+                run_id=record.run_id,
+                agent_id="helper",
+                session_id=record.session_id,
+                messages=[Message(role="tool", tool_call_id="call", content="raw result")],
+                tools=[ToolExecution(tool_call_id="call", tool_name="side_effect", result="raw result")],
+                status=RunStatus.completed,
+            ),
+        )
+        storage.upsert_session(session)
+        persist_continuation_checkpoint(
+            storage=storage,
+            session=session,
+            session_id=record.session_id,
+            scope_id="helper",
+            run_id=record.run_id,
+            checkpoint=record.checkpoint,
+            run_metadata=record.run_metadata,
+        )
+        return True
+
+    return storage, _persist
 
 
 async def _collect(stream: AsyncIterator[str]) -> list[str]:
@@ -538,8 +596,8 @@ def test_blocking_continuation_advances_and_resets_turn_state() -> None:
     assert recorder.completed_calls[-1]["completed_tools"] == [first_trace, _trace("sleep")]
 
 
-def test_blocking_tool_heavy_sequence_checkpoints_and_finishes_below_limit() -> None:
-    """A synthetic long tool sequence splits into fresh internal runs and completes."""
+def test_blocking_tool_heavy_sequence_checkpoints_and_finishes_below_limit(tmp_path: Path) -> None:
+    """The model hook checkpoints, persists, and starts a fresh internal run."""
     log = _AdapterLog()
     recorder = _FakeTurnRecorder()
     prompts: list[str] = []
@@ -553,6 +611,7 @@ def test_blocking_tool_heavy_sequence_checkpoints_and_finishes_below_limit() -> 
         )
         for index in range(12)
     )
+    storage, checkpoint_writer = _durable_checkpoint_writer(tmp_path)
 
     async def _attempt(
         _run: TurnRunState,
@@ -563,10 +622,25 @@ def test_blocking_tool_heavy_sequence_checkpoints_and_finishes_below_limit() -> 
         prepared_tokens = max(500, estimate_compaction_input_tokens(continuation.active_prompt) + 300)
         guard = build_active_turn_context_guard(
             context_window_tokens=8_000,
-            headroom_tokens=2_000,
+            reserve_tokens=2_000,
+            model_max_tokens=None,
             prepared_context_tokens=prepared_tokens,
         )
         assert guard is not None
+
+        class _BoundaryModel:
+            def format_function_call_results(
+                self,
+                messages: list[Message],
+                function_call_results: list[Message],
+                compress_tool_results: bool = False,
+                **_kwargs: object,
+            ) -> None:
+                _ = compress_tool_results
+                messages.extend(function_call_results)
+
+        model = _BoundaryModel()
+        install_active_turn_checkpoint_hook(model, guard)  # type: ignore[arg-type]
         messages = [Message(role="user", content=continuation.active_prompt)]
         attempt_tools: list[ToolTraceEntry] = []
         while completed_tool_count < len(all_tools):
@@ -579,10 +653,11 @@ def test_blocking_tool_heavy_sequence_checkpoints_and_finishes_below_limit() -> 
                 tool_name=tool.tool_name,
                 content=f"artifact-{completed_tool_count}.txt\n" + "r" * 3_000,
             )
-            messages.extend((assistant, result))
+            messages.append(assistant)
+            model.format_function_call_results(messages, [result])
             attempt_tools.append(tool)
             completed_tool_count += 1
-            if guard.checkpoint_after_tool_boundary(messages=messages, function_call_results=[result]):
+            if result.stop_after_tool_call:
                 assert guard.trigger is not None
                 return CompletedAttempt(
                     run_id=f"run-checkpoint-{len(prompts)}",
@@ -600,16 +675,23 @@ def test_blocking_tool_heavy_sequence_checkpoints_and_finishes_below_limit() -> 
             completed_tools=(*attempt_tools, _trace("finalize")),
         )
 
-    result = asyncio.run(
-        run_blocking_response_turn(
-            _ctx(),
-            _blocking_adapter(log, _attempt),
-            TurnSinks(turn_recorder=cast("Any", recorder)),
-            continuation=_continuation("produce the report"),
-        ),
-    )
+    try:
+        result = asyncio.run(
+            run_blocking_response_turn(
+                _ctx(),
+                _blocking_adapter(log, _attempt, checkpoint_writer=checkpoint_writer),
+                TurnSinks(turn_recorder=cast("Any", recorder)),
+                continuation=_continuation("produce the report"),
+            ),
+        )
+        persisted_session = get_agent_session(storage, "session-1")
+    finally:
+        storage.close()
 
     assert result == "finished"
+    assert persisted_session is not None
+    assert all(not run.tools for run in persisted_session.runs or ())
+    assert all(message.role != "tool" for run in persisted_session.runs or () for message in run.messages or ())
     assert max(provider_inputs) < 6_000
     assert 1 < len(prompts) <= 5
     assert "ACTIVE TURN CHECKPOINT COMPLETED" in prompts[1]

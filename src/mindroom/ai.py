@@ -203,7 +203,6 @@ class _PreparedAgentRun:
     # this snapshot instead of re-resolving, because the per-thread override
     # store can change mid-run (for example via the thread_model tool).
     runtime_model_name: str
-    runtime_context_window: int | None = None
 
     @property
     def prompt_text(self) -> str:
@@ -1249,7 +1248,6 @@ async def _prepare_agent_and_prompt(
         unseen_event_ids=unseen_event_ids,
         prepared_history=prepared_history,
         runtime_model_name=runtime_model.model_name,
-        runtime_context_window=runtime_model.context_window,
     )
 
 
@@ -1307,9 +1305,12 @@ async def _prepare_agent_run_context(
 
     agent = prepared_run.agent
     runtime_model_config = config.models.get(prepared_run.runtime_model_name)
+    model_params = model_params_payload(agent.model) if agent.model is not None else {}
+    loaded_max_tokens = model_params.get("max_tokens")
     checkpoint_guard = build_active_turn_context_guard(
-        context_window_tokens=prepared_run.runtime_context_window,
-        headroom_tokens=config.resolve_entity(ctx.entity_label).compaction_config.reserve_tokens,
+        context_window_tokens=runtime_model_config.context_window if runtime_model_config is not None else None,
+        reserve_tokens=config.resolve_entity(ctx.entity_label).compaction_config.reserve_tokens,
+        model_max_tokens=loaded_max_tokens if isinstance(loaded_max_tokens, int) else None,
         prepared_context_tokens=prepared_run.prepared_history.prepared_context_tokens,
         configured_provider=runtime_model_config.provider if runtime_model_config is not None else None,
         model_id=runtime_model_config.id if runtime_model_config is not None else None,
@@ -1331,7 +1332,7 @@ async def _prepare_agent_run_context(
         requester_id=ctx.requester_id,
         correlation_id=ctx.correlation_id,
         tools_schema=agent_tool_definition_payloads_for_logging(agent) if agent.model is not None else [],
-        model_params=model_params_payload(agent.model) if agent.model is not None else {},
+        model_params=model_params,
         extra_metadata=deep_merge_metadata(ctx.matrix_run_metadata, run_extra_content),
     )
     if turn_recorder is not None:
