@@ -6,6 +6,7 @@ import { createElement } from "react";
 import {
   SiGmail,
   SiGooglecalendar,
+  SiGoogledocs,
   SiGoogledrive,
   SiGooglesheets,
 } from "react-icons/si";
@@ -291,6 +292,22 @@ const googleDriveIntegration = new GenericOAuthIntegrationProvider(
   "google_drive",
 );
 
+const googleDocsIntegration = new GenericOAuthIntegrationProvider(
+  {
+    id: "google_docs",
+    name: "Google Docs",
+    description: "Create, read, and edit documents with Google Docs",
+    category: "productivity",
+    icon: createElement(SiGoogledocs, {
+      className: "h-5 w-5 text-blue-600",
+    }),
+    status: "available",
+    setup_type: "oauth",
+    connected: false,
+  },
+  "google_docs",
+);
+
 const googleCalendarIntegration = new GenericOAuthIntegrationProvider(
   {
     id: "google_calendar",
@@ -343,6 +360,7 @@ const googleGmailIntegration = new GenericOAuthIntegrationProvider(
 // Export all integration providers
 export const integrationProviders: Record<string, IntegrationProvider> = {
   google_calendar: googleCalendarIntegration,
+  google_docs: googleDocsIntegration,
   google_drive: googleDriveIntegration,
   google_gmail: googleGmailIntegration,
   google_sheets: googleSheetsIntegration,

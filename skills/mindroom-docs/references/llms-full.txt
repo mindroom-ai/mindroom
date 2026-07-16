@@ -1958,7 +1958,7 @@ Adding or removing tools via chat does not discard existing per-agent overrides 
 `worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process.
 When omitted, MindRoom routes `coding`, `docker`, `file`, `python`, and `shell` through the proxy by default.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
-Some local-only tools stay in the primary runtime even when listed: `attachments`, `gmail`, `google_calendar`, `google_drive`, `google_sheets`, and `homeassistant`.
+Some local-only tools stay in the primary runtime even when listed: `attachments`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `homeassistant`.
 Dedicated Docker workers also receive a projected read-only config snapshot so config-relative plugins, knowledge bases, and other worker-safe assets remain available without exposing unrelated primary-runtime state.
 Agent-scoped workers snapshot only that agent's projected context files and assigned knowledge bases, while scopes that intentionally share one worker across multiple agents keep the broader shared projection for that worker.
 Writable file-memory paths are rewritten into worker-owned state instead of being mounted from the host config tree.
@@ -1969,7 +1969,7 @@ Some integrations require `worker_scope` unset or `shared` because their credent
 That list includes `spotify`, `homeassistant`, and non-OAuth configured `mcp_<server_id>` tools.
 OAuth-backed remote MCP tools use requester-scoped OAuth credentials and can be used with `worker_scope: user` or `worker_scope: user_agent`.
 Among those shared-scope integrations, `homeassistant` always stays local regardless of `worker_tools` and is never proxied to the sandbox.
-`gmail`, `google_calendar`, `google_drive`, and `google_sheets` also always stay local.
+`gmail`, `google_calendar`, `google_docs`, `google_drive`, and `google_sheets` also always stay local.
 `spotify` can still be proxied through the sandbox.
 The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 
@@ -2017,7 +2017,7 @@ Workers mount those canonical private-instance roots.
 They do not own them.
 
 The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`.
-OAuth providers that support scoped dashboard flows, such as the Google Drive, Gmail, Calendar, and Sheets providers, are the exception.
+OAuth providers that support scoped dashboard flows, such as the Google Drive, Docs, Gmail, Calendar, and Sheets providers, are the exception.
 For those providers, the dashboard can connect scoped `user` and `user_agent` credentials, but the Google tools still execute in the primary MindRoom runtime.
 Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime instead.
 
@@ -3039,7 +3039,7 @@ The dashboard remains a manual alternative only when no `connect_url` is availab
 ## Browse By Topic
 
 - [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/) - Local files, shell, Python, coding helpers, and worker-routed execution tools.
-- [Data & Databases](https://docs.mindroom.chat/tools/data-and-databases/) - SQL, databases, Google Drive files, spreadsheets, tabular analysis, and financial/business datasets.
+- [Data & Databases](https://docs.mindroom.chat/tools/data-and-databases/) - SQL, databases, Google Docs and Drive files, spreadsheets, tabular analysis, and financial/business datasets.
 - [Web Search](https://docs.mindroom.chat/tools/web-search/) - Search engines and search APIs.
 - [Web Scraping & Browser](https://docs.mindroom.chat/tools/web-scraping-and-browser/) - Crawlers, extractors, browser automation, and page-reading tools.
 - [Research Sources](https://docs.mindroom.chat/tools/research-sources/) - ArXiv, Wikipedia, PubMed, and Hacker News.
@@ -3753,12 +3753,12 @@ sleep(5)
 
 # Data & Databases
 
-Use these tools to query SQL and graph databases, analyze tabular files, work with Google datasets, Drive files, and spreadsheets, and fetch financial or business data.
+Use these tools to query SQL and graph databases, analyze tabular files, work with Google datasets, Docs, Drive files, and spreadsheets, and fetch financial or business data.
 
 ## What This Page Covers
 
 This page documents the built-in tools in the `data-and-databases` group.
-Use these tools when you need database access, dataframe-style analysis, Google Drive file lookup, spreadsheet automation, or market and company data.
+Use these tools when you need database access, dataframe-style analysis, Google document editing, Drive file lookup, spreadsheet automation, or market and company data.
 
 ## Tools On This Page
 
@@ -3771,6 +3771,7 @@ Use these tools when you need database access, dataframe-style analysis, Google 
 - [`pandas`] - In-memory dataframe creation and dataframe method execution.
 - [`google_bigquery`] - BigQuery dataset inspection and SQL queries.
 - [`google_drive`] - Google Drive file listing, metadata search, file reading, and workspace downloads through the per-service Google Drive OAuth provider.
+- [`google_docs`] - Google Docs creation, tab-aware structure reads, text insertion, and text replacement through the per-service Google Docs OAuth provider.
 - [`google_sheets`] - Google Sheets access through the per-service Google Sheets OAuth provider, with read support verified by default and create/update support when enabled.
 - [`openbb`] - Stock prices, company search, news, profiles, and price targets through OpenBB.
 - [`yfinance`] - Yahoo Finance market data, fundamentals, news, and history.
@@ -3778,13 +3779,13 @@ Use these tools when you need database access, dataframe-style analysis, Google 
 
 ## Common Setup Notes
 
-`sql`, `postgres`, `redshift`, `neo4j`, `google_bigquery`, `google_drive`, `google_sheets`, and `financial_datasets_api` are registered as `requires_config`, so they stay unavailable in the dashboard until their required config or auth is present.
+`sql`, `postgres`, `redshift`, `neo4j`, `google_bigquery`, `google_drive`, `google_docs`, `google_sheets`, and `financial_datasets_api` are registered as `requires_config`, so they stay unavailable in the dashboard until their required config or auth is present.
 `duckdb`, `csv`, `pandas`, `openbb`, and `yfinance` are `setup_type: none`, so they can be enabled immediately once their optional Python dependencies are installed.
 MindRoom validates inline tool overrides against the declared `config_fields`, and `type="password"` fields such as `password`, `secret_access_key`, and `api_key` must go through the dashboard or credential store instead of inline YAML.
 Several fields on this page are advanced constructor inputs rather than normal `config.yaml` values, including `db_engine`, `connection`, `credentials`, `duckdb_connection`, `duckdb_kwargs`, `obb`, and `session`.
 Token-like fields such as `openbb_pat` are better kept in stored credentials even when the current metadata does not mark them as password fields.
-`src/mindroom/api/integrations.py` currently contains Spotify-specific OAuth endpoints only, while Google Drive and Google Sheets use the generic `/api/oauth/google_drive/*` and `/api/oauth/google_sheets/*` flows.
-`google_drive` and `google_sheets` declare per-service `auth_provider` values and store OAuth tokens separately from editable tool settings.
+`src/mindroom/api/integrations.py` currently contains Spotify-specific OAuth endpoints only, while Google Drive, Docs, and Sheets use the generic `/api/oauth/google_drive/*`, `/api/oauth/google_docs/*`, and `/api/oauth/google_sheets/*` flows.
+`google_drive`, `google_docs`, and `google_sheets` declare per-service `auth_provider` values and store OAuth tokens separately from editable tool settings.
 `csv` queries use DuckDB under the hood, and `duckdb` is the better fit when you need to create tables from files, export results, or load local and S3 data repeatedly.
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
@@ -4236,6 +4237,55 @@ google_drive_download_file("1AbCdEfGhIjKlMnOpQrStUvWxYz")
 - Downloads require an agent workspace; when the agent has none (for example the default `mem0` memory backend without a `private` workspace), `download_file` is ignored and a warning is logged.
 - The provider requests Drive read-only access plus OpenID email/profile scopes.
 - Configure Google OAuth through [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/).
+
+## [`google_docs`]
+
+`google_docs` is the native Google Docs API toolkit for creating documents, reading their tab-aware structure and content, and editing text.
+
+### What It Does
+
+`google_docs_create_document()` creates a blank document and can insert optional initial text in the same tool call.
+`google_docs_get_document()` returns the complete Google Docs API document resource with `includeTabsContent` enabled, including tabs, structural elements, paragraphs, text runs, styles, tables, lists, and other returned structure.
+`google_docs_insert_text()` inserts at a Docs API body index or appends at the end of the selected tab.
+`google_docs_replace_text()` replaces every matching occurrence across all tabs or an explicit list of tab IDs and reports Google's replacement counts.
+Every successful operation returns the document edit URL.
+When no usable scoped OAuth credentials exist, the tool returns a structured `OAuthConnectionRequired` result with the provider-specific connection link.
+
+### Configuration
+
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `create_document` | `boolean` | `no` | `true` | Enable document creation and optional initial-text insertion. |
+| `read_document` | `boolean` | `no` | `true` | Enable complete tab-aware structure and content reads. |
+| `edit_document` | `boolean` | `no` | `true` | Enable text insertion and replacement. |
+
+### Example
+
+```yaml
+agents:
+  writer:
+    worker_scope: user_agent
+    tools:
+      - google_docs:
+          create_document: true
+          read_document: true
+          edit_document: true
+```
+
+```python
+google_docs_create_document("Launch plan", "DRAFT\n")
+google_docs_get_document("1AbCdEfGhIjKlMnOpQrStUvWxYz")
+google_docs_insert_text("1AbCdEfGhIjKlMnOpQrStUvWxYz", "Next step\n")
+google_docs_replace_text("1AbCdEfGhIjKlMnOpQrStUvWxYz", "DRAFT", "FINAL", match_case=True)
+```
+
+### Notes
+
+- `google_docs` uses its own `google_docs` OAuth provider and `google_docs_oauth` token service, separate from Google Drive.
+- The provider requests `documents` plus OpenID email/profile scopes and does not request any Drive scope.
+- `google_drive` remains read-only and does not gain Docs write access when `google_docs` is enabled.
+- Google classifies the `documents` scope as sensitive, so public production clients need the verification follow-up described in [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/#production-verification-follow-up).
+- `google_docs` always runs in the primary MindRoom runtime so Google OAuth tokens are never mirrored into worker containers.
 
 ## [`google_sheets`]
 
@@ -9830,7 +9880,7 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 ### Notes
 
 - `homeassistant` requires `worker_scope` to be unset or `shared`, and it is unavailable for `worker_scope: user` or `worker_scope: user_agent`.
-- `homeassistant`, `gmail`, `google_calendar`, `google_drive`, and `google_sheets` always stay local and are never proxied through the sandbox, even if you change `worker_tools`.
+- `homeassistant`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, and `google_sheets` always stay local and are never proxied through the sandbox, even if you change `worker_tools`.
 - The current setup path is the dedicated Home Assistant integration flow in the dashboard or `src/mindroom/api/homeassistant_integration.py`, not generic env-to-credentials syncing.
 - That integration supports both OAuth and long-lived access tokens, and the OAuth flow requires a Home Assistant OAuth application with the callback URL `/api/homeassistant/callback` on the MindRoom dashboard host.
 - Home Assistant URLs are validated before server-side fetches, and private, local, or loopback URLs require the explicit `allow_private_url` opt-in.
@@ -9853,7 +9903,7 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 | Category | Tools | Link |
 |----------|-------|------|
 | **Execution & Coding** | file, shell, python, coding, docker, calculator, reasoning, sleep | [→ execution-and-coding](https://docs.mindroom.chat/tools/execution-and-coding/) |
-| **Data & Databases** | sql, postgres, neo4j, duckdb, csv, pandas, google_drive, google_sheets, yfinance | [→ data-and-databases](https://docs.mindroom.chat/tools/data-and-databases/) |
+| **Data & Databases** | sql, postgres, neo4j, duckdb, csv, pandas, google_drive, google_docs, google_sheets, yfinance | [→ data-and-databases](https://docs.mindroom.chat/tools/data-and-databases/) |
 | **Web Search** | duckduckgo, googlesearch, tavily, exa, serpapi, serper, searxng | [→ web-search](https://docs.mindroom.chat/tools/web-search/) |
 | **Web Scraping & Browser** | firecrawl, crawl4ai, browser, jina, website, trafilatura | [→ web-scraping-and-browser](https://docs.mindroom.chat/tools/web-scraping-and-browser/) |
 | **Research Sources** | arxiv, google_scholar, wikipedia, pubmed, hackernews | [→ research-sources](https://docs.mindroom.chat/tools/research-sources/) |
@@ -12073,7 +12123,7 @@ Identity restrictions are provider settings, not MindRoom policy.
 Providers can enforce allowed email domains, allowed hosted-domain claims, and custom claim validators.
 If a configured restriction cannot be checked from verified provider claims, the callback fails closed and no credential is saved.
 
-Built-in Google providers use the generic framework for Drive, Calendar, Sheets, and Gmail.
+Built-in Google providers use the generic framework for Drive, Docs, Calendar, Sheets, and Gmail.
 Each provider has minimal service-specific scopes, stores OAuth tokens under its own `*_oauth` service, stores editable tool settings separately, and uses `/api/oauth/*`.
 Each provider first checks its provider-specific client config service, then the shared `google_oauth_client` service.
 The shared `google_oauth_client` service supplies only `client_id` and `client_secret`; MindRoom derives the provider-specific redirect URI.
@@ -15966,6 +16016,7 @@ Public, unpaired, and organization-managed deployments can configure their own G
 | Tool | Provider ID | Callback path | Token service | Client config service | Settings service | Scopes |
 | --- | --- | --- | --- | --- | --- | --- |
 | Google Drive | `google_drive` | `/api/oauth/google_drive/callback` | `google_drive_oauth` | `google_drive_oauth_client` | `google_drive` | Drive read-only plus OpenID email/profile |
+| Google Docs | `google_docs` | `/api/oauth/google_docs/callback` | `google_docs_oauth` | `google_docs_oauth_client` | `google_docs` | Docs view/edit/create/delete plus OpenID email/profile |
 | Google Calendar | `google_calendar` | `/api/oauth/google_calendar/callback` | `google_calendar_oauth` | `google_calendar_oauth_client` | `google_calendar` | Calendar events, calendar-list read-only, free/busy, and settings read-only plus OpenID email/profile |
 | Google Sheets | `google_sheets` | `/api/oauth/google_sheets/callback` | `google_sheets_oauth` | `google_sheets_oauth_client` | `google_sheets` | Sheets read/write, plus OpenID email/profile |
 | Gmail | `google_gmail` | `/api/oauth/google_gmail/callback` | `google_gmail_oauth` | `google_gmail_oauth_client` | `gmail` | Gmail modify plus OpenID email/profile |
@@ -15976,6 +16027,10 @@ MindRoom requests only the scopes required by the operations currently exposed t
 
 - `drive.readonly` lets an agent search, list, and read existing files across the connected account without granting Drive write access.
   The narrower `drive.file` scope cannot preserve account-wide search because it is limited to files created by or explicitly shared with the app.
+- `documents` lets an agent create documents, read complete document structure and content, and apply text edits without granting access to non-Docs Drive files.
+  The scope also authorizes document deletion across the connected account, although MindRoom's `google_docs` tool does not expose a delete operation.
+  Google classifies `documents` as sensitive, while the broader `drive` scope is restricted.
+  The non-sensitive `drive.file` scope is not sufficient for MindRoom's direct document-ID workflow because it limits access to files created by or explicitly opened with the app, and MindRoom does not use Google Picker.
 - `calendar.events` lets an agent read events and, when `allow_update` is enabled, create, update, delete, move, and respond to events without granting calendar sharing or calendar deletion access.
 - `calendar.calendarlist.readonly` lets an agent list subscribed calendars without adding, removing, or editing subscriptions.
 - `calendar.freebusy` lets an agent check availability without exposing event details through that operation.
@@ -15995,18 +16050,28 @@ MindRoom does not use Google user data to train or improve generalized, foundati
 Skip this section for a normal local installation.
 Create a **Web application** OAuth client in Google Cloud Console when you need a public callback origin or a custom Google OAuth app.
 Enable only the APIs for the tools you plan to use.
+Enable the Google Docs API before connecting `google_docs`.
 Add one authorized redirect URI for each provider you enable.
 
 For local development, the redirect URIs are:
 
 ```text
 http://localhost:8765/api/oauth/google_drive/callback
+http://localhost:8765/api/oauth/google_docs/callback
 http://localhost:8765/api/oauth/google_calendar/callback
 http://localhost:8765/api/oauth/google_sheets/callback
 http://localhost:8765/api/oauth/google_gmail/callback
 ```
 
 For production, replace the origin with your public MindRoom origin.
+
+## Production Verification Follow-up
+
+The Google Docs provider requests the sensitive `https://www.googleapis.com/auth/documents` scope.
+Do not add this scope to a production OAuth consent configuration while another verification submission is under review unless you intentionally choose to update that submission.
+Use a separate Google Cloud testing project and test users to enable the Docs API, add the `documents` scope, configure the Docs callback, and validate the integration without changing the production submission.
+After the current production review completes, add the Docs API and `documents` scope to the production project's Data Access configuration and submit the required sensitive-scope verification follow-up with a scope justification and end-to-end demo.
+Do not enable production Google Docs connections for general users until Google has approved the added scope, because unapproved sensitive scopes can show an unverified-app warning and remain subject to test-user limits.
 
 ## Custom Client Config
 
@@ -16058,6 +16123,7 @@ Optional account restrictions are service-specific:
 
 ```bash
 GOOGLE_DRIVE_ALLOWED_EMAIL_DOMAINS=example.com
+GOOGLE_DOCS_ALLOWED_EMAIL_DOMAINS=example.com
 GOOGLE_CALENDAR_ALLOWED_HOSTED_DOMAINS=example.com
 GOOGLE_SHEETS_ALLOWED_EMAIL_DOMAINS=example.com
 GOOGLE_GMAIL_ALLOWED_HOSTED_DOMAINS=example.com
@@ -16094,6 +16160,7 @@ agents:
     worker_scope: user_agent
     tools:
       - google_drive
+      - google_docs
       - google_calendar
       - google_sheets
       - gmail
@@ -16113,8 +16180,8 @@ After the browser flow completes, have the target agent retry the operation and 
 As a manual alternative, open the dashboard and select **Connect** for the Google integration only when neither `config_manager` nor a tool result provides a `connect_url`.
 The dashboard explains which installation and credential scope will receive the connection before you continue.
 
-OAuth tokens are stored under provider token services such as `google_drive_oauth`.
-Editable tool settings are stored separately under services such as `google_drive`, `google_calendar`, `google_sheets`, and `gmail`.
+OAuth tokens are stored under provider token services such as `google_drive_oauth` and `google_docs_oauth`.
+Editable tool settings are stored separately under services such as `google_drive`, `google_docs`, `google_calendar`, `google_sheets`, and `gmail`.
 MindRoom does not mirror Google OAuth tokens into worker containers.
 
 ## Privacy and Access Scope
@@ -16144,6 +16211,7 @@ Enable the APIs for the tools you use and add the matching callback URLs.
 
 ```text
 http://localhost:8765/api/oauth/google_drive/callback
+http://localhost:8765/api/oauth/google_docs/callback
 http://localhost:8765/api/oauth/google_calendar/callback
 http://localhost:8765/api/oauth/google_sheets/callback
 http://localhost:8765/api/oauth/google_gmail/callback
@@ -16152,6 +16220,10 @@ http://localhost:8765/api/oauth/google_gmail/callback
 Replace the origin when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` points to a public deployment.
 For a shared custom client, store the configuration under `google_oauth_client`.
 Provider-specific services such as `google_drive_oauth_client` override the shared client.
+
+Google Docs requires the Google Docs API and the sensitive `https://www.googleapis.com/auth/documents` scope in the OAuth consent configuration.
+That scope authorizes viewing, editing, creating, and deleting Google Docs across the connected account, although MindRoom exposes create, read, insert, and replace operations rather than document deletion.
+Use a separate testing project while a production OAuth verification request is already under review, then submit a deliberate production verification follow-up after that review completes.
 
 When using standalone dashboard API-key auth, also set `MINDROOM_OWNER_USER_ID` to your Matrix user ID, such as `@alice:matrix.example.com`.
 Do not use `MINDROOM_OWNER_USER_ID` as the identity model for hosted multi-user private agents.
@@ -17027,7 +17099,7 @@ The `worker_tools` field has three states:
 
 Agent-level `worker_tools` overrides `defaults.worker_tools`.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
-Some local-only tools stay in the primary runtime even when listed: `attachments`, `gmail`, `google_calendar`, `google_drive`, `google_sheets`, and `homeassistant`.
+Some local-only tools stay in the primary runtime even when listed: `attachments`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `homeassistant`.
 With `MINDROOM_WORKER_BACKEND=static_runner`, a sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must be configured for selected execution tools to run.
 Without that URL, explicitly selected worker-routed tools fail closed unless `MINDROOM_SANDBOX_EXECUTION_MODE=off|local|disabled` or `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` is set.
 If `worker_tools` is omitted and no static proxy URL is configured, simple local installs run those tools in the primary MindRoom process.
@@ -17037,7 +17109,7 @@ With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, w
 
 `worker_tools` controls which tools run in the sandbox proxy.
 `worker_scope` controls how those sandbox runtimes are shared between calls.
-Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_drive`, `google_sheets`, and `homeassistant`.
+Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `homeassistant`.
 Additionally, `spotify` is a shared-only integration that requires `worker_scope` unset or `shared` but can still be proxied through the sandbox.
 The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 
@@ -17080,7 +17152,7 @@ With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, M
 - `worker_scope` does **not** change where agent data is stored.
   All scopes read and write the same agent storage directory (`agents/<name>/`).
 - The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`.
-  OAuth providers that support scoped dashboard flows, such as the Google Drive, Gmail, Calendar, and Sheets providers, are the exception.
+  OAuth providers that support scoped dashboard flows, such as the Google Drive, Docs, Gmail, Calendar, and Sheets providers, are the exception.
   For those providers, the dashboard can connect scoped `user` and `user_agent` credentials, but the Google tools still execute in the primary MindRoom runtime.
   Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime.
 - `user` mode shares one runtime across multiple agents for a single user, so agents in that runtime can access each other's files.

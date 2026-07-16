@@ -18,6 +18,7 @@ agents:
     worker_scope: user_agent
     tools:
       - google_drive
+      - google_docs
       - google_calendar
       - google_sheets
       - gmail
@@ -37,8 +38,8 @@ After the browser flow completes, have the target agent retry the operation and 
 As a manual alternative, open the dashboard and select **Connect** for the Google integration only when neither `config_manager` nor a tool result provides a `connect_url`.
 The dashboard explains which installation and credential scope will receive the connection before you continue.
 
-OAuth tokens are stored under provider token services such as `google_drive_oauth`.
-Editable tool settings are stored separately under services such as `google_drive`, `google_calendar`, `google_sheets`, and `gmail`.
+OAuth tokens are stored under provider token services such as `google_drive_oauth` and `google_docs_oauth`.
+Editable tool settings are stored separately under services such as `google_drive`, `google_docs`, `google_calendar`, `google_sheets`, and `gmail`.
 MindRoom does not mirror Google OAuth tokens into worker containers.
 
 ## Privacy and Access Scope
@@ -68,6 +69,7 @@ Enable the APIs for the tools you use and add the matching callback URLs.
 
 ```text
 http://localhost:8765/api/oauth/google_drive/callback
+http://localhost:8765/api/oauth/google_docs/callback
 http://localhost:8765/api/oauth/google_calendar/callback
 http://localhost:8765/api/oauth/google_sheets/callback
 http://localhost:8765/api/oauth/google_gmail/callback
@@ -76,6 +78,10 @@ http://localhost:8765/api/oauth/google_gmail/callback
 Replace the origin when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` points to a public deployment.
 For a shared custom client, store the configuration under `google_oauth_client`.
 Provider-specific services such as `google_drive_oauth_client` override the shared client.
+
+Google Docs requires the Google Docs API and the sensitive `https://www.googleapis.com/auth/documents` scope in the OAuth consent configuration.
+That scope authorizes viewing, editing, creating, and deleting Google Docs across the connected account, although MindRoom exposes create, read, insert, and replace operations rather than document deletion.
+Use a separate testing project while a production OAuth verification request is already under review, then submit a deliberate production verification follow-up after that review completes.
 
 When using standalone dashboard API-key auth, also set `MINDROOM_OWNER_USER_ID` to your Matrix user ID, such as `@alice:matrix.example.com`.
 Do not use `MINDROOM_OWNER_USER_ID` as the identity model for hosted multi-user private agents.

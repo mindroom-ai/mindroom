@@ -57,7 +57,7 @@ The dashboard remains a manual alternative only when no `connect_url` is availab
 ## Browse By Topic
 
 - [Execution & Coding](execution-and-coding.md) - Local files, shell, Python, coding helpers, and worker-routed execution tools.
-- [Data & Databases](data-and-databases.md) - SQL, databases, Google Drive files, spreadsheets, tabular analysis, and financial/business datasets.
+- [Data & Databases](data-and-databases.md) - SQL, databases, Google Docs and Drive files, spreadsheets, tabular analysis, and financial/business datasets.
 - [Web Search](web-search.md) - Search engines and search APIs.
 - [Web Scraping & Browser](web-scraping-and-browser.md) - Crawlers, extractors, browser automation, and page-reading tools.
 - [Research Sources](research-sources.md) - ArXiv, Wikipedia, PubMed, and Hacker News.

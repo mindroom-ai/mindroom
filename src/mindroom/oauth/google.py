@@ -270,8 +270,15 @@ def _google_oauth_provider(
     tool_config_service: str,
     client_config_services: tuple[str, ...],
     status_capabilities: tuple[str, ...],
+    include_granted_scopes: bool = True,
 ) -> OAuthProvider:
     """Return a Google OAuth provider with shared Google OAuth defaults."""
+    extra_auth_params = {
+        "access_type": "offline",
+        "prompt": "consent",
+    }
+    if include_granted_scopes:
+        extra_auth_params["include_granted_scopes"] = "true"
     return OAuthProvider(
         id=provider_id,
         display_name=display_name,
@@ -284,11 +291,7 @@ def _google_oauth_provider(
         shared_client_config_services=(_GOOGLE_CLIENT_CONFIG_SERVICE,),
         allowed_email_domains_env=_google_domain_env_names(provider_id, "ALLOWED_EMAIL_DOMAINS"),
         allowed_hosted_domains_env=_google_domain_env_names(provider_id, "ALLOWED_HOSTED_DOMAINS"),
-        extra_auth_params={
-            "access_type": "offline",
-            "include_granted_scopes": "true",
-            "prompt": "consent",
-        },
+        extra_auth_params=extra_auth_params,
         pkce_code_challenge_method="S256",
         runtime_bootstrapper=_google_runtime_bootstrapper,
         status_capabilities=status_capabilities,

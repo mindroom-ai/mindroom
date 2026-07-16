@@ -53,7 +53,7 @@ The dashboard remains a manual alternative only when no `connect_url` is availab
 ## Browse By Topic
 
 - [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/) - Local files, shell, Python, coding helpers, and worker-routed execution tools.
-- [Data & Databases](https://docs.mindroom.chat/tools/data-and-databases/) - SQL, databases, Google Drive files, spreadsheets, tabular analysis, and financial/business datasets.
+- [Data & Databases](https://docs.mindroom.chat/tools/data-and-databases/) - SQL, databases, Google Docs and Drive files, spreadsheets, tabular analysis, and financial/business datasets.
 - [Web Search](https://docs.mindroom.chat/tools/web-search/) - Search engines and search APIs.
 - [Web Scraping & Browser](https://docs.mindroom.chat/tools/web-scraping-and-browser/) - Crawlers, extractors, browser automation, and page-reading tools.
 - [Research Sources](https://docs.mindroom.chat/tools/research-sources/) - ArXiv, Wikipedia, PubMed, and Hacker News.
