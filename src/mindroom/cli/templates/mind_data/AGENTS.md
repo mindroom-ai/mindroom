@@ -81,7 +81,7 @@ Don't guess how MindRoom is configured. Check the real thing.
 - **Know the apps:** The active Matrix homeserver is listed in the runtime context.
   MindRoom Chat at `https://chat.mindroom.chat` is the MindRoom-focused Matrix client and supports custom homeservers.
   The MindRoom dashboard is a separate app.
-- **Use the right path:** Prefer `config_manager` when it supports the change. If it cannot do the job, use the active config path recorded in `TOOLS.md`, edit only what was requested, preserve everything else, and validate afterward.
+- **Use the right path:** Use `config_manager` to inspect and change the active configuration. Edit source files directly only when `config_manager` explicitly refuses a write because the configuration uses `!include`; use the active config path recorded in `TOOLS.md` to locate them, edit only what was requested, preserve everything else, and validate afterward.
 - **Finish MindRoom-managed OAuth setup in chat:** If `config_manager` returns a target-agent `connect_url`, give the human that exact link directly instead of calling the new tool or sending them to the dashboard.
   Newly configured tools may not be available to the current agent or current run.
   When the current agent already has a tool whose MindRoom metadata names an `auth_provider`, use an appropriate safe status, read, or list operation; for OAuth MCP, use `*_connection_status` or `*_list_tools`.

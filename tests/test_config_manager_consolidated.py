@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
 import nio
 import pytest
 import yaml
+from agno.tools.function import Function
 from pydantic import ValidationError
 
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -140,18 +141,243 @@ def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "config_manager
 
 
 class TestConsolidatedConfigManager:
-    """Test the consolidated ConfigManager with only 3 tools."""
+    """Test the consolidated ConfigManager with four tools."""
 
     def test_init(self, tmp_path: Path) -> None:
         """Test ConfigManagerTools initialization."""
         cm = _config_manager(_minimal_config_path(tmp_path))
         assert cm.config_path is not None
         assert cm.name == "config_manager"
-        # Should only have 3 tools now
-        assert len(cm.tools) == 3
+        assert len(cm.tools) == 4
         assert any(tool.__name__ == "get_info" for tool in cm.tools)
+        assert any(tool.__name__ == "manage_config" for tool in cm.tools)
         assert any(tool.__name__ == "manage_agent" for tool in cm.tools)
         assert any(tool.__name__ == "manage_team" for tool in cm.tools)
+
+    def test_manage_config_inspects_authored_subtree_with_redaction(self, tmp_path: Path) -> None:
+        """Inspection should be path-scoped, authored-only, and centrally redacted."""
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(
+            Config(
+                models={
+                    "default": {
+                        "provider": "openai",
+                        "id": "gpt-4o",
+                        "api_key": "sk-test-secret",
+                    },
+                },
+            ),
+            config_path,
+        )
+
+        result = _config_manager(config_path).manage_config(operation="inspect", path="/models/default")
+
+        assert "Authored MindRoom configuration" in result
+        assert "authored values only" in result
+        assert "api_key: '***redacted***'" in result
+        assert "id: gpt-4o" in result
+        assert "sk-test-secret" not in result
+        assert str(config_path.resolve()) in result
+
+    def test_manage_config_schema_accepts_arbitrary_json_values(self, tmp_path: Path) -> None:
+        """The model-facing patch schema must allow scalars, lists, objects, and null."""
+        function = Function.from_callable(_config_manager(_minimal_config_path(tmp_path)).manage_config)
+        changes_schema = function.parameters["properties"]["changes"]["anyOf"][0]
+        entry_schema = changes_schema["items"]
+
+        assert entry_schema["properties"]["op"]["enum"] == ["add", "replace", "remove"]
+        assert entry_schema["additionalProperties"] is False
+        assert entry_schema["properties"]["value"]["anyOf"][0] == {}
+
+    def test_manage_config_patches_full_schema_atomically(self, tmp_path: Path) -> None:
+        """One patch should update unrelated Config sections through shared validation."""
+        config_path = _minimal_config_path(tmp_path)
+        cm = _config_manager(config_path)
+
+        result = cm.manage_config(
+            operation="patch",
+            changes=[
+                {"op": "add", "path": "/authorization", "value": {"room_permissions": {}}},
+                {
+                    "op": "add",
+                    "path": "/authorization/room_permissions/room~1a~0b",
+                    "value": ["@user:example.org"],
+                },
+                {"op": "replace", "path": "/models/default/id", "value": "gpt-5"},
+                {"op": "add", "path": "/tool_approval", "value": {"default": "require_approval"}},
+            ],
+        )
+
+        assert "patch updated" in result
+        assert "Persisted: yes" in result
+        assert "/tool_approval" in result
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["models"]["default"]["id"] == "gpt-5"
+        assert saved["authorization"]["room_permissions"]["room/a~b"] == ["@user:example.org"]
+        assert saved["tool_approval"]["default"] == "require_approval"
+
+    def test_manage_config_appends_and_preserves_explicit_null(self, tmp_path: Path) -> None:
+        """Array append and explicit null should remain distinct from removal."""
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(
+            Config(
+                models={"default": {"provider": "openai", "id": "gpt-4o"}},
+                agents={"writer": AgentConfig(display_name="Writer", role="Writes", instructions=["first"])},
+            ),
+            config_path,
+        )
+
+        result = _config_manager(config_path).manage_config(
+            operation="patch",
+            changes=[
+                {"op": "add", "path": "/agents/writer/instructions/-", "value": "second"},
+                {"op": "add", "path": "/agents/writer/compaction", "value": {"model": None}},
+            ],
+        )
+
+        assert "patch updated" in result
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["agents"]["writer"]["instructions"] == ["first", "second"]
+        assert saved["agents"]["writer"]["compaction"]["model"] is None
+
+    def test_manage_config_dry_run_validates_without_writing(self, tmp_path: Path) -> None:
+        """Dry runs should return a receipt while preserving the original bytes."""
+        config_path = _minimal_config_path(tmp_path)
+        original = config_path.read_bytes()
+
+        result = _config_manager(config_path).manage_config(
+            operation="patch",
+            changes=[{"op": "replace", "path": "/models/default/id", "value": "gpt-5"}],
+            dry_run=True,
+        )
+
+        assert "patch validated" in result
+        assert "Persisted: no (dry run)" in result
+        assert config_path.read_bytes() == original
+
+    def test_manage_config_rejects_invalid_batch_without_writing(self, tmp_path: Path) -> None:
+        """A later bad pointer should roll back the whole in-memory patch."""
+        config_path = _minimal_config_path(tmp_path)
+        original = config_path.read_bytes()
+
+        result = _config_manager(config_path).manage_config(
+            operation="patch",
+            changes=[
+                {"op": "replace", "path": "/models/default/id", "value": "gpt-5"},
+                {"op": "remove", "path": "/models/missing"},
+            ],
+        )
+
+        assert "Remove target does not exist" in result
+        assert "Changes were NOT applied" in result
+        assert config_path.read_bytes() == original
+
+    @pytest.mark.parametrize(
+        ("change", "expected"),
+        [
+            ({"op": "move", "path": "/models/default"}, "Input should be 'add', 'replace' or 'remove'"),
+            ({"op": "add", "path": "models/default", "value": {}}, "must be empty for the root or start"),
+            ({"op": "add", "path": "/models/~2bad", "value": {}}, "Invalid JSON Pointer escape"),
+            ({"op": "add", "path": "/models/new"}, "requires a value"),
+            ({"op": "remove", "path": "/models/default", "value": {}}, "unsupported keys"),
+        ],
+    )
+    def test_manage_config_rejects_malformed_patch_entries(
+        self,
+        tmp_path: Path,
+        change: dict[str, Any],
+        expected: str,
+    ) -> None:
+        """Malformed operations and pointers should fail without touching disk."""
+        config_path = _minimal_config_path(tmp_path)
+        original = config_path.read_bytes()
+
+        result = _config_manager(config_path).manage_config(operation="patch", changes=[change])
+
+        assert expected in result
+        assert "Changes were NOT applied" in result
+        assert config_path.read_bytes() == original
+
+    def test_manage_config_replace_missing_suggests_add(self, tmp_path: Path) -> None:
+        """Unset authored fields should explain the replace-versus-add distinction."""
+        config_path = _minimal_config_path(tmp_path)
+
+        result = _config_manager(config_path).manage_config(
+            operation="patch",
+            changes=[{"op": "replace", "path": "/defaults", "value": {"markdown": False}}],
+        )
+
+        assert "use add instead" in result
+        assert "Changes were NOT applied" in result
+
+    def test_manage_config_rejects_schema_invalid_patch_without_writing(self, tmp_path: Path) -> None:
+        """Runtime-aware Config validation should reject unknown fields atomically."""
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(
+            Config(
+                models={"default": {"provider": "openai", "id": "gpt-4o"}},
+                agents={"writer": AgentConfig(display_name="Writer", role="Writes")},
+            ),
+            config_path,
+        )
+        original = config_path.read_bytes()
+
+        result = _config_manager(config_path).manage_config(
+            operation="patch",
+            changes=[{"op": "add", "path": "/agents/writer/not_a_field", "value": True}],
+        )
+
+        assert "Invalid configuration" in result
+        assert "not_a_field" in result
+        assert config_path.read_bytes() == original
+
+    def test_manage_config_preserves_tool_overrides_and_runtime_overlay(self, tmp_path: Path) -> None:
+        """Unrelated patches must preserve authored overrides without persisting runtime overlays."""
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(
+            Config(
+                models={"default": {"provider": "openai", "id": "gpt-4o"}},
+                defaults=DefaultsConfig(
+                    tools=[{"shell": {"enable_run_shell_command": True}}],
+                ),
+            ),
+            config_path,
+        )
+        runtime_paths = resolve_runtime_paths(
+            config_path=config_path,
+            process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": "true"},
+        )
+
+        result = ConfigManagerTools(runtime_paths).manage_config(
+            operation="patch",
+            changes=[{"op": "add", "path": "/timezone", "value": "Europe/Amsterdam"}],
+        )
+
+        assert "patch updated" in result
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["defaults"]["tools"] == [{"shell": {"enable_run_shell_command": True}}]
+        assert "approved_egress" not in str(saved)
+        assert "tool_approval" not in saved
+
+    def test_manage_config_surfaces_include_boundary_on_inspect_and_patch(self, tmp_path: Path) -> None:
+        """Composed configs should remain inspectable but reject structured writes."""
+        config_path = tmp_path / "config.yaml"
+        models_path = tmp_path / "models.yaml"
+        config_path.write_text("models: !include models.yaml\n", encoding="utf-8")
+        models_path.write_text("default:\n  provider: openai\n  id: gpt-4o\n", encoding="utf-8")
+        cm = _config_manager(config_path)
+
+        inspected = cm.manage_config(operation="inspect", path="/models/default")
+        rejected = cm.manage_config(
+            operation="patch",
+            changes=[{"op": "replace", "path": "/models/default/id", "value": "gpt-5"}],
+        )
+
+        assert "composed from multiple files" in inspected
+        assert "structured patching is unavailable" in inspected
+        assert "composed from multiple files" in rejected
+        assert "Changes were NOT applied" in rejected
+        assert "gpt-4o" in models_path.read_text(encoding="utf-8")
 
     def test_init_uses_explicit_config_path(self) -> None:
         """Initialization should preserve the explicitly provided config path."""
@@ -1433,15 +1659,15 @@ class TestConsolidatedConfigManager:
                 assert "Error: Unknown info_type" not in result
 
     def test_reduced_tool_count(self, tmp_path: Path) -> None:
-        """Verify we reduced from 15 tools to just 3."""
+        """Verify the toolkit remains consolidated into four functions."""
         cm = _config_manager(_minimal_config_path(tmp_path))
 
-        # Should only have 3 tools registered
-        assert len(cm.tools) == 3
+        assert len(cm.tools) == 4
 
         # Check the specific tools
         tool_names = [tool.__name__ for tool in cm.tools]
         assert "get_info" in tool_names
+        assert "manage_config" in tool_names
         assert "manage_agent" in tool_names
         assert "manage_team" in tool_names
 
