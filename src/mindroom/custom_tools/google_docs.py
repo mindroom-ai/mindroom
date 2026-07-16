@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Any, cast
 
 from agno.tools import Toolkit
@@ -21,9 +22,19 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_GOOGLE_DOCS_URL_ID_PATTERN = re.compile(
+    r"^https?://docs\.google\.com/document/(?:u/\d+/)?d/([A-Za-z0-9_-]+)(?:[/?#]|$)",
+)
+
 
 def _document_url(document_id: str) -> str:
     return f"https://docs.google.com/document/d/{document_id}/edit"
+
+
+def _normalize_document_id(value: str) -> str:
+    document_id = value.strip()
+    match = _GOOGLE_DOCS_URL_ID_PATTERN.match(document_id)
+    return match.group(1) if match else document_id
 
 
 class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Toolkit):
@@ -167,7 +178,8 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
             JSON containing the complete Google Docs API document resource and edit URL.
 
         """
-        if not document_id.strip():
+        document_id = _normalize_document_id(document_id)
+        if not document_id:
             return json.dumps({"error": "Google Docs document_id must not be empty"})
         try:
             service = self._docs_service()
@@ -203,7 +215,8 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
             JSON containing the atomic Google Docs batch-update response.
 
         """
-        if not document_id.strip():
+        document_id = _normalize_document_id(document_id)
+        if not document_id:
             return json.dumps({"error": "Google Docs document_id must not be empty"})
         if not text:
             return json.dumps({"error": "Google Docs insertion text must not be empty"})
@@ -254,7 +267,8 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
             JSON containing replacement counts in the Google Docs batch-update response.
 
         """
-        if not document_id.strip():
+        document_id = _normalize_document_id(document_id)
+        if not document_id:
             return json.dumps({"error": "Google Docs document_id must not be empty"})
         if not find_text:
             return json.dumps({"error": "Google Docs find_text must not be empty"})

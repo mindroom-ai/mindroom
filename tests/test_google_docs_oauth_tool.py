@@ -235,6 +235,21 @@ def test_google_docs_get_document_returns_tab_aware_structure(tmp_path: Path) ->
     )
 
 
+def test_google_docs_get_document_accepts_full_edit_url(tmp_path: Path) -> None:
+    tool, service = _connected_tool(tmp_path)
+
+    tool.google_docs_get_document(
+        "https://docs.google.com/document/u/0/d/document-id/edit?usp=sharing",
+    )
+
+    assert service.documents_resource.get_calls == [
+        {
+            "documentId": "document-id",
+            "includeTabsContent": True,
+        },
+    ]
+
+
 def test_google_docs_insert_text_supports_index_and_tab(tmp_path: Path) -> None:
     tool, service = _connected_tool(tmp_path)
 
