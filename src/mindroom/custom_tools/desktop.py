@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from itertools import count
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -118,6 +119,8 @@ class DesktopTools(Toolkit):
             ed25519=device_ed25519,
         )
         self._timeout_seconds = float(timeout_seconds)
+        self._command_session_id = uuid4().hex
+        self._command_sequences = count()
         register_toolkit_functions(
             self,
             sync_entrypoints={},
@@ -176,8 +179,8 @@ class DesktopTools(Toolkit):
             now_ms = round(time.time() * 1000)
             command = DesktopCommand(
                 request_id=uuid4().hex,
-                session_id=context.session_id,
-                sequence=time.time_ns(),
+                session_id=self._command_session_id,
+                sequence=next(self._command_sequences),
                 issued_at_ms=now_ms,
                 expires_at_ms=now_ms + round(self._timeout_seconds * 1000),
                 action=action,  # ty: ignore[invalid-argument-type] - validated by _action_parameters.

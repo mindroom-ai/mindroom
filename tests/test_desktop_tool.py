@@ -34,6 +34,40 @@ def test_desktop_tool_is_registered_as_room_scoped_primary_tool() -> None:
 
 
 @pytest.mark.asyncio
+async def test_commands_use_one_process_channel_with_monotonic_sequences(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wall-clock changes cannot make later commands look reordered to the local bridge."""
+    context = SimpleNamespace(
+        session_id="matrix-conversation",
+        requester_id="@alice:example.org",
+        agent_name="computer",
+        client=object(),
+    )
+    request = AsyncMock(
+        return_value=DesktopResponse(
+            request_id="request-1",
+            session_id="channel",
+            ok=True,
+            result={"online": True},
+        ),
+    )
+    monkeypatch.setattr("mindroom.custom_tools.desktop.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.desktop.desktop_response_router",
+        lambda _client: SimpleNamespace(request=request),
+    )
+    tool = DesktopTools("@desktop:example.org", "DESKTOP", "fingerprint")
+
+    await tool.desktop("status")
+    await tool.desktop("status")
+
+    first_command = request.await_args_list[0].args[1]
+    second_command = request.await_args_list[1].args[1]
+    assert first_command.session_id == second_command.session_id
+    assert first_command.session_id != context.session_id
+    assert (first_command.sequence, second_command.sequence) == (0, 1)
+
+
+@pytest.mark.asyncio
 async def test_screenshot_response_becomes_model_visible_image(monkeypatch: pytest.MonkeyPatch) -> None:
     """The agent receives decrypted bytes plus structured source-screen dimensions."""
     client = object()
