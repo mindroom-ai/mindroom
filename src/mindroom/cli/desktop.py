@@ -22,7 +22,7 @@ _error_console = Console(stderr=True)
 
 desktop_app = typer.Typer(
     name="desktop",
-    help="Connect a local screen and input device to cloud MindRoom over Matrix E2EE.",
+    help="Connect allowlisted local applications to cloud MindRoom over Matrix E2EE.",
     no_args_is_help=True,
 )
 
@@ -163,10 +163,15 @@ def desktop_run(
         "--allow-agent",
         help="MindRoom agent name allowed to operate this desktop; repeat as needed.",
     ),
+    allow_app: list[str] = typer.Option(  # noqa: B008
+        ...,
+        "--allow-app",
+        help="Exact local application ID exposed to the agent; repeat as needed.",
+    ),
     allow_control: bool = typer.Option(
         False,
         "--allow-control",
-        help="Enable click/type/scroll/keypress for a short local lease. Default is observe-only.",
+        help="Enable semantic and fallback input for a short local lease. Default is observe-only.",
     ),
     lease_minutes: int = typer.Option(15, "--lease-minutes", min=1, max=60, help="Local control lease duration."),
     max_screenshot_width: int = typer.Option(1600, "--max-screenshot-width", min=320, max=3840),
@@ -203,6 +208,7 @@ def desktop_run(
                 controller_ed25519=controller_ed25519,
                 allow_requester=frozenset(allow_requester),
                 allow_agent=frozenset(allow_agent),
+                allow_app=frozenset(allow_app),
                 allow_control=allow_control,
                 lease_minutes=lease_minutes,
                 max_screenshot_width=max_screenshot_width,
@@ -225,6 +231,7 @@ async def _run_bridge(
     controller_ed25519: str,
     allow_requester: frozenset[str],
     allow_agent: frozenset[str],
+    allow_app: frozenset[str],
     allow_control: bool,
     lease_minutes: int,
     max_screenshot_width: int,
@@ -246,6 +253,7 @@ async def _run_bridge(
     try:
         await resolve_pinned_device(client, controller)
         provider = PyAutoGuiDesktopProvider(
+            allowed_app_ids=allow_app,
             max_screenshot_width=max_screenshot_width,
             jpeg_quality=jpeg_quality,
         )
@@ -257,6 +265,7 @@ async def _run_bridge(
                 controller=controller,
                 allowed_requester_ids=allow_requester,
                 allowed_agent_names=allow_agent,
+                allowed_app_ids=allow_app,
                 allow_control=allow_control,
                 control_lease_expires_at_ms=lease_expiry,
             ),
@@ -282,6 +291,7 @@ async def _run_bridge(
         _console.print(f"[green]Desktop bridge online:[/green] {mode}")
         _console.print(f"Allowed requesters: {', '.join(sorted(allow_requester))}")
         _console.print(f"Allowed agents: {', '.join(sorted(allow_agent))}")
+        _console.print(f"Allowed applications: {', '.join(sorted(allow_app))}")
         _console.print("Move the pointer to the upper-left corner to trigger PyAutoGUI's emergency stop.")
         await client.sync_forever(timeout=30_000, full_state=False, set_presence="online")
     finally:

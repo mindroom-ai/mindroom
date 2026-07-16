@@ -2,19 +2,65 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Literal, cast
 
-DESKTOP_COMMAND_EVENT_TYPE = "io.mindroom.desktop.command.v1"
-DESKTOP_RESPONSE_EVENT_TYPE = "io.mindroom.desktop.response.v1"
-DESKTOP_PROTOCOL_VERSION = 1
+DESKTOP_COMMAND_EVENT_TYPE = "io.mindroom.desktop.command.v2"
+DESKTOP_RESPONSE_EVENT_TYPE = "io.mindroom.desktop.response.v2"
+DESKTOP_PROTOCOL_VERSION = 2
 MAX_COMMAND_TTL_MS = 120_000
 MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024
+_MAX_COMMAND_PARAMETERS_BYTES = 16 * 1024
 
-type DesktopAction = Literal["status", "screenshot", "click", "type_text", "scroll", "keypress"]
+type DesktopAction = Literal[
+    "status",
+    "list_apps",
+    "get_app_state",
+    "screenshot",
+    "click_element",
+    "set_value",
+    "scroll_element",
+    "perform_action",
+    "click",
+    "type_text",
+    "scroll",
+    "keypress",
+]
 
-DESKTOP_CONTROL_ACTIONS = frozenset({"click", "type_text", "scroll", "keypress"})
-_DESKTOP_ACTIONS = frozenset({"status", "screenshot", *DESKTOP_CONTROL_ACTIONS})
+DESKTOP_CONTROL_ACTIONS = frozenset(
+    {
+        "click_element",
+        "set_value",
+        "scroll_element",
+        "perform_action",
+        "click",
+        "type_text",
+        "scroll",
+        "keypress",
+    },
+)
+DESKTOP_APP_ACTIONS = frozenset({"get_app_state", "screenshot", *DESKTOP_CONTROL_ACTIONS})
+DESKTOP_SAFE_KEYS = frozenset(
+    {
+        "backspace",
+        "delete",
+        "down",
+        "end",
+        "enter",
+        "esc",
+        "escape",
+        "home",
+        "left",
+        "pagedown",
+        "pageup",
+        "return",
+        "right",
+        "tab",
+        "up",
+    },
+)
+_DESKTOP_ACTIONS = frozenset({"status", "list_apps", *DESKTOP_APP_ACTIONS})
 
 
 class DesktopProtocolError(ValueError):
@@ -133,6 +179,19 @@ class DesktopCommand:
             msg = f"Desktop command TTL must be between 1 and {MAX_COMMAND_TTL_MS} milliseconds."
             raise DesktopProtocolError(msg)
         parameters = _object_mapping(content.get("parameters", {}), "command.parameters")
+        try:
+            encoded_parameters = json.dumps(
+                parameters,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode()
+        except (TypeError, ValueError) as exc:
+            msg = "command.parameters must contain finite JSON values."
+            raise DesktopProtocolError(msg) from exc
+        if len(encoded_parameters) > _MAX_COMMAND_PARAMETERS_BYTES:
+            msg = f"command.parameters must not exceed {_MAX_COMMAND_PARAMETERS_BYTES} encoded bytes."
+            raise DesktopProtocolError(msg)
         return cls(
             request_id=_bounded_identifier(content, "request_id", "command"),
             session_id=_bounded_identifier(content, "session_id", "command"),
@@ -140,8 +199,8 @@ class DesktopCommand:
             issued_at_ms=issued_at_ms,
             expires_at_ms=expires_at_ms,
             action=cast("DesktopAction", action),
-            requester_id=_required_str(content, "requester_id", "command"),
-            agent_name=_required_str(content, "agent_name", "command"),
+            requester_id=_bounded_str(content, "requester_id", "command", max_length=255),
+            agent_name=_bounded_str(content, "agent_name", "command", max_length=128),
             parameters=parameters,
         )
 
@@ -235,9 +294,13 @@ def _required_int(content: dict[str, object], key: str, label: str) -> int:
 
 
 def _bounded_identifier(content: dict[str, object], key: str, label: str) -> str:
+    return _bounded_str(content, key, label, max_length=128)
+
+
+def _bounded_str(content: dict[str, object], key: str, label: str, *, max_length: int) -> str:
     value = _required_str(content, key, label)
-    if len(value) > 128:
-        msg = f"{label}.{key} must not exceed 128 characters."
+    if len(value) > max_length:
+        msg = f"{label}.{key} must not exceed {max_length} characters."
         raise DesktopProtocolError(msg)
     return value
 
@@ -250,10 +313,12 @@ def _require_protocol_version(content: dict[str, object]) -> None:
 
 
 __all__ = [
+    "DESKTOP_APP_ACTIONS",
     "DESKTOP_COMMAND_EVENT_TYPE",
     "DESKTOP_CONTROL_ACTIONS",
     "DESKTOP_PROTOCOL_VERSION",
     "DESKTOP_RESPONSE_EVENT_TYPE",
+    "DESKTOP_SAFE_KEYS",
     "MAX_COMMAND_TTL_MS",
     "MAX_SCREENSHOT_BYTES",
     "DesktopAction",

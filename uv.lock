@@ -4089,6 +4089,8 @@ desi-vocal = [
 ]
 desktop = [
     { name = "pyautogui" },
+    { name = "pyobjc-framework-applicationservices", marker = "sys_platform == 'darwin'" },
+    { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin'" },
 ]
 discord = [
     { name = "requests" },
@@ -4488,6 +4490,8 @@ requires-dist = [
     { name = "pygithub", marker = "extra == 'github'", specifier = ">=2.5" },
     { name = "pygments", specifier = ">=2.20" },
     { name = "pyjwt", specifier = ">=2.8" },
+    { name = "pyobjc-framework-applicationservices", marker = "sys_platform == 'darwin' and extra == 'desktop'", specifier = ">=12.2.1" },
+    { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin' and extra == 'desktop'", specifier = ">=12.2.1" },
     { name = "pypdf", marker = "extra == 'arxiv'" },
     { name = "python-docx", marker = "extra == 'file-generation'", specifier = ">=1.2" },
     { name = "python-dotenv", specifier = ">=1" },
@@ -7144,6 +7148,27 @@ wheels = [
 ]
 
 [[package]]
+name = "pyobjc-framework-applicationservices"
+version = "12.2.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyobjc-core" },
+    { name = "pyobjc-framework-cocoa" },
+    { name = "pyobjc-framework-coretext" },
+    { name = "pyobjc-framework-quartz" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5e/4d/0ebdd8144aba94b8fe9828ccee5616a4bf53d1f8bc51cff55f3cce86d695/pyobjc_framework_applicationservices-12.2.1.tar.gz", hash = "sha256:048ea663c9ac75c44a15dc7d5b8d78cbb4c97bf1c76e83835e8d5498e184001f", size = 109342, upload-time = "2026-06-19T16:19:46.149Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bf/89/39a7462006afbc06c69029fe4181b7359a9da25ae7864ef75f9d3ffb9272/pyobjc_framework_applicationservices-12.2.1-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:f519ced13888d03410cd7da1f08fc56ee2944099e607216cef7ca26ecfdef61b", size = 32764, upload-time = "2026-06-19T16:05:39.26Z" },
+    { url = "https://files.pythonhosted.org/packages/b2/6e/8e928d5e3025529ed92c6eb5fd88a5e6e485cc6df945c541f29b4af7f2c6/pyobjc_framework_applicationservices-12.2.1-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:8749290f796e6cca341d443769b79329dde5d157bcc4413c1f7fdb68ea4a8e48", size = 32782, upload-time = "2026-06-19T16:05:40.284Z" },
+    { url = "https://files.pythonhosted.org/packages/50/a5/c7b5a31777fe2ce7c07b9c16941ff4fbf0a150bf755164d96228d32ccb4f/pyobjc_framework_applicationservices-12.2.1-cp313-cp313t-macosx_10_13_universal2.whl", hash = "sha256:9ee11677fbd6a0987234814c7dde88ffd11242e8c1f76952e6654ea07f2370ac", size = 33048, upload-time = "2026-06-19T16:05:41.308Z" },
+    { url = "https://files.pythonhosted.org/packages/8b/47/cd2bd76b862686c0aa78568ed9dff175764353c209a3096c72d6e2a9b151/pyobjc_framework_applicationservices-12.2.1-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:a1c0ee536cb8bd7f5a811165ec323a9207b1e8dad9534fe2081f767fb90b0411", size = 32921, upload-time = "2026-06-19T16:05:42.23Z" },
+    { url = "https://files.pythonhosted.org/packages/05/db/6989a96f8501aa3a16513d08b2c4c78ca906a10b6a4e5a33c4c59fd1bea9/pyobjc_framework_applicationservices-12.2.1-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:0d55dd5be19e4a1363662bc8b48894d45714d07f0ee3958665fc9ea7df0f61b7", size = 33163, upload-time = "2026-06-19T16:05:43.256Z" },
+    { url = "https://files.pythonhosted.org/packages/5c/41/66f2bcd12454a85f0479393f5825021332ee84b49583c7954cd20310cab5/pyobjc_framework_applicationservices-12.2.1-cp315-cp315-macosx_10_15_universal2.whl", hash = "sha256:e91c84238b2f68f608473854bcabb8770f15ad837e7561d217f24a1e482e42be", size = 32915, upload-time = "2026-06-19T16:05:44.151Z" },
+    { url = "https://files.pythonhosted.org/packages/81/cf/04b6b1eb181fa3071e9743bab7551f5d2ec3f650ac74bab790f21717ba51/pyobjc_framework_applicationservices-12.2.1-cp315-cp315t-macosx_10_15_universal2.whl", hash = "sha256:09bfa27765d4c74155323fd8185b7aba6d639ce06c0a9f00ee2d9e7dce3d7800", size = 33158, upload-time = "2026-06-19T16:05:45.017Z" },
+]
+
+[[package]]
 name = "pyobjc-framework-cocoa"
 version = "12.2.1"
 source = { registry = "https://pypi.org/simple" }
@@ -7159,6 +7184,26 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/98/d8/64a94651b9294702d55e748d94de30e25bc59d0784526be7643f4467eccd/pyobjc_framework_cocoa-12.2.1-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:a6c584e2af0813cb2f6103b184e632665a26f58c1bd5b08ffd6e95a19c617f7b", size = 392404, upload-time = "2026-06-19T16:07:44.955Z" },
     { url = "https://files.pythonhosted.org/packages/5c/cc/26e8a7bf1f5e8caa38b7f80d486296f9fd3c97e71ad7e5444ef22e802758/pyobjc_framework_cocoa-12.2.1-cp315-cp315-macosx_10_15_universal2.whl", hash = "sha256:b6023657b8d6cc049a21bd6b4752425f2f53c42f9f0b02d64c7608cc484bf103", size = 388589, upload-time = "2026-06-19T16:07:46.276Z" },
     { url = "https://files.pythonhosted.org/packages/b6/f3/eedf743a303ea742b8e082afe3613fb4d6618bc1a48cf2568b004ce906f7/pyobjc_framework_cocoa-12.2.1-cp315-cp315t-macosx_10_15_universal2.whl", hash = "sha256:c685ccd8e266a07cf912a2c5a13b1f2eff2a868a1aff163b4801b4687bd425e1", size = 392691, upload-time = "2026-06-19T16:07:47.477Z" },
+]
+
+[[package]]
+name = "pyobjc-framework-coretext"
+version = "12.2.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyobjc-core" },
+    { name = "pyobjc-framework-cocoa" },
+    { name = "pyobjc-framework-quartz" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5a/9c/4c7f452059dc1d3845b8e627b9113c247a997b9b07518e848c2ab7ff3149/pyobjc_framework_coretext-12.2.1.tar.gz", hash = "sha256:af740e784d7c592c34025ec7165f4f6c1a69b5a2d9075f06e41e4f77c212aed2", size = 97349, upload-time = "2026-06-19T16:20:22.508Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c5/11/c1298c2ec3b0cd19a457a1fd0da47898f894a13df5516f80dc04d1a7a4d9/pyobjc_framework_coretext-12.2.1-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:ac2ead13dfa4379a1566129d0e8a8ea778a2bcac9ac360a583360fd4f1ba39c6", size = 30123, upload-time = "2026-06-19T16:09:51.183Z" },
+    { url = "https://files.pythonhosted.org/packages/05/8c/154e8f34923b24aade64a20eca2b759f8f67e109654308103080751f246f/pyobjc_framework_coretext-12.2.1-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:5c5a3c6e2d905a17efb15572dad97ce582feeab5c3b92537015445e0e0bb46de", size = 30116, upload-time = "2026-06-19T16:09:52.219Z" },
+    { url = "https://files.pythonhosted.org/packages/01/61/f53458c8f7fe74008e342946eca1fa82b777b284d4e13d8bd2e3e5724cab/pyobjc_framework_coretext-12.2.1-cp313-cp313t-macosx_10_13_universal2.whl", hash = "sha256:5c979058c77df8cd3dac5fd7db4c484f9886fbe09e2687bfaf269a856f631f78", size = 30659, upload-time = "2026-06-19T16:09:53.034Z" },
+    { url = "https://files.pythonhosted.org/packages/c6/d8/d1178bb1ba3bb7a0d7a55db460aa89f2a8b232ed7eaf76cb402923cacf2d/pyobjc_framework_coretext-12.2.1-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:d0b3b0467a23dbc2a39d0839e7100cc98b429fb7d52a471bd65477f46bb4c9e5", size = 30100, upload-time = "2026-06-19T16:09:53.902Z" },
+    { url = "https://files.pythonhosted.org/packages/12/c3/780d739909e6d8ddd9e8786fd19e8ea10ccfcc7275df987e349af0fb33b1/pyobjc_framework_coretext-12.2.1-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:3d4a92fa657180cd0e900b98535da4f0f4d8c76a7077730a507e50d52d2853e3", size = 30642, upload-time = "2026-06-19T16:09:54.736Z" },
+    { url = "https://files.pythonhosted.org/packages/0f/e9/867197c6cf2396b33e95d6175d7fdc6f789314859fb107560ae9b19c7b14/pyobjc_framework_coretext-12.2.1-cp315-cp315-macosx_10_15_universal2.whl", hash = "sha256:7a17034fd0a08cf58323b7234a385ce0ec355509d414df69e3f8f88df26de1fc", size = 30098, upload-time = "2026-06-19T16:09:55.679Z" },
+    { url = "https://files.pythonhosted.org/packages/10/a3/f4e6d1a38cd4db8a1275eddb287f3cdc2c01c48f80b30e89cc58cfd92156/pyobjc_framework_coretext-12.2.1-cp315-cp315t-macosx_10_15_universal2.whl", hash = "sha256:28980144af75598654f6997b2bbb427885f4f5df90aa4d840f452ba5778ab155", size = 30669, upload-time = "2026-06-19T16:09:56.521Z" },
 ]
 
 [[package]]

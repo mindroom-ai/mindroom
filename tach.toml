@@ -2061,8 +2061,15 @@ path = "mindroom.desktop.protocol"
 depends_on = []
 
 [[modules]]
-path = "mindroom.desktop.provider"
+path = "mindroom.desktop.accessibility"
 depends_on = []
+
+[[modules]]
+path = "mindroom.desktop.provider"
+depends_on = [
+    "mindroom.desktop.accessibility",
+    "mindroom.desktop.protocol",
+]
 
 [[modules]]
 path = "mindroom.desktop.media"
@@ -2082,6 +2089,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.desktop.bridge"
 depends_on = [
+    "mindroom.desktop.accessibility",
     "mindroom.desktop.media",
     "mindroom.desktop.protocol",
     "mindroom.desktop.provider",

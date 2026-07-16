@@ -63,6 +63,26 @@ def test_command_rejects_unsafe_or_unbounded_values(field: str, value: object, m
         DesktopCommand.from_content(content)
 
 
+@pytest.mark.parametrize(
+    ("parameters", "match"),
+    [
+        ({"text": "x" * (16 * 1024 + 1)}, "encoded bytes"),
+        ({"x": float("nan")}, "finite JSON"),
+        ({"nested": object()}, "finite JSON"),
+    ],
+)
+def test_command_rejects_oversized_or_non_json_parameters(
+    parameters: dict[str, object],
+    match: str,
+) -> None:
+    """Pinned senders still cannot make the local bridge process unbounded command data."""
+    content = _command().to_content()
+    content["parameters"] = parameters
+
+    with pytest.raises(DesktopProtocolError, match=match):
+        DesktopCommand.from_content(content)
+
+
 def test_success_response_round_trip_includes_encrypted_media() -> None:
     """Successful screenshots use the strict Matrix encrypted-file shape."""
     response = DesktopResponse(

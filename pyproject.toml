@@ -435,6 +435,8 @@ zoom = [
 ]
 desktop = [
   "pyautogui>=0.9.54",
+  "pyobjc-framework-applicationservices>=12.2.1; sys_platform=='darwin'",
+  "pyobjc-framework-cocoa>=12.2.1; sys_platform=='darwin'",
 ]
 [project.scripts]
 mindroom = "mindroom.cli.main:main"

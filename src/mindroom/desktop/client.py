@@ -112,7 +112,7 @@ def _timeout_message(command: DesktopCommand, *, timeout_seconds: float) -> str:
         return message
     return (
         f"{message} The action outcome is unknown and it may have completed; do not repeat it automatically. "
-        "Request status or a screenshot before deciding the next step."
+        "Request get_app_state before deciding the next step."
     )
 
 

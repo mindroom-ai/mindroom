@@ -7683,7 +7683,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
-      "description": "Observe and operate one exact locally authorized desktop over Matrix end-to-end encryption",
+      "description": "Operate exact locally allowlisted applications through accessibility state over Matrix encryption",
       "display_name": "Matrix Desktop",
       "docs_url": "https://docs.mindroom.chat/tools/desktop/",
       "function_names": [

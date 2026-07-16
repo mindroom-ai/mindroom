@@ -8,11 +8,17 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from mindroom.desktop.accessibility import (
+    AccessibilityActionOutcomeUnknownError,
+    AccessibilityError,
+)
 from mindroom.desktop.media import DesktopMediaError, upload_encrypted_screenshot
 from mindroom.desktop.protocol import (
+    DESKTOP_APP_ACTIONS,
     DESKTOP_COMMAND_EVENT_TYPE,
     DESKTOP_CONTROL_ACTIONS,
     DESKTOP_RESPONSE_EVENT_TYPE,
+    DESKTOP_SAFE_KEYS,
     DesktopCommand,
     DesktopProtocolError,
     DesktopResponse,
@@ -40,6 +46,8 @@ logger = get_logger(__name__)
 _MAX_REPLAY_RESPONSES = 1024
 _MAX_TRACKED_SESSIONS = 128
 _MAX_FUTURE_SKEW_MS = 30_000
+_MAX_PARAMETER_TEXT_LENGTH = 2_000
+_MAX_PARAMETER_IDENTIFIER_LENGTH = 256
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,16 +57,29 @@ class DesktopBridgePolicy:
     controller: PinnedMatrixDevice
     allowed_requester_ids: frozenset[str]
     allowed_agent_names: frozenset[str]
+    allowed_app_ids: frozenset[str]
     allow_control: bool = False
     control_lease_expires_at_ms: int | None = None
 
     def __post_init__(self) -> None:
-        """Require explicit caller and agent allowlists."""
+        """Require explicit caller, agent, and application allowlists."""
         if not self.allowed_requester_ids:
             msg = "Desktop bridge requires at least one allowed requester Matrix ID."
             raise ValueError(msg)
         if not self.allowed_agent_names:
             msg = "Desktop bridge requires at least one allowed agent name."
+            raise ValueError(msg)
+        if not self.allowed_app_ids:
+            msg = "Desktop bridge requires at least one allowed application ID."
+            raise ValueError(msg)
+        if any(not value.strip() for value in self.allowed_requester_ids):
+            msg = "Desktop bridge requester IDs must not be empty."
+            raise ValueError(msg)
+        if any(not value.strip() for value in self.allowed_agent_names):
+            msg = "Desktop bridge agent names must not be empty."
+            raise ValueError(msg)
+        if any(not value.strip() for value in self.allowed_app_ids):
+            msg = "Desktop bridge application IDs must not be empty."
             raise ValueError(msg)
         if self.allow_control and self.control_lease_expires_at_ms is None:
             msg = "Control-enabled desktop bridge requires a lease expiry."
@@ -70,6 +91,14 @@ class DesktopBridgePolicy:
     def caller_allowed(self, command: DesktopCommand) -> bool:
         """Return whether local static policy admits the human and agent provenance."""
         return command.requester_id in self.allowed_requester_ids and command.agent_name in self.allowed_agent_names
+
+
+@dataclass(frozen=True, slots=True)
+class _Execution:
+    result: dict[str, object]
+    capture_app: str | None = None
+    capture_state_id: str | None = None
+    follow_up_app: str | None = None
 
 
 @dataclass
@@ -155,21 +184,28 @@ class DesktopBridge:
         execution = await self._execute_safely(command)
         if isinstance(execution, DesktopResponse):
             return execution
-        result, should_capture = execution
-        if not should_capture:
-            return self._success_response(command, result=result)
-        return await self._capture_response(command, result=result)
+        if execution.follow_up_app is not None:
+            execution = await self._attach_follow_up_state(command, execution)
+            if isinstance(execution, DesktopResponse):
+                return execution
+        if execution.capture_app is None or execution.capture_state_id is None:
+            return self._success_response(command, result=execution.result)
+        return await self._capture_response(
+            command,
+            result=execution.result,
+            app_id=execution.capture_app,
+            state_id=execution.capture_state_id,
+        )
 
-    async def _execute_safely(
-        self,
-        command: DesktopCommand,
-    ) -> tuple[dict[str, object], bool] | DesktopResponse:
+    async def _execute_safely(self, command: DesktopCommand) -> _Execution | DesktopResponse:
         try:
             return await self._execute(command)
         except DesktopEmergencyStopError as exc:
             self._control_revoked = True
             return self._error_response(command, str(exc))
-        except (DesktopProviderError, DesktopProtocolError) as exc:
+        except AccessibilityActionOutcomeUnknownError:
+            return self._unknown_control_response(command)
+        except (AccessibilityError, DesktopProviderError, DesktopProtocolError) as exc:
             return self._error_response(command, str(exc))
         except Exception:
             logger.exception(
@@ -181,21 +217,57 @@ class DesktopBridge:
                 return self._unknown_control_response(command)
             return self._error_response(command, "Local desktop operation failed.")
 
+    async def _attach_follow_up_state(
+        self,
+        command: DesktopCommand,
+        execution: _Execution,
+    ) -> _Execution | DesktopResponse:
+        app_id = execution.follow_up_app
+        if app_id is None:
+            return execution
+        try:
+            state = await asyncio.to_thread(self.provider.get_app_state, app_id)
+        except Exception:
+            logger.exception(
+                "desktop_control_follow_up_state_failed",
+                request_id=command.request_id,
+                action=command.action,
+            )
+            warning = (
+                "The desktop action completed, but fresh app state could not be read; do not repeat the action "
+                "automatically. Request get_app_state before deciding the next step."
+            )
+            return self._success_response(
+                command,
+                result={**execution.result, "warning": warning, "follow_up_state": "failed"},
+            )
+        return _Execution(
+            result={**execution.result, "state": state.to_result()},
+            capture_app=state.app_id,
+            capture_state_id=state.state_id,
+        )
+
     async def _capture_response(
         self,
         command: DesktopCommand,
         *,
         result: dict[str, object],
+        app_id: str,
+        state_id: str,
     ) -> DesktopResponse:
         try:
-            capture = await asyncio.to_thread(self.provider.screenshot)
+            capture = await asyncio.to_thread(
+                self.provider.screenshot,
+                app_id=app_id,
+                state_id=state_id,
+            )
             screenshot = await upload_encrypted_screenshot(
                 self.client,
                 capture.content,
                 mime_type=capture.mime_type,
                 filename=f"desktop-{command.request_id}.jpg",
             )
-        except (DesktopProviderError, DesktopMediaError) as exc:
+        except (AccessibilityError, DesktopProviderError, DesktopMediaError) as exc:
             return self._capture_error_response(command, result=result, error=str(exc))
         except Exception:
             logger.exception("desktop_follow_up_screenshot_failed", action=command.action)
@@ -205,6 +277,12 @@ class DesktopBridge:
             result={
                 **result,
                 "screen": {"width": capture.screen_width, "height": capture.screen_height},
+                "capture": {
+                    "x": capture.capture_x,
+                    "y": capture.capture_y,
+                    "width": capture.capture_width,
+                    "height": capture.capture_height,
+                },
                 "image": {"width": capture.image_width, "height": capture.image_height},
             },
             screenshot=screenshot,
@@ -212,12 +290,17 @@ class DesktopBridge:
 
     def _policy_error(self, command: DesktopCommand) -> str | None:
         now_ms = round(self.clock() * 1000)
+        app_id = command.parameters.get("app")
         if command.issued_at_ms > now_ms + _MAX_FUTURE_SKEW_MS:
             error = "Desktop command was issued too far in the future."
-        elif command.expires_at_ms < now_ms:
+        elif command.expires_at_ms <= now_ms:
             error = "Desktop command expired before local execution."
         elif not self.policy.caller_allowed(command):
             error = "Desktop command requester or agent is not allowed by local policy."
+        elif command.action in DESKTOP_APP_ACTIONS and (
+            not isinstance(app_id, str) or app_id not in self.policy.allowed_app_ids
+        ):
+            error = "Desktop command must target an application in the local allowlist."
         elif command.action not in DESKTOP_CONTROL_ACTIONS:
             error = None
         elif not self.policy.allow_control:
@@ -240,42 +323,147 @@ class DesktopBridge:
             self._sequence_high_watermarks.popitem(last=False)
         return None
 
-    async def _execute(self, command: DesktopCommand) -> tuple[dict[str, object], bool]:
+    async def _execute(self, command: DesktopCommand) -> _Execution:
         parameters = command.parameters
         if command.action == "status":
             _reject_unexpected_parameters(parameters, allowed=frozenset())
             status = await asyncio.to_thread(self.provider.status)
-            return {**status, "bridge": self._bridge_status()}, False
-        if command.action == "screenshot":
+            return _Execution({**status, "bridge": self._bridge_status()})
+        if command.action == "list_apps":
             _reject_unexpected_parameters(parameters, allowed=frozenset())
-            return {"action": command.action}, True
+            apps = await asyncio.to_thread(self.provider.list_apps)
+            return _Execution({"apps": [app.to_result() for app in apps]})
+        if command.action in {"get_app_state", "screenshot"}:
+            _reject_unexpected_parameters(parameters, allowed=frozenset({"app"}))
+            state = await asyncio.to_thread(self.provider.get_app_state, _required_str_parameter(parameters, "app"))
+            return _Execution(
+                {"action": command.action, "state": state.to_result()},
+                capture_app=state.app_id,
+                capture_state_id=state.state_id,
+            )
+
+        app_id = _required_str_parameter(parameters, "app")
+        state_id = _required_str_parameter(parameters, "state_id")
+        if command.action in {"click_element", "set_value", "scroll_element", "perform_action"}:
+            await self._execute_semantic_control(command, app_id=app_id, state_id=state_id)
+        else:
+            await self._execute_fallback_control(command, app_id=app_id, state_id=state_id)
+        return _Execution(
+            {"action": command.action, "action_completed": True},
+            follow_up_app=app_id,
+        )
+
+    async def _execute_semantic_control(
+        self,
+        command: DesktopCommand,
+        *,
+        app_id: str,
+        state_id: str,
+    ) -> None:
+        parameters = command.parameters
+        if command.action == "click_element":
+            _reject_unexpected_parameters(parameters, allowed=frozenset({"app", "state_id", "element_index"}))
+            await asyncio.to_thread(
+                self.provider.click_element,
+                app_id=app_id,
+                state_id=state_id,
+                element_index=_required_int_parameter(parameters, "element_index"),
+            )
+        elif command.action == "set_value":
+            _reject_unexpected_parameters(
+                parameters,
+                allowed=frozenset({"app", "state_id", "element_index", "value"}),
+            )
+            await asyncio.to_thread(
+                self.provider.set_value,
+                app_id=app_id,
+                state_id=state_id,
+                element_index=_required_int_parameter(parameters, "element_index"),
+                value=_required_str_parameter(parameters, "value", allow_empty=True),
+            )
+        elif command.action == "scroll_element":
+            _reject_unexpected_parameters(
+                parameters,
+                allowed=frozenset({"app", "state_id", "element_index", "direction", "pages"}),
+            )
+            await asyncio.to_thread(
+                self.provider.scroll_element,
+                app_id=app_id,
+                state_id=state_id,
+                element_index=_required_int_parameter(parameters, "element_index"),
+                direction=_required_str_parameter(parameters, "direction"),
+                pages=_required_int_parameter(parameters, "pages"),
+            )
+        elif command.action == "perform_action":
+            _reject_unexpected_parameters(
+                parameters,
+                allowed=frozenset({"app", "state_id", "element_index", "action_name"}),
+            )
+            await asyncio.to_thread(
+                self.provider.perform_action,
+                app_id=app_id,
+                state_id=state_id,
+                element_index=_required_int_parameter(parameters, "element_index"),
+                action_name=_required_str_parameter(parameters, "action_name"),
+            )
+        else:
+            msg = f"Unsupported semantic desktop action: {command.action}."
+            raise DesktopProtocolError(msg)
+
+    async def _execute_fallback_control(
+        self,
+        command: DesktopCommand,
+        *,
+        app_id: str,
+        state_id: str,
+    ) -> None:
+        parameters = command.parameters
         if command.action == "click":
-            _reject_unexpected_parameters(parameters, allowed=frozenset({"x", "y", "button"}))
+            _reject_unexpected_parameters(
+                parameters,
+                allowed=frozenset({"app", "state_id", "x", "y", "button"}),
+            )
             await asyncio.to_thread(
                 self.provider.click,
+                app_id=app_id,
+                state_id=state_id,
                 x=_required_int_parameter(parameters, "x"),
                 y=_required_int_parameter(parameters, "y"),
                 button=_optional_str_parameter(parameters, "button", default="left"),
             )
         elif command.action == "type_text":
-            _reject_unexpected_parameters(parameters, allowed=frozenset({"text"}))
-            await asyncio.to_thread(self.provider.type_text, text=_required_str_parameter(parameters, "text"))
+            _reject_unexpected_parameters(parameters, allowed=frozenset({"app", "state_id", "text"}))
+            await asyncio.to_thread(
+                self.provider.type_text,
+                app_id=app_id,
+                state_id=state_id,
+                text=_required_str_parameter(parameters, "text"),
+            )
         elif command.action == "scroll":
-            _reject_unexpected_parameters(parameters, allowed=frozenset({"clicks", "x", "y"}))
+            _reject_unexpected_parameters(
+                parameters,
+                allowed=frozenset({"app", "state_id", "direction", "pages", "x", "y"}),
+            )
             await asyncio.to_thread(
                 self.provider.scroll,
-                clicks=_required_int_parameter(parameters, "clicks"),
+                app_id=app_id,
+                state_id=state_id,
+                direction=_required_str_parameter(parameters, "direction"),
+                pages=_required_int_parameter(parameters, "pages"),
                 x=_optional_int_parameter(parameters, "x"),
                 y=_optional_int_parameter(parameters, "y"),
             )
         elif command.action == "keypress":
-            _reject_unexpected_parameters(parameters, allowed=frozenset({"keys"}))
-            await asyncio.to_thread(self.provider.keypress, keys=_required_str_list_parameter(parameters, "keys"))
+            _reject_unexpected_parameters(parameters, allowed=frozenset({"app", "state_id", "keys"}))
+            await asyncio.to_thread(
+                self.provider.keypress,
+                app_id=app_id,
+                state_id=state_id,
+                keys=_required_str_list_parameter(parameters, "keys"),
+            )
         else:
-            msg = f"Unsupported desktop action: {command.action}."
+            msg = f"Unsupported fallback desktop action: {command.action}."
             raise DesktopProtocolError(msg)
-
-        return {"action": command.action, "action_completed": True}, True
 
     def _bridge_status(self) -> dict[str, object]:
         control_available = self._control_available()
@@ -283,6 +471,7 @@ class DesktopBridge:
             "mode": "control" if control_available else "observe_only",
             "control_available": control_available,
             "emergency_stop_latched": self._control_revoked,
+            "allowed_app_count": len(self.policy.allowed_app_ids),
         }
         if self.policy.control_lease_expires_at_ms is not None:
             status["control_lease_expires_at_ms"] = self.policy.control_lease_expires_at_ms
@@ -293,7 +482,7 @@ class DesktopBridge:
             self.policy.allow_control
             and not self._control_revoked
             and self._control_lease_deadline is not None
-            and self.monotonic_clock() <= self._control_lease_deadline
+            and self.monotonic_clock() < self._control_lease_deadline
         )
 
     def _capture_error_response(
@@ -303,11 +492,20 @@ class DesktopBridge:
         result: dict[str, object],
         error: str,
     ) -> DesktopResponse:
+        if command.action == "get_app_state":
+            warning = (
+                "Accessibility state was read, but its app-window screenshot failed and the state may now be stale; "
+                "request get_app_state again before acting."
+            )
+            return self._success_response(
+                command,
+                result={**result, "warning": warning, "follow_up_screenshot": "failed"},
+            )
         if command.action not in DESKTOP_CONTROL_ACTIONS:
             return self._error_response(command, error)
         warning = (
-            "The desktop action completed, but its follow-up screenshot failed; do not repeat the action automatically. "
-            "Request status or a screenshot before deciding the next step."
+            "The desktop action completed and fresh app state was read, but its follow-up screenshot failed; "
+            "do not repeat the action automatically. Request get_app_state before the next action."
         )
         logger.warning(
             "desktop_control_follow_up_screenshot_failed",
@@ -324,7 +522,7 @@ class DesktopBridge:
     def _unknown_control_response(self, command: DesktopCommand) -> DesktopResponse:
         warning = (
             "The desktop action outcome is unknown and it may have completed; do not repeat the action automatically. "
-            "Request status or a screenshot before deciding the next step."
+            "Request get_app_state before deciding the next step."
         )
         logger.warning(
             "desktop_control_outcome_unknown",
@@ -401,10 +599,15 @@ def _optional_int_parameter(parameters: dict[str, object], key: str) -> int | No
     return _required_int_parameter(parameters, key)
 
 
-def _required_str_parameter(parameters: dict[str, object], key: str) -> str:
+def _required_str_parameter(parameters: dict[str, object], key: str, *, allow_empty: bool = False) -> str:
     value = parameters.get(key)
-    if not isinstance(value, str) or not value:
-        msg = f"Desktop parameter {key} must be a non-empty string."
+    if not isinstance(value, str) or (not value and not allow_empty):
+        qualifier = "a string" if allow_empty else "a non-empty string"
+        msg = f"Desktop parameter {key} must be {qualifier}."
+        raise DesktopProtocolError(msg)
+    max_length = _MAX_PARAMETER_TEXT_LENGTH if key in {"text", "value"} else _MAX_PARAMETER_IDENTIFIER_LENGTH
+    if len(value) > max_length:
+        msg = f"Desktop parameter {key} must not exceed {max_length} characters."
         raise DesktopProtocolError(msg)
     return value
 
@@ -417,10 +620,14 @@ def _optional_str_parameter(parameters: dict[str, object], key: str, *, default:
 
 def _required_str_list_parameter(parameters: dict[str, object], key: str) -> list[str]:
     value = parameters.get(key)
-    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-        msg = f"Desktop parameter {key} must be a list of strings."
+    if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], str):
+        msg = f"Desktop parameter {key} must contain exactly one locally safe navigation key."
         raise DesktopProtocolError(msg)
-    return [item for item in value if isinstance(item, str)]
+    normalized = value[0].strip().lower()
+    if normalized not in DESKTOP_SAFE_KEYS:
+        msg = f"Desktop parameter {key} may escape the allowed app."
+        raise DesktopProtocolError(msg)
+    return [normalized]
 
 
 __all__ = ["DesktopBridge", "DesktopBridgePolicy"]

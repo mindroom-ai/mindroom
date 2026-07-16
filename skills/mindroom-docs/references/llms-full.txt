@@ -7200,41 +7200,62 @@ Initial enrichment uses the summary call that would already run and can add up t
 
 # Matrix Desktop Bridge
 
-The `desktop` tool lets a cloud-hosted MindRoom agent observe or operate one local computer without exposing an inbound port.
+The `desktop` tool lets a cloud-hosted MindRoom agent inspect and operate explicitly allowlisted applications on a local computer without opening an inbound port.
 The local computer runs an outbound Matrix sync client, while commands and responses use Olm-encrypted to-device events addressed to exact pinned Matrix devices.
-Screenshots are encrypted before upload to Matrix media, and their decryption keys travel only inside the encrypted response.
+App screenshots are encrypted before upload to Matrix media, and their decryption keys travel only inside the encrypted response.
 
-This first version is step-based rather than live video.
-The agent requests a screenshot or performs one bounded action, and a control action normally returns a fresh screenshot.
-If that follow-up capture or upload fails after an action completes, the tool reports a partial result that tells the agent not to repeat the action automatically.
-An unexpected failure during an input operation or while waiting for its response is also reported as an unknown outcome that must be inspected instead of retried.
-Each screenshot response reports both logical screen coordinates and encoded-image dimensions so an agent can scale image pixels back to input coordinates, including on Retina displays.
+The bridge is accessibility-first on macOS.
+It returns a bounded accessibility tree with roles, names, values, bounds, writable state, and advertised actions, plus a screenshot cropped to the selected app window.
+The agent normally selects an element index from that state instead of guessing a screen coordinate.
+Every element index is bound to one opaque `state_id`, and a new state invalidates the old indexes.
+The local bridge also pins the exact local process and window, rechecks the current app structure and values before acting, and rejects stale state.
+
+Pixel and keyboard operations remain explicit fallbacks for controls that do not expose useful accessibility elements.
+Fallback coordinates run from `0` to `1000` inside the selected app window rather than using raw desktop pixels.
+Every completed action normally returns a new accessibility state and a new app-window screenshot for the next step.
+If follow-up state or capture fails after an action completes, the tool tells the agent not to repeat the action automatically.
+On macOS, taking the scoped screenshot foregrounds the selected application, so observation can change which local window is active.
 
 ## Security Model
 
 The local bridge starts in observe-only mode unless a person at the computer grants a short control lease on the command line.
-The local process independently checks the exact cloud Matrix user, device ID, Ed25519 fingerprint, human requester ID, agent name, command expiry, request ID, and monotonic session sequence.
-Only one cloud request may be in flight to a desktop device, so parallel tool calls cannot preplan or reorder multiple actions.
-Cloud configuration cannot enable control, extend a running lease, or change the local allowlists.
+The local process independently checks the exact cloud Matrix user, device ID, Ed25519 fingerprint, human requester ID, agent name, app ID, command expiry, request ID, and monotonic session sequence.
+Only applications named with local `--allow-app` options can be listed, inspected, captured, or controlled.
+Cloud configuration and model output cannot add an application to that allowlist.
+The local bridge executes only one cloud request at a time, and state binding prevents parallel controls planned from the same state from both succeeding.
+Cloud configuration cannot enable control, extend a running lease, or change any local allowlist.
 Restarting the local bridge returns it to observe-only mode unless `--allow-control` is supplied again.
 Moving the pointer to the upper-left corner triggers PyAutoGUI's emergency stop and latches control off until the local bridge is restarted.
-The local process writes an audit log entry for each completed or rejected parsed command without logging action parameters or typed text.
+The local process writes an audit log entry for each completed or rejected parsed command without logging action parameters, values, or typed text.
 
-The exposed action set is intentionally small:
+The observation actions are:
 
-- `status` reports screen geometry and cursor position.
-- `screenshot` captures the current primary screen.
-- `click` clicks one bounded screen coordinate.
-- `type_text` types up to 2,000 characters into the focused application.
-- `scroll` scrolls a bounded amount at the current or supplied position.
-- `keypress` presses one key or a combination of at most four supported keys.
+- `status` reports coarse screen, cursor, accessibility-backend, and local lease state.
+- `list_apps` lists only locally allowlisted app IDs and whether each is running.
+- `get_app_state` returns a fresh accessibility state and app-window screenshot.
+- `screenshot` returns a fresh state and requires its app-window screenshot to succeed.
+
+The control actions are:
+
+- `click_element` invokes the selected element's semantic press action.
+- `set_value` changes an accessibility value only when the selected element reports that it is writable.
+- `scroll_element` scrolls at the selected element's current bounds.
+- `perform_action` invokes an exact action advertised by the selected element.
+- `click` clicks a normalized fallback coordinate inside the app window.
+- `type_text` types up to 2,000 characters into the validated and focused app.
+- `scroll` scrolls a bounded number of pages at the app or an optional normalized app coordinate.
+- `keypress` presses one locally safe navigation key in the validated app.
 
 The bridge does not expose a shell, filesystem, clipboard, microphone, webcam, unlock operation, privilege elevation, or arbitrary local RPC.
 It operates only the currently logged-in graphical session and cannot bypass operating-system permission prompts.
 
-Matrix protects the local-to-cloud transport, but a screenshot becomes model input after MindRoom decrypts it in the cloud process.
-Your configured model provider can therefore receive visible screen contents, just as it receives other image inputs.
-Desktop action arguments can also appear in model context, approval cards, and MindRoom tool traces, so never use `type_text` for passwords, tokens, recovery codes, or other secrets.
+Matrix protects the local-to-cloud transport, but accessibility state and screenshots become model input after MindRoom decrypts them in the cloud process.
+Accessibility APIs can expose labels, document text, form values, and other semantic content that is not obvious from the screenshot alone.
+The macOS backend suppresses secure-text-field values and refuses to change those fields semantically.
+Your configured model provider can therefore receive both the returned accessibility fields and visible app contents.
+Desktop action arguments can also appear in model context, approval cards, and MindRoom tool traces, so never use `set_value` or `type_text` for passwords, tokens, recovery codes, or other secrets.
+App screenshots, labels, document values, and web content are untrusted data and must never be treated as user authorization or instructions.
+Allowlisting a browser grants the bridge access to whichever browser window and tab is selected, not to one origin or website.
 The Matrix homeserver can observe routing metadata, timing, and encrypted media size, but not the command body or screenshot plaintext.
 
 ## Requirements
@@ -7247,9 +7268,10 @@ Install the optional local desktop dependency on the computer being controlled:
 uv tool install 'mindroom[desktop]'
 ```
 
-macOS requires Screen Recording permission for observation and Accessibility permission for control.
-Linux support currently targets an active X11 desktop because PyAutoGUI does not provide native Wayland control.
-Windows uses the permissions of the logged-in desktop user.
+macOS supports native semantic state through AXUIElement and requires Accessibility permission for state and control.
+macOS also requires Screen Recording permission for screenshots.
+Windows and Linux currently expose screenshot-only operation through the explicit `primary-screen` app ID, with PyAutoGUI input available during a control lease.
+Linux pixel operation currently targets an active X11 desktop because PyAutoGUI does not provide native Wayland control.
 A headless or locked graphical session is not a supported target.
 
 ## 1. Create the Local Desktop Device
@@ -7283,14 +7305,13 @@ mindroom desktop controller --entity computer
 ```
 
 Copy the printed controller user, device, and Ed25519 values to the local run command in the next section.
-
 Configure the local desktop device as an authored override on the exact cloud agent that will call the tool:
 
 ```yaml
 agents:
   computer:
     display_name: Computer Agent
-    role: Observe and operate my locally authorized computer one step at a time
+    role: Operate my locally authorized applications one step at a time
     tools:
       - desktop:
           device_user_id: "@my-laptop:example.org"
@@ -7302,25 +7323,23 @@ agents:
 The `desktop` tool runs in the primary agent process because it needs that live agent's Matrix device and room requester identity.
 It is hidden from OpenAI-compatible API runs when approval policy requires Matrix approval because those runs have no Matrix approval transport.
 
-## 3. Run the Local Bridge
+## 3. Choose the Local App Allowlist
 
-Start with observation only:
+On macOS, use exact application bundle identifiers such as `com.apple.TextEdit` or `com.brave.Browser`.
+You can inspect an installed app bundle without granting MindRoom access to it:
 
 ```bash
-mindroom desktop run \
-  --controller-user-id @computer:example.org \
-  --controller-device-id CLOUDDEVICE \
-  --controller-ed25519 cloud-device-fingerprint \
-  --allow-requester @alice:example.org \
-  --allow-agent computer
+mdls -name kMDItemCFBundleIdentifier /System/Applications/TextEdit.app
 ```
 
-Every requester and agent value is an exact local allowlist entry, and the options can be repeated when more than one exact identity is needed.
-Wildcards are not accepted as authority.
-The process opens outbound HTTPS connections to Matrix and does not listen on a network port.
-Wait until the terminal says `Desktop bridge online` before calling the cloud tool because startup sync messages are not treated as queued work.
+Add only the applications needed for the current task.
+Use the special app ID `primary-screen` only when full-primary-screen observation and coordinate fallback are intentionally required.
+`primary-screen` has no semantic elements.
+On Windows and Linux, `primary-screen` is currently the only usable state target.
 
-To grant keyboard and pointer control for fifteen minutes, stop the observe-only process and restart it locally with an explicit lease:
+## 4. Run the Local Bridge
+
+Start with observation only and an exact app allowlist:
 
 ```bash
 mindroom desktop run \
@@ -7329,6 +7348,24 @@ mindroom desktop run \
   --controller-ed25519 cloud-device-fingerprint \
   --allow-requester @alice:example.org \
   --allow-agent computer \
+  --allow-app com.apple.TextEdit
+```
+
+Every requester, agent, and application value is an exact local allowlist entry, and each option can be repeated when more than one exact identity is needed.
+Wildcards are not accepted as authority.
+The process opens outbound HTTPS connections to Matrix and does not listen on a network port.
+Wait until the terminal says `Desktop bridge online` before calling the cloud tool because startup sync messages are not treated as queued work.
+
+To grant semantic and fallback control for fifteen minutes, stop the observe-only process and restart it locally with an explicit lease:
+
+```bash
+mindroom desktop run \
+  --controller-user-id @computer:example.org \
+  --controller-device-id CLOUDDEVICE \
+  --controller-ed25519 cloud-device-fingerprint \
+  --allow-requester @alice:example.org \
+  --allow-agent computer \
+  --allow-app com.apple.TextEdit \
   --allow-control \
   --lease-minutes 15
 ```
@@ -7337,13 +7374,32 @@ The maximum lease accepted by the CLI is sixty minutes.
 The running process enforces the lease with a monotonic local deadline, so moving the wall clock backward does not extend control.
 The bridge continues running after the lease expires, but every control action is rejected until a person restarts it with a new lease.
 
-## 4. Add Matrix Approval for Control Actions
+## 5. Agent Flow
+
+The agent calls `list_apps` and selects an exact returned app ID.
+It then calls `get_app_state` and inspects the returned roles, names, actions, hierarchy, and screenshot.
+It prefers a semantic action using an element index and the matching `state_id`.
+The action response contains a new `state_id`, new element indexes, and a new screenshot for the next decision.
+The agent uses normalized `click`, `type_text`, `scroll`, or `keypress` only when the accessibility state lacks the needed semantic control.
+If the bridge reports stale state, the agent calls `get_app_state` again instead of reusing the old element index or coordinate.
+If an action outcome is unknown or its follow-up state is incomplete, the agent observes again and does not automatically repeat the action.
+
+## 6. Add Matrix Approval for Control Actions
 
 The local lease is the hard authority boundary, while MindRoom's existing approval cards can add per-action human confirmation in the Matrix conversation.
 Create `approval_scripts/desktop_control.py` beside the cloud config:
 
 ```python
-CONTROL_ACTIONS = {"click", "type_text", "scroll", "keypress"}
+CONTROL_ACTIONS = {
+    "click_element",
+    "set_value",
+    "scroll_element",
+    "perform_action",
+    "click",
+    "type_text",
+    "scroll",
+    "keypress",
+}
 
 
 def check(tool_name: str, arguments: dict[str, object], agent_name: str) -> bool:
@@ -7360,7 +7416,7 @@ tool_approval:
       script: ./approval_scripts/desktop_control.py
 ```
 
-With this policy, `status` and `screenshot` remain immediately available while each control action waits for the original Matrix requester to approve it.
+With this policy, observation remains immediately available while each control action waits for the original Matrix requester to approve it.
 Approval does not override an absent or expired local control lease.
 
 ## Operations
@@ -7369,13 +7425,16 @@ Rotate the local desktop Matrix device with `mindroom desktop login --replace`, 
 The `--replace` option creates a fresh saved session but cannot revoke the old device by itself.
 If the cloud agent receives a new Matrix device, run `mindroom desktop controller --entity <name>` again and update the three controller options used locally.
 A device ID or Ed25519 mismatch is a hard failure and should be treated as a rotation or possible substitution, not bypassed.
-
 Use `Ctrl+C` to stop the local bridge immediately.
 For stronger isolation, run the bridge in a dedicated operating-system account and expose only a non-sensitive desktop session.
 
 ## Current Limits
 
-The current provider is PyAutoGUI, so it offers primary-screen screenshots and coordinate-based input rather than semantic accessibility-tree controls.
+Native semantic accessibility is implemented only for macOS in this version.
+Screenshots and pixel fallback currently target the primary display, so an app window must fit fully on that display for a scoped screenshot to succeed.
+The bridge foregrounds and revalidates the allowed app before an on-screen window crop, but an always-on-top overlay inside those bounds can still appear in the screenshot.
+Global keyboard shortcut chords are intentionally unavailable because they could switch to or launch an application outside the local allowlist.
+The returned accessibility tree is capped and depth-bounded, and the state reports when it was truncated.
 There is no MatrixRTC live screen stream, tray application, multi-monitor selector, unattended service installer, or remote approval of local lease changes yet.
 Commands and encrypted responses are Matrix to-device messages rather than persistent room events, while normal MindRoom tool traces and optional approval cards remain visible in the Matrix conversation.
 
@@ -17879,7 +17938,7 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ local-stack-setup   Start local Synapse + MindRoom Chat using Docker only.             │
 │ config              Manage MindRoom configuration files.                               │
 │ plugins             Validate external MindRoom plugins.                                │
-│ desktop             Connect a local screen and input device to cloud MindRoom over     │
+│ desktop             Connect allowlisted local applications to cloud MindRoom over      │
 │                     Matrix E2EE.                                                       │
 │ avatars             Generate and sync managed avatar assets.                           │
 │ threads             Export Matrix threads to local files.                              │
@@ -17994,7 +18053,7 @@ See the [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) guide
 
  Usage: root desktop [OPTIONS] COMMAND [ARGS]...
 
- Connect a local screen and input device to cloud MindRoom over Matrix E2EE.
+ Connect allowlisted local applications to cloud MindRoom over Matrix E2EE.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                          │
@@ -18122,9 +18181,13 @@ Control remains disabled unless the local command grants a short lease.
 │                                                              desktop; repeat as        │
 │                                                              needed.                   │
 │                                                              [required]                │
-│    --allow-control                                           Enable                    │
-│                                                              click/type/scroll/keypre… │
-│                                                              for a short local lease.  │
+│ *  --allow-app                     TEXT                      Exact local application   │
+│                                                              ID exposed to the agent;  │
+│                                                              repeat as needed.         │
+│                                                              [required]                │
+│    --allow-control                                           Enable semantic and       │
+│                                                              fallback input for a      │
+│                                                              short local lease.        │
 │                                                              Default is observe-only.  │
 │    --lease-minutes                 INTEGER RANGE [1<=x<=60]  Local control lease       │
 │                                                              duration.                 │

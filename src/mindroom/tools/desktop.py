@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="desktop",
     display_name="Matrix Desktop",
-    description="Observe and operate one exact locally authorized desktop over Matrix end-to-end encryption",
+    description="Operate exact locally allowlisted applications through accessibility state over Matrix encryption",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,

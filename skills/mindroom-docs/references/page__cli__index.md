@@ -46,7 +46,7 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ local-stack-setup   Start local Synapse + MindRoom Chat using Docker only.             │
 │ config              Manage MindRoom configuration files.                               │
 │ plugins             Validate external MindRoom plugins.                                │
-│ desktop             Connect a local screen and input device to cloud MindRoom over     │
+│ desktop             Connect allowlisted local applications to cloud MindRoom over      │
 │                     Matrix E2EE.                                                       │
 │ avatars             Generate and sync managed avatar assets.                           │
 │ threads             Export Matrix threads to local files.                              │
@@ -161,7 +161,7 @@ See the [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) guide
 
  Usage: root desktop [OPTIONS] COMMAND [ARGS]...
 
- Connect a local screen and input device to cloud MindRoom over Matrix E2EE.
+ Connect allowlisted local applications to cloud MindRoom over Matrix E2EE.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                          │
@@ -289,9 +289,13 @@ Control remains disabled unless the local command grants a short lease.
 │                                                              desktop; repeat as        │
 │                                                              needed.                   │
 │                                                              [required]                │
-│    --allow-control                                           Enable                    │
-│                                                              click/type/scroll/keypre… │
-│                                                              for a short local lease.  │
+│ *  --allow-app                     TEXT                      Exact local application   │
+│                                                              ID exposed to the agent;  │
+│                                                              repeat as needed.         │
+│                                                              [required]                │
+│    --allow-control                                           Enable semantic and       │
+│                                                              fallback input for a      │
+│                                                              short local lease.        │
 │                                                              Default is observe-only.  │
 │    --lease-minutes                 INTEGER RANGE [1<=x<=60]  Local control lease       │
 │                                                              duration.                 │
