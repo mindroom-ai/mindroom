@@ -30,7 +30,10 @@ def resolve_history_execution_plan(
         active_context_window=active_context_window,
     )
     compaction_context_window = compaction_runtime.context_window
-    replay_window_tokens = active_context_window
+    replay_window_tokens = _resolve_replay_window(
+        active_context_window=active_context_window,
+        configured_replay_window=compaction_config.replay_window_tokens,
+    )
     summary_input_budget_tokens, unavailable_reason = _resolve_summary_input_budget(
         compaction_context_window=compaction_context_window,
         reserve_tokens=compaction_config.reserve_tokens,
@@ -201,6 +204,17 @@ def context_budget_after_reserve(context_window_tokens: int, reserve_tokens: int
     """Return the usable context budget after clamped reserve and known prompt cost."""
     normalized_reserve_tokens = _normalize_compaction_budget_tokens(reserve_tokens, context_window_tokens)
     return max(0, context_window_tokens - normalized_reserve_tokens - spent_tokens)
+
+
+def _resolve_replay_window(
+    *,
+    active_context_window: int | None,
+    configured_replay_window: int | None,
+) -> int | None:
+    """Cap persisted replay without changing the provider's real context window."""
+    if active_context_window is None or configured_replay_window is None:
+        return active_context_window
+    return min(active_context_window, configured_replay_window)
 
 
 def _resolve_replay_budget_tokens(

@@ -241,6 +241,11 @@ class CompactionOverrideConfig(BaseModel):
         lt=1,
         description="Soft replay trigger budget as a fraction of the context window",
     )
+    replay_window_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional context-window cap used only for persisted replay and compaction planning",
+    )
     reserve_tokens: int | None = Field(
         default=None,
         ge=0,
@@ -278,6 +283,11 @@ class CompactionConfig(BaseModel):
         gt=0,
         lt=1,
         description="Soft replay trigger budget as a fraction of the context window",
+    )
+    replay_window_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional context-window cap used only for persisted replay and compaction planning",
     )
     reserve_tokens: int = Field(
         default=16384,

@@ -378,6 +378,7 @@ defaults:
   compaction:
     enabled: true
     threshold_percent: 0.8
+    replay_window_tokens: null     # Optional persisted-replay cap; does not change the model's real context window
     reserve_tokens: 16384
   max_tool_calls_from_history: null  # Limit tool call messages replayed from history (null = no limit)
   show_tool_calls: true            # Default: true (show tool details inline; hidden mode still allows generic worker warmup copy)

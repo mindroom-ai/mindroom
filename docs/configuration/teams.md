@@ -102,13 +102,14 @@ Team YAML keys follow the same naming rules as agents: alphanumeric characters a
 `num_history_runs` and `num_history_messages` are mutually exclusive, just like the agent-level settings.
 When a named team sets these fields, the team scope uses the team-owned policy instead of inheriting one member's history policy.
 
-Team-scoped compaction supports `enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, and `model`.
+Team-scoped compaction supports `enabled`, `threshold_tokens`, `threshold_percent`, `replay_window_tokens`, `reserve_tokens`, and `model`.
 When the active team model has a known `context_window`, MindRoom always computes a final replay plan for the shared team scope and reduces or disables persisted replay for the run when needed.
 Automatic destructive compaction is enabled by default through `defaults.compaction`, but it runs only when raw history exceeds the hard replay budget for the next reply.
 `threshold_tokens` and `threshold_percent` set a soft trigger budget for planning metadata and compaction notices.
 Crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting.
+Use `replay_window_tokens` to cap persisted replay and required-compaction planning below the model's real context window without lowering the provider request limit.
 Use `enabled: false` to disable automatic pre-reply compaction for a team.
-Replay safety always uses the active team model window.
+Replay safety uses the smaller of `replay_window_tokens` and the active team model window.
 If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass.
 Manual `compact_context` remains available when a compaction model and context window are configured.
 Compaction uses an in-room lifecycle notice that is edited in place.

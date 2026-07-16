@@ -185,13 +185,14 @@ Approval-gated tools are stricter than plain ad-hoc chat access.
 Approval-gated tools only work there while the router is already joined.
 
 MindRoom compacts in one visible lifecycle.
-Per-agent compaction supports `enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, and `model`.
+Per-agent compaction supports `enabled`, `threshold_tokens`, `threshold_percent`, `replay_window_tokens`, `reserve_tokens`, and `model`.
 When the active runtime model has a known `context_window`, MindRoom always computes a per-run replay plan that reduces or disables persisted replay before the model call if needed.
 Automatic destructive compaction is enabled by default through `defaults.compaction`, but it runs only when raw history exceeds the hard replay budget for the next reply.
 `threshold_tokens` and `threshold_percent` set a soft trigger budget for planning metadata and compaction notices.
 Crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting.
+Use `replay_window_tokens` to cap persisted replay and required-compaction planning below the model's real context window without lowering the provider request limit.
 Use `reserve_tokens` to leave hard-budget headroom, use `model` to choose the summary model, or set `enabled: false` to disable automatic pre-reply compaction for this agent.
-Replay safety always uses the active runtime model window.
+Replay safety uses the smaller of `replay_window_tokens` and the active runtime model window.
 If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass.
 If the current reply needs required compaction to preserve usable history, MindRoom sends `Compacting history...`, compacts before the model call, and edits that same notice with the result.
 Manual `compact_context` records a durable request that runs before the next reply in the same conversation scope.

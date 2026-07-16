@@ -713,6 +713,49 @@ def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_di
     assert execution_plan.replay_budget_tokens == 490
 
 
+@pytest.mark.parametrize(
+    ("active_context_window", "expected_replay_window"),
+    [
+        (1_000_000, 200_000),
+        (100_000, 100_000),
+    ],
+)
+def test_resolve_history_execution_plan_caps_replay_without_changing_model_window(
+    tmp_path: Path,
+    active_context_window: int,
+    expected_replay_window: int,
+) -> None:
+    config, _runtime_paths_value = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(replay_window_tokens=200_000),
+        context_window=active_context_window,
+    )
+
+    execution_plan = resolve_history_execution_plan(
+        config=config,
+        compaction_config=config.resolve_entity("test_agent").compaction_config,
+        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        active_model_name="default",
+        active_context_window=active_context_window,
+        static_prompt_tokens=10_000,
+    )
+
+    assert execution_plan.compaction_context_window == active_context_window
+    assert execution_plan.replay_window_tokens == expected_replay_window
+    assert execution_plan.trigger_threshold_tokens == int(expected_replay_window * 0.8)
+    hard_replay_budget = execution_plan.hard_replay_budget_tokens
+    assert hard_replay_budget is not None
+    assert hard_replay_budget == expected_replay_window - 16_384 - 10_000
+
+    decision = classify_compaction_decision(
+        plan=execution_plan,
+        force_compact_before_next_run=False,
+        current_history_tokens=hard_replay_budget + 1,
+    )
+    assert decision.mode == "required"
+    assert decision.reason == "history_exceeds_hard_budget"
+
+
 def test_classify_compaction_decision_forced_compaction_takes_priority() -> None:
     execution_plan = ResolvedHistoryExecutionPlan(
         authored_compaction_enabled=True,

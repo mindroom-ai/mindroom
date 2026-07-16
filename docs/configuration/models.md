@@ -33,7 +33,7 @@ Each model configuration supports the following fields:
 | `host` | No | `null` | Host URL for self-hosted models (e.g., Ollama) |
 | `api_key` | No | `null` | API key (usually read from environment variables) |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters |
-| `context_window` | No | `null` | Context window size in tokens; MindRoom needs it on the active runtime model to enforce replay budgets, an explicit `compaction.model` also needs its own `context_window` for destructive compaction, and on `vertexai_claude` models it additionally enables request-time fitting that trims replayed history when a request would exceed the window |
+| `context_window` | No | `null` | Actual model context window size in tokens; MindRoom needs it on the active runtime model to enforce request and replay budgets, and an explicit `compaction.model` also needs its own `context_window` for destructive compaction |
 
 ## Configuration Examples
 
@@ -243,7 +243,8 @@ For starter config generation, use `mindroom config init --provider bedrock_clau
 
 ## Context Window
 
-When `context_window` is set, MindRoom uses it to budget persisted replay and required destructive compaction.
+Set `context_window` to the model provider's actual limit.
+MindRoom uses it to budget persisted replay and required destructive compaction unless compaction config sets a smaller `replay_window_tokens` cap.
 MindRoom always applies a final replay-fit step when the active runtime model has a known `context_window`.
 That replay-fit step reduces or disables persisted replay for the current run when needed.
 On `vertexai_claude` models, a known `context_window` also enables a request-time guard inside the provider call.
@@ -255,6 +256,7 @@ Set `enabled: false` in `defaults.compaction` or a per-agent/per-team `compactio
 It runs only when history exceeds the hard replay budget for the next reply.
 Use `threshold_tokens` or `threshold_percent` to set the soft trigger budget that appears in planning metadata and compaction notices.
 Crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting for that reply.
+Use `replay_window_tokens` to keep persisted replay and required compaction within a smaller operational window without presenting that smaller value as the provider's request limit.
 Use `reserve_tokens` to leave hard-budget headroom for the current prompt and output.
 Manual `compact_context` records a durable request that runs before the next reply in the same conversation scope.
 Manual `compact_context` remains available when a compaction model and context window are configured.
@@ -273,6 +275,10 @@ models:
     provider: anthropic
     id: claude-sonnet-5
     context_window: 1000000  # 1M tokens
+
+defaults:
+  compaction:
+    replay_window_tokens: 200000  # Compact persisted history around a smaller operational window
 ```
 
 This is useful for models with smaller context windows or long-running conversations that accumulate persisted history.

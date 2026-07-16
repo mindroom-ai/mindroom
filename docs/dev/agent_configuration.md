@@ -184,9 +184,10 @@ agents:
 - **num_history_runs**: Number of prior Agno runs to include as history context (per-agent override)
 - **num_history_messages**: Max messages from history (mutually exclusive with `num_history_runs`)
 - **compress_tool_results**: Compress tool results in history to save context (per-agent override, inherits a default of `false`, and can invalidate Anthropic/Vertex Claude prompt caches when enabled)
-- **compaction**: Optional per-agent required-compaction overrides (`enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, `model`); when the active runtime model has a known `context_window`, MindRoom always computes a replay plan for the current run and reduces or disables persisted replay when needed.
+- **compaction**: Optional per-agent required-compaction overrides (`enabled`, `threshold_tokens`, `threshold_percent`, `replay_window_tokens`, `reserve_tokens`, `model`); when the active runtime model has a known `context_window`, MindRoom always computes a replay plan for the current run and reduces or disables persisted replay when needed.
 Automatic destructive compaction is enabled by default through `defaults.compaction`, but it runs only when raw history exceeds the hard replay budget for the next reply.
 `threshold_tokens` and `threshold_percent` set a soft trigger budget for planning metadata and compaction notices; crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting.
+`replay_window_tokens` can cap persisted replay and required-compaction planning below the model's real context window without lowering the provider request limit.
 Set `enabled: false` in defaults or the agent override to disable automatic pre-reply compaction.
 Manual `compact_context` records a durable request that runs before the next reply in the same conversation scope.
 Manual `compact_context` remains available when a compaction model and context window are configured.
