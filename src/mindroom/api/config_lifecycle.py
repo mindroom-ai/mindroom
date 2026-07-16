@@ -321,11 +321,11 @@ def _save_raw_config_source_to_file(
     constants.safe_replace(tmp_path, config_path)
 
 
-def _persist_runtime_validated_config(
+def persist_runtime_validated_config(
     runtime_config: Config,
     runtime_paths: constants.RuntimePaths,
 ) -> None:
-    """Persist one validated config and immediately publish matching committed API snapshots."""
+    """Persist one already-validated config and immediately publish matching committed API snapshots."""
     validated_payload = runtime_config.authored_model_dump()
     matching_states = [state for state in _registered_api_states() if state.snapshot.runtime_paths == runtime_paths]
     if not matching_states:
@@ -376,7 +376,7 @@ def validate_and_persist_config_payload(
 ) -> Config:
     """Validate and persist one authored config payload against the active runtime."""
     validated_config, _ = _validated_config_payload(raw_config, runtime_paths)
-    _persist_runtime_validated_config(validated_config, runtime_paths)
+    persist_runtime_validated_config(validated_config, runtime_paths)
     return validated_config
 
 

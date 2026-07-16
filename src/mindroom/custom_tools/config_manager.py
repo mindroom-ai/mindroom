@@ -1,4 +1,4 @@
-"""Consolidated ConfigManager tool for building and managing MindRoom agents."""
+"""Consolidated ConfigManager tool for inspecting and controlling the MindRoom configuration."""
 
 from __future__ import annotations
 
@@ -11,9 +11,9 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
 from agno.tools import Toolkit
-from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
+from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError, model_validator
 
-from mindroom.api.config_lifecycle import validate_and_persist_config_payload
+from mindroom.api.config_lifecycle import persist_runtime_validated_config, validate_and_persist_config_payload
 from mindroom.authorization import (
     is_sender_allowed_for_agent_credential_management,
     responder_candidate_entities_from_cached_room,
@@ -39,6 +39,7 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
+from mindroom.yaml_io import safe_dump
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -66,12 +67,24 @@ class _ConfigPatchChange(BaseModel):
     path: str
     value: JsonValue = None
 
+    @model_validator(mode="after")
+    def _require_value_exactly_for_writes(self) -> _ConfigPatchChange:
+        has_value = "value" in self.model_fields_set
+        if self.op == "remove":
+            if has_value:
+                msg = "op 'remove' does not take a value"
+                raise ValueError(msg)
+        elif not has_value:
+            msg = f"op {self.op!r} requires a value"
+            raise ValueError(msg)
+        return self
+
 
 def _normalize_patch_changes(
     changes: Sequence[_ConfigPatchChange | dict[str, Any]],
-) -> list[dict[str, Any]]:
+) -> list[_ConfigPatchChange]:
     """Normalize tool-decoded models and direct-call dictionaries."""
-    normalized: list[dict[str, Any]] = []
+    normalized: list[_ConfigPatchChange] = []
     for position, change in enumerate(changes):
         try:
             model = change if isinstance(change, _ConfigPatchChange) else _ConfigPatchChange.model_validate(change)
@@ -82,21 +95,21 @@ def _normalize_patch_changes(
             )
             msg = f"Invalid patch request: {details}"
             raise _ConfigPatchError(msg) from exc
-        normalized.append(model.model_dump(exclude_unset=True))
+        normalized.append(model)
     return normalized
 
 
-def _reject_normalized_root_nulls(changes: list[dict[str, Any]], validated_authored: dict[str, Any]) -> None:
+def _reject_normalized_root_nulls(changes: list[_ConfigPatchChange], validated_authored: dict[str, Any]) -> None:
     """Reject root nulls that the Config schema silently normalizes away."""
     missing = object()
     for change in changes:
-        if change["op"] not in {"add", "replace"} or change.get("value", missing) is not None:
+        if change.op == "remove" or change.value is not None:
             continue
-        tokens = _decode_json_pointer(change["path"])
+        tokens = _decode_json_pointer(change.path)
         if len(tokens) != 1 or validated_authored.get(tokens[0], missing) is None:
             continue
         msg = (
-            f"{change['path']!r} cannot be set to null because the schema normalizes null "
+            f"{change.path!r} cannot be set to null because the schema normalizes null "
             "to unset/default; use remove to unset it or provide a non-null value"
         )
         raise _ConfigPatchError(msg)
@@ -169,12 +182,8 @@ def _resolve_json_pointer(document: Any, path: str) -> Any:  # noqa: ANN401
 
 
 def _resolve_patch_parent(document: Any, path: str) -> tuple[Any, str]:  # noqa: ANN401
-    """Resolve the parent container and final token for one patch path."""
+    """Resolve the parent container and final token for one non-root patch path."""
     tokens = _decode_json_pointer(path)
-    if not tokens:
-        msg = "The document root cannot be removed; replace it with an object instead"
-        raise _ConfigPatchError(msg)
-
     parent = document
     for token in tokens[:-1]:
         if isinstance(parent, dict):
@@ -195,127 +204,76 @@ def _resolve_patch_parent(document: Any, path: str) -> tuple[Any, str]:  # noqa:
     return parent, tokens[-1]
 
 
-def _validated_patch_entry(change: dict[str, Any], position: int) -> tuple[str, str]:
-    """Validate one patch entry and return its operation and path."""
-    operation = change.get("op")
-    path = change.get("path")
-    if operation not in {"add", "replace", "remove"}:
-        msg = f"Patch entry {position} has unsupported op {operation!r}; use add, replace, or remove"
-        raise _ConfigPatchError(msg)
-    if not isinstance(path, str):
-        msg = f"Patch entry {position} requires a string path"
-        raise _ConfigPatchError(msg)
-
-    allowed_keys = {"op", "path"} if operation == "remove" else {"op", "path", "value"}
-    unexpected_keys = sorted(set(change) - allowed_keys)
-    if unexpected_keys:
-        msg = f"Patch entry {position} has unsupported keys: {', '.join(unexpected_keys)}"
-        raise _ConfigPatchError(msg)
-    if operation in {"add", "replace"} and "value" not in change:
-        msg = f"Patch entry {position} with op {operation!r} requires a value"
-        raise _ConfigPatchError(msg)
-    return operation, path
-
-
-def _apply_mapping_patch(
-    parent: dict[str, Any],
-    *,
-    operation: str,
-    reference_token: str,
-    path: str,
-    change: dict[str, Any],
-) -> None:
+def _apply_mapping_patch(parent: dict[str, Any], change: _ConfigPatchChange, reference_token: str) -> None:
     """Apply one validated patch entry to a mapping parent."""
-    if operation == "replace" and reference_token not in parent:
-        msg = f"Replace target does not exist in the authored configuration: {path!r}; use add instead"
+    if change.op == "replace" and reference_token not in parent:
+        msg = f"Replace target does not exist in the authored configuration: {change.path!r}; use add instead"
         raise _ConfigPatchError(msg)
-    if operation == "remove":
+    if change.op == "remove":
         if reference_token not in parent:
-            msg = f"Remove target does not exist in the authored configuration: {path!r}"
+            msg = f"Remove target does not exist in the authored configuration: {change.path!r}"
             raise _ConfigPatchError(msg)
         del parent[reference_token]
         return
-    parent[reference_token] = deepcopy(change["value"])
+    parent[reference_token] = deepcopy(change.value)
 
 
-def _apply_list_patch(
-    parent: list[Any],
-    *,
-    operation: str,
-    reference_token: str,
-    path: str,
-    change: dict[str, Any],
-) -> None:
+def _apply_list_patch(parent: list[Any], change: _ConfigPatchChange, reference_token: str) -> None:
     """Apply one validated patch entry to an array parent."""
-    index = _array_index(reference_token, length=len(parent), allow_append=operation == "add", path=path)
-    if operation == "add":
+    index = _array_index(reference_token, length=len(parent), allow_append=change.op == "add", path=change.path)
+    if change.op == "add":
         if index > len(parent):
-            msg = f"Array index {index} is out of range for add in JSON Pointer {path!r}"
+            msg = f"Array index {index} is out of range for add in JSON Pointer {change.path!r}"
             raise _ConfigPatchError(msg)
-        parent.insert(index, deepcopy(change["value"]))
+        parent.insert(index, deepcopy(change.value))
         return
     if index >= len(parent):
-        verb = "Replace" if operation == "replace" else "Remove"
-        suffix = "; use add instead" if operation == "replace" else ""
-        msg = f"{verb} target does not exist in the authored configuration: {path!r}{suffix}"
+        verb = "Replace" if change.op == "replace" else "Remove"
+        suffix = "; use add instead" if change.op == "replace" else ""
+        msg = f"{verb} target does not exist in the authored configuration: {change.path!r}{suffix}"
         raise _ConfigPatchError(msg)
-    if operation == "replace":
-        parent[index] = deepcopy(change["value"])
+    if change.op == "replace":
+        parent[index] = deepcopy(change.value)
     else:
         del parent[index]
 
 
-def _apply_one_config_patch(candidate: Any, change: dict[str, Any], position: int) -> tuple[Any, str]:  # noqa: ANN401
+def _apply_one_config_patch(candidate: Any, change: _ConfigPatchChange) -> Any:  # noqa: ANN401
     """Apply one validated patch entry and return the possibly replaced root."""
-    operation, path = _validated_patch_entry(change, position)
-    if path == "":
-        if operation == "remove":
+    if change.path == "":
+        if change.op == "remove":
             msg = "The document root cannot be removed; replace it with an object instead"
             raise _ConfigPatchError(msg)
-        return deepcopy(change["value"]), path
+        return deepcopy(change.value)
 
-    parent, reference_token = _resolve_patch_parent(candidate, path)
+    parent, reference_token = _resolve_patch_parent(candidate, change.path)
     if isinstance(parent, dict):
-        _apply_mapping_patch(
-            parent,
-            operation=operation,
-            reference_token=reference_token,
-            path=path,
-            change=change,
-        )
+        _apply_mapping_patch(parent, change, reference_token)
     elif isinstance(parent, list):
-        _apply_list_patch(
-            parent,
-            operation=operation,
-            reference_token=reference_token,
-            path=path,
-            change=change,
-        )
+        _apply_list_patch(parent, change, reference_token)
     else:
-        msg = f"Patch parent is not a container in JSON Pointer {path!r}"
+        msg = f"Patch parent is not a container in JSON Pointer {change.path!r}"
         raise _ConfigPatchError(msg)
-    return candidate, path
+    return candidate
 
 
-def _apply_config_patch(document: dict[str, Any], changes: list[dict[str, Any]]) -> tuple[dict[str, Any], list[str]]:
+def _apply_config_patch(
+    document: dict[str, Any],
+    changes: list[_ConfigPatchChange],
+) -> tuple[dict[str, Any], list[str]]:
     """Apply an atomic add/replace/remove patch to a copied config document."""
     if not changes:
         msg = "Patch operation requires a non-empty changes list"
         raise _ConfigPatchError(msg)
 
     candidate: Any = deepcopy(document)
-    changed_paths: list[str] = []
-    for position, change in enumerate(changes):
-        if not isinstance(change, dict):
-            msg = f"Patch entry {position} must be an object"
-            raise _ConfigPatchError(msg)
-        candidate, changed_path = _apply_one_config_patch(candidate, change, position)
-        changed_paths.append(changed_path)
+    for change in changes:
+        candidate = _apply_one_config_patch(candidate, change)
 
     if not isinstance(candidate, dict):
         msg = "The authored configuration root must be an object"
         raise _ConfigPatchError(msg)
-    return candidate, changed_paths
+    return candidate, [change.path for change in changes]
 
 
 def _is_known_tool_entry(tool_name: str, tool_metadata: dict[str, ToolMetadata]) -> bool:
@@ -483,10 +441,10 @@ class _InfoType(str, Enum):
 
 
 class ConfigManagerTools(Toolkit):
-    """Consolidated tools for managing MindRoom agent configurations.
+    """Consolidated tools for inspecting and controlling the MindRoom configuration.
 
-    This toolkit provides comprehensive agent building capabilities with a minimal
-    number of tools to reduce cognitive load on AI models.
+    This toolkit provides full-configuration inspection and patching plus agent and
+    team building with a minimal number of tools to reduce cognitive load on AI models.
     """
 
     def __init__(self, runtime_paths: RuntimePaths) -> None:
@@ -524,9 +482,11 @@ class ConfigManagerTools(Toolkit):
         This is full-configuration control. Both operations address the authored
         document written to ``config.yaml``: unset defaults and runtime overlays
         are not present. Paths use RFC 6901 JSON Pointer syntax; the empty string
-        addresses the document root. Patch changes support RFC 6902 ``add``,
-        ``replace``, and ``remove``. Use ``-`` as the final token to append to a
-        list. All changes in one call are validated and persisted atomically.
+        addresses the document root. Inspection output is always redacted, at any
+        pointer depth; read raw values from the source files when truly required.
+        Patch changes support RFC 6902 ``add``, ``replace``, and ``remove``. Use
+        ``-`` as the final token to append to a list. All changes in one call are
+        validated and persisted atomically.
 
         Args:
             operation: ``inspect`` to read one subtree or ``patch`` to change config.
@@ -564,14 +524,15 @@ class ConfigManagerTools(Toolkit):
         assert config is not None
 
         try:
-            value = _resolve_json_pointer(config.authored_model_dump(), path)
-            redacted_value = redact_sensitive_data(value)
-            rendered = yaml.safe_dump(
-                redacted_value,
+            redacted_document = redact_sensitive_data(config.authored_model_dump())
+            value = _resolve_json_pointer(redacted_document, path)
+            rendered = safe_dump(
+                value,
                 default_flow_style=False,
                 sort_keys=False,
                 allow_unicode=True,
             ).rstrip()
+            rendered = rendered.removesuffix("\n...").rstrip()
         except _ConfigPatchError as exc:
             return f"Error inspecting authored configuration: {exc}"
         except Exception as exc:
@@ -630,7 +591,7 @@ class ConfigManagerTools(Toolkit):
             validated_config = Config.validate_with_runtime(candidate, self.runtime_paths)
             _reject_normalized_root_nulls(normalized_changes, validated_config.authored_model_dump())
             if not dry_run:
-                validate_and_persist_config_payload(candidate, self.runtime_paths)
+                persist_runtime_validated_config(validated_config, self.runtime_paths)
         except _ConfigPatchError as exc:
             return f"Error: {exc}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
         except (ValidationError, ConfigRuntimeValidationError) as exc:

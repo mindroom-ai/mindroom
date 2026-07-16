@@ -179,6 +179,32 @@ class TestConsolidatedConfigManager:
         assert "sk-test-secret" not in result
         assert str(config_path.resolve()) in result
 
+    def test_manage_config_inspect_redacts_secret_leaf_pointers(self, tmp_path: Path) -> None:
+        """A pointer directly at a secret leaf must stay redacted at any depth."""
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(
+            Config(
+                models={
+                    "default": {
+                        "provider": "openai",
+                        "id": "gpt-4o",
+                        # A secret that no token-shape regex matches, so only
+                        # key-context redaction can catch it.
+                        "api_key": "plain-local-secret",
+                    },
+                },
+            ),
+            config_path,
+        )
+
+        result = _config_manager(config_path).manage_config(
+            operation="inspect",
+            path="/models/default/api_key",
+        )
+
+        assert "plain-local-secret" not in result
+        assert "```yaml\n'***redacted***'\n```" in result
+
     def test_manage_config_schema_accepts_arbitrary_json_values(self, tmp_path: Path) -> None:
         """The model-facing patch schema must allow scalars, lists, objects, and null."""
         function = Function.from_callable(_config_manager(_minimal_config_path(tmp_path)).manage_config)
@@ -279,7 +305,7 @@ class TestConsolidatedConfigManager:
             ({"op": "add", "path": "models/default", "value": {}}, "must be empty for the root or start"),
             ({"op": "add", "path": "/models/~2bad", "value": {}}, "Invalid JSON Pointer escape"),
             ({"op": "add", "path": "/models/new"}, "requires a value"),
-            ({"op": "remove", "path": "/models/default", "value": {}}, "unsupported keys"),
+            ({"op": "remove", "path": "/models/default", "value": {}}, "does not take a value"),
         ],
     )
     def test_manage_config_rejects_malformed_patch_entries(
