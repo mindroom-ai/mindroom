@@ -2494,7 +2494,9 @@ visibility = ["mindroom.cli.main"]
 path = "mindroom.cli.plugins"
 depends_on = [
     "mindroom.cli.config",
+    "mindroom.constants",
     "mindroom.plugin_check",
+    "mindroom.plugin_install",
 ]
 visibility = ["mindroom.cli.main"]
 
@@ -2735,6 +2737,13 @@ depends_on = [
     "mindroom.oauth.registry",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.plugins",
+]
+visibility = ["mindroom.cli.plugins", "mindroom.plugin_install"]
+
+[[modules]]
+path = "mindroom.plugin_install"
+depends_on = [
+    "mindroom.plugin_check",
 ]
 visibility = ["mindroom.cli.plugins"]
 
