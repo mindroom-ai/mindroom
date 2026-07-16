@@ -567,7 +567,7 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_call_config(self) -> Config:
+    def validate_call_agents(self) -> Config:
         """Ensure call agents and cascaded model references are valid."""
         unknown_agents = sorted(set(self.calls.agents) - set(self.agents))
         if unknown_agents:
