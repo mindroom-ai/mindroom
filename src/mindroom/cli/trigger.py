@@ -21,10 +21,10 @@ from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption,
 from rich.markup import escape
 
 from mindroom.cli.config import console
+from mindroom.constants import DEFAULT_MINDROOM_URL
 from mindroom.external_triggers.auth import sign_trigger_request
 from mindroom.external_triggers.store import public_key_fingerprint
 
-_DEFAULT_BASE_URL = "http://127.0.0.1:8765"
 _DEFAULT_KEY_ID = "default"
 _DEFAULT_TIMEOUT = 10.0
 _ED25519_PRIVATE_KEY_BYTES = 32
@@ -101,7 +101,7 @@ def send(
     timeout: float = typer.Option(_DEFAULT_TIMEOUT, "--timeout", help="HTTP request timeout in seconds."),
     verify_tls: bool = typer.Option(True, "--verify-tls/--no-verify-tls", help="Verify TLS certificates."),
     url: str = typer.Option(
-        _DEFAULT_BASE_URL,
+        DEFAULT_MINDROOM_URL,
         "--url",
         envvar="MINDROOM_URL",
         help="MindRoom base URL.",

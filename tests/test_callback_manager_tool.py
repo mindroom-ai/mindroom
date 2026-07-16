@@ -107,8 +107,12 @@ def test_generated_script_posts_summary_and_deletes_itself(tmp_path: Path) -> No
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
     capture_path = tmp_path / "curl-args.txt"
+    capture_stdin_path = tmp_path / "curl-stdin.txt"
     fake_curl = fake_bin / "curl"
-    fake_curl.write_text('#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" > "$CAPTURE_ARGS"\n', encoding="utf-8")
+    fake_curl.write_text(
+        '#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" > "$CAPTURE_ARGS"\ncat > "$CAPTURE_STDIN"\n',
+        encoding="utf-8",
+    )
     fake_curl.chmod(0o700)
     message = 'quoted "summary" with \\ slash'
 
@@ -120,6 +124,7 @@ def test_generated_script_posts_summary_and_deletes_itself(tmp_path: Path) -> No
         env={
             **os.environ,
             "CAPTURE_ARGS": str(capture_path),
+            "CAPTURE_STDIN": str(capture_stdin_path),
             "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
         },
     )
@@ -127,6 +132,9 @@ def test_generated_script_posts_summary_and_deletes_itself(tmp_path: Path) -> No
     curl_args = capture_path.read_text(encoding="utf-8").splitlines()
     assert curl_args[curl_args.index("--connect-timeout") + 1] == "10"
     assert curl_args[curl_args.index("--max-time") + 1] == "60"
+    assert curl_args[curl_args.index("-H") + 1] == "@-"
+    assert "mrt_" not in "\n".join(curl_args)
+    assert capture_stdin_path.read_text(encoding="utf-8").startswith("Authorization: Bearer mrt_")
     assert json.loads(curl_args[curl_args.index("--data") + 1]) == {
         "kind": "mindroom.callback.completed",
         "title": "✅ quote-safe callback",

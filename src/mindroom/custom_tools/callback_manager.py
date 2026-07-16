@@ -12,6 +12,11 @@ from pydantic import ValidationError
 
 from mindroom.callbacks.script import build_callback_script, write_callback_script
 from mindroom.config.validation import non_empty_stripped
+from mindroom.constants import DEFAULT_MINDROOM_URL
+from mindroom.custom_tools.external_trigger_context import (
+    ExternalTriggerContextError,
+    require_external_trigger_owner_context,
+)
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.external_triggers.auth import mint_trigger_capability
 from mindroom.external_triggers.store import (
@@ -19,25 +24,21 @@ from mindroom.external_triggers.store import (
     ExternalTriggerStoreError,
     ExternalTriggerTarget,
 )
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import resolve_agent_owned_path
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-_DEFAULT_BASE_URL = "http://127.0.0.1:8765"
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+
 _CALLBACK_KIND = "mindroom.callback.completed"
 _MAX_LABEL_LENGTH = 200
-
-
-class _CallbackManagerError(RuntimeError):
-    """Raised when a callback cannot be minted in the current context."""
 
 
 def _callback_base_url(context: ToolRuntimeContext) -> str:
     configured_url = context.runtime_paths.env_value("MINDROOM_URL")
     base_url = configured_url.strip() if configured_url is not None else ""
-    return (base_url or _DEFAULT_BASE_URL).rstrip("/")
+    return (base_url or DEFAULT_MINDROOM_URL).rstrip("/")
 
 
 class CallbackManagerTools(Toolkit):
@@ -48,19 +49,10 @@ class CallbackManagerTools(Toolkit):
 
     @staticmethod
     def _context() -> ToolRuntimeContext:
-        context = get_tool_runtime_context()
-        if context is None:
-            msg = "Callback manager requires live Matrix tool context."
-            raise _CallbackManagerError(msg)
-        if context.runtime_paths.control_state_root is None:
-            msg = "Callback manager requires primary control state."
-            raise _CallbackManagerError(msg)
+        context = require_external_trigger_owner_context("Callback manager")
         if not context.config.external_trigger_policy.enabled:
             msg = "Callback manager requires external triggers to be enabled."
-            raise _CallbackManagerError(msg)
-        if not context.requester_id or context.requester_id == context.client.user_id:
-            msg = "Callback owner must be a human Matrix requester."
-            raise _CallbackManagerError(msg)
+            raise ExternalTriggerContextError(msg)
         return context
 
     def mint_callback(self, label: str) -> str:
@@ -76,7 +68,6 @@ class CallbackManagerTools(Toolkit):
         context: ToolRuntimeContext | None = None
         record = None
         store: ExternalTriggerStore | None = None
-        script_path: Path | None = None
         try:
             context = self._context()
             normalized_label = _callback_label(label)
@@ -115,10 +106,7 @@ class CallbackManagerTools(Toolkit):
                 script_path=str(script_path),
                 instruction=instruction,
             )
-        except (_CallbackManagerError, ExternalTriggerStoreError, OSError, ValidationError, ValueError) as exc:
-            if script_path is not None:
-                with suppress(OSError):
-                    script_path.unlink(missing_ok=True)
+        except (ExternalTriggerContextError, ExternalTriggerStoreError, OSError, ValidationError, ValueError) as exc:
             if record is not None and store is not None and context is not None:
                 with suppress(ExternalTriggerStoreError):
                     store.delete_record(

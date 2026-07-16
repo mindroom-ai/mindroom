@@ -52,8 +52,9 @@ json_escape() {{
 
 BODY=$(printf '{{"kind":"mindroom.callback.completed","title":"✅ %s","message":"%s"}}' \\
   "$(json_escape "$CALLBACK_LABEL")" "$(json_escape "$MESSAGE")")
-if curl -fsS --connect-timeout 10 --max-time 60 -X POST "$CALLBACK_URL" \\
-  -H "Authorization: Bearer $CALLBACK_TOKEN" \\
+if printf 'Authorization: Bearer %s\n' "$CALLBACK_TOKEN" | \\
+  curl -fsS --connect-timeout 10 --max-time 60 -X POST "$CALLBACK_URL" \\
+  -H @- \\
   -H 'Content-Type: application/json' \\
   -o /dev/null \\
   --data "$BODY"; then

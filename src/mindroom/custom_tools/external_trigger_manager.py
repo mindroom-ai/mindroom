@@ -7,6 +7,10 @@ from typing import TYPE_CHECKING
 from agno.tools import Toolkit
 from pydantic import ValidationError
 
+from mindroom.custom_tools.external_trigger_context import (
+    ExternalTriggerContextError,
+    require_external_trigger_owner_context,
+)
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.external_triggers.store import (
     ExternalTriggerRecord,
@@ -15,14 +19,11 @@ from mindroom.external_triggers.store import (
     ExternalTriggerTarget,
     public_key_fingerprint,
 )
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-
-class _ExternalTriggerManagerError(RuntimeError):
-    """Raised when the manager tool cannot run in the current tool context."""
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 class ExternalTriggerManagerTools(Toolkit):
@@ -46,24 +47,14 @@ class ExternalTriggerManagerTools(Toolkit):
 
     @classmethod
     def _context(cls) -> ToolRuntimeContext:
-        context = get_tool_runtime_context()
-        if context is None:
-            msg = "External trigger manager requires live Matrix tool context."
-            raise _ExternalTriggerManagerError(msg)
-        if context.runtime_paths.control_state_root is None:
-            msg = "External trigger manager requires primary control state."
-            raise _ExternalTriggerManagerError(msg)
-        if not context.requester_id or context.requester_id == context.client.user_id:
-            msg = "External trigger owner must be a human Matrix requester."
-            raise _ExternalTriggerManagerError(msg)
-        return context
+        return require_external_trigger_owner_context("External trigger manager")
 
     @classmethod
     def _with_store(cls, action: Callable[[ToolRuntimeContext, ExternalTriggerStore], str]) -> str:
         try:
             context = cls._context()
             return action(context, ExternalTriggerStore(context.runtime_paths))
-        except (_ExternalTriggerManagerError, ExternalTriggerStoreError, ValidationError) as exc:
+        except (ExternalTriggerContextError, ExternalTriggerStoreError, ValidationError) as exc:
             return cls._payload("error", message=str(exc))
 
     @staticmethod

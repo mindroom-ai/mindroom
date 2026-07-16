@@ -110,7 +110,6 @@ _.validate_thread_placement  # unused method (src/mindroom/external_triggers/sto
 _.validate_owner_user_id  # unused method (src/mindroom/external_triggers/store.py)
 _.validate_required_record_text  # unused method (src/mindroom/external_triggers/store.py)
 _.normalize_allowed_kinds  # unused method (src/mindroom/external_triggers/store.py)
-_.validate_key_fingerprint  # unused method (src/mindroom/external_triggers/store.py)
 _.validate_record_keys  # unused method (src/mindroom/external_triggers/store.py)
 _.validate_kind  # unused method (src/mindroom/external_triggers/models.py)
 _.validate_message  # unused method (src/mindroom/external_triggers/models.py)
