@@ -2505,12 +2505,18 @@ path = "mindroom.cli"
 depends_on = []
 
 [[modules]]
+path = "mindroom.cli.agent_docs"
+depends_on = []
+visibility = ["mindroom.cli.config"]
+
+[[modules]]
 path = "mindroom.cli.banner"
 depends_on = []
 
 [[modules]]
 path = "mindroom.cli.config"
 depends_on = [
+    "mindroom.cli.agent_docs",
     "mindroom.cli.env_file",
     "mindroom.cli.owner",
     "mindroom.config.main",
@@ -2617,6 +2623,7 @@ depends_on = [
 path = "mindroom.cli.trigger"
 depends_on = [
     "mindroom.cli.config",
+    "mindroom.constants",
     "mindroom.external_triggers.auth",
 ]
 visibility = ["mindroom.cli.main"]

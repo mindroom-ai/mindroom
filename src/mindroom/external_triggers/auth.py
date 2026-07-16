@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import hmac
+import secrets
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -27,10 +29,23 @@ _REQUIRED_HEADERS = (
     _SIGNATURE_HEADER,
 )
 _ED25519_PUBLIC_KEY_BYTES = 32
+_CAPABILITY_TOKEN_PREFIX = "mrt_"  # noqa: S105 - public token format marker, not a credential
 
 
 class TriggerAuthError(Exception):
     """Raised when external trigger authentication fails."""
+
+
+def mint_trigger_capability() -> tuple[str, str]:
+    """Return one random bearer capability and the hash stored by MindRoom."""
+    token = _CAPABILITY_TOKEN_PREFIX + secrets.token_urlsafe(32)
+    return token, hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def trigger_capability_matches(token: str, token_hash: str) -> bool:
+    """Compare one presented bearer capability against its stored hash."""
+    presented_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return hmac.compare_digest(presented_hash, token_hash)
 
 
 @dataclass(frozen=True)

@@ -200,6 +200,7 @@ mindroom run
 - [Memory System](https://docs.mindroom.chat/memory/) - How agent memory works
 - [Scheduling](https://docs.mindroom.chat/scheduling/) - Schedule tasks with cron or natural language
 - [External Triggers](https://docs.mindroom.chat/external-triggers/) - Wake agents from signed watcher events
+- [Agent Callbacks](https://docs.mindroom.chat/agent-callbacks/) - One-shot completion callbacks for spawned sub-agents
 - [Voice Messages](https://docs.mindroom.chat/voice/) - Voice message transcription
 - [Image Messages](https://docs.mindroom.chat/images/) - Image analysis with vision models
 - [File & Video Attachments](https://docs.mindroom.chat/attachments/) - Context-scoped file and video handling
@@ -1237,6 +1238,7 @@ defaults:
   compaction:
     enabled: true
     threshold_percent: 0.8
+    replay_window_tokens: null     # Optional persisted-replay cap; does not change the model's real context window
     reserve_tokens: 16384
   max_tool_calls_from_history: null  # Limit tool call messages replayed from history (null = no limit)
   show_tool_calls: true            # Default: true (show tool details inline; hidden mode still allows generic worker warmup copy)
@@ -1387,6 +1389,7 @@ calls:
       voice: marin
     openai-cascaded:
       backend: cascaded
+      model: default                 # Optional: top-level model alias overriding room/agent models for call turns
       stt:
         provider: openai
         model: gpt-4o-transcribe
@@ -1813,13 +1816,21 @@ Approval-gated tools are stricter than plain ad-hoc chat access.
 Approval-gated tools only work there while the router is already joined.
 
 MindRoom compacts in one visible lifecycle.
-Per-agent compaction supports `enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, and `model`.
+Per-agent compaction supports `enabled`, `threshold_tokens`, `threshold_percent`, `replay_window_tokens`, `reserve_tokens`, and `model`.
 When the active runtime model has a known `context_window`, MindRoom always computes a per-run replay plan that reduces or disables persisted replay before the model call if needed.
 Automatic destructive compaction is enabled by default through `defaults.compaction`, but it runs only when raw history exceeds the hard replay budget for the next reply.
 `threshold_tokens` and `threshold_percent` set a soft trigger budget for planning metadata and compaction notices.
 Crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting.
-Use `reserve_tokens` to leave hard-budget headroom, use `model` to choose the summary model, or set `enabled: false` to disable automatic pre-reply compaction for this agent.
-Replay safety always uses the active runtime model window.
+
+You can tune compaction behavior with these settings:
+
+- Use `replay_window_tokens` to cap persisted replay and required-compaction planning below the model's real context window without lowering the provider request limit.
+- Use `reserve_tokens` to leave hard-budget headroom.
+- Use `model` to choose the summary model.
+- Set `enabled: false` to disable automatic pre-reply compaction for this agent.
+
+When the active runtime model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
+When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
 If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass.
 If the current reply needs required compaction to preserve usable history, MindRoom sends `Compacting history...`, compacts before the model call, and edits that same notice with the result.
 Manual `compact_context` records a durable request that runs before the next reply in the same conversation scope.
@@ -2302,7 +2313,7 @@ Each model configuration supports the following fields:
 | `host` | No | `null` | Host URL for self-hosted models (e.g., Ollama) |
 | `api_key` | No | `null` | API key (usually read from environment variables) |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters |
-| `context_window` | No | `null` | Context window size in tokens; MindRoom needs it on the active runtime model to enforce replay budgets, an explicit `compaction.model` also needs its own `context_window` for destructive compaction, and on `vertexai_claude` models it additionally enables request-time fitting that trims replayed history when a request would exceed the window |
+| `context_window` | No | `null` | Actual provider context window size in tokens; MindRoom uses it as the default replay-planning window unless compaction sets a smaller `replay_window_tokens`; an explicit `compaction.model` needs its own `context_window` for summary generation; on `vertexai_claude` it also enables request-time fitting |
 
 ## Configuration Examples
 
@@ -2512,7 +2523,8 @@ For starter config generation, use `mindroom config init --provider bedrock_clau
 
 ## Context Window
 
-When `context_window` is set, MindRoom uses it to budget persisted replay and required destructive compaction.
+Set `context_window` to the model provider's actual limit.
+MindRoom uses it to budget persisted replay and required destructive compaction unless compaction config sets a smaller `replay_window_tokens` cap.
 MindRoom always applies a final replay-fit step when the active runtime model has a known `context_window`.
 That replay-fit step reduces or disables persisted replay for the current run when needed.
 On `vertexai_claude` models, a known `context_window` also enables a request-time guard inside the provider call.
@@ -2522,9 +2534,16 @@ When the current turn alone cannot fit, the request fails with a clear provider 
 Automatic destructive compaction is enabled by default through `defaults.compaction`.
 Set `enabled: false` in `defaults.compaction` or a per-agent/per-team `compaction` override to disable automatic pre-reply compaction.
 It runs only when history exceeds the hard replay budget for the next reply.
-Use `threshold_tokens` or `threshold_percent` to set the soft trigger budget that appears in planning metadata and compaction notices.
-Crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting for that reply.
-Use `reserve_tokens` to leave hard-budget headroom for the current prompt and output.
+
+You can tune compaction behavior with these settings:
+
+- Use `threshold_tokens` or `threshold_percent` to set the soft trigger budget. Crossing this soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting for that reply.
+- Use `replay_window_tokens` to keep persisted replay and required compaction within a smaller operational window without presenting that smaller value as the provider's request limit.
+- Use `reserve_tokens` to leave hard-budget headroom for the current prompt and output.
+
+When the active runtime model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
+When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
+
 Manual `compact_context` records a durable request that runs before the next reply in the same conversation scope.
 Manual `compact_context` remains available when a compaction model and context window are configured.
 It still uses the active runtime window for the final replay-fit step, but destructive compaction itself can be available whenever an explicit `compaction.model` has its own `context_window`.
@@ -2542,6 +2561,10 @@ models:
     provider: anthropic
     id: claude-sonnet-5
     context_window: 1000000  # 1M tokens
+
+defaults:
+  compaction:
+    replay_window_tokens: 200000  # Compact persisted history around a smaller operational window
 ```
 
 This is useful for models with smaller context windows or long-running conversations that accumulate persisted history.
@@ -2715,13 +2738,19 @@ Team YAML keys follow the same naming rules as agents: alphanumeric characters a
 `num_history_runs` and `num_history_messages` are mutually exclusive, just like the agent-level settings.
 When a named team sets these fields, the team scope uses the team-owned policy instead of inheriting one member's history policy.
 
-Team-scoped compaction supports `enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, and `model`.
+Team-scoped compaction supports `enabled`, `threshold_tokens`, `threshold_percent`, `replay_window_tokens`, `reserve_tokens`, and `model`.
 When the active team model has a known `context_window`, MindRoom always computes a final replay plan for the shared team scope and reduces or disables persisted replay for the run when needed.
 Automatic destructive compaction is enabled by default through `defaults.compaction`, but it runs only when raw history exceeds the hard replay budget for the next reply.
 `threshold_tokens` and `threshold_percent` set a soft trigger budget for planning metadata and compaction notices.
 Crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting.
-Use `enabled: false` to disable automatic pre-reply compaction for a team.
-Replay safety always uses the active team model window.
+
+You can tune team-scoped compaction behavior with these settings:
+
+- Use `replay_window_tokens` to cap persisted replay and required-compaction planning below the model's real context window without lowering the provider request limit.
+- Set `enabled: false` to disable automatic pre-reply compaction for a team.
+
+When the active team model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
+When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
 If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass.
 Manual `compact_context` remains available when a compaction model and context window are configured.
 Compaction uses an in-room lifecycle notice that is edited in place.
@@ -9015,7 +9044,7 @@ Use these tools when you need multi-agent coordination, reusable workflow runs, 
 - [`delegate`] - Run another configured agent as a one-shot specialist and return its answer inline.
 - [`dynamic_workflow`] - Create, update, run, and inspect saved Dynamic Workflows with persisted report artifacts.
 - [`report_publishing`] - Publish authorized report artifacts through revocable public links.
-- [`config_manager`] - Inspect MindRoom config and create, update, validate, or template agents and teams.
+- [`config_manager`] - Inspect and patch the full MindRoom configuration, and create, update, validate, or template agents and teams.
 - [`self_config`] - Let an agent read and update only its own configuration.
 - [`openclaw_compat`] - Config-only preset that expands to native MindRoom tools.
 - [`claude_agent`] - Persistent Claude Agent SDK sessions with optional gateway support and per-session labels.
@@ -9360,15 +9389,21 @@ revoke_public_report("pub_...")
 
 ## [`config_manager`]
 
-`config_manager` is the broad config-authoring toolkit for inspecting MindRoom and creating or updating agents and teams.
+`config_manager` is the full configuration control plane: it inspects and patches any authored `Config` field and creates or updates agents and teams through curated helpers.
 
 ### What It Does
 
-`config_manager` exposes `get_info()`, `manage_agent()`, and `manage_team()`.
+`config_manager` exposes `get_info()`, `manage_config()`, `manage_agent()`, and `manage_team()`.
 `get_info(info_type, name=None)` supports `mindroom_docs`, `config_schema`, `available_models`, `agents`, `teams`, `available_tools`, `tool_details`, `agent_config`, and `agent_template`.
 `tool_details` requires `name` and reads from live `TOOL_METADATA`, so it includes real config fields and statuses from the current worktree.
 `agent_config` returns the authored YAML for a specific agent.
 `agent_template` generates starter YAML for one of the built-in template types: `researcher`, `developer`, `social`, `communicator`, `analyst`, or `productivity`.
+`manage_config(operation, path, changes, dry_run)` addresses the authored document written to `config.yaml` with RFC 6901 JSON Pointer paths.
+`manage_config(operation="inspect", path=...)` returns one authored subtree as YAML with secret-bearing values redacted at every pointer depth.
+`manage_config(operation="patch", changes=[...])` applies an atomic batch of RFC 6902 `add`, `replace`, and `remove` entries across the full `Config` schema, validates the result against the active runtime, and persists only when validation passes.
+`dry_run=True` validates a patch and returns its receipt without writing.
+Patch receipts report the config path, changed paths, and validation and persistence status without echoing changed values.
+When the configuration is composed from multiple files via `!include`, inspection still works but structured patching is refused so source files are never flattened.
 `manage_agent()` supports `create`, `update`, and `validate`.
 Agent creates and updates validate tool names against the live registry and validate knowledge base IDs against the current config.
 When a plain string tool list replaces an existing tool list, `config_manager` preserves inline overrides for retained tools instead of flattening them away.
@@ -9395,6 +9430,14 @@ agents:
 ```python
 get_info("available_tools")
 get_info("tool_details", name="claude_agent")
+manage_config(operation="inspect", path="/authorization")
+manage_config(
+    operation="patch",
+    changes=[
+        {"op": "replace", "path": "/models/default/id", "value": "claude-sonnet-5"},
+        {"op": "add", "path": "/agents/triage/instructions/-", "value": "Escalate anything urgent."},
+    ],
+)
 manage_agent(
     operation="create",
     agent_name="triage",
@@ -13505,7 +13548,8 @@ When a call starts in a room, the configured agent:
 
 The voice agent is the same agent you chat with.
 Realtime carries the agent's rendered prompt and effective tools into OpenAI Realtime.
-Cascaded sends each finalized transcript through the normal MindRoom agent response path, preserving the resolved model, rendered system prompt, instructions, knowledge, skills, hooks, tools, requester identity, history storage, and tool execution behavior.
+Cascaded sends each finalized transcript through the normal MindRoom agent response path, preserving model resolution, the rendered system prompt, instructions, knowledge, skills, hooks, tools, requester identity, history storage, and tool execution behavior.
+A cascaded profile may explicitly override the resolved LLM while preserving all other agent behavior.
 MindRoom keeps a managed call active only while its devices belong to one Matrix user, and uses that user's ID as the real requester for the room-scoped tool runtime.
 Multiple devices belonging to that same user are supported.
 Tools requiring confirmation, user input, external execution, or `tool_approval` are hidden in both backends because a voice call has no approval UI.
@@ -13531,8 +13575,11 @@ calls:
 Voice calls require the `matrix_calls` extra (`pip install "mindroom[matrix_calls]"` or `uv sync --extra matrix_calls`).
 `calls.profiles` defines reusable, complete voice pipelines.
 `calls.agents` maps each enabled agent to exactly one profile name.
-Realtime profiles contain only realtime settings.
+The `model` in a realtime profile is the provider-specific OpenAI realtime speech model ID.
 Cascaded profiles require complete STT and TTS settings, and each speech leg selects its own credential service.
+The optional `model` in a cascaded profile references a named entry from the top-level `models` mapping.
+An explicit cascaded call model takes precedence over room and agent models for the calls-enabled agent.
+Omitting it keeps the existing room and agent model resolution.
 There are no inherited backend defaults or credential fallbacks.
 `enabled` and `livekit_service_url` remain global and cannot be overridden per agent.
 Set a dedicated credential service when voice and chat use different OpenAI credentials.
@@ -13572,9 +13619,51 @@ Calls-enabled agents advertise `📞 Voice calls` in their Matrix presence statu
 Requester-private agents use the sole authorized caller's verified Matrix user ID to resolve their workspace, memory, credentials, history, knowledge, and tool execution scope.
 The same caller scope applies in configured rooms and authorized ad-hoc invite rooms.
 
+## Cascaded LLM model override
+
+This example uses a large model for text conversations and a faster model for cascaded call turns.
+The override changes only the calls-enabled agent's LLM selection, while STT, TTS, prompts, history, memory, tools, and delegated-agent model selection remain unchanged.
+
+```yaml
+models:
+  chat:
+    provider: anthropic
+    id: claude-opus-4-8
+  call_fast:
+    provider: anthropic
+    id: claude-haiku-4-5
+
+agents:
+  assistant:
+    display_name: Assistant
+    model: chat
+
+calls:
+  enabled: true
+  profiles:
+    fast-cascaded:
+      backend: cascaded
+      model: call_fast
+      stt:
+        provider: openai
+        model: gpt-4o-transcribe
+        credentials_service: openai-voice
+      tts:
+        provider: openai
+        model: tts-1
+        credentials_service: openai-voice
+        extra_kwargs:
+          voice: ash
+  agents:
+    assistant: fast-cascaded
+```
+
+The configured `call_fast` alias is validated when MindRoom loads the configuration.
+An unknown alias fails configuration loading instead of falling back to the normal agent model.
+
 ## Cascaded cloud example
 
-This example uses OpenAI speech services while the agent keeps its normally configured model provider.
+This example omits the cascaded `model` override and uses OpenAI speech services while the agent keeps its normally resolved model.
 The agent can therefore use Anthropic, Gemini, OpenAI, or any other MindRoom model provider without changing the call configuration.
 
 ```yaml
@@ -14634,6 +14723,8 @@ MindRoom verifies the signature, checks replay and size limits, checks that the 
 
 MindRoom does not run watcher code and does not poll external systems from the agent turn loop.
 
+For background-agent completion, use [Agent Callbacks](https://docs.mindroom.chat/agent-callbacks/): one tool call creates a single-use capability trigger and a Bash/curl script that wakes the originating agent and thread.
+
 ## Use Cases
 
 - A campground cancellation watcher checks a booking site and sends an event only when a matching site opens.
@@ -14641,7 +14732,9 @@ MindRoom does not run watcher code and does not poll external systems from the a
 
 ## Model
 
-Triggers are managed by the `external_trigger_manager` tool, not by authored per-trigger YAML.
+Reusable signed triggers are managed by the `external_trigger_manager` tool, not by authored per-trigger YAML.
+
+The `callback_manager` tool uses the same trigger records and ingress route to mint single-use bearer-capability triggers.
 
 `config.yaml` contains only global policy for the feature.
 
@@ -14649,13 +14742,13 @@ Trigger records live in primary-runtime control state under `MINDROOM_CONTROL_ST
 
 Workers, sandbox runners, and public runtime environments do not receive `MINDROOM_CONTROL_STATE_PATH`.
 
-The tool accepts only public key material.
+The `mindroom trigger keygen` command prints the private key, public key, and public key fingerprint.
 
-The watcher keeps the private key.
+Share only the printed public key with the agent, and keep the private key in the watcher runtime.
 
-Tool output includes the endpoint path and public key fingerprint, but never includes the private key or raw public key.
+The external trigger manager accepts only that public key and returns the endpoint path and public key fingerprint, never raw key material.
 
-The public API endpoint is `POST /api/triggers/<trigger_id>`.
+Both auth modes use the public API endpoint `POST /api/triggers/<trigger_id>`.
 
 ## Configuration
 
@@ -14689,7 +14782,7 @@ external_trigger_policy:
     - "@admin:example.org"
 ```
 
-`enabled: false` makes trigger endpoints return not found.
+`enabled: false` makes signed and capability trigger endpoints return not found.
 
 `admin_users` can list, rotate, enable, disable, or delete triggers across owners.
 
@@ -14705,7 +14798,17 @@ Triggers do not create rooms or make agents join rooms.
 
 No new Matrix room is created for a trigger.
 
-## Setup Flow
+## Delivery Modes
+
+Reusable triggers use Ed25519 signatures and caller-chosen stable event IDs.
+
+Single-use triggers use a random bearer capability, store only its hash, and use the immutable trigger record UID for replay protection.
+
+Single-use triggers are consumed only after Matrix delivery succeeds, so a failed delivery can be retried without minting a new callback.
+
+The public external trigger manager creates reusable triggers, while `callback_manager.mint_callback` creates single-use triggers bound to the current agent, room, and thread.
+
+## Signed Trigger Setup Flow
 
 Generate a watcher signing key.
 
@@ -14765,9 +14868,9 @@ Use `--no-verify-tls` only for local development against a trusted endpoint.
 
 Each request uses one immutable trigger snapshot.
 
-That snapshot includes the record version, auth epoch, target, public key, policy-capped replay window, policy-capped body size, and current API config generation.
+That snapshot includes the record version, auth mode, target, authentication material, policy-capped replay window, policy-capped body size, and current API config generation.
 
-The API authenticates the signature, parses the body, checks current owner authorization, checks target runtime readiness, checks live owner membership in the target room, claims replay state, then dispatches.
+The API authenticates the signature or bearer capability, parses the body, checks current owner authorization, checks target runtime readiness, checks live owner membership in the target room, claims replay state, then dispatches.
 
 Target runtime readiness requires both the router and target bot to be running and joined to the resolved target room.
 
@@ -14793,7 +14896,7 @@ Private target agents created from their current live room may use that room eve
 
 The router plus target transport bot must be joined before delivery.
 
-## Idempotency
+## Reusable Trigger Idempotency
 
 Use a stable `--event-id` for the same external event.
 
@@ -14860,6 +14963,77 @@ This is not a secret boundary if the agent has unsandboxed shell access as that 
 In that mode, the agent can usually read the same user's files or invoke the same local tools.
 
 Use a separate OS user, sandbox, Kubernetes sidecar, or CronJob isolation when the private key must be hidden from agent code.
+
+# Agent Callbacks
+
+Agent callbacks let a MindRoom agent hand a background process a script that wakes the originating agent and thread when the work finishes.
+
+They are a small adapter over external triggers rather than a separate callback service.
+
+The intended flow is simple:
+
+1. The MindRoom agent starts a background Codex session or another long-running task.
+2. It calls `mint_callback` with a short label for that task.
+3. It includes the returned instruction in the background agent's prompt.
+4. The background agent runs the script with a short result summary when it finishes.
+
+## Configuration
+
+Enable the tool on agents that launch background work:
+
+```yaml
+agents:
+  orchestrator:
+    role: Launch and supervise coding agents.
+    tools:
+      - callback_manager
+```
+
+No callback-specific configuration is required.
+
+Callbacks use the existing `external_trigger_policy`, which is enabled by default, and count toward `max_triggers_per_owner` until used or deleted.
+
+## Tool Result
+
+`mint_callback(label)` returns a script path and an instruction like this:
+
+```text
+When finished, run: bash /path/to/callback_1234.sh "<short result summary>"
+```
+
+The script needs only Bash and curl.
+
+It posts the summary back to the room and thread where the callback was minted, waking the same MindRoom agent.
+
+MindRoom stores the callback as a bearer-authenticated external trigger whose delivery mode is `single_use`.
+
+After successful Matrix delivery, the external trigger is consumed and the script deletes itself.
+
+If delivery fails, the script remains so the background agent can retry it.
+
+Changing the request's `event_id` cannot make the trigger deliver more than once.
+
+Unused callbacks do not expire automatically, so delete abandoned records with `external_trigger_manager` if they are no longer needed.
+
+## Network Access
+
+Generated scripts call `http://127.0.0.1:8765` by default.
+
+Set `MINDROOM_URL` when the background process needs another address to reach the MindRoom API.
+
+Point `MINDROOM_URL` only at a trusted MindRoom endpoint because the script sends its bearer token there.
+
+## Security
+
+Each script contains a random bearer token whose hash is stored in MindRoom control state.
+
+The token can only wake the agent, room, and thread captured when it was minted.
+
+Missing or incorrect tokens receive the same not-found response.
+
+The request then follows the normal external-trigger readiness, authorization, room-membership, replay, Matrix-delivery, and failure-retry path.
+
+Use [External Triggers](https://docs.mindroom.chat/external-triggers/) directly for reusable integrations that need stable signed identities.
 
 # Authorization
 

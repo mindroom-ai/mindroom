@@ -10,7 +10,7 @@ from mindroom.config.validation import non_empty_stripped
 
 
 class ExternalTriggerPayload(BaseModel):
-    """Signed external trigger request body."""
+    """External trigger request body."""
 
     model_config = ConfigDict(extra="forbid")
 

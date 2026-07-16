@@ -107,6 +107,8 @@ def _trigger_snapshot(
         public_key="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
         public_key_fingerprint="sha256:test",
         key_id=f"{trigger_id}-main",
+        capability_token_hash=None,
+        delivery_mode="reusable",
         allowed_kinds=(),
         replay_window_seconds=300,
         max_body_bytes=65536,

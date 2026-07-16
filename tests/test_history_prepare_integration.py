@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -319,6 +320,58 @@ async def test_prepare_agent_and_prompt_uses_room_resolved_agent_model_for_execu
     assert mock_prepare.await_args is not None
     assert mock_prepare.await_args.kwargs["resolved_inputs"].active_model_name == "large"
     assert mock_prepare.await_args.kwargs["resolved_inputs"].active_context_window == 48_000
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_prefers_explicit_turn_model_over_room_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent", model="default")},
+            defaults=DefaultsConfig(tools=[]),
+            room_models={"lobby": "large"},
+            models={
+                "default": ModelConfig(provider="openai", id="default-model"),
+                "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
+                "call_fast": ModelConfig(provider="openai", id="fast-model", context_window=16_000),
+            },
+        ),
+        runtime_paths,
+    )
+    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
+    live_agent = _agent()
+    turn = replace(
+        make_turn_context("test_agent", room_id="!room:localhost"),
+        active_model_name="call_fast",
+    )
+
+    with (
+        patch("mindroom.ai.create_agent", return_value=live_agent) as mock_create_agent,
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+        patch(
+            "mindroom.execution_preparation.prepare_scope_history",
+            new=AsyncMock(return_value=MagicMock()),
+        ) as mock_prepare,
+        patch(
+            "mindroom.execution_preparation.finalize_history_preparation",
+            return_value=PreparedHistoryState(),
+        ),
+    ):
+        prepared = await _prepare_agent_and_prompt(
+            turn,
+            prompt="Current prompt",
+            runtime_paths=runtime_paths,
+            config=config,
+        )
+
+    assert prepared.runtime_model_name == "call_fast"
+    assert mock_create_agent.call_args.kwargs["active_model_name"] == "call_fast"
+    resolved_inputs = mock_prepare.await_args.kwargs["resolved_inputs"]
+    assert resolved_inputs.active_model_name == "call_fast"
+    assert resolved_inputs.active_context_window == 16_000
 
 
 @pytest.mark.asyncio

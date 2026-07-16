@@ -272,8 +272,10 @@ def _call_execution_identity_from_tool_kwargs(kwargs: dict[str, object]) -> Tool
     )
 
 
-def _cascaded_config(*, local: bool = False) -> Config:
+def _cascaded_config(*, local: bool = False, call_model: str | None = None) -> Config:
     config = _config()
+    if call_model is not None:
+        config.models[call_model] = ModelConfig(provider="openai", id="fast-call-model")
     if local:
         config.models["default"] = ModelConfig(
             provider="openai",
@@ -289,6 +291,7 @@ def _cascaded_config(*, local: bool = False) -> Config:
         profiles={
             "cascaded": CascadedCallProfile(
                 backend="cascaded",
+                model=call_model,
                 stt=SpeechServiceConfig(
                     provider="openai_compatible" if local else "openai",
                     model="whisper-large-v3" if local else "gpt-4o-transcribe",
@@ -623,6 +626,7 @@ async def test_manager_selects_cascaded_backend_with_independent_speech_services
 
     async def fake_tools(**kwargs: object) -> CallAgentTooling:
         assert kwargs["enable_responder"] is True
+        assert kwargs["active_model_name"] == "call_fast"
         assert str(kwargs["session_id"]).startswith(f"{ROOM_ID}:call:")
         return CallAgentTooling(
             tools=(),
@@ -635,7 +639,7 @@ async def test_manager_selects_cascaded_backend_with_independent_speech_services
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = FakeBridge()
-    manager = _manager(client, bridge, tmp_path, _cascaded_config())
+    manager = _manager(client, bridge, tmp_path, _cascaded_config(call_model="call_fast"))
 
     await manager.on_room_event(_room(), _member_unknown_event())
 
@@ -3273,6 +3277,54 @@ def test_cascaded_calls_require_both_speech_services() -> None:
         CallsConfig(
             profiles={"voice": {"backend": "cascaded", "tts": tts}},  # type: ignore[dict-item]
             agents={"helper": "voice"},
+        )
+
+
+def test_cascaded_calls_accept_optional_model_override() -> None:
+    """A cascaded profile can select a configured model for its agent turns."""
+    stt = SpeechServiceConfig(model="gpt-4o-transcribe", credentials_service="openai")
+    tts = SpeechServiceConfig(model="tts-1", credentials_service="openai")
+    config = Config(
+        models={"call_fast": ModelConfig(provider="anthropic", id="claude-haiku-4-5")},
+        agents={"helper": AgentConfig(display_name="Helper")},
+        calls=CallsConfig(
+            profiles={
+                "voice": CascadedCallProfile(
+                    backend="cascaded",
+                    model="call_fast",
+                    stt=stt,
+                    tts=tts,
+                ),
+            },
+            agents={"helper": "voice"},
+        ),
+    )
+
+    resolved = config.calls.resolve_agent_config("helper")
+    assert isinstance(resolved, CascadedCallProfile)
+    assert resolved.model == "call_fast"
+
+
+def test_calls_config_rejects_unknown_cascaded_model() -> None:
+    """Call model aliases must exist in the top-level model catalog."""
+    stt = SpeechServiceConfig(model="gpt-4o-transcribe", credentials_service="openai")
+    tts = SpeechServiceConfig(model="tts-1", credentials_service="openai")
+
+    with pytest.raises(ValueError, match=r"voice -> missing"):
+        Config(
+            models={},
+            agents={"helper": AgentConfig(display_name="Helper")},
+            calls=CallsConfig(
+                profiles={
+                    "voice": CascadedCallProfile(
+                        backend="cascaded",
+                        model="missing",
+                        stt=stt,
+                        tts=tts,
+                    ),
+                },
+                agents={"helper": "voice"},
+            ),
         )
 
 

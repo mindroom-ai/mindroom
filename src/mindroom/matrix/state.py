@@ -6,10 +6,9 @@ from functools import lru_cache
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
-import yaml
 from pydantic import BaseModel, Field, field_serializer
 
-from mindroom import constants
+from mindroom import constants, yaml_io
 
 
 class MatrixAccount(BaseModel):
@@ -223,7 +222,7 @@ def _load_matrix_state_file(state_file: Path, *, current_domain: str) -> MatrixS
     if not state_file.exists():
         return MatrixState()
     with state_file.open(encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
+        data = yaml_io.safe_load(f) or {}
     state = MatrixState.model_validate(data)
     migrated = _migrate_accounts_to_current_schema(state, current_domain=current_domain)
     normalized_data = state.model_dump(mode="json")
@@ -246,7 +245,7 @@ def _write_matrix_state_file(state_file: Path, data: dict[str, object]) -> None:
             delete=False,
         ) as temp_file:
             temp_path = Path(temp_file.name)
-            yaml.safe_dump(data, temp_file, default_flow_style=False, sort_keys=False)
+            yaml_io.safe_dump(data, temp_file, default_flow_style=False, sort_keys=False)
             temp_file.flush()
             os.fsync(temp_file.fileno())
         temp_path.replace(state_file)

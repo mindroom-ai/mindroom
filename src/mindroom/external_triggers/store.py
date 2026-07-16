@@ -106,10 +106,12 @@ class ExternalTriggerRecord(BaseModel):
     created_in_room_id: str
     created_in_thread_id: str | None = None
     target: ExternalTriggerTarget
-    auth: Literal["ed25519"] = "ed25519"
-    key_id: str
-    public_key: str
-    public_key_fingerprint: str
+    auth: Literal["ed25519", "capability"] = "ed25519"
+    key_id: str | None = None
+    public_key: str | None = None
+    public_key_fingerprint: str | None = None
+    capability_token_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    delivery_mode: Literal["reusable", "single_use"] = "reusable"
     allowed_kinds: tuple[str, ...] = ()
     replay_window_seconds: int = Field(ge=30, le=3600)
     max_body_bytes: int = Field(ge=1024, le=262144)
@@ -124,7 +126,7 @@ class ExternalTriggerRecord(BaseModel):
         MatrixID.parse(owner_user_id)
         return owner_user_id
 
-    @field_validator("uid", "created_by_agent_name", "created_in_room_id", "key_id", "public_key")
+    @field_validator("uid", "created_by_agent_name", "created_in_room_id")
     @classmethod
     def validate_required_record_text(cls, value: str) -> str:
         """Reject empty required record fields."""
@@ -150,11 +152,28 @@ class ExternalTriggerRecord(BaseModel):
         return tuple(kinds)
 
     @model_validator(mode="after")
-    def validate_key_fingerprint(self) -> ExternalTriggerRecord:
-        """Ensure key material and fingerprint match."""
-        fingerprint = public_key_fingerprint(self.public_key)
-        if self.public_key_fingerprint != fingerprint:
-            msg = "public_key_fingerprint does not match public_key"
+    def validate_auth(self) -> ExternalTriggerRecord:
+        """Require exactly the key material used by the selected auth mode."""
+        if self.auth == "ed25519":
+            if not self.key_id or not self.public_key or not self.public_key_fingerprint:
+                msg = "ed25519 triggers require key id, public key, and fingerprint"
+                raise ValueError(msg)
+            if self.capability_token_hash is not None:
+                msg = "ed25519 triggers must not contain a capability hash"
+                raise ValueError(msg)
+            fingerprint = public_key_fingerprint(self.public_key)
+            if self.public_key_fingerprint != fingerprint:
+                msg = "public_key_fingerprint does not match public_key"
+                raise ValueError(msg)
+            return self
+        if self.capability_token_hash is None:
+            msg = "capability triggers require a token hash"
+            raise ValueError(msg)
+        if self.key_id is not None or self.public_key is not None or self.public_key_fingerprint is not None:
+            msg = "capability triggers must not contain signing key material"
+            raise ValueError(msg)
+        if self.delivery_mode != "single_use":
+            msg = "capability triggers must be single use"
             raise ValueError(msg)
         return self
 
@@ -177,10 +196,12 @@ class TriggerDeliverySnapshot(BaseModel):
     created_in_thread_id: str | None = None
     target: ExternalTriggerTarget
     resolved_room_id: str
-    auth: Literal["ed25519"]
-    key_id: str
-    public_key: str
-    public_key_fingerprint: str
+    auth: Literal["ed25519", "capability"]
+    key_id: str | None
+    public_key: str | None
+    public_key_fingerprint: str | None
+    capability_token_hash: str | None
+    delivery_mode: Literal["reusable", "single_use"]
     allowed_kinds: tuple[str, ...]
     replay_window_seconds: int
     max_body_bytes: int
@@ -281,17 +302,64 @@ class ExternalTriggerStore:
             created_at=now,
             updated_at=now,
         )
+        return self._insert_record(record, config=config)
+
+    def create_single_use_capability_record(
+        self,
+        *,
+        trigger_id: str,
+        owner_user_id: str,
+        created_by_agent_name: str,
+        created_in_room_id: str,
+        created_in_thread_id: str | None,
+        target: ExternalTriggerTarget,
+        capability_token_hash: str,
+        description: str = "",
+        allowed_kinds: Iterable[str] = (),
+        config: Config,
+    ) -> ExternalTriggerRecord:
+        """Create one bearer-authenticated trigger consumed after successful delivery."""
+        _validate_trigger_id(trigger_id)
+        policy = config.external_trigger_policy
+        now = int(time.time())
+        record = ExternalTriggerRecord(
+            trigger_id=trigger_id,
+            uid=uuid.uuid4().hex,
+            version=1,
+            auth_epoch=1,
+            enabled=True,
+            description=description,
+            owner_user_id=owner_user_id,
+            created_by_agent_name=created_by_agent_name,
+            created_in_room_id=created_in_room_id,
+            created_in_thread_id=created_in_thread_id,
+            target=target,
+            auth="capability",
+            capability_token_hash=capability_token_hash,
+            delivery_mode="single_use",
+            allowed_kinds=tuple(allowed_kinds),
+            replay_window_seconds=policy.default_replay_window_seconds,
+            max_body_bytes=policy.default_max_body_bytes,
+            created_at=now,
+            updated_at=now,
+        )
+        return self._insert_record(record, config=config)
+
+    def _insert_record(self, record: ExternalTriggerRecord, *, config: Config) -> ExternalTriggerRecord:
+        """Validate and durably insert one new trigger record."""
         self._validate_record_against_config(record, config)
         with advisory_file_lock(self._lock_path):
             records = self._read_records()
-            if trigger_id in records.triggers:
-                msg = f"external trigger already exists: {trigger_id}"
+            if record.trigger_id in records.triggers:
+                msg = f"external trigger already exists: {record.trigger_id}"
                 raise ExternalTriggerStoreError(msg)
-            owner_count = sum(1 for existing in records.triggers.values() if existing.owner_user_id == owner_user_id)
-            if owner_count >= policy.max_triggers_per_owner:
+            owner_count = sum(
+                1 for existing in records.triggers.values() if existing.owner_user_id == record.owner_user_id
+            )
+            if owner_count >= config.external_trigger_policy.max_triggers_per_owner:
                 msg = "external trigger owner quota exceeded"
                 raise ExternalTriggerStoreError(msg)
-            records.triggers[trigger_id] = record
+            records.triggers[record.trigger_id] = record
             self._write_records(records)
         return record
 
@@ -330,6 +398,9 @@ class ExternalTriggerStore:
         with advisory_file_lock(self._lock_path):
             records = self._read_records()
             record = self._require_owned_record(records, trigger_id, actor_user_id, config)
+            if record.auth != "ed25519":
+                msg = "only ed25519 trigger keys can be rotated"
+                raise ExternalTriggerStoreError(msg)
             updated = _validate_record_update(
                 record.model_copy(
                     update={
@@ -351,6 +422,19 @@ class ExternalTriggerStore:
         with advisory_file_lock(self._lock_path):
             records = self._read_records()
             self._require_owned_record(records, trigger_id, actor_user_id, config)
+            records.triggers.pop(trigger_id)
+            self._write_records(records)
+
+    def consume_single_use(self, trigger_id: str, *, expected_uid: str) -> None:
+        """Delete the same single-use trigger that produced a delivery snapshot."""
+        with advisory_file_lock(self._lock_path):
+            records = self._read_records()
+            record = records.triggers.get(trigger_id)
+            if record is None:
+                return
+            if record.uid != expected_uid or record.delivery_mode != "single_use":
+                msg = "single-use trigger changed before it could be consumed"
+                raise ExternalTriggerStoreError(msg)
             records.triggers.pop(trigger_id)
             self._write_records(records)
 
@@ -390,6 +474,8 @@ class ExternalTriggerStore:
             key_id=record.key_id,
             public_key=record.public_key,
             public_key_fingerprint=record.public_key_fingerprint,
+            capability_token_hash=record.capability_token_hash,
+            delivery_mode=record.delivery_mode,
             allowed_kinds=record.allowed_kinds,
             replay_window_seconds=min(record.replay_window_seconds, policy.max_replay_window_seconds),
             max_body_bytes=min(record.max_body_bytes, policy.max_body_bytes),

@@ -33,6 +33,7 @@ class CascadedCallProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     backend: Literal["cascaded"]
+    model: str | None = Field(default=None, description="Configured LLM alias for cascaded agent turns")
     stt: SpeechServiceConfig = Field(description="Speech-to-text service")
     tts: SpeechServiceConfig = Field(description="Text-to-speech service")
 

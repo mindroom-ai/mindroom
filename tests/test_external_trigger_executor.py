@@ -98,6 +98,8 @@ def _snapshot(
         key_id="default",
         public_key="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
         public_key_fingerprint="sha256:test",
+        capability_token_hash=None,
+        delivery_mode="reusable",
         allowed_kinds=("campground.availability",),
         replay_window_seconds=300,
         max_body_bytes=65536,

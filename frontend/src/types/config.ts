@@ -118,6 +118,7 @@ export interface CompactionConfig {
   enabled?: boolean;
   threshold_tokens?: number | null;
   threshold_percent?: number | null;
+  replay_window_tokens?: number | null;
   reserve_tokens?: number;
   model?: string | null;
 }
@@ -130,6 +131,7 @@ function isPureCompactionModelClear(compaction: CompactionConfig): boolean {
     compaction.enabled === undefined &&
     compaction.threshold_tokens === undefined &&
     compaction.threshold_percent === undefined &&
+    compaction.replay_window_tokens === undefined &&
     compaction.reserve_tokens === undefined
   );
 }
@@ -140,6 +142,7 @@ function isEmptyCompactionOverride(compaction: CompactionConfig): boolean {
     compaction.model === undefined &&
     compaction.threshold_tokens === undefined &&
     compaction.threshold_percent === undefined &&
+    compaction.replay_window_tokens === undefined &&
     compaction.reserve_tokens === undefined
   );
 }

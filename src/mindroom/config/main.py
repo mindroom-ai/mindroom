@@ -20,6 +20,7 @@ from pydantic import (
     model_validator,
 )
 
+from mindroom import yaml_io
 from mindroom.agent_policy import (
     build_agent_policy_seeds,
     get_agent_delegation_closure,
@@ -31,7 +32,7 @@ from mindroom.agent_policy import (
 from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
-from mindroom.config.calls import CallsConfig
+from mindroom.config.calls import CallsConfig, CascadedCallProfile
 from mindroom.config.entity_view import ResolvedEntityView
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -116,7 +117,7 @@ def _persisted_entity_account_usernames(runtime_paths: RuntimePaths) -> dict[str
     state_file = matrix_state_file(runtime_paths=runtime_paths)
     if not state_file.exists():
         return {}
-    data = yaml.safe_load(state_file.read_text(encoding="utf-8")) or {}
+    data = yaml_io.safe_load(state_file.read_text(encoding="utf-8")) or {}
     if not isinstance(data, dict):
         return {}
     accounts = data.get("accounts")
@@ -567,10 +568,21 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def validate_call_agents(self) -> Config:
-        """Ensure call agents exist and no two are configured for one room."""
+        """Ensure call agents and cascaded model references are valid."""
         unknown_agents = sorted(set(self.calls.agents) - set(self.agents))
         if unknown_agents:
             msg = f"calls.agents references unknown agent(s): {', '.join(unknown_agents)}"
+            raise ValueError(msg)
+
+        invalid_models = sorted(
+            f"{profile_name} -> {profile.model}"
+            for profile_name, profile in self.calls.profiles.items()
+            if isinstance(profile, CascadedCallProfile)
+            and profile.model is not None
+            and profile.model not in self.models
+        )
+        if invalid_models:
+            msg = "calls.profiles references unknown cascaded model(s): " + ", ".join(invalid_models)
             raise ValueError(msg)
 
         agents_by_room: dict[str, list[str]] = {}

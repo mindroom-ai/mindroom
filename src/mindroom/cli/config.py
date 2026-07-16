@@ -19,6 +19,7 @@ from rich.console import Console
 from rich.syntax import Syntax
 
 from mindroom import constants
+from mindroom.cli.agent_docs import ensure_config_agent_docs
 from mindroom.cli.env_file import write_private_env_text
 from mindroom.model_defaults import (
     CONFIG_INIT_MODEL_ALTERNATIVES,
@@ -495,6 +496,15 @@ def config_init(
 
     _ensure_mind_workspace(_default_mind_workspace(storage_root), config_path=target, force=force)
 
+    created_docs = ensure_config_agent_docs(
+        target.parent,
+        config_path=target,
+        storage_root=storage_root,
+        force=force,
+    )
+    if created_docs:
+        console.print(f"[green]Agent docs created:[/green] {', '.join(doc.name for doc in created_docs)}")
+
     env_changed = _write_env_file(
         env_path,
         selected_matrix_server,
@@ -647,8 +657,7 @@ def config_resolve(
         console.print("\nRun [cyan]mindroom config init[/cyan] to create one.")
         raise typer.Exit(1)
 
-    import yaml  # noqa: PLC0415
-
+    from mindroom import yaml_io  # noqa: PLC0415
     from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
     from mindroom.config.yaml_includes import load_yaml_config_source  # noqa: PLC0415
 
@@ -659,7 +668,7 @@ def config_resolve(
         raise typer.Exit(1) from None
 
     print(
-        yaml.safe_dump(data, default_flow_style=False, sort_keys=True, allow_unicode=True),
+        yaml_io.safe_dump(data, default_flow_style=False, sort_keys=True, allow_unicode=True),
         end="",
     )
 

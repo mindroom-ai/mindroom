@@ -33,7 +33,7 @@ Each model configuration supports the following fields:
 | `host` | No | `null` | Host URL for self-hosted models (e.g., Ollama) |
 | `api_key` | No | `null` | API key (usually read from environment variables) |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters |
-| `context_window` | No | `null` | Context window size in tokens; MindRoom needs it on the active runtime model to enforce replay budgets, an explicit `compaction.model` also needs its own `context_window` for destructive compaction, and on `vertexai_claude` models it additionally enables request-time fitting that trims replayed history when a request would exceed the window |
+| `context_window` | No | `null` | Actual provider context window size in tokens; MindRoom uses it as the default replay-planning window unless compaction sets a smaller `replay_window_tokens`; an explicit `compaction.model` needs its own `context_window` for summary generation; on `vertexai_claude` it also enables request-time fitting |
 
 ## Configuration Examples
 
@@ -243,7 +243,8 @@ For starter config generation, use `mindroom config init --provider bedrock_clau
 
 ## Context Window
 
-When `context_window` is set, MindRoom uses it to budget persisted replay and required destructive compaction.
+Set `context_window` to the model provider's actual limit.
+MindRoom uses it to budget persisted replay and required destructive compaction unless compaction config sets a smaller `replay_window_tokens` cap.
 MindRoom always applies a final replay-fit step when the active runtime model has a known `context_window`.
 That replay-fit step reduces or disables persisted replay for the current run when needed.
 On `vertexai_claude` models, a known `context_window` also enables a request-time guard inside the provider call.
@@ -253,9 +254,16 @@ When the current turn alone cannot fit, the request fails with a clear provider 
 Automatic destructive compaction is enabled by default through `defaults.compaction`.
 Set `enabled: false` in `defaults.compaction` or a per-agent/per-team `compaction` override to disable automatic pre-reply compaction.
 It runs only when history exceeds the hard replay budget for the next reply.
-Use `threshold_tokens` or `threshold_percent` to set the soft trigger budget that appears in planning metadata and compaction notices.
-Crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting for that reply.
-Use `reserve_tokens` to leave hard-budget headroom for the current prompt and output.
+
+You can tune compaction behavior with these settings:
+
+- Use `threshold_tokens` or `threshold_percent` to set the soft trigger budget. Crossing this soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting for that reply.
+- Use `replay_window_tokens` to keep persisted replay and required compaction within a smaller operational window without presenting that smaller value as the provider's request limit.
+- Use `reserve_tokens` to leave hard-budget headroom for the current prompt and output.
+
+When the active runtime model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
+When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
+
 Manual `compact_context` records a durable request that runs before the next reply in the same conversation scope.
 Manual `compact_context` remains available when a compaction model and context window are configured.
 It still uses the active runtime window for the final replay-fit step, but destructive compaction itself can be available whenever an explicit `compaction.model` has its own `context_window`.
@@ -273,6 +281,10 @@ models:
     provider: anthropic
     id: claude-sonnet-5
     context_window: 1000000  # 1M tokens
+
+defaults:
+  compaction:
+    replay_window_tokens: 200000  # Compact persisted history around a smaller operational window
 ```
 
 This is useful for models with smaller context windows or long-running conversations that accumulate persisted history.

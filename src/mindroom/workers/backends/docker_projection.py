@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, cast
 
 import yaml
 
+from mindroom import yaml_io
 from mindroom.config.yaml_includes import load_yaml_config_source_with_digests
 from mindroom.constants import config_relative_path, resolve_config_relative_path
 from mindroom.sensitivity import is_sensitive_config_key, is_sensitive_header_key, normalize_config_key
@@ -334,7 +335,7 @@ class DockerProjectionManager:
             projected_knowledge_base_ids=projected_knowledge_base_ids,
         )
 
-        projected_yaml = yaml.safe_dump(config_data, sort_keys=False, allow_unicode=True)
+        projected_yaml = yaml_io.safe_dump(config_data, sort_keys=False, allow_unicode=True)
         projection_manifest = {
             "config_yaml": projected_yaml,
             "config_filename": PurePosixPath(self.config.config_path).name,

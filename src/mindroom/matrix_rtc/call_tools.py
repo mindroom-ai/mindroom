@@ -203,6 +203,7 @@ async def build_call_tools(
     session_id: str | None = None,
     enable_responder: bool = False,
     voice_instructions: str | None = None,
+    active_model_name: str | None = None,
 ) -> CallAgentTooling:
     """Materialize the agent for the selected voice backend."""
     session_id = session_id or create_session_id(room_id, None)
@@ -213,7 +214,12 @@ async def build_call_tools(
         reply_to_event_id=None,
         session_id=session_id,
     )
-    context = tool_support.build_context(target, user_id=requester_id, agent_name=agent_name)
+    context = tool_support.build_context(
+        target,
+        user_id=requester_id,
+        agent_name=agent_name,
+        active_model_name=active_model_name,
+    )
     if context is None:
         msg = f"Tool runtime context unavailable for voice agent {agent_name}"
         raise RuntimeError(msg)
@@ -253,6 +259,7 @@ async def build_call_tools(
             session_id=session_id,
             voice_enrichment_items=voice_enrichment_items,
             response_tracker=response_tracker,
+            active_model_name=active_model_name,
         )
         return CallAgentTooling(
             tools=(),
@@ -359,6 +366,7 @@ async def _run_call_agent(
     session_id: str,
     voice_enrichment_items: tuple[EnrichmentItem, ...],
     response_tracker: _CallResponseTracker,
+    active_model_name: str | None,
 ) -> CallAgentResponse:
     """Run one finalized call transcript through the normal MindRoom agent."""
     from mindroom.ai import ResponseTurnContext, ai_response  # noqa: PLC0415 - heavy optional call path
@@ -388,25 +396,31 @@ async def _run_call_agent(
         thread_id=None,
         requester_id=requester_id,
         matrix_run_metadata=None,
+        active_model_name=active_model_name,
         system_enrichment_items=enrichment_items,
     )
+    run_metadata: dict[str, Any] = {}
 
     async def _respond() -> str:
-        return await ai_response(
-            turn,
-            prompt=transcript,
-            runtime_paths=runtime_paths,
-            config=config,
-            knowledge=knowledge_resolution.knowledge,
-            run_id_callback=recorder.set_run_id,
-            include_interactive_questions=False,
-            tool_function_filter=context.tool_function_filter,
-            show_tool_calls=False,
-            execution_identity=execution_identity,
-            refresh_scheduler=refresh_scheduler,
-            turn_recorder=recorder,
-            eager_deferred_tools=True,
-        )
+        try:
+            return await ai_response(
+                turn,
+                prompt=transcript,
+                runtime_paths=runtime_paths,
+                config=config,
+                knowledge=knowledge_resolution.knowledge,
+                run_id_callback=recorder.set_run_id,
+                include_interactive_questions=False,
+                tool_function_filter=context.tool_function_filter,
+                show_tool_calls=False,
+                run_metadata_collector=run_metadata,
+                execution_identity=execution_identity,
+                refresh_scheduler=refresh_scheduler,
+                turn_recorder=recorder,
+                eager_deferred_tools=True,
+            )
+        finally:
+            recorder.set_run_metadata({**(recorder.run_metadata or {}), **run_metadata})
 
     try:
         response = await tool_support.run_in_context(tool_context=context, operation=_respond)

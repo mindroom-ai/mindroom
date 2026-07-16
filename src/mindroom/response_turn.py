@@ -209,6 +209,7 @@ class ResponseTurnContext:
     thread_id: str | None
     requester_id: str | None
     matrix_run_metadata: dict[str, Any] | None
+    active_model_name: str | None = None
     active_event_ids: frozenset[str] = frozenset()
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     # Set only for scheduled fires that carry a history limit; identifies the

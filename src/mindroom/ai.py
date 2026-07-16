@@ -1106,6 +1106,7 @@ async def _prepare_agent_and_prompt(
         """
         runtime_model = config.resolve_runtime_model(
             entity_name=agent_name,
+            active_model_name=ctx.active_model_name,
             room_id=ctx.room_id,
             thread_id=ctx.thread_id,
             runtime_paths=runtime_paths,
