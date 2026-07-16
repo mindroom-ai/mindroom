@@ -34,6 +34,13 @@ def test_safe_load_accepts_streams() -> None:
     assert yaml_io.safe_load(io.StringIO("a: 1")) == {"a": 1}
 
 
+def test_safe_load_accepts_bytes_and_binary_streams() -> None:
+    """Byte inputs should work, matching yaml.safe_load's interface."""
+    document_bytes = _SAMPLE_DOCUMENT.encode()
+    assert yaml_io.safe_load(document_bytes) == yaml.safe_load(document_bytes)
+    assert yaml_io.safe_load(io.BytesIO(b"a: 1")) == {"a": 1}
+
+
 def test_safe_dump_roundtrips() -> None:
     """Dumped documents should parse back to the original data."""
     data = yaml.safe_load(_SAMPLE_DOCUMENT)
@@ -46,6 +53,26 @@ def test_safe_dump_to_stream_returns_none() -> None:
     stream = io.StringIO()
     assert yaml_io.safe_dump({"a": 1}, stream) is None
     assert yaml_io.safe_load(stream.getvalue()) == {"a": 1}
+
+
+def test_safe_dump_forwards_pyyaml_options() -> None:
+    """Standard dump options should pass through with PyYAML semantics."""
+    data = {"outer": {"message": "a deliberately long value"}}
+    assert yaml_io.safe_dump(data, explicit_start=True, indent=4, width=20) == yaml.safe_dump(
+        data,
+        explicit_start=True,
+        indent=4,
+        width=20,
+    )
+
+
+def test_safe_dump_accepts_encoded_binary_streams() -> None:
+    """Encoded binary streams should work exactly like yaml.safe_dump."""
+    actual = io.BytesIO()
+    expected = io.BytesIO()
+    assert yaml_io.safe_dump({"a": "é"}, actual, encoding="utf-8", allow_unicode=True) is None
+    assert yaml.safe_dump({"a": "é"}, expected, encoding="utf-8", allow_unicode=True) is None
+    assert actual.getvalue() == expected.getvalue()
 
 
 def test_safe_dump_rejects_unsafe_types_like_safe_dump() -> None:
