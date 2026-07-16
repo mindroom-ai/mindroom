@@ -434,7 +434,7 @@ zoom = [
   "requests",
 ]
 desktop = [
-    "pyautogui>=0.9.54",
+  "pyautogui>=0.9.54",
 ]
 [project.scripts]
 mindroom = "mindroom.cli.main:main"

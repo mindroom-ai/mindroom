@@ -24,6 +24,7 @@
 - [AI & Generation](https://docs.mindroom.chat/tools/ai-and-generation/)
 - [Media & Content](https://docs.mindroom.chat/tools/media-and-content/)
 - [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/)
+- [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/)
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/)
 - [Project Management](https://docs.mindroom.chat/tools/project-management/)
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/)

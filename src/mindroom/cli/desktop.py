@@ -283,4 +283,4 @@ async def _run_bridge(
         await client.close()
 
 
-__all__ = ["desktop_app"]
+__all__ = ["desktop_app", "desktop_controller", "desktop_login", "desktop_run"]
