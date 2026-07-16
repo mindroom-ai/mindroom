@@ -328,8 +328,9 @@ class TestConfigInit:
         assert "MindRoom Chat at `https://chat.mindroom.chat`" in agents_template
         assert "supports custom homeservers" in agents_template
         assert "The MindRoom dashboard is a separate app" in agents_template
-        assert "After enabling an OAuth-backed tool" in agents_template
-        assert "give the human the exact `connect_url` directly" in agents_template
+        assert "If `config_manager` returns a target-agent `connect_url`" in agents_template
+        assert "Newly configured tools may not be available to the current agent or current run" in agents_template
+        assert "`*_connection_status` or `*_list_tools`" in agents_template
         assert "localhost link must be opened on the computer where MindRoom is running" in agents_template
         assert "`https://mindroom.chat`" not in agents_template
         assert "knowledge_bases" not in config

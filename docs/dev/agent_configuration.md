@@ -601,13 +601,16 @@ Some tools need additional setup:
 ### Tools requiring OAuth:
 - **gmail**, **google_calendar**, **google_drive**, **google_sheets** - Google OAuth
 - **homeassistant** - Home Assistant OAuth or long-lived access token
-- **spotify** - Spotify OAuth
+- **spotify** - Manually supplied Spotify OAuth access token
 
-After enabling an OAuth-backed tool, call a harmless read or list operation from that tool.
-If it returns structured `OAuthConnectionRequired` data with `oauth_connection_required: true`, present the exact agent-scoped `connect_url` directly and do not send the user to the dashboard.
+The structured `OAuthConnectionRequired` flow applies only when a tool's MindRoom catalog metadata names an `auth_provider`, not to every tool in the list above or every `SetupType.OAUTH` integration.
+When the current agent already has one of these MindRoom-managed provider tools, call an appropriate safe status, read, or list operation from that tool.
+For an OAuth MCP server, use its generated `*_connection_status` or `*_list_tools` operation.
+If the operation returns `oauth_connection_required: true`, present the exact scoped `connect_url` directly and do not send the user to the dashboard.
 If `requires_host_browser` is true, explain that the localhost link must be opened in a browser on the computer where MindRoom is running.
-Retry the operation after the user connects.
-Use the dashboard only as a manual alternative when no `connect_url` is available.
+Have the target agent retry the operation after the user connects.
+Do not promise that a newly configured tool can be called in the same run, because the current provider-visible tool schema may not include it yet.
+Use the dashboard only as a manual alternative when the structured result does not provide a `connect_url`.
 
 ### Tools requiring software:
 - **docker** - Install Docker on your system

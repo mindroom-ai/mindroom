@@ -3022,14 +3022,19 @@ See [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agen
 Configured MCP servers also appear here as dynamic tools named `mcp_<server_id>`.
 See [MCP](https://docs.mindroom.chat/mcp/) for the `mcp_servers` config and naming rules.
 
-## OAuth Onboarding In Conversation
+## MindRoom-Managed OAuth Onboarding In Conversation
 
-After an agent enables an OAuth-backed tool, it should immediately call a harmless read or list operation from that tool.
-If the tool is disconnected, the result contains structured `OAuthConnectionRequired` data with `oauth_connection_required: true`, the exact agent-scoped `connect_url`, and `requires_host_browser: true` when the URL uses localhost.
-The agent should present `connect_url` directly instead of sending the user to the dashboard.
-When `requires_host_browser` is true, the agent should explain that the localhost link must be opened in a browser on the computer where MindRoom is running, not on a phone or another computer.
-After the user connects, the agent should retry the operation.
-The dashboard remains a manual alternative when a tool result does not provide a connect URL.
+This flow applies to tools whose MindRoom catalog metadata names an `auth_provider`, including the Google provider tools and OAuth MCP servers.
+It does not apply to every tool labeled `SetupType.OAUTH`; tools without `auth_provider` metadata use their own setup contract.
+When `config_manager` creates or updates an agent with one of these tools, it returns a connect URL scoped to the updated agent and current authorized requester when that binding is available.
+Present that URL directly instead of asking the configuring agent to call the new tool, because newly configured tools are not guaranteed to enter the current run's tool schema.
+When the current agent already has a MindRoom-managed provider tool, call an appropriate safe status, read, or list operation to check its connection.
+For an OAuth MCP server, use its generated `*_connection_status` or `*_list_tools` operation.
+If the operation is disconnected, its structured `OAuthConnectionRequired` result includes `oauth_connection_required: true`, the exact scoped `connect_url`, and `requires_host_browser: true` when the URL uses localhost.
+Present `connect_url` directly instead of sending the user to the dashboard.
+When `requires_host_browser` is true, explain that the localhost link must be opened in a browser on the computer where MindRoom is running, not on a phone or another computer.
+After the user connects, have the target agent retry the safe operation or original request.
+The dashboard remains a manual alternative only when no `connect_url` is available.
 
 ## Browse By Topic
 
@@ -16096,14 +16101,16 @@ agents:
 
 ## Connect
 
-After enabling a Google tool for an agent, ask the agent to perform a harmless read or list operation with that tool.
+When `config_manager` enables a Google provider tool, use the direct connect URL in its result when one is returned for the updated agent and requester scope.
+Do not ask the configuring agent to invoke a newly added tool in the same run, because the current provider-visible tool schema may not include it.
+Once a Google tool is available to the target agent, ask that agent to perform an appropriate safe status, read, or list operation with the tool.
 If the tool is disconnected, its result contains structured `OAuthConnectionRequired` data with `oauth_connection_required: true` and the exact `connect_url` for that provider, requester, agent, and execution scope.
 The agent should present that `connect_url` directly instead of sending you to the dashboard.
 If the result includes `requires_host_browser: true`, open the localhost link in a browser on the computer where the MindRoom process is running, not on a phone or another computer.
 If you made the request from another device, open the conversation on the MindRoom computer or copy the complete URL into a browser there.
 Google asks you to choose an account and approve only that provider's scopes.
-After the browser flow completes, retry the operation and the integration is ready for the selected agent and execution scope.
-As a manual alternative, open the dashboard and select **Connect** for the Google integration when a tool result does not provide a connect URL.
+After the browser flow completes, have the target agent retry the operation and the integration is ready for the selected agent and execution scope.
+As a manual alternative, open the dashboard and select **Connect** for the Google integration only when neither `config_manager` nor a tool result provides a connect URL.
 The dashboard explains which installation and credential scope will receive the connection before you continue.
 
 OAuth tokens are stored under provider token services such as `google_drive_oauth`.

@@ -29,14 +29,16 @@ agents:
 
 ## Connect
 
-After enabling a Google tool for an agent, ask the agent to perform a harmless read or list operation with that tool.
+When `config_manager` enables a Google provider tool, use the direct connect URL in its result when one is returned for the updated agent and requester scope.
+Do not ask the configuring agent to invoke a newly added tool in the same run, because the current provider-visible tool schema may not include it.
+Once a Google tool is available to the target agent, ask that agent to perform an appropriate safe status, read, or list operation with the tool.
 If the tool is disconnected, its result contains structured `OAuthConnectionRequired` data with `oauth_connection_required: true` and the exact `connect_url` for that provider, requester, agent, and execution scope.
 The agent should present that `connect_url` directly instead of sending you to the dashboard.
 If the result includes `requires_host_browser: true`, open the localhost link in a browser on the computer where the MindRoom process is running, not on a phone or another computer.
 If you made the request from another device, open the conversation on the MindRoom computer or copy the complete URL into a browser there.
 Google asks you to choose an account and approve only that provider's scopes.
-After the browser flow completes, retry the operation and the integration is ready for the selected agent and execution scope.
-As a manual alternative, open the dashboard and select **Connect** for the Google integration when a tool result does not provide a connect URL.
+After the browser flow completes, have the target agent retry the operation and the integration is ready for the selected agent and execution scope.
+As a manual alternative, open the dashboard and select **Connect** for the Google integration only when neither `config_manager` nor a tool result provides a connect URL.
 The dashboard explains which installation and credential scope will receive the connection before you continue.
 
 OAuth tokens are stored under provider token services such as `google_drive_oauth`.
