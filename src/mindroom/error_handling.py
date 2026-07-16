@@ -24,7 +24,6 @@ _CONTEXT_OVERFLOW_MARKERS = (
     "input is too long for this model",
     "input too long",
     "prompt is too long",
-    "too many input tokens",
 )
 _RATE_LIMIT_MARKERS = ("rate limit", "token rate", "tokens per minute", "requests per minute", "quota")
 _OUTPUT_LIMIT_MARKERS = (
@@ -165,7 +164,7 @@ def get_user_friendly_error_message(error: Exception, agent_name: str | None = N
     if is_context_window_overflow_error(error):
         structured_error = _structured_provider_error(str(error))
         diagnostic = redact_sensitive_text(structured_error[1]) if structured_error is not None else safe_error
-        return f"{agent_prefix}⚠️ Error: {diagnostic}"
+        return f"{agent_prefix}⚠️ Context window exceeded: {diagnostic}"
     if any(x in error_str for x in ["rate", "429", "quota"]) or _has_provider_status(error, 429):
         return f"{agent_prefix}⏱️ Rate limited. Please wait a moment and try again."
     if _is_transient_provider_error(error):

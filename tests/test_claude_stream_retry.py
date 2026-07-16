@@ -242,11 +242,18 @@ def test_sync_stream_does_not_retry_context_window_error(error: ModelProviderErr
 
 
 @pytest.mark.asyncio
-async def test_output_token_limit_remains_transient() -> None:
-    """Output truncation wording must not turn a transient status into context overflow."""
+@pytest.mark.parametrize(
+    ("message", "status_code"),
+    [
+        pytest.param("Output token limit reached at max_tokens", 500, id="output-token-limit"),
+        pytest.param("Too many input tokens", 429, id="untyped-rate-limit"),
+    ],
+)
+async def test_non_context_limit_error_remains_transient(message: str, status_code: int) -> None:
+    """Output and rate limits must not become deterministic context overflows."""
     model, calls = _hooked_model_with_async_attempts(
         [
-            [ModelProviderError(message="Output token limit reached at max_tokens", status_code=500)],
+            [ModelProviderError(message=message, status_code=status_code)],
             [ModelResponse(content="recovered")],
         ],
     )

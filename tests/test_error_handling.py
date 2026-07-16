@@ -151,6 +151,7 @@ def test_context_window_overflow_classification(error: Exception | str) -> None:
     [
         ModelRateLimitError(message="overloaded_error", status_code=529),
         ModelProviderError(message="Rate limit exceeded for input tokens per minute", status_code=429),
+        ModelProviderError(message="Too many input tokens", status_code=429),
         ModelProviderError(message="model overloaded", status_code=529),
         ModelProviderError(message="Internal server error", status_code=500),
         ModelProviderError(message="Output token limit reached at max_tokens", status_code=500),
@@ -172,6 +173,7 @@ def test_wrapped_context_overflow_keeps_user_diagnostic() -> None:
 
     message = get_user_friendly_error_message(error)
 
+    assert "Context window exceeded" in message
     assert "input token count (250001)" in message
     assert "temporarily unavailable" not in message
 
