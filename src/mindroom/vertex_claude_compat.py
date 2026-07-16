@@ -274,7 +274,6 @@ class MindroomVertexAIClaude(VertexAIClaude):
             return None
         return estimate_compaction_input_tokens(
             stable_serialize(request_kwargs),
-            provider=self.provider,
             model_id=self.id,
         ) + count_schema_tokens(response_format, self.id)
 

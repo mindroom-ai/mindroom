@@ -705,6 +705,22 @@ async def test_generate_compaction_summary_rejects_near_empty_result() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_generate_compaction_summary_accepts_defensive_byte_floor() -> None:
+    content = "1234567890abcdef"
+
+    summary = await generate_compaction_summary(
+        model=_RecordingClaude(
+            id="claude-sonnet-5",
+            response=ModelResponse(content=content),
+        ),
+        summary_input="conversation payload",
+        summary_prompt="Summarize the conversation.",
+    )
+
+    assert summary.summary == content
+
+
 def test_retry_policy_shrinks_budget_for_empty_result() -> None:
     """Empty results may be a provider's response to an oversized request."""
     error = _CompactionSummaryEmptyResultError("summary generation returned no result")
@@ -714,7 +730,7 @@ def test_retry_policy_shrinks_budget_for_empty_result() -> None:
 
 
 def test_compaction_input_estimate_uses_tiktoken_for_known_model() -> None:
-    estimator = compaction_token_estimator(provider="openai", model_id="gpt-4o")
+    estimator = compaction_token_estimator(model_id="gpt-4o")
 
     assert estimator.method == "tiktoken:o200k_base"
     assert estimator.confidence == "high"
@@ -723,19 +739,20 @@ def test_compaction_input_estimate_uses_tiktoken_for_known_model() -> None:
 
 
 def test_compaction_input_estimate_uses_conservative_claude_fallback() -> None:
-    estimator = compaction_token_estimator(provider="anthropic", model_id="claude-sonnet-5")
+    estimator = compaction_token_estimator(model_id="claude-sonnet-5")
 
-    assert estimator.method == "utf8_bytes_claude_conservative"
+    assert estimator.method == "utf8_bytes_conservative"
     assert estimator.confidence == "low"
     assert estimator.estimate("structured: true") == len(b"structured: true")
     assert estimator.estimate("☃☃") == 6
 
 
-def test_compaction_input_estimate_recognizes_anthropic_provider_without_model_id() -> None:
-    estimator = compaction_token_estimator(provider="anthropic")
+def test_compaction_input_estimate_uses_conservative_unknown_fallback() -> None:
+    estimator = compaction_token_estimator()
 
-    assert estimator.method == "utf8_bytes_claude_conservative"
+    assert estimator.method == "utf8_bytes_conservative"
     assert estimator.confidence == "low"
+    assert estimator.estimate("structured: true") == len(b"structured: true")
 
 
 def test_compaction_budget_reserves_loaded_model_output_cap() -> None:
@@ -797,7 +814,7 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
     assert outcome is not None
     # Chunk 1 fails twice, succeeds on a bounded third attempt, then chunk 2 compacts run-2.
     assert len(attempts) == 4
-    estimator = compaction_token_estimator(provider="fake", model_id="summary-model")
+    estimator = compaction_token_estimator(model_id="summary-model")
     assert estimator.estimate(attempts[1]) < estimator.estimate(attempts[0])
     assert estimator.estimate(attempts[2]) < estimator.estimate(attempts[1])
     assert attempts[3] != attempts[2]

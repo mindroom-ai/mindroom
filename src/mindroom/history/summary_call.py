@@ -56,6 +56,9 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
+# Compaction only summarizes substantial history, so fewer than 16 normalized
+# UTF-8 bytes represents the tiny-success class without inspecting wording or
+# structure. This is a defensive size heuristic, not semantic validation.
 _MIN_COMPACTION_SUMMARY_BYTES = 16
 
 _RETRYABLE_PROVIDER_ERROR_FRAGMENTS = (
@@ -80,7 +83,7 @@ class CompactionSummaryOutputLimitError(RuntimeError):
 
 
 class _CompactionSummaryEmptyResultError(RuntimeError):
-    """Raised when the summary model returns a success response with no text."""
+    """Raised for a successful response below the defensive summary-size floor."""
 
 
 @dataclass(frozen=True)
@@ -88,8 +91,9 @@ class SummaryRetryPolicy:
     """Explicit retry policy for failed compaction summary calls.
 
     The schedule is deterministic: each shrinkable failure divides the input
-    budget by ``shrink_divisor`` (clamped to ``floor_tokens``); once the budget
-    can no longer shrink, or ``max_attempts`` is reached, the error propagates.
+    budget by ``shrink_divisor`` (clamped to ``floor_tokens``). Ordinary errors
+    stop at ``max_attempts``; empty or near-empty successes stop at
+    ``empty_result_max_attempts``.
     """
 
     max_attempts: int = 2
@@ -273,7 +277,7 @@ async def generate_compaction_summary(
     normalized_text = _normalize_compaction_summary_text(raw_text)
     normalized_bytes = len(normalized_text.encode("utf-8"))
     output_tokens = _response_output_tokens(response)
-    is_near_empty = normalized_bytes < _MIN_COMPACTION_SUMMARY_BYTES
+    is_near_empty = 0 < normalized_bytes < _MIN_COMPACTION_SUMMARY_BYTES
     if not normalized_text or is_near_empty:
         msg = (
             "summary generation returned an empty or near-empty result "

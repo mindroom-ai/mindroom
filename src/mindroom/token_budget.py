@@ -24,11 +24,11 @@ _TokenEstimateConfidence = Literal["high", "low"]
 class _CompactionTokenEstimator:
     """Local token estimator selected for one compaction model.
 
-    Known tiktoken model IDs use their model-specific encoding. Unknown models,
-    including Claude-family models whose exact counter is a provider API call,
-    use one token per UTF-8 byte as a conservative local upper bound. The latter
-    intentionally trades input capacity for avoiding tokenizer undercounts and
-    never adds a network request to compaction.
+    Model IDs recognized by tiktoken use their model-specific encoding. All
+    other IDs, including Claude IDs, use one token per UTF-8 byte as a
+    conservative local upper bound. The latter intentionally trades input
+    capacity for avoiding tokenizer undercounts and never adds a network request
+    to compaction.
     """
 
     method: str
@@ -63,10 +63,9 @@ def estimate_text_tokens(value: str | list[str] | None) -> int:
 @lru_cache(maxsize=32)
 def compaction_token_estimator(
     *,
-    provider: str | None = None,
     model_id: str | None = None,
 ) -> _CompactionTokenEstimator:
-    """Select a provider/model-aware local estimator for compaction input."""
+    """Use a known tiktoken encoding or a conservative local fallback."""
     if model_id:
         try:
             encoding = tiktoken.encoding_for_model(model_id)
@@ -79,25 +78,16 @@ def compaction_token_estimator(
                 _encoding=encoding,
             )
 
-    normalized_provider = (provider or "").strip().lower().replace("-", "_")
-    is_claude_family = (
-        normalized_provider == "anthropic" or "claude" in normalized_provider or "claude" in (model_id or "").lower()
-    )
-    family = "claude" if is_claude_family else "unknown"
-    return _CompactionTokenEstimator(
-        method=f"utf8_bytes_{family}_conservative",
-        confidence="low",
-    )
+    return _CompactionTokenEstimator(method="utf8_bytes_conservative", confidence="low")
 
 
 def estimate_compaction_input_tokens(
     value: str,
     *,
-    provider: str | None = None,
     model_id: str | None = None,
 ) -> int:
     """Estimate serialized compaction history with a local model-aware estimator."""
-    return compaction_token_estimator(provider=provider, model_id=model_id).estimate(value)
+    return compaction_token_estimator(model_id=model_id).estimate(value)
 
 
 def configured_model_max_output_tokens(model: Model) -> int | None:

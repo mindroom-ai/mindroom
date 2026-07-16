@@ -452,7 +452,7 @@ def test_build_summary_input_oversized_run_preserves_messages_before_tool_schema
         compacted_runs=[run],
         max_input_tokens=280,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=compaction_token_estimator(provider="openai", model_id="gpt-4o").estimate,
+        token_estimator=compaction_token_estimator(model_id="gpt-4o").estimate,
     )
 
     assert [included_run.run_id for included_run in included_runs] == ["run-big-metadata"]
