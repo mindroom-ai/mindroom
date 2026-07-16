@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from agno.knowledge.knowledge import Knowledge
+from agno.models.metrics import Metrics
 from agno.run.base import RunStatus
 from agno.tools.function import Function
 
@@ -18,6 +19,8 @@ from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
+from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.knowledge import KnowledgeAvailability, KnowledgeAvailabilityDetail
 from mindroom.matrix_rtc.call_tools import (
     _CallAgentRunState,
@@ -25,10 +28,11 @@ from mindroom.matrix_rtc.call_tools import (
     _wrap_agno_function,
     build_call_tools,
 )
+from mindroom.memory import MemoryPromptParts
 from mindroom.tool_system.events import ToolTraceEntry
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
-from tests.conftest import test_runtime_paths
+from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -313,9 +317,11 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
             *,
             user_id: str | None,
             agent_name: str | None = None,
+            active_model_name: str | None = None,
         ) -> ToolRuntimeContext:
             assert user_id == REQUESTER
             assert agent_name == AGENT
+            assert active_model_name is None
             seen_targets.append(target)
             return _runtime_context(
                 config=config,
@@ -391,12 +397,15 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
         def build_context(
             self,
             target: MessageTarget,
-            **_kwargs: object,
+            *,
+            user_id: str | None,
+            agent_name: str | None = None,
+            active_model_name: str | None = None,
         ) -> ToolRuntimeContext:
             context = ToolRuntimeContext(
-                agent_name=AGENT,
+                agent_name=agent_name or AGENT,
                 target=target,
-                requester_id=REQUESTER,
+                requester_id=user_id or REQUESTER,
                 client=MagicMock(),
                 config=config,
                 runtime_paths=runtime_paths,
@@ -404,6 +413,7 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
                 conversation_cache=MagicMock(),
                 hook_registry=MagicMock(),
                 orchestrator=SimpleNamespace(knowledge_refresh_scheduler=refresh_scheduler),  # type: ignore[arg-type]
+                active_model_name=active_model_name,
             )
             contexts.append(context)
             return context
@@ -476,6 +486,7 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
     assert turn.requester_id == REQUESTER
     assert turn.session_id == "!room:example.org:call:one"
     assert turn.active_model_name == "call_fast"
+    assert contexts[0].active_model_name == "call_fast"
     assert turn.system_enrichment_items[0].text == "Speak briefly."
     assert kwargs["config"] is config
     assert kwargs["knowledge"] is knowledge
@@ -568,6 +579,137 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
     assert tool_filter(spawn) is False
     assert tool_filter(send) is False
     assert contexts[0].tool_function_filter is None
+
+
+@pytest.mark.asyncio
+async def test_cascaded_responder_records_call_selected_model_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The call override drives real agent preparation and persisted run metadata."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={AGENT: AgentConfig(display_name="Helper", model="default")},
+            room_models={"lobby": "large"},
+            models={
+                "default": ModelConfig(provider="openai", id="default-model"),
+                "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
+                "call_fast": ModelConfig(provider="openai", id="fast-model", context_window=16_000),
+            },
+        ),
+        runtime_paths,
+    )
+    execution_identity = SimpleNamespace()
+    persisted_interruptions: list[dict[str, object]] = []
+
+    class StrictToolSupport:
+        def build_context(
+            self,
+            target: MessageTarget,
+            *,
+            user_id: str | None,
+            agent_name: str | None = None,
+            active_model_name: str | None = None,
+        ) -> ToolRuntimeContext:
+            return ToolRuntimeContext(
+                agent_name=agent_name or AGENT,
+                target=target,
+                requester_id=user_id or REQUESTER,
+                client=MagicMock(),
+                config=config,
+                runtime_paths=runtime_paths,
+                event_cache=MagicMock(),
+                conversation_cache=MagicMock(),
+                hook_registry=MagicMock(),
+                active_model_name=active_model_name,
+            )
+
+        def build_execution_identity(self, **_kwargs: object) -> SimpleNamespace:
+            return execution_identity
+
+        async def run_in_context(
+            self,
+            *,
+            tool_context: ToolRuntimeContext,
+            operation: Callable[[], Awaitable[str]],
+        ) -> str:
+            assert get_tool_runtime_context() is None
+            with tool_runtime_context(tool_context):
+                return await operation()
+
+    mock_agent = MagicMock()
+    mock_agent.model = MagicMock()
+    mock_agent.model.__class__.__name__ = "OpenAIChat"
+    mock_agent.model.id = "fast-model"
+    mock_agent.name = "Helper"
+    mock_agent.add_history_to_context = False
+    mock_run_output = MagicMock()
+    mock_run_output.run_id = "call-run-1"
+    mock_run_output.session_id = "!room:example.org:call:metadata"
+    mock_run_output.status = RunStatus.completed
+    mock_run_output.model = "fast-model"
+    mock_run_output.model_provider = "openai"
+    mock_run_output.metrics = Metrics(input_tokens=100, output_tokens=20, total_tokens=120)
+    mock_run_output.tools = None
+    mock_run_output.content = "It is sunny."
+
+    create_agent_mock = MagicMock(return_value=mock_agent)
+    monkeypatch.setattr("mindroom.ai.create_agent", create_agent_mock)
+    monkeypatch.setattr(
+        "mindroom.ai.build_memory_prompt_parts",
+        AsyncMock(return_value=MemoryPromptParts()),
+    )
+    monkeypatch.setattr(
+        "mindroom.ai_runtime.cached_agent_run",
+        AsyncMock(return_value=mock_run_output),
+    )
+    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
+    monkeypatch.setattr(
+        "mindroom.ai.open_resolved_scope_session_context",
+        lambda **_kwargs: nullcontext(None),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access",
+        lambda *_args, **_kwargs: SimpleNamespace(knowledge=None, unavailable=()),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.open_resolved_scope_session_context",
+        lambda **_kwargs: nullcontext(SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.persist_interrupted_replay",
+        lambda **kwargs: persisted_interruptions.append(kwargs),
+    )
+
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=StrictToolSupport(),  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+        session_id="!room:example.org:call:metadata",
+        enable_responder=True,
+        active_model_name="call_fast",
+    )
+
+    assert tooling.responder is not None
+    response = await tooling.responder("What is the weather?", None)
+    assert response.text == "It is sunny."
+    assert response.turn_id is not None
+    assert tooling.finalize_spoken_response is not None
+    finalize = tooling.finalize_spoken_response(response.turn_id, "It is", True)
+    assert finalize is not None
+    await finalize
+
+    assert create_agent_mock.call_args.kwargs["active_model_name"] == "call_fast"
+    run_metadata = persisted_interruptions[0]["run_metadata"]
+    assert isinstance(run_metadata, dict)
+    payload = run_metadata[AI_RUN_METADATA_KEY]
+    assert payload["model"]["config"] == "call_fast"
+    assert payload["model"]["id"] == "fast-model"
+    assert payload["context"]["window_tokens"] == 16_000
 
 
 def test_call_response_tracker_keeps_fifo_without_retaining_settled_tokens(tmp_path: Path) -> None:

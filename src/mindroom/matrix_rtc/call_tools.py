@@ -41,6 +41,7 @@ from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
+from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.session_ids import create_session_id
 from mindroom.tool_approval import tool_requires_approval_for_openai_compat
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -214,7 +215,12 @@ async def build_call_tools(
         reply_to_event_id=None,
         session_id=session_id,
     )
-    context = tool_support.build_context(target, user_id=requester_id, agent_name=agent_name)
+    context = tool_support.build_context(
+        target,
+        user_id=requester_id,
+        agent_name=agent_name,
+        active_model_name=active_model_name,
+    )
     if context is None:
         msg = f"Tool runtime context unavailable for voice agent {agent_name}"
         raise RuntimeError(msg)
@@ -394,23 +400,28 @@ async def _run_call_agent(
         active_model_name=active_model_name,
         system_enrichment_items=enrichment_items,
     )
+    run_metadata: dict[str, Any] = {}
 
     async def _respond() -> str:
-        return await ai_response(
-            turn,
-            prompt=transcript,
-            runtime_paths=runtime_paths,
-            config=config,
-            knowledge=knowledge_resolution.knowledge,
-            run_id_callback=recorder.set_run_id,
-            include_interactive_questions=False,
-            tool_function_filter=context.tool_function_filter,
-            show_tool_calls=False,
-            execution_identity=execution_identity,
-            refresh_scheduler=refresh_scheduler,
-            turn_recorder=recorder,
-            eager_deferred_tools=True,
-        )
+        try:
+            return await ai_response(
+                turn,
+                prompt=transcript,
+                runtime_paths=runtime_paths,
+                config=config,
+                knowledge=knowledge_resolution.knowledge,
+                run_id_callback=recorder.set_run_id,
+                include_interactive_questions=False,
+                tool_function_filter=context.tool_function_filter,
+                show_tool_calls=False,
+                run_metadata_collector=run_metadata,
+                execution_identity=execution_identity,
+                refresh_scheduler=refresh_scheduler,
+                turn_recorder=recorder,
+                eager_deferred_tools=True,
+            )
+        finally:
+            recorder.set_run_metadata(deep_merge_metadata(recorder.run_metadata, run_metadata))
 
     try:
         response = await tool_support.run_in_context(tool_context=context, operation=_respond)
