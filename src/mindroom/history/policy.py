@@ -253,15 +253,15 @@ class _ResolvedCompactionRuntime:
     context_window: int | None
 
 
-def _resolve_effective_compaction_threshold(compaction_config: CompactionConfig, context_window: int) -> int:
+def _resolve_effective_compaction_threshold(compaction_config: CompactionConfig, replay_window_tokens: int) -> int:
     """Resolve the soft replay trigger budget in tokens."""
     threshold_tokens = compaction_config.threshold_tokens
     if threshold_tokens is not None:
         return threshold_tokens
     threshold_percent = compaction_config.threshold_percent
     if threshold_percent is not None:
-        return int(context_window * threshold_percent)
-    return int(context_window * 0.8)
+        return int(replay_window_tokens * threshold_percent)
+    return int(replay_window_tokens * 0.8)
 
 
 def _normalize_compaction_budget_tokens(tokens: int, context_window: int | None) -> int:
