@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 from mindroom.desktop.accessibility import (
     PRIMARY_SCREEN_APP_ID,
+    AccessibilityActionOutcomeUnknownError,
     AccessibilityElement,
     AccessibilityError,
     AccessibilityState,
@@ -69,6 +70,7 @@ class FakeMacServices:
     kAXPositionAttribute = "position"
     kAXSizeAttribute = "size"
     kAXRoleAttribute = "role"
+    kAXSubroleAttribute = "subrole"
     kAXTitleAttribute = "title"
     kAXDescriptionAttribute = "description"
     kAXHelpAttribute = "help"
@@ -82,6 +84,8 @@ class FakeMacServices:
 
     def __init__(self) -> None:
         self.window = "window-1"
+        self.collection_count = 0
+        self.collection_hook: Callable[[int], None] | None = None
         self.attributes: dict[object, dict[str, object]] = {
             "window-1": {
                 "role": "AXWindow",
@@ -104,13 +108,17 @@ class FakeMacServices:
                 "enabled": True,
             },
             "password": {
-                "role": "AXSecureTextField",
+                "role": "AXTextField",
+                "subrole": "AXSecureTextField",
                 "title": "Password",
                 "value": "must-not-leave-machine",
                 "enabled": True,
+                "settable": True,
             },
         }
         self.actions = {"button": UserList(["AXPress", "Name:Unsafe\nTarget:0x0"])}
+        self.apply_value_updates = True
+        self.performed_actions: list[tuple[object, str]] = []
 
     @staticmethod
     def AXIsProcessTrusted() -> bool:
@@ -128,6 +136,9 @@ class FakeMacServices:
     ) -> tuple[int, object | None]:
         if isinstance(reference, tuple) and reference[0] == "app":
             if attribute == self.kAXFocusedWindowAttribute:
+                self.collection_count += 1
+                if self.collection_hook is not None:
+                    self.collection_hook(self.collection_count)
                 return 0, self.window
             if attribute == self.kAXWindowsAttribute:
                 return 0, UserList([self.window])
@@ -147,7 +158,17 @@ class FakeMacServices:
         attribute: str,
         _unused: object,
     ) -> tuple[int, bool]:
-        return 0, reference == "password" and attribute == self.kAXValueAttribute
+        settable = self.attributes.get(reference, {}).get("settable") is True
+        return 0, settable and attribute == self.kAXValueAttribute
+
+    def AXUIElementPerformAction(self, reference: object, action: str) -> int:
+        self.performed_actions.append((reference, action))
+        return 0
+
+    def AXUIElementSetAttributeValue(self, reference: object, attribute: str, value: object) -> int:
+        if self.apply_value_updates:
+            self.attributes[reference][attribute] = value
+        return 0
 
 
 def _fake_mac_backend() -> tuple[MacAccessibilityBackend, FakeMacServices, FakeWorkspace]:
@@ -171,6 +192,7 @@ def test_accessibility_state_serializes_bounded_semantic_fields() -> None:
         depth=2,
         parent_index=1,
         role="AXButton",
+        subrole=None,
         name="Save",
         value=None,
         enabled=True,
@@ -217,12 +239,86 @@ def test_mac_tree_accepts_native_sequences_and_hides_secure_values() -> None:
     button = next(element for element in state.elements if element.name == "Save")
     password = next(element for element in state.elements if element.name == "Password")
     assert button.actions == ("AXPress",)
-    assert password.role == "AXSecureTextField"
+    assert password.role == "AXTextField"
+    assert password.subrole == "AXSecureTextField"
     assert password.value is None
     assert not password.settable
 
     with pytest.raises(AccessibilityError, match="Secure text fields"):
         backend.set_value(state.app_id, state.state_id, password.index, "secret")
+
+
+def test_mac_tree_skips_empty_table_wrappers_but_keeps_descendants() -> None:
+    """Presentation-only Finder-style rows and cells cannot consume the bounded tree."""
+    backend, services, _ = _fake_mac_backend()
+    services.attributes["window-1"]["children"] = UserList(["row"])
+    services.attributes["row"] = {"role": "AXRow", "children": UserList(["cell"])}
+    services.attributes["cell"] = {"role": "AXCell", "children": UserList(["button"])}
+    services.actions["row"] = UserList(["AXShowAlternateUI", "AXShowDefaultUI"])
+
+    state = backend.get_app_state("com.example.Editor")
+
+    assert [element.role for element in state.elements] == ["AXWindow", "AXButton"]
+    assert state.elements[1].name == "Save"
+    assert state.elements[1].parent_index == 0
+
+
+def test_mac_tree_uses_visible_rows_for_outline() -> None:
+    """Off-screen Finder rows cannot crowd visible file controls out of bounded state."""
+    backend, services, _ = _fake_mac_backend()
+    services.attributes["window-1"]["children"] = UserList(["outline"])
+    services.attributes["outline"] = {
+        "role": "AXOutline",
+        "children": UserList(["offscreen-row"]),
+        "AXVisibleRows": UserList(["visible-row"]),
+    }
+    services.attributes["offscreen-row"] = {"role": "AXRow", "title": "private.txt"}
+    services.attributes["visible-row"] = {"role": "AXRow", "title": "test-note.txt"}
+
+    state = backend.get_app_state("com.example.Editor")
+
+    assert [element.name for element in state.elements if element.role == "AXRow"] == ["test-note.txt"]
+
+
+def test_mac_truncated_state_skips_costly_stabilization() -> None:
+    """A bounded partial tree remains usable without repeatedly walking a very large app."""
+    backend, services, _ = _fake_mac_backend()
+    children = UserList([f"button-{index}" for index in range(128)])
+    services.attributes["window-1"]["children"] = children
+    for child in children:
+        services.attributes[child] = {"role": "AXButton", "title": child}
+
+    state = backend.get_app_state("com.example.Editor")
+
+    assert state.truncated
+    assert len(state.elements) == 128
+    assert services.collection_count == 1
+    target = next(element for element in state.elements if element.name == "button-0")
+    services.attributes["button-0"]["title"] = "changed"
+    with pytest.raises(AccessibilityError, match="state changed"):
+        backend.click_element(state.app_id, state.state_id, target.index)
+
+
+def test_mac_state_ignores_non_actionable_image_animation() -> None:
+    """Decorative icon jitter cannot prevent an otherwise stable application state."""
+    backend, services, _ = _fake_mac_backend()
+    services.attributes["window-1"]["children"] = UserList(["image", "button"])
+    services.attributes["image"] = {
+        "role": "AXImage",
+        "title": "trash",
+        "position": SimpleNamespace(x=10, y=10),
+        "size": SimpleNamespace(width=16, height=16),
+    }
+
+    def move_decorative_image(collection_count: int) -> None:
+        services.attributes["image"]["position"] = SimpleNamespace(x=10 + collection_count, y=10)
+
+    services.collection_hook = move_decorative_image
+
+    state = backend.get_app_state("com.example.Editor")
+
+    assert next(element for element in state.elements if element.role == "AXImage").name == "trash"
+    assert services.collection_count == 4
 
 
 def test_mac_semantic_action_rejects_disabled_element_before_invocation() -> None:
@@ -236,6 +332,23 @@ def test_mac_semantic_action_rejects_disabled_element_before_invocation() -> Non
         backend.click_element(state.app_id, state.state_id, button.index)
 
 
+def test_mac_state_waits_for_stable_observations(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A one-time asynchronous UI update settles before a state ID is exposed."""
+    backend, services, _ = _fake_mac_backend()
+    monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", lambda _seconds: None)
+
+    def update_after_initial_matching_observation(collection_count: int) -> None:
+        if collection_count == 3:
+            services.attributes["button"]["title"] = "Publish"
+
+    services.collection_hook = update_after_initial_matching_observation
+
+    state = backend.get_app_state("com.example.Editor")
+
+    assert next(element for element in state.elements if element.role == "AXButton").name == "Publish"
+    assert services.collection_count == 6
+
+
 def test_mac_semantic_action_rejects_changed_target_value() -> None:
     """Any changed semantic value invalidates the state before an action can run."""
     backend, services, _ = _fake_mac_backend()
@@ -245,6 +358,32 @@ def test_mac_semantic_action_rejects_changed_target_value() -> None:
 
     with pytest.raises(AccessibilityError, match="state changed"):
         backend.click_element(state.app_id, state.state_id, button.index)
+
+
+def test_mac_set_value_focuses_text_field_and_verifies_result() -> None:
+    """Writable web-style text fields are focused and must expose the requested value."""
+    backend, services, _ = _fake_mac_backend()
+    services.attributes["button"].update(role="AXTextField", settable=True)
+    state = backend.get_app_state("com.example.Editor")
+    field = next(element for element in state.elements if element.name == "Save")
+
+    backend.set_value(state.app_id, state.state_id, field.index, "published")
+
+    assert services.performed_actions == [("button", "AXPress")]
+    assert services.attributes["button"]["value"] == "published"
+
+
+def test_mac_set_value_rejects_unconfirmed_os_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A no-op AX success becomes an unknown outcome instead of a false completion."""
+    backend, services, _ = _fake_mac_backend()
+    monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", lambda _seconds: None)
+    services.attributes["button"].update(role="AXTextField", settable=True)
+    services.apply_value_updates = False
+    state = backend.get_app_state("com.example.Editor")
+    field = next(element for element in state.elements if element.name == "Save")
+
+    with pytest.raises(AccessibilityActionOutcomeUnknownError, match="did not expose"):
+        backend.set_value(state.app_id, state.state_id, field.index, "published")
 
 
 def test_mac_capture_rechecks_state_after_foregrounding_app() -> None:

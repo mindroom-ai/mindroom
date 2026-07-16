@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -17,6 +18,8 @@ from mindroom.desktop.protocol import DESKTOP_SAFE_KEYS
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from PIL.Image import Image as PillowImage
 
 _EMERGENCY_STOP_MESSAGE = "Desktop emergency stop engaged; restart the bridge locally before granting control again."
 
@@ -150,6 +153,9 @@ class PyAutoGuiDesktopProvider:
         pyautogui.FAILSAFE = True
         pyautogui.PAUSE = 0.05
         self._pyautogui: Any = pyautogui
+        self._capture_screen: Callable[[], PillowImage] = (
+            _capture_macos_primary_screen if sys.platform == "darwin" else pyautogui.screenshot
+        )
         self._max_screenshot_width = max_screenshot_width
         self._jpeg_quality = jpeg_quality
         self._accessibility = accessibility_backend or create_accessibility_backend(
@@ -181,7 +187,7 @@ class PyAutoGuiDesktopProvider:
         region = state.window
         screen_width, screen_height = self._screen_size()
         _validate_region(region, screen_width=screen_width, screen_height=screen_height)
-        image = self._pyautogui.screenshot()
+        image = self._capture_screen()
         source_width, source_height = image.size
         left = round(region.x * source_width / screen_width)
         top = round(region.y * source_height / screen_height)
@@ -337,6 +343,39 @@ def _validate_region(region: DesktopRect, *, screen_width: int, screen_height: i
     ):
         msg = f"Capture region is outside the {screen_width}x{screen_height} primary screen."
         raise DesktopProviderError(msg)
+
+
+def _capture_macos_primary_screen() -> PillowImage:
+    """Capture the primary macOS display without spawning an unbounded child process."""
+    import Quartz  # noqa: PLC0415
+    from PIL import Image  # noqa: PLC0415
+
+    display_id = Quartz.CGMainDisplayID()  # ty: ignore[unresolved-attribute]
+    cg_image = Quartz.CGDisplayCreateImage(display_id)  # ty: ignore[unresolved-attribute]
+    if cg_image is None:
+        msg = "macOS did not return a primary-display screenshot; check Screen Recording permission."
+        raise DesktopProviderError(msg)
+    width = int(Quartz.CGImageGetWidth(cg_image))  # ty: ignore[unresolved-attribute]
+    height = int(Quartz.CGImageGetHeight(cg_image))  # ty: ignore[unresolved-attribute]
+    bytes_per_row = int(Quartz.CGImageGetBytesPerRow(cg_image))  # ty: ignore[unresolved-attribute]
+    bits_per_pixel = int(Quartz.CGImageGetBitsPerPixel(cg_image))  # ty: ignore[unresolved-attribute]
+    if width <= 0 or height <= 0 or bits_per_pixel != 32 or bytes_per_row < width * 4:
+        msg = "macOS returned an unsupported primary-display pixel format."
+        raise DesktopProviderError(msg)
+    provider = Quartz.CGImageGetDataProvider(cg_image)  # ty: ignore[unresolved-attribute]
+    content = bytes(Quartz.CGDataProviderCopyData(provider))  # ty: ignore[unresolved-attribute]
+    if len(content) < bytes_per_row * height:
+        msg = "macOS returned an incomplete primary-display screenshot."
+        raise DesktopProviderError(msg)
+    return Image.frombuffer(
+        "RGBA",
+        (width, height),
+        content,
+        "raw",
+        "BGRA",
+        bytes_per_row,
+        1,
+    )
 
 
 def _normalized_point(rect: DesktopRect, *, x: int, y: int) -> tuple[int, int]:

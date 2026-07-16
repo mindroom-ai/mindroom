@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import sys
+import time
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -35,15 +36,25 @@ class _Workspace(Protocol):
 PRIMARY_SCREEN_APP_ID = "primary-screen"
 MAX_ACCESSIBILITY_ELEMENTS = 128
 _MAX_ACCESSIBILITY_DEPTH = 12
-_MAX_VISITED_ELEMENTS = 2048
+_MAX_VISITED_ELEMENTS = 512
 _MAX_TEXT_LENGTH = 160
+_STATE_STABILIZATION_ATTEMPTS = 12
+_STATE_STABILIZATION_DELAY_SECONDS = 0.05
+_STATE_STABILIZATION_MATCHES = 3
+_VALUE_VERIFICATION_ATTEMPTS = 4
+_FOCUS_BEFORE_SET_ROLES = frozenset({"AXComboBox", "AXSearchField", "AXTextField"})
+_VISIBLE_ROW_CONTAINER_ROLES = frozenset({"AXOutline", "AXTable"})
 _CONTAINER_ROLES = frozenset(
     {
         "AXApplication",
+        "AXCell",
+        "AXColumn",
         "AXGroup",
+        "AXImage",
         "AXLayoutArea",
         "AXList",
         "AXOutline",
+        "AXRow",
         "AXScrollArea",
         "AXSplitGroup",
         "AXTable",
@@ -52,6 +63,7 @@ _CONTAINER_ROLES = frozenset(
         "AXWindow",
     },
 )
+_PRESENTATION_ONLY_ACTIONS = frozenset({"AXShowAlternateUI", "AXShowDefaultUI"})
 
 
 class AccessibilityError(RuntimeError):
@@ -84,6 +96,7 @@ class AccessibilityElement:
     depth: int
     parent_index: int | None
     role: str
+    subrole: str | None
     name: str | None
     value: str | int | float | bool | None
     enabled: bool | None
@@ -102,6 +115,8 @@ class AccessibilityElement:
         }
         if self.parent_index is not None:
             result["parent_index"] = self.parent_index
+        if self.subrole is not None:
+            result["subrole"] = self.subrole
         if self.name is not None:
             result["name"] = self.name
         if self.value is not None:
@@ -245,9 +260,33 @@ class MacAccessibilityBackend:
             state = _primary_screen_state(self._screen_size(), state_id=uuid4().hex)
             self._states[app_id] = _StoredMacState(state, _state_fingerprint(state), (), None, None)
             return state
-        stored = self._collect_app_state(app_id, state_id=uuid4().hex)
-        self._states[app_id] = stored
-        return stored.public
+        state_id = uuid4().hex
+        candidate = self._collect_app_state(app_id, state_id=state_id)
+        if candidate.public.truncated:
+            self._states[app_id] = candidate
+            return candidate.public
+        matching_observations = 0
+        for _ in range(_STATE_STABILIZATION_ATTEMPTS):
+            time.sleep(_STATE_STABILIZATION_DELAY_SECONDS)
+            application = candidate.application
+            if application is None or candidate.window_reference is None:
+                break
+            current = self._collect_app_state(
+                app_id,
+                state_id=state_id,
+                expected_pid=application.processIdentifier(),
+                expected_window=candidate.window_reference,
+            )
+            if current.fingerprint == candidate.fingerprint:
+                matching_observations += 1
+            else:
+                matching_observations = 0
+            candidate = current
+            if matching_observations >= _STATE_STABILIZATION_MATCHES:
+                self._states[app_id] = current
+                return current.public
+        msg = "Accessibility state did not settle; wait briefly and request get_app_state again."
+        raise AccessibilityError(msg)
 
     def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityState:
         """Revalidate exact state before focusing an allowed target."""
@@ -290,6 +329,12 @@ class MacAccessibilityBackend:
         self._activate(current.application)
         current = self._current_action_state(app_id, state_id, element_index)
         reference = self._writable_value_target(current, element_index)
+        element = current.public.elements[element_index]
+        if element.role in _FOCUS_BEFORE_SET_ROLES and self._services.kAXPressAction in element.actions:
+            focus_error = self._services.AXUIElementPerformAction(reference, self._services.kAXPressAction)
+            if focus_error != self._services.kAXErrorSuccess:
+                msg = f"macOS accessibility focus action returned error {focus_error}; the outcome is unknown."
+                raise AccessibilityActionOutcomeUnknownError(msg)
         error = self._services.AXUIElementSetAttributeValue(
             reference,
             self._services.kAXValueAttribute,
@@ -298,6 +343,7 @@ class MacAccessibilityBackend:
         if error != self._services.kAXErrorSuccess:
             msg = f"macOS accessibility value action returned error {error}; the outcome is unknown."
             raise AccessibilityActionOutcomeUnknownError(msg)
+        self._verify_value_update(reference, value)
 
     def perform_action(self, app_id: str, state_id: str, element_index: int, action: str) -> None:
         """Perform only an action present in the fresh element's advertised action list."""
@@ -413,14 +459,19 @@ class MacAccessibilityBackend:
             seen.add(reference)
             visited += 1
             role = _bounded_text(self._copy_attribute(reference, self._services.kAXRoleAttribute)) or "AXUnknown"
+            subrole = _bounded_text(self._copy_attribute(reference, self._services.kAXSubroleAttribute))
             actions = self._action_names(reference)
             name = self._element_name(reference)
-            secure = role == "AXSecureTextField"
+            secure = role == "AXSecureTextField" or subrole == "AXSecureTextField"
             value = (
                 None if secure else _bounded_value(self._copy_attribute(reference, self._services.kAXValueAttribute))
             )
             include = (
-                depth == 0 or role not in _CONTAINER_ROLES or name is not None or value is not None or bool(actions)
+                depth == 0
+                or role not in _CONTAINER_ROLES
+                or name is not None
+                or value is not None
+                or any(action not in _PRESENTATION_ONLY_ACTIONS for action in actions)
             )
             current_parent = parent_index
             if include:
@@ -437,6 +488,7 @@ class MacAccessibilityBackend:
                         depth=depth,
                         parent_index=parent_index,
                         role=role,
+                        subrole=subrole,
                         name=name,
                         value=value,
                         enabled=enabled,
@@ -447,11 +499,12 @@ class MacAccessibilityBackend:
                 )
                 references.append(reference)
                 current_parent = index
+            children = self._children(reference, role=role)
             if depth >= _MAX_ACCESSIBILITY_DEPTH:
-                if self._children(reference):
+                if children:
                     truncated = True
                 continue
-            for child in self._children(reference):
+            for child in children:
                 queue.append((child, depth + 1, current_parent))
         if queue or visited >= _MAX_VISITED_ELEMENTS:
             truncated = True
@@ -525,8 +578,12 @@ class MacAccessibilityBackend:
             return None
         return DesktopRect(round(point.x), round(point.y), width, height)
 
-    def _children(self, reference: object) -> tuple[object, ...]:
-        children = self._copy_attribute(reference, self._services.kAXChildrenAttribute)
+    def _children(self, reference: object, *, role: str) -> tuple[object, ...]:
+        children = None
+        if role in _VISIBLE_ROW_CONTAINER_ROLES:
+            children = self._copy_attribute(reference, "AXVisibleRows")
+        if children is None:
+            children = self._copy_attribute(reference, self._services.kAXChildrenAttribute)
         if children is None:
             children = self._copy_attribute(reference, "AXChildrenInNavigationOrder")
         if not isinstance(children, Sequence) or isinstance(children, str):
@@ -578,7 +635,7 @@ class MacAccessibilityBackend:
         reference = self._validate_element_index(stored, element_index)
         self._require_element_enabled(stored, element_index)
         element = stored.public.elements[element_index]
-        if element.role == "AXSecureTextField":
+        if element.role == "AXSecureTextField" or element.subrole == "AXSecureTextField":
             msg = "Secure text fields cannot be read or changed through the desktop bridge."
             raise AccessibilityError(msg)
         if not element.settable:
@@ -598,6 +655,15 @@ class MacAccessibilityBackend:
             msg = f"Accessibility element {element_index} does not advertise action {action!r}."
             raise AccessibilityError(msg)
         return reference
+
+    def _verify_value_update(self, reference: object, requested_value: str) -> None:
+        for _ in range(_VALUE_VERIFICATION_ATTEMPTS):
+            observed_value = self._copy_attribute(reference, self._services.kAXValueAttribute)
+            if observed_value == requested_value:
+                return
+            time.sleep(_STATE_STABILIZATION_DELAY_SECONDS)
+        msg = "macOS accepted the accessibility value action but did not expose the requested value; the outcome is unknown."
+        raise AccessibilityActionOutcomeUnknownError(msg)
 
     def _require_allowed(self, app_id: str) -> None:
         if app_id not in self._allowed_app_ids:
@@ -719,11 +785,17 @@ def _state_fingerprint(state: AccessibilityState) -> str:
                 "depth": element.depth,
                 "parent_index": element.parent_index,
                 "role": element.role,
+                "subrole": element.subrole,
                 "name": element.name,
                 "value": element.value,
                 "enabled": element.enabled,
                 "settable": element.settable,
-                "bounds": element.bounds.to_result() if element.bounds is not None else None,
+                "bounds": (
+                    element.bounds.to_result()
+                    if element.bounds is not None
+                    and (element.role != "AXImage" or element.settable or bool(element.actions))
+                    else None
+                ),
                 "actions": element.actions,
             }
             for element in state.elements

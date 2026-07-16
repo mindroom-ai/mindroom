@@ -36,6 +36,7 @@ ELEMENT = AccessibilityElement(
     depth=0,
     parent_index=None,
     role="AXButton",
+    subrole=None,
     name="Save",
     value=None,
     enabled=True,

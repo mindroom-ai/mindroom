@@ -117,6 +117,7 @@ def _provider() -> tuple[PyAutoGuiDesktopProvider, FakePyAutoGui, FakeAccessibil
     accessibility = FakeAccessibilityBackend()
     provider = object.__new__(PyAutoGuiDesktopProvider)
     provider._pyautogui = pyautogui
+    provider._capture_screen = pyautogui.screenshot
     provider._max_screenshot_width = 1600
     provider._jpeg_quality = 80
     provider._accessibility = accessibility

@@ -13,6 +13,7 @@ It returns a bounded accessibility tree with roles, names, values, bounds, writa
 The agent normally selects an element index from that state instead of guessing a screen coordinate.
 Every element index is bound to one opaque `state_id`, and a new state invalidates the old indexes.
 The local bridge also pins the exact local process and window, rechecks the current app structure and values before acting, and rejects stale state.
+On macOS, a complete tree is sampled until it is briefly stable before its `state_id` is returned, while a capped partial tree is returned immediately with `truncated: true`.
 
 Pixel and keyboard operations remain explicit fallbacks for controls that do not expose useful accessibility elements.
 Fallback coordinates run from `0` to `1000` inside the selected app window rather than using raw desktop pixels.
@@ -26,6 +27,8 @@ The local bridge starts in observe-only mode unless a person at the computer gra
 The local process independently checks the exact cloud Matrix user, device ID, Ed25519 fingerprint, human requester ID, agent name, app ID, command expiry, request ID, and monotonic session sequence.
 Only applications named with local `--allow-app` options can be listed, inspected, captured, or controlled.
 Cloud configuration and model output cannot add an application to that allowlist.
+The allowlist restricts the bridge's direct target, but an allowed app can still cause operating-system side effects such as opening a link or document in another app.
+The bridge cannot then inspect or control that newly opened app unless its exact app ID is also locally allowlisted.
 The local bridge executes only one cloud request at a time, and state binding prevents parallel controls planned from the same state from both succeeding.
 Cloud configuration cannot enable control, extend a running lease, or change any local allowlist.
 Restarting the local bridge returns it to observe-only mode unless `--allow-control` is supplied again.
@@ -55,7 +58,7 @@ It operates only the currently logged-in graphical session and cannot bypass ope
 
 Matrix protects the local-to-cloud transport, but accessibility state and screenshots become model input after MindRoom decrypts them in the cloud process.
 Accessibility APIs can expose labels, document text, form values, and other semantic content that is not obvious from the screenshot alone.
-The macOS backend suppresses secure-text-field values and refuses to change those fields semantically.
+The macOS backend recognizes secure text fields from both accessibility roles and subroles, suppresses their values, and refuses to change them semantically.
 Your configured model provider can therefore receive both the returned accessibility fields and visible app contents.
 Desktop action arguments can also appear in model context, approval cards, and MindRoom tool traces, so never use `set_value` or `type_text` for passwords, tokens, recovery codes, or other secrets.
 App screenshots, labels, document values, and web content are untrusted data and must never be treated as user authorization or instructions.
@@ -187,6 +190,7 @@ The action response contains a new `state_id`, new element indexes, and a new sc
 The agent uses normalized `click`, `type_text`, `scroll`, or `keypress` only when the accessibility state lacks the needed semantic control.
 If the bridge reports stale state, the agent calls `get_app_state` again instead of reusing the old element index or coordinate.
 If an action outcome is unknown or its follow-up state is incomplete, the agent observes again and does not automatically repeat the action.
+Some applications change their UI successfully and then return an accessibility error, so a fresh observation is the only safe way to resolve an unknown outcome.
 
 ## 6. Add Matrix Approval for Control Actions
 
@@ -239,5 +243,6 @@ Screenshots and pixel fallback currently target the primary display, so an app w
 The bridge foregrounds and revalidates the allowed app before an on-screen window crop, but an always-on-top overlay inside those bounds can still appear in the screenshot.
 Global keyboard shortcut chords are intentionally unavailable because they could switch to or launch an application outside the local allowlist.
 The returned accessibility tree is capped and depth-bounded, and the state reports when it was truncated.
+Table and outline state prefers the rows that macOS reports as visible so off-screen Finder-style content does not crowd current controls out of the bounded tree.
 There is no MatrixRTC live screen stream, tray application, multi-monitor selector, unattended service installer, or remote approval of local lease changes yet.
 Commands and encrypted responses are Matrix to-device messages rather than persistent room events, while normal MindRoom tool traces and optional approval cards remain visible in the Matrix conversation.
