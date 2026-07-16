@@ -38,6 +38,9 @@ class ConfigIncludeError(yaml.YAMLError):
     """User-facing error raised when resolving config ``!include`` tags fails."""
 
 
+# Deliberately built on the pure-Python SafeLoader rather than mindroom.yaml_io:
+# the loader renames its stream so error marks point at the offending config
+# file, which the libyaml parser does not support, and config parsing is cold.
 class _IncludeLoader(yaml.SafeLoader):
     """SafeLoader that resolves include tags relative to the file being parsed."""
 

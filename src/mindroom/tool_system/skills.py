@@ -13,11 +13,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import json5
-import yaml
 from agno.skills import LocalSkills, Skills
 from agno.skills.errors import SkillValidationError
 from agno.skills.loaders import SkillLoader
 
+from mindroom import yaml_io
 from mindroom.constants import runtime_env_values
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
@@ -404,7 +404,7 @@ def _read_skill_frontmatter(
 
     frontmatter_text = match.group(1)
     try:
-        frontmatter = yaml.safe_load(frontmatter_text) or {}
+        frontmatter = yaml_io.safe_load(frontmatter_text) or {}
     except Exception as exc:
         logger.warning("Failed to parse skill frontmatter", path=str(skill_path), error=str(exc))
         return None

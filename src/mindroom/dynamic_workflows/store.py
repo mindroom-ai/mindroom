@@ -17,6 +17,7 @@ from uuid import uuid4
 
 import yaml
 
+from mindroom import yaml_io
 from mindroom.durable_write import write_json_file_durable
 from mindroom.dynamic_workflows.validation import (
     ID_RE,
@@ -607,7 +608,7 @@ def _relative_artifact_path(artifact_path: Path, storage_root: Path) -> str:
 
 def _load_yaml_mapping(path: Path) -> dict[str, object]:
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        data = yaml_io.safe_load(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         msg = "YAML mapping was not found."
         raise DynamicWorkflowError(msg) from exc
@@ -636,7 +637,7 @@ def _load_json_mapping(path: Path) -> dict[str, object]:
 
 
 def _atomic_write_yaml(path: Path, data: dict[str, object]) -> None:
-    _atomic_write_text(path, yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+    _atomic_write_text(path, yaml_io.safe_dump(data, sort_keys=False, allow_unicode=True))
 
 
 def _atomic_write_text(path: Path, text: str) -> None:

@@ -122,14 +122,14 @@ def test_resolve_room_aliases_does_not_reparse_yaml(
     _load_matrix_state_file_cached.cache_clear()
 
     safe_load_calls = 0
-    real_safe_load = matrix_state.yaml.safe_load
+    real_safe_load = matrix_state.yaml_io.safe_load
 
     def _counting_safe_load(stream: object) -> object:
         nonlocal safe_load_calls
         safe_load_calls += 1
         return real_safe_load(stream)
 
-    monkeypatch.setattr(matrix_state.yaml, "safe_load", _counting_safe_load)
+    monkeypatch.setattr(matrix_state.yaml_io, "safe_load", _counting_safe_load)
 
     matrix_state.resolve_room_aliases(["dev", "#external:localhost"], runtime_paths)
     matrix_state.resolve_room_aliases(["dev", "#external:localhost"], runtime_paths)
