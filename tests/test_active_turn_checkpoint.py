@@ -26,6 +26,8 @@ from mindroom.tool_system.events import ToolTraceEntry
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import pytest
+
 
 class _FakeModel:
     """Small Agno-model surface used to exercise result formatting hooks."""
@@ -243,3 +245,21 @@ def test_checkpoint_content_stays_bounded_for_long_tool_sequence() -> None:
     assert len(completed_work) + len(key_results) <= _MAX_TOOL_CONTEXT_CHARS
     assert "omitted to keep the checkpoint bounded" in checkpoint.content
     assert "Pending steps:" in checkpoint.content
+
+
+def test_tool_checkpoint_omission_handles_tiny_character_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An undersized bound still produces bounded prose instead of popping an empty list."""
+    monkeypatch.setattr("mindroom.active_turn_checkpoint._MAX_TOOL_CONTEXT_CHARS", 20)
+
+    completed_work, key_results = _render_tool_checkpoint_sections(
+        [
+            ToolTraceEntry(
+                type="tool_call_completed",
+                tool_name="large-tool",
+                args_preview="a" * 100,
+                result_preview="r" * 100,
+            ),
+        ],
+    )
+
+    assert len(completed_work) + len(key_results) <= 20

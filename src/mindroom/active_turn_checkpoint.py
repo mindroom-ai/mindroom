@@ -272,6 +272,10 @@ def _render_tool_checkpoint_sections(completed_tools: list[ToolTraceEntry]) -> t
                     work_lines = candidate_work_lines
                     result_lines = candidate_result_lines
                     break
+                if not result_lines:
+                    work_lines = [omission[:_MAX_TOOL_CONTEXT_CHARS]]
+                    result_lines = []
+                    break
                 work_lines.pop()
                 result_lines.pop()
                 omitted += 1

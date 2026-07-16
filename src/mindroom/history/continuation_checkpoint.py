@@ -41,7 +41,9 @@ def persist_continuation_checkpoint(
             scope_id=scope_id,
             is_team=False,
         )
-    assert isinstance(persisted_session, AgentSession)
+    if not isinstance(persisted_session, AgentSession):
+        msg = "Direct-agent checkpoint persistence requires an AgentSession"
+        raise TypeError(msg)
     persisted_run = _build_checkpoint_run(
         checkpoint=checkpoint,
         run_id=run_id,
