@@ -58,12 +58,14 @@ def test_safe_dump_to_stream_returns_none() -> None:
 def test_safe_dump_forwards_pyyaml_options() -> None:
     """Standard dump options should pass through with PyYAML semantics."""
     data = {"outer": {"message": "a deliberately long value"}}
-    assert yaml_io.safe_dump(data, explicit_start=True, indent=4, width=20) == yaml.safe_dump(
+    expected = yaml.dump(
         data,
+        Dumper=yaml_io._SAFE_DUMPER,
         explicit_start=True,
         indent=4,
         width=20,
     )
+    assert yaml_io.safe_dump(data, explicit_start=True, indent=4, width=20) == expected
 
 
 def test_safe_dump_accepts_encoded_binary_streams() -> None:
