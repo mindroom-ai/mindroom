@@ -96,6 +96,7 @@ depends_on = ["mindroom.durable_write"]
 [[modules]]
 path = "mindroom.ai"
 depends_on = [
+    "mindroom.active_turn_checkpoint",
     "mindroom.agents",
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
@@ -107,6 +108,7 @@ depends_on = [
     "mindroom.history.runtime",
     "mindroom.history.types",
     "mindroom.history.interrupted_replay",
+    "mindroom.history.continuation_checkpoint",
     "mindroom.hooks",
     "mindroom.llm_request_logging",
     "mindroom.logging_config",
@@ -134,6 +136,7 @@ visibility = ["mindroom.ai"]
 [[modules]]
 path = "mindroom.response_turn"
 depends_on = [
+    "mindroom.active_turn_checkpoint",
     "mindroom.ai_runtime",
     "mindroom.ai_turn_state",
     "mindroom.cancellation",
@@ -170,6 +173,19 @@ visibility = ["mindroom.response_turn"]
 path = "mindroom.dynamic_tool_continuation"
 depends_on = []
 visibility = ["mindroom.response_turn"]
+
+[[modules]]
+path = "mindroom.active_turn_checkpoint"
+depends_on = [
+    "mindroom.history.policy",
+    "mindroom.redaction",
+    "mindroom.token_budget",
+]
+visibility = [
+    "mindroom.ai",
+    "mindroom.history.continuation_checkpoint",
+    "mindroom.response_turn",
+]
 
 [[modules]]
 path = "mindroom.agents"
@@ -245,6 +261,7 @@ depends_on = [
 visibility = [
     "mindroom.agents",
     "mindroom.conversation_state_writer",
+    "mindroom.history.continuation_checkpoint",
     "mindroom.history.interrupted_replay",
     "mindroom.history.runtime",
     "mindroom.memory.auto_flush",
@@ -1058,6 +1075,14 @@ visibility = [
     "mindroom.response_runner",
     "mindroom.teams",
 ]
+
+[[modules]]
+path = "mindroom.history.continuation_checkpoint"
+depends_on = [
+    "mindroom.agent_storage",
+    "mindroom.history.storage",
+]
+visibility = ["mindroom.ai"]
 
 [[modules]]
 path = "mindroom.history.turn_recorder"

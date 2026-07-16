@@ -25,6 +25,12 @@ from agno.run.agent import (
 from agno.run.base import RunStatus
 
 from mindroom import ai_runtime
+from mindroom.active_turn_checkpoint import (
+    ActiveTurnCheckpointRecord,
+    ActiveTurnContextGuard,
+    build_active_turn_context_guard,
+    install_active_turn_checkpoint_hook,
+)
 from mindroom.agents import create_agent
 from mindroom.ai_run_metadata import (
     build_ai_run_metadata_content,
@@ -34,6 +40,7 @@ from mindroom.ai_run_metadata import (
 )
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
+from mindroom.history.continuation_checkpoint import persist_continuation_checkpoint
 from mindroom.history.interrupted_replay import (
     persist_interrupted_replay,
     split_interrupted_tool_trace,
@@ -95,6 +102,7 @@ if TYPE_CHECKING:
     from agno.knowledge.knowledge import Knowledge
     from agno.models.base import Model
     from agno.models.response import ToolExecution
+    from agno.session.agent import AgentSession
     from agno.tools.function import Function
 
     from mindroom.ai_turn_state import AITurnState
@@ -195,6 +203,7 @@ class _PreparedAgentRun:
     # this snapshot instead of re-resolving, because the per-thread override
     # store can change mid-run (for example via the thread_model tool).
     runtime_model_name: str
+    runtime_context_window: int | None = None
 
     @property
     def prompt_text(self) -> str:
@@ -353,6 +362,7 @@ class _AgentTurnCallbacks:
     close_runtime_dbs: Callable[[ScopeSessionContext | None], None]
     discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
     persist_standalone_replay: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None]
+    persist_continuation_checkpoint: Callable[[ScopeSessionContext | None, ActiveTurnCheckpointRecord], bool]
 
 
 def _build_agent_turn_callbacks(
@@ -425,6 +435,23 @@ def _build_agent_turn_callbacks(
             original_status=snapshot.original_status,
         )
 
+    def _persist_continuation_checkpoint(
+        scope_context: ScopeSessionContext | None,
+        record: ActiveTurnCheckpointRecord,
+    ) -> bool:
+        if scope_context is None or record.session_id is None or record.run_id is None:
+            return False
+        persist_continuation_checkpoint(
+            storage=scope_context.storage,
+            session=cast("AgentSession | None", scope_context.session),
+            session_id=record.session_id,
+            scope_id=scope_context.scope.scope_id,
+            run_id=record.run_id,
+            checkpoint=record.checkpoint,
+            run_metadata=record.run_metadata,
+        )
+        return True
+
     return _AgentTurnCallbacks(
         open_scope=_open_scope,
         on_scope_opened=_on_scope_opened,
@@ -432,6 +459,7 @@ def _build_agent_turn_callbacks(
         close_runtime_dbs=_close_runtime_dbs,
         discard_empty_run=_discard_empty_run,
         persist_standalone_replay=_persist_standalone_replay,
+        persist_continuation_checkpoint=_persist_continuation_checkpoint,
     )
 
 
@@ -460,6 +488,7 @@ class _AgentRunContext:
     run_input: list[Message]
     metadata: dict[str, Any] | None
     inline_media_fallback_prompt: str
+    checkpoint_guard: ActiveTurnContextGuard | None = None
 
     @property
     def agent_name(self) -> str:
@@ -1220,6 +1249,7 @@ async def _prepare_agent_and_prompt(
         unseen_event_ids=unseen_event_ids,
         prepared_history=prepared_history,
         runtime_model_name=runtime_model.model_name,
+        runtime_context_window=runtime_model.context_window,
     )
 
 
@@ -1276,7 +1306,14 @@ async def _prepare_agent_run_context(
         note_prepared_history_timing(pipeline_timing, prepared_run.prepared_history)
 
     agent = prepared_run.agent
+    checkpoint_guard = build_active_turn_context_guard(
+        context_window_tokens=prepared_run.runtime_context_window,
+        headroom_tokens=config.resolve_entity(ctx.entity_label).compaction_config.reserve_tokens,
+        prepared_context_tokens=prepared_run.prepared_history.prepared_context_tokens,
+    )
     if agent.model is not None:
+        if checkpoint_guard is not None:
+            install_active_turn_checkpoint_hook(agent.model, checkpoint_guard)
         ai_runtime.install_queued_message_notice_hook(
             agent.model,
             notice_text=config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
@@ -1306,6 +1343,7 @@ async def _prepare_agent_run_context(
         run_input=prepared_run.run_input,
         metadata=metadata,
         inline_media_fallback_prompt=config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT"),
+        checkpoint_guard=checkpoint_guard,
     )
 
 
@@ -1556,6 +1594,7 @@ async def ai_response(  # noqa: C901
             tool_executions=tuple(response.tools or ()),
             completed_tools=tuple(response_tool_trace),
             metadata_content=metadata_content,
+            checkpoint_trigger=run_context.checkpoint_guard.trigger if run_context.checkpoint_guard else None,
         )
 
     adapter = BlockingTurnAdapter(
@@ -1569,6 +1608,7 @@ async def ai_response(  # noqa: C901
         discard_empty_run=callbacks.discard_empty_run,
         on_scope_opened=callbacks.on_scope_opened,
         persist_standalone_replay=callbacks.persist_standalone_replay,
+        persist_continuation_checkpoint=callbacks.persist_continuation_checkpoint,
     )
     return await run_blocking_response_turn(
         ctx,
@@ -1589,6 +1629,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
     stream_generator: AsyncIterator[object],
     *,
     state: _StreamingAttemptState,
+    checkpoint_guard: ActiveTurnContextGuard | None = None,
     show_tool_calls: bool,
     agent_name: str,
     media_inputs: MediaInputs,
@@ -1659,6 +1700,11 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
 
             if isinstance(event, ModelRequestCompletedEvent):
                 _track_model_request_metrics(state, event)
+                if checkpoint_guard is not None:
+                    checkpoint_guard.observe_model_request(
+                        input_tokens=event.input_tokens,
+                        output_tokens=event.output_tokens,
+                    )
                 continue
 
             if isinstance(event, RunCompletedEvent):
@@ -1761,6 +1807,7 @@ async def _stream_agent_attempt_chunks(
         async for stream_chunk in _process_stream_events(
             stream_generator,
             state=state,
+            checkpoint_guard=run_context.checkpoint_guard,
             show_tool_calls=show_tool_calls,
             agent_name=run_context.agent_name,
             media_route=attempt.media_route,
@@ -2120,6 +2167,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 tool_executions=tuple(state.completed_tool_executions),
                 completed_tools=tuple(state.completed_tools),
                 metadata_content=metadata_content,
+                checkpoint_trigger=run_context.checkpoint_guard.trigger if run_context.checkpoint_guard else None,
             ),
         )
 
@@ -2134,6 +2182,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         finalize_attempt=_finalize_streaming_attempt,
         make_text_chunk=lambda text: RunContentEvent(content=text),
         persist_standalone_replay=callbacks.persist_standalone_replay,
+        persist_continuation_checkpoint=callbacks.persist_continuation_checkpoint,
     )
     response_stream = stream_response_turn(
         ctx,

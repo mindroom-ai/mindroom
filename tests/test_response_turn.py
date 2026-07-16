@@ -9,9 +9,16 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from agno.models.message import Message
 from agno.models.response import ToolExecution
 from agno.run.base import RunStatus
 
+from mindroom.active_turn_checkpoint import (
+    ACTIVE_TURN_CHECKPOINT_LIMIT,
+    ActiveTurnCheckpointRecord,
+    ActiveTurnCheckpointTrigger,
+    build_active_turn_context_guard,
+)
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
 from mindroom.response_turn import (
     AttemptResolved,
@@ -31,6 +38,7 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
+from mindroom.token_budget import estimate_compaction_input_tokens
 from mindroom.tool_system.events import ToolTraceEntry
 
 if TYPE_CHECKING:
@@ -123,6 +131,15 @@ def _dynamic_tool_execution(tool_name: str = "sleep") -> ToolExecution:
     )
 
 
+def _checkpoint_trigger() -> ActiveTurnCheckpointTrigger:
+    return ActiveTurnCheckpointTrigger(
+        estimated_input_tokens=90,
+        input_limit_tokens=80,
+        context_window_tokens=100,
+        used_actual_input_tokens=True,
+    )
+
+
 def _ctx(**overrides: object) -> ResponseTurnContext:
     values: dict[str, Any] = {
         "entity_label": "helper",
@@ -160,6 +177,7 @@ class _AdapterLog:
     finalized: int = 0
     discards: list[EmptyRunDiscard] = field(default_factory=list)
     persisted: list[StandaloneReplaySnapshot] = field(default_factory=list)
+    checkpoints: list[ActiveTurnCheckpointRecord] = field(default_factory=list)
     snapshot: TurnPartialSnapshot = field(default_factory=TurnPartialSnapshot)
 
 
@@ -176,10 +194,18 @@ def _blocking_adapter(
     run_attempt: Callable[[TurnRunState, DynamicContinuationRunState], Awaitable[Any]],
     *,
     with_standalone_replay: bool = True,
+    checkpoint_persisted: bool = True,
     unexpected_error_text: Callable[[Exception], str] | None = None,
 ) -> BlockingTurnAdapter:
     def _persist(_scope: ScopeSessionContext | None, snapshot: StandaloneReplaySnapshot) -> None:
         log.persisted.append(snapshot)
+
+    def _persist_checkpoint(
+        _scope: ScopeSessionContext | None,
+        record: ActiveTurnCheckpointRecord,
+    ) -> bool:
+        log.checkpoints.append(record)
+        return checkpoint_persisted
 
     return BlockingTurnAdapter(
         open_scope=_open_scope_factory(log),
@@ -191,6 +217,7 @@ def _blocking_adapter(
         finalize_attempt=lambda _scope: _bump(log, "finalized"),
         unexpected_error_text=unexpected_error_text,
         persist_standalone_replay=_persist if with_standalone_replay else None,
+        persist_continuation_checkpoint=_persist_checkpoint,
     )
 
 
@@ -202,10 +229,18 @@ def _streaming_adapter(
     ],
     *,
     with_standalone_replay: bool = True,
+    checkpoint_persisted: bool = True,
     unexpected_error_text: Callable[[Exception], str] | None = None,
 ) -> StreamingTurnAdapter[str]:
     def _persist(_scope: ScopeSessionContext | None, snapshot: StandaloneReplaySnapshot) -> None:
         log.persisted.append(snapshot)
+
+    def _persist_checkpoint(
+        _scope: ScopeSessionContext | None,
+        record: ActiveTurnCheckpointRecord,
+    ) -> bool:
+        log.checkpoints.append(record)
+        return checkpoint_persisted
 
     return StreamingTurnAdapter[str](
         open_scope=_open_scope_factory(log),
@@ -218,6 +253,7 @@ def _streaming_adapter(
         finalize_attempt=lambda _scope: _bump(log, "finalized"),
         unexpected_error_text=unexpected_error_text,
         persist_standalone_replay=_persist if with_standalone_replay else None,
+        persist_continuation_checkpoint=_persist_checkpoint,
     )
 
 
@@ -500,6 +536,211 @@ def test_blocking_continuation_advances_and_resets_turn_state() -> None:
     assert recorder.synced_calls[-1]["completed_tools"] == [first_trace]
     # The final recording carries the first attempt's tools plus the second's.
     assert recorder.completed_calls[-1]["completed_tools"] == [first_trace, _trace("sleep")]
+
+
+def test_blocking_tool_heavy_sequence_checkpoints_and_finishes_below_limit() -> None:
+    """A synthetic long tool sequence splits into fresh internal runs and completes."""
+    log = _AdapterLog()
+    recorder = _FakeTurnRecorder()
+    prompts: list[str] = []
+    provider_inputs: list[int] = []
+    completed_tool_count = 0
+    all_tools = tuple(
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name=f"tool-{index}",
+            result_preview=f"artifact-{index}.txt",
+        )
+        for index in range(12)
+    )
+
+    async def _attempt(
+        _run: TurnRunState,
+        continuation: DynamicContinuationRunState,
+    ) -> CompletedAttempt:
+        nonlocal completed_tool_count
+        prompts.append(continuation.active_prompt)
+        prepared_tokens = max(500, estimate_compaction_input_tokens(continuation.active_prompt) + 300)
+        guard = build_active_turn_context_guard(
+            context_window_tokens=8_000,
+            headroom_tokens=2_000,
+            prepared_context_tokens=prepared_tokens,
+        )
+        assert guard is not None
+        messages = [Message(role="user", content=continuation.active_prompt)]
+        attempt_tools: list[ToolTraceEntry] = []
+        while completed_tool_count < len(all_tools):
+            provider_inputs.append(guard.prepared_context_tokens + guard.unaccounted_tool_tokens)
+            tool = all_tools[completed_tool_count]
+            assistant = Message(role="assistant", content=f"Calling {tool.tool_name}")
+            result = Message(
+                role="tool",
+                tool_call_id=f"call-{completed_tool_count}",
+                tool_name=tool.tool_name,
+                content=f"artifact-{completed_tool_count}.txt\n" + "r" * 3_000,
+            )
+            messages.extend((assistant, result))
+            attempt_tools.append(tool)
+            completed_tool_count += 1
+            if guard.checkpoint_after_tool_boundary(messages=messages, function_call_results=[result]):
+                assert guard.trigger is not None
+                return CompletedAttempt(
+                    run_id=f"run-checkpoint-{len(prompts)}",
+                    attempt_run_id=f"run-checkpoint-{len(prompts)}",
+                    replayable_text="Collected another bounded batch of results.",
+                    completed_tools=tuple(attempt_tools),
+                    checkpoint_trigger=guard.trigger,
+                )
+        return CompletedAttempt(
+            response_text="finished",
+            replayable_text="finished",
+            has_visible_content=True,
+            run_id="run-final",
+            attempt_run_id="run-final",
+            completed_tools=(*attempt_tools, _trace("finalize")),
+        )
+
+    result = asyncio.run(
+        run_blocking_response_turn(
+            _ctx(),
+            _blocking_adapter(log, _attempt),
+            TurnSinks(turn_recorder=cast("Any", recorder)),
+            continuation=_continuation("produce the report"),
+        ),
+    )
+
+    assert result == "finished"
+    assert max(provider_inputs) < 6_000
+    assert 1 < len(prompts) <= 5
+    assert "ACTIVE TURN CHECKPOINT COMPLETED" in prompts[1]
+    assert len(log.checkpoints) == len(prompts) - 1
+    checkpoint = log.checkpoints[0].checkpoint.content
+    assert "Goal:\nproduce the report" in checkpoint
+    assert "Completed work:" in checkpoint
+    assert "Key results and artifact references:" in checkpoint
+    assert "Pending steps:" in checkpoint
+    assert recorder.completed_calls[-1]["completed_tools"] == [*all_tools, _trace("finalize")]
+
+
+def test_blocking_checkpoint_persistence_failure_stops_without_rerun() -> None:
+    """A failed durable checkpoint returns a clear fallback before another run."""
+    log = _AdapterLog()
+    attempts = 0
+
+    async def _attempt(_run: TurnRunState, _c: DynamicContinuationRunState) -> CompletedAttempt:
+        nonlocal attempts
+        attempts += 1
+        return CompletedAttempt(
+            run_id="run-checkpoint",
+            completed_tools=(_trace("write"),),
+            checkpoint_trigger=_checkpoint_trigger(),
+        )
+
+    result = asyncio.run(
+        run_blocking_response_turn(
+            _ctx(),
+            _blocking_adapter(log, _attempt, checkpoint_persisted=False),
+            TurnSinks(),
+            continuation=_continuation(),
+        ),
+    )
+
+    assert attempts == 1
+    assert "could not be saved safely" in result
+    assert len(log.checkpoints) == 1
+
+
+def test_blocking_checkpoint_continuation_count_is_bounded() -> None:
+    """Repeated safe checkpoints stop with preserved state at the hard limit."""
+    log = _AdapterLog()
+    attempts = 0
+
+    async def _attempt(_run: TurnRunState, _c: DynamicContinuationRunState) -> CompletedAttempt:
+        nonlocal attempts
+        attempts += 1
+        return CompletedAttempt(
+            run_id=f"run-checkpoint-{attempts}",
+            completed_tools=(_trace(f"tool-{attempts}"),),
+            checkpoint_trigger=_checkpoint_trigger(),
+        )
+
+    result = asyncio.run(
+        run_blocking_response_turn(
+            _ctx(),
+            _blocking_adapter(log, _attempt),
+            TurnSinks(),
+            continuation=_continuation(),
+        ),
+    )
+
+    assert attempts == ACTIVE_TURN_CHECKPOINT_LIMIT + 1
+    assert len(log.checkpoints) == attempts
+    assert "continuation limit was reached" in result
+
+
+def test_blocking_checkpoint_continuation_cancellation_retains_completed_tools() -> None:
+    """Cancellation after a checkpoint keeps earlier side-effecting tool results recorded."""
+    log = _AdapterLog()
+    recorder = _FakeTurnRecorder()
+    attempts = 0
+    completed = _trace("create_artifact")
+
+    async def _attempt(_run: TurnRunState, _c: DynamicContinuationRunState) -> CompletedAttempt:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return CompletedAttempt(
+                run_id="run-checkpoint",
+                attempt_run_id="run-checkpoint",
+                completed_tools=(completed,),
+                checkpoint_trigger=_checkpoint_trigger(),
+            )
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            run_blocking_response_turn(
+                _ctx(),
+                _blocking_adapter(log, _attempt),
+                TurnSinks(turn_recorder=cast("Any", recorder)),
+                continuation=_continuation(),
+            ),
+        )
+
+    assert len(log.checkpoints) == 1
+    assert recorder.interrupted_calls[-1]["completed_tools"] == [completed]
+
+
+def test_blocking_checkpoint_continuation_error_retains_completed_tools() -> None:
+    """A terminal provider error after continuation retains pre-checkpoint work."""
+    log = _AdapterLog()
+    recorder = _FakeTurnRecorder()
+    attempts = 0
+    completed = _trace("send_request")
+
+    async def _attempt(_run: TurnRunState, _c: DynamicContinuationRunState) -> CompletedAttempt | ExcludedAttempt:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return CompletedAttempt(
+                run_id="run-checkpoint",
+                attempt_run_id="run-checkpoint",
+                completed_tools=(completed,),
+                checkpoint_trigger=_checkpoint_trigger(),
+            )
+        return ExcludedAttempt(RunStatus.error, response_text="provider failed")
+
+    result = asyncio.run(
+        run_blocking_response_turn(
+            _ctx(),
+            _blocking_adapter(log, _attempt),
+            TurnSinks(turn_recorder=cast("Any", recorder)),
+            continuation=_continuation(),
+        ),
+    )
+
+    assert result == "provider failed"
+    assert recorder.interrupted_calls[-1]["completed_tools"] == [completed]
 
 
 def test_blocking_continuation_limit_returns_limit_message() -> None:
@@ -971,6 +1212,49 @@ def test_streaming_continuation_advances_then_finishes() -> None:
     assert chunks == ["loading tool", "final answer"]
     assert len(prompts) == 2
     assert "DYNAMIC TOOL CALL COMPLETED" in prompts[1]
+    assert log.released == 1
+    assert log.finalized == 2
+
+
+def test_streaming_checkpoint_continues_and_finalizes_each_attempt() -> None:
+    """Streaming keeps one visible turn while checkpointed attempts clean up normally."""
+    log = _AdapterLog()
+    prompts: list[str] = []
+
+    async def _attempt(
+        _run: TurnRunState,
+        continuation: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        prompts.append(continuation.active_prompt)
+        if len(prompts) == 1:
+            yield "tool progress"
+            yield AttemptResolved(
+                CompletedAttempt(
+                    run_id="run-checkpoint",
+                    attempt_run_id="run-checkpoint",
+                    replayable_text="tool progress",
+                    completed_tools=(_trace("write"),),
+                    checkpoint_trigger=_checkpoint_trigger(),
+                ),
+            )
+            return
+        yield "final answer"
+        yield AttemptResolved(CompletedAttempt(replayable_text="final answer", has_visible_content=True))
+
+    chunks = asyncio.run(
+        _collect(
+            stream_response_turn(
+                _ctx(),
+                _streaming_adapter(log, _attempt),
+                TurnSinks(),
+                continuation=_continuation("original ask"),
+            ),
+        ),
+    )
+
+    assert chunks == ["tool progress", "final answer"]
+    assert len(log.checkpoints) == 1
+    assert "ACTIVE TURN CHECKPOINT COMPLETED" in prompts[1]
     assert log.released == 1
     assert log.finalized == 2
 

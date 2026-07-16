@@ -27,6 +27,12 @@ from uuid import uuid4
 from agno.run.base import RunStatus
 
 from mindroom import ai_runtime
+from mindroom.active_turn_checkpoint import (
+    ACTIVE_TURN_CHECKPOINT_LIMIT,
+    ActiveTurnCheckpointRecord,
+    ActiveTurnCheckpointTrigger,
+    build_active_turn_checkpoint,
+)
 from mindroom.ai_turn_state import AITurnState
 from mindroom.cancellation import build_cancelled_error
 from mindroom.constants import (
@@ -270,6 +276,7 @@ class CompletedAttempt:
     tool_executions: tuple[ToolExecution, ...] = ()
     completed_tools: tuple[ToolTraceEntry, ...] = ()
     metadata_content: dict[str, Any] | None = None
+    checkpoint_trigger: ActiveTurnCheckpointTrigger | None = None
 
 
 @dataclass(frozen=True)
@@ -342,6 +349,9 @@ class BlockingTurnAdapter:
     finalize_attempt: Callable[[ScopeSessionContext | None], None] | None = None
     unexpected_error_text: Callable[[Exception], str] | None = None
     persist_standalone_replay: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None] | None = None
+    persist_continuation_checkpoint: Callable[[ScopeSessionContext | None, ActiveTurnCheckpointRecord], bool] | None = (
+        None
+    )
 
 
 @dataclass(frozen=True)
@@ -362,12 +372,15 @@ class StreamingTurnAdapter[ChunkT]:
     finalize_attempt: Callable[[ScopeSessionContext | None], None] | None = None
     unexpected_error_text: Callable[[Exception], str] | None = None
     persist_standalone_replay: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None] | None = None
+    persist_continuation_checkpoint: Callable[[ScopeSessionContext | None, ActiveTurnCheckpointRecord], bool] | None = (
+        None
+    )
 
 
 def _raise_continuation_budget_exhausted() -> NoReturn:
-    # The continuation loop always settles on its final iteration: at the limit
-    # the decision carries a limit_message and never asks to continue.
-    msg = "dynamic tool continuation loop must return within its iteration budget"
+    # Every continuation type settles on its final iteration rather than asking
+    # for an unbounded additional provider run.
+    msg = "response turn continuation loop must return within its iteration budget"
     raise AssertionError(msg)
 
 
@@ -663,6 +676,7 @@ def _settle_blocking_attempt(
         continuation,
         discard_empty_run=adapter.discard_empty_run,
         release_attempt_entity=adapter.release_attempt_entity,
+        persist_continuation_checkpoint=adapter.persist_continuation_checkpoint,
         continuation_count=continuation_count,
     )
     if settle.keep_going:
@@ -700,6 +714,92 @@ class _CompletionSettle:
     response_text: str
 
 
+def _settle_active_turn_checkpoint(
+    ctx: ResponseTurnContext,
+    sinks: TurnSinks,
+    run: TurnRunState,
+    resolution: CompletedAttempt,
+    continuation: DynamicContinuationRunState,
+    *,
+    release_attempt_entity: Callable[[ScopeSessionContext | None], None],
+    persist_continuation_checkpoint: (Callable[[ScopeSessionContext | None, ActiveTurnCheckpointRecord], bool] | None),
+    continuation_count: int,
+) -> _CompletionSettle | None:
+    """Persist one safe boundary and either continue or return a clear fallback."""
+    trigger = resolution.checkpoint_trigger
+    if trigger is None:
+        return None
+    completed_tools_for_turn = run.turn_state.completed_tools_for(resolution.completed_tools)
+    checkpoint = build_active_turn_checkpoint(
+        goal=continuation.original_prompt,
+        partial_text=resolution.replayable_text,
+        completed_tools=completed_tools_for_turn,
+        trigger=trigger,
+    )
+    record = ActiveTurnCheckpointRecord(
+        session_id=resolution.session_id or ctx.session_id,
+        run_id=resolution.run_id or resolution.attempt_run_id,
+        checkpoint=checkpoint,
+        run_metadata=run.run_metadata,
+    )
+    persisted = False
+    if persist_continuation_checkpoint is not None:
+        try:
+            persisted = persist_continuation_checkpoint(run.scope_context, record)
+        except Exception:
+            logger.exception("Failed to persist active-turn continuation checkpoint", entity=ctx.entity_label)
+    if not persisted:
+        fallback = (
+            "I stopped before starting another internal run because the active-turn checkpoint could not be "
+            "saved safely. Completed tool calls were not replayed."
+        )
+        return _CompletionSettle(
+            keep_going=False,
+            continuation=continuation,
+            recorded_text=fallback,
+            recorded_tools=resolution.completed_tools,
+            response_text=fallback,
+        )
+    if continuation_count >= ACTIVE_TURN_CHECKPOINT_LIMIT:
+        fallback = (
+            "I stopped after saving the active-turn checkpoint because the continuation limit was reached. "
+            "Completed work is preserved; send a new message to resume from it."
+        )
+        logger.warning(
+            "Active-turn continuation limit reached",
+            entity=ctx.entity_label,
+            continuation_count=continuation_count,
+        )
+        return _CompletionSettle(
+            keep_going=False,
+            continuation=continuation,
+            recorded_text=fallback,
+            recorded_tools=resolution.completed_tools,
+            response_text=fallback,
+        )
+    logger.info(
+        "Active-turn checkpoint persisted",
+        entity=ctx.entity_label,
+        estimated_input_tokens=trigger.estimated_input_tokens,
+        input_limit_tokens=trigger.input_limit_tokens,
+        used_actual_input_tokens=trigger.used_actual_input_tokens,
+    )
+    return _CompletionSettle(
+        keep_going=True,
+        continuation=_advance_turn_continuation(
+            sinks,
+            release_attempt_entity,
+            run,
+            resolution,
+            continuation,
+            next_prompt=checkpoint.continuation_prompt,
+        ),
+        recorded_text="",
+        recorded_tools=(),
+        response_text="",
+    )
+
+
 def _settle_completed_attempt(
     ctx: ResponseTurnContext,
     sinks: TurnSinks,
@@ -709,6 +809,7 @@ def _settle_completed_attempt(
     *,
     discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None],
     release_attempt_entity: Callable[[ScopeSessionContext | None], None],
+    persist_continuation_checkpoint: (Callable[[ScopeSessionContext | None, ActiveTurnCheckpointRecord], bool] | None),
     continuation_count: int,
 ) -> _CompletionSettle:
     """Settle one completed attempt into a record/deliver plan or a continuation."""
@@ -738,6 +839,18 @@ def _settle_completed_attempt(
             recorded_tools=(),
             response_text=ai_runtime.EMPTY_RESPONSE_NOTICE,
         )
+    checkpoint_settle = _settle_active_turn_checkpoint(
+        ctx,
+        sinks,
+        run,
+        resolution,
+        continuation,
+        release_attempt_entity=release_attempt_entity,
+        persist_continuation_checkpoint=persist_continuation_checkpoint,
+        continuation_count=continuation_count,
+    )
+    if checkpoint_settle is not None:
+        return checkpoint_settle
     decision = continuation_decision_from_tools(
         resolution.tool_executions,
         original_prompt=continuation.original_prompt,
@@ -852,6 +965,7 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                         continuation,
                         discard_empty_run=adapter.discard_empty_run,
                         release_attempt_entity=adapter.release_attempt_entity,
+                        persist_continuation_checkpoint=adapter.persist_continuation_checkpoint,
                         continuation_count=continuation_count,
                     )
                     continuation = settle.continuation

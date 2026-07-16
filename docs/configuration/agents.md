@@ -190,7 +190,8 @@ When the active runtime model has a known `context_window`, MindRoom always comp
 Automatic destructive compaction is enabled by default through `defaults.compaction`, but it runs only when raw history exceeds the hard replay budget for the next reply.
 `threshold_tokens` and `threshold_percent` set a soft trigger budget for planning metadata and compaction notices.
 Crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting.
-Use `reserve_tokens` to leave hard-budget headroom, use `model` to choose the summary model, or set `enabled: false` to disable automatic pre-reply compaction for this agent.
+Use `reserve_tokens` to leave hard-budget headroom and to trigger a fresh internal run after a completed direct-agent tool batch approaches the active model's input limit.
+Use `model` to choose the summary model, or set `enabled: false` to disable automatic pre-reply compaction for this agent.
 Replay safety always uses the active runtime model window.
 If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass.
 If the current reply needs required compaction to preserve usable history, MindRoom sends `Compacting history...`, compacts before the model call, and edits that same notice with the result.
