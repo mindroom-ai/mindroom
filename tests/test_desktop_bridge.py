@@ -241,7 +241,7 @@ def transport(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
 async def test_observe_only_bridge_returns_state_and_window_screenshot(transport: AsyncMock) -> None:
     """Observation returns semantic state and captures only that app window."""
     provider = FakeProvider()
-    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)  # type: ignore[arg-type]
+    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
 
     await bridge.on_to_device_event(_event(_command()))
 
@@ -259,7 +259,7 @@ async def test_list_apps_and_status_expose_only_coarse_local_authority(transport
     """The agent can discover allowed apps and local mode without a screenshot."""
     provider = FakeProvider()
     bridge = DesktopBridge(
-        client=object(),  # type: ignore[arg-type]
+        client=object(),
         provider=provider,
         policy=_policy(allow_control=True),
         clock=lambda: NOW_SECONDS,
@@ -282,7 +282,7 @@ async def test_list_apps_and_status_expose_only_coarse_local_authority(transport
 async def test_disallowed_app_is_rejected_before_provider_access(transport: AsyncMock) -> None:
     """Payload parameters cannot broaden the exact local app allowlist."""
     provider = FakeProvider()
-    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)  # type: ignore[arg-type]
+    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
 
     await bridge.on_to_device_event(_event(_command(parameters={"app": "com.example.Secret"})))
 
@@ -296,7 +296,7 @@ async def test_disallowed_app_is_rejected_before_provider_access(transport: Asyn
 async def test_get_state_survives_window_screenshot_failure(transport: AsyncMock) -> None:
     """A useful accessibility tree is returned even when pixels cannot be captured."""
     provider = FakeProvider(screenshot_error=True)
-    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)  # type: ignore[arg-type]
+    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
 
     await bridge.on_to_device_event(_event(_command("get_app_state")))
 
@@ -311,7 +311,7 @@ async def test_get_state_survives_window_screenshot_failure(transport: AsyncMock
 async def test_screenshot_action_still_requires_pixels(transport: AsyncMock) -> None:
     """An explicit screenshot request remains a normal retryable observation failure."""
     provider = FakeProvider(screenshot_error=True)
-    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)  # type: ignore[arg-type]
+    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
 
     await bridge.on_to_device_event(_event(_command("screenshot")))
 
@@ -324,7 +324,7 @@ async def test_screenshot_action_still_requires_pixels(transport: AsyncMock) -> 
 async def test_control_is_denied_without_local_lease(transport: AsyncMock) -> None:
     """Cloud configuration alone cannot enable semantic or fallback control."""
     provider = FakeProvider()
-    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)  # type: ignore[arg-type]
+    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
     command = _command(
         "click_element",
         parameters={"app": APP_ID, "state_id": "state-1", "element_index": 0},
@@ -345,7 +345,7 @@ async def test_control_lease_uses_monotonic_deadline(transport: AsyncMock) -> No
     monotonic_clock = [100.0]
     provider = FakeProvider()
     bridge = DesktopBridge(
-        client=object(),  # type: ignore[arg-type]
+        client=object(),
         provider=provider,
         policy=_policy(allow_control=True),
         clock=lambda: wall_clock[0],
@@ -372,7 +372,7 @@ async def test_semantic_action_returns_fresh_state_and_window_capture(transport:
     """A leased semantic action is followed by new indexes and app-scoped visual feedback."""
     provider = FakeProvider()
     bridge = DesktopBridge(
-        client=object(),  # type: ignore[arg-type]
+        client=object(),
         provider=provider,
         policy=_policy(allow_control=True),
         clock=lambda: NOW_SECONDS,
@@ -402,7 +402,7 @@ async def test_bridge_allows_empty_semantic_value_but_rejects_shortcut_chord(tra
     """Clearing a field is supported while global keyboard shortcuts stay local-policy errors."""
     provider = FakeProvider()
     bridge = DesktopBridge(
-        client=object(),  # type: ignore[arg-type]
+        client=object(),
         provider=provider,
         policy=_policy(allow_control=True),
         clock=lambda: NOW_SECONDS,
@@ -443,7 +443,7 @@ async def test_stale_state_is_a_safe_rejection_not_unknown_input(transport: Asyn
     """Local stale-state validation happens before fallback input is attempted."""
     provider = FakeProvider(stale_state=True)
     bridge = DesktopBridge(
-        client=object(),  # type: ignore[arg-type]
+        client=object(),
         provider=provider,
         policy=_policy(allow_control=True),
         clock=lambda: NOW_SECONDS,
@@ -468,7 +468,7 @@ async def test_completed_action_is_partial_when_follow_up_state_fails(transport:
     """A post-action observation failure warns against retrying known-completed input."""
     provider = FakeProvider(state_error_after=0)
     bridge = DesktopBridge(
-        client=object(),  # type: ignore[arg-type]
+        client=object(),
         provider=provider,
         policy=_policy(allow_control=True),
         clock=lambda: NOW_SECONDS,
@@ -496,7 +496,7 @@ async def test_completed_action_is_partial_when_follow_up_capture_fails(transpor
     """A capture failure after fresh state warns against retrying the action."""
     provider = FakeProvider(screenshot_error=True)
     bridge = DesktopBridge(
-        client=object(),  # type: ignore[arg-type]
+        client=object(),
         provider=provider,
         policy=_policy(allow_control=True),
         clock=lambda: NOW_SECONDS,
@@ -523,7 +523,7 @@ async def test_unexpected_control_failure_reports_unknown_outcome(transport: Asy
     """An input exception cannot make a potentially completed action look retryable."""
     provider = FakeProvider(click_error=True)
     bridge = DesktopBridge(
-        client=object(),  # type: ignore[arg-type]
+        client=object(),
         provider=provider,
         policy=_policy(allow_control=True),
         clock=lambda: NOW_SECONDS,
@@ -556,7 +556,7 @@ async def test_completed_action_is_partial_when_upload_fails(
     )
     provider = FakeProvider()
     bridge = DesktopBridge(
-        client=object(),  # type: ignore[arg-type]
+        client=object(),
         provider=provider,
         policy=_policy(allow_control=True),
         clock=lambda: NOW_SECONDS,
@@ -581,7 +581,7 @@ async def test_completed_action_is_partial_when_upload_fails(
 async def test_requester_agent_replay_and_sequence_are_enforced(transport: AsyncMock) -> None:
     """Provenance and idempotency remain enforced before reading the allowed app."""
     provider = FakeProvider()
-    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)  # type: ignore[arg-type]
+    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
 
     await bridge.on_to_device_event(_event(_command(requester_id="@mallory:example.org")))
     assert not _response(transport).ok
@@ -601,7 +601,7 @@ async def test_emergency_stop_latches_control_off_until_local_restart(transport:
     """Moving to the fail-safe corner revokes later input in the same process."""
     provider = FakeProvider(emergency_stop=True)
     bridge = DesktopBridge(
-        client=object(),  # type: ignore[arg-type]
+        client=object(),
         provider=provider,
         policy=_policy(allow_control=True),
         clock=lambda: NOW_SECONDS,

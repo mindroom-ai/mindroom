@@ -52,7 +52,7 @@ def _event(response: DesktopResponse) -> AuthenticatedToDeviceEvent:
 async def test_request_waits_for_exact_correlated_response(monkeypatch: pytest.MonkeyPatch) -> None:
     """Only matching request and session IDs from the pinned device resolve a waiter."""
     client = FakeClient()
-    router = DesktopResponseRouter(client)  # type: ignore[arg-type]
+    router = DesktopResponseRouter(client)
     send = AsyncMock()
     monkeypatch.setattr("mindroom.desktop.client.send_encrypted_to_device", send)
     monkeypatch.setattr("mindroom.desktop.client.authenticated_sender_matches", lambda *_args: True)
@@ -74,7 +74,7 @@ async def test_request_waits_for_exact_correlated_response(monkeypatch: pytest.M
 async def test_request_timeout_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     """An offline desktop cannot hold an agent tool call open indefinitely."""
     client = FakeClient()
-    router = DesktopResponseRouter(client)  # type: ignore[arg-type]
+    router = DesktopResponseRouter(client)
     monkeypatch.setattr("mindroom.desktop.client.send_encrypted_to_device", AsyncMock())
 
     with pytest.raises(DesktopRequestError, match="did not answer"):
@@ -85,7 +85,7 @@ async def test_request_timeout_is_bounded(monkeypatch: pytest.MonkeyPatch) -> No
 async def test_control_timeout_reports_unknown_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
     """A timed-out control action cannot be presented as safe to retry."""
     client = FakeClient()
-    router = DesktopResponseRouter(client)  # type: ignore[arg-type]
+    router = DesktopResponseRouter(client)
     monkeypatch.setattr("mindroom.desktop.client.send_encrypted_to_device", AsyncMock())
 
     with pytest.raises(DesktopRequestError, match=r"outcome is unknown.*do not repeat"):
@@ -96,7 +96,7 @@ async def test_control_timeout_reports_unknown_outcome(monkeypatch: pytest.Monke
 async def test_only_one_request_per_target_can_be_in_flight(monkeypatch: pytest.MonkeyPatch) -> None:
     """Parallel tool calls cannot reorder or preplan multiple desktop actions."""
     client = FakeClient()
-    router = DesktopResponseRouter(client)  # type: ignore[arg-type]
+    router = DesktopResponseRouter(client)
     send = AsyncMock()
     monkeypatch.setattr("mindroom.desktop.client.send_encrypted_to_device", send)
 
