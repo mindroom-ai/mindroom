@@ -457,8 +457,7 @@ def test_agent_forgets_persisted_invited_room_after_being_kicked(
         runtime_paths=runtime_paths_for(config),
     )
     room_id = "!agent-call:localhost"
-    bot._room_lifecycle.invited_rooms = {room_id}
-    bot._room_lifecycle.save_invited_rooms()
+    bot._room_lifecycle._update_invited_room(room_id, remember=True)
     bot._room_lifecycle.forget_invited_room(room_id)
 
     assert bot._room_lifecycle.invited_rooms == set()

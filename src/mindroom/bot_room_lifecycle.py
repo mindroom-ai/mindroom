@@ -131,12 +131,6 @@ class BotRoomLifecycle:
             return set()
         return load_invited_rooms(self.invited_rooms_file_path())
 
-    def save_invited_rooms(self) -> None:
-        """Persist invited room IDs for one eligible entity."""
-        if not self.should_persist_invited_rooms():
-            return
-        save_invited_rooms(self.invited_rooms_file_path(), self.invited_rooms)
-
     def forget_invited_room(self, room_id: str) -> None:
         """Stop preserving an ad-hoc room after this bot leaves it."""
         if not self.should_persist_invited_rooms():
