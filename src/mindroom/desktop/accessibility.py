@@ -226,7 +226,6 @@ class MacAccessibilityBackend:
 
         self._allowed_app_ids = allowed_app_ids
         self._screen_size = screen_size
-        self._appkit: Any = AppKit
         self._services: Any = ApplicationServices
         self._workspace: _Workspace = AppKit.NSWorkspace.sharedWorkspace()  # ty: ignore[unresolved-attribute]
         self._states: dict[str, _StoredMacState] = {}
@@ -612,7 +611,7 @@ class MacAccessibilityBackend:
     def _activate(self, application: _RunningApplication | None) -> None:
         if application is None:
             return
-        activated = application.activateWithOptions_(self._appkit.NSApplicationActivateIgnoringOtherApps)
+        activated = application.activateWithOptions_(0)
         if not activated:
             msg = "Allowed application could not be focused before input."
             raise AccessibilityError(msg)

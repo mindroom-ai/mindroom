@@ -340,7 +340,12 @@ class DesktopBridge:
         self._sequence_high_watermarks[command.session_id] = command.sequence
         self._sequence_high_watermarks.move_to_end(command.session_id)
         while len(self._sequence_high_watermarks) > _MAX_TRACKED_SESSIONS:
-            self._sequence_high_watermarks.popitem(last=False)
+            evicted_session_id, _ = self._sequence_high_watermarks.popitem(last=False)
+            logger.warning(
+                "desktop_sequence_session_evicted",
+                session_id=evicted_session_id,
+                tracked_session_limit=_MAX_TRACKED_SESSIONS,
+            )
         return None
 
     async def _execute(self, command: DesktopCommand) -> _Execution:

@@ -31,6 +31,7 @@ class FakeRunningApplication:
     def __init__(self, pid: int = 42) -> None:
         self.pid = pid
         self.activation_hook: Callable[[], None] | None = None
+        self.activation_options: list[int] = []
 
     def bundleIdentifier(self) -> str:
         return "com.example.Editor"
@@ -44,7 +45,8 @@ class FakeRunningApplication:
     def isActive(self) -> bool:
         return True
 
-    def activateWithOptions_(self, _options: int) -> bool:
+    def activateWithOptions_(self, options: int) -> bool:
+        self.activation_options.append(options)
         if self.activation_hook is not None:
             self.activation_hook()
         return True
@@ -178,7 +180,6 @@ def _fake_mac_backend() -> tuple[MacAccessibilityBackend, FakeMacServices, FakeW
     backend = object.__new__(MacAccessibilityBackend)
     backend._allowed_app_ids = frozenset({"com.example.Editor"})
     backend._screen_size = lambda: (1920, 1080)
-    backend._appkit = SimpleNamespace(NSApplicationActivateIgnoringOtherApps=1)
     backend._services = services
     backend._workspace = workspace
     backend._states = {}
@@ -394,6 +395,7 @@ def test_mac_capture_rechecks_state_after_foregrounding_app() -> None:
 
     with pytest.raises(AccessibilityError, match="state changed"):
         backend.prepare_capture(state.app_id, state.state_id)
+    assert workspace.applications[0].activation_options == [0]
 
 
 def test_mac_element_scroll_rejects_bounds_outside_allowed_window() -> None:
