@@ -18,7 +18,9 @@ from mindroom.claude_prompt_cache import (
     TOOL_SEARCH_RESULT_BLOCK_TYPE,
     TOOL_SEARCH_TOOL_TYPE,
 )
+from mindroom.token_budget import stable_serialize
 from mindroom.vertex_claude_compat import (
+    _EXACT_COUNT_THRESHOLD_RATIO,
     _VERTEX_TOOL_SEARCH_TOKEN_RESERVE,
     MindroomVertexAIClaude,
     _request_for_vertex_token_count,
@@ -465,6 +467,44 @@ async def test_fit_request_messages_counts_exactly_at_half_budget() -> None:
             compress_tool_results=False,
         )
 
+    assert fitted is messages
+    counter.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_conservative_fallback_crossing_half_budget_delegates_to_exact_count() -> None:
+    """The byte fallback may deliberately cause an earlier Vertex count call."""
+    model = _model()
+    messages = [Message(role="user", content="hello")]
+    request_kwargs = {
+        "model": model.id,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    counter = AsyncMock(return_value=20)
+
+    with (
+        patch.object(model, "_request_input_kwargs", return_value=request_kwargs),
+        patch.object(model, "_count_request_input_tokens", new=counter),
+        patch("mindroom.vertex_claude_compat.count_schema_tokens", return_value=0),
+    ):
+        estimated_tokens = model._estimate_request_input_tokens(
+            messages,
+            tools=None,
+            response_format=None,
+            compress_tool_results=False,
+        )
+        fitted = await model._fit_request_messages(
+            messages,
+            tools=None,
+            response_format=None,
+            compress_tool_results=False,
+        )
+
+    assert estimated_tokens == len(stable_serialize(request_kwargs).encode("utf-8"))
+    assert model.context_window is not None
+    assert model.max_tokens is not None
+    exact_count_threshold = (model.context_window - model.max_tokens) * _EXACT_COUNT_THRESHOLD_RATIO
+    assert estimated_tokens >= exact_count_threshold
     assert fitted is messages
     counter.assert_awaited_once()
 

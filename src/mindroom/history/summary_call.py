@@ -18,9 +18,8 @@ It enforces the call-side half of the compaction invariants
    ``SummaryRetryPolicy`` decides which error classes warrant a smaller retry
    (timeouts and the named context-length fragments), the shrink schedule
    (halving), and the give-up floor — no inline string matching at call sites.
-   Empty or near-empty success responses also retry with less input because some
-   providers surface rejected or oversized requests as a successful response
-   carrying no useful summary.
+   Empty-text success responses also retry with less input because some providers
+   surface rejected or oversized requests as an empty successful response.
 
 5. Output-capped summaries use an explicit retry signal.
    ``generate_compaction_summary`` refuses to return a likely truncated summary,
@@ -56,10 +55,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
-# Compaction only summarizes substantial history, so fewer than 16 normalized
-# UTF-8 bytes represents the tiny-success class without inspecting wording or
-# structure. This is a defensive size heuristic, not semantic validation.
-_MIN_COMPACTION_SUMMARY_BYTES = 16
 
 _RETRYABLE_PROVIDER_ERROR_FRAGMENTS = (
     "timed out",
@@ -83,7 +78,7 @@ class CompactionSummaryOutputLimitError(RuntimeError):
 
 
 class _CompactionSummaryEmptyResultError(RuntimeError):
-    """Raised for a successful response below the defensive summary-size floor."""
+    """Raised when the summary model returns a success response with no text."""
 
 
 @dataclass(frozen=True)
@@ -92,7 +87,7 @@ class SummaryRetryPolicy:
 
     The schedule is deterministic: each shrinkable failure divides the input
     budget by ``shrink_divisor`` (clamped to ``floor_tokens``). Ordinary errors
-    stop at ``max_attempts``; empty or near-empty successes stop at
+    stop at ``max_attempts``; empty successes stop at
     ``empty_result_max_attempts``.
     """
 
@@ -275,15 +270,11 @@ async def generate_compaction_summary(
         raise exc.original from exc
     raw_text = response.content if isinstance(response.content, str) else ""
     normalized_text = _normalize_compaction_summary_text(raw_text)
-    normalized_bytes = len(normalized_text.encode("utf-8"))
-    output_tokens = _response_output_tokens(response)
-    is_near_empty = 0 < normalized_bytes < _MIN_COMPACTION_SUMMARY_BYTES
-    if not normalized_text or is_near_empty:
+    if not normalized_text:
         msg = (
-            "summary generation returned an empty or near-empty result "
-            f"(output_tokens={output_tokens}, "
-            f"has_reasoning={bool(response.reasoning_content or response.redacted_reasoning_content)}, "
-            f"normalized_bytes={normalized_bytes})"
+            "summary generation returned no result "
+            f"(output_tokens={_response_output_tokens(response)}, "
+            f"has_reasoning={bool(response.reasoning_content or response.redacted_reasoning_content)})"
         )
         raise _CompactionSummaryEmptyResultError(msg)
     if _summary_response_likely_truncated(response, output_token_limit=summary_output_limit):

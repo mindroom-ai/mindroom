@@ -679,7 +679,7 @@ async def test_generate_compaction_summary_empty_result_raises_typed_error_with_
     """An empty summary response raises the typed error carrying response diagnostics."""
     with pytest.raises(
         _CompactionSummaryEmptyResultError,
-        match=r"empty or near-empty result \(output_tokens=0, has_reasoning=False, normalized_bytes=0\)",
+        match=r"returned no result \(output_tokens=0, has_reasoning=False\)",
     ):
         await generate_compaction_summary(
             model=_RecordingClaude(
@@ -693,32 +693,17 @@ async def test_generate_compaction_summary_empty_result_raises_typed_error_with_
 
 
 @pytest.mark.asyncio
-async def test_generate_compaction_summary_rejects_near_empty_result() -> None:
-    with pytest.raises(_CompactionSummaryEmptyResultError, match=r"normalized_bytes=2"):
-        await generate_compaction_summary(
-            model=_RecordingClaude(
-                id="claude-sonnet-5",
-                response=ModelResponse(content="ok"),
-            ),
-            summary_input="conversation payload",
-            summary_prompt="Summarize the conversation.",
-        )
-
-
-@pytest.mark.asyncio
-async def test_generate_compaction_summary_accepts_defensive_byte_floor() -> None:
-    content = "1234567890abcdef"
-
+async def test_generate_compaction_summary_accepts_short_non_empty_result() -> None:
     summary = await generate_compaction_summary(
         model=_RecordingClaude(
             id="claude-sonnet-5",
-            response=ModelResponse(content=content),
+            response=ModelResponse(content="ok"),
         ),
         summary_input="conversation payload",
         summary_prompt="Summarize the conversation.",
     )
 
-    assert summary.summary == content
+    assert summary.summary == "ok"
 
 
 def test_retry_policy_shrinks_budget_for_empty_result() -> None:
