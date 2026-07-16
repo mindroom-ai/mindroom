@@ -48,9 +48,9 @@ When `config_manager` creates or updates an agent with one of these tools, it re
 Present that URL directly instead of asking the configuring agent to call the new tool, because newly configured tools are not guaranteed to enter the current run's tool schema.
 When the current agent already has a MindRoom-managed provider tool, call an appropriate safe status, read, or list operation to check its connection.
 For an OAuth MCP server, use its generated `*_connection_status` or `*_list_tools` operation.
-If the operation is disconnected, its structured `OAuthConnectionRequired` result includes `oauth_connection_required: true`, the exact scoped `connect_url`, and `requires_host_browser: true` when the URL uses localhost.
-Present `connect_url` directly instead of sending the user to the dashboard.
-When `requires_host_browser` is true, explain that the localhost link must be opened in a browser on the computer where MindRoom is running, not on a phone or another computer.
+If the operation is disconnected, its structured `OAuthConnectionRequired` result includes `oauth_connection_required: true`, a scoped `connect_url` when available, and `requires_host_browser: true` when the URL uses a supported loopback host.
+When `connect_url` is provided, present it directly instead of sending the user to the dashboard.
+When `requires_host_browser` is true, explain that the loopback URL (`localhost`, `127.0.0.1`, or `::1`) must be opened in a browser on the computer where MindRoom is running, not on a phone or another computer.
 After the user connects, have the target agent retry the safe operation or original request.
 The dashboard remains a manual alternative only when no `connect_url` is available.
 
