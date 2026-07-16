@@ -93,7 +93,7 @@ def _oauth_onboarding_guidance(
         for tool_name in updated_tools
         if tool_name not in previous_tool_names
         and (metadata := tool_metadata.get(tool_name)) is not None
-        and metadata.setup_type is SetupType.OAUTH
+        and metadata.setup_type == SetupType.OAUTH
         and metadata.auth_provider is not None
     ]
     if not added_oauth_tools:
