@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from agno.exceptions import ModelProviderError
+from agno.exceptions import ContextWindowExceededError
 from agno.media import Image
 from agno.models.message import Message
 from agno.models.response import ModelResponse
@@ -18,6 +18,7 @@ from mindroom.claude_prompt_cache import (
     TOOL_SEARCH_RESULT_BLOCK_TYPE,
     TOOL_SEARCH_TOOL_TYPE,
 )
+from mindroom.claude_stream_retry import install_claude_stream_retry_hook
 from mindroom.token_budget import stable_serialize
 from mindroom.vertex_claude_compat import (
     _EXACT_COUNT_THRESHOLD_RATIO,
@@ -539,7 +540,7 @@ async def test_fit_request_messages_rejects_current_turn_that_cannot_fit() -> No
     with (
         patch.object(model, "_estimate_request_input_tokens", return_value=40),
         patch.object(model, "_count_request_input_tokens", new=AsyncMock(return_value=90)),
-        pytest.raises(ModelProviderError, match="current turn"),
+        pytest.raises(ContextWindowExceededError, match="current turn"),
     ):
         await model._fit_request_messages(
             _tool_loop_messages(),
@@ -547,3 +548,27 @@ async def test_fit_request_messages_rejects_current_turn_that_cannot_fit() -> No
             response_format=None,
             compress_tool_results=False,
         )
+
+
+@pytest.mark.asyncio
+async def test_stream_retry_does_not_repeat_current_turn_fit_failure() -> None:
+    """The installed stream wrapper preserves one typed local fit failure."""
+    model = _model()
+    install_claude_stream_retry_hook(model)
+    counter = AsyncMock(return_value=90)
+
+    with (
+        patch.object(model, "_estimate_request_input_tokens", return_value=40) as estimator,
+        patch.object(model, "_count_request_input_tokens", new=counter),
+        pytest.raises(ContextWindowExceededError) as raised,
+    ):
+        _ = [
+            response
+            async for response in model.ainvoke_stream(
+                _tool_loop_messages(),
+                Message(role="assistant"),
+            )
+        ]
+
+    assert raised.value.message == "Vertex Claude current turn uses more than the 80-token input limit."
+    estimator.assert_called_once()
