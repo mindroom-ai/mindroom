@@ -22,7 +22,9 @@ if TYPE_CHECKING:
 
 PLAYWRIGHT_MCP_PACKAGE = "@playwright/mcp@0.0.78"
 _MAX_RESULT_CHARS = 32_000
+_MAX_RESULT_JSON_BYTES = 24_000
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024
+_TRUNCATION_SUFFIX = "\n…"
 _OBSERVE_ACTIONS = frozenset({"status", "profiles", "tabs", "snapshot", "screenshot", "console"})
 _CONTROL_ACTIONS = frozenset({"start", "stop", "open", "focus", "close", "navigate", "pdf", "upload", "dialog", "act"})
 BROWSER_ACTIONS = _OBSERVE_ACTIONS | _CONTROL_ACTIONS
@@ -110,6 +112,7 @@ class PlaywrightMCPBrowserProvider:
         self._queue: asyncio.Queue[_QueuedCall | None] | None = None
         self._actor_task: asyncio.Task[None] | None = None
         self._actor_lock = asyncio.Lock()
+        self._closed = False
 
     async def execute(self, action: str, parameters: dict[str, object]) -> BrowserProviderResult:
         """Translate the stable MindRoom browser surface into Playwright MCP calls."""
@@ -139,7 +142,7 @@ class PlaywrightMCPBrowserProvider:
             )
         if action == "stop":
             _reject_unexpected(parameters, frozenset())
-            await self.close()
+            await self._stop_actor(permanent=False)
             return BrowserProviderResult(
                 {
                     "action": action,
@@ -159,7 +162,7 @@ class PlaywrightMCPBrowserProvider:
                 _raise_result_error(action, last_result)
             if last_result is None:
                 msg = f"Browser action {action} did not produce an MCP call."
-                raise PlaywrightBrowserError(msg)
+                raise PlaywrightBrowserError(msg)  # noqa: TRY301
             return _provider_result(action, last_result, max_chars=_result_max_chars(parameters))
         except PlaywrightBrowserError as exc:
             if browser_action_requires_control(action):
@@ -172,8 +175,14 @@ class PlaywrightMCPBrowserProvider:
         return self._actor_task is not None and not self._actor_task.done()
 
     async def close(self) -> None:
-        """Stop the actor after its current call and close MCP in the owning task."""
+        """Permanently close the provider after its already queued calls finish."""
+        await self._stop_actor(permanent=True)
+
+    async def _stop_actor(self, *, permanent: bool) -> None:
+        """Stop the current actor, optionally rejecting every later MCP call."""
         async with self._actor_lock:
+            if permanent:
+                self._closed = True
             task = self._actor_task
             queue = self._queue
             self._actor_task = None
@@ -181,13 +190,16 @@ class PlaywrightMCPBrowserProvider:
             if task is None:
                 return
             if queue is not None:
-                await queue.put(None)
+                queue.put_nowait(None)
         await task
 
     async def _call_tool(self, tool_name: str, arguments: dict[str, object]) -> CallToolResult:
-        future: asyncio.Future[CallToolResult] = asyncio.get_running_loop().create_future()
-        queued_call = _QueuedCall(tool_name=tool_name, arguments=arguments, future=future)
         async with self._actor_lock:
+            if self._closed:
+                msg = "Playwright browser provider is closed."
+                raise PlaywrightBrowserError(msg)
+            future: asyncio.Future[CallToolResult] = asyncio.get_running_loop().create_future()
+            queued_call = _QueuedCall(tool_name=tool_name, arguments=arguments, future=future)
             if self.running:
                 assert self._queue is not None
                 self._queue.put_nowait(queued_call)
@@ -212,7 +224,7 @@ class PlaywrightMCPBrowserProvider:
         self._queue = queue
         self._actor_task = asyncio.create_task(self._run_actor(queue), name="playwright_mcp_extension")
 
-    async def _run_actor(self, queue: asyncio.Queue[_QueuedCall | None]) -> None:  # noqa: C901
+    async def _run_actor(self, queue: asyncio.Queue[_QueuedCall | None]) -> None:  # noqa: C901, PLR0912
         active: _QueuedCall | None = None
         try:
             parameters = StdioServerParameters(
@@ -375,7 +387,8 @@ def _mcp_calls(  # noqa: C901, PLR0911, PLR0912, PLR0915
         return [*prefix, _MCPCall("browser_handle_dialog", arguments)]
     if action == "act":
         _reject_unexpected(parameters, frozenset({"targetId", "request"}))
-        request = _string_keyed_object(parameters.get("request"), "Browser act requires a request object with string keys.")
+        error = "Browser act requires a request object with string keys."
+        request = _string_keyed_object(parameters.get("request"), error)
         return [*prefix, _act_call(request)]
     msg = f"Unsupported Playwright browser action: {action}."
     raise PlaywrightBrowserError(msg)
@@ -493,9 +506,7 @@ def _string_keyed_object(value: object, error_message: str) -> dict[str, object]
 
 def _provider_result(action: str, result: CallToolResult, *, max_chars: int) -> BrowserProviderResult:
     _raise_result_error(action, result)
-    text = _result_text(result)
-    if len(text) > max_chars:
-        text = text[:max_chars].rstrip() + "\n…"
+    text = _truncate_result_text(_result_text(result), max_chars=max_chars)
     images = [block for block in result.content if isinstance(block, ImageContent)]
     image = _browser_image(images[0]) if images else None
     return BrowserProviderResult(
@@ -519,9 +530,7 @@ def _result_text(result: CallToolResult) -> str:
 
 def _raise_result_error(action: str, result: CallToolResult) -> None:
     if result.isError:
-        text = _result_text(result)
-        if len(text) > _MAX_RESULT_CHARS:
-            text = text[:_MAX_RESULT_CHARS].rstrip() + "\n…"
+        text = _truncate_result_text(_result_text(result), max_chars=_MAX_RESULT_CHARS)
         raise PlaywrightBrowserError(text or f"Playwright MCP action {action} failed.")
 
 
@@ -628,10 +637,33 @@ def _optional_positive_int(parameters: Mapping[str, object], key: str) -> int | 
 def _browser_error(tool_name: str, exc: Exception) -> PlaywrightBrowserError:
     if isinstance(exc, PlaywrightBrowserError):
         return exc
-    detail = str(exc)
-    if len(detail) > _MAX_RESULT_CHARS:
-        detail = detail[:_MAX_RESULT_CHARS].rstrip() + "\n…"
-    return PlaywrightBrowserError(f"Playwright MCP {tool_name} failed: {detail}")
+    detail = f"Playwright MCP {tool_name} failed: {exc}"
+    return PlaywrightBrowserError(_truncate_result_text(detail, max_chars=_MAX_RESULT_CHARS))
+
+
+def _truncate_result_text(text: str, *, max_chars: int) -> str:
+    """Bound model-visible text by characters and its eventual nio JSON encoding."""
+    candidate = text[:max_chars]
+    truncated = len(candidate) < len(text)
+    rendered = candidate.rstrip() + (_TRUNCATION_SUFFIX if truncated else "")
+    if _json_string_size(rendered) <= _MAX_RESULT_JSON_BYTES:
+        return rendered
+
+    low = 0
+    high = len(candidate)
+    while low < high:
+        midpoint = (low + high + 1) // 2
+        rendered = candidate[:midpoint].rstrip() + _TRUNCATION_SUFFIX
+        if _json_string_size(rendered) <= _MAX_RESULT_JSON_BYTES:
+            low = midpoint
+        else:
+            high = midpoint - 1
+    return candidate[:low].rstrip() + _TRUNCATION_SUFFIX
+
+
+def _json_string_size(value: str) -> int:
+    """Return the bytes nio's default JSON encoder uses for one string value."""
+    return len(json.dumps(value, separators=(",", ":")).encode())
 
 
 __all__ = [

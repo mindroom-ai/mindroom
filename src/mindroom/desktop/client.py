@@ -57,6 +57,11 @@ class DesktopResponseRouter:
         timeout_seconds: float,
     ) -> DesktopResponse:
         """Send one command and wait for its exact pinned response."""
+        try:
+            command = DesktopCommand.from_content(command.to_content())
+        except DesktopProtocolError as exc:
+            msg = f"Desktop command is invalid and was not sent: {exc}"
+            raise DesktopRequestError(msg) from exc
         if command.request_id in self._pending:
             msg = f"Desktop request ID is already pending: {command.request_id}."
             raise DesktopRequestError(msg)

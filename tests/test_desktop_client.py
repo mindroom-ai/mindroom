@@ -107,6 +107,24 @@ async def test_request_timeout_is_bounded(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_invalid_command_is_rejected_before_delivery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A command the bridge cannot parse fails immediately without unknown-outcome guidance."""
+    client = FakeClient()
+    router = DesktopResponseRouter(client)
+    send = AsyncMock()
+    monkeypatch.setattr("mindroom.desktop.client.send_encrypted_to_device", send)
+    command = _command(action="click")
+    command.parameters["text"] = "x" * (16 * 1024 + 1)
+
+    with pytest.raises(DesktopRequestError, match="invalid and was not sent") as exc_info:
+        await router.request(TARGET, command, timeout_seconds=1)
+
+    assert "encoded bytes" in str(exc_info.value)
+    assert "outcome is unknown" not in str(exc_info.value)
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_request_timeout_includes_a_stuck_send(monkeypatch: pytest.MonkeyPatch) -> None:
     """Matrix delivery retries are covered by the same end-to-end tool deadline."""
     client = FakeClient()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -11,14 +12,15 @@ import pytest
 from mcp.types import CallToolResult, ImageContent, TextContent
 
 from mindroom.desktop.playwright_mcp import (
+    _MAX_RESULT_JSON_BYTES,
     PLAYWRIGHT_MCP_PACKAGE,
     PlaywrightActionOutcomeUnknownError,
     PlaywrightBrowserError,
     PlaywrightMCPBrowserProvider,
-    _QueuedCall,
     _act_call,
     _mcp_calls,
     _provider_result,
+    _QueuedCall,
     browser_action_requires_control,
 )
 
@@ -150,6 +152,16 @@ def test_provider_result_preserves_model_text_and_image() -> None:
     assert provider_result.image is not None
     assert provider_result.image.content == image_bytes
     assert provider_result.image.mime_type == "image/png"
+
+
+def test_provider_result_respects_encrypted_matrix_json_budget() -> None:
+    """Multibyte page text remains bounded after nio's ASCII-escaped JSON encoding."""
+    provider_result = _provider_result("snapshot", _text_result("漢" * 32_000), max_chars=32_000)
+    text = provider_result.payload["result"]
+
+    assert isinstance(text, str)
+    assert len(json.dumps(text, separators=(",", ":")).encode()) <= _MAX_RESULT_JSON_BYTES
+    assert text.endswith("\n…")
 
 
 def test_provider_result_rejects_mcp_tool_errors() -> None:
@@ -299,3 +311,46 @@ async def test_mcp_startup_failure_reaches_first_queued_call_immediately(
         await asyncio.wait_for(provider._call_tool("browser_tabs", {"action": "list"}), timeout=0.5)
 
     assert provider.running is False
+
+
+@pytest.mark.asyncio
+async def test_permanent_close_rejects_calls_while_actor_finishes(tmp_path: Path) -> None:
+    """A final close cannot race with a fresh MCP actor start."""
+    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
+    queue: asyncio.Queue[_QueuedCall | None] = asyncio.Queue()
+    sentinel_seen = asyncio.Event()
+    finish_actor = asyncio.Event()
+
+    async def actor() -> None:
+        assert await queue.get() is None
+        sentinel_seen.set()
+        await finish_actor.wait()
+
+    provider._queue = queue
+    provider._actor_task = asyncio.create_task(actor())
+    close_task = asyncio.create_task(provider.close())
+    await sentinel_seen.wait()
+
+    with pytest.raises(PlaywrightBrowserError, match="provider is closed"):
+        await provider._call_tool("browser_tabs", {"action": "list"})
+
+    finish_actor.set()
+    await close_task
+    assert provider.running is False
+
+
+@pytest.mark.asyncio
+async def test_browser_stop_remains_restartable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The user-facing stop action releases MCP without permanently closing the provider."""
+    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
+
+    def complete_start(queued_call: _QueuedCall) -> None:
+        queued_call.future.set_result(_text_result("started"))
+
+    monkeypatch.setattr(provider, "_start_actor", complete_start)
+
+    stopped = await provider.execute("stop", {})
+    started = await provider.execute("start", {})
+
+    assert stopped.payload["running"] is False
+    assert started.payload["result"] == "started"
