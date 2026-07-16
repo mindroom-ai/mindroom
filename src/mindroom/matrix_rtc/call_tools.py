@@ -41,7 +41,6 @@ from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
-from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.session_ids import create_session_id
 from mindroom.tool_approval import tool_requires_approval_for_openai_compat
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -421,7 +420,7 @@ async def _run_call_agent(
                 eager_deferred_tools=True,
             )
         finally:
-            recorder.set_run_metadata(deep_merge_metadata(recorder.run_metadata, run_metadata))
+            recorder.set_run_metadata({**(recorder.run_metadata or {}), **run_metadata})
 
     try:
         response = await tool_support.run_in_context(tool_context=context, operation=_respond)
