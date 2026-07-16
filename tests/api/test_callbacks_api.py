@@ -118,10 +118,11 @@ def _callback_api_context(
     _bind_runtime(ready_checks)
     monkeypatch.setattr("mindroom.api.callbacks.is_user_joined_room", _owner_joined)
 
-    with TestClient(api_main.app) as client:
-        yield CallbackApiContext(client, record, token, runtime_paths, ready_checks)
-
-    api_main.unbind_external_trigger_runtime(api_main.app)
+    try:
+        with TestClient(api_main.app) as client:
+            yield CallbackApiContext(client, record, token, runtime_paths, ready_checks)
+    finally:
+        api_main.unbind_external_trigger_runtime(api_main.app)
 
 
 @pytest.fixture

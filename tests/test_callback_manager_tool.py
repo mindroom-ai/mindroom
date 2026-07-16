@@ -119,6 +119,8 @@ def test_generated_script_posts_summary_and_deletes_itself(tmp_path: Path) -> No
     )
 
     curl_args = capture_path.read_text(encoding="utf-8").splitlines()
+    assert curl_args[curl_args.index("--connect-timeout") + 1] == "10"
+    assert curl_args[curl_args.index("--max-time") + 1] == "60"
     assert json.loads(curl_args[curl_args.index("--data") + 1]) == {"message": message}
     assert completed.stdout.strip() == "MindRoom notified."
     assert not script_path.exists()

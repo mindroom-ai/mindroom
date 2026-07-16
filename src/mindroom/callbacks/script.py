@@ -50,7 +50,7 @@ json_escape() {{
 }}
 
 BODY=$(printf '{{"message":"%s"}}' "$(json_escape "$MESSAGE")")
-if curl -fsS -X POST "$CALLBACK_URL" \\
+if curl -fsS --connect-timeout 10 --max-time 60 -X POST "$CALLBACK_URL" \\
   -H "Authorization: Bearer $CALLBACK_TOKEN" \\
   -H 'Content-Type: application/json' \\
   --data "$BODY"; then

@@ -237,15 +237,16 @@ def _trigger_api_context(
     _bind_runtime(ready_checks)
     monkeypatch.setattr("mindroom.api.external_triggers.is_external_trigger_owner_joined_target_room", _owner_joined)
 
-    with TestClient(api_main.app) as client:
-        yield TriggerApiContext(
-            client=client,
-            private_key=private_key,
-            runtime_paths=runtime_paths,
-            ready_checks=ready_checks,
-        )
-
-    api_main.unbind_external_trigger_runtime(api_main.app)
+    try:
+        with TestClient(api_main.app) as client:
+            yield TriggerApiContext(
+                client=client,
+                private_key=private_key,
+                runtime_paths=runtime_paths,
+                ready_checks=ready_checks,
+            )
+    finally:
+        api_main.unbind_external_trigger_runtime(api_main.app)
 
 
 @pytest.fixture
@@ -466,16 +467,18 @@ def test_policy_caps_apply_at_request_time(
     _bind_runtime(ready_checks)
     monkeypatch.setattr("mindroom.api.external_triggers.is_external_trigger_owner_joined_target_room", _owner_joined)
 
-    with TestClient(api_main.app) as client:
-        body = _body(message="x" * 2000)
-        response = client.post(
-            "/api/triggers/campground",
-            content=body,
-            headers=_sign(private_key, body=body),
-        )
+    try:
+        with TestClient(api_main.app) as client:
+            body = _body(message="x" * 2000)
+            response = client.post(
+                "/api/triggers/campground",
+                content=body,
+                headers=_sign(private_key, body=body),
+            )
 
-    assert response.status_code == 413
-    api_main.unbind_external_trigger_runtime(api_main.app)
+        assert response.status_code == 413
+    finally:
+        api_main.unbind_external_trigger_runtime(api_main.app)
 
 
 def test_owner_permission_removed_blocks_delivery_before_replay_claim(

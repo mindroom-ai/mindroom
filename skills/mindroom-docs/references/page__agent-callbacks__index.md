@@ -47,6 +47,8 @@ Generated scripts call `http://127.0.0.1:8765` by default.
 
 Set `MINDROOM_URL` when the background process needs another address to reach the MindRoom API.
 
+Point `MINDROOM_URL` only at a trusted MindRoom endpoint because the script sends its bearer token there.
+
 ## Security
 
 Each script contains a random bearer token whose hash is stored in MindRoom control state.
