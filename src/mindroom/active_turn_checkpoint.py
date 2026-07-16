@@ -251,7 +251,6 @@ def _render_tool_checkpoint_sections(completed_tools: list[ToolTraceEntry]) -> t
 
     work_lines = [f"- {len(completed_tools)} tool call(s) completed before this checkpoint."]
     result_lines: list[str] = []
-    rendered_chars = len(work_lines[0])
     for index, tool in enumerate(completed_tools, start=1):
         work_line = f"- [{index}] `{tool.tool_name}` completed"
         if tool.args_preview:
@@ -261,14 +260,26 @@ def _render_tool_checkpoint_sections(completed_tools: list[ToolTraceEntry]) -> t
         result_line += _quoted_preview(tool.result_preview) if tool.result_preview else "no result preview recorded"
         if tool.truncated:
             result_line += " (stored preview truncated)"
-        candidate_chars = rendered_chars + len(work_line) + len(result_line)
-        if candidate_chars > _MAX_TOOL_CONTEXT_CHARS:
+        candidate_work_lines = [*work_lines, work_line]
+        candidate_result_lines = [*result_lines, result_line]
+        if _joined_line_chars(candidate_work_lines, candidate_result_lines) > _MAX_TOOL_CONTEXT_CHARS:
             omitted = len(completed_tools) - index + 1
-            omission = f"- {omitted} additional completed tool call(s) omitted to keep the checkpoint bounded."
-            work_lines.append(omission)
-            result_lines.append(omission)
+            while True:
+                omission = f"- {omitted} additional completed tool call(s) omitted to keep the checkpoint bounded."
+                candidate_work_lines = [*work_lines, omission]
+                candidate_result_lines = [*result_lines, omission]
+                if _joined_line_chars(candidate_work_lines, candidate_result_lines) <= _MAX_TOOL_CONTEXT_CHARS:
+                    work_lines = candidate_work_lines
+                    result_lines = candidate_result_lines
+                    break
+                work_lines.pop()
+                result_lines.pop()
+                omitted += 1
             break
-        work_lines.append(work_line)
-        result_lines.append(result_line)
-        rendered_chars = candidate_chars
+        work_lines = candidate_work_lines
+        result_lines = candidate_result_lines
     return "\n".join(work_lines), "\n".join(result_lines)
+
+
+def _joined_line_chars(work_lines: list[str], result_lines: list[str]) -> int:
+    return len("\n".join(work_lines)) + len("\n".join(result_lines))

@@ -12,7 +12,9 @@ from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 
 from mindroom.active_turn_checkpoint import (
+    _MAX_TOOL_CONTEXT_CHARS,
     ActiveTurnCheckpointTrigger,
+    _render_tool_checkpoint_sections,
     build_active_turn_checkpoint,
     build_active_turn_context_guard,
     install_active_turn_checkpoint_hook,
@@ -219,22 +221,25 @@ def test_checkpoint_replaces_raw_tool_run_without_replayable_calls(tmp_path: Pat
 
 def test_checkpoint_content_stays_bounded_for_long_tool_sequence() -> None:
     """Many large tool previews collapse into one bounded continuation checkpoint."""
+    completed_tools = [
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name=f"tool-{index}",
+            args_preview="a" * 1_200,
+            result_preview="r" * 500,
+            truncated=True,
+        )
+        for index in range(120)
+    ]
     checkpoint = build_active_turn_checkpoint(
         goal="Finish the long task",
         partial_text="working",
-        completed_tools=[
-            ToolTraceEntry(
-                type="tool_call_completed",
-                tool_name=f"tool-{index}",
-                args_preview="a" * 1_200,
-                result_preview="r" * 500,
-                truncated=True,
-            )
-            for index in range(120)
-        ],
+        completed_tools=completed_tools,
         trigger=_trigger(),
     )
+    completed_work, key_results = _render_tool_checkpoint_sections(completed_tools)
 
     assert len(checkpoint.content) < 30_000
+    assert len(completed_work) + len(key_results) <= _MAX_TOOL_CONTEXT_CHARS
     assert "omitted to keep the checkpoint bounded" in checkpoint.content
     assert "Pending steps:" in checkpoint.content
