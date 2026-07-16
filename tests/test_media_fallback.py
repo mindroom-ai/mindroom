@@ -99,6 +99,7 @@ def test_no_media_present_never_retries() -> None:
     [
         ContextWindowExceededError(message="prompt is too long: 250000 tokens > 200000 maximum"),
         "Error code: 400 - maximum context length is 128000 tokens",
+        "Request too large",
         ModelProviderError(message="Request Entity Too Large", status_code=413),
         # Transient failures can pass on the retry because the blip passed, so
         # a lucky retry success must not disable media for the route.

@@ -5,8 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from agno.exceptions import ContextWindowExceededError, ModelProviderError
+from agno.exceptions import ModelProviderError
 
+from mindroom.error_handling import is_context_window_overflow_error
 from mindroom.media_inputs import MediaInputs, MediaKind
 
 if TYPE_CHECKING:
@@ -29,6 +30,7 @@ _INLINE_MEDIA_FALLBACK_MARKER = "[Inline media unavailable for this model]"
 _PAYLOAD_TOO_LARGE_STATUS = 413
 _RATE_LIMIT_STATUS = 429
 _SERVER_ERROR_STATUS = 500
+_OVERSIZED_REQUEST_MARKERS = ("payload too large", "content_too_large", "request too large")
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,16 +179,16 @@ def _capability_teaching_blocked(error: Exception | str, lowered_error_text: str
     from the exception object, never from provider error prose; streamed run
     errors arrive as bare text without a status and stay eligible to teach.
     """
-    if isinstance(error, ContextWindowExceededError):
+    if is_context_window_overflow_error(error):
         return True
     if isinstance(error, ModelProviderError) and (
         error.status_code in (_PAYLOAD_TOO_LARGE_STATUS, _RATE_LIMIT_STATUS)
         or error.status_code >= _SERVER_ERROR_STATUS
     ):
         return True
-    if f"error code: {_PAYLOAD_TOO_LARGE_STATUS}" in lowered_error_text:
-        return True
-    return any(marker in lowered_error_text for marker in ModelProviderError.CONTEXT_WINDOW_PATTERNS)
+    return f"error code: {_PAYLOAD_TOO_LARGE_STATUS}" in lowered_error_text or any(
+        marker in lowered_error_text for marker in _OVERSIZED_REQUEST_MARKERS
+    )
 
 
 def _without_media_kinds(media_inputs: MediaInputs, kinds: frozenset[MediaKind]) -> MediaInputs:

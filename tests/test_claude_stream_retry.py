@@ -62,6 +62,21 @@ def _mid_stream_api_error() -> ModelProviderError:
     )
 
 
+def _context_window_errors() -> list[ModelProviderError]:
+    return [
+        ContextWindowExceededError(message="prompt is too long"),
+        ModelProviderError(
+            message="{'type': 'error', 'error': {'type': 'invalid_request_error', "
+            "'message': 'prompt is too long: 250001 tokens > 200000 maximum'}}",
+            status_code=200,
+        ),
+        ModelProviderError(
+            message="The input token count (250001) exceeds the maximum number of tokens allowed (200000).",
+            status_code=500,
+        ),
+    ]
+
+
 async def _collect(stream: AsyncIterator[ModelResponse]) -> list[ModelResponse]:
     return [response async for response in stream]
 
@@ -153,15 +168,15 @@ async def test_does_not_retry_non_transient_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_does_not_retry_context_window_error() -> None:
-    """Context-window overflows are permanent and never retried."""
-    model, calls = _hooked_model_with_async_attempts(
-        [[ContextWindowExceededError(message="prompt is too long")]],
-    )
+@pytest.mark.parametrize("error", _context_window_errors(), ids=("typed", "wrapped-status-200", "wrapped-status-500"))
+async def test_async_stream_does_not_retry_context_window_error(error: ModelProviderError) -> None:
+    """Typed and wrapped context overflows propagate unchanged without retry."""
+    model, calls = _hooked_model_with_async_attempts([[error]])
 
-    with pytest.raises(ContextWindowExceededError):
+    with pytest.raises(ModelProviderError) as raised:
         await _collect(model.ainvoke_stream([], object()))
 
+    assert raised.value is error
     assert len(calls) == 1
 
 
@@ -209,6 +224,34 @@ def test_sync_stream_retries_transient_error() -> None:
     )
 
     responses = list(model.invoke_stream([], object()))
+
+    assert [response.content for response in responses] == ["recovered"]
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("error", _context_window_errors(), ids=("typed", "wrapped-status-200", "wrapped-status-500"))
+def test_sync_stream_does_not_retry_context_window_error(error: ModelProviderError) -> None:
+    """The synchronous stream path applies the same overflow classification."""
+    model, calls = _hooked_model_with_sync_attempts([[error]])
+
+    with pytest.raises(ModelProviderError) as raised:
+        list(model.invoke_stream([], object()))
+
+    assert raised.value is error
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_output_token_limit_remains_transient() -> None:
+    """Output truncation wording must not turn a transient status into context overflow."""
+    model, calls = _hooked_model_with_async_attempts(
+        [
+            [ModelProviderError(message="Output token limit reached at max_tokens", status_code=500)],
+            [ModelResponse(content="recovered")],
+        ],
+    )
+
+    responses = await _collect(model.ainvoke_stream([], object()))
 
     assert [response.content for response in responses] == ["recovered"]
     assert len(calls) == 2
