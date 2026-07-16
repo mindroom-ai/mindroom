@@ -19,6 +19,7 @@ from rich.console import Console
 from rich.syntax import Syntax
 
 from mindroom import constants
+from mindroom.cli.agent_docs import ensure_config_agent_docs
 from mindroom.cli.env_file import write_private_env_text
 from mindroom.model_defaults import (
     CONFIG_INIT_MODEL_ALTERNATIVES,
@@ -494,6 +495,15 @@ def config_init(
         target.write_text(content, encoding="utf-8")
 
     _ensure_mind_workspace(_default_mind_workspace(storage_root), config_path=target, force=force)
+
+    created_docs = ensure_config_agent_docs(
+        target.parent,
+        config_path=target,
+        storage_root=storage_root,
+        force=force,
+    )
+    if created_docs:
+        console.print(f"[green]Agent docs created:[/green] {', '.join(doc.name for doc in created_docs)}")
 
     env_changed = _write_env_file(
         env_path,
