@@ -89,7 +89,8 @@ def _render_interruption_summary(snapshot: InterruptedReplaySnapshot) -> str:
     """Render one prose interruption summary safe for model-facing assistant history.
 
     Raw tool traces here read as machine-formatted terminal turns and teach the model
-    to end subsequent turns with empty content, so only tool names are listed.
+    to end subsequent turns with empty content. Keep this status line prose-only;
+    redacted Matrix previews are rendered separately as explicitly quoted data.
     """
     details: list[str] = []
     if snapshot.completed_tools:
