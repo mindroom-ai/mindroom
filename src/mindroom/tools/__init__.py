@@ -74,6 +74,7 @@ from mindroom.tools.github import github_tools
 from mindroom.tools.gmail import gmail_tools
 from mindroom.tools.google_bigquery import google_bigquery_tools
 from mindroom.tools.google_calendar import google_calendar_tools
+from mindroom.tools.google_docs import google_docs_tools
 from mindroom.tools.google_drive import google_drive_tools
 from mindroom.tools.google_maps import google_maps_tools
 from mindroom.tools.google_scholar import google_scholar_tools
@@ -202,6 +203,7 @@ __all__ = [
     "gmail_tools",
     "google_bigquery_tools",
     "google_calendar_tools",
+    "google_docs_tools",
     "google_drive_tools",
     "google_maps_tools",
     "google_scholar_tools",

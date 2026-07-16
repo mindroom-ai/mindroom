@@ -7860,6 +7860,73 @@
     },
     {
       "agent_override_fields": null,
+      "auth_provider": "google_docs",
+      "category": "productivity",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow creating Google Docs and adding initial text.",
+          "label": "Create Documents",
+          "name": "create_document",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow reading complete tab-aware document structure and content.",
+          "label": "Read Documents",
+          "name": "read_document",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow inserting and replacing text in Google Docs.",
+          "label": "Edit Documents",
+          "name": "edit_document",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-httplib2",
+        "google-auth-oauthlib"
+      ],
+      "description": "Create, read, and edit documents through the connected user's Google Docs",
+      "display_name": "Google Docs",
+      "docs_url": "https://developers.google.com/workspace/docs/api/reference/rest",
+      "function_names": [
+        "google_docs_create_document",
+        "google_docs_get_document",
+        "google_docs_insert_text",
+        "google_docs_replace_text"
+      ],
+      "helper_text": null,
+      "icon": "SiGoogledocs",
+      "icon_color": "text-blue-600",
+      "name": "google_docs",
+      "requires_room_context": false,
+      "setup_type": "oauth",
+      "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
       "auth_provider": "google_drive",
       "category": "productivity",
       "config_fields": [

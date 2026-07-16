@@ -75,6 +75,7 @@ def test_agent_scoped_service_policy(service: str, worker_scope: str | None, exp
     "service",
     [
         "google_calendar_oauth",
+        "google_docs_oauth",
         "google_drive_oauth",
         "google_gmail_oauth",
         "google_sheets_oauth",

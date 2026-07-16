@@ -1537,6 +1537,7 @@ def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path: Path)
     [
         ("google_drive", "shared", frozenset({"google_drive"})),
         ("google_calendar", "shared", frozenset({"google_calendar"})),
+        ("google_docs", "shared", frozenset({"google_docs"})),
         ("google_sheets", "shared", frozenset({"google_sheets"})),
         ("gmail", "shared", frozenset({"gmail"})),
         # Agent-scoped OAuth token services no longer inject themselves into the
@@ -1585,6 +1586,7 @@ def test_get_tools_marks_shared_only_integrations_unsupported_for_isolating_work
     assert tools_by_name["spotify"]["execution_scope_supported"] is False
     assert tools_by_name["gmail"]["execution_scope_supported"] is True
     assert tools_by_name["google_calendar"]["execution_scope_supported"] is True
+    assert tools_by_name["google_docs"]["execution_scope_supported"] is True
     assert tools_by_name["google_sheets"]["execution_scope_supported"] is True
     assert "calculator" in tools_by_name
     assert tools_by_name["calculator"]["execution_scope_supported"] is True
