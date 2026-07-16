@@ -3276,6 +3276,54 @@ def test_cascaded_calls_require_both_speech_services() -> None:
         )
 
 
+def test_cascaded_calls_accept_optional_model_override() -> None:
+    """A cascaded profile can select a configured model for its agent turns."""
+    stt = SpeechServiceConfig(model="gpt-4o-transcribe", credentials_service="openai")
+    tts = SpeechServiceConfig(model="tts-1", credentials_service="openai")
+    config = Config(
+        models={"call_fast": ModelConfig(provider="anthropic", id="claude-haiku-4-5")},
+        agents={"helper": AgentConfig(display_name="Helper")},
+        calls=CallsConfig(
+            profiles={
+                "voice": CascadedCallProfile(
+                    backend="cascaded",
+                    model="call_fast",
+                    stt=stt,
+                    tts=tts,
+                ),
+            },
+            agents={"helper": "voice"},
+        ),
+    )
+
+    resolved = config.calls.resolve_agent_config("helper")
+    assert isinstance(resolved, CascadedCallProfile)
+    assert resolved.model == "call_fast"
+
+
+def test_calls_config_rejects_unknown_cascaded_model() -> None:
+    """Call model aliases must exist in the top-level model catalog."""
+    stt = SpeechServiceConfig(model="gpt-4o-transcribe", credentials_service="openai")
+    tts = SpeechServiceConfig(model="tts-1", credentials_service="openai")
+
+    with pytest.raises(ValueError, match=r"voice -> missing"):
+        Config(
+            models={},
+            agents={"helper": AgentConfig(display_name="Helper")},
+            calls=CallsConfig(
+                profiles={
+                    "voice": CascadedCallProfile(
+                        backend="cascaded",
+                        model="missing",
+                        stt=stt,
+                        tts=tts,
+                    ),
+                },
+                agents={"helper": "voice"},
+            ),
+        )
+
+
 def test_openai_compatible_speech_config_requires_endpoint() -> None:
     """A compatible provider cannot silently fall through to OpenAI cloud."""
     with pytest.raises(ValueError, match="require host"):

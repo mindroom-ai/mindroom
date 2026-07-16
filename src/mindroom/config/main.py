@@ -32,7 +32,7 @@ from mindroom.agent_policy import (
 from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
-from mindroom.config.calls import CallsConfig
+from mindroom.config.calls import CallsConfig, CascadedCallProfile
 from mindroom.config.entity_view import ResolvedEntityView
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -567,11 +567,22 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_call_agents(self) -> Config:
-        """Ensure call agents exist and no two are configured for one room."""
+    def validate_call_config(self) -> Config:
+        """Ensure call agents and cascaded model references are valid."""
         unknown_agents = sorted(set(self.calls.agents) - set(self.agents))
         if unknown_agents:
             msg = f"calls.agents references unknown agent(s): {', '.join(unknown_agents)}"
+            raise ValueError(msg)
+
+        invalid_models = sorted(
+            f"{profile_name} -> {profile.model}"
+            for profile_name, profile in self.calls.profiles.items()
+            if isinstance(profile, CascadedCallProfile)
+            and profile.model is not None
+            and profile.model not in self.models
+        )
+        if invalid_models:
+            msg = "calls.profiles references unknown cascaded model(s): " + ", ".join(invalid_models)
             raise ValueError(msg)
 
         agents_by_room: dict[str, list[str]] = {}
