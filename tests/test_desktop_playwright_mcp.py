@@ -212,6 +212,25 @@ async def test_failed_tab_selection_never_mutates_the_previous_tab(
 
 
 @pytest.mark.asyncio
+async def test_failed_observation_after_tab_selection_reports_unknown_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed observation still reports the preceding tab switch as a possible side effect."""
+    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
+    call_tool = AsyncMock(side_effect=[_text_result("selected"), _text_result("extension disconnected", error=True)])
+    monkeypatch.setattr(provider, "_call_tool", call_tool)
+
+    with pytest.raises(PlaywrightActionOutcomeUnknownError, match="extension disconnected"):
+        await provider.execute("snapshot", {"targetId": "1"})
+
+    assert [call.args for call in call_tool.await_args_list] == [
+        ("browser_tabs", {"action": "select", "index": 1}),
+        ("browser_snapshot", {}),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_uploads_are_confined_to_the_browser_workspace(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

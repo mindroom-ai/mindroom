@@ -165,7 +165,7 @@ class PlaywrightMCPBrowserProvider:
                 raise PlaywrightBrowserError(msg)  # noqa: TRY301
             return _provider_result(action, last_result, max_chars=_result_max_chars(parameters))
         except PlaywrightBrowserError as exc:
-            if browser_action_requires_control(action):
+            if browser_action_requires_control(action, parameters):
                 raise PlaywrightActionOutcomeUnknownError(str(exc)) from exc
             raise
 
