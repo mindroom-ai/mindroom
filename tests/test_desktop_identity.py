@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import nio
 import pytest
 from nio.crypto import Olm
 from nio.store import SqliteStore
@@ -35,7 +36,12 @@ def test_controller_identity_reads_the_persisted_olm_account(tmp_path: Path) -> 
     state.save(runtime_paths)
     store_path = olm_store_dir(user_id, runtime_paths)
     store_path.mkdir(parents=True, exist_ok=True)
-    store = SqliteStore(user_id, device_id, str(store_path))
+    store = SqliteStore(
+        user_id,
+        device_id,
+        str(store_path),
+        pickle_key=nio.AsyncClientConfig().pickle_key,
+    )
     olm = Olm(user_id, device_id, store)
     expected_fingerprint = olm.account.identity_keys["ed25519"]
     store.database.close()

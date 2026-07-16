@@ -3649,6 +3649,7 @@ expose = [
     "create_authenticated_client",
     "login",
     "matrix_client",
+    "matrix_client_config",
     "matrix_startup_error",
     "olm_store_dir",
     "olm_store_exists",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import sys
 import time
 from collections import deque
@@ -42,6 +43,8 @@ _STATE_STABILIZATION_ATTEMPTS = 12
 _STATE_STABILIZATION_DELAY_SECONDS = 0.05
 _STATE_STABILIZATION_MATCHES = 3
 _VALUE_VERIFICATION_ATTEMPTS = 4
+_DIRECT_ACTIVATION_ATTEMPTS = 5
+_ACTIVATION_ATTEMPTS = 20
 _FOCUS_BEFORE_SET_ROLES = frozenset({"AXComboBox", "AXSearchField", "AXTextField"})
 _VISIBLE_ROW_CONTAINER_ROLES = frozenset({"AXOutline", "AXTable"})
 _CONTAINER_ROLES = frozenset(
@@ -289,15 +292,19 @@ class MacAccessibilityBackend:
 
     def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityState:
         """Revalidate exact state before focusing an allowed target."""
-        return self.prepare_capture(app_id, state_id)
-
-    def prepare_capture(self, app_id: str, state_id: str) -> AccessibilityState:
-        """Revalidate exact state before and after foregrounding the allowed target."""
         stored = self._fresh_state(app_id, state_id)
         self._activate(stored.application)
         if stored.application is None:
             return stored.public
         return self._fresh_state(app_id, state_id).public
+
+    def prepare_capture(self, app_id: str, state_id: str) -> AccessibilityState:
+        """Revalidate app identity and window geometry around foreground capture."""
+        stored = self._current_capture_state(app_id, state_id)
+        self._activate(stored.application)
+        if stored.application is None:
+            return stored.public
+        return self._current_capture_state(app_id, state_id).public
 
     def element_for_action(
         self,
@@ -400,12 +407,52 @@ class MacAccessibilityBackend:
         if observed is None or observed.public.state_id != state_id:
             msg = "Accessibility state is stale; request get_app_state again before acting."
             raise AccessibilityError(msg)
-        current = self._fresh_state(app_id, state_id)
+        application = observed.application
+        if application is None or observed.window_reference is None:
+            msg = "Accessibility target is stale; request get_app_state again before acting."
+            raise AccessibilityError(msg)
+        try:
+            current = self._collect_app_state(
+                app_id,
+                state_id=state_id,
+                expected_pid=application.processIdentifier(),
+                expected_window=observed.window_reference,
+            )
+        except AccessibilityError:
+            self._states.pop(app_id, None)
+            raise
         self._validate_element_index(observed, element_index)
         self._validate_element_index(current, element_index)
         if observed.public.elements[element_index] != current.public.elements[element_index]:
             self._states.pop(app_id, None)
             msg = "Accessibility target element changed; request get_app_state again before acting."
+            raise AccessibilityError(msg)
+        return current
+
+    def _current_capture_state(self, app_id: str, state_id: str) -> _StoredMacState:
+        observed = self._states.get(app_id)
+        if observed is None or observed.public.state_id != state_id:
+            msg = "Accessibility state is stale; request get_app_state again before acting."
+            raise AccessibilityError(msg)
+        if app_id == PRIMARY_SCREEN_APP_ID:
+            return self._fresh_state(app_id, state_id)
+        application = observed.application
+        if application is None or observed.window_reference is None:
+            msg = "Accessibility target is stale; request get_app_state again before acting."
+            raise AccessibilityError(msg)
+        try:
+            current = self._collect_app_state(
+                app_id,
+                state_id=state_id,
+                expected_pid=application.processIdentifier(),
+                expected_window=observed.window_reference,
+            )
+        except AccessibilityError:
+            self._states.pop(app_id, None)
+            raise
+        if current.public.window != observed.public.window:
+            self._states.pop(app_id, None)
+            msg = "Accessibility target window geometry changed; request get_app_state again before capture."
             raise AccessibilityError(msg)
         return current
 
@@ -612,9 +659,17 @@ class MacAccessibilityBackend:
         if application is None:
             return
         activated = application.activateWithOptions_(0)
-        if not activated:
-            msg = "Allowed application could not be focused before input."
+        if activated and _wait_for_activation(application, attempts=_DIRECT_ACTIVATION_ATTEMPTS):
+            return
+        app_id = application.bundleIdentifier()
+        if app_id is None:
+            msg = "Allowed application has no bundle identifier for activation."
             raise AccessibilityError(msg)
+        _request_application_activation(app_id)
+        if _wait_for_activation(application, attempts=_ACTIVATION_ATTEMPTS):
+            return
+        msg = "Allowed application did not become active before input."
+        raise AccessibilityError(msg)
 
     @staticmethod
     def _validate_element_index(stored: _StoredMacState, element_index: int) -> object:
@@ -748,6 +803,29 @@ class ScreenshotOnlyAccessibilityBackend:
         if app_id != PRIMARY_SCREEN_APP_ID:
             msg = "Semantic application accessibility is currently available only on macOS."
             raise AccessibilityError(msg)
+
+
+def _wait_for_activation(application: _RunningApplication, *, attempts: int) -> bool:
+    for _ in range(attempts):
+        if application.isActive():
+            return True
+        time.sleep(_STATE_STABILIZATION_DELAY_SECONDS)
+    return False
+
+
+def _request_application_activation(app_id: str) -> None:
+    """Ask macOS to activate one exact bundle ID through a bounded Apple event."""
+    import AppKit  # noqa: PLC0415
+
+    if re.fullmatch(r"[A-Za-z0-9.-]+", app_id) is None:
+        msg = "Allowed application has an invalid bundle identifier for activation."
+        raise AccessibilityError(msg)
+    source = f'with timeout of 2 seconds\ntell application id "{app_id}" to activate\nend timeout'
+    script = AppKit.NSAppleScript.alloc().initWithSource_(source)  # ty: ignore[unresolved-attribute]
+    _result, error = script.executeAndReturnError_(None)
+    if error is not None:
+        msg = "Allowed application activation request failed before input."
+        raise AccessibilityError(msg)
 
 
 def create_accessibility_backend(

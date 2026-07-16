@@ -28,8 +28,9 @@ from mindroom.desktop.accessibility import (
 class FakeRunningApplication:
     """Small NSRunningApplication-compatible test object."""
 
-    def __init__(self, pid: int = 42) -> None:
+    def __init__(self, pid: int = 42, *, active: bool = True) -> None:
         self.pid = pid
+        self.active = active
         self.activation_hook: Callable[[], None] | None = None
         self.activation_options: list[int] = []
 
@@ -43,7 +44,7 @@ class FakeRunningApplication:
         return self.pid
 
     def isActive(self) -> bool:
-        return True
+        return self.active
 
     def activateWithOptions_(self, options: int) -> bool:
         self.activation_options.append(options)
@@ -296,7 +297,7 @@ def test_mac_truncated_state_skips_costly_stabilization() -> None:
     assert services.collection_count == 1
     target = next(element for element in state.elements if element.name == "button-0")
     services.attributes["button-0"]["title"] = "changed"
-    with pytest.raises(AccessibilityError, match="state changed"):
+    with pytest.raises(AccessibilityError, match="target element changed"):
         backend.click_element(state.app_id, state.state_id, target.index)
 
 
@@ -357,8 +358,20 @@ def test_mac_semantic_action_rejects_changed_target_value() -> None:
     button = next(element for element in state.elements if element.name == "Save")
     services.attributes["button"]["value"] = "published"
 
-    with pytest.raises(AccessibilityError, match="state changed"):
+    with pytest.raises(AccessibilityError, match="target element changed"):
         backend.click_element(state.app_id, state.state_id, button.index)
+
+
+def test_mac_semantic_action_allows_unrelated_dynamic_content() -> None:
+    """A stable target remains actionable while an unrelated status element updates."""
+    backend, services, _ = _fake_mac_backend()
+    state = backend.get_app_state("com.example.Editor")
+    button = next(element for element in state.elements if element.name == "Save")
+    services.attributes["window-1"]["title"] = "Editor — synced"
+
+    backend.click_element(state.app_id, state.state_id, button.index)
+
+    assert services.performed_actions == [("button", "AXPress")]
 
 
 def test_mac_set_value_focuses_text_field_and_verifies_result() -> None:
@@ -387,15 +400,63 @@ def test_mac_set_value_rejects_unconfirmed_os_success(monkeypatch: pytest.Monkey
         backend.set_value(state.app_id, state.state_id, field.index, "published")
 
 
-def test_mac_capture_rechecks_state_after_foregrounding_app() -> None:
-    """Activation cannot silently change the UI between validation and pixel capture."""
+def test_mac_capture_allows_dynamic_content_after_foregrounding_app() -> None:
+    """An app window can be captured when activation updates unrelated dynamic content."""
+    backend, services, workspace = _fake_mac_backend()
+    state = backend.get_app_state("com.example.Editor")
+    workspace.applications[0].activation_hook = lambda: services.attributes["button"].update(value="published")
+
+    captured = backend.prepare_capture(state.app_id, state.state_id)
+
+    assert captured.window == state.window
+    assert workspace.applications[0].activation_options == [0]
+
+
+def test_mac_fallback_rejects_dynamic_content_after_foregrounding_app() -> None:
+    """Pixel input still requires exact visual state after app activation."""
     backend, services, workspace = _fake_mac_backend()
     state = backend.get_app_state("com.example.Editor")
     workspace.applications[0].activation_hook = lambda: services.attributes["button"].update(value="published")
 
     with pytest.raises(AccessibilityError, match="state changed"):
-        backend.prepare_capture(state.app_id, state.state_id)
-    assert workspace.applications[0].activation_options == [0]
+        backend.prepare_fallback(state.app_id, state.state_id)
+
+
+def test_mac_activation_must_reach_foreground_before_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An OS-accepted but incomplete activation fails before any app input."""
+    backend, services, workspace = _fake_mac_backend()
+    monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("mindroom.desktop.accessibility._request_application_activation", lambda _app_id: None)
+    workspace.applications[0].active = False
+    state = backend.get_app_state("com.example.Editor")
+    button = next(element for element in state.elements if element.name == "Save")
+
+    with pytest.raises(AccessibilityError, match="did not become active"):
+        backend.click_element(state.app_id, state.state_id, button.index)
+
+    assert services.performed_actions == []
+
+
+def test_mac_activation_uses_bounded_apple_event_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The local bridge can foreground an allowed app when direct CLI activation is ignored."""
+    backend, services, workspace = _fake_mac_backend()
+    application = workspace.applications[0]
+    application.active = False
+    monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", lambda _seconds: None)
+    calls: list[str] = []
+
+    def activate_app(app_id: str) -> None:
+        calls.append(app_id)
+        application.active = True
+
+    monkeypatch.setattr("mindroom.desktop.accessibility._request_application_activation", activate_app)
+    state = backend.get_app_state("com.example.Editor")
+    button = next(element for element in state.elements if element.name == "Save")
+
+    backend.click_element(state.app_id, state.state_id, button.index)
+
+    assert calls == ["com.example.Editor"]
+    assert services.performed_actions == [("button", "AXPress")]
 
 
 def test_mac_element_scroll_rejects_bounds_outside_allowed_window() -> None:
@@ -412,7 +473,7 @@ def test_mac_element_scroll_rejects_bounds_outside_allowed_window() -> None:
         backend.element_for_action(state.app_id, state.state_id, button.index)
 
 
-@pytest.mark.parametrize("replacement", ["process", "window", "structure"])
+@pytest.mark.parametrize("replacement", ["process", "window"])
 def test_mac_state_pins_exact_process_and_window(replacement: str) -> None:
     """A matching bundle ID cannot redirect an old state to another process or window."""
     backend, services, workspace = _fake_mac_backend()
@@ -421,10 +482,7 @@ def test_mac_state_pins_exact_process_and_window(replacement: str) -> None:
         workspace.applications = [FakeRunningApplication(pid=99)]
     elif replacement == "window":
         services.window = "window-2"
-    else:
-        services.attributes["button"]["title"] = "Publish"
-
-    with pytest.raises(AccessibilityError, match=r"process changed|window changed|state changed"):
+    with pytest.raises(AccessibilityError, match=r"process changed|window changed"):
         backend.prepare_capture(state.app_id, state.state_id)
     with pytest.raises(AccessibilityError, match="stale"):
         backend.prepare_capture(state.app_id, state.state_id)

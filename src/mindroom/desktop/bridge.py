@@ -503,9 +503,12 @@ class DesktopBridge:
         return status
 
     def _control_available(self) -> bool:
+        lease_expires_at_ms = self.policy.control_lease_expires_at_ms
         return (
             self.policy.allow_control
             and not self._control_revoked
+            and lease_expires_at_ms is not None
+            and self.clock() * 1000 < lease_expires_at_ms
             and self._control_lease_deadline is not None
             and self.monotonic_clock() < self._control_lease_deadline
         )
@@ -519,7 +522,8 @@ class DesktopBridge:
     ) -> DesktopResponse:
         if command.action == "get_app_state":
             warning = (
-                "Accessibility state was read, but its app-window screenshot failed and the state may now be stale; "
+                f"Accessibility state was read, but its app-window screenshot failed: {error} "
+                "The state may now be stale; "
                 "request get_app_state again before acting."
             )
             return self._success_response(
@@ -529,7 +533,7 @@ class DesktopBridge:
         if command.action not in DESKTOP_CONTROL_ACTIONS:
             return self._error_response(command, error)
         warning = (
-            "The desktop action completed and fresh app state was read, but its follow-up screenshot failed; "
+            f"The desktop action completed and fresh app state was read, but its follow-up screenshot failed: {error} "
             "do not repeat the action automatically. Request get_app_state before the next action."
         )
         logger.warning(
@@ -538,6 +542,7 @@ class DesktopBridge:
             action=command.action,
             requester_id=command.requester_id,
             agent_name=command.agent_name,
+            error=error,
         )
         return self._success_response(
             command,

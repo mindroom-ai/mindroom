@@ -140,22 +140,36 @@ async def restore_desktop_client(
     runtime_paths: RuntimePaths,
 ) -> nio.AsyncClient:
     """Restore the exact desktop Matrix device and its Olm identity."""
+    client = await open_desktop_client(session, runtime_paths=runtime_paths)
+    try:
+        await prepare_desktop_client(client)
+    except Exception:
+        await client.close()
+        raise
+    return client
+
+
+async def open_desktop_client(
+    session: DesktopMatrixSession,
+    *,
+    runtime_paths: RuntimePaths,
+) -> nio.AsyncClient:
+    """Restore a desktop Matrix client before consuming queued sync events."""
     if not olm_store_exists(session.user_id, session.device_id, runtime_paths):
         msg = "Desktop Matrix encryption store is missing; run 'mindroom desktop login --replace' for a fresh device."
         raise DesktopSessionError(msg)
-    client = await restore_login(
+    return await restore_login(
         session.homeserver,
         session.user_id,
         session.device_id,
         session.access_token,
         runtime_paths,
     )
-    try:
-        await _prepare_crypto(client)
-    except Exception:
-        await client.close()
-        raise
-    return client
+
+
+async def prepare_desktop_client(client: nio.AsyncClient) -> None:
+    """Prepare Olm only after the caller has registered command callbacks."""
+    await _prepare_crypto(client)
 
 
 async def _prepare_crypto(client: nio.AsyncClient) -> None:
@@ -193,6 +207,8 @@ __all__ = [
     "desktop_session_path",
     "load_desktop_session",
     "login_desktop_client",
+    "open_desktop_client",
+    "prepare_desktop_client",
     "restore_desktop_client",
     "save_desktop_session",
 ]

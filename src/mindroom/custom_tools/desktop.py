@@ -197,15 +197,19 @@ class DesktopTools(Toolkit):
                 action,
                 client=context.client,
                 response=response,
+                timeout_seconds=self._timeout_seconds,
             )
         except (DesktopMediaError, DesktopProtocolError, DesktopRequestError, OlmToDeviceError, ValueError) as exc:
             return _error_result(action, str(exc))
 
 
-async def _tool_result_from_response(action: str, *, client: nio.AsyncClient, response: object) -> ToolResult:
-    if not isinstance(response, DesktopResponse):
-        msg = "Desktop device returned an invalid response."
-        raise DesktopProtocolError(msg)
+async def _tool_result_from_response(
+    action: str,
+    *,
+    client: nio.AsyncClient,
+    response: DesktopResponse,
+    timeout_seconds: float,
+) -> ToolResult:
     if not response.ok:
         return _error_result(action, response.error or "Desktop device rejected the request.")
     content = custom_tool_payload(
@@ -217,7 +221,11 @@ async def _tool_result_from_response(action: str, *, client: nio.AsyncClient, re
     if response.screenshot is None:
         return _result_without_screenshot(action, response=response, content=content)
     try:
-        image_bytes = await download_encrypted_screenshot(client, response.screenshot)
+        image_bytes = await download_encrypted_screenshot(
+            client,
+            response.screenshot,
+            timeout_seconds=timeout_seconds,
+        )
     except DesktopMediaError:
         if action == "get_app_state":
             return _partial_result(

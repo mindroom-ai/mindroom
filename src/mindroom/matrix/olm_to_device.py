@@ -52,8 +52,12 @@ async def resolve_pinned_device(
 
     device = olm.device_store[target.user_id].get(target.device_id)
     if device is None:
-        olm.users_for_key_query.add(target.user_id)
-        response = await client.keys_query()
+        access_token = client.access_token
+        if not access_token:
+            msg = "Matrix login is unavailable for the pinned device-key query."
+            raise OlmToDeviceError(msg)
+        method, path, data = nio.Api.keys_query(access_token, {target.user_id})
+        response = await client._send(nio.KeysQueryResponse, method, path, data)
         if isinstance(response, nio.KeysQueryError):
             msg = f"Matrix device-key query failed for {target.user_id}: {response}"
             raise OlmToDeviceError(msg)

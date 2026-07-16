@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar
@@ -9,7 +10,13 @@ from typing import TYPE_CHECKING, ClassVar
 import pytest
 
 from mindroom.desktop.accessibility import AccessibilityState, DesktopRect
-from mindroom.desktop.provider import DesktopEmergencyStopError, DesktopProviderError, PyAutoGuiDesktopProvider
+from mindroom.desktop.provider import (
+    DesktopEmergencyStopError,
+    DesktopProviderError,
+    PyAutoGuiDesktopProvider,
+    _capture_macos_primary_screen,
+    _type_macos_unicode,
+)
 
 if TYPE_CHECKING:
     import io
@@ -54,6 +61,7 @@ class FakePyAutoGui:
     def __init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
         self.cursor = (10, 20)
+        self.fail_during_input = False
 
     @staticmethod
     def size() -> SimpleNamespace:
@@ -71,6 +79,8 @@ class FakePyAutoGui:
 
     def click(self, *, x: int, y: int, button: str) -> None:
         """Record a logical click."""
+        if self.fail_during_input:
+            raise FakeFailSafeError
         self.calls.append(("click", (x, y, button)))
 
     def scroll(self, clicks: int, *, x: int | None, y: int | None) -> None:
@@ -211,3 +221,62 @@ def test_corner_emergency_stop_blocks_semantic_control() -> None:
         provider.set_value(app_id="com.example.Editor", state_id="state-1", element_index=3, value="draft")
 
     assert accessibility.calls == []
+
+
+def test_mid_action_pyautogui_fail_safe_is_translated() -> None:
+    """PyAutoGUI raising during an operation reaches the bridge as an emergency stop."""
+    provider, pyautogui, _ = _provider()
+    pyautogui.fail_during_input = True
+
+    with pytest.raises(DesktopEmergencyStopError, match="emergency stop"):
+        provider.click(app_id="com.example.Editor", state_id="state-1", x=10, y=20, button="left")
+
+
+def test_macos_type_text_uses_layout_independent_unicode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MacOS fallback typing does not use PyAutoGUI's ASCII and keyboard-layout mapping."""
+    provider, pyautogui, _ = _provider()
+    typed: list[str] = []
+    monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
+    monkeypatch.setattr("mindroom.desktop.provider._type_macos_unicode", typed.append)
+
+    provider.type_text(app_id="com.example.Editor", state_id="state-1", text="café — 漢字 🙂")
+
+    assert typed == ["café — 漢字 🙂"]
+    assert pyautogui.calls == []
+
+
+def test_macos_unicode_events_use_utf16_lengths(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Emoji and non-ASCII text are posted without truncating surrogate pairs."""
+    configured: list[tuple[bool, int, str]] = []
+    posted: list[bool] = []
+
+    def create_event(_source: object, _keycode: int, key_down: bool) -> dict[str, bool]:
+        return {"key_down": key_down}
+
+    def set_unicode(event: dict[str, bool], length: int, text: str) -> None:
+        configured.append((event["key_down"], length, text))
+
+    def post_event(_tap: object, event: dict[str, bool]) -> None:
+        posted.append(event["key_down"])
+
+    quartz = SimpleNamespace(
+        CGEventCreateKeyboardEvent=create_event,
+        CGEventKeyboardSetUnicodeString=set_unicode,
+        CGEventPost=post_event,
+        kCGHIDEventTap="hid",
+    )
+    monkeypatch.setitem(sys.modules, "Quartz", quartz)
+
+    _type_macos_unicode("a🙂b")
+
+    assert configured == [(True, 4, "a🙂b"), (False, 4, "a🙂b")]
+    assert posted == [True, False]
+
+
+def test_macos_capture_requires_screen_recording_permission(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wallpaper-only macOS captures are rejected before pixels can reach the agent."""
+    quartz = SimpleNamespace(CGPreflightScreenCaptureAccess=lambda: False)
+    monkeypatch.setitem(sys.modules, "Quartz", quartz)
+
+    with pytest.raises(DesktopProviderError, match="Screen Recording permission"):
+        _capture_macos_primary_screen()

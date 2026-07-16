@@ -183,6 +183,11 @@ def olm_store_exists(user_id: str, device_id: str, runtime_paths: RuntimePaths) 
     return (olm_store_dir(user_id, runtime_paths) / f"{user_id}_{device_id}.db").is_file()
 
 
+def matrix_client_config() -> nio.AsyncClientConfig:
+    """Return the shared nio configuration used to read and write Olm stores."""
+    return nio.AsyncClientConfig(replace_rotated_device_keys=True)
+
+
 def _create_matrix_client(
     homeserver: str,
     runtime_paths: RuntimePaths,
@@ -205,7 +210,7 @@ def _create_matrix_client(
         # Agents trust devices on first use and never verify interactively;
         # accept a peer device's re-registered olm identity (trust reset)
         # instead of keeping stale keys that silently break E2EE and calls.
-        config=nio.AsyncClientConfig(replace_rotated_device_keys=True),
+        config=matrix_client_config(),
         ssl=ssl_context,  # ty: ignore[invalid-argument-type]
     )
     if user_id:
@@ -296,6 +301,7 @@ __all__ = [
     "create_authenticated_client",
     "login",
     "matrix_client",
+    "matrix_client_config",
     "matrix_startup_error",
     "olm_store_dir",
     "olm_store_exists",

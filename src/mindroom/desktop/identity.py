@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from nio.store import SqliteStore
 
-from mindroom.matrix.client_session import olm_store_dir, olm_store_exists
+from mindroom.matrix.client_session import matrix_client_config, olm_store_dir, olm_store_exists
 from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import matrix_state_for_runtime
 
@@ -52,12 +52,17 @@ def controller_identity_for_entity(
         user_id,
         account.device_id,
         str(olm_store_dir(user_id, runtime_paths)),
+        pickle_key=matrix_client_config().pickle_key,
     )
     try:
-        olm_account = store.load_account()
-        fingerprint = olm_account.identity_keys.get("ed25519") if olm_account is not None else None
+        try:
+            olm_account = store.load_account()
+        except Exception as exc:
+            msg = f"MindRoom entity {entity_name!r} has an unreadable local Olm identity store."
+            raise DesktopIdentityError(msg) from exc
     finally:
         store.database.close()
+    fingerprint = olm_account.identity_keys.get("ed25519") if olm_account is not None else None
     if not isinstance(fingerprint, str) or not fingerprint:
         msg = f"MindRoom entity {entity_name!r} has no local Ed25519 device identity."
         raise DesktopIdentityError(msg)

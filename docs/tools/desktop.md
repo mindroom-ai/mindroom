@@ -87,7 +87,9 @@ Create a dedicated Matrix user such as `@my-laptop:example.org` using your norma
 Run the one-time login on the local computer and enter that account's password at the hidden prompt:
 
 ```bash
-mindroom desktop login --user-id @my-laptop:example.org
+mindroom desktop login \
+  --user-id @my-laptop:example.org \
+  --homeserver https://matrix.example.org
 ```
 
 The command saves only the reusable Matrix access token and device identifiers under the selected MindRoom storage directory.

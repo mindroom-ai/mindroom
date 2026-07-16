@@ -43,7 +43,7 @@ class DesktopResponseRouter:
     """Correlate authenticated desktop responses arriving on one live Matrix client."""
 
     def __init__(self, client: nio.AsyncClient) -> None:
-        self._client = client
+        self._client_ref = weakref.ref(client)
         self._pending: dict[str, _PendingDesktopResponse] = {}
         self._targets_in_flight: set[PinnedMatrixDevice] = set()
         client.add_to_device_callback(self.on_to_device_event, AuthenticatedToDeviceEvent)
@@ -71,14 +71,19 @@ class DesktopResponseRouter:
         )
         self._targets_in_flight.add(target)
         try:
-            await send_encrypted_to_device(
-                self._client,
-                target,
-                event_type=DESKTOP_COMMAND_EVENT_TYPE,
-                content=command.to_content(),
-            )
             try:
-                return await asyncio.wait_for(future, timeout=timeout_seconds)
+                async with asyncio.timeout(timeout_seconds):
+                    client = self._client_ref()
+                    if client is None:
+                        msg = "Desktop Matrix client closed before the request could be sent."
+                        raise DesktopRequestError(msg)
+                    await send_encrypted_to_device(
+                        client,
+                        target,
+                        event_type=DESKTOP_COMMAND_EVENT_TYPE,
+                        content=command.to_content(),
+                    )
+                    return await future
             except TimeoutError as exc:
                 msg = _timeout_message(command, timeout_seconds=timeout_seconds)
                 raise DesktopRequestError(msg) from exc
@@ -101,7 +106,8 @@ class DesktopResponseRouter:
             return
         if response.session_id != pending.session_id:
             return
-        if not authenticated_sender_matches(self._client, event, pending.target):
+        client = self._client_ref()
+        if client is None or not authenticated_sender_matches(client, event, pending.target):
             return
         pending.future.set_result(response)
 

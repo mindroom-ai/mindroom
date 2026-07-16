@@ -64,6 +64,11 @@ def desktop_controller(
 @desktop_app.command("login")
 def desktop_login(
     user_id: str = typer.Option(..., "--user-id", help="Dedicated Matrix user ID for this desktop device."),
+    homeserver: str | None = typer.Option(
+        None,
+        "--homeserver",
+        help="Matrix homeserver URL; defaults to the configured MindRoom homeserver.",
+    ),
     replace: bool = typer.Option(False, "--replace", help="Replace the saved session with a fresh Matrix device."),
     config_path: Path | None = typer.Option(  # noqa: B008
         None,
@@ -95,7 +100,7 @@ def desktop_login(
         asyncio.run(
             _login_and_save(
                 runtime_paths=runtime_paths,
-                homeserver=runtime_matrix_homeserver(runtime_paths),
+                homeserver=homeserver or runtime_matrix_homeserver(runtime_paths),
                 user_id=user_id,
                 password=password,
                 session_path=session_path,
@@ -239,7 +244,10 @@ async def _run_bridge(
 ) -> None:
     from mindroom.desktop.bridge import DesktopBridge, DesktopBridgePolicy  # noqa: PLC0415
     from mindroom.desktop.provider import PyAutoGuiDesktopProvider  # noqa: PLC0415
-    from mindroom.desktop.session import restore_desktop_client  # noqa: PLC0415
+    from mindroom.desktop.session import (  # noqa: PLC0415
+        open_desktop_client,
+        prepare_desktop_client,
+    )
     from mindroom.matrix.olm_to_device import PinnedMatrixDevice, resolve_pinned_device  # noqa: PLC0415
     from mindroom.matrix.to_device import AuthenticatedToDeviceEvent  # noqa: PLC0415
 
@@ -248,10 +256,9 @@ async def _run_bridge(
         device_id=controller_device_id,
         ed25519=controller_ed25519,
     )
-    client = await restore_desktop_client(session, runtime_paths=runtime_paths)
+    client = await open_desktop_client(session, runtime_paths=runtime_paths)
     tasks: set[asyncio.Task[None]] = set()
     try:
-        await resolve_pinned_device(client, controller)
         provider = PyAutoGuiDesktopProvider(
             allowed_app_ids=allow_app,
             max_screenshot_width=max_screenshot_width,
@@ -287,13 +294,16 @@ async def _run_bridge(
                 _error_console.print(f"[red]Desktop command task failed:[/red] {error}")
 
         client.add_to_device_callback(schedule_event, AuthenticatedToDeviceEvent)
+        await prepare_desktop_client(client)
+        await resolve_pinned_device(client, controller)
+
         mode = f"control enabled for {lease_minutes} minute(s)" if allow_control else "observe-only"
         _console.print(f"[green]Desktop bridge online:[/green] {mode}")
         _console.print(f"Allowed requesters: {', '.join(sorted(allow_requester))}")
         _console.print(f"Allowed agents: {', '.join(sorted(allow_agent))}")
         _console.print(f"Allowed applications: {', '.join(sorted(allow_app))}")
         _console.print("Move the pointer to the upper-left corner to trigger PyAutoGUI's emergency stop.")
-        await client.sync_forever(timeout=30_000, full_state=False, set_presence="online")
+        await _sync_desktop_client(client)
     finally:
         client.stop_sync_forever()
         for task in tasks:
@@ -301,6 +311,28 @@ async def _run_bridge(
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         await client.close()
+
+
+async def _sync_desktop_client(client: nio.AsyncClient) -> None:
+    """Run desktop sync and surface permanent Matrix authentication failures."""
+    import nio  # noqa: PLC0415
+
+    from mindroom.desktop.session import DesktopSessionError  # noqa: PLC0415
+
+    permanent_sync_error: nio.SyncError | None = None
+
+    async def stop_on_permanent_sync_error(response: nio.SyncError) -> None:
+        nonlocal permanent_sync_error
+        if response.status_code not in {"M_FORBIDDEN", "M_UNKNOWN_TOKEN", "M_USER_DEACTIVATED"}:
+            return
+        permanent_sync_error = response
+        client.stop_sync_forever()
+
+    client.add_response_callback(stop_on_permanent_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
+    await client.sync_forever(timeout=30_000, full_state=False, set_presence="online")
+    if permanent_sync_error is not None:
+        msg = f"Desktop Matrix sync stopped after permanent authentication failure: {permanent_sync_error}"
+        raise DesktopSessionError(msg)
 
 
 __all__ = ["desktop_app", "desktop_controller", "desktop_login", "desktop_run"]

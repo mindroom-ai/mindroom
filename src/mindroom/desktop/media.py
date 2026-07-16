@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import nio
 from nio import crypto
 
@@ -64,9 +66,16 @@ async def upload_encrypted_screenshot(
 async def download_encrypted_screenshot(
     client: nio.AsyncClient,
     media: EncryptedDesktopMedia,
+    *,
+    timeout_seconds: float,
 ) -> bytes:
     """Download, authenticate, and decrypt one desktop screenshot."""
-    response = await client.download(media.url)
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            response = await client.download(media.url)
+    except TimeoutError as exc:
+        msg = f"Matrix screenshot download did not finish within {timeout_seconds:g} seconds."
+        raise DesktopMediaError(msg) from exc
     if not isinstance(response, nio.DownloadResponse) or not isinstance(response.body, bytes):
         msg = f"Matrix screenshot download failed: {response}"
         raise DesktopMediaError(msg)

@@ -147,7 +147,7 @@ Start MindRoom with your configuration.
 
 ## desktop
 
-Connect a local primary screen and input device to cloud MindRoom over Matrix end-to-end encryption.
+Connect explicitly allowlisted local applications to cloud MindRoom over Matrix end-to-end encryption.
 See the [Matrix Desktop Bridge](tools/desktop.md) guide for the complete secure setup.
 
 <!-- CODE:START -->
@@ -240,6 +240,8 @@ Create and privately save the dedicated local desktop Matrix device.
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ *  --user-id               TEXT  Dedicated Matrix user ID for this desktop device.     │
 │                                  [required]                                            │
+│    --homeserver            TEXT  Matrix homeserver URL; defaults to the configured     │
+│                                  MindRoom homeserver.                                  │
 │    --replace                     Replace the saved session with a fresh Matrix device. │
 │    --config        -c      PATH  MindRoom config path used for runtime env.            │
 │    --storage-path  -s      PATH  Desktop bridge state directory.                       │

@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from PIL.Image import Image as PillowImage
 
 _EMERGENCY_STOP_MESSAGE = "Desktop emergency stop engaged; restart the bridge locally before granting control again."
+_MACOS_UNICODE_CHUNK_LENGTH = 20
 
 
 class DesktopProviderError(RuntimeError):
@@ -277,7 +278,10 @@ class PyAutoGuiDesktopProvider:
             raise DesktopProviderError(msg)
         self._check_emergency_stop()
         self._accessibility.prepare_fallback(app_id, state_id)
-        self._run_input(lambda: self._pyautogui.write(text, interval=0.01))
+        if sys.platform == "darwin":
+            self._run_input(lambda: _type_macos_unicode(text))
+        else:
+            self._run_input(lambda: self._pyautogui.write(text, interval=0.01))
 
     def scroll(
         self,
@@ -350,6 +354,9 @@ def _capture_macos_primary_screen() -> PillowImage:
     import Quartz  # noqa: PLC0415
     from PIL import Image  # noqa: PLC0415
 
+    if not Quartz.CGPreflightScreenCaptureAccess():  # ty: ignore[unresolved-attribute]
+        msg = "macOS Screen Recording permission is required for desktop screenshots."
+        raise DesktopProviderError(msg)
     display_id = Quartz.CGMainDisplayID()  # ty: ignore[unresolved-attribute]
     cg_image = Quartz.CGDisplayCreateImage(display_id)  # ty: ignore[unresolved-attribute]
     if cg_image is None:
@@ -376,6 +383,24 @@ def _capture_macos_primary_screen() -> PillowImage:
         bytes_per_row,
         1,
     )
+
+
+def _type_macos_unicode(text: str) -> None:
+    """Post layout-independent Unicode keyboard events to the active macOS app."""
+    import Quartz  # noqa: PLC0415
+
+    for offset in range(0, len(text), _MACOS_UNICODE_CHUNK_LENGTH):
+        chunk = text[offset : offset + _MACOS_UNICODE_CHUNK_LENGTH]
+        utf16_length = len(chunk.encode("utf-16-le")) // 2
+        key_down = Quartz.CGEventCreateKeyboardEvent(None, 0, True)  # ty: ignore[unresolved-attribute]
+        key_up = Quartz.CGEventCreateKeyboardEvent(None, 0, False)  # ty: ignore[unresolved-attribute]
+        if key_down is None or key_up is None:
+            msg = "macOS could not create a Unicode keyboard event."
+            raise DesktopProviderError(msg)
+        Quartz.CGEventKeyboardSetUnicodeString(key_down, utf16_length, chunk)  # ty: ignore[unresolved-attribute]
+        Quartz.CGEventKeyboardSetUnicodeString(key_up, utf16_length, chunk)  # ty: ignore[unresolved-attribute]
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, key_down)  # ty: ignore[unresolved-attribute]
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, key_up)  # ty: ignore[unresolved-attribute]
 
 
 def _normalized_point(rect: DesktopRect, *, x: int, y: int) -> tuple[int, int]:

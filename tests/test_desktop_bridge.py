@@ -255,6 +255,21 @@ async def test_observe_only_bridge_returns_state_and_window_screenshot(transport
 
 
 @pytest.mark.asyncio
+async def test_bridge_rejects_command_from_unpinned_sender(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bridge wiring drops a valid command unless its Olm sender matches the exact controller pin."""
+    provider = FakeProvider()
+    send = AsyncMock()
+    monkeypatch.setattr("mindroom.desktop.bridge.authenticated_sender_matches", lambda *_args: False)
+    monkeypatch.setattr("mindroom.desktop.bridge.send_encrypted_to_device", send)
+    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
+
+    await bridge.on_to_device_event(_event(_command()))
+
+    assert provider.calls == []
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_list_apps_and_status_expose_only_coarse_local_authority(transport: AsyncMock) -> None:
     """The agent can discover allowed apps and local mode without a screenshot."""
     provider = FakeProvider()
@@ -289,6 +304,31 @@ async def test_disallowed_app_is_rejected_before_provider_access(transport: Asyn
     response = _response(transport)
     assert not response.ok
     assert "local allowlist" in (response.error or "")
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("issued_at_ms", "expires_at_ms", "expected_error"),
+    [
+        (8_000, 10_000, "expired before local execution"),
+        (40_001, 41_000, "too far in the future"),
+    ],
+)
+async def test_command_time_window_is_enforced(
+    transport: AsyncMock,
+    issued_at_ms: int,
+    expires_at_ms: int,
+    expected_error: str,
+) -> None:
+    """Expired and implausibly future commands fail before any local observation or input."""
+    provider = FakeProvider()
+    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
+    command = replace(_command(), issued_at_ms=issued_at_ms, expires_at_ms=expires_at_ms)
+
+    await bridge.on_to_device_event(_event(command))
+
+    assert expected_error in (_response(transport).error or "")
     assert provider.calls == []
 
 
@@ -362,6 +402,35 @@ async def test_control_lease_uses_monotonic_deadline(transport: AsyncMock) -> No
             ),
         ),
     )
+
+    assert _response(transport).error == "Local desktop control lease has expired."
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_control_lease_expires_across_system_sleep(transport: AsyncMock) -> None:
+    """Wall time expiry revokes control even when the macOS monotonic clock paused during sleep."""
+    wall_clock = [NOW_SECONDS]
+    monotonic_clock = [100.0]
+    provider = FakeProvider()
+    bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(allow_control=True),
+        clock=lambda: wall_clock[0],
+        monotonic_clock=lambda: monotonic_clock[0],
+    )
+    wall_clock[0] = 21.0
+    command = replace(
+        _command(
+            "click",
+            parameters={"app": APP_ID, "state_id": "state-1", "x": 10, "y": 20, "button": "left"},
+        ),
+        issued_at_ms=20_000,
+        expires_at_ms=22_000,
+    )
+
+    await bridge.on_to_device_event(_event(command))
 
     assert _response(transport).error == "Local desktop control lease has expired."
     assert provider.calls == []
@@ -589,7 +658,9 @@ async def test_requester_agent_replay_and_sequence_are_enforced(transport: Async
 
     first = _command(request_id="request-2", sequence=2)
     await bridge.on_to_device_event(_event(first))
+    first_response_content = transport.await_args.kwargs["content"]
     await bridge.on_to_device_event(_event(first))
+    assert transport.await_args.kwargs["content"] == first_response_content
     assert provider.calls == [("get_app_state", APP_ID), ("screenshot", (APP_ID, "state-1"))]
 
     await bridge.on_to_device_event(_event(_command("status", request_id="request-2", sequence=2)))
