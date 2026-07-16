@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 import json
 import tarfile
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from typer.testing import CliRunner
@@ -18,6 +18,9 @@ from mindroom.plugin_install import (
     parse_plugin_spec,
     update_plugin,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 runner = CliRunner()
 
@@ -54,11 +57,11 @@ def _fake_github(
     commit: str = "a" * 40,
     files: dict[str, str] = _VALID_PLUGIN_FILES,
 ) -> None:
-    monkeypatch.setattr(plugin_install, "_resolve_commit", lambda repository, ref: commit)
+    monkeypatch.setattr(plugin_install, "_resolve_commit", lambda _repository, _ref: commit)
     monkeypatch.setattr(
         plugin_install,
         "_download_archive",
-        lambda repository, resolved: _archive_bytes(files, root=f"demo-plugin-{resolved[:7]}"),
+        lambda _repository, resolved: _archive_bytes(files, root=f"demo-plugin-{resolved[:7]}"),
     )
 
 
@@ -224,6 +227,22 @@ def test_plugins_install_cli_reports_result_and_config_snippet(
     assert "Installed plugin: compat-demo" in result.stdout
     assert f"acme/demo-plugin@{'a' * 12}" in result.stdout
     assert "- path:" in result.stdout
+
+
+def test_plugins_install_cli_honors_config_path_and_prints_relative_snippet(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--path should target that config's plugins directory and yield a portable snippet."""
+    _fake_github(monkeypatch)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["plugins", "install", "acme/demo-plugin", "--path", str(config_path)])
+
+    assert result.exit_code == 0
+    assert (tmp_path / "plugins" / "demo-plugin" / "hooks.py").is_file()
+    assert "- path: plugins/demo-plugin" in result.stdout
 
 
 def test_plugins_install_cli_reports_failure_without_traceback(
