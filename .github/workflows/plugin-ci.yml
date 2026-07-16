@@ -1,0 +1,107 @@
+name: Plugin compatibility
+
+on:
+  workflow_call:
+    inputs:
+      plugin_repository:
+        description: Plugin repository in owner/name form.
+        required: true
+        type: string
+      plugin_ref:
+        description: Exact plugin commit, branch, or tag to test.
+        required: true
+        type: string
+      artifact_name:
+        description: Filesystem-safe name for test artifacts.
+        required: true
+        type: string
+      mindroom_repository:
+        description: MindRoom repository in owner/name form.
+        default: mindroom-ai/mindroom
+        required: false
+        type: string
+      mindroom_ref:
+        description: Exact MindRoom commit, branch, or tag to test.
+        default: main
+        required: false
+        type: string
+      python_version:
+        description: Python version used by MindRoom and plugin tests.
+        default: "3.13"
+        required: false
+        type: string
+      require_tests:
+        description: Fail when the plugin has no Python test suite.
+        default: false
+        required: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out MindRoom
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: ${{ inputs.mindroom_repository }}
+          ref: ${{ inputs.mindroom_ref }}
+          path: mindroom
+          persist-credentials: false
+
+      - name: Check out plugin
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: ${{ inputs.plugin_repository }}
+          ref: ${{ inputs.plugin_ref }}
+          path: plugin
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: mindroom/uv.lock
+
+      - name: Install Python
+        run: uv python install '${{ inputs.python_version }}'
+
+      - name: Install MindRoom test environment
+        run: uv sync --project mindroom --locked --group dev
+
+      - name: Validate plugin runtime contract
+        run: uv run --project mindroom mindroom plugins check "$GITHUB_WORKSPACE/plugin"
+
+      - name: Run plugin tests
+        if: ${{ hashFiles('plugin/tests/**/*.py') != '' }}
+        env:
+          MINDROOM_DEEP_RESEARCH_INTEGRATION: "0"
+          PYTHONDONTWRITEBYTECODE: "1"
+        working-directory: plugin
+        run: >-
+          uv run --project ../mindroom pytest -q tests
+          --junitxml="${RUNNER_TEMP}/plugin-junit.xml"
+
+      - name: Require plugin tests
+        if: ${{ hashFiles('plugin/tests/**/*.py') == '' && inputs.require_tests }}
+        run: |
+          echo 'Plugin test suite is required but plugin/tests/**/*.py is empty.' >&2
+          exit 1
+
+      - name: Record optional missing plugin tests
+        if: ${{ hashFiles('plugin/tests/**/*.py') == '' && !inputs.require_tests }}
+        run: echo 'No plugin test suite found; strict runtime validation passed.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload plugin test results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ${{ inputs.artifact_name }}-junit
+          path: ${{ runner.temp }}/plugin-junit.xml
+          if-no-files-found: ignore
+          retention-days: 14

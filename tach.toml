@@ -2491,6 +2491,14 @@ depends_on = [
 visibility = ["mindroom.cli.main"]
 
 [[modules]]
+path = "mindroom.cli.plugins"
+depends_on = [
+    "mindroom.cli.config",
+    "mindroom.plugin_check",
+]
+visibility = ["mindroom.cli.main"]
+
+[[modules]]
 path = "mindroom.cli.service"
 depends_on = [
     "mindroom.services.config",
@@ -2516,6 +2524,7 @@ depends_on = [
     "mindroom.cli.doctor",
     "mindroom.cli.local_stack",
     "mindroom.cli.migrate",
+    "mindroom.cli.plugins",
     "mindroom.cli.service",
     "mindroom.cli.trigger",
     "mindroom.config.main",
@@ -2716,6 +2725,18 @@ depends_on = [
     "mindroom.mcp.registry",
     "mindroom.tool_system.plugins",
 ]
+
+[[modules]]
+path = "mindroom.plugin_check"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.constants",
+    "mindroom.hooks",
+    "mindroom.oauth.registry",
+    "mindroom.tool_system.catalog",
+    "mindroom.tool_system.plugins",
+]
+visibility = ["mindroom.cli.plugins"]
 
 [[modules]]
 path = "mindroom.tool_system.dependencies"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import tokenize
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
@@ -26,6 +27,7 @@ from mindroom.tool_system.registry_state import (
 from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
     from types import ModuleType
 
@@ -173,6 +175,45 @@ def load_plugins(
             raise
 
         return plugins
+
+
+@contextmanager
+def isolated_plugin_runtime(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    skip_broken_plugins: bool = False,
+) -> Iterator[list[_Plugin]]:
+    """Load plugins transactionally, then restore all process-global plugin state."""
+    import mindroom.tools  # noqa: F401, PLC0415
+
+    with locked_tool_registry_state():
+        previous_snapshot = capture_tool_registry_snapshot()
+        previous_skill_roots = tuple(get_plugin_skill_roots())
+        previous_manifest_cache = plugin_imports._PLUGIN_CACHE.copy()
+        previous_package_roots = {
+            cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()
+        }
+        try:
+            _clear_plugin_reload_caches()
+            _evict_synthetic_plugin_subtrees(previous_package_roots)
+            yield load_plugins(
+                config,
+                runtime_paths,
+                skip_broken_plugins=skip_broken_plugins,
+            )
+        finally:
+            current_package_roots = {
+                cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()
+            }
+            _cancel_plugin_module_tasks(current_package_roots)
+            restore_tool_registry_snapshot(previous_snapshot)
+            set_plugin_skill_roots(previous_skill_roots)
+            plugin_imports._PLUGIN_CACHE.clear()
+            plugin_imports._PLUGIN_CACHE.update(previous_manifest_cache)
+            _clear_configured_plugin_roots_cache()
+            _clear_oauth_provider_cache_after_plugin_change()
+            clear_tool_schema_cache()
 
 
 def get_configured_plugin_roots(
