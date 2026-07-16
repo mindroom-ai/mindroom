@@ -68,13 +68,13 @@ def save_invited_rooms(path: Path, room_ids: set[str]) -> bool:
     return True
 
 
-def remember_invited_room(path: Path, room_id: str) -> bool:
-    """Add one room using fresh durable state and report persistence success."""
+def remember_invited_room(path: Path, room_id: str) -> None:
+    """Add one room using fresh durable state."""
     room_ids = load_invited_rooms(path)
     if room_id in room_ids:
-        return True
+        return
     room_ids.add(room_id)
-    return save_invited_rooms(path, room_ids)
+    save_invited_rooms(path, room_ids)
 
 
 def should_accept_invites(config: Config, agent_name: str) -> bool:

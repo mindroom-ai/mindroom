@@ -685,11 +685,9 @@ async def _put_scheduled_task_state_content(
         if admin_wrote:
             logger.info("scheduled_task_state_persisted_via_admin", room_id=room_id, task_id=task_id)
             return
-        active_write_failure = f"{active_write_failure}; privileged fallback failed. {permission_hint}"
+        active_write_failure = f"{active_write_failure}; privileged fallback failed"
 
-    if matrix_admin is None:
-        active_write_failure = f"{active_write_failure}. {permission_hint}"
-    msg = f"Failed to persist scheduled task state for task `{task_id}`: {active_write_failure}"
+    msg = f"Failed to persist scheduled task state for task `{task_id}`: {active_write_failure}. {permission_hint}"
     raise ValueError(msg)
 
 

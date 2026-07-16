@@ -2231,7 +2231,7 @@ async def test_schedule_task_rejects_invalid_history_limit_before_parsing(
 
 
 @pytest.mark.asyncio
-async def test_schedule_task_returns_error_when_state_write_and_admin_fallback_fail(tmp_path: Path) -> None:
+async def test_schedule_task_returns_error_when_state_write_fails_without_admin_fallback(tmp_path: Path) -> None:
     """Scheduling must not return a task ID when Matrix state persistence fails."""
     client = AsyncMock()
     client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
@@ -2277,6 +2277,28 @@ async def test_schedule_task_returns_error_when_state_write_and_admin_fallback_f
     assert "Failed to persist scheduled task state" in message
     assert "Ensure the room router is joined" in message
     start_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_state_write_error_includes_hint_when_admin_fallback_raises() -> None:
+    """A raised privileged fallback must report the router recovery action."""
+    client = AsyncMock()
+    client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
+    matrix_admin = AsyncMock()
+    matrix_admin.put_room_state = AsyncMock(side_effect=RuntimeError("admin unavailable"))
+
+    with pytest.raises(ValueError, match="privileged fallback raised") as exc_info:
+        await scheduling._put_scheduled_task_state_content(
+            client=client,
+            room_id="!test:server",
+            task_id="taskfail",
+            content={},
+            matrix_admin=matrix_admin,
+        )
+
+    message = str(exc_info.value)
+    assert "privileged fallback raised RuntimeError: admin unavailable" in message
+    assert "Ensure the room router is joined" in message
 
 
 @pytest.mark.asyncio
