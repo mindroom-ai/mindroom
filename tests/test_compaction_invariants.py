@@ -731,6 +731,13 @@ def test_compaction_input_estimate_uses_conservative_claude_fallback() -> None:
     assert estimator.estimate("☃☃") == 6
 
 
+def test_compaction_input_estimate_recognizes_anthropic_provider_without_model_id() -> None:
+    estimator = compaction_token_estimator(provider="anthropic")
+
+    assert estimator.method == "utf8_bytes_claude_conservative"
+    assert estimator.confidence == "low"
+
+
 def test_compaction_budget_reserves_loaded_model_output_cap() -> None:
     model = _RecordingClaude(id="claude-sonnet-5", max_tokens=64_000)
 

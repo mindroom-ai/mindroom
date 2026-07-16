@@ -80,7 +80,9 @@ def compaction_token_estimator(
             )
 
     normalized_provider = (provider or "").strip().lower().replace("-", "_")
-    is_claude_family = "claude" in normalized_provider or "claude" in (model_id or "").lower()
+    is_claude_family = (
+        normalized_provider == "anthropic" or "claude" in normalized_provider or "claude" in (model_id or "").lower()
+    )
     family = "claude" if is_claude_family else "unknown"
     return _CompactionTokenEstimator(
         method=f"utf8_bytes_{family}_conservative",
