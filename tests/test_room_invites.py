@@ -20,6 +20,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.hooks.matrix_admin import build_hook_matrix_admin
 from mindroom.matrix.invited_rooms_store import invited_rooms_path
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
@@ -272,6 +273,56 @@ async def test_router_accepts_authorized_invite_persists_and_rejoins_on_startup(
     await restarted_bot.join_configured_rooms()
 
     join_room.assert_awaited_once_with(restarted_bot.client, "!router-invited:localhost")
+
+
+@pytest.mark.asyncio
+async def test_router_invite_preserves_room_created_after_lifecycle_loaded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A later invite must not overwrite a hook-created room missing from the lifecycle cache."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        test_runtime_paths(tmp_path),
+    )
+    bot = AgentBot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot.client = AsyncMock()
+    bot.client.rooms = {}
+
+    creator_client = AsyncMock(spec=nio.AsyncClient)
+    creator_client.homeserver = "http://localhost:8008"
+    creator_client.user_id = bot.agent_user.user_id
+    with monkeypatch.context() as patch_context:
+        create_room = AsyncMock(return_value="!hook-created:localhost")
+        patch_context.setattr("mindroom.hooks.matrix_admin.create_room", create_room)
+        admin = build_hook_matrix_admin(
+            creator_client,
+            runtime_paths_for(config),
+            config=config,
+        )
+        await admin.create_room(name="Hook-created room")
+
+    assert bot._room_lifecycle.invited_rooms == set()
+
+    join_room = AsyncMock(return_value=True)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+    monkeypatch.setattr(bot._room_lifecycle, "send_welcome_message_if_empty", AsyncMock())
+    room = MagicMock(room_id="!later-invite:localhost", canonical_alias=None)
+    event = MagicMock(sender="@owner:localhost")
+
+    await bot._on_invite(room, event)
+
+    expected_rooms = {"!hook-created:localhost", "!later-invite:localhost"}
+    assert bot._room_lifecycle.invited_rooms == expected_rooms
+    assert _invited_rooms_path(config, ROUTER_AGENT_NAME).read_text(encoding="utf-8") == (
+        '[\n  "!hook-created:localhost",\n  "!later-invite:localhost"\n]\n'
+    )
 
 
 @pytest.mark.asyncio

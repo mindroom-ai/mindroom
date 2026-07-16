@@ -651,6 +651,7 @@ async def _put_scheduled_task_state_content(
     matrix_admin: HookMatrixAdmin | None = None,
 ) -> None:
     """Write scheduled-task state, falling back to the admin-capable Matrix path on rejection."""
+    permission_hint = "Ensure the room router is joined with permission to write room state, then retry."
     active_write_failure: str | None = None
     try:
         response = await client.room_put_state(
@@ -677,14 +678,17 @@ async def _put_scheduled_task_state_content(
         except Exception as exc:
             msg = (
                 f"Failed to persist scheduled task state for task `{task_id}`: "
-                f"active write failed ({active_write_failure}); privileged fallback raised {type(exc).__name__}: {exc!s}"
+                f"active write failed ({active_write_failure}); privileged fallback raised {type(exc).__name__}: {exc!s}. "
+                f"{permission_hint}"
             )
             raise ValueError(msg) from exc
         if admin_wrote:
             logger.info("scheduled_task_state_persisted_via_admin", room_id=room_id, task_id=task_id)
             return
-        active_write_failure = f"{active_write_failure}; privileged fallback failed"
+        active_write_failure = f"{active_write_failure}; privileged fallback failed. {permission_hint}"
 
+    if matrix_admin is None:
+        active_write_failure = f"{active_write_failure}. {permission_hint}"
     msg = f"Failed to persist scheduled task state for task `{task_id}`: {active_write_failure}"
     raise ValueError(msg)
 

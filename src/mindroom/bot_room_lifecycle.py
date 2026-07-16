@@ -15,8 +15,10 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import get_joined_rooms, join_room
 from mindroom.matrix.decrypt_failure import raise_notice_floor
 from mindroom.matrix.invited_rooms_store import (
+    forget_invited_room,
     invited_rooms_path,
     load_invited_rooms,
+    remember_invited_room,
     save_invited_rooms,
     should_accept_invites,
     should_persist_invited_rooms,
@@ -138,10 +140,9 @@ class BotRoomLifecycle:
 
     def forget_invited_room(self, room_id: str) -> None:
         """Stop preserving an ad-hoc room after this bot leaves it."""
-        if room_id not in self.invited_rooms:
+        if not self.should_persist_invited_rooms():
             return
-        self.invited_rooms.remove(room_id)
-        self.save_invited_rooms()
+        self.invited_rooms = forget_invited_room(self.invited_rooms_file_path(), room_id)
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this bot should preserve across restarts."""
@@ -291,8 +292,7 @@ class BotRoomLifecycle:
                 # Pre-join encrypted history can never decrypt on this device;
                 # don't post decrypt-failure notices for it.
                 raise_notice_floor(client.user_id, room.room_id)
-            if self.should_persist_invited_rooms() and room.room_id not in self.invited_rooms:
-                self.invited_rooms.add(room.room_id)
-                self.save_invited_rooms()
+            if self.should_persist_invited_rooms():
+                self.invited_rooms = remember_invited_room(self.invited_rooms_file_path(), room.room_id)
             if self.deps.agent_name == ROUTER_AGENT_NAME:
                 await self.send_welcome_message_if_empty(room.room_id, event.sender)

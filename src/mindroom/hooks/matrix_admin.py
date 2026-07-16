@@ -12,8 +12,7 @@ from mindroom.matrix.identity import managed_account_key, managed_account_user_i
 from mindroom.matrix.invited_rooms_store import (
     invited_room_entity_names,
     invited_rooms_path,
-    load_invited_rooms,
-    save_invited_rooms,
+    remember_invited_room,
     should_persist_invited_rooms,
 )
 from mindroom.matrix_identifiers import extract_server_name_from_homeserver
@@ -105,11 +104,7 @@ class _BoundHookMatrixAdmin:
         if entity_name is None or not should_persist_invited_rooms(self.config, entity_name):
             return
         path = invited_rooms_path(self.runtime_paths.storage_root, entity_name)
-        room_ids = load_invited_rooms(path)
-        if room_id in room_ids:
-            return
-        room_ids.add(room_id)
-        save_invited_rooms(path, room_ids)
+        remember_invited_room(path, room_id)
 
     def _managed_entity_name_for_user_id(self, user_id: str | None) -> str | None:
         """Return the configured bot entity name for one managed Matrix user ID."""

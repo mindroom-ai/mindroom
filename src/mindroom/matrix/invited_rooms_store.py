@@ -47,7 +47,12 @@ def load_invited_rooms(path: Path) -> set[str]:
 
 
 def save_invited_rooms(path: Path, room_ids: set[str]) -> None:
-    """Persist invited rooms atomically for one eligible entity."""
+    """Replace invited rooms atomically for one eligible entity.
+
+    Single-room updates should use ``remember_invited_room`` or
+    ``forget_invited_room`` so a stale in-memory snapshot cannot discard
+    changes written by another runtime component.
+    """
     temp_path = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -60,6 +65,24 @@ def save_invited_rooms(path: Path, room_ids: set[str]) -> None:
         logger.exception("failed_to_save_invited_rooms", path=str(path))
     finally:
         temp_path.unlink(missing_ok=True)
+
+
+def remember_invited_room(path: Path, room_id: str) -> set[str]:
+    """Add one room using fresh durable state and return the updated set."""
+    room_ids = load_invited_rooms(path)
+    if room_id not in room_ids:
+        room_ids.add(room_id)
+        save_invited_rooms(path, room_ids)
+    return room_ids
+
+
+def forget_invited_room(path: Path, room_id: str) -> set[str]:
+    """Remove one room using fresh durable state and return the updated set."""
+    room_ids = load_invited_rooms(path)
+    if room_id in room_ids:
+        room_ids.remove(room_id)
+        save_invited_rooms(path, room_ids)
+    return room_ids
 
 
 def should_accept_invites(config: Config, agent_name: str) -> bool:

@@ -2275,6 +2275,7 @@ async def test_schedule_task_returns_error_when_state_write_and_admin_fallback_f
     assert task_id is None
     assert "Failed to schedule" in message
     assert "Failed to persist scheduled task state" in message
+    assert "Ensure the room router is joined" in message
     start_task.assert_not_called()
 
 
