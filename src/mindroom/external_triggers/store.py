@@ -523,10 +523,20 @@ def _public_key_fingerprint_from_bytes(public_key_bytes: bytes) -> str:
 
 
 def _validate_owner(owner_user_id: str, config: Config, runtime_paths: RuntimePaths) -> None:
+    validate_delivery_owner(owner_user_id, config, runtime_paths, subject="external trigger")
+
+
+def validate_delivery_owner(
+    owner_user_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    subject: str,
+) -> None:
     """Require an external human owner, not a managed bot identity."""
     parsed_owner = MatrixID.parse(owner_user_id)
     if owner_user_id in config.bot_accounts:
-        msg = "external trigger owner must not be a configured bot account"
+        msg = f"{subject} owner must not be a configured bot account"
         raise ExternalTriggerStoreError(msg)
     local_domain = extract_server_name_from_homeserver(
         constants.runtime_matrix_homeserver(runtime_paths),
@@ -537,7 +547,7 @@ def _validate_owner(owner_user_id: str, config: Config, runtime_paths: RuntimePa
         and parsed_owner.domain == local_domain
         and config.mindroom_user.username == parsed_owner.username
     ):
-        msg = "external trigger owner must not be the MindRoom user"
+        msg = f"{subject} owner must not be the MindRoom user"
         raise ExternalTriggerStoreError(msg)
     configured_entities = [constants.ROUTER_AGENT_NAME, *config.agents, *config.teams]
     matrix_state = matrix_state_for_runtime(runtime_paths)
@@ -547,7 +557,7 @@ def _validate_owner(owner_user_id: str, config: Config, runtime_paths: RuntimePa
             continue
         managed_id = MatrixID.from_username(account.username, account.domain or local_domain).full_id
         if owner_user_id == managed_id:
-            msg = "external trigger owner must not be a managed entity account"
+            msg = f"{subject} owner must not be a managed entity account"
             raise ExternalTriggerStoreError(msg)
     try:
         managed_account_ids = {
@@ -556,50 +566,80 @@ def _validate_owner(owner_user_id: str, config: Config, runtime_paths: RuntimePa
     except MissingManagedEntityAccountError:
         managed_account_ids = set()
     if owner_user_id in managed_account_ids:
-        msg = "external trigger owner must not be a managed entity account"
+        msg = f"{subject} owner must not be a managed entity account"
         raise ExternalTriggerStoreError(msg)
     managed_localparts = {agent_username_localpart(entity_name, runtime_paths) for entity_name in configured_entities}
     if parsed_owner.domain == local_domain and parsed_owner.username in managed_localparts:
-        msg = "external trigger owner must not be a managed entity account"
+        msg = f"{subject} owner must not be a managed entity account"
         raise ExternalTriggerStoreError(msg)
 
 
 def _validate_target(record: ExternalTriggerRecord, config: Config, runtime_paths: RuntimePaths) -> None:
+    validate_delivery_target(
+        target_agent=record.target.agent,
+        target_room_id=record.target.room_id,
+        created_by_agent_name=record.created_by_agent_name,
+        created_in_room_id=record.created_in_room_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        subject="external trigger",
+    )
+
+
+def validate_delivery_target(
+    *,
+    target_agent: str,
+    target_room_id: str,
+    created_by_agent_name: str,
+    created_in_room_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    subject: str,
+) -> None:
     """Require a configured entity and a deliverable room target."""
-    target = record.target
-    if target.agent not in config.agents and target.agent not in config.teams:
-        msg = f"external trigger target references unknown agent or team: {target.agent}"
+    if target_agent not in config.agents and target_agent not in config.teams:
+        msg = f"{subject} target references unknown agent or team: {target_agent}"
         raise ExternalTriggerStoreError(msg)
-    if target.room_id in get_rooms_for_entity(target.agent, config):
+    if target_room_id in get_rooms_for_entity(target_agent, config):
         return
-    resolved_room_id = resolve_room_id(target.room_id, runtime_paths)
+    resolved_room_id = resolve_room_id(target_room_id, runtime_paths)
     configured_entities = configured_routable_entity_names_for_room(
         config,
         resolved_room_id,
         runtime_paths,
-        room_aliases=(target.room_id,),
+        room_aliases=(target_room_id,),
     )
-    if target.agent in configured_entities:
+    if target_agent in configured_entities:
         return
-    if _targets_private_current_room(record, config, runtime_paths):
+    if _targets_private_current_room(
+        target_agent=target_agent,
+        target_room_id=target_room_id,
+        created_by_agent_name=created_by_agent_name,
+        created_in_room_id=created_in_room_id,
+        config=config,
+        runtime_paths=runtime_paths,
+    ):
         return
-    msg = "external trigger target room must already be configured for the target entity"
+    msg = f"{subject} target room must already be configured for the target entity"
     raise ExternalTriggerStoreError(msg)
 
 
 def _targets_private_current_room(
-    record: ExternalTriggerRecord,
+    *,
+    target_agent: str,
+    target_room_id: str,
+    created_by_agent_name: str,
+    created_in_room_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> bool:
     """Allow private current-agent triggers for dynamic rooms created outside config."""
-    target = record.target
-    if target.agent != record.created_by_agent_name:
+    if target_agent != created_by_agent_name:
         return False
-    agent_config = config.agents.get(target.agent)
+    agent_config = config.agents.get(target_agent)
     if agent_config is None or agent_config.private is None:
         return False
-    return _room_ids_match(target.room_id, record.created_in_room_id, runtime_paths)
+    return _room_ids_match(target_room_id, created_in_room_id, runtime_paths)
 
 
 def _room_ids_match(left: str, right: str, runtime_paths: RuntimePaths) -> bool:

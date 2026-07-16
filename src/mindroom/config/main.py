@@ -31,6 +31,7 @@ from mindroom.agent_policy import (
 from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.callback_policy import CallbackPolicyConfig
 from mindroom.config.calls import CallsConfig
 from mindroom.config.entity_view import ResolvedEntityView
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
@@ -146,7 +147,7 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "matrix_room_access",
     "matrix_space",
 )
-_OPTIONAL_MODEL_SECTION_NAMES = ("debug", "external_trigger_policy", "tool_approval")
+_OPTIONAL_MODEL_SECTION_NAMES = ("callback_policy", "debug", "external_trigger_policy", "tool_approval")
 
 
 class ConfigRuntimeValidationError(ValueError):
@@ -394,6 +395,10 @@ class Config(BaseModel):
     external_trigger_policy: ExternalTriggerPolicyConfig = Field(
         default_factory=ExternalTriggerPolicyConfig,
         description="Global policy for tool-managed signed external triggers",
+    )
+    callback_policy: CallbackPolicyConfig = Field(
+        default_factory=CallbackPolicyConfig,
+        description="Global policy for tool-minted one-shot agent completion callbacks",
     )
     models: dict[str, ModelConfig] = Field(default_factory=dict, description="Model configurations")
     tool_approval: ToolApprovalConfig = Field(
