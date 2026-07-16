@@ -29,6 +29,7 @@ from mindroom.history.compaction import (
 from mindroom.history.policy import (
     classify_compaction_decision,
     describe_compaction_unavailability,
+    normalize_compaction_budget_tokens,
     resolve_history_execution_plan,
 )
 from mindroom.history.prompt_tokens import estimate_agent_static_tokens, estimate_team_static_tokens
@@ -529,14 +530,10 @@ async def _run_scope_compaction(
         execution_plan.compaction_model_name,
     )
     model_max_output_tokens = configured_model_max_output_tokens(summary_model)
-    summary_input_budget = execution_plan.summary_input_budget_tokens
-    if model_max_output_tokens is not None:
-        assert execution_plan.compaction_context_window is not None
-        summary_input_budget = compute_compaction_input_budget(
-            execution_plan.compaction_context_window,
-            reserve_tokens=execution_plan.reserve_tokens,
-            model_max_output_tokens=model_max_output_tokens,
-        )
+    summary_input_budget = _effective_summary_input_budget(
+        execution_plan,
+        model_max_output_tokens=model_max_output_tokens,
+    )
     logger.info(
         "Compaction summary input budget resolved",
         summary_model=execution_plan.compaction_model_name,
@@ -561,6 +558,28 @@ async def _run_scope_compaction(
         summary_prompt=config.get_prompt("COMPACTION_SUMMARY_PROMPT"),
         lifecycle_notice_event_id=lifecycle_notice_event_id,
         progress_callback=progress_callback,
+    )
+
+
+def _effective_summary_input_budget(
+    execution_plan: ResolvedHistoryExecutionPlan,
+    *,
+    model_max_output_tokens: int | None,
+) -> int:
+    """Apply the loaded model output cap without bypassing resolved reserve policy."""
+    assert execution_plan.summary_input_budget_tokens is not None
+    if model_max_output_tokens is None:
+        return execution_plan.summary_input_budget_tokens
+
+    assert execution_plan.compaction_context_window is not None
+    normalized_reserve_tokens = normalize_compaction_budget_tokens(
+        execution_plan.reserve_tokens,
+        execution_plan.compaction_context_window,
+    )
+    return compute_compaction_input_budget(
+        execution_plan.compaction_context_window,
+        reserve_tokens=normalized_reserve_tokens,
+        model_max_output_tokens=model_max_output_tokens,
     )
 
 

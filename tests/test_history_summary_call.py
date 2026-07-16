@@ -53,7 +53,7 @@ async def test_compaction_call_timeout_raises_runtime_error() -> None:
     class _SlowSummaryModel(FakeModel):
         async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
             await asyncio.sleep(0.05)
-            return ModelResponse(content="merged summary")
+            return ModelResponse(content="merged durable summary")
 
     with (
         patch("mindroom.history.summary_call.MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS", 0.01),
@@ -69,7 +69,11 @@ async def test_compaction_call_timeout_raises_runtime_error() -> None:
 @pytest.mark.asyncio
 async def test_compaction_summary_uses_configured_system_prompt() -> None:
     """Compaction summaries should use the configured prompt text."""
-    model = RecordingModel(id="summary-model", provider="fake")
+    model = RecordingModel(
+        id="summary-model",
+        provider="fake",
+        response_content="merged durable summary",
+    )
 
     await generate_compaction_summary(
         model=model,
@@ -138,7 +142,7 @@ async def test_compaction_call_timeout_raises_even_when_provider_returns_after_c
             except asyncio.CancelledError:
                 self.cancelled.set()
                 await self.release_after_cancel.wait()
-                return ModelResponse(content="merged summary")
+                return ModelResponse(content="merged durable summary")
             finally:
                 self.finished.set()
             raise AssertionError
@@ -318,7 +322,7 @@ async def test_compaction_timeout_cleanup_detaches_after_grace_window() -> None:
             except asyncio.CancelledError:
                 self.cancelled.set()
                 await self.release_cleanup.wait()
-                return ModelResponse(content="merged summary")
+                return ModelResponse(content="merged durable summary")
             finally:
                 self.finished.set()
             raise AssertionError
@@ -352,7 +356,7 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
     class _SlowSummaryModel(FakeModel):
         async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
             await asyncio.sleep(0.05)
-            return ModelResponse(content="merged summary")
+            return ModelResponse(content="merged durable summary")
 
     config, runtime_paths = _make_config(
         tmp_path,

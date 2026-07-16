@@ -28,6 +28,7 @@ from mindroom.history.compaction import (
     estimate_session_summary_tokens,
 )
 from mindroom.history.runtime import (
+    _effective_summary_input_budget,
     open_scope_session_context,
     prepare_bound_scope_history,
     prepare_scope_history,
@@ -71,6 +72,24 @@ def test_prepare_scope_history_boundary_does_not_accept_execution_identity() -> 
     assert "execution_identity" not in inspect.signature(prepare_bound_team_run_context).parameters
     assert "execution_identity" not in inspect.signature(prepare_bound_scope_history).parameters
     assert "execution_identity" not in inspect.signature(prepare_scope_history).parameters
+
+
+def test_effective_summary_input_budget_reuses_normalized_reserve_policy() -> None:
+    execution_plan = ResolvedHistoryExecutionPlan(
+        authored_compaction_enabled=True,
+        destructive_compaction_available=True,
+        explicit_compaction_model=True,
+        compaction_model_name="summary-model",
+        compaction_context_window=100_000,
+        replay_window_tokens=100_000,
+        trigger_threshold_tokens=80_000,
+        reserve_tokens=120_000,
+        static_prompt_tokens=0,
+        replay_budget_tokens=50_000,
+        summary_input_budget_tokens=38_000,
+    )
+
+    assert _effective_summary_input_budget(execution_plan, model_max_output_tokens=64_000) == 24_000
 
 
 @pytest.mark.asyncio

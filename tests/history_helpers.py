@@ -69,24 +69,25 @@ class RecordingModel(Model):
     """Model that records the final prompt message list."""
 
     seen_messages: list[Message] = field(default_factory=list)
+    response_content: str = "ok"
 
     def invoke(self, *_args: object, **kwargs: object) -> ModelResponse:
         messages = kwargs.get("messages")
         if isinstance(messages, list):
             self.seen_messages = list(messages)
-        return ModelResponse(content="ok")
+        return ModelResponse(content=self.response_content)
 
     async def ainvoke(self, *_args: object, **kwargs: object) -> ModelResponse:
         messages = kwargs.get("messages")
         if isinstance(messages, list):
             self.seen_messages = list(messages)
-        return ModelResponse(content="ok")
+        return ModelResponse(content=self.response_content)
 
     def invoke_stream(self, *_args: object, **_kwargs: object):
-        yield ModelResponse(content="ok")
+        yield ModelResponse(content=self.response_content)
 
     async def ainvoke_stream(self, *_args: object, **_kwargs: object):
-        yield ModelResponse(content="ok")
+        yield ModelResponse(content=self.response_content)
 
     def _parse_provider_response(self, response: ModelResponse, *_args: object, **_kwargs: object) -> ModelResponse:
         return response

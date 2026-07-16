@@ -273,7 +273,7 @@ async def generate_compaction_summary(
     normalized_text = _normalize_compaction_summary_text(raw_text)
     normalized_bytes = len(normalized_text.encode("utf-8"))
     output_tokens = _response_output_tokens(response)
-    is_near_empty = output_tokens is not None and normalized_bytes < _MIN_COMPACTION_SUMMARY_BYTES
+    is_near_empty = normalized_bytes < _MIN_COMPACTION_SUMMARY_BYTES
     if not normalized_text or is_near_empty:
         msg = (
             "summary generation returned an empty or near-empty result "

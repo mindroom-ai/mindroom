@@ -698,7 +698,7 @@ async def test_generate_compaction_summary_rejects_near_empty_result() -> None:
         await generate_compaction_summary(
             model=_RecordingClaude(
                 id="claude-sonnet-5",
-                response=ModelResponse(content="ok", output_tokens=1),
+                response=ModelResponse(content="ok"),
             ),
             summary_input="conversation payload",
             summary_prompt="Summarize the conversation.",
