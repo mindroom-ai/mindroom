@@ -141,6 +141,7 @@ class BotRoomLifecycle:
     def forget_invited_room(self, room_id: str) -> None:
         """Stop preserving an ad-hoc room after this bot leaves it."""
         if not self.should_persist_invited_rooms():
+            self.invited_rooms.discard(room_id)
             return
         self.invited_rooms = forget_invited_room(self.invited_rooms_file_path(), room_id)
 

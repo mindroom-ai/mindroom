@@ -419,6 +419,40 @@ def test_agent_forgets_persisted_invited_room_after_being_kicked(
     assert _invited_rooms_path(config, "agent1").read_text(encoding="utf-8") == "[]\n"
 
 
+def test_nonpersisting_agent_forget_clears_in_memory_room(tmp_path: Path) -> None:
+    """Disabling invite persistence must not leave stale in-memory membership."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "agent1": AgentConfig(
+                    display_name="Agent 1",
+                    role="Test agent",
+                    accept_invites=False,
+                ),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot = AgentBot(
+        agent_user=AgentMatrixUser(
+            agent_name="agent1",
+            user_id="@mindroom_agent1:localhost",
+            display_name="Agent 1",
+            password=TEST_PASSWORD,
+        ),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    room_id = "!old-invite:localhost"
+    bot._room_lifecycle.invited_rooms = {room_id}
+
+    bot._room_lifecycle.forget_invited_room(room_id)
+
+    assert bot._room_lifecycle.invited_rooms == set()
+    assert not _invited_rooms_path(config, "agent1").exists()
+
+
 @pytest.mark.asyncio
 async def test_router_duplicate_invite_retries_failed_welcome_delivery(
     monkeypatch: pytest.MonkeyPatch,
