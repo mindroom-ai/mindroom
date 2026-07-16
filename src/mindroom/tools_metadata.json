@@ -7395,6 +7395,32 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Mint one-shot completion callbacks that wake this agent when a sub-agent finishes",
+      "display_name": "Callback Manager",
+      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "function_names": [
+        "mint_callback",
+        "list_callbacks",
+        "revoke_callback"
+      ],
+      "helper_text": null,
+      "icon": "Webhook",
+      "icon_color": "text-amber-500",
+      "name": "callback_manager",
+      "requires_room_context": false,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "productivity",
       "config_fields": [
         {
           "authored_override": true,

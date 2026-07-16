@@ -113,6 +113,7 @@ cal_com = [
   "requests",
 ]
 calculator = []
+callback_manager = []
 cartesia = [
   "cartesia",
 ]

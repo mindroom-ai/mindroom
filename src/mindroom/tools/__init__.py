@@ -41,6 +41,7 @@ from mindroom.tools.browser import browser_tools
 from mindroom.tools.browserbase import browserbase_tools
 from mindroom.tools.cal_com import cal_com_tools
 from mindroom.tools.calculator import calculator_tools
+from mindroom.tools.callback_manager import callback_manager_tools
 from mindroom.tools.cartesia import cartesia_tools
 from mindroom.tools.claude_agent import claude_agent_tools
 from mindroom.tools.clickup import clickup_tools
@@ -169,6 +170,7 @@ __all__ = [
     "browserbase_tools",
     "cal_com_tools",
     "calculator_tools",
+    "callback_manager_tools",
     "cartesia_tools",
     "claude_agent_tools",
     "clickup_tools",
