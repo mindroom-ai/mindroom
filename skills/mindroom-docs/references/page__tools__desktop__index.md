@@ -3,6 +3,9 @@
 The `desktop` tool lets a cloud-hosted MindRoom agent inspect and operate explicitly allowlisted applications on a local computer without opening an inbound port.
 The local computer runs an outbound Matrix sync client, while commands and responses use Olm-encrypted to-device events addressed to exact pinned Matrix devices.
 App screenshots are encrypted before upload to Matrix media, and their decryption keys travel only inside the encrypted response.
+By default, the screenshot is model-visible but MindRoom does not create a durable plaintext screenshot file on the cloud host.
+When a user asks to receive the image, `desktop(action="screenshot", return_attachment=true)` returns a turn-scoped `att_*` handle that can be sent with `matrix_message`.
+That handle reuses the existing encrypted Matrix media instead of saving or uploading the screenshot again, and it expires when the turn ends.
 
 The bridge is accessibility-first on macOS.
 It returns a bounded accessibility tree with roles, names, values, bounds, writable state, and advertised actions, plus a screenshot cropped to the selected app window.
@@ -37,6 +40,10 @@ The observation actions are:
 - `list_apps` lists only locally allowlisted app IDs and whether each is running.
 - `get_app_state` returns a fresh accessibility state and app-window screenshot.
 - `screenshot` returns a fresh state and requires its app-window screenshot to succeed.
+
+Only `screenshot` accepts `return_attachment=true`.
+The option does not write plaintext pixels to attachment storage.
+It exposes the existing encrypted MXC object only inside the active tool context, and Matrix delivery refuses to send that handle to an unencrypted room.
 
 The control actions are:
 
@@ -249,6 +256,7 @@ The agent uses normalized `click`, `type_text`, `scroll`, or `keypress` only whe
 If the bridge reports stale state, the agent calls `get_app_state` again instead of reusing the old element index or coordinate.
 If an action outcome is unknown or its follow-up state is incomplete, the agent observes again and does not automatically repeat the action.
 Some applications change their UI successfully and then return an accessibility error, so a fresh observation is the only safe way to resolve an unknown outcome.
+If the user asks to receive the screenshot, the agent calls `desktop(action="screenshot", app="...", return_attachment=true)` and then sends the returned `attachment_id` in the same turn with `matrix_message`.
 
 For browser work, the agent starts with `browser(action="tabs", target="desktop")` or `browser(action="snapshot", target="desktop")`.
 The snapshot returns semantic roles, names, current values, and element references from the current page.
@@ -257,6 +265,7 @@ Element references are opaque and may include frame identity, so the agent must 
 The agent passes those references to `browser(action="act", target="desktop", request=...)` for form filling and interactive steps.
 After navigation or a significant page update, the agent requests a new snapshot instead of reusing old references.
 The `screenshot` action is useful for visual context, but semantic actions should use snapshot references rather than guessing image coordinates.
+For a browser screenshot that the user should receive, the agent passes `returnAttachment=true` with `target="desktop"` and sends the returned `attachment_id` through `matrix_message` in the same turn.
 
 ## 6. Add Matrix Approval for Control Actions
 

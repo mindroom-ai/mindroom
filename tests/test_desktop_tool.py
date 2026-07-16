@@ -109,6 +109,78 @@ async def test_screenshot_response_becomes_model_visible_image(monkeypatch: pyte
 
 
 @pytest.mark.asyncio
+async def test_screenshot_can_return_turn_scoped_sendable_attachment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opt-in screenshots reuse encrypted MXC media without creating a plaintext file."""
+    context = SimpleNamespace(
+        session_id="session-1",
+        requester_id="@alice:example.org",
+        agent_name="computer",
+        client=object(),
+        runtime_attachment_ids=[],
+        runtime_media_attachments={},
+    )
+    response = DesktopResponse(
+        request_id="request-1",
+        session_id="session-1",
+        ok=True,
+        result={"capture": {"width": 800, "height": 600}},
+        screenshot=MEDIA,
+    )
+    monkeypatch.setattr("mindroom.custom_tools.desktop.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.desktop.desktop_response_router",
+        lambda _client: SimpleNamespace(request=AsyncMock(return_value=response)),
+    )
+    monkeypatch.setattr(
+        "mindroom.custom_tools.desktop.download_encrypted_screenshot",
+        AsyncMock(return_value=b"\xff\xd8\xffjpeg"),
+    )
+
+    result = await DesktopTools("@desktop:example.org", "DESKTOP", "fingerprint").desktop(
+        "screenshot",
+        app="com.example.Editor",
+        return_attachment=True,
+    )
+
+    payload = json.loads(result.content)
+    attachment_id = payload["attachment_id"]
+    assert attachment_id.startswith("att_")
+    assert payload["attachment_lifetime"] == "current_turn"
+    assert context.runtime_attachment_ids == [attachment_id]
+    attachment = context.runtime_media_attachments[attachment_id]
+    assert attachment.url == MEDIA.url
+    assert attachment.key == MEDIA.key
+    assert attachment.filename.endswith(".jpg")
+
+
+@pytest.mark.asyncio
+async def test_return_attachment_is_rejected_for_non_screenshot_actions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only an explicit screenshot may mint a sendable image handle."""
+    request = AsyncMock()
+    monkeypatch.setattr(
+        "mindroom.custom_tools.desktop.get_tool_runtime_context",
+        lambda: SimpleNamespace(
+            requester_id="@alice:example.org",
+            agent_name="computer",
+            client=object(),
+        ),
+    )
+    monkeypatch.setattr(
+        "mindroom.custom_tools.desktop.desktop_response_router",
+        lambda _client: SimpleNamespace(request=request),
+    )
+
+    result = await DesktopTools("@desktop:example.org", "DESKTOP", "fingerprint").desktop(
+        "get_app_state",
+        app="com.example.Editor",
+        return_attachment=True,
+    )
+
+    assert json.loads(result.content)["status"] == "error"
+    request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_invalid_control_parameters_fail_before_matrix_delivery(monkeypatch: pytest.MonkeyPatch) -> None:
     """Malformed actions never leave the cloud controller device."""
     request = AsyncMock()

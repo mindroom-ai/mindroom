@@ -609,6 +609,64 @@ async def test_desktop_target_returns_decrypted_browser_screenshot(
 
 
 @pytest.mark.asyncio
+async def test_desktop_browser_screenshot_can_return_sendable_attachment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real-profile screenshots can be resent from encrypted media without a local file."""
+    context = SimpleNamespace(
+        requester_id="@alice:example.org",
+        agent_name="computer",
+        client=object(),
+        runtime_attachment_ids=[],
+        runtime_media_attachments={},
+    )
+    response = DesktopResponse(
+        request_id="screenshot",
+        session_id="session",
+        ok=True,
+        result={"action": "screenshot", "provider": "playwright_mcp_extension"},
+        screenshot=DESKTOP_MEDIA,
+    )
+    monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.desktop_response_router",
+        lambda _client: SimpleNamespace(request=AsyncMock(return_value=response)),
+    )
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.download_encrypted_screenshot",
+        AsyncMock(return_value=b"\x89PNGpage"),
+    )
+    tool = BrowserTools(
+        TEST_RUNTIME_PATHS,
+        device_user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        device_ed25519="fingerprint",
+    )
+
+    result = await tool.browser(action="screenshot", target="desktop", returnAttachment=True)
+
+    assert not isinstance(result, str)
+    payload = json.loads(result.content)
+    attachment_id = payload["attachment_id"]
+    assert payload["attachment_lifetime"] == "current_turn"
+    assert context.runtime_attachment_ids == [attachment_id]
+    attachment = context.runtime_media_attachments[attachment_id]
+    assert attachment.url == DESKTOP_MEDIA.url
+    assert attachment.filename.endswith(".png")
+
+
+@pytest.mark.asyncio
+async def test_browser_return_attachment_requires_desktop_screenshot() -> None:
+    """Host screenshots and non-screenshot actions reject the desktop-only attachment option."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+
+    with pytest.raises(ValueError, match="requires target=desktop"):
+        await tool.browser(action="screenshot", target="host", returnAttachment=True)
+    with pytest.raises(ValueError, match="only supported for action=screenshot"):
+        await tool.browser(action="tabs", target="desktop", returnAttachment=True)
+
+
+@pytest.mark.asyncio
 async def test_act_unknown_kind_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """Unknown act kind is rejected."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)

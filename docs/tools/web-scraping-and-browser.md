@@ -672,6 +672,7 @@ It creates tabs, tracks the active tab, records console entries, and resolves te
 `snapshot()` can return either `ai` or `aria` format.
 `act()` currently supports `click`, `type`, `press`, `hover`, `drag`, `select`, `fill`, `resize`, `wait`, `evaluate`, and `close`.
 The desktop target uses the browser's real signed-in state and requires the Matrix desktop bridge, the local extension option, and a local control lease for interactive actions.
+Desktop screenshots are model-visible by default, while `returnAttachment=true` additionally returns a current-turn `att_*` handle that can be sent through `matrix_message` without saving plaintext pixels or uploading the encrypted media again.
 Safari and other unsupported browsers can still be operated through the separate accessibility-first `desktop` tool.
 If `output_dir` is unset, screenshots and PDFs are written under `<storage>/browser`.
 The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable` when available.
@@ -707,11 +708,13 @@ browser(action="open", target="desktop", targetUrl="https://matrix.org/blog/")
 browser(action="snapshot", target="desktop")
 browser(action="act", target="desktop", request={"kind": "click", "ref": "e1"})
 browser(action="screenshot", target="desktop", fullPage=True)
+browser(action="screenshot", target="desktop", fullPage=True, returnAttachment=True)
 ```
 
 #### Notes
 
 - The host target uses MindRoom's managed Playwright profile, while the desktop target uses the user's connected local browser profile through Matrix.
+- `returnAttachment` is accepted only by `action="screenshot"` with `target="desktop"`, and the returned handle expires when the current turn ends.
 - See the [Matrix Desktop Bridge](desktop.md) guide for extension installation, Brave paths, the local lease, and the full trust model.
 
 ### [`web_browser_tools`]

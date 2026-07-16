@@ -25,6 +25,10 @@ from playwright.async_api import BrowserContext, ConsoleMessage, Dialog, Page, P
 from playwright.async_api import Error as PlaywrightError
 
 from mindroom.browser_fetch_guard import continue_or_abort_browser_fetch
+from mindroom.custom_tools.desktop_attachment import (
+    register_runtime_screenshot_attachment,
+    screenshot_attachment_result_fields,
+)
 from mindroom.desktop.client import desktop_response_router
 from mindroom.desktop.media import download_encrypted_screenshot
 from mindroom.desktop.playwright_mcp import browser_action_requires_control
@@ -572,6 +576,13 @@ class BrowserTools(Toolkit):
         target_schema["enum"] = ["host", "desktop"]
         properties["target"] = target_schema
 
+        attachment_schema = dict(properties.get("returnAttachment") or {})
+        attachment_schema["description"] = (
+            "For action=screenshot with target=desktop, return a turn-scoped att_* handle so matrix_message can "
+            "send the captured image without saving plaintext to disk."
+        )
+        properties["returnAttachment"] = attachment_schema
+
         parameters["properties"] = properties
         function.parameters = parameters
 
@@ -612,6 +623,7 @@ class BrowserTools(Toolkit):
         ref: str | None = None,
         element: str | None = None,
         type: str | None = None,
+        returnAttachment: bool = False,
         level: str | None = None,
         paths: list[str] | None = None,
         inputRef: str | None = None,
@@ -644,6 +656,7 @@ class BrowserTools(Toolkit):
             ref: Snapshot ref id or CSS selector.
             element: CSS selector for element-specific actions.
             type: Screenshot type (``png`` or ``jpeg``).
+            returnAttachment: For desktop screenshots, expose an ephemeral handle that matrix_message can send.
             level: Console log level filter.
             paths: Upload file paths.
             inputRef: Upload input selector or ref.
@@ -662,8 +675,17 @@ class BrowserTools(Toolkit):
             raise ValueError(msg)
         if normalized_action in {"actions", "help"}:
             return json.dumps(_browser_help_payload(normalized_action), sort_keys=True)
+        if not isinstance(returnAttachment, bool):
+            msg = "returnAttachment must be a boolean."
+            raise TypeError(msg)
+        if returnAttachment and normalized_action != "screenshot":
+            msg = "returnAttachment is only supported for action=screenshot."
+            raise ValueError(msg)
 
         resolved_target = self._resolve_target(target=target, node=node)
+        if returnAttachment and resolved_target != "desktop":
+            msg = "returnAttachment requires target=desktop."
+            raise ValueError(msg)
         if resolved_target == "desktop":
             return await self._desktop_browser(
                 action=normalized_action,
@@ -676,6 +698,7 @@ class BrowserTools(Toolkit):
                 ref=ref,
                 element=element,
                 image_type=type,
+                return_attachment=returnAttachment,
                 level=level,
                 paths=paths,
                 accept=accept,
@@ -865,6 +888,7 @@ class BrowserTools(Toolkit):
         ref: str | None,
         element: str | None,
         image_type: str | None,
+        return_attachment: bool,
         level: str | None,
         paths: list[str] | None,
         accept: bool | None,
@@ -916,16 +940,23 @@ class BrowserTools(Toolkit):
         )
         if not response.ok:
             raise ValueError(response.error or "Desktop Playwright browser request failed.")
-        content = json.dumps(response.result, sort_keys=True, ensure_ascii=False)
+        result_payload = dict(response.result)
         if response.screenshot is None:
-            return content
+            return json.dumps(result_payload, sort_keys=True, ensure_ascii=False)
         image_bytes = await download_encrypted_screenshot(
             context.client,
             response.screenshot,
             timeout_seconds=self._timeout_seconds,
         )
+        if return_attachment:
+            attachment = register_runtime_screenshot_attachment(
+                context,
+                response.screenshot,
+                filename_prefix="browser-screenshot",
+            )
+            result_payload.update(screenshot_attachment_result_fields(attachment))
         return ToolResult(
-            content=content,
+            content=json.dumps(result_payload, sort_keys=True, ensure_ascii=False),
             images=[Image(content=image_bytes, mime_type=response.screenshot.mime_type)],
         )
 

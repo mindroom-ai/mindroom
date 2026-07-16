@@ -3685,6 +3685,7 @@ expose = [
     "send_audio_message",
     "send_file_message",
     "send_message_result",
+    "send_runtime_encrypted_media_message",
 ]
 from = ["mindroom.matrix.client_delivery"]
 
@@ -3931,6 +3932,7 @@ expose = [
     "get_worker_progress_pump",
     "get_plugin_state_root",
     "get_tool_runtime_context",
+    "get_tool_runtime_media_attachment",
     "list_tool_runtime_attachment_ids",
     "resolve_current_session_id",
     "resolve_tool_runtime_hook_bindings",

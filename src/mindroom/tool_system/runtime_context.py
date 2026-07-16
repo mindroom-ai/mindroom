@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
     from mindroom.matrix.identity import MatrixID
+    from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
     from mindroom.message_target import MessageTarget
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.scheduling import SchedulingRuntime
@@ -76,6 +77,7 @@ class ToolRuntimeContext:
     storage_path: Path | None = None
     attachment_ids: tuple[str, ...] = field(default_factory=tuple)
     runtime_attachment_ids: list[str] = field(default_factory=list)
+    runtime_media_attachments: dict[str, RuntimeEncryptedMediaAttachment] = field(default_factory=dict)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty)
     correlation_id: str | None = None
     hook_message_sender: HookMessageSender | None = None
@@ -444,7 +446,9 @@ def attachment_id_available_in_tool_runtime_context(
     if not normalized_attachment_id:
         return False
     return (
-        normalized_attachment_id in context.attachment_ids or normalized_attachment_id in context.runtime_attachment_ids
+        normalized_attachment_id in context.attachment_ids
+        or normalized_attachment_id in context.runtime_attachment_ids
+        or normalized_attachment_id in context.runtime_media_attachments
     )
 
 
@@ -467,6 +471,28 @@ def append_tool_runtime_attachment_id(attachment_id: str) -> ToolRuntimeContext 
 
     context.runtime_attachment_ids.append(normalized_attachment_id)
     return context
+
+
+def register_tool_runtime_media_attachment(
+    context: ToolRuntimeContext,
+    attachment: RuntimeEncryptedMediaAttachment,
+) -> None:
+    """Register an encrypted media handle for attachment sends during this turn only."""
+    existing = context.runtime_media_attachments.get(attachment.attachment_id)
+    if existing is not None and existing != attachment:
+        msg = f"Runtime attachment ID collision: {attachment.attachment_id}"
+        raise ValueError(msg)
+    context.runtime_media_attachments[attachment.attachment_id] = attachment
+    if attachment.attachment_id not in context.runtime_attachment_ids:
+        context.runtime_attachment_ids.append(attachment.attachment_id)
+
+
+def get_tool_runtime_media_attachment(
+    context: ToolRuntimeContext,
+    attachment_id: str,
+) -> RuntimeEncryptedMediaAttachment | None:
+    """Resolve one turn-scoped encrypted media handle without touching disk."""
+    return context.runtime_media_attachments.get(attachment_id.strip())
 
 
 def get_plugin_state_root(
