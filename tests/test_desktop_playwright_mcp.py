@@ -201,6 +201,58 @@ async def test_provider_executes_multi_step_tab_selection_before_navigation(
 
 
 @pytest.mark.asyncio
+async def test_provider_removes_only_its_transient_screenshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Screenshot bytes survive while the exact MCP scratch file is removed."""
+    image_bytes = b"\x89PNG\r\n\x1a\nlive screenshot"
+    unrelated = tmp_path / "page-keep.png"
+    unrelated.write_bytes(b"keep")
+    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
+
+    async def take_screenshot(tool_name: str, arguments: dict[str, object]) -> CallToolResult:
+        assert tool_name == "browser_take_screenshot"
+        filename = arguments["filename"]
+        assert isinstance(filename, str)
+        (tmp_path / filename).write_bytes(image_bytes)
+        return _text_result(f"Screenshot saved as {filename}")
+
+    call_tool = AsyncMock(side_effect=take_screenshot)
+    monkeypatch.setattr(provider, "_call_tool", call_tool)
+
+    result = await provider.execute("screenshot", {})
+
+    assert result.image is not None
+    assert result.image.content == image_bytes
+    assert result.image.mime_type == "image/png"
+    assert unrelated.read_bytes() == b"keep"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["page-keep.png"]
+
+
+@pytest.mark.asyncio
+async def test_provider_removes_transient_screenshot_when_validation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An invalid MCP image cannot strand its generated plaintext file."""
+    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
+
+    async def take_empty_screenshot(_tool_name: str, arguments: dict[str, object]) -> CallToolResult:
+        filename = arguments["filename"]
+        assert isinstance(filename, str)
+        (tmp_path / filename).write_bytes(b"")
+        return _text_result("Screenshot completed")
+
+    monkeypatch.setattr(provider, "_call_tool", AsyncMock(side_effect=take_empty_screenshot))
+
+    with pytest.raises(PlaywrightBrowserError, match="must contain between"):
+        await provider.execute("screenshot", {})
+
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
 async def test_failed_tab_selection_never_mutates_the_previous_tab(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
+from uuid import uuid4
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import get_default_environment, stdio_client
@@ -77,6 +78,12 @@ class _QueuedCall:
 class _MCPCall:
     tool_name: str
     arguments: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class _ScreenshotOutput:
+    path: Path
+    mime_type: str
 
 
 class PlaywrightMCPBrowserProvider:
@@ -154,7 +161,7 @@ class PlaywrightMCPBrowserProvider:
 
         if action == "upload":
             parameters = {**parameters, "paths": self._upload_paths(parameters)}
-        calls = _mcp_calls(action, parameters)
+        calls, screenshot_output = self._calls_with_screenshot_output(action, parameters)
         try:
             last_result: CallToolResult | None = None
             for call in calls:
@@ -163,11 +170,14 @@ class PlaywrightMCPBrowserProvider:
             if last_result is None:
                 msg = f"Browser action {action} did not produce an MCP call."
                 raise PlaywrightBrowserError(msg)  # noqa: TRY301
-            return _provider_result(action, last_result, max_chars=_result_max_chars(parameters))
+            provider_result = _provider_result(action, last_result, max_chars=_result_max_chars(parameters))
+            return _provider_result_with_screenshot(provider_result, screenshot_output)
         except PlaywrightBrowserError as exc:
             if browser_action_requires_control(action, parameters):
                 raise PlaywrightActionOutcomeUnknownError(str(exc)) from exc
             raise
+        finally:
+            _remove_screenshot_output(screenshot_output)
 
     @property
     def running(self) -> bool:
@@ -311,6 +321,23 @@ class PlaywrightMCPBrowserProvider:
                 raise PlaywrightBrowserError(msg)
             paths.append(str(resolved))
         return paths
+
+    def _calls_with_screenshot_output(
+        self,
+        action: str,
+        parameters: dict[str, object],
+    ) -> tuple[list[_MCPCall], _ScreenshotOutput | None]:
+        calls = _mcp_calls(action, parameters)
+        if action != "screenshot":
+            return calls, None
+        image_type = _optional_str(parameters, "type") or "png"
+        path = self._output_dir / f"mindroom-screenshot-{uuid4().hex}.{image_type}"
+        screenshot_call = calls[-1]
+        calls[-1] = _MCPCall(
+            screenshot_call.tool_name,
+            {**screenshot_call.arguments, "filename": path.name},
+        )
+        return calls, _ScreenshotOutput(path=path, mime_type=f"image/{image_type}")
 
 
 def browser_action_requires_control(action: str, parameters: Mapping[str, object] | None = None) -> bool:
@@ -535,18 +562,46 @@ def _raise_result_error(action: str, result: CallToolResult) -> None:
 
 
 def _browser_image(block: ImageContent) -> BrowserImage:
-    if block.mimeType not in {"image/jpeg", "image/png"}:
-        msg = f"Playwright MCP returned unsupported image type: {block.mimeType}."
-        raise PlaywrightBrowserError(msg)
     try:
         content = base64.b64decode(block.data, validate=True)
     except ValueError as exc:
         msg = "Playwright MCP returned invalid base64 image data."
         raise PlaywrightBrowserError(msg) from exc
+    return _validated_browser_image(content, block.mimeType)
+
+
+def _browser_image_file(path: Path, mime_type: str) -> BrowserImage:
+    if not path.is_file():
+        msg = "Playwright MCP did not create the requested screenshot file."
+        raise PlaywrightBrowserError(msg)
+    return _validated_browser_image(path.read_bytes(), mime_type)
+
+
+def _provider_result_with_screenshot(
+    provider_result: BrowserProviderResult,
+    screenshot_output: _ScreenshotOutput | None,
+) -> BrowserProviderResult:
+    if screenshot_output is None:
+        return provider_result
+    return BrowserProviderResult(
+        payload=provider_result.payload,
+        image=_browser_image_file(screenshot_output.path, screenshot_output.mime_type),
+    )
+
+
+def _remove_screenshot_output(screenshot_output: _ScreenshotOutput | None) -> None:
+    if screenshot_output is not None:
+        screenshot_output.path.unlink(missing_ok=True)
+
+
+def _validated_browser_image(content: bytes, mime_type: str) -> BrowserImage:
+    if mime_type not in {"image/jpeg", "image/png"}:
+        msg = f"Playwright MCP returned unsupported image type: {mime_type}."
+        raise PlaywrightBrowserError(msg)
     if not content or len(content) > _MAX_IMAGE_BYTES:
         msg = f"Playwright MCP image must contain between 1 and {_MAX_IMAGE_BYTES} bytes."
         raise PlaywrightBrowserError(msg)
-    return BrowserImage(content=content, mime_type=block.mimeType)
+    return BrowserImage(content=content, mime_type=mime_type)
 
 
 def _tab_selection_call(target_id: str | None) -> list[_MCPCall]:
