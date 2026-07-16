@@ -90,6 +90,9 @@ def plugin_update(
     if update_all and ref is not None:
         console.print("[red]--ref requires a single plugin NAME.[/red]")
         raise typer.Exit(2)
+    if name is not None and (not name or name in {".", ".."} or "/" in name or "\\" in name):
+        console.print(f"[red]Invalid plugin name (expected a plain directory name):[/red] {name}")
+        raise typer.Exit(2)
 
     resolved_plugins_dir = _resolved_plugins_dir(plugins_dir, _runtime_config_dir(path))
     directories = find_locked_plugin_dirs(resolved_plugins_dir) if update_all else (resolved_plugins_dir / str(name),)

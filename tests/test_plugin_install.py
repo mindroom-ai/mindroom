@@ -20,6 +20,7 @@ from mindroom.plugin_install import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 runner = CliRunner()
@@ -78,11 +79,68 @@ def test_parse_plugin_spec_accepts_supported_forms(spec: str, expected: plugin_i
     assert parse_plugin_spec(spec) == expected
 
 
-@pytest.mark.parametrize("spec", ["", "@v1", "demo@", "a/b/c", "/demo", "acme/"])
+@pytest.mark.parametrize("spec", ["", "@v1", "demo@", "a/b/c", "/demo", "acme/", "..", "acme/..", "acme/.", "de\\mo"])
 def test_parse_plugin_spec_rejects_invalid_forms(spec: str) -> None:
-    """Malformed specs should fail before any network access."""
+    """Malformed and directory-unsafe specs should fail before any network access."""
     with pytest.raises(ValueError, match="Invalid plugin spec"):
         parse_plugin_spec(spec)
+
+
+class _FakeResponse:
+    def __init__(self, text: str) -> None:
+        self.status_code = 200
+        self.text = text
+
+
+def test_resolve_commit_quotes_ref_and_sends_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Refs should be URL-quoted and GITHUB_TOKEN should authenticate the request."""
+    captured: dict[str, object] = {}
+
+    def fake_get(url: str, **kwargs: object) -> _FakeResponse:
+        captured["url"] = url
+        captured["headers"] = kwargs["headers"]
+        return _FakeResponse("a" * 40)
+
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setattr(plugin_install.httpx, "get", fake_get)
+
+    commit = plugin_install._resolve_commit("acme/demo-plugin", "feature/x#1")
+
+    assert commit == "a" * 40
+    assert captured["url"] == "https://api.github.com/repos/acme/demo-plugin/commits/feature/x%231"
+    assert captured["headers"] == {"Accept": "application/vnd.github.sha", "Authorization": "Bearer test-token"}
+
+
+def test_resolve_commit_rejects_non_sha_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Anything but a 40-hex commit SHA should never reach the lock file."""
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(plugin_install.httpx, "get", lambda _url, **_kwargs: _FakeResponse("<html>error</html>"))
+
+    with pytest.raises(ValueError, match="unexpected commit"):
+        plugin_install._resolve_commit("acme/demo-plugin", "HEAD")
+
+
+def test_download_archive_enforces_size_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Oversized archives should abort the download instead of exhausting memory."""
+
+    class _FakeStream:
+        status_code = 200
+
+        def __enter__(self) -> _FakeStream:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def iter_bytes(self) -> Iterator[bytes]:
+            yield b"x" * 8
+            yield b"x" * 8
+
+    monkeypatch.setattr(plugin_install, "_MAX_ARCHIVE_BYTES", 10)
+    monkeypatch.setattr(plugin_install.httpx, "stream", lambda _method, _url, **_kwargs: _FakeStream())
+
+    with pytest.raises(ValueError, match="exceeds"):
+        plugin_install._download_archive("acme/demo-plugin", "a" * 40)
 
 
 def test_install_plugin_vendors_validated_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -201,6 +259,29 @@ def test_read_plugin_lock_requires_lock_file(tmp_path: Path) -> None:
         plugin_install._read_plugin_lock(tmp_path)
 
 
+def test_read_plugin_lock_ignores_unknown_fields_and_rejects_missing(tmp_path: Path) -> None:
+    """Locks from other mindroom versions should load; corrupt locks should not."""
+    lock_path = tmp_path / plugin_install._PLUGIN_LOCK_FILENAME
+    lock_path.write_text(
+        json.dumps(
+            {
+                "repository": "acme/demo-plugin",
+                "requested_ref": "HEAD",
+                "commit": "a" * 40,
+                "installed_at": "2026-07-16T00:00:00+00:00",
+                "future_field": "ignored",
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    assert plugin_install._read_plugin_lock(tmp_path).repository == "acme/demo-plugin"
+
+    lock_path.write_text(json.dumps({"repository": "acme/demo-plugin"}), encoding="utf-8")
+    with pytest.raises(ValueError, match="missing commit"):
+        plugin_install._read_plugin_lock(tmp_path)
+
+
 def test_find_locked_plugin_dirs_skips_unmanaged_entries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Only vendored plugin directories should participate in --all updates."""
     _fake_github(monkeypatch)
@@ -288,3 +369,12 @@ def test_plugins_update_cli_requires_exactly_one_target(tmp_path: Path) -> None:
 
     assert result.exit_code == 2
     assert "exactly one of NAME or --all" in result.output
+
+
+@pytest.mark.parametrize("name", ["../outside", "..", "a/b", "a\\b", ""])
+def test_plugins_update_cli_rejects_traversal_names(tmp_path: Path, name: str) -> None:
+    """Update targets must stay inside the plugins directory."""
+    result = runner.invoke(app, ["plugins", "update", name, "--plugins-dir", str(tmp_path)])
+
+    assert result.exit_code == 2
+    assert "Invalid plugin name" in result.output

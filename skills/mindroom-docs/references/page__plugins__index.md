@@ -523,6 +523,7 @@ mindroom plugins update ping-hook-plugin --ref v1.3.0
 Updates re-resolve the pinned reference, skip plugins already at the resolved commit, and atomically replace the plugin directory only after the new revision passes the strict check.
 A failed update leaves the installed version untouched.
 Both commands accept `--path` to target a specific config file's directory and `--plugins-dir` to override the vendor directory.
+Set `GITHUB_TOKEN` to authenticate GitHub requests, which raises API rate limits and allows private repositories.
 
 ## Compatibility checks
 

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import re
 import shutil
 import tarfile
 import tempfile
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 
@@ -19,6 +22,8 @@ _PLUGIN_LOCK_FILENAME = ".mindroom-plugin.lock.json"
 _DEFAULT_OWNER = "mindroom-ai"
 _DEFAULT_REF = "HEAD"
 _HTTP_TIMEOUT_SECONDS = 30.0
+_MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
+_COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +80,9 @@ def parse_plugin_spec(spec: str) -> _PluginSpec:
             raise ValueError(msg)
     else:
         owner, name = _DEFAULT_OWNER, base
+    if name in {".", ".."} or "\\" in name:
+        msg = f"Invalid plugin spec (unsafe directory name): {spec!r}"
+        raise ValueError(msg)
     return _PluginSpec(
         repository=f"{owner}/{name}",
         ref=ref or _DEFAULT_REF,
@@ -96,7 +104,11 @@ def install_plugin(spec: _PluginSpec, plugins_dir: Path) -> InstallResult:
         installed_at=datetime.now(UTC).isoformat(timespec="seconds"),
     )
     staged, result = _stage_validated_plugin(lock, plugins_dir)
-    staged.rename(destination)
+    try:
+        staged.rename(destination)
+    except BaseException:
+        shutil.rmtree(staged, ignore_errors=True)
+        raise
     return InstallResult(
         name=result.name,
         directory=destination,
@@ -123,13 +135,17 @@ def update_plugin(directory: Path, ref: str | None = None) -> _UpdateResult:
     )
     staged, result = _stage_validated_plugin(new_lock, directory.parent)
     previous = directory.with_name(f".previous-{directory.name}")
-    if previous.exists():
-        shutil.rmtree(previous)
-    directory.rename(previous)
     try:
-        staged.rename(directory)
+        if previous.exists():
+            shutil.rmtree(previous)
+        directory.rename(previous)
+        try:
+            staged.rename(directory)
+        except BaseException:
+            previous.rename(directory)
+            raise
     except BaseException:
-        previous.rename(directory)
+        shutil.rmtree(staged, ignore_errors=True)
         raise
     shutil.rmtree(previous)
     return _UpdateResult(
@@ -151,7 +167,15 @@ def _read_plugin_lock(directory: Path) -> _PluginLock:
         msg = f"Not a vendored plugin (missing {_PLUGIN_LOCK_FILENAME}): {directory}"
         raise ValueError(msg)
     payload = json.loads(lock_path.read_text(encoding="utf-8"))
-    return _PluginLock(**payload)
+    if not isinstance(payload, dict):
+        msg = f"Invalid plugin lock file (expected a JSON object): {lock_path}"
+        raise TypeError(msg)
+    field_names = {field.name for field in fields(_PluginLock)}
+    missing = sorted(field_names - payload.keys())
+    if missing:
+        msg = f"Invalid plugin lock file (missing {', '.join(missing)}): {lock_path}"
+        raise ValueError(msg)
+    return _PluginLock(**{name: payload[name] for name in field_names})
 
 
 def find_locked_plugin_dirs(plugins_dir: Path) -> tuple[Path, ...]:
@@ -192,11 +216,20 @@ def _stage_validated_plugin(lock: _PluginLock, parent_dir: Path) -> tuple[Path, 
     )
 
 
+def _github_headers(accept: str | None = None) -> dict[str, str]:
+    """Build GitHub request headers, honoring ``GITHUB_TOKEN`` when set."""
+    headers = {} if accept is None else {"Accept": accept}
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 def _resolve_commit(repository: str, ref: str) -> str:
     """Resolve one git reference to an exact commit SHA via the GitHub API."""
     response = httpx.get(
-        f"https://api.github.com/repos/{repository}/commits/{ref}",
-        headers={"Accept": "application/vnd.github.sha"},
+        f"https://api.github.com/repos/{repository}/commits/{quote(ref, safe='/')}",
+        headers=_github_headers(accept="application/vnd.github.sha"),
         timeout=_HTTP_TIMEOUT_SECONDS,
         follow_redirects=True,
     )
@@ -204,23 +237,31 @@ def _resolve_commit(repository: str, ref: str) -> str:
         msg = f"Failed to resolve {repository}@{ref}: HTTP {response.status_code}"
         raise ValueError(msg)
     commit = response.text.strip()
-    if not commit:
-        msg = f"GitHub returned an empty commit for {repository}@{ref}"
+    if _COMMIT_SHA_PATTERN.fullmatch(commit) is None:
+        msg = f"GitHub returned an unexpected commit for {repository}@{ref}: {commit[:80]!r}"
         raise ValueError(msg)
     return commit
 
 
 def _download_archive(repository: str, commit: str) -> bytes:
-    """Download the tar.gz archive for one exact commit."""
-    response = httpx.get(
+    """Download the tar.gz archive for one exact commit, capped at a hard size limit."""
+    with httpx.stream(
+        "GET",
         f"https://codeload.github.com/{repository}/tar.gz/{commit}",
+        headers=_github_headers(),
         timeout=_HTTP_TIMEOUT_SECONDS,
         follow_redirects=True,
-    )
-    if response.status_code != httpx.codes.OK:
-        msg = f"Failed to download archive for {repository}@{commit}: HTTP {response.status_code}"
-        raise ValueError(msg)
-    return response.content
+    ) as response:
+        if response.status_code != httpx.codes.OK:
+            msg = f"Failed to download archive for {repository}@{commit}: HTTP {response.status_code}"
+            raise ValueError(msg)
+        data = bytearray()
+        for chunk in response.iter_bytes():
+            data.extend(chunk)
+            if len(data) > _MAX_ARCHIVE_BYTES:
+                msg = f"Archive for {repository}@{commit} exceeds {_MAX_ARCHIVE_BYTES // (1024 * 1024)} MB"
+                raise ValueError(msg)
+    return bytes(data)
 
 
 def _extract_archive(data: bytes, destination: Path) -> None:
