@@ -107,6 +107,8 @@ Crossing that soft trigger while still within the hard budget leaves the stored 
 You can tune team-scoped compaction behavior with these settings:
 
 - Use `replay_window_tokens` to cap persisted replay and required-compaction planning below the model's real context window without lowering the provider request limit.
+- Use `reserve_tokens` to leave hard-budget headroom.
+- Use `model` to choose the summary model.
 - Set `enabled: false` to disable automatic pre-reply compaction for a team.
 
 When the active team model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
