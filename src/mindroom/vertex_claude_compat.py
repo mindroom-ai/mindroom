@@ -28,34 +28,6 @@ if TYPE_CHECKING:
     from agno.models.message import Message
     from agno.models.response import ModelResponse
     from agno.run.agent import RunOutput
-    from anthropic.lib.streaming._beta_types import (
-        BetaRawContentBlockStartEvent,
-        ParsedBetaContentBlockStopEvent,
-        ParsedBetaMessageStopEvent,
-    )
-    from anthropic.types import (
-        ContentBlockDeltaEvent,
-        ContentBlockStartEvent,
-        ContentBlockStopEvent,
-        MessageStopEvent,
-    )
-    from anthropic.types import (
-        Message as AnthropicMessage,
-    )
-    from anthropic.types.beta import BetaRawContentBlockDeltaEvent
-    from anthropic.types.beta.beta_message import BetaMessage
-
-    type ClaudeProviderResponse = AnthropicMessage | BetaMessage
-    type ClaudeProviderStreamEvent = (
-        ContentBlockStartEvent
-        | ContentBlockDeltaEvent
-        | ContentBlockStopEvent
-        | MessageStopEvent
-        | BetaRawContentBlockDeltaEvent
-        | BetaRawContentBlockStartEvent
-        | ParsedBetaContentBlockStopEvent
-        | ParsedBetaMessageStopEvent
-    )
 
 logger = get_logger(__name__)
 
@@ -494,28 +466,28 @@ class MindroomVertexAIClaude(VertexAIClaude):
 
     def _parse_provider_response(
         self,
-        response: ClaudeProviderResponse,
+        response: object,
         response_format: dict[str, Any] | type[Any] | None = None,
         **kwargs: object,
     ) -> ModelResponse:
         """Preserve Vertex Claude's non-streaming safeguard signal."""
         self._raise_for_safeguard_refusal(response)
-        return super()._parse_provider_response(response, response_format=response_format, **kwargs)
+        return super()._parse_provider_response(cast("Any", response), response_format=response_format, **kwargs)
 
     def _parse_provider_response_delta(
         self,
-        response: ClaudeProviderStreamEvent,
+        response: object,
         response_format: dict[str, Any] | type[Any] | None = None,
     ) -> ModelResponse:
         """Preserve Vertex Claude's final streaming safeguard signal."""
         self._raise_for_safeguard_refusal(response)
-        return super()._parse_provider_response_delta(response, response_format=response_format)
+        return super()._parse_provider_response_delta(cast("Any", response), response_format=response_format)
 
     def _handle_api_error(self, e: Exception) -> NoReturn:
         """Keep typed safeguard refusals intact for MindRoom's user error path."""
         if isinstance(e, ModelSafeguardRefusalError):
             raise e
-        super()._handle_api_error(e)
+        return super()._handle_api_error(e)
 
     def _prepare_request_kwargs(
         self,
