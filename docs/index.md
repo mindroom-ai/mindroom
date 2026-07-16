@@ -196,6 +196,7 @@ mindroom run
 - [Memory System](memory.md) - How agent memory works
 - [Scheduling](scheduling.md) - Schedule tasks with cron or natural language
 - [External Triggers](external-triggers.md) - Wake agents from signed watcher events
+- [Agent Callbacks](agent-callbacks.md) - One-shot completion callbacks for spawned sub-agents
 - [Voice Messages](voice.md) - Voice message transcription
 - [Image Messages](images.md) - Image analysis with vision models
 - [File & Video Attachments](attachments.md) - Context-scoped file and video handling

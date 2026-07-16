@@ -15,25 +15,25 @@ class ExternalTriggerPolicyConfig(BaseModel):
         default=300,
         ge=30,
         le=3600,
-        description="Default accepted signature age for newly created triggers",
+        description="Default accepted signature age for newly created signed triggers",
     )
     max_replay_window_seconds: int = Field(
         default=3600,
         ge=30,
         le=3600,
-        description="Maximum accepted signature age any trigger may request",
+        description="Maximum accepted signature age any signed trigger may request",
     )
     default_max_body_bytes: int = Field(
         default=65536,
         ge=1024,
         le=262144,
-        description="Default signed request body size limit for newly created triggers",
+        description="Default request body size limit for newly created triggers",
     )
     max_body_bytes: int = Field(
         default=262144,
         ge=1024,
         le=262144,
-        description="Maximum signed request body size any trigger may request",
+        description="Maximum request body size any trigger may request",
     )
     max_triggers_per_owner: int = Field(
         default=20,

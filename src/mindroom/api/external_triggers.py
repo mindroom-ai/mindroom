@@ -1,4 +1,4 @@
-"""Public signed API endpoint for external trigger delivery."""
+"""Public API endpoint for authenticated external trigger delivery."""
 
 from __future__ import annotations
 
@@ -11,9 +11,17 @@ from pydantic import ValidationError
 
 from mindroom.api import config_lifecycle
 from mindroom.authorization import is_authorized_sender, is_sender_allowed_for_agent_reply
-from mindroom.external_triggers.auth import TriggerAuthError, TriggerSignatureHeaders, verify_trigger_request
+from mindroom.external_triggers.auth import (
+    TriggerAuthError,
+    TriggerSignatureHeaders,
+    trigger_capability_matches,
+    verify_trigger_request,
+)
 from mindroom.external_triggers.executor import execute_external_trigger, is_external_trigger_owner_joined_target_room
-from mindroom.external_triggers.models import ExternalTriggerAcceptedResponse, ExternalTriggerPayload
+from mindroom.external_triggers.models import (
+    ExternalTriggerAcceptedResponse,
+    ExternalTriggerPayload,
+)
 from mindroom.external_triggers.replay_store import (
     ExternalTriggerEventClaim,
     ExternalTriggerReplayStore,
@@ -50,15 +58,13 @@ _T = TypeVar("_T")
     response_model=ExternalTriggerAcceptedResponse,
 )
 async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTriggerAcceptedResponse:
-    """Accept one signed external trigger and dispatch it into Matrix."""
+    """Accept one authenticated external trigger and dispatch it into Matrix."""
     config, runtime_paths, trigger_snapshot = await _request_config_and_trigger_snapshot(trigger_id, request)
     body = await _read_bounded_body(request, max_body_bytes=trigger_snapshot.max_body_bytes)
-    signature_headers = _verified_signature_headers(
+    signature_headers = _authenticate_trigger_request(
         request,
         body=body,
-        expected_key_id=trigger_snapshot.key_id,
-        public_key_b64=trigger_snapshot.public_key,
-        replay_window_seconds=trigger_snapshot.replay_window_seconds,
+        snapshot=trigger_snapshot,
     )
     payload = _parse_payload(body)
     if trigger_snapshot.allowed_kinds and payload.kind not in trigger_snapshot.allowed_kinds:
@@ -117,16 +123,23 @@ def _bind_request_api_snapshot(request: Request) -> config_lifecycle.ApiSnapshot
 async def _claim_and_execute_trigger(
     *,
     payload: ExternalTriggerPayload,
-    signature_headers: TriggerSignatureHeaders,
+    signature_headers: TriggerSignatureHeaders | None,
     snapshot: TriggerDeliverySnapshot,
     config: Config,
     runtime_paths: RuntimePaths,
     runtime: config_lifecycle.ExternalTriggerRuntime,
 ) -> ExternalTriggerAcceptedResponse:
     now = int(time.time())
-    event_id = payload.event_id or signature_headers.nonce
+    event_id = (
+        snapshot.uid
+        if snapshot.delivery_mode == "single_use"
+        else _reusable_event_id(
+            payload,
+            signature_headers,
+        )
+    )
     replay_store = _replay_store(runtime_paths)
-    if not await _run_replay_store_call(
+    if signature_headers is not None and not await _run_replay_store_call(
         replay_store.claim_nonce,
         snapshot.replay_scope,
         signature_headers.nonce,
@@ -143,6 +156,7 @@ async def _claim_and_execute_trigger(
         ttl_seconds=_IN_PROGRESS_EVENT_ID_TTL_SECONDS,
     )
     if event_claim is ExternalTriggerEventClaim.DELIVERED:
+        await _consume_single_use_trigger(snapshot, runtime_paths)
         return ExternalTriggerAcceptedResponse(
             accepted=True,
             duplicate=True,
@@ -176,6 +190,7 @@ async def _claim_and_execute_trigger(
         now=int(time.time()),
         ttl_seconds=_DELIVERED_EVENT_ID_TTL_SECONDS,
     )
+    await _consume_single_use_trigger(snapshot, runtime_paths)
     return ExternalTriggerAcceptedResponse(
         accepted=True,
         duplicate=False,
@@ -224,14 +239,17 @@ async def _read_bounded_body(request: Request, *, max_body_bytes: int) -> bytes:
     return b"".join(body_chunks)
 
 
-def _verified_signature_headers(
+def _authenticate_trigger_request(
     request: Request,
     *,
     body: bytes,
-    expected_key_id: str,
-    public_key_b64: str,
-    replay_window_seconds: int,
-) -> TriggerSignatureHeaders:
+    snapshot: TriggerDeliverySnapshot,
+) -> TriggerSignatureHeaders | None:
+    if snapshot.auth == "capability":
+        _require_matching_capability(request, snapshot)
+        return None
+    if snapshot.key_id is None or snapshot.public_key is None:
+        raise HTTPException(status_code=503, detail="External trigger signing key is not available")
     try:
         signature_headers = TriggerSignatureHeaders.from_mapping(request.headers)
         verify_trigger_request(
@@ -239,14 +257,51 @@ def _verified_signature_headers(
             path=request.url.path,
             body=body,
             headers=signature_headers,
-            expected_key_id=expected_key_id,
-            public_key_b64=public_key_b64,
-            replay_window_seconds=replay_window_seconds,
+            expected_key_id=snapshot.key_id,
+            public_key_b64=snapshot.public_key,
+            replay_window_seconds=snapshot.replay_window_seconds,
             now=int(time.time()),
         )
     except TriggerAuthError as exc:
         raise HTTPException(status_code=401, detail="Invalid external trigger signature") from exc
     return signature_headers
+
+
+def _require_matching_capability(request: Request, snapshot: TriggerDeliverySnapshot) -> None:
+    authorization = request.headers.get("authorization", "")
+    scheme, _, token = authorization.partition(" ")
+    token_hash = snapshot.capability_token_hash
+    if (
+        scheme.lower() != "bearer"
+        or not token.strip()
+        or token_hash is None
+        or not trigger_capability_matches(token.strip(), token_hash)
+    ):
+        raise HTTPException(status_code=404, detail="External trigger not found")
+
+
+def _reusable_event_id(
+    payload: ExternalTriggerPayload,
+    signature_headers: TriggerSignatureHeaders | None,
+) -> str:
+    if payload.event_id is not None:
+        return payload.event_id
+    if signature_headers is None:
+        raise HTTPException(status_code=422, detail="Reusable triggers require an event id")
+    return signature_headers.nonce
+
+
+async def _consume_single_use_trigger(snapshot: TriggerDeliverySnapshot, runtime_paths: RuntimePaths) -> None:
+    if snapshot.delivery_mode != "single_use":
+        return
+    try:
+        await asyncio.to_thread(
+            _trigger_store(runtime_paths).consume_single_use,
+            snapshot.trigger_id,
+            expected_uid=snapshot.uid,
+        )
+    except ExternalTriggerStoreError as exc:
+        raise HTTPException(status_code=503, detail="Single-use trigger could not be consumed") from exc
 
 
 def _parse_payload(body: bytes) -> ExternalTriggerPayload:
