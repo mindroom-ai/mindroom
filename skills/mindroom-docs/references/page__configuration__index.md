@@ -528,6 +528,7 @@ calls:
       voice: marin
     openai-cascaded:
       backend: cascaded
+      model: default                 # Optional: top-level model alias overriding room/agent models for call turns
       stt:
         provider: openai
         model: gpt-4o-transcribe

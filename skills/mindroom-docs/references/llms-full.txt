@@ -1385,6 +1385,7 @@ calls:
       voice: marin
     openai-cascaded:
       backend: cascaded
+      model: default                 # Optional: top-level model alias overriding room/agent models for call turns
       stt:
         provider: openai
         model: gpt-4o-transcribe
@@ -13190,7 +13191,8 @@ When a call starts in a room, the configured agent:
 
 The voice agent is the same agent you chat with.
 Realtime carries the agent's rendered prompt and effective tools into OpenAI Realtime.
-Cascaded sends each finalized transcript through the normal MindRoom agent response path, preserving the resolved model, rendered system prompt, instructions, knowledge, skills, hooks, tools, requester identity, history storage, and tool execution behavior.
+Cascaded sends each finalized transcript through the normal MindRoom agent response path, preserving model resolution, the rendered system prompt, instructions, knowledge, skills, hooks, tools, requester identity, history storage, and tool execution behavior.
+A cascaded profile may explicitly override the resolved LLM while preserving all other agent behavior.
 MindRoom keeps a managed call active only while its devices belong to one Matrix user, and uses that user's ID as the real requester for the room-scoped tool runtime.
 Multiple devices belonging to that same user are supported.
 Tools requiring confirmation, user input, external execution, or `tool_approval` are hidden in both backends because a voice call has no approval UI.
@@ -13216,8 +13218,11 @@ calls:
 Voice calls require the `matrix_calls` extra (`pip install "mindroom[matrix_calls]"` or `uv sync --extra matrix_calls`).
 `calls.profiles` defines reusable, complete voice pipelines.
 `calls.agents` maps each enabled agent to exactly one profile name.
-Realtime profiles contain only realtime settings.
+The `model` in a realtime profile is the provider-specific OpenAI realtime speech model ID.
 Cascaded profiles require complete STT and TTS settings, and each speech leg selects its own credential service.
+The optional `model` in a cascaded profile references a named entry from the top-level `models` mapping.
+An explicit cascaded call model takes precedence over room and agent models for the calls-enabled agent.
+Omitting it keeps the existing room and agent model resolution.
 There are no inherited backend defaults or credential fallbacks.
 `enabled` and `livekit_service_url` remain global and cannot be overridden per agent.
 Set a dedicated credential service when voice and chat use different OpenAI credentials.
@@ -13257,9 +13262,51 @@ Calls-enabled agents advertise `📞 Voice calls` in their Matrix presence statu
 Requester-private agents use the sole authorized caller's verified Matrix user ID to resolve their workspace, memory, credentials, history, knowledge, and tool execution scope.
 The same caller scope applies in configured rooms and authorized ad-hoc invite rooms.
 
+## Cascaded LLM model override
+
+This example uses a large model for text conversations and a faster model for cascaded call turns.
+The override changes only the calls-enabled agent's LLM selection, while STT, TTS, prompts, history, memory, tools, and delegated-agent model selection remain unchanged.
+
+```yaml
+models:
+  chat:
+    provider: anthropic
+    id: claude-opus-4-8
+  call_fast:
+    provider: anthropic
+    id: claude-haiku-4-5
+
+agents:
+  assistant:
+    display_name: Assistant
+    model: chat
+
+calls:
+  enabled: true
+  profiles:
+    fast-cascaded:
+      backend: cascaded
+      model: call_fast
+      stt:
+        provider: openai
+        model: gpt-4o-transcribe
+        credentials_service: openai-voice
+      tts:
+        provider: openai
+        model: tts-1
+        credentials_service: openai-voice
+        extra_kwargs:
+          voice: ash
+  agents:
+    assistant: fast-cascaded
+```
+
+The configured `call_fast` alias is validated when MindRoom loads the configuration.
+An unknown alias fails configuration loading instead of falling back to the normal agent model.
+
 ## Cascaded cloud example
 
-This example uses OpenAI speech services while the agent keeps its normally configured model provider.
+This example omits the cascaded `model` override and uses OpenAI speech services while the agent keeps its normally resolved model.
 The agent can therefore use Anthropic, Gemini, OpenAI, or any other MindRoom model provider without changing the call configuration.
 
 ```yaml
