@@ -397,6 +397,8 @@ class TestConfigInit:
             "skills/mindroom-docs/references/llms-full.txt" in content
         )
         assert "mindroom config validate" in content
+        assert "mindroom service status" in content
+        assert "mindroom service restart" in content
         assert "`config.yaml`" in content
         assert str((tmp_path / "mindroom_data").resolve()) in content
         assert claude_doc.read_text(encoding="utf-8") == content

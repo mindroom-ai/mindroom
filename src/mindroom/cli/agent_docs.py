@@ -37,12 +37,14 @@ Use `mindroom <command>` if MindRoom is installed, otherwise `uvx mindroom <comm
 2. `mindroom doctor` — preflight checks for Matrix connectivity, credentials, and config.
 3. Read the newest `mindroom_*.log` under `logs/` in the storage root for the actual startup error.
 4. `mindroom config path` — confirm this is the config file MindRoom actually loads.
-5. `mindroom run --log-level DEBUG` — reproduce with verbose logging.
+5. `mindroom service status` — if MindRoom is installed as a background user service; shows state plus recent logs (`mindroom service logs` for the full log command).
+6. `mindroom run --log-level DEBUG` — reproduce with verbose logging.
 
 ## How to fix
 
 - Schema errors: make the smallest edit to `{config_file}` that makes `mindroom config validate` pass; the documentation above describes every field.
 - Missing API keys: add them to `.env` (`mindroom config validate` warns about missing provider keys).
+- After fixing, restart: `mindroom run` in a shell, or `mindroom service restart` when installed as a background service.
 - Roll back an upgrade by pinning the previous version: `uvx mindroom@<version> run`.
 - Last resort: `mindroom config init --force` regenerates a starter config — this discards customizations, so copy `{config_file}` aside first.
 
