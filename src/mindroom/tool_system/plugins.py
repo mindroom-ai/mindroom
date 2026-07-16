@@ -207,6 +207,7 @@ def isolated_plugin_runtime(
                 cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()
             }
             _cancel_plugin_module_tasks(current_package_roots)
+            # This also restores _MODULE_IMPORT_CACHE and the prior synthetic modules.
             restore_tool_registry_snapshot(previous_snapshot)
             set_plugin_skill_roots(previous_skill_roots)
             plugin_imports._PLUGIN_CACHE.clear()

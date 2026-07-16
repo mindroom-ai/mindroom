@@ -499,8 +499,8 @@ Validate a plugin against the installed MindRoom version before deployment:
 mindroom plugins check ./my-plugin
 ```
 
-The command strictly loads the manifest, tools, hooks, OAuth providers, and skills using isolated temporary runtime paths.
-It reports each discovered surface and exits nonzero without leaving plugin registrations active when validation fails.
+The command strictly loads and validates the manifest, tools, hooks, OAuth providers, and skills using isolated temporary runtime paths.
+It reports discovered tools, hooks, and skills, then exits nonzero without leaving plugin registrations active when validation fails.
 
 ## Live development (hot reload)
 

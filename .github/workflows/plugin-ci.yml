@@ -69,10 +69,19 @@ jobs:
           cache-dependency-glob: mindroom/uv.lock
 
       - name: Install Python
-        run: uv python install '${{ inputs.python_version }}'
+        env:
+          PYTHON_VERSION: ${{ inputs.python_version }}
+        run: uv python install "$PYTHON_VERSION"
 
       - name: Install MindRoom test environment
         run: uv sync --project mindroom --locked --group dev
+
+      - name: Install plugin project
+        if: ${{ hashFiles('plugin/pyproject.toml') != '' }}
+        run: |
+          uv pip install --python mindroom/.venv/bin/python --editable plugin
+          uv pip install --python mindroom/.venv/bin/python --editable mindroom --no-deps
+          uv pip check --python mindroom/.venv/bin/python
 
       - name: Validate plugin runtime contract
         run: uv run --project mindroom mindroom plugins check "$GITHUB_WORKSPACE/plugin"

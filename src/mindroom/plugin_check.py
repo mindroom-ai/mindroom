@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import HookRegistry, get_hook_metadata
-from mindroom.oauth.registry import clear_oauth_provider_cache, load_oauth_providers
+from mindroom.oauth.registry import load_oauth_providers
 from mindroom.tool_system.catalog import TOOL_METADATA, clear_resolved_tool_state_cache, ensure_tool_registry_loaded
 from mindroom.tool_system.plugins import isolated_plugin_runtime
 
@@ -74,5 +74,4 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
                     ),
                 )
         finally:
-            clear_oauth_provider_cache()
             clear_resolved_tool_state_cache()

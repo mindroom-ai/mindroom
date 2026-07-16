@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 
 from mindroom.cli.main import app
 from mindroom.plugin_check import check_plugin
+from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.registry_state import TOOL_REGISTRY
 from mindroom.tool_system.skills import get_plugin_skill_roots
@@ -93,6 +94,7 @@ def test_check_plugin_validates_all_registration_surfaces_and_restores_state(tmp
     plugin_root = _valid_plugin(tmp_path / "plugin")
     original_tool_metadata = TOOL_METADATA.copy()
     original_skill_roots = tuple(get_plugin_skill_roots())
+    original_module_import_cache = plugin_imports._MODULE_IMPORT_CACHE.copy()
     original_synthetic_modules = {name for name in sys.modules if name.startswith("mindroom_plugin_")}
 
     result = check_plugin(plugin_root)
@@ -103,6 +105,7 @@ def test_check_plugin_validates_all_registration_surfaces_and_restores_state(tmp
     assert result.skill_directories == ("skills",)
     assert original_tool_metadata == TOOL_METADATA
     assert tuple(get_plugin_skill_roots()) == original_skill_roots
+    assert original_module_import_cache == plugin_imports._MODULE_IMPORT_CACHE
     assert {name for name in sys.modules if name.startswith("mindroom_plugin_")} == original_synthetic_modules
 
 
@@ -219,4 +222,16 @@ def test_plugins_check_cli_reports_failure_without_traceback(tmp_path: Path) -> 
     assert result.exit_code == 1
     assert "Plugin check failed:" in result.stdout
     assert "plugin exploded" in result.stdout
+    assert "Traceback (most recent call last)" not in result.output
     assert result.exception is not None
+
+
+def test_plugins_check_cli_rejects_nonexistent_directory(tmp_path: Path) -> None:
+    """Typer should reject a missing plugin path before runtime loading."""
+    missing_plugin = tmp_path / "missing-plugin"
+
+    result = runner.invoke(app, ["plugins", "check", str(missing_plugin)])
+
+    assert result.exit_code == 2
+    assert "does not exist" in result.output
+    assert "Traceback (most recent call last)" not in result.output

@@ -15,7 +15,7 @@ plugins_app = typer.Typer(help="Validate external MindRoom plugins.")
 def plugin_check(
     path: Path = typer.Argument(  # noqa: B008
         ...,
-        exists=False,
+        exists=True,
         file_okay=False,
         dir_okay=True,
         resolve_path=True,
