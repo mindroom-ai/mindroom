@@ -16,7 +16,6 @@ from mindroom.callbacks.store import (
     CallbackRecordNotDeliverableError,
     CallbackStore,
     CallbackStoreError,
-    hash_callback_token,
     token_matches_hash,
 )
 from mindroom.config.main import Config
@@ -85,7 +84,6 @@ def test_mint_record_stores_hash_only_and_returns_raw_token(tmp_path: Path) -> N
 
     assert token.startswith("mrcb_")
     assert token not in store.store_path.read_text(encoding="utf-8")
-    assert record.token_hash == hash_callback_token(token)
     assert token_matches_hash(token, record.token_hash)
     assert not token_matches_hash("mrcb_wrong", record.token_hash)
     assert record.callback_id.startswith("cb_")

@@ -94,6 +94,7 @@ class CallbackManagerTools(Toolkit):
             "max_uses": record.max_uses,
             "uses_left": record.uses_left,
             "consumed": record.uses_left == 0,
+            "consumed_at": record.consumed_at,
             "script_path": record.script_path,
             "created_at": record.created_at,
             "expires_at": _expires_at_iso(record.expires_at),

@@ -115,6 +115,10 @@ _.validate_record_keys  # unused method (src/mindroom/external_triggers/store.py
 _.validate_kind  # unused method (src/mindroom/external_triggers/models.py)
 _.validate_message  # unused method (src/mindroom/external_triggers/models.py)
 post_external_trigger  # unused function (src/mindroom/api/external_triggers.py)
+_.validate_label  # unused method (src/mindroom/callbacks/store.py)
+_.validate_uses  # unused method (src/mindroom/callbacks/store.py)
+get_record  # unused method (src/mindroom/callbacks/store.py) - state accessor exercised by tests
+post_callback  # unused function (src/mindroom/api/callbacks.py)
 _.validate_team_agents  # unused method (src/mindroom/config/main.py)
 _.handle_endtag  # unused method (src/mindroom/matrix/message_builder.py)
 _._normalize_set_at  # unused method (src/mindroom/thread_tags.py)

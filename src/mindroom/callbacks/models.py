@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mindroom.config.validation import non_empty_stripped
 
-CallbackStatus = Literal["done", "failed", "blocked", "progress"]
+_CallbackStatus = Literal["done", "failed", "blocked", "progress"]
 
 
 class CallbackFirePayload(BaseModel):
@@ -16,7 +16,7 @@ class CallbackFirePayload(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    status: CallbackStatus = "done"
+    status: _CallbackStatus = "done"
     message: str
     data: dict[str, Any] = Field(default_factory=dict)
 

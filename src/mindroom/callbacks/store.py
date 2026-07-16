@@ -56,19 +56,19 @@ class CallbackRecordNotDeliverableError(CallbackStoreError):
     """Raised when a stored callback is no longer deliverable under current config."""
 
 
-def generate_callback_token() -> str:
+def _generate_callback_token() -> str:
     """Return one fresh bearer token; only its hash is ever stored."""
     return _CALLBACK_TOKEN_PREFIX + secrets.token_urlsafe(32)
 
 
-def hash_callback_token(token: str) -> str:
+def _hash_callback_token(token: str) -> str:
     """Return the stored SHA-256 hex digest for one bearer token."""
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def token_matches_hash(token: str, token_hash: str) -> bool:
     """Compare one presented token against a stored hash in constant time."""
-    return hmac.compare_digest(hash_callback_token(token), token_hash)
+    return hmac.compare_digest(_hash_callback_token(token), token_hash)
 
 
 def _generate_callback_id() -> str:
@@ -216,10 +216,10 @@ class CallbackStore:
             msg = "max_uses must be at least 1"
             raise CallbackStoreError(msg)
         now = int(time.time())
-        token = generate_callback_token()
+        token = _generate_callback_token()
         record = CallbackRecord(
             callback_id=_generate_callback_id(),
-            token_hash=hash_callback_token(token),
+            token_hash=_hash_callback_token(token),
             owner_user_id=owner_user_id,
             created_by_agent_name=created_by_agent_name,
             created_in_room_id=created_in_room_id,
