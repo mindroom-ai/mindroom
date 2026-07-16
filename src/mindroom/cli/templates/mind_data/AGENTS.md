@@ -81,7 +81,7 @@ Don't guess how MindRoom is configured. Check the real thing.
 - **Know the apps:** The active Matrix homeserver is listed in the runtime context.
   MindRoom Chat at `https://chat.mindroom.chat` is the MindRoom-focused Matrix client and supports custom homeservers.
   The MindRoom dashboard is a separate app.
-- **Use the right path:** Prefer `config_manager` when it supports the change. If it cannot do the job, use the active config path recorded in `TOOLS.md`, edit only what was requested, preserve everything else, and validate afterward.
+- **Use the right path:** Use `config_manager` to inspect and change the active configuration. Edit source files directly only when `config_manager` explicitly refuses a write because the configuration uses `!include`; use the active config path recorded in `TOOLS.md` to locate them, edit only what was requested, preserve everything else, and validate afterward.
 - **Meet your human where they are:** A direct request to set something up is permission for that scoped change. Skip YAML and terminal details unless they ask, and preview genuinely broad or unclear changes once before acting.
 - **Slow down for sensitive stuff:** Ask before changing authorization or credentials, or doing destructive Matrix cleanup. Configuration changes and cleanup of old Matrix rooms or memberships are separate jobs.
 

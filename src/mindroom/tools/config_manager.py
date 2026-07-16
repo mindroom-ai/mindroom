@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="config_manager",
     display_name="Config Manager",
-    description="Build and manage MindRoom agents with expert knowledge of the system",
+    description="Inspect and control the full MindRoom configuration, including agents, plugins, and authorization",
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
@@ -29,10 +29,10 @@ if TYPE_CHECKING:
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
     dependencies=["agno", "pydantic", "pyyaml"],
     docs_url="https://github.com/mindroom-ai/mindroom",
-    function_names=("get_info", "manage_agent", "manage_team"),
+    function_names=("get_info", "manage_config", "manage_agent", "manage_team"),
 )
 def config_manager_tools() -> type[ConfigManagerTools]:
-    """Return config manager tools for agent building."""
+    """Return full configuration-management tools."""
     from mindroom.custom_tools.config_manager import ConfigManagerTools
 
     return ConfigManagerTools

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
 from agno.tools import Toolkit
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
 from mindroom.api.config_lifecycle import validate_and_persist_config_payload
 from mindroom.authorization import responder_candidate_entities_from_cached_room
@@ -24,10 +25,13 @@ from mindroom.config.main import (
 from mindroom.config.models import AgentLearningMode, ToolConfigEntry
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
+from mindroom.redaction import redact_sensitive_data
 from mindroom.tool_system.catalog import ToolCategory, ToolStatus, resolved_tool_metadata_for_runtime
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.catalog import ToolMetadata
 
@@ -35,6 +39,251 @@ logger = get_logger(__name__)
 _CONFIG_CHANGE_REJECTED_MESSAGE = "Changes were NOT applied."
 _AgentScope = Literal["current_room", "all"]
 _VALID_AGENT_SCOPES = {"current_room", "all"}
+_MAX_CONFIG_INSPECTION_CHARS = 20_000
+
+
+class _ConfigPatchError(ValueError):
+    """One invalid JSON Pointer or patch operation."""
+
+
+class _ConfigPatchChange(BaseModel):
+    """One schema-visible authored configuration patch entry."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["add", "replace", "remove"]
+    path: str
+    value: JsonValue | None = None
+
+
+def _normalize_patch_changes(
+    changes: Sequence[_ConfigPatchChange | dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Normalize tool-decoded models and direct-call dictionaries."""
+    return [
+        (
+            change.model_dump(exclude_unset=True)
+            if isinstance(change, _ConfigPatchChange)
+            else _ConfigPatchChange.model_validate(change).model_dump(exclude_unset=True)
+        )
+        for change in changes
+    ]
+
+
+def _decode_json_pointer(path: str) -> list[str]:
+    """Decode one RFC 6901 JSON Pointer into reference tokens."""
+    if path == "":
+        return []
+    if not path.startswith("/"):
+        msg = f"JSON Pointer must be empty for the root or start with '/': {path!r}"
+        raise _ConfigPatchError(msg)
+
+    decoded: list[str] = []
+    for raw_token in path[1:].split("/"):
+        token: list[str] = []
+        index = 0
+        while index < len(raw_token):
+            character = raw_token[index]
+            if character != "~":
+                token.append(character)
+                index += 1
+                continue
+            if index + 1 >= len(raw_token) or raw_token[index + 1] not in {"0", "1"}:
+                msg = f"Invalid JSON Pointer escape in {path!r}; only '~0' and '~1' are allowed"
+                raise _ConfigPatchError(msg)
+            token.append("~" if raw_token[index + 1] == "0" else "/")
+            index += 2
+        decoded.append("".join(token))
+    return decoded
+
+
+def _array_index(reference_token: str, *, length: int, allow_append: bool, path: str) -> int:
+    """Return one validated RFC 6902 array index."""
+    if reference_token == "-":  # noqa: S105 - JSON Patch append sentinel, not a password
+        if allow_append:
+            return length
+        msg = f"Array append token '-' is only valid for add operations: {path!r}"
+        raise _ConfigPatchError(msg)
+    if (
+        not reference_token.isascii()
+        or not reference_token.isdigit()
+        or (len(reference_token) > 1 and reference_token.startswith("0"))
+    ):
+        msg = f"Invalid array index {reference_token!r} in JSON Pointer {path!r}"
+        raise _ConfigPatchError(msg)
+    return int(reference_token)
+
+
+def _resolve_json_pointer(document: Any, path: str) -> Any:  # noqa: ANN401
+    """Resolve one JSON Pointer against an authored config document."""
+    current = document
+    for token in _decode_json_pointer(path):
+        if isinstance(current, dict):
+            if token not in current:
+                msg = f"Path does not exist in the authored configuration: {path!r}"
+                raise _ConfigPatchError(msg)
+            current = current[token]
+            continue
+        if isinstance(current, list):
+            index = _array_index(token, length=len(current), allow_append=False, path=path)
+            if index >= len(current):
+                msg = f"Array index {index} is out of range in JSON Pointer {path!r}"
+                raise _ConfigPatchError(msg)
+            current = current[index]
+            continue
+        msg = f"Cannot traverse through {type(current).__name__} in JSON Pointer {path!r}"
+        raise _ConfigPatchError(msg)
+    return current
+
+
+def _resolve_patch_parent(document: Any, path: str) -> tuple[Any, str]:  # noqa: ANN401
+    """Resolve the parent container and final token for one patch path."""
+    tokens = _decode_json_pointer(path)
+    if not tokens:
+        msg = "The document root cannot be removed; replace it with an object instead"
+        raise _ConfigPatchError(msg)
+
+    parent = document
+    for token in tokens[:-1]:
+        if isinstance(parent, dict):
+            if token not in parent:
+                msg = f"Parent path does not exist in the authored configuration: {path!r}"
+                raise _ConfigPatchError(msg)
+            parent = parent[token]
+            continue
+        if isinstance(parent, list):
+            index = _array_index(token, length=len(parent), allow_append=False, path=path)
+            if index >= len(parent):
+                msg = f"Array index {index} is out of range in JSON Pointer {path!r}"
+                raise _ConfigPatchError(msg)
+            parent = parent[index]
+            continue
+        msg = f"Cannot traverse through {type(parent).__name__} in JSON Pointer {path!r}"
+        raise _ConfigPatchError(msg)
+    return parent, tokens[-1]
+
+
+def _validated_patch_entry(change: dict[str, Any], position: int) -> tuple[str, str]:
+    """Validate one patch entry and return its operation and path."""
+    operation = change.get("op")
+    path = change.get("path")
+    if operation not in {"add", "replace", "remove"}:
+        msg = f"Patch entry {position} has unsupported op {operation!r}; use add, replace, or remove"
+        raise _ConfigPatchError(msg)
+    if not isinstance(path, str):
+        msg = f"Patch entry {position} requires a string path"
+        raise _ConfigPatchError(msg)
+
+    allowed_keys = {"op", "path"} if operation == "remove" else {"op", "path", "value"}
+    unexpected_keys = sorted(set(change) - allowed_keys)
+    if unexpected_keys:
+        msg = f"Patch entry {position} has unsupported keys: {', '.join(unexpected_keys)}"
+        raise _ConfigPatchError(msg)
+    if operation in {"add", "replace"} and "value" not in change:
+        msg = f"Patch entry {position} with op {operation!r} requires a value"
+        raise _ConfigPatchError(msg)
+    return operation, path
+
+
+def _apply_mapping_patch(
+    parent: dict[str, Any],
+    *,
+    operation: str,
+    reference_token: str,
+    path: str,
+    change: dict[str, Any],
+) -> None:
+    """Apply one validated patch entry to a mapping parent."""
+    if operation == "replace" and reference_token not in parent:
+        msg = f"Replace target does not exist in the authored configuration: {path!r}; use add instead"
+        raise _ConfigPatchError(msg)
+    if operation == "remove":
+        if reference_token not in parent:
+            msg = f"Remove target does not exist in the authored configuration: {path!r}"
+            raise _ConfigPatchError(msg)
+        del parent[reference_token]
+        return
+    parent[reference_token] = deepcopy(change["value"])
+
+
+def _apply_list_patch(
+    parent: list[Any],
+    *,
+    operation: str,
+    reference_token: str,
+    path: str,
+    change: dict[str, Any],
+) -> None:
+    """Apply one validated patch entry to an array parent."""
+    index = _array_index(reference_token, length=len(parent), allow_append=operation == "add", path=path)
+    if operation == "add":
+        if index > len(parent):
+            msg = f"Array index {index} is out of range for add in JSON Pointer {path!r}"
+            raise _ConfigPatchError(msg)
+        parent.insert(index, deepcopy(change["value"]))
+        return
+    if index >= len(parent):
+        verb = "Replace" if operation == "replace" else "Remove"
+        suffix = "; use add instead" if operation == "replace" else ""
+        msg = f"{verb} target does not exist in the authored configuration: {path!r}{suffix}"
+        raise _ConfigPatchError(msg)
+    if operation == "replace":
+        parent[index] = deepcopy(change["value"])
+    else:
+        del parent[index]
+
+
+def _apply_one_config_patch(candidate: Any, change: dict[str, Any], position: int) -> tuple[Any, str]:  # noqa: ANN401
+    """Apply one validated patch entry and return the possibly replaced root."""
+    operation, path = _validated_patch_entry(change, position)
+    if path == "":
+        if operation == "remove":
+            msg = "The document root cannot be removed; replace it with an object instead"
+            raise _ConfigPatchError(msg)
+        return deepcopy(change["value"]), path
+
+    parent, reference_token = _resolve_patch_parent(candidate, path)
+    if isinstance(parent, dict):
+        _apply_mapping_patch(
+            parent,
+            operation=operation,
+            reference_token=reference_token,
+            path=path,
+            change=change,
+        )
+    elif isinstance(parent, list):
+        _apply_list_patch(
+            parent,
+            operation=operation,
+            reference_token=reference_token,
+            path=path,
+            change=change,
+        )
+    else:
+        msg = f"Patch parent is not a container in JSON Pointer {path!r}"
+        raise _ConfigPatchError(msg)
+    return candidate, path
+
+
+def _apply_config_patch(document: dict[str, Any], changes: list[dict[str, Any]]) -> tuple[dict[str, Any], list[str]]:
+    """Apply an atomic add/replace/remove patch to a copied config document."""
+    if not changes:
+        msg = "Patch operation requires a non-empty changes list"
+        raise _ConfigPatchError(msg)
+
+    candidate: Any = deepcopy(document)
+    changed_paths: list[str] = []
+    for position, change in enumerate(changes):
+        if not isinstance(change, dict):
+            msg = f"Patch entry {position} must be an object"
+            raise _ConfigPatchError(msg)
+        candidate, changed_path = _apply_one_config_patch(candidate, change, position)
+        changed_paths.append(changed_path)
+
+    if not isinstance(candidate, dict):
+        msg = "The authored configuration root must be an object"
+        raise _ConfigPatchError(msg)
+    return candidate, changed_paths
 
 
 def _is_known_tool_entry(tool_name: str, tool_metadata: dict[str, ToolMetadata]) -> bool:
@@ -119,9 +368,160 @@ class ConfigManagerTools(Toolkit):
             name="config_manager",
             tools=[
                 self.get_info,
+                self.manage_config,
                 self.manage_agent,
                 self.manage_team,
             ],
+        )
+
+    def manage_config(
+        self,
+        operation: Literal["inspect", "patch"],
+        path: str = "",
+        changes: list[_ConfigPatchChange] | None = None,
+        dry_run: bool = False,
+    ) -> str:
+        """Inspect or patch any authored MindRoom configuration field.
+
+        This is full-configuration control. Both operations address the authored
+        document written to ``config.yaml``: unset defaults and runtime overlays
+        are not present. Paths use RFC 6901 JSON Pointer syntax; the empty string
+        addresses the document root. Patch changes support RFC 6902 ``add``,
+        ``replace``, and ``remove``. Use ``-`` as the final token to append to a
+        list. All changes in one call are validated and persisted atomically.
+
+        Args:
+            operation: ``inspect`` to read one subtree or ``patch`` to change config.
+            path: JSON Pointer to inspect. Only used with ``operation="inspect"``.
+            changes: Atomic patch entries with ``op``, ``path``, and ``value``
+                (except ``remove``, which has no value).
+            dry_run: Validate a patch and return its receipt without writing.
+
+        Returns:
+            Redacted authored YAML for inspection, or a validation/persistence receipt.
+
+        """
+        if operation == "inspect":
+            return self._inspect_authored_config(path=path, changes=changes, dry_run=dry_run)
+        if operation == "patch":
+            return self._patch_authored_config(path=path, changes=changes, dry_run=dry_run)
+        return "Error: Unknown operation. Use 'inspect' or 'patch'."
+
+    def _inspect_authored_config(  # noqa: PLR0911
+        self,
+        *,
+        path: str,
+        changes: list[_ConfigPatchChange] | None,
+        dry_run: bool,
+    ) -> str:
+        """Return one redacted authored config subtree."""
+        if changes is not None:
+            return "Error: changes is only valid with operation='patch'."
+        if dry_run:
+            return "Error: dry_run is only valid with operation='patch'."
+
+        config, load_error = self._load_config_or_error()
+        if load_error:
+            return load_error
+        assert config is not None
+
+        try:
+            value = _resolve_json_pointer(config.authored_model_dump(), path)
+            redacted_value = redact_sensitive_data(value)
+            rendered = yaml.safe_dump(
+                redacted_value,
+                default_flow_style=False,
+                sort_keys=False,
+                allow_unicode=True,
+            ).rstrip()
+        except _ConfigPatchError as exc:
+            return f"Error inspecting authored configuration: {exc}"
+        except Exception as exc:
+            logger.exception("config_inspection_failed", path=path)
+            return f"Error inspecting authored configuration: {exc}"
+
+        if len(rendered) > _MAX_CONFIG_INSPECTION_CHARS:
+            return (
+                f"Error: Authored configuration at {path or '<root>'!r} is too large to return "
+                f"safely ({len(rendered)} characters). Inspect a narrower JSON Pointer path."
+            )
+        include_note = (
+            "\n\n⚠️ This configuration is composed from multiple files via `!include`. "
+            "Inspection shows the composed authored document, but structured patching is unavailable."
+            if len(config.source_files) > 1
+            else ""
+        )
+        return (
+            "## Authored MindRoom configuration\n\n"
+            f"- Config path: `{self.config_path}`\n"
+            f"- JSON Pointer: `{path}`\n"
+            "- View: authored values only; unset defaults and runtime overlays are excluded\n\n"
+            f"```yaml\n{rendered}\n```"
+            f"{include_note}"
+        )
+
+    def _patch_authored_config(  # noqa: PLR0911
+        self,
+        *,
+        path: str,
+        changes: list[_ConfigPatchChange] | None,
+        dry_run: bool,
+    ) -> str:
+        """Validate and optionally persist one authored config patch."""
+        if path:
+            return "Error: path is only valid with operation='inspect'; use changes[].path for patches."
+        if changes is None:
+            return f"Error: operation='patch' requires changes.\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
+
+        config, load_error = self._load_config_or_error(
+            footer=_CONFIG_CHANGE_REJECTED_MESSAGE,
+        )
+        if load_error:
+            return load_error
+        assert config is not None
+        if len(config.source_files) > 1:
+            return (
+                "Error: configuration is composed from multiple files via !include; "
+                f"edit the source files instead.\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
+            )
+
+        try:
+            authored = config.authored_model_dump()
+            candidate, changed_paths = _apply_config_patch(authored, _normalize_patch_changes(changes))
+            Config.validate_with_runtime(candidate, self.runtime_paths)
+            if not dry_run:
+                validate_and_persist_config_payload(candidate, self.runtime_paths)
+        except _ConfigPatchError as exc:
+            return f"Error: {exc}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
+        except (ValidationError, ConfigRuntimeValidationError) as exc:
+            return format_invalid_config_message(exc, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
+        except Exception as exc:
+            logger.exception("config_patch_failed")
+            return f"Error patching configuration: {exc}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
+
+        return self._config_patch_receipt(changed_paths, dry_run=dry_run)
+
+    def _config_patch_receipt(self, changed_paths: list[str], *, dry_run: bool) -> str:
+        """Return a path-only receipt without leaking changed values."""
+        status = "validated" if dry_run else "updated"
+        paths = "\n".join(f"  - `{changed_path}`" for changed_path in changed_paths)
+        runtime_note = (
+            "No runtime state changed because this was a dry run."
+            if dry_run
+            else (
+                "Matching registered API snapshots are published synchronously when present. "
+                "The orchestrator applies the saved configuration through its normal reload "
+                "after the current response; this receipt does not claim Matrix-side reconciliation."
+            )
+        )
+        return (
+            f"✅ Authored configuration patch {status}.\n\n"
+            f"- Config path: `{self.config_path}`\n"
+            "- Validated: yes\n"
+            f"- Persisted: {'no (dry run)' if dry_run else 'yes'}\n"
+            "- Changed paths:\n"
+            f"{paths}\n\n"
+            f"{runtime_note}"
         )
 
     def get_info(  # noqa: C901, PLR0911, PLR0912
