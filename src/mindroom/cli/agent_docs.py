@@ -18,6 +18,8 @@ MindRoom is an open-source AI agent platform: agents live in Matrix chat rooms a
 
 - Source: https://github.com/mindroom-ai/mindroom
 - Documentation: https://docs.mindroom.chat/
+- LLM-readable docs index: https://raw.githubusercontent.com/mindroom-ai/mindroom/refs/heads/main/skills/mindroom-docs/references/llms.txt
+- Complete docs in one file (~1 MB): https://raw.githubusercontent.com/mindroom-ai/mindroom/refs/heads/main/skills/mindroom-docs/references/llms-full.txt
 
 If you are a coding agent asked to repair this installation (for example, MindRoom does not start after an upgrade), work from this directory using the notes below.
 
@@ -78,7 +80,10 @@ def ensure_config_agent_docs(
     created: list[Path] = []
 
     agents_path = config_dir / _AGENTS_DOC_NAME
-    if force or not agents_path.exists():
+    if force or not (agents_path.is_symlink() or agents_path.exists()):
+        # Unlink first so --force replaces a symlinked AGENTS.md instead of
+        # writing through it into the symlink target.
+        agents_path.unlink(missing_ok=True)
         agents_path.write_text(content, encoding="utf-8")
         created.append(agents_path)
 
@@ -93,7 +98,8 @@ def ensure_config_agent_docs(
         claude_path.symlink_to(_AGENTS_DOC_NAME)
     except OSError:
         # Symlinks can be unavailable (e.g. Windows without developer mode);
-        # a plain copy gives coding agents the same entry point.
-        claude_path.write_text(content, encoding="utf-8")
+        # a plain copy of AGENTS.md — which may hold preserved user content —
+        # gives coding agents the same entry point.
+        claude_path.write_text(agents_path.read_text(encoding="utf-8"), encoding="utf-8")
     created.append(claude_path)
     return created

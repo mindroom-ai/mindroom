@@ -202,6 +202,55 @@ def test_ensure_config_agent_docs_copies_when_symlinks_unavailable(
     assert created == [tmp_path / "AGENTS.md", claude_doc]
 
 
+def test_ensure_config_agent_docs_copy_mirrors_preserved_agents_doc(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The no-symlink fallback copies preserved user AGENTS.md content, not the template."""
+
+    def _unsupported_symlink(*_args: object, **_kwargs: object) -> None:
+        message = "symlinks unsupported"
+        raise OSError(message)
+
+    monkeypatch.setattr(Path, "symlink_to", _unsupported_symlink)
+    agents_doc = tmp_path / "AGENTS.md"
+    agents_doc.write_text("custom agents notes\n", encoding="utf-8")
+
+    created = ensure_config_agent_docs(
+        tmp_path,
+        config_path=tmp_path / "config.yaml",
+        storage_root=tmp_path / "mindroom_data",
+    )
+
+    claude_doc = tmp_path / "CLAUDE.md"
+    assert agents_doc.read_text(encoding="utf-8") == "custom agents notes\n"
+    assert claude_doc.read_text(encoding="utf-8") == "custom agents notes\n"
+    assert created == [claude_doc]
+
+
+def test_ensure_config_agent_docs_force_replaces_agents_symlink_without_clobbering_target(
+    tmp_path: Path,
+) -> None:
+    """Force must replace a symlinked AGENTS.md instead of writing through it."""
+    external_target = tmp_path / "external.md"
+    external_target.write_text("external notes\n", encoding="utf-8")
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    agents_doc = config_dir / "AGENTS.md"
+    agents_doc.symlink_to(external_target)
+
+    ensure_config_agent_docs(
+        config_dir,
+        config_path=config_dir / "config.yaml",
+        storage_root=config_dir / "mindroom_data",
+        force=True,
+    )
+
+    assert external_target.read_text(encoding="utf-8") == "external notes\n"
+    assert not agents_doc.is_symlink()
+    assert "# MindRoom Configuration" in agents_doc.read_text(encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # mindroom config init
 # ---------------------------------------------------------------------------
@@ -339,6 +388,14 @@ class TestConfigInit:
 
         content = agents_doc.read_text(encoding="utf-8")
         assert "https://docs.mindroom.chat/" in content
+        assert (
+            "https://raw.githubusercontent.com/mindroom-ai/mindroom/refs/heads/main/"
+            "skills/mindroom-docs/references/llms.txt" in content
+        )
+        assert (
+            "https://raw.githubusercontent.com/mindroom-ai/mindroom/refs/heads/main/"
+            "skills/mindroom-docs/references/llms-full.txt" in content
+        )
         assert "mindroom config validate" in content
         assert "`config.yaml`" in content
         assert str((tmp_path / "mindroom_data").resolve()) in content
