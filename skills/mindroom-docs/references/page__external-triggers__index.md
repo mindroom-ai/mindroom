@@ -27,11 +27,11 @@ Trigger records live in primary-runtime control state under `MINDROOM_CONTROL_ST
 
 Workers, sandbox runners, and public runtime environments do not receive `MINDROOM_CONTROL_STATE_PATH`.
 
-The external trigger manager accepts only public key material.
+The `mindroom trigger keygen` command prints the private key, public key, and public key fingerprint.
 
-The watcher keeps the private key.
+Share only the printed public key with the agent, and keep the private key in the watcher runtime.
 
-Its output includes the endpoint path and public key fingerprint, but never includes the private key or raw public key.
+The external trigger manager accepts only that public key and returns the endpoint path and public key fingerprint, never raw key material.
 
 Both auth modes use the public API endpoint `POST /api/triggers/<trigger_id>`.
 
