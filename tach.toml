@@ -504,6 +504,34 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.callbacks"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.callbacks.executor",
+    "mindroom.callbacks.models",
+    "mindroom.callbacks.store",
+    "mindroom.external_triggers.executor",
+    "mindroom.external_triggers.models",
+]
+
+[[modules]]
+path = "mindroom.callbacks.executor"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.external_triggers.executor",
+]
+
+[[modules]]
+path = "mindroom.callbacks.sweep"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.callbacks.executor",
+    "mindroom.callbacks.store",
+    "mindroom.external_triggers.executor",
+    "mindroom.external_triggers.models",
+]
+
+[[modules]]
 path = "mindroom.external_triggers.executor"
 depends_on = [
     "mindroom.constants",
@@ -614,6 +642,7 @@ path = "mindroom.api.main"
 depends_on = [
     "mindroom.agent_policy",
     "mindroom.api.auth",
+    "mindroom.api.callbacks",
     "mindroom.api.config_lifecycle",
     "mindroom.api.credentials",
     "mindroom.api.dynamic_workflows",
@@ -630,6 +659,7 @@ depends_on = [
     "mindroom.api.skills",
     "mindroom.api.tools",
     "mindroom.api.workers",
+    "mindroom.callbacks.sweep",
     "mindroom.constants",
     "mindroom.credentials_sync",
     "mindroom.embedder_health",
