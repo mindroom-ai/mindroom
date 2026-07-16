@@ -7634,6 +7634,77 @@
         {
           "authored_override": true,
           "default": null,
+          "description": "Dedicated Matrix account used by the local desktop bridge.",
+          "label": "Desktop Matrix User ID",
+          "name": "device_user_id",
+          "options": null,
+          "placeholder": null,
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Exact device ID printed by 'mindroom desktop login'.",
+          "label": "Desktop Matrix Device ID",
+          "name": "device_id",
+          "options": null,
+          "placeholder": null,
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Exact Ed25519 fingerprint printed by 'mindroom desktop login'.",
+          "label": "Desktop Device Fingerprint",
+          "name": "device_ed25519",
+          "options": null,
+          "placeholder": null,
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 30,
+          "description": "Short-lived command and response timeout, from 1 to 120 seconds.",
+          "label": "Command Timeout Seconds",
+          "name": "timeout_seconds",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "Observe and operate one exact locally authorized desktop over Matrix end-to-end encryption",
+      "display_name": "Matrix Desktop",
+      "docs_url": "https://docs.mindroom.chat/tools/desktop/",
+      "function_names": [
+        "desktop"
+      ],
+      "helper_text": null,
+      "icon": "MonitorUp",
+      "icon_color": "text-cyan-500",
+      "name": "desktop",
+      "requires_room_context": true,
+      "setup_type": "special",
+      "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "productivity",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": null,
           "description": null,
           "label": "Db Path",
           "name": "db_path",

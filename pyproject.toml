@@ -433,6 +433,9 @@ zep = [
 zoom = [
   "requests",
 ]
+desktop-bridge = [
+    "pyautogui>=0.9.54",
+]
 [project.scripts]
 mindroom = "mindroom.cli.main:main"
 [project.urls]

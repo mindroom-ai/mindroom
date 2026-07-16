@@ -1,0 +1,60 @@
+"""Tests for private local desktop Matrix sessions."""
+
+from __future__ import annotations
+
+import json
+import os
+from typing import TYPE_CHECKING
+
+import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+from mindroom.desktop.session import (
+    DesktopMatrixSession,
+    DesktopSessionError,
+    load_desktop_session,
+    save_desktop_session,
+)
+
+
+def _session() -> DesktopMatrixSession:
+    return DesktopMatrixSession(
+        homeserver="https://matrix.example.org",
+        user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        access_token="secret-access-token",  # noqa: S106 - Test-only persisted token fixture.
+    )
+
+
+def test_session_round_trip_uses_owner_only_permissions(tmp_path: Path) -> None:
+    """The reusable Matrix token is never persisted with ambient read access."""
+    path = tmp_path / "desktop" / "matrix_session.json"
+
+    save_desktop_session(path, _session())
+
+    assert load_desktop_session(path) == _session()
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix permission bits are not authoritative on Windows")
+def test_session_refuses_group_readable_token(tmp_path: Path) -> None:
+    """An accidentally exposed token stops the bridge instead of being used."""
+    path = tmp_path / "matrix_session.json"
+    path.write_text(json.dumps(_session().to_payload()), encoding="utf-8")
+    path.chmod(0o640)
+
+    with pytest.raises(DesktopSessionError, match="must not be readable"):
+        load_desktop_session(path)
+
+
+def test_session_rejects_malformed_payload(tmp_path: Path) -> None:
+    """Incomplete credentials never reach the Matrix client."""
+    path = tmp_path / "matrix_session.json"
+    path.write_text('{"v": 1, "user_id": "@desktop:example.org"}', encoding="utf-8")
+    path.chmod(0o600)
+
+    with pytest.raises(DesktopSessionError, match="field homeserver"):
+        load_desktop_session(path)
