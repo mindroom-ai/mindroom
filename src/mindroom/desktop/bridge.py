@@ -11,13 +11,15 @@ from typing import TYPE_CHECKING
 from mindroom.desktop.media import DesktopMediaError, upload_encrypted_screenshot
 from mindroom.desktop.protocol import (
     DESKTOP_COMMAND_EVENT_TYPE,
+    DESKTOP_CONTROL_ACTIONS,
     DESKTOP_RESPONSE_EVENT_TYPE,
     DesktopCommand,
     DesktopProtocolError,
     DesktopResponse,
+    EncryptedDesktopMedia,
     event_content,
 )
-from mindroom.desktop.provider import DesktopEmergencyStopError, DesktopProvider, DesktopProviderError, ScreenCapture
+from mindroom.desktop.provider import DesktopEmergencyStopError, DesktopProvider, DesktopProviderError
 from mindroom.logging_config import get_logger
 from mindroom.matrix.olm_to_device import (
     OlmToDeviceError,
@@ -35,7 +37,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_CONTROL_ACTIONS = frozenset({"click", "type_text", "scroll", "keypress"})
 _MAX_REPLAY_RESPONSES = 1024
 _MAX_TRACKED_SESSIONS = 128
 _MAX_FUTURE_SKEW_MS = 30_000
@@ -79,11 +80,20 @@ class DesktopBridge:
     provider: DesktopProvider
     policy: DesktopBridgePolicy
     clock: Callable[[], float] = time.time
+    monotonic_clock: Callable[[], float] = time.monotonic
     _responses: OrderedDict[str, DesktopResponse] = field(default_factory=OrderedDict, init=False)
     _sequence_high_watermarks: OrderedDict[str, int] = field(default_factory=OrderedDict, init=False)
     _in_flight: set[str] = field(default_factory=set, init=False)
     _execution_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _control_revoked: bool = field(default=False, init=False)
+    _control_lease_deadline: float | None = field(default=None, init=False)
+
+    def __post_init__(self) -> None:
+        """Convert the wall-clock lease label into a rollback-safe local deadline."""
+        if self.policy.control_lease_expires_at_ms is None:
+            return
+        remaining_seconds = max(0.0, self.policy.control_lease_expires_at_ms / 1000 - self.clock())
+        self._control_lease_deadline = self.monotonic_clock() + remaining_seconds
 
     async def on_to_device_event(self, event: AuthenticatedToDeviceEvent) -> None:
         """Handle one authenticated custom to-device event without trusting its payload."""
@@ -104,6 +114,14 @@ class DesktopBridge:
 
         cached = self._responses.get(command.request_id)
         if cached is not None:
+            logger.info(
+                "desktop_command_replayed",
+                request_id=command.request_id,
+                action=command.action,
+                requester_id=command.requester_id,
+                agent_name=command.agent_name,
+                ok=cached.ok,
+            )
             await self._send_response(cached)
             return
         if command.request_id in self._in_flight:
@@ -114,6 +132,15 @@ class DesktopBridge:
             async with self._execution_lock:
                 response = await self._process(command)
             self._remember_response(response)
+            logger.info(
+                "desktop_command_completed",
+                request_id=command.request_id,
+                action=command.action,
+                requester_id=command.requester_id,
+                agent_name=command.agent_name,
+                ok=response.ok,
+                partial=bool(response.result.get("warning")),
+            )
             await self._send_response(response)
         finally:
             self._in_flight.discard(command.request_id)
@@ -125,36 +152,63 @@ class DesktopBridge:
         sequence_error = self._record_sequence(command)
         if sequence_error is not None:
             return self._error_response(command, sequence_error)
+        execution = await self._execute_safely(command)
+        if isinstance(execution, DesktopResponse):
+            return execution
+        result, should_capture = execution
+        if not should_capture:
+            return self._success_response(command, result=result)
+        return await self._capture_response(command, result=result)
+
+    async def _execute_safely(
+        self,
+        command: DesktopCommand,
+    ) -> tuple[dict[str, object], bool] | DesktopResponse:
         try:
-            result, capture = await self._execute(command)
-            screenshot = None
-            if capture is not None:
-                screenshot = await upload_encrypted_screenshot(
-                    self.client,
-                    capture.content,
-                    mime_type=capture.mime_type,
-                    filename=f"desktop-{command.request_id}.jpg",
-                )
-                result = {
-                    **result,
-                    "screen": {"width": capture.screen_width, "height": capture.screen_height},
-                    "image": {"width": capture.image_width, "height": capture.image_height},
-                }
-            return DesktopResponse(
-                request_id=command.request_id,
-                session_id=command.session_id,
-                ok=True,
-                result=result,
-                screenshot=screenshot,
-            )
+            return await self._execute(command)
         except DesktopEmergencyStopError as exc:
             self._control_revoked = True
             return self._error_response(command, str(exc))
-        except (DesktopProviderError, DesktopMediaError, DesktopProtocolError) as exc:
+        except (DesktopProviderError, DesktopProtocolError) as exc:
             return self._error_response(command, str(exc))
         except Exception:
-            logger.exception("desktop_command_execution_failed", action=command.action)
+            logger.exception(
+                "desktop_command_execution_failed",
+                request_id=command.request_id,
+                action=command.action,
+            )
+            if command.action in DESKTOP_CONTROL_ACTIONS:
+                return self._unknown_control_response(command)
             return self._error_response(command, "Local desktop operation failed.")
+
+    async def _capture_response(
+        self,
+        command: DesktopCommand,
+        *,
+        result: dict[str, object],
+    ) -> DesktopResponse:
+        try:
+            capture = await asyncio.to_thread(self.provider.screenshot)
+            screenshot = await upload_encrypted_screenshot(
+                self.client,
+                capture.content,
+                mime_type=capture.mime_type,
+                filename=f"desktop-{command.request_id}.jpg",
+            )
+        except (DesktopProviderError, DesktopMediaError) as exc:
+            return self._capture_error_response(command, result=result, error=str(exc))
+        except Exception:
+            logger.exception("desktop_follow_up_screenshot_failed", action=command.action)
+            return self._capture_error_response(command, result=result, error="Local screenshot operation failed.")
+        return self._success_response(
+            command,
+            result={
+                **result,
+                "screen": {"width": capture.screen_width, "height": capture.screen_height},
+                "image": {"width": capture.image_width, "height": capture.image_height},
+            },
+            screenshot=screenshot,
+        )
 
     def _policy_error(self, command: DesktopCommand) -> str | None:
         now_ms = round(self.clock() * 1000)
@@ -164,13 +218,13 @@ class DesktopBridge:
             error = "Desktop command expired before local execution."
         elif not self.policy.caller_allowed(command):
             error = "Desktop command requester or agent is not allowed by local policy."
-        elif command.action not in _CONTROL_ACTIONS:
+        elif command.action not in DESKTOP_CONTROL_ACTIONS:
             error = None
         elif not self.policy.allow_control:
             error = "Desktop control is disabled; this bridge is observe-only."
         elif self._control_revoked:
             error = "Desktop emergency stop is latched; restart the bridge locally before granting control again."
-        elif self.policy.control_lease_expires_at_ms is None or self.policy.control_lease_expires_at_ms < now_ms:
+        elif not self._control_available():
             error = "Local desktop control lease has expired."
         else:
             error = None
@@ -186,14 +240,15 @@ class DesktopBridge:
             self._sequence_high_watermarks.popitem(last=False)
         return None
 
-    async def _execute(self, command: DesktopCommand) -> tuple[dict[str, object], ScreenCapture | None]:
+    async def _execute(self, command: DesktopCommand) -> tuple[dict[str, object], bool]:
         parameters = command.parameters
         if command.action == "status":
             _reject_unexpected_parameters(parameters, allowed=frozenset())
-            return await asyncio.to_thread(self.provider.status), None
+            status = await asyncio.to_thread(self.provider.status)
+            return {**status, "bridge": self._bridge_status()}, False
         if command.action == "screenshot":
             _reject_unexpected_parameters(parameters, allowed=frozenset())
-            return {"action": command.action}, await asyncio.to_thread(self.provider.screenshot)
+            return {"action": command.action}, True
         if command.action == "click":
             _reject_unexpected_parameters(parameters, allowed=frozenset({"x", "y", "button"}))
             await asyncio.to_thread(
@@ -220,7 +275,68 @@ class DesktopBridge:
             msg = f"Unsupported desktop action: {command.action}."
             raise DesktopProtocolError(msg)
 
-        return {"action": command.action}, await asyncio.to_thread(self.provider.screenshot)
+        return {"action": command.action, "action_completed": True}, True
+
+    def _bridge_status(self) -> dict[str, object]:
+        control_available = self._control_available()
+        status: dict[str, object] = {
+            "mode": "control" if control_available else "observe_only",
+            "control_available": control_available,
+            "emergency_stop_latched": self._control_revoked,
+        }
+        if self.policy.control_lease_expires_at_ms is not None:
+            status["control_lease_expires_at_ms"] = self.policy.control_lease_expires_at_ms
+        return status
+
+    def _control_available(self) -> bool:
+        return (
+            self.policy.allow_control
+            and not self._control_revoked
+            and self._control_lease_deadline is not None
+            and self.monotonic_clock() <= self._control_lease_deadline
+        )
+
+    def _capture_error_response(
+        self,
+        command: DesktopCommand,
+        *,
+        result: dict[str, object],
+        error: str,
+    ) -> DesktopResponse:
+        if command.action not in DESKTOP_CONTROL_ACTIONS:
+            return self._error_response(command, error)
+        warning = (
+            "The desktop action completed, but its follow-up screenshot failed; do not repeat the action automatically. "
+            "Request status or a screenshot before deciding the next step."
+        )
+        logger.warning(
+            "desktop_control_follow_up_screenshot_failed",
+            request_id=command.request_id,
+            action=command.action,
+            requester_id=command.requester_id,
+            agent_name=command.agent_name,
+        )
+        return self._success_response(
+            command,
+            result={**result, "warning": warning, "follow_up_screenshot": "failed"},
+        )
+
+    def _unknown_control_response(self, command: DesktopCommand) -> DesktopResponse:
+        warning = (
+            "The desktop action outcome is unknown and it may have completed; do not repeat the action automatically. "
+            "Request status or a screenshot before deciding the next step."
+        )
+        logger.warning(
+            "desktop_control_outcome_unknown",
+            request_id=command.request_id,
+            action=command.action,
+            requester_id=command.requester_id,
+            agent_name=command.agent_name,
+        )
+        return self._success_response(
+            command,
+            result={"action": command.action, "action_outcome": "unknown", "warning": warning},
+        )
 
     def _remember_response(self, response: DesktopResponse) -> None:
         self._responses[response.request_id] = response
@@ -246,6 +362,21 @@ class DesktopBridge:
             session_id=command.session_id,
             ok=False,
             error=error,
+        )
+
+    @staticmethod
+    def _success_response(
+        command: DesktopCommand,
+        *,
+        result: dict[str, object],
+        screenshot: EncryptedDesktopMedia | None = None,
+    ) -> DesktopResponse:
+        return DesktopResponse(
+            request_id=command.request_id,
+            session_id=command.session_id,
+            ok=True,
+            result=result,
+            screenshot=screenshot,
         )
 
 

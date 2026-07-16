@@ -13,7 +13,8 @@ MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024
 
 type DesktopAction = Literal["status", "screenshot", "click", "type_text", "scroll", "keypress"]
 
-_DESKTOP_ACTIONS = frozenset({"status", "screenshot", "click", "type_text", "scroll", "keypress"})
+DESKTOP_CONTROL_ACTIONS = frozenset({"click", "type_text", "scroll", "keypress"})
+_DESKTOP_ACTIONS = frozenset({"status", "screenshot", *DESKTOP_CONTROL_ACTIONS})
 
 
 class DesktopProtocolError(ValueError):
@@ -250,6 +251,7 @@ def _require_protocol_version(content: dict[str, object]) -> None:
 
 __all__ = [
     "DESKTOP_COMMAND_EVENT_TYPE",
+    "DESKTOP_CONTROL_ACTIONS",
     "DESKTOP_PROTOCOL_VERSION",
     "DESKTOP_RESPONSE_EVENT_TYPE",
     "MAX_COMMAND_TTL_MS",

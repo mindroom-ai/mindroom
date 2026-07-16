@@ -91,6 +91,7 @@ class PyAutoGuiDesktopProvider:
 
     def screenshot(self) -> ScreenCapture:
         """Capture and downscale the current desktop as a JPEG."""
+        screen_width, screen_height = self._screen_size()
         image = self._pyautogui.screenshot()
         source_width, source_height = image.size
         if source_width > self._max_screenshot_width:
@@ -102,8 +103,8 @@ class PyAutoGuiDesktopProvider:
         return ScreenCapture(
             content=output.getvalue(),
             mime_type="image/jpeg",
-            screen_width=source_width,
-            screen_height=source_height,
+            screen_width=screen_width,
+            screen_height=screen_height,
             image_width=image_width,
             image_height=image_height,
         )

@@ -26,14 +26,14 @@ class FakeClient:
         self.callback = callback
 
 
-def _command() -> DesktopCommand:
+def _command(*, request_id: str = "request-1", action: str = "status") -> DesktopCommand:
     return DesktopCommand(
-        request_id="request-1",
+        request_id=request_id,
         session_id="session-1",
         sequence=1,
         issued_at_ms=1_000,
         expires_at_ms=2_000,
-        action="status",
+        action=action,
         requester_id="@alice:example.org",
         agent_name="computer",
     )
@@ -79,3 +79,33 @@ async def test_request_timeout_is_bounded(monkeypatch: pytest.MonkeyPatch) -> No
 
     with pytest.raises(DesktopRequestError, match="did not answer"):
         await router.request(TARGET, _command(), timeout_seconds=0.001)
+
+
+@pytest.mark.asyncio
+async def test_control_timeout_reports_unknown_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A timed-out control action cannot be presented as safe to retry."""
+    client = FakeClient()
+    router = DesktopResponseRouter(client)  # type: ignore[arg-type]
+    monkeypatch.setattr("mindroom.desktop.client.send_encrypted_to_device", AsyncMock())
+
+    with pytest.raises(DesktopRequestError, match=r"outcome is unknown.*do not repeat"):
+        await router.request(TARGET, _command(action="click"), timeout_seconds=0.001)
+
+
+@pytest.mark.asyncio
+async def test_only_one_request_per_target_can_be_in_flight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Parallel tool calls cannot reorder or preplan multiple desktop actions."""
+    client = FakeClient()
+    router = DesktopResponseRouter(client)  # type: ignore[arg-type]
+    send = AsyncMock()
+    monkeypatch.setattr("mindroom.desktop.client.send_encrypted_to_device", send)
+
+    first = asyncio.create_task(router.request(TARGET, _command(), timeout_seconds=1))
+    await asyncio.sleep(0)
+    with pytest.raises(DesktopRequestError, match="already in progress"):
+        await router.request(TARGET, _command(request_id="request-2"), timeout_seconds=1)
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    send.assert_awaited_once()

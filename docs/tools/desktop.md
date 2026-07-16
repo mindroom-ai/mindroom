@@ -9,21 +9,25 @@ The local computer runs an outbound Matrix sync client, while commands and respo
 Screenshots are encrypted before upload to Matrix media, and their decryption keys travel only inside the encrypted response.
 
 This first version is step-based rather than live video.
-The agent requests a screenshot or performs one bounded action, and every control action returns a fresh screenshot.
-Each response reports both source-screen and encoded-image dimensions so an agent can scale image coordinates back to the real desktop.
+The agent requests a screenshot or performs one bounded action, and a control action normally returns a fresh screenshot.
+If that follow-up capture or upload fails after an action completes, the tool reports a partial result that tells the agent not to repeat the action automatically.
+An unexpected failure during an input operation or while waiting for its response is also reported as an unknown outcome that must be inspected instead of retried.
+Each screenshot response reports both logical screen coordinates and encoded-image dimensions so an agent can scale image pixels back to input coordinates, including on Retina displays.
 
 ## Security Model
 
 The local bridge starts in observe-only mode unless a person at the computer grants a short control lease on the command line.
 The local process independently checks the exact cloud Matrix user, device ID, Ed25519 fingerprint, human requester ID, agent name, command expiry, request ID, and monotonic session sequence.
+Only one cloud request may be in flight to a desktop device, so parallel tool calls cannot preplan or reorder multiple actions.
 Cloud configuration cannot enable control, extend a running lease, or change the local allowlists.
 Restarting the local bridge returns it to observe-only mode unless `--allow-control` is supplied again.
 Moving the pointer to the upper-left corner triggers PyAutoGUI's emergency stop and latches control off until the local bridge is restarted.
+The local process writes an audit log entry for each completed or rejected parsed command without logging action parameters or typed text.
 
 The exposed action set is intentionally small:
 
 - `status` reports screen geometry and cursor position.
-- `screenshot` captures the active desktop.
+- `screenshot` captures the current primary screen.
 - `click` clicks one bounded screen coordinate.
 - `type_text` types up to 2,000 characters into the focused application.
 - `scroll` scrolls a bounded amount at the current or supplied position.
@@ -34,6 +38,7 @@ It operates only the currently logged-in graphical session and cannot bypass ope
 
 Matrix protects the local-to-cloud transport, but a screenshot becomes model input after MindRoom decrypts it in the cloud process.
 Your configured model provider can therefore receive visible screen contents, just as it receives other image inputs.
+Desktop action arguments can also appear in model context, approval cards, and MindRoom tool traces, so never use `type_text` for passwords, tokens, recovery codes, or other secrets.
 The Matrix homeserver can observe routing metadata, timing, and encrypted media size, but not the command body or screenshot plaintext.
 
 ## Requirements
@@ -74,7 +79,7 @@ Copy these exact public identity values to the cloud MindRoom configuration.
 
 ## 2. Configure the Cloud Agent
 
-Start cloud MindRoom at least once so the chosen agent or team has a persistent Matrix device.
+Start cloud MindRoom at least once so the chosen agent has a persistent Matrix device.
 On the cloud server, print that controller's local device identity:
 
 ```bash
@@ -83,7 +88,7 @@ mindroom desktop controller --entity computer
 
 Copy the printed controller user, device, and Ed25519 values to the local run command in the next section.
 
-Configure the local desktop device as an authored override on the exact cloud entity that will call the tool:
+Configure the local desktop device as an authored override on the exact cloud agent that will call the tool:
 
 ```yaml
 agents:
@@ -117,6 +122,7 @@ mindroom desktop run \
 Every requester and agent value is an exact local allowlist entry, and the options can be repeated when more than one exact identity is needed.
 Wildcards are not accepted as authority.
 The process opens outbound HTTPS connections to Matrix and does not listen on a network port.
+Wait until the terminal says `Desktop bridge online` before calling the cloud tool because startup sync messages are not treated as queued work.
 
 To grant keyboard and pointer control for fifteen minutes, stop the observe-only process and restart it locally with an explicit lease:
 
@@ -132,6 +138,7 @@ mindroom desktop run \
 ```
 
 The maximum lease accepted by the CLI is sixty minutes.
+The running process enforces the lease with a monotonic local deadline, so moving the wall clock backward does not extend control.
 The bridge continues running after the lease expires, but every control action is rejected until a person restarts it with a new lease.
 
 ## 4. Add Matrix Approval for Control Actions
@@ -162,8 +169,9 @@ Approval does not override an absent or expired local control lease.
 
 ## Operations
 
-Rotate the local desktop Matrix device with `mindroom desktop login --replace`, then update all three local device pin fields in the cloud tool configuration.
-If the cloud entity receives a new Matrix device, run `mindroom desktop controller --entity <name>` again and update the three controller options used locally.
+Rotate the local desktop Matrix device with `mindroom desktop login --replace`, revoke the old device in Matrix account management, and then update all three local device pin fields in the cloud tool configuration.
+The `--replace` option creates a fresh saved session but cannot revoke the old device by itself.
+If the cloud agent receives a new Matrix device, run `mindroom desktop controller --entity <name>` again and update the three controller options used locally.
 A device ID or Ed25519 mismatch is a hard failure and should be treated as a rotation or possible substitution, not bypassed.
 
 Use `Ctrl+C` to stop the local bridge immediately.
@@ -171,6 +179,6 @@ For stronger isolation, run the bridge in a dedicated operating-system account a
 
 ## Current Limits
 
-The current provider is PyAutoGUI, so it offers whole-desktop screenshots and coordinate-based input rather than semantic accessibility-tree controls.
+The current provider is PyAutoGUI, so it offers primary-screen screenshots and coordinate-based input rather than semantic accessibility-tree controls.
 There is no MatrixRTC live screen stream, tray application, multi-monitor selector, unattended service installer, or remote approval of local lease changes yet.
 Commands and encrypted responses are Matrix to-device messages rather than persistent room events, while normal MindRoom tool traces and optional approval cards remain visible in the Matrix conversation.

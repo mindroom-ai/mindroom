@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -14,6 +16,7 @@ if TYPE_CHECKING:
 from mindroom.desktop.session import (
     DesktopMatrixSession,
     DesktopSessionError,
+    _prepare_crypto,
     load_desktop_session,
     save_desktop_session,
 )
@@ -58,3 +61,17 @@ def test_session_rejects_malformed_payload(tmp_path: Path) -> None:
 
     with pytest.raises(DesktopSessionError, match="field homeserver"):
         load_desktop_session(path)
+
+
+@pytest.mark.asyncio
+async def test_initial_crypto_sync_does_not_announce_bridge_online() -> None:
+    """Presence stays offline until the command callback is registered and sync-forever starts."""
+    client = SimpleNamespace(
+        sync=AsyncMock(return_value=object()),
+        should_upload_keys=False,
+        olm=object(),
+    )
+
+    await _prepare_crypto(client)
+
+    client.sync.assert_awaited_once_with(timeout=0, full_state=False, set_presence="offline")

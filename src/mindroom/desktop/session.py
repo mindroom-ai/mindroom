@@ -160,7 +160,7 @@ async def restore_desktop_client(
 
 async def _prepare_crypto(client: nio.AsyncClient) -> None:
     """Load the crypto store, publish keys, and establish a current sync token."""
-    response = await client.sync(timeout=0, full_state=False, set_presence="online")
+    response = await client.sync(timeout=0, full_state=False, set_presence="offline")
     if isinstance(response, nio.SyncError):
         msg = f"Desktop Matrix initial sync failed: {response}"
         raise DesktopSessionError(msg)

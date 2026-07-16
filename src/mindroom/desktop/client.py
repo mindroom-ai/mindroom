@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.desktop.protocol import (
     DESKTOP_COMMAND_EVENT_TYPE,
+    DESKTOP_CONTROL_ACTIONS,
     DESKTOP_RESPONSE_EVENT_TYPE,
     DesktopCommand,
     DesktopProtocolError,
@@ -44,6 +45,7 @@ class DesktopResponseRouter:
     def __init__(self, client: nio.AsyncClient) -> None:
         self._client = client
         self._pending: dict[str, _PendingDesktopResponse] = {}
+        self._targets_in_flight: set[PinnedMatrixDevice] = set()
         client.add_to_device_callback(self.on_to_device_event, AuthenticatedToDeviceEvent)
 
     async def request(
@@ -57,6 +59,9 @@ class DesktopResponseRouter:
         if command.request_id in self._pending:
             msg = f"Desktop request ID is already pending: {command.request_id}."
             raise DesktopRequestError(msg)
+        if target in self._targets_in_flight:
+            msg = "A desktop request is already in progress for this device; inspect its result before the next action."
+            raise DesktopRequestError(msg)
         loop = asyncio.get_running_loop()
         future: asyncio.Future[DesktopResponse] = loop.create_future()
         self._pending[command.request_id] = _PendingDesktopResponse(
@@ -64,6 +69,7 @@ class DesktopResponseRouter:
             session_id=command.session_id,
             future=future,
         )
+        self._targets_in_flight.add(target)
         try:
             await send_encrypted_to_device(
                 self._client,
@@ -74,10 +80,11 @@ class DesktopResponseRouter:
             try:
                 return await asyncio.wait_for(future, timeout=timeout_seconds)
             except TimeoutError as exc:
-                msg = f"Desktop device did not answer within {timeout_seconds:g} seconds."
+                msg = _timeout_message(command, timeout_seconds=timeout_seconds)
                 raise DesktopRequestError(msg) from exc
         finally:
             self._pending.pop(command.request_id, None)
+            self._targets_in_flight.discard(target)
 
     def on_to_device_event(self, event: nio.ToDeviceEvent) -> None:
         """Resolve a waiter only for a valid response from its exact pinned device."""
@@ -97,6 +104,16 @@ class DesktopResponseRouter:
         if not authenticated_sender_matches(self._client, event, pending.target):
             return
         pending.future.set_result(response)
+
+
+def _timeout_message(command: DesktopCommand, *, timeout_seconds: float) -> str:
+    message = f"Desktop device did not answer within {timeout_seconds:g} seconds."
+    if command.action not in DESKTOP_CONTROL_ACTIONS:
+        return message
+    return (
+        f"{message} The action outcome is unknown and it may have completed; do not repeat it automatically. "
+        "Request status or a screenshot before deciding the next step."
+    )
 
 
 _ROUTERS: weakref.WeakKeyDictionary[nio.AsyncClient, DesktopResponseRouter] = weakref.WeakKeyDictionary()

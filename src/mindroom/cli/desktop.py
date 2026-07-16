@@ -29,7 +29,7 @@ desktop_app = typer.Typer(
 
 @desktop_app.command("controller")
 def desktop_controller(
-    entity: str = typer.Option(..., "--entity", help="Cloud agent or team whose Matrix device will send commands."),
+    entity: str = typer.Option(..., "--entity", help="Cloud agent whose Matrix device will send commands."),
     config_path: Path | None = typer.Option(  # noqa: B008
         None,
         "--config",
@@ -267,11 +267,21 @@ async def _run_bridge(
                 return
             task = asyncio.create_task(bridge.on_to_device_event(event), name="desktop_command")
             tasks.add(task)
-            task.add_done_callback(tasks.discard)
+            task.add_done_callback(command_done)
+
+        def command_done(task: asyncio.Task[None]) -> None:
+            tasks.discard(task)
+            if task.cancelled():
+                return
+            error = task.exception()
+            if error is not None:
+                _error_console.print(f"[red]Desktop command task failed:[/red] {error}")
 
         client.add_to_device_callback(schedule_event, AuthenticatedToDeviceEvent)
         mode = f"control enabled for {lease_minutes} minute(s)" if allow_control else "observe-only"
         _console.print(f"[green]Desktop bridge online:[/green] {mode}")
+        _console.print(f"Allowed requesters: {', '.join(sorted(allow_requester))}")
+        _console.print(f"Allowed agents: {', '.join(sorted(allow_agent))}")
         _console.print("Move the pointer to the upper-left corner to trigger PyAutoGUI's emergency stop.")
         await client.sync_forever(timeout=30_000, full_state=False, set_presence="online")
     finally:
