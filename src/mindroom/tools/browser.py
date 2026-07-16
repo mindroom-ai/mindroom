@@ -54,6 +54,50 @@ if TYPE_CHECKING:
                 "network addresses. Cloud metadata and link-local addresses stay blocked."
             ),
         ),
+        ConfigField(
+            name="default_target",
+            label="Default Browser Target",
+            type="select",
+            required=False,
+            default="host",
+            options=[
+                {"label": "MindRoom host profile", "value": "host"},
+                {"label": "Matrix desktop profile", "value": "desktop"},
+            ],
+            description=(
+                "Use host for MindRoom's managed Playwright profile or desktop for the Playwright extension "
+                "installed in the user's existing local browser profile."
+            ),
+        ),
+        ConfigField(
+            name="device_user_id",
+            label="Desktop Matrix User ID",
+            type="text",
+            required=False,
+            description="Required for target=desktop; dedicated Matrix account used by the local desktop bridge.",
+        ),
+        ConfigField(
+            name="device_id",
+            label="Desktop Matrix Device ID",
+            type="text",
+            required=False,
+            description="Required for target=desktop; exact device ID printed by 'mindroom desktop login'.",
+        ),
+        ConfigField(
+            name="device_ed25519",
+            label="Desktop Device Fingerprint",
+            type="text",
+            required=False,
+            description="Required for target=desktop; exact Ed25519 fingerprint of the local bridge device.",
+        ),
+        ConfigField(
+            name="timeout_seconds",
+            label="Desktop Browser Timeout Seconds",
+            type="number",
+            required=False,
+            default=90,
+            description="Matrix and local Playwright MCP timeout from 1 to 120 seconds.",
+        ),
     ],
     function_names=("browser",),
 )

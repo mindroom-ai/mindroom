@@ -272,26 +272,26 @@ Control remains disabled unless the local command grants a short lease.
  Run the outbound-only Matrix sync loop and execute locally authorized commands.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ *  --controller-user-id            TEXT                      Pinned cloud controller   │
+│ *  --controller-user-id             TEXT                     Pinned cloud controller   │
 │                                                              Matrix user.              │
 │                                                              [required]                │
-│ *  --controller-device-id          TEXT                      Pinned cloud controller   │
+│ *  --controller-device-id           TEXT                     Pinned cloud controller   │
 │                                                              device.                   │
 │                                                              [required]                │
-│ *  --controller-ed25519            TEXT                      Pinned controller         │
+│ *  --controller-ed25519             TEXT                     Pinned controller         │
 │                                                              fingerprint.              │
 │                                                              [required]                │
-│ *  --allow-requester               TEXT                      Human Matrix requester    │
+│ *  --allow-requester                TEXT                     Human Matrix requester    │
 │                                                              allowed to operate this   │
 │                                                              desktop; repeat as        │
 │                                                              needed.                   │
 │                                                              [required]                │
-│ *  --allow-agent                   TEXT                      MindRoom agent name       │
+│ *  --allow-agent                    TEXT                     MindRoom agent name       │
 │                                                              allowed to operate this   │
 │                                                              desktop; repeat as        │
 │                                                              needed.                   │
 │                                                              [required]                │
-│ *  --allow-app                     TEXT                      Exact local application   │
+│ *  --allow-app                      TEXT                     Exact local application   │
 │                                                              ID exposed to the agent;  │
 │                                                              repeat as needed.         │
 │                                                              [required]                │
@@ -299,19 +299,34 @@ Control remains disabled unless the local command grants a short lease.
 │                                                              fallback input for a      │
 │                                                              short local lease.        │
 │                                                              Default is observe-only.  │
-│    --lease-minutes                 INTEGER RANGE [1<=x<=60]  Local control lease       │
-│                                                              duration.                 │
+│    --lease-minutes                  INTEGER RANGE            Local control lease       │
+│                                     [1<=x<=60]               duration.                 │
 │                                                              [default: 15]             │
-│    --max-screenshot-width          INTEGER RANGE             [default: 1600]           │
-│                                    [320<=x<=3840]                                      │
-│    --jpeg-quality                  INTEGER RANGE             [default: 80]             │
-│                                    [40<=x<=95]                                         │
-│    --log-level             -l      TEXT                      [default: INFO]           │
-│    --config                -c      PATH                      MindRoom config path used │
+│    --max-screenshot-width           INTEGER RANGE            [default: 1600]           │
+│                                     [320<=x<=3840]                                     │
+│    --jpeg-quality                   INTEGER RANGE            [default: 80]             │
+│                                     [40<=x<=95]                                        │
+│    --browser-extension                                       Expose Playwright MCP     │
+│                                                              control of an existing    │
+│                                                              browser profile when its  │
+│                                                              extension is installed.   │
+│    --browser-executable             PATH                     Chrome-family executable  │
+│                                                              to open the Playwright    │
+│                                                              extension connection      │
+│                                                              page, including Brave.    │
+│    --browser-user-data-dir          PATH                     Existing browser          │
+│                                                              user-data root containing │
+│                                                              the profile where the     │
+│                                                              extension is installed.   │
+│    --browser-timeout-seco…          INTEGER RANGE            Local Playwright MCP call │
+│                                     [1<=x<=120]              timeout.                  │
+│                                                              [default: 90]             │
+│    --log-level              -l      TEXT                     [default: INFO]           │
+│    --config                 -c      PATH                     MindRoom config path used │
 │                                                              for runtime env.          │
-│    --storage-path          -s      PATH                      Desktop bridge state      │
+│    --storage-path           -s      PATH                     Desktop bridge state      │
 │                                                              directory.                │
-│    --help                  -h                                Show this message and     │
+│    --help                   -h                               Show this message and     │
 │                                                              exit.                     │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 

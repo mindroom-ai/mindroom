@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import nio
 import pytest
+import typer
 from typer.testing import CliRunner
 
 import mindroom.cli.desktop as desktop_cli
@@ -44,6 +45,30 @@ def test_desktop_login_accepts_explicit_homeserver(monkeypatch: pytest.MonkeyPat
 
     assert result.exit_code == 0, result.output
     assert login.await_args.kwargs["homeserver"] == "https://matrix.example.org"
+
+
+def test_browser_profile_paths_require_extension_mode(tmp_path: Path) -> None:
+    """Profile options cannot be silently ignored when extension mode is absent."""
+    with pytest.raises(typer.Exit) as exc_info:
+        desktop_cli._validate_browser_options(
+            enabled=False,
+            executable_path=tmp_path / "Brave",
+            user_data_dir=None,
+        )
+
+    assert exc_info.value.exit_code == 2
+
+
+def test_browser_profile_paths_must_exist(tmp_path: Path) -> None:
+    """Bad local browser paths fail before Matrix login and sync startup."""
+    with pytest.raises(typer.Exit) as exc_info:
+        desktop_cli._validate_browser_options(
+            enabled=True,
+            executable_path=tmp_path / "missing-brave",
+            user_data_dir=None,
+        )
+
+    assert exc_info.value.exit_code == 2
 
 
 class _FakeBridgeClient:

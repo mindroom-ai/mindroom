@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.desktop.protocol import (
+    DESKTOP_BROWSER_ACTIONS,
     DESKTOP_COMMAND_EVENT_TYPE,
     DESKTOP_CONTROL_ACTIONS,
     DESKTOP_RESPONSE_EVENT_TYPE,
@@ -116,9 +117,14 @@ def _timeout_message(command: DesktopCommand, *, timeout_seconds: float) -> str:
     message = f"Desktop device did not answer within {timeout_seconds:g} seconds."
     if command.action not in DESKTOP_CONTROL_ACTIONS:
         return message
+    recovery_action = (
+        "browser(action='tabs' or 'snapshot', target='desktop')"
+        if command.action in DESKTOP_BROWSER_ACTIONS
+        else "get_app_state"
+    )
     return (
         f"{message} The action outcome is unknown and it may have completed; do not repeat it automatically. "
-        "Request get_app_state before deciding the next step."
+        f"Request {recovery_action} before deciding the next step."
     )
 
 

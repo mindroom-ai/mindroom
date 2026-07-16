@@ -56,6 +56,16 @@ The control actions are:
 The bridge does not expose a shell, filesystem, clipboard, microphone, webcam, unlock operation, privilege elevation, or arbitrary local RPC.
 It operates only the currently logged-in graphical session and cannot bypass operating-system permission prompts.
 
+The optional Playwright MCP extension path is a separate browser capability on the same pinned Matrix transport and local control lease.
+It returns semantic page snapshots and stable element references from the browser, which are usually more precise for forms and interactive websites than desktop coordinates.
+Its observation actions are `status`, `profiles`, `tabs`, `snapshot`, `screenshot`, and `console`.
+Its control actions are `start`, `stop`, `open`, `focus`, `close`, `navigate`, `pdf`, `upload`, `dialog`, and `act`.
+The browser `act` action supports semantic click, type, key press, hover, drag, select, multi-field fill, resize, wait, evaluate, and close operations.
+Enabling the extension grants access to the tabs and signed-in state in the connected browser profile, and the desktop application allowlist does not narrow that access to one tab or origin.
+Extension mode is not a network sandbox: MindRoom validates URLs passed directly to `open` and `navigate`, but redirects, page scripts, and evaluated JavaScript retain the connected profile's normal network reach.
+The local MCP process is pinned to the documented package version and can read upload files only from its `<storage>/desktop-browser` workspace.
+The browser extension and MCP process communicate over a machine-local loopback connection, while every cloud-to-local command still travels through pinned Matrix Olm encryption.
+
 Matrix protects the local-to-cloud transport, but accessibility state and screenshots become model input after MindRoom decrypts them in the cloud process.
 Accessibility APIs can expose labels, document text, form values, and other semantic content that is not obvious from the screenshot alone.
 The macOS backend recognizes secure text fields from both accessibility roles and subroles, suppresses their values, and refuses to change them semantically.
@@ -80,6 +90,8 @@ macOS also requires Screen Recording permission for screenshots.
 Windows and Linux currently expose screenshot-only operation through the explicit `primary-screen` app ID, with PyAutoGUI input available during a control lease.
 Linux pixel operation currently targets an active X11 desktop because PyAutoGUI does not provide native Wayland control.
 A headless or locked graphical session is not a supported target.
+Playwright extension mode requires Node.js 18 or newer, a Chromium-family browser, and the official Playwright MCP Bridge extension installed in the browser profile that MindRoom will use.
+Chrome and Brave are supported by the local command through an explicit browser executable and user-data root.
 
 ## 1. Create the Local Desktop Device
 
@@ -132,6 +144,22 @@ agents:
 The `desktop` tool runs in the primary agent process because it needs that live agent's Matrix device and room requester identity.
 It is hidden from OpenAI-compatible API runs when approval policy requires Matrix approval because those runs have no Matrix approval transport.
 
+To use the same device with the `browser` tool, configure its desktop target on that agent:
+
+```yaml
+agents:
+  computer:
+    tools:
+      - browser:
+          default_target: desktop
+          device_user_id: "@my-laptop:example.org"
+          device_id: "ABCDEFGHIJ"
+          device_ed25519: "desktop-device-fingerprint"
+          timeout_seconds: 90
+```
+
+You can keep `default_target: host` and pass `target="desktop"` only for calls that should use the user's existing local profile.
+
 ## 3. Choose the Local App Allowlist
 
 On macOS, use exact application bundle identifiers such as `com.apple.TextEdit` or `com.brave.Browser`.
@@ -183,6 +211,36 @@ The maximum lease accepted by the CLI is sixty minutes.
 The running process enforces the lease with a monotonic local deadline, so moving the wall clock backward does not extend control.
 The bridge continues running after the lease expires, but every control action is rejected until a person restarts it with a new lease.
 
+### Use the Signed-In Browser Profile
+
+Install the official [Playwright MCP Bridge extension](https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm) in the local browser profile.
+The browser will show its normal extension installation confirmation, and MindRoom cannot bypass it.
+For Brave on macOS, add these options to the local bridge command:
+
+```bash
+mindroom desktop run \
+  --controller-user-id @computer:example.org \
+  --controller-device-id CLOUDDEVICE \
+  --controller-ed25519 cloud-device-fingerprint \
+  --allow-requester @alice:example.org \
+  --allow-agent computer \
+  --allow-app com.brave.Browser \
+  --allow-control \
+  --lease-minutes 15 \
+  --browser-extension \
+  --browser-executable "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" \
+  --browser-user-data-dir "$HOME/Library/Application Support/BraveSoftware/Brave-Browser"
+```
+
+For Chrome, omit the two explicit path options to use Playwright MCP's normal Chrome discovery, or provide the matching Chrome executable and user-data root.
+The first browser call starts `@playwright/mcp@0.0.78` locally through `npx` and opens the extension connection page in that profile.
+The connection page lets the user choose an initial tab and displays a reconnect token.
+To reconnect after local bridge restarts without another browser prompt, store that value as `PLAYWRIGHT_MCP_EXTENSION_TOKEN` in the local MindRoom `.env` file with owner-only permissions.
+Treat the reconnect token like a local browser-control credential, never commit it, and regenerate it from the extension page if it is exposed.
+MindRoom passes only the safe MCP subprocess environment, this explicit reconnect token, and the selected browser profile root to the Node child, so unrelated provider API keys are not inherited.
+The local bridge terminal remains the only place that can grant or renew the control lease.
+Files used with `browser(action="upload", target="desktop")` must already exist under `<storage>/desktop-browser` on the local computer.
+
 ## 5. Agent Flow
 
 The agent calls `list_apps` and selects an exact returned app ID.
@@ -193,6 +251,14 @@ The agent uses normalized `click`, `type_text`, `scroll`, or `keypress` only whe
 If the bridge reports stale state, the agent calls `get_app_state` again instead of reusing the old element index or coordinate.
 If an action outcome is unknown or its follow-up state is incomplete, the agent observes again and does not automatically repeat the action.
 Some applications change their UI successfully and then return an accessibility error, so a fresh observation is the only safe way to resolve an unknown outcome.
+
+For browser work, the agent starts with `browser(action="tabs", target="desktop")` or `browser(action="snapshot", target="desktop")`.
+The snapshot returns semantic roles, names, current values, and element references from the current page.
+Reading the current tab is observation-only, while supplying `targetId` first selects that tab and therefore requires the local control lease.
+Element references are opaque and may include frame identity, so the agent must pass each returned reference through unchanged.
+The agent passes those references to `browser(action="act", target="desktop", request=...)` for form filling and interactive steps.
+After navigation or a significant page update, the agent requests a new snapshot instead of reusing old references.
+The `screenshot` action is useful for visual context, but semantic actions should use snapshot references rather than guessing image coordinates.
 
 ## 6. Add Matrix Approval for Control Actions
 
@@ -241,6 +307,7 @@ For stronger isolation, run the bridge in a dedicated operating-system account a
 ## Current Limits
 
 Native semantic accessibility is implemented only for macOS in this version.
+Playwright extension mode is limited to Chromium-family browsers, so Safari and other unsupported browsers continue to use the accessibility and scoped-screenshot path.
 Screenshots and pixel fallback currently target the primary display, so an app window must fit fully on that display for a scoped screenshot to succeed.
 The bridge foregrounds and revalidates the allowed app before an on-screen window crop, but an always-on-top overlay inside those bounds can still appear in the screenshot.
 Global keyboard shortcut chords are intentionally unavailable because they could switch to or launch an application outside the local allowlist.

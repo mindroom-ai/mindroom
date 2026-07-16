@@ -15,8 +15,16 @@ from mindroom.desktop.accessibility import (
     AccessibilityError,
 )
 from mindroom.desktop.media import DesktopMediaError, upload_encrypted_screenshot
+from mindroom.desktop.playwright_mcp import (
+    BrowserImage,
+    BrowserProvider,
+    PlaywrightActionOutcomeUnknownError,
+    PlaywrightBrowserError,
+    browser_action_requires_control,
+)
 from mindroom.desktop.protocol import (
     DESKTOP_APP_ACTIONS,
+    DESKTOP_BROWSER_ACTIONS,
     DESKTOP_COMMAND_EVENT_TYPE,
     DESKTOP_CONTROL_ACTIONS,
     DESKTOP_RESPONSE_EVENT_TYPE,
@@ -62,6 +70,7 @@ class DesktopBridgePolicy:
     allowed_app_ids: frozenset[str]
     allow_control: bool = False
     control_lease_expires_at_ms: int | None = None
+    browser_enabled: bool = False
 
     def __post_init__(self) -> None:
         """Require explicit caller, agent, and application allowlists."""
@@ -101,6 +110,7 @@ class _Execution:
     capture_app: str | None = None
     capture_state_id: str | None = None
     follow_up_app: str | None = None
+    browser_image: BrowserImage | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +126,7 @@ class DesktopBridge:
     client: nio.AsyncClient
     provider: DesktopProvider
     policy: DesktopBridgePolicy
+    browser_provider: BrowserProvider | None = None
     clock: Callable[[], float] = time.time
     monotonic_clock: Callable[[], float] = time.monotonic
     _responses: OrderedDict[str, _CachedDesktopResponse] = field(default_factory=OrderedDict, init=False)
@@ -127,6 +138,9 @@ class DesktopBridge:
 
     def __post_init__(self) -> None:
         """Convert the wall-clock lease label into a rollback-safe local deadline."""
+        if self.policy.browser_enabled != (self.browser_provider is not None):
+            msg = "Desktop browser policy and local browser provider must be enabled together."
+            raise ValueError(msg)
         if self.policy.control_lease_expires_at_ms is None:
             return
         remaining_seconds = max(0.0, self.policy.control_lease_expires_at_ms / 1000 - self.clock())
@@ -194,7 +208,7 @@ class DesktopBridge:
         finally:
             self._in_flight.discard(command.request_id)
 
-    async def _process(self, command: DesktopCommand) -> DesktopResponse:
+    async def _process(self, command: DesktopCommand) -> DesktopResponse:  # noqa: PLR0911
         policy_error = self._policy_error(command)
         if policy_error is not None:
             return self._error_response(command, policy_error)
@@ -208,6 +222,8 @@ class DesktopBridge:
             execution = await self._attach_follow_up_state(command, execution)
             if isinstance(execution, DesktopResponse):
                 return execution
+        if execution.browser_image is not None:
+            return await self._browser_image_response(command, execution)
         if execution.capture_app is None or execution.capture_state_id is None:
             return self._success_response(command, result=execution.result)
         return await self._capture_response(
@@ -217,7 +233,26 @@ class DesktopBridge:
             state_id=execution.capture_state_id,
         )
 
-    async def _execute_safely(self, command: DesktopCommand) -> _Execution | DesktopResponse:
+    async def _browser_image_response(self, command: DesktopCommand, execution: _Execution) -> DesktopResponse:
+        image = execution.browser_image
+        if image is None:
+            return self._success_response(command, result=execution.result)
+        extension = "png" if image.mime_type == "image/png" else "jpg"
+        try:
+            screenshot = await upload_encrypted_screenshot(
+                self.client,
+                image.content,
+                mime_type=image.mime_type,
+                filename=f"browser-{command.request_id}.{extension}",
+            )
+        except DesktopMediaError as exc:
+            return self._capture_error_response(command, result=execution.result, error=str(exc))
+        except Exception:
+            logger.exception("browser_image_upload_failed", action=command.action)
+            return self._capture_error_response(command, result=execution.result, error="Browser image upload failed.")
+        return self._success_response(command, result=execution.result, screenshot=screenshot)
+
+    async def _execute_safely(self, command: DesktopCommand) -> _Execution | DesktopResponse:  # noqa: PLR0911
         try:
             return await self._execute(command)
         except DesktopEmergencyStopError as exc:
@@ -225,7 +260,9 @@ class DesktopBridge:
             return self._error_response(command, str(exc))
         except AccessibilityActionOutcomeUnknownError:
             return self._unknown_control_response(command)
-        except (AccessibilityError, DesktopProviderError, DesktopProtocolError) as exc:
+        except PlaywrightActionOutcomeUnknownError:
+            return self._unknown_control_response(command)
+        except (AccessibilityError, DesktopProviderError, DesktopProtocolError, PlaywrightBrowserError) as exc:
             return self._error_response(command, str(exc))
         except Exception:
             logger.exception(
@@ -317,6 +354,8 @@ class DesktopBridge:
             error = "Desktop command expired before local execution."
         elif not self.policy.caller_allowed(command):
             error = "Desktop command requester or agent is not allowed by local policy."
+        elif command.action in DESKTOP_BROWSER_ACTIONS:
+            error = self._browser_policy_error(command)
         elif command.action in DESKTOP_APP_ACTIONS and (
             not isinstance(app_id, str) or app_id not in self.policy.allowed_app_ids
         ):
@@ -332,6 +371,27 @@ class DesktopBridge:
         else:
             error = None
         return error
+
+    def _browser_policy_error(self, command: DesktopCommand) -> str | None:  # noqa: PLR0911
+        if not self.policy.browser_enabled or self.browser_provider is None:
+            return "Playwright browser extension support is disabled on this desktop bridge."
+        try:
+            browser_action, browser_parameters = _browser_command_parameters(command.parameters)
+            requires_control = browser_action_requires_control(browser_action, browser_parameters)
+        except (DesktopProtocolError, PlaywrightBrowserError) as exc:
+            return str(exc)
+        expected_action = "browser_control" if requires_control else "browser_observe"
+        if command.action != expected_action:
+            return "Desktop browser command used the wrong observe/control classification."
+        if not requires_control:
+            return None
+        if not self.policy.allow_control:
+            return "Desktop control is disabled; this bridge is observe-only."
+        if self._control_revoked:
+            return "Desktop emergency stop is latched; restart the bridge locally before granting control again."
+        if not self._control_available():
+            return "Local desktop control lease has expired."
+        return None
 
     def _record_sequence(self, command: DesktopCommand) -> str | None:
         previous = self._sequence_high_watermarks.get(command.session_id)
@@ -350,6 +410,15 @@ class DesktopBridge:
 
     async def _execute(self, command: DesktopCommand) -> _Execution:
         parameters = command.parameters
+        if command.action in DESKTOP_BROWSER_ACTIONS:
+            browser_action, browser_parameters = _browser_command_parameters(parameters)
+            if self.browser_provider is None:
+                msg = "Playwright browser extension support is disabled on this desktop bridge."
+                raise DesktopProtocolError(msg)
+            if command.action == "browser_control":
+                await asyncio.to_thread(self.provider.check_emergency_stop)
+            browser_result = await self.browser_provider.execute(browser_action, browser_parameters)
+            return _Execution(browser_result.payload, browser_image=browser_result.image)
         if command.action == "status":
             _reject_unexpected_parameters(parameters, allowed=frozenset())
             status = await asyncio.to_thread(self.provider.status)
@@ -497,6 +566,7 @@ class DesktopBridge:
             "control_available": control_available,
             "emergency_stop_latched": self._control_revoked,
             "allowed_app_count": len(self.policy.allowed_app_ids),
+            "browser_enabled": self.policy.browser_enabled,
         }
         if self.policy.control_lease_expires_at_ms is not None:
             status["control_lease_expires_at_ms"] = self.policy.control_lease_expires_at_ms
@@ -550,9 +620,14 @@ class DesktopBridge:
         )
 
     def _unknown_control_response(self, command: DesktopCommand) -> DesktopResponse:
+        recovery_action = (
+            "browser(action='tabs' or 'snapshot', target='desktop')"
+            if command.action in DESKTOP_BROWSER_ACTIONS
+            else "get_app_state"
+        )
         warning = (
             "The desktop action outcome is unknown and it may have completed; do not repeat the action automatically. "
-            "Request get_app_state before deciding the next step."
+            f"Request {recovery_action} before deciding the next step."
         )
         logger.warning(
             "desktop_control_outcome_unknown",
@@ -654,6 +729,31 @@ def _required_str_parameter(parameters: dict[str, object], key: str, *, allow_em
         msg = f"Desktop parameter {key} must not exceed {max_length} characters."
         raise DesktopProtocolError(msg)
     return value
+
+
+def _required_object_parameter(parameters: dict[str, object], key: str) -> dict[str, object]:
+    value = parameters.get(key)
+    if not isinstance(value, dict):
+        msg = f"Desktop parameter {key} must be an object with string keys."
+        raise DesktopProtocolError(msg)
+    result: dict[str, object] = {}
+    for item_key, item_value in value.items():
+        if not isinstance(item_key, str):
+            msg = f"Desktop parameter {key} must be an object with string keys."
+            raise DesktopProtocolError(msg)
+        result[item_key] = item_value
+    return result
+
+
+def _browser_command_parameters(parameters: dict[str, object]) -> tuple[str, dict[str, object]]:
+    _reject_unexpected_parameters(
+        parameters,
+        allowed=frozenset({"browser_action", "browser_parameters"}),
+    )
+    return (
+        _required_str_parameter(parameters, "browser_action"),
+        _required_object_parameter(parameters, "browser_parameters"),
+    )
 
 
 def _optional_str_parameter(parameters: dict[str, object], key: str, *, default: str) -> str:

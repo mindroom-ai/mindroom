@@ -56,6 +56,10 @@ class DesktopProvider(Protocol):
         """Return coarse screen, cursor, and accessibility status."""
         ...
 
+    def check_emergency_stop(self) -> None:
+        """Raise when the machine-local pointer fail-safe is engaged."""
+        ...
+
     def list_apps(self) -> list[DesktopApp]:
         """List only applications explicitly allowed by local policy."""
         ...
@@ -173,6 +177,10 @@ class PyAutoGuiDesktopProvider:
             "cursor": {"x": int(cursor.x), "y": int(cursor.y)},
             "accessibility": self._accessibility.availability(),
         }
+
+    def check_emergency_stop(self) -> None:
+        """Reject control while the pointer is on a PyAutoGUI fail-safe point."""
+        self._check_emergency_stop()
 
     def list_apps(self) -> list[DesktopApp]:
         """List only applications explicitly allowed on this machine."""

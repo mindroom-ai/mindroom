@@ -181,6 +181,28 @@ def desktop_run(
     lease_minutes: int = typer.Option(15, "--lease-minutes", min=1, max=60, help="Local control lease duration."),
     max_screenshot_width: int = typer.Option(1600, "--max-screenshot-width", min=320, max=3840),
     jpeg_quality: int = typer.Option(80, "--jpeg-quality", min=40, max=95),
+    browser_extension: bool = typer.Option(
+        False,
+        "--browser-extension",
+        help="Expose Playwright MCP control of an existing browser profile when its extension is installed.",
+    ),
+    browser_executable: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--browser-executable",
+        help="Chrome-family executable to open the Playwright extension connection page, including Brave.",
+    ),
+    browser_user_data_dir: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--browser-user-data-dir",
+        help="Existing browser user-data root containing the profile where the extension is installed.",
+    ),
+    browser_timeout_seconds: int = typer.Option(
+        90,
+        "--browser-timeout-seconds",
+        min=1,
+        max=120,
+        help="Local Playwright MCP call timeout.",
+    ),
     log_level: str = typer.Option("INFO", "--log-level", "-l"),
     config_path: Path | None = typer.Option(  # noqa: B008
         None,
@@ -200,6 +222,11 @@ def desktop_run(
     from mindroom.desktop.session import desktop_session_path, load_desktop_session  # noqa: PLC0415
     from mindroom.logging_config import setup_logging  # noqa: PLC0415
 
+    _validate_browser_options(
+        enabled=browser_extension,
+        executable_path=browser_executable,
+        user_data_dir=browser_user_data_dir,
+    )
     runtime_paths = activate_cli_runtime(config_path, storage_path=storage_path)
     setup_logging(level=log_level.upper(), runtime_paths=runtime_paths)
     try:
@@ -218,6 +245,10 @@ def desktop_run(
                 lease_minutes=lease_minutes,
                 max_screenshot_width=max_screenshot_width,
                 jpeg_quality=jpeg_quality,
+                browser_extension=browser_extension,
+                browser_executable=browser_executable,
+                browser_user_data_dir=browser_user_data_dir,
+                browser_timeout_seconds=browser_timeout_seconds,
             ),
         )
     except KeyboardInterrupt:
@@ -225,6 +256,26 @@ def desktop_run(
     except Exception as exc:
         _error_console.print(f"[red]Desktop bridge failed:[/red] {exc}")
         raise typer.Exit(1) from None
+
+
+def _validate_browser_options(
+    *,
+    enabled: bool,
+    executable_path: Path | None,
+    user_data_dir: Path | None,
+) -> None:
+    """Reject browser-extension options that cannot describe a usable local profile."""
+    if not enabled and (executable_path is not None or user_data_dir is not None):
+        _error_console.print(
+            "[red]Error:[/red] --browser-executable and --browser-user-data-dir require --browser-extension.",
+        )
+        raise typer.Exit(2)
+    if executable_path is not None and not executable_path.expanduser().is_file():
+        _error_console.print(f"[red]Error:[/red] Browser executable does not exist: {executable_path}")
+        raise typer.Exit(2)
+    if user_data_dir is not None and not user_data_dir.expanduser().is_dir():
+        _error_console.print(f"[red]Error:[/red] Browser user-data directory does not exist: {user_data_dir}")
+        raise typer.Exit(2)
 
 
 async def _run_bridge(
@@ -241,8 +292,13 @@ async def _run_bridge(
     lease_minutes: int,
     max_screenshot_width: int,
     jpeg_quality: int,
+    browser_extension: bool = False,
+    browser_executable: Path | None = None,
+    browser_user_data_dir: Path | None = None,
+    browser_timeout_seconds: int = 90,
 ) -> None:
     from mindroom.desktop.bridge import DesktopBridge, DesktopBridgePolicy  # noqa: PLC0415
+    from mindroom.desktop.playwright_mcp import PlaywrightMCPBrowserProvider  # noqa: PLC0415
     from mindroom.desktop.provider import PyAutoGuiDesktopProvider  # noqa: PLC0415
     from mindroom.desktop.session import (  # noqa: PLC0415
         open_desktop_client,
@@ -255,6 +311,17 @@ async def _run_bridge(
         user_id=controller_user_id,
         device_id=controller_device_id,
         ed25519=controller_ed25519,
+    )
+    browser_provider = (
+        PlaywrightMCPBrowserProvider(
+            output_dir=runtime_paths.storage_root / "desktop-browser",
+            executable_path=browser_executable,
+            user_data_dir=browser_user_data_dir,
+            call_timeout_seconds=browser_timeout_seconds,
+            extension_token=runtime_paths.env_value("PLAYWRIGHT_MCP_EXTENSION_TOKEN"),
+        )
+        if browser_extension
+        else None
     )
     client = await open_desktop_client(session, runtime_paths=runtime_paths)
     tasks: set[asyncio.Task[None]] = set()
@@ -275,7 +342,9 @@ async def _run_bridge(
                 allowed_app_ids=allow_app,
                 allow_control=allow_control,
                 control_lease_expires_at_ms=lease_expiry,
+                browser_enabled=browser_extension,
             ),
+            browser_provider=browser_provider,
         )
 
         def schedule_event(event: nio.ToDeviceEvent) -> None:
@@ -302,6 +371,8 @@ async def _run_bridge(
         _console.print(f"Allowed requesters: {', '.join(sorted(allow_requester))}")
         _console.print(f"Allowed agents: {', '.join(sorted(allow_agent))}")
         _console.print(f"Allowed applications: {', '.join(sorted(allow_app))}")
+        if browser_extension:
+            _console.print("Playwright browser extension: enabled for the active installed browser profile")
         _console.print("Move the pointer to the upper-left corner to trigger PyAutoGUI's emergency stop.")
         await _sync_desktop_client(client)
     finally:
@@ -310,7 +381,11 @@ async def _run_bridge(
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        await client.close()
+        try:
+            if browser_provider is not None:
+                await browser_provider.close()
+        finally:
+            await client.close()
 
 
 async def _sync_desktop_client(client: nio.AsyncClient) -> None:

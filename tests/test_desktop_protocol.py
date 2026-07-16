@@ -45,6 +45,27 @@ def test_command_round_trip_preserves_authorization_provenance() -> None:
     assert DesktopCommand.from_content(command.to_content()) == command
 
 
+@pytest.mark.parametrize("action", ["browser_observe", "browser_control"])
+def test_browser_commands_share_the_pinned_desktop_wire_protocol(action: str) -> None:
+    """Browser-native calls retain the same Matrix identity and replay envelope."""
+    command = DesktopCommand(
+        request_id="browser-request",
+        session_id="browser-session",
+        sequence=3,
+        issued_at_ms=1_000,
+        expires_at_ms=2_000,
+        action=action,
+        requester_id="@alice:example.org",
+        agent_name="computer",
+        parameters={
+            "browser_action": "snapshot" if action == "browser_observe" else "navigate",
+            "browser_parameters": {"targetId": "1"},
+        },
+    )
+
+    assert DesktopCommand.from_content(command.to_content()) == command
+
+
 @pytest.mark.parametrize(
     ("field", "value", "match"),
     [

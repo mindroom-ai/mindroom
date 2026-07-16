@@ -9787,6 +9787,75 @@
           "required": false,
           "type": "boolean",
           "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": "host",
+          "description": "Use host for MindRoom's managed Playwright profile or desktop for the Playwright extension installed in the user's existing local browser profile.",
+          "label": "Default Browser Target",
+          "name": "default_target",
+          "options": [
+            {
+              "label": "MindRoom host profile",
+              "value": "host"
+            },
+            {
+              "label": "Matrix desktop profile",
+              "value": "desktop"
+            }
+          ],
+          "placeholder": null,
+          "required": false,
+          "type": "select",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Required for target=desktop; dedicated Matrix account used by the local desktop bridge.",
+          "label": "Desktop Matrix User ID",
+          "name": "device_user_id",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Required for target=desktop; exact device ID printed by 'mindroom desktop login'.",
+          "label": "Desktop Matrix Device ID",
+          "name": "device_id",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Required for target=desktop; exact Ed25519 fingerprint of the local bridge device.",
+          "label": "Desktop Device Fingerprint",
+          "name": "device_ed25519",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 90,
+          "description": "Matrix and local Playwright MCP timeout from 1 to 120 seconds.",
+          "label": "Desktop Browser Timeout Seconds",
+          "name": "timeout_seconds",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
         }
       ],
       "consumes_workspace_paths": false,

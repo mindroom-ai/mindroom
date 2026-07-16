@@ -26,6 +26,8 @@ type DesktopAction = Literal[
     "type_text",
     "scroll",
     "keypress",
+    "browser_observe",
+    "browser_control",
 ]
 
 DESKTOP_CONTROL_ACTIONS = frozenset(
@@ -38,9 +40,13 @@ DESKTOP_CONTROL_ACTIONS = frozenset(
         "type_text",
         "scroll",
         "keypress",
+        "browser_control",
     },
 )
-DESKTOP_APP_ACTIONS = frozenset({"get_app_state", "screenshot", *DESKTOP_CONTROL_ACTIONS})
+DESKTOP_BROWSER_ACTIONS = frozenset({"browser_observe", "browser_control"})
+DESKTOP_APP_ACTIONS = frozenset(
+    {"get_app_state", "screenshot", *(DESKTOP_CONTROL_ACTIONS - DESKTOP_BROWSER_ACTIONS)},
+)
 DESKTOP_SAFE_KEYS = frozenset(
     {
         "backspace",
@@ -60,7 +66,7 @@ DESKTOP_SAFE_KEYS = frozenset(
         "up",
     },
 )
-_DESKTOP_ACTIONS = frozenset({"status", "list_apps", *DESKTOP_APP_ACTIONS})
+_DESKTOP_ACTIONS = frozenset({"status", "list_apps", *DESKTOP_APP_ACTIONS, *DESKTOP_BROWSER_ACTIONS})
 
 
 class DesktopProtocolError(ValueError):
@@ -314,6 +320,7 @@ def _require_protocol_version(content: dict[str, object]) -> None:
 
 __all__ = [
     "DESKTOP_APP_ACTIONS",
+    "DESKTOP_BROWSER_ACTIONS",
     "DESKTOP_COMMAND_EVENT_TYPE",
     "DESKTOP_CONTROL_ACTIONS",
     "DESKTOP_PROTOCOL_VERSION",

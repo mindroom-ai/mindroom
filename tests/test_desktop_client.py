@@ -136,6 +136,20 @@ async def test_control_timeout_reports_unknown_outcome(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
+async def test_browser_control_timeout_requests_browser_observation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Browser timeouts direct the agent to fresh tab state rather than desktop accessibility state."""
+    client = FakeClient()
+    router = DesktopResponseRouter(client)
+    monkeypatch.setattr("mindroom.desktop.client.send_encrypted_to_device", AsyncMock())
+
+    with pytest.raises(
+        DesktopRequestError,
+        match=r"browser\(action='tabs' or 'snapshot', target='desktop'\)",
+    ):
+        await router.request(TARGET, _command(action="browser_control"), timeout_seconds=0.001)
+
+
+@pytest.mark.asyncio
 async def test_only_one_request_per_target_can_be_in_flight(monkeypatch: pytest.MonkeyPatch) -> None:
     """Parallel tool calls cannot reorder or preplan multiple desktop actions."""
     client = FakeClient()

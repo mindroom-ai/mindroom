@@ -16,6 +16,11 @@ from mindroom.desktop.accessibility import (
 )
 from mindroom.desktop.bridge import DesktopBridge, DesktopBridgePolicy
 from mindroom.desktop.media import DesktopMediaError
+from mindroom.desktop.playwright_mcp import (
+    BrowserImage,
+    BrowserProviderResult,
+    PlaywrightActionOutcomeUnknownError,
+)
 from mindroom.desktop.protocol import (
     DESKTOP_APP_ACTIONS,
     DESKTOP_COMMAND_EVENT_TYPE,
@@ -86,6 +91,13 @@ class FakeProvider:
             "screen": {"width": 1920, "height": 1080},
             "accessibility": {"available": True, "backend": "fake"},
         }
+
+    def check_emergency_stop(self) -> None:
+        """Model the pointer fail-safe checked before every browser control call."""
+        self.calls.append(("check_emergency_stop", None))
+        if self.emergency_stop:
+            msg = "Desktop emergency stop engaged; restart the bridge locally before granting control again."
+            raise DesktopEmergencyStopError(msg)
 
     def list_apps(self) -> list[DesktopApp]:
         """Return only the configured fake application."""
@@ -175,6 +187,29 @@ class FakeProvider:
         self.calls.append(("keypress", (app_id, state_id, keys)))
 
 
+@dataclass
+class FakeBrowserProvider:
+    """Record browser actions handled inside the local Matrix bridge."""
+
+    result: BrowserProviderResult = field(
+        default_factory=lambda: BrowserProviderResult(
+            {"action": "snapshot", "provider": "playwright_mcp_extension", "result": "snapshot", "status": "ok"},
+        ),
+    )
+    calls: list[tuple[str, dict[str, object]]] = field(default_factory=list)
+    error: Exception | None = None
+
+    async def execute(self, action: str, parameters: dict[str, object]) -> BrowserProviderResult:
+        """Record and return the planned result."""
+        self.calls.append((action, parameters))
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+    async def close(self) -> None:
+        """Satisfy the provider lifecycle contract."""
+
+
 def _command(
     action: str = "screenshot",
     *,
@@ -208,7 +243,7 @@ def _event(command: DesktopCommand) -> AuthenticatedToDeviceEvent:
     )
 
 
-def _policy(*, allow_control: bool = False) -> DesktopBridgePolicy:
+def _policy(*, allow_control: bool = False, browser_enabled: bool = False) -> DesktopBridgePolicy:
     return DesktopBridgePolicy(
         controller=CONTROLLER,
         allowed_requester_ids=frozenset({"@alice:example.org"}),
@@ -216,6 +251,7 @@ def _policy(*, allow_control: bool = False) -> DesktopBridgePolicy:
         allowed_app_ids=frozenset({APP_ID}),
         allow_control=allow_control,
         control_lease_expires_at_ms=20_000 if allow_control else None,
+        browser_enabled=browser_enabled,
     )
 
 
@@ -289,8 +325,189 @@ async def test_list_apps_and_status_expose_only_coarse_local_authority(transport
         "control_available": True,
         "emergency_stop_latched": False,
         "allowed_app_count": 1,
+        "browser_enabled": False,
         "control_lease_expires_at_ms": 20_000,
     }
+
+
+@pytest.mark.asyncio
+async def test_browser_observation_uses_optional_provider_without_control_lease(transport: AsyncMock) -> None:
+    """Tabs and accessibility snapshots remain available in observe-only mode."""
+    browser = FakeBrowserProvider()
+    bridge = DesktopBridge(
+        client=object(),
+        provider=FakeProvider(),
+        policy=_policy(browser_enabled=True),
+        browser_provider=browser,
+        clock=lambda: NOW_SECONDS,
+    )
+    command = _command(
+        "browser_observe",
+        parameters={"browser_action": "snapshot", "browser_parameters": {}},
+    )
+
+    await bridge.on_to_device_event(_event(command))
+
+    response = _response(transport)
+    assert response.ok
+    assert response.result["provider"] == "playwright_mcp_extension"
+    assert browser.calls == [("snapshot", {})]
+
+
+@pytest.mark.asyncio
+async def test_browser_tab_selection_cannot_hide_inside_observe_action(transport: AsyncMock) -> None:
+    """Selecting a tab mutates visible browser state and therefore requires a control command and lease."""
+    browser = FakeBrowserProvider()
+    bridge = DesktopBridge(
+        client=object(),
+        provider=FakeProvider(),
+        policy=_policy(browser_enabled=True),
+        browser_provider=browser,
+        clock=lambda: NOW_SECONDS,
+    )
+
+    await bridge.on_to_device_event(
+        _event(
+            _command(
+                "browser_observe",
+                parameters={"browser_action": "snapshot", "browser_parameters": {"targetId": "1"}},
+            ),
+        ),
+    )
+
+    assert _response(transport).error == "Desktop browser command used the wrong observe/control classification."
+    assert browser.calls == []
+
+
+@pytest.mark.asyncio
+async def test_browser_control_requires_same_local_lease_as_accessibility(transport: AsyncMock) -> None:
+    """Installing the extension does not bypass the bridge's local control authority."""
+    browser = FakeBrowserProvider()
+    parameters = {
+        "browser_action": "act",
+        "browser_parameters": {"request": {"kind": "click", "ref": "e3"}},
+    }
+    observe_only = DesktopBridge(
+        client=object(),
+        provider=FakeProvider(),
+        policy=_policy(browser_enabled=True),
+        browser_provider=browser,
+        clock=lambda: NOW_SECONDS,
+    )
+
+    await observe_only.on_to_device_event(_event(_command("browser_control", parameters=parameters)))
+
+    assert _response(transport).error == "Desktop control is disabled; this bridge is observe-only."
+    assert browser.calls == []
+    transport.reset_mock()
+
+    controlled = DesktopBridge(
+        client=object(),
+        provider=FakeProvider(),
+        policy=_policy(allow_control=True, browser_enabled=True),
+        browser_provider=browser,
+        clock=lambda: NOW_SECONDS,
+    )
+    await controlled.on_to_device_event(_event(_command("browser_control", parameters=parameters)))
+
+    assert _response(transport).ok
+    assert browser.calls == [("act", {"request": {"kind": "click", "ref": "e3"}})]
+
+
+@pytest.mark.asyncio
+async def test_browser_control_honors_pointer_emergency_stop(transport: AsyncMock) -> None:
+    """The local PyAutoGUI fail-safe latches before Playwright receives a control action."""
+    provider = FakeProvider(emergency_stop=True)
+    browser = FakeBrowserProvider()
+    bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(allow_control=True, browser_enabled=True),
+        browser_provider=browser,
+        clock=lambda: NOW_SECONDS,
+    )
+
+    await bridge.on_to_device_event(
+        _event(
+            _command(
+                "browser_control",
+                parameters={"browser_action": "navigate", "browser_parameters": {"targetUrl": "https://example.com"}},
+            ),
+        ),
+    )
+
+    response = _response(transport)
+    assert not response.ok
+    assert "emergency stop" in (response.error or "").lower()
+    assert provider.calls == [("check_emergency_stop", None)]
+    assert browser.calls == []
+
+
+@pytest.mark.asyncio
+async def test_browser_control_failure_requires_fresh_observation(transport: AsyncMock) -> None:
+    """A dispatched browser mutation is never presented as safe to retry automatically."""
+    browser = FakeBrowserProvider(error=PlaywrightActionOutcomeUnknownError("extension disconnected"))
+    bridge = DesktopBridge(
+        client=object(),
+        provider=FakeProvider(),
+        policy=_policy(allow_control=True, browser_enabled=True),
+        browser_provider=browser,
+        clock=lambda: NOW_SECONDS,
+    )
+
+    await bridge.on_to_device_event(
+        _event(
+            _command(
+                "browser_control",
+                parameters={"browser_action": "navigate", "browser_parameters": {"targetUrl": "https://example.com"}},
+            ),
+        ),
+    )
+
+    response = _response(transport)
+    assert response.ok
+    assert response.result["action_outcome"] == "unknown"
+    warning = str(response.result["warning"])
+    assert "outcome is unknown" in warning
+    assert "browser(action='tabs' or 'snapshot', target='desktop')" in warning
+
+
+@pytest.mark.asyncio
+async def test_browser_screenshot_is_uploaded_as_encrypted_matrix_media(transport: AsyncMock) -> None:
+    """Browser-native screenshots use the same encrypted media path as desktop captures."""
+    browser = FakeBrowserProvider(
+        BrowserProviderResult(
+            {"action": "screenshot", "result": "captured", "status": "ok"},
+            BrowserImage(b"\x89PNGbrowser", "image/png"),
+        ),
+    )
+    bridge = DesktopBridge(
+        client=object(),
+        provider=FakeProvider(),
+        policy=_policy(browser_enabled=True),
+        browser_provider=browser,
+        clock=lambda: NOW_SECONDS,
+    )
+
+    await bridge.on_to_device_event(
+        _event(
+            _command(
+                "browser_observe",
+                parameters={"browser_action": "screenshot", "browser_parameters": {}},
+            ),
+        ),
+    )
+
+    response = _response(transport)
+    assert response.ok
+    assert response.screenshot == MEDIA
+    upload = pytest.importorskip("mindroom.desktop.bridge").upload_encrypted_screenshot
+    upload.assert_awaited_once_with(
+        bridge.client,
+        b"\x89PNGbrowser",
+        mime_type="image/png",
+        filename="browser-request-1.png",
+    )
 
 
 @pytest.mark.asyncio

@@ -2072,6 +2072,10 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.desktop.playwright_mcp"
+depends_on = []
+
+[[modules]]
 path = "mindroom.desktop.media"
 depends_on = [
     "mindroom.desktop.protocol",
@@ -2091,6 +2095,7 @@ path = "mindroom.desktop.bridge"
 depends_on = [
     "mindroom.desktop.accessibility",
     "mindroom.desktop.media",
+    "mindroom.desktop.playwright_mcp",
     "mindroom.desktop.protocol",
     "mindroom.desktop.provider",
     "mindroom.logging_config",
@@ -2574,6 +2579,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.desktop.bridge",
     "mindroom.desktop.identity",
+    "mindroom.desktop.playwright_mcp",
     "mindroom.desktop.provider",
     "mindroom.desktop.session",
     "mindroom.logging_config",
