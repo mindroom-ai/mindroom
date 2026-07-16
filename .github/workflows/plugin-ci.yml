@@ -16,13 +16,11 @@ on:
         required: true
         type: string
       mindroom_repository:
-        description: MindRoom repository in owner/name form.
-        default: mindroom-ai/mindroom
+        description: Optional MindRoom repository override; defaults to the reusable workflow repository.
         required: false
         type: string
       mindroom_ref:
-        description: Exact MindRoom commit, branch, or tag to test.
-        default: main
+        description: Optional MindRoom revision override; defaults to the reusable workflow commit.
         required: false
         type: string
       python_version:
@@ -49,8 +47,8 @@ jobs:
       - name: Check out MindRoom
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          repository: ${{ inputs.mindroom_repository }}
-          ref: ${{ inputs.mindroom_ref }}
+          repository: ${{ inputs.mindroom_repository || job.workflow_repository }}
+          ref: ${{ inputs.mindroom_ref || job.workflow_sha }}
           path: mindroom
           persist-credentials: false
 
