@@ -155,6 +155,35 @@ async def test_invalid_control_parameters_fail_before_matrix_delivery(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_launch_app_uses_allowlisted_app_without_a_state_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cloud can request an explicit launch before any accessibility state exists."""
+    context = SimpleNamespace(
+        session_id="session-1",
+        requester_id="@alice:example.org",
+        agent_name="computer",
+        client=object(),
+    )
+    request = AsyncMock(
+        return_value=DesktopResponse(
+            request_id="request-1",
+            session_id="session-1",
+            ok=False,
+            error="Expected test rejection.",
+        ),
+    )
+    monkeypatch.setattr("mindroom.custom_tools.desktop.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.desktop.desktop_response_router",
+        lambda _client: SimpleNamespace(request=request),
+    )
+    tool = DesktopTools("@desktop:example.org", "DESKTOP", "fingerprint")
+
+    await tool.desktop("launch_app", app="com.example.Editor")
+
+    assert request.await_args.args[1].parameters == {"app": "com.example.Editor"}
+
+
+@pytest.mark.asyncio
 async def test_set_value_can_clear_semantic_field(monkeypatch: pytest.MonkeyPatch) -> None:
     """An empty semantic value is valid and avoids a select-all shortcut fallback."""
     context = SimpleNamespace(

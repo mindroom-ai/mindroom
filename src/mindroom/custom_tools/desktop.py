@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 _ACTIONS = [
     "status",
     "list_apps",
+    "launch_app",
     "get_app_state",
     "screenshot",
     "click_element",
@@ -128,7 +129,8 @@ class DesktopTools(Toolkit):
             descriptions={
                 "desktop": (
                     "Operate a locally allowlisted application through accessibility state and encrypted Matrix messages. "
-                    "Start with list_apps, then get_app_state for the chosen app. Prefer click_element, set_value, "
+                    "Start with list_apps; if the chosen app is not running, use launch_app, then get_app_state. "
+                    "Prefer click_element, set_value, "
                     "scroll_element, or perform_action over pixel and keyboard fallbacks. Every element index belongs "
                     "only to its state_id; use the fresh state returned after each action. Coordinates are normalized "
                     "from 0 to 1000 inside the reported app window and are fallback only. If an action outcome is "
@@ -291,7 +293,7 @@ def _action_parameters(
     if action in {"status", "list_apps"}:
         return {}
     app_id = _required_argument(app, name="app")
-    if action in {"get_app_state", "screenshot"}:
+    if action in {"launch_app", "get_app_state", "screenshot"}:
         return {"app": app_id}
     current_state_id = _required_argument(state_id, name="state_id")
     common: dict[str, object] = {"app": app_id, "state_id": current_state_id}

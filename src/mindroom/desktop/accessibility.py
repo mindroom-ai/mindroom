@@ -45,6 +45,7 @@ _STATE_STABILIZATION_MATCHES = 3
 _VALUE_VERIFICATION_ATTEMPTS = 4
 _DIRECT_ACTIVATION_ATTEMPTS = 5
 _ACTIVATION_ATTEMPTS = 20
+_LAUNCH_ATTEMPTS = 100
 _FOCUS_BEFORE_SET_ROLES = frozenset({"AXComboBox", "AXSearchField", "AXTextField"})
 _VISIBLE_ROW_CONTAINER_ROLES = frozenset({"AXOutline", "AXTable"})
 _CONTAINER_ROLES = frozenset(
@@ -177,6 +178,10 @@ class AccessibilityBackend(Protocol):
         """List only applications named in the local allowlist."""
         ...
 
+    def launch_app(self, app_id: str) -> None:
+        """Launch or foreground one exact allowlisted application."""
+        ...
+
     def get_app_state(self, app_id: str) -> AccessibilityState:
         """Capture and cache one fresh semantic state."""
         ...
@@ -254,6 +259,20 @@ class MacAccessibilityBackend:
                 continue
             apps.append(DesktopApp(app_id, running.get(app_id, app_id), app_id in running))
         return apps
+
+    def launch_app(self, app_id: str) -> None:
+        """Launch or foreground one exact allowlisted application."""
+        self._require_allowed(app_id)
+        if app_id == PRIMARY_SCREEN_APP_ID:
+            msg = "The primary-screen fallback cannot be launched as an application."
+            raise AccessibilityError(msg)
+        try:
+            application = self._running_application(app_id)
+        except AccessibilityError:
+            _request_application_activation(app_id)
+            application = self._wait_for_running_application(app_id)
+        self._activate(application)
+        self._states.pop(app_id, None)
 
     def get_app_state(self, app_id: str) -> AccessibilityState:
         """Capture one allowed app and invalidate its previous element indexes."""
@@ -574,6 +593,15 @@ class MacAccessibilityBackend:
         active = [application for application in matches if application.isActive()]
         return active[0] if active else matches[0]
 
+    def _wait_for_running_application(self, app_id: str) -> _RunningApplication:
+        for _ in range(_LAUNCH_ATTEMPTS):
+            try:
+                return self._running_application(app_id)
+            except AccessibilityError:
+                time.sleep(_STATE_STABILIZATION_DELAY_SECONDS)
+        msg = "Application launch was requested, but its outcome is unknown; request list_apps before trying again."
+        raise AccessibilityActionOutcomeUnknownError(msg)
+
     def _window_element(self, app_element: object) -> object:
         focused = self._copy_attribute(app_element, self._services.kAXFocusedWindowAttribute)
         if focused is not None:
@@ -747,6 +775,12 @@ class ScreenshotOnlyAccessibilityBackend:
             )
             for app_id in sorted(self._allowed_app_ids)
         ]
+
+    def launch_app(self, app_id: str) -> None:
+        """Reject application launch when semantic app scoping is unavailable."""
+        self._require_primary(app_id)
+        msg = "Application launch is currently available only on macOS."
+        raise AccessibilityError(msg)
 
     def get_app_state(self, app_id: str) -> AccessibilityState:
         """Create an empty state bound to the current primary-screen geometry."""

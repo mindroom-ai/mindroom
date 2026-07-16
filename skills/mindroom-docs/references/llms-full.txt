@@ -7277,7 +7277,7 @@ On macOS, taking the scoped screenshot foregrounds the selected application, so 
 
 The local bridge starts in observe-only mode unless a person at the computer grants a short control lease on the command line.
 The local process independently checks the exact cloud Matrix user, device ID, Ed25519 fingerprint, human requester ID, agent name, app ID, command expiry, request ID, and monotonic session sequence.
-Only applications named with local `--allow-app` options can be listed, inspected, captured, or controlled.
+Only applications named with local `--allow-app` options can be listed, launched, inspected, captured, or controlled.
 Cloud configuration and model output cannot add an application to that allowlist.
 The allowlist restricts the bridge's direct target, but an allowed app can still cause operating-system side effects such as opening a link or document in another app.
 The bridge cannot then inspect or control that newly opened app unless its exact app ID is also locally allowlisted.
@@ -7296,6 +7296,7 @@ The observation actions are:
 
 The control actions are:
 
+- `launch_app` launches or foregrounds one exact locally allowlisted application.
 - `click_element` invokes the selected element's semantic press action.
 - `set_value` changes an accessibility value only when the selected element reports that it is writable.
 - `scroll_element` scrolls at the selected element's current bounds.
@@ -7496,6 +7497,7 @@ Files used with `browser(action="upload", target="desktop")` must already exist 
 ## 5. Agent Flow
 
 The agent calls `list_apps` and selects an exact returned app ID.
+If the selected app is not running, the agent calls `launch_app`, which requires the local control lease and returns fresh state when the app becomes accessible.
 It then calls `get_app_state` and inspects the returned roles, names, actions, hierarchy, and screenshot.
 It prefers a semantic action using an element index and the matching `state_id`.
 The action response contains a new `state_id`, new element indexes, and a new screenshot for the next decision.
@@ -7519,6 +7521,7 @@ Create `approval_scripts/desktop_control.py` beside the cloud config:
 
 ```python
 CONTROL_ACTIONS = {
+    "launch_app",
     "click_element",
     "set_value",
     "scroll_element",

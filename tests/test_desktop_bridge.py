@@ -104,6 +104,10 @@ class FakeProvider:
         self.calls.append(("list_apps", None))
         return [DesktopApp(APP_ID, "Editor", True)]
 
+    def launch_app(self, app_id: str) -> None:
+        """Record one exact allowlisted application launch."""
+        self.calls.append(("launch_app", app_id))
+
     def get_app_state(self, app_id: str) -> AccessibilityState:
         """Return a fresh state or fail after the configured number of reads."""
         self.calls.append(("get_app_state", app_id))
@@ -328,6 +332,41 @@ async def test_list_apps_and_status_expose_only_coarse_local_authority(transport
         "browser_enabled": False,
         "control_lease_expires_at_ms": 20_000,
     }
+
+
+@pytest.mark.asyncio
+async def test_launch_app_requires_control_and_returns_fresh_state(transport: AsyncMock) -> None:
+    """Launching stays behind the local lease and returns state bound to the resulting app window."""
+    provider = FakeProvider()
+    observe_bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(),
+        clock=lambda: NOW_SECONDS,
+    )
+
+    await observe_bridge.on_to_device_event(_event(_command("launch_app")))
+
+    assert _response(transport).error == "Desktop control is disabled; this bridge is observe-only."
+    assert provider.calls == []
+    transport.reset_mock()
+    control_bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(allow_control=True),
+        clock=lambda: NOW_SECONDS,
+    )
+
+    await control_bridge.on_to_device_event(_event(_command("launch_app")))
+
+    response = _response(transport)
+    assert response.ok
+    assert response.result["state"] == STATE.to_result()
+    assert provider.calls == [
+        ("launch_app", APP_ID),
+        ("get_app_state", APP_ID),
+        ("screenshot", (APP_ID, "state-1")),
+    ]
 
 
 @pytest.mark.asyncio

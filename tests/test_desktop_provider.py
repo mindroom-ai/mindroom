@@ -107,6 +107,10 @@ class FakeAccessibilityBackend:
     window: DesktopRect = field(default_factory=lambda: DesktopRect(100, 50, 800, 600))
     calls: list[tuple[str, object]] = field(default_factory=list)
 
+    def launch_app(self, app_id: str) -> None:
+        """Record one allowlisted application launch."""
+        self.calls.append(("launch_app", app_id))
+
     def prepare_capture(self, app_id: str, state_id: str) -> AccessibilityState:
         """Record capture validation and return the current app window."""
         self.calls.append(("prepare_capture", (app_id, state_id)))
@@ -144,6 +148,16 @@ def test_retina_capture_crops_logical_app_window() -> None:
     assert (capture.capture_x, capture.capture_y) == (100, 50)
     assert (capture.capture_width, capture.capture_height) == (800, 600)
     assert (capture.image_width, capture.image_height) == (1600, 1200)
+
+
+def test_launch_app_checks_emergency_stop_before_accessibility_backend() -> None:
+    """An app launch is local control and honors the same pointer fail-safe as input."""
+    provider, pyautogui, accessibility = _provider()
+
+    provider.launch_app("com.example.Editor")
+
+    assert pyautogui.calls == []
+    assert accessibility.calls == [("launch_app", "com.example.Editor")]
 
 
 def test_capture_rejects_window_outside_primary_screen() -> None:

@@ -459,6 +459,36 @@ def test_mac_activation_uses_bounded_apple_event_fallback(monkeypatch: pytest.Mo
     assert services.performed_actions == [("button", "AXPress")]
 
 
+def test_mac_launches_only_the_exact_allowlisted_bundle_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stopped allowlisted app can be launched without exposing arbitrary application names."""
+    backend, _, workspace = _fake_mac_backend()
+    workspace.applications = []
+    launched = FakeRunningApplication()
+    calls: list[str] = []
+
+    def launch(app_id: str) -> None:
+        calls.append(app_id)
+        workspace.applications.append(launched)
+
+    monkeypatch.setattr("mindroom.desktop.accessibility._request_application_activation", launch)
+
+    backend.launch_app("com.example.Editor")
+
+    assert calls == ["com.example.Editor"]
+    assert launched.activation_options == [0]
+
+
+def test_mac_launch_timeout_has_unknown_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An accepted launch request that never appears cannot be presented as safe to repeat."""
+    backend, _, workspace = _fake_mac_backend()
+    workspace.applications = []
+    monkeypatch.setattr("mindroom.desktop.accessibility._request_application_activation", lambda _app_id: None)
+    monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(AccessibilityActionOutcomeUnknownError, match="outcome is unknown"):
+        backend.launch_app("com.example.Editor")
+
+
 def test_mac_element_scroll_rejects_bounds_outside_allowed_window() -> None:
     """Element-scoped pixel scrolling cannot land on a different visible application."""
     backend, services, _ = _fake_mac_backend()
@@ -501,6 +531,8 @@ def test_screenshot_only_backend_requires_explicit_primary_screen_allowlist() ->
     ]
     with pytest.raises(AccessibilityError, match="only on macOS"):
         backend.get_app_state("com.example.Editor")
+    with pytest.raises(AccessibilityError, match="only on macOS"):
+        backend.launch_app("com.example.Editor")
     with pytest.raises(AccessibilityError, match="allowlist"):
         backend.get_app_state("not-allowed")
 

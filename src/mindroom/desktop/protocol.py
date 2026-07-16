@@ -16,6 +16,7 @@ _MAX_COMMAND_PARAMETERS_BYTES = 16 * 1024
 type DesktopAction = Literal[
     "status",
     "list_apps",
+    "launch_app",
     "get_app_state",
     "screenshot",
     "click_element",
@@ -32,6 +33,7 @@ type DesktopAction = Literal[
 
 DESKTOP_CONTROL_ACTIONS = frozenset(
     {
+        "launch_app",
         "click_element",
         "set_value",
         "scroll_element",

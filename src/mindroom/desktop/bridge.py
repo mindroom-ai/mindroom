@@ -427,6 +427,14 @@ class DesktopBridge:
             _reject_unexpected_parameters(parameters, allowed=frozenset())
             apps = await asyncio.to_thread(self.provider.list_apps)
             return _Execution({"apps": [app.to_result() for app in apps]})
+        if command.action == "launch_app":
+            _reject_unexpected_parameters(parameters, allowed=frozenset({"app"}))
+            app_id = _required_str_parameter(parameters, "app")
+            await asyncio.to_thread(self.provider.launch_app, app_id)
+            return _Execution(
+                {"action": command.action, "action_completed": True},
+                follow_up_app=app_id,
+            )
         if command.action in {"get_app_state", "screenshot"}:
             _reject_unexpected_parameters(parameters, allowed=frozenset({"app"}))
             state = await asyncio.to_thread(self.provider.get_app_state, _required_str_parameter(parameters, "app"))

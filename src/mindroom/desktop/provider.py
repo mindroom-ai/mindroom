@@ -64,6 +64,10 @@ class DesktopProvider(Protocol):
         """List only applications explicitly allowed by local policy."""
         ...
 
+    def launch_app(self, app_id: str) -> None:
+        """Launch or foreground one exact allowlisted application."""
+        ...
+
     def get_app_state(self, app_id: str) -> AccessibilityState:
         """Return one fresh app-scoped accessibility state."""
         ...
@@ -185,6 +189,11 @@ class PyAutoGuiDesktopProvider:
     def list_apps(self) -> list[DesktopApp]:
         """List only applications explicitly allowed on this machine."""
         return self._accessibility.list_apps()
+
+    def launch_app(self, app_id: str) -> None:
+        """Launch or foreground one exact allowlisted application."""
+        self._check_emergency_stop()
+        self._accessibility.launch_app(app_id)
 
     def get_app_state(self, app_id: str) -> AccessibilityState:
         """Capture a fresh semantic state for one allowed application."""
