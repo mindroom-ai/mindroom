@@ -2,6 +2,8 @@
 
 Agent callbacks let a MindRoom agent hand a background process a script that wakes the originating agent and thread when the work finishes.
 
+They are a small adapter over external triggers rather than a separate callback service.
+
 The intended flow is simple:
 
 1. The MindRoom agent starts a background Codex session or another long-running task.
@@ -23,6 +25,8 @@ agents:
 
 No callback-specific configuration is required.
 
+Callbacks use the existing `external_trigger_policy`, which is enabled by default, and count toward `max_triggers_per_owner` until used or deleted.
+
 ## Tool Result
 
 `mint_callback(label)` returns a script path and an instruction like this:
@@ -35,11 +39,13 @@ The script needs only Bash and curl.
 
 It posts the summary back to the room and thread where the callback was minted, waking the same MindRoom agent.
 
-After successful delivery, both the callback record and script are deleted.
+MindRoom stores the callback as a bearer-authenticated external trigger whose delivery mode is `single_use`.
+
+After successful Matrix delivery, the external trigger is consumed and the script deletes itself.
 
 If delivery fails, the script remains so the background agent can retry it.
 
-Callbacks expire after seven days and can deliver only once.
+Changing the request's `event_id` cannot make the trigger deliver more than once.
 
 ## Network Access
 
@@ -57,4 +63,6 @@ The token can only wake the agent, room, and thread captured when it was minted.
 
 Missing or incorrect tokens receive the same not-found response.
 
-Use [External Triggers](https://docs.mindroom.chat/external-triggers/) for long-lived integrations that need stable signed identities or replay handling.
+The request then follows the normal external-trigger readiness, authorization, room-membership, replay, Matrix-delivery, and failure-retry path.
+
+Use [External Triggers](https://docs.mindroom.chat/external-triggers/) directly for reusable integrations that need stable signed identities.

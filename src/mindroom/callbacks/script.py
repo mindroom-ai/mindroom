@@ -13,13 +13,14 @@ if TYPE_CHECKING:
 _GITIGNORE_CONTENT = "*\n"
 
 
-def build_callback_script(*, callback_url: str, token: str) -> str:
+def build_callback_script(*, callback_url: str, token: str, label: str) -> str:
     """Render a callback script that needs only Bash and curl."""
     return f"""#!/usr/bin/env bash
 # Usage: bash <this script> "<short result summary>"
 set -euo pipefail
 CALLBACK_URL={shlex.quote(callback_url)}
 CALLBACK_TOKEN={shlex.quote(token)}
+CALLBACK_LABEL={shlex.quote(label)}
 MESSAGE="${{*:-Background task finished.}}"
 
 json_escape() {{
@@ -49,10 +50,12 @@ json_escape() {{
   printf '%s' "$escaped"
 }}
 
-BODY=$(printf '{{"message":"%s"}}' "$(json_escape "$MESSAGE")")
+BODY=$(printf '{{"kind":"mindroom.callback.completed","title":"✅ %s","message":"%s"}}' \\
+  "$(json_escape "$CALLBACK_LABEL")" "$(json_escape "$MESSAGE")")
 if curl -fsS --connect-timeout 10 --max-time 60 -X POST "$CALLBACK_URL" \\
   -H "Authorization: Bearer $CALLBACK_TOKEN" \\
   -H 'Content-Type: application/json' \\
+  -o /dev/null \\
   --data "$BODY"; then
   rm -f -- "$0"
   echo "MindRoom notified."

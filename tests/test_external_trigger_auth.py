@@ -12,7 +12,9 @@ from mindroom.external_triggers.auth import (
     TriggerAuthError,
     TriggerSignatureHeaders,
     canonical_trigger_signing_payload,
+    mint_trigger_capability,
     sign_trigger_request,
+    trigger_capability_matches,
     verify_trigger_request,
 )
 
@@ -27,6 +29,15 @@ def _public_key_b64(private_key: Ed25519PrivateKey) -> str:
         format=PublicFormat.Raw,
     )
     return base64.b64encode(public_key_bytes).decode("ascii")
+
+
+def test_capability_mint_returns_only_matching_token_and_hash() -> None:
+    """Minted bearer capabilities are random and checked against their stored hash."""
+    token, token_hash = mint_trigger_capability()
+
+    assert token.startswith("mrt_")
+    assert trigger_capability_matches(token, token_hash)
+    assert not trigger_capability_matches(f"{token}x", token_hash)
 
 
 def test_exact_signed_request_verifies() -> None:

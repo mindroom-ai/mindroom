@@ -9,16 +9,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from mindroom.config.validation import non_empty_stripped
 
 
-class TriggerDeliveryReadiness(BaseModel):
-    """Minimal live-readiness inputs shared by trigger and callback delivery."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    enabled: bool
-    target_agent: str
-    resolved_room_id: str
-
-
 class ExternalTriggerPayload(BaseModel):
     """Signed external trigger request body."""
 

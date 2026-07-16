@@ -13,8 +13,6 @@ from mindroom.matrix.mentions import format_entity_mention
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     import nio
 
     from mindroom.config.main import Config
@@ -45,43 +43,6 @@ def _build_external_trigger_text(target_text: str, payload: ExternalTriggerPaylo
     return "\n\n".join(sections)
 
 
-async def deliver_entity_mention_message(
-    *,
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_event_id: str | None,
-    entity_name: str,
-    build_text: Callable[[str], str],
-    extra_content: dict[str, Any],
-    config: Config,
-    runtime_paths: RuntimePaths,
-    conversation_cache: ConversationCacheProtocol,
-    caller_label: str = "external_trigger",
-) -> str | None:
-    """Post one entity-mention message into a room or thread with trusted metadata."""
-    latest_thread_event_id = None
-    if thread_event_id is not None:
-        latest_thread_event_id = await conversation_cache.get_latest_thread_event_id_if_needed(
-            room_id,
-            thread_event_id,
-            caller_label=caller_label,
-        )
-
-    plain_target, mentioned_user_ids, markdown_target = format_entity_mention(entity_name, config, runtime_paths)
-    content = build_message_content(
-        body=build_text(plain_target),
-        formatted_body=markdown_to_html(build_text(markdown_target)),
-        mentioned_user_ids=mentioned_user_ids,
-        thread_event_id=thread_event_id,
-        latest_thread_event_id=latest_thread_event_id,
-        extra_content=extra_content,
-    )
-    delivered = await send_and_track_message(client, room_id, content, conversation_cache)
-    if delivered is None:
-        return None
-    return delivered.event_id
-
-
 async def execute_external_trigger(
     *,
     client: nio.AsyncClient,
@@ -92,34 +53,47 @@ async def execute_external_trigger(
     conversation_cache: ConversationCacheProtocol,
 ) -> str | None:
     """Post one authenticated external trigger payload to its configured Matrix target."""
-    return await deliver_entity_mention_message(
-        client=client,
-        room_id=snapshot.resolved_room_id,
-        thread_event_id=None if snapshot.target.new_thread else snapshot.target.thread_id,
-        entity_name=snapshot.target.agent,
-        build_text=lambda target_text: _build_external_trigger_text(target_text, payload),
-        extra_content=_external_trigger_content_metadata(snapshot, payload),
-        config=config,
-        runtime_paths=runtime_paths,
-        conversation_cache=conversation_cache,
+    room_id = snapshot.resolved_room_id
+    thread_event_id = None if snapshot.target.new_thread else snapshot.target.thread_id
+    latest_thread_event_id = None
+    if thread_event_id is not None:
+        latest_thread_event_id = await conversation_cache.get_latest_thread_event_id_if_needed(
+            room_id,
+            thread_event_id,
+            caller_label="external_trigger",
+        )
+
+    plain_target, mentioned_user_ids, markdown_target = format_entity_mention(
+        snapshot.target.agent,
+        config,
+        runtime_paths,
     )
-
-
-async def is_user_joined_room(client: nio.AsyncClient, room_id: str, user_id: str) -> bool:
-    """Return whether one user is currently joined to one room.
-
-    A failed membership fetch counts as not joined so delivery stays fail-closed.
-    """
-    member_ids = await get_room_members(client, room_id)
-    return member_ids is not None and user_id in member_ids
+    plain_text = _build_external_trigger_text(plain_target, payload)
+    markdown_text = _build_external_trigger_text(markdown_target, payload)
+    content = build_message_content(
+        body=plain_text,
+        formatted_body=markdown_to_html(markdown_text),
+        mentioned_user_ids=mentioned_user_ids,
+        thread_event_id=thread_event_id,
+        latest_thread_event_id=latest_thread_event_id,
+        extra_content=_external_trigger_content_metadata(snapshot, payload),
+    )
+    delivered = await send_and_track_message(client, room_id, content, conversation_cache)
+    if delivered is None:
+        return None
+    return delivered.event_id
 
 
 async def is_external_trigger_owner_joined_target_room(
     client: nio.AsyncClient,
     snapshot: TriggerDeliverySnapshot,
 ) -> bool:
-    """Return whether the trigger owner is currently joined to the delivery room."""
-    return await is_user_joined_room(client, snapshot.resolved_room_id, snapshot.owner_user_id)
+    """Return whether the trigger owner is currently joined to the delivery room.
+
+    A failed membership fetch counts as not joined so delivery stays fail-closed.
+    """
+    member_ids = await get_room_members(client, snapshot.resolved_room_id)
+    return member_ids is not None and snapshot.owner_user_id in member_ids
 
 
 def _external_trigger_content_metadata(

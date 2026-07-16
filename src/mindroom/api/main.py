@@ -18,10 +18,9 @@ from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import ApiAuthState, verify_user  # noqa: F401
 from mindroom.api.auth import router as auth_router
+from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResult  # noqa: F401
 
 # Import routers
-from mindroom.api.callbacks import router as callbacks_router
-from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResult  # noqa: F401
 from mindroom.api.credentials import router as credentials_router
 from mindroom.api.dynamic_workflows import router as dynamic_workflows_router
 from mindroom.api.external_triggers import router as external_triggers_router
@@ -62,7 +61,7 @@ if TYPE_CHECKING:
     from starlette.types import ASGIApp, Receive, Scope, Send
 
     from mindroom.config.main import Config
-    from mindroom.external_triggers.models import TriggerDeliveryReadiness
+    from mindroom.external_triggers.store import TriggerDeliverySnapshot
 
 logger = get_logger(__name__)
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
@@ -530,7 +529,7 @@ def bind_external_trigger_runtime(
     client: object,
     conversation_cache: object,
     *,
-    is_delivery_target_ready: Callable[[TriggerDeliveryReadiness], Awaitable[bool]],
+    is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]],
 ) -> None:
     """Attach router Matrix delivery runtime to one API app."""
     api_state = config_lifecycle.require_api_state(api_app)
@@ -538,7 +537,7 @@ def bind_external_trigger_runtime(
         client=client,
         conversation_cache=conversation_cache,
         config_generation=api_state.snapshot.generation,
-        is_delivery_target_ready=is_delivery_target_ready,
+        is_trigger_snapshot_ready=is_trigger_snapshot_ready,
     )
 
 
@@ -702,7 +701,6 @@ app.include_router(workers_router, dependencies=[Depends(verify_user)])
 app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify_user
 app.include_router(report_publishing_public_router)
 app.include_router(external_triggers_router)
-app.include_router(callbacks_router)
 app.include_router(dynamic_workflows_router, dependencies=[Depends(verify_user)])
 
 

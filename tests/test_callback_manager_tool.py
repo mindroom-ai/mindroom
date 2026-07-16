@@ -9,10 +9,10 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from mindroom.callbacks.store import CallbackStore
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.custom_tools.callback_manager import CallbackManagerTools
+from mindroom.external_triggers.store import ExternalTriggerStore
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 
@@ -75,18 +75,24 @@ def test_mint_callback_writes_one_bound_script(tmp_path: Path) -> None:
     assert script_path.parent.joinpath(".gitignore").read_text(encoding="utf-8") == "*\n"
 
     callback_id = script_path.stem
-    record = CallbackStore(_runtime_paths(tmp_path)).get_record(callback_id)
-    assert record is not None
+    store = ExternalTriggerStore(_runtime_paths(tmp_path))
+    [record] = store.list_records()
+    assert record.trigger_id == callback_id
     assert record.owner_user_id == "@owner:example.org"
-    assert record.room_id == "lobby"
-    assert record.thread_id == "$thread"
-    assert record.agent_name == "coder"
-    assert record.label == "issue-042 implementer"
+    assert record.created_in_room_id == "lobby"
+    assert record.created_in_thread_id == "$thread"
+    assert record.target.room_id == "lobby"
+    assert record.target.thread_id == "$thread"
+    assert record.target.agent == "coder"
+    assert record.description == "issue-042 implementer"
+    assert record.auth == "capability"
+    assert record.delivery_mode == "single_use"
+    assert record.allowed_kinds == ("mindroom.callback.completed",)
 
     script_text = script_path.read_text(encoding="utf-8")
-    assert f"/api/callbacks/{callback_id}" in script_text
-    assert "CALLBACK_TOKEN=mrcb_" in script_text
-    assert "mrcb_" not in CallbackStore(_runtime_paths(tmp_path)).store_path.read_text(encoding="utf-8")
+    assert f"/api/triggers/{callback_id}" in script_text
+    assert "CALLBACK_TOKEN=mrt_" in script_text
+    assert "mrt_" not in store.store_path.read_text(encoding="utf-8")
 
 
 def test_generated_script_posts_summary_and_deletes_itself(tmp_path: Path) -> None:
@@ -121,7 +127,11 @@ def test_generated_script_posts_summary_and_deletes_itself(tmp_path: Path) -> No
     curl_args = capture_path.read_text(encoding="utf-8").splitlines()
     assert curl_args[curl_args.index("--connect-timeout") + 1] == "10"
     assert curl_args[curl_args.index("--max-time") + 1] == "60"
-    assert json.loads(curl_args[curl_args.index("--data") + 1]) == {"message": message}
+    assert json.loads(curl_args[curl_args.index("--data") + 1]) == {
+        "kind": "mindroom.callback.completed",
+        "title": "✅ quote-safe callback",
+        "message": message,
+    }
     assert completed.stdout.strip() == "MindRoom notified."
     assert not script_path.exists()
 
@@ -138,8 +148,8 @@ def test_script_failure_rolls_back_record(tmp_path: Path, monkeypatch: pytest.Mo
         payload = _payload(CallbackManagerTools().mint_callback("rollback"))
 
     assert payload["status"] == "error"
-    store_payload = json.loads(CallbackStore(_runtime_paths(tmp_path)).store_path.read_text(encoding="utf-8"))
-    assert store_payload["callbacks"] == {}
+    store_payload = json.loads(ExternalTriggerStore(_runtime_paths(tmp_path)).store_path.read_text(encoding="utf-8"))
+    assert store_payload["triggers"] == {}
 
 
 def test_manager_requires_live_human_requester(tmp_path: Path) -> None:

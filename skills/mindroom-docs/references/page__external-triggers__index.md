@@ -8,7 +8,7 @@ MindRoom verifies the signature, checks replay and size limits, checks that the 
 
 MindRoom does not run watcher code and does not poll external systems from the agent turn loop.
 
-For background-agent completion, use [Agent Callbacks](https://docs.mindroom.chat/agent-callbacks/) instead: one tool call creates a single-use script that wakes the originating agent and thread.
+For background-agent completion, use [Agent Callbacks](https://docs.mindroom.chat/agent-callbacks/): one tool call creates a single-use capability trigger and a Bash/curl script that wakes the originating agent and thread.
 
 ## Use Cases
 
@@ -17,7 +17,9 @@ For background-agent completion, use [Agent Callbacks](https://docs.mindroom.cha
 
 ## Model
 
-Triggers are managed by the `external_trigger_manager` tool, not by authored per-trigger YAML.
+Reusable signed triggers are managed by the `external_trigger_manager` tool, not by authored per-trigger YAML.
+
+The `callback_manager` tool uses the same trigger records and ingress route to mint single-use bearer-capability triggers.
 
 `config.yaml` contains only global policy for the feature.
 
@@ -25,13 +27,13 @@ Trigger records live in primary-runtime control state under `MINDROOM_CONTROL_ST
 
 Workers, sandbox runners, and public runtime environments do not receive `MINDROOM_CONTROL_STATE_PATH`.
 
-The tool accepts only public key material.
+The external trigger manager accepts only public key material.
 
 The watcher keeps the private key.
 
-Tool output includes the endpoint path and public key fingerprint, but never includes the private key or raw public key.
+Its output includes the endpoint path and public key fingerprint, but never includes the private key or raw public key.
 
-The public API endpoint is `POST /api/triggers/<trigger_id>`.
+Both auth modes use the public API endpoint `POST /api/triggers/<trigger_id>`.
 
 ## Configuration
 
@@ -65,7 +67,7 @@ external_trigger_policy:
     - "@admin:example.org"
 ```
 
-`enabled: false` makes trigger endpoints return not found.
+`enabled: false` makes signed and capability trigger endpoints return not found.
 
 `admin_users` can list, rotate, enable, disable, or delete triggers across owners.
 
@@ -81,7 +83,17 @@ Triggers do not create rooms or make agents join rooms.
 
 No new Matrix room is created for a trigger.
 
-## Setup Flow
+## Delivery Modes
+
+Reusable triggers use Ed25519 signatures and caller-chosen stable event IDs.
+
+Single-use triggers use a random bearer capability, store only its hash, and use the immutable trigger record ID for replay protection.
+
+Single-use triggers are consumed only after Matrix delivery succeeds, so a failed delivery can be retried without minting a new callback.
+
+The public external trigger manager creates reusable triggers, while `callback_manager.mint_callback` creates single-use triggers bound to the current agent, room, and thread.
+
+## Signed Trigger Setup Flow
 
 Generate a watcher signing key.
 
@@ -141,9 +153,9 @@ Use `--no-verify-tls` only for local development against a trusted endpoint.
 
 Each request uses one immutable trigger snapshot.
 
-That snapshot includes the record version, auth epoch, target, public key, policy-capped replay window, policy-capped body size, and current API config generation.
+That snapshot includes the record version, auth mode, target, authentication material, policy-capped replay window, policy-capped body size, and current API config generation.
 
-The API authenticates the signature, parses the body, checks current owner authorization, checks target runtime readiness, checks live owner membership in the target room, claims replay state, then dispatches.
+The API authenticates the signature or bearer capability, parses the body, checks current owner authorization, checks target runtime readiness, checks live owner membership in the target room, claims replay state, then dispatches.
 
 Target runtime readiness requires both the router and target bot to be running and joined to the resolved target room.
 
@@ -169,7 +181,7 @@ Private target agents created from their current live room may use that room eve
 
 The router plus target transport bot must be joined before delivery.
 
-## Idempotency
+## Reusable Trigger Idempotency
 
 Use a stable `--event-id` for the same external event.
 

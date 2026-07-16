@@ -14,7 +14,7 @@ from mindroom.api import main as api_main
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
-from mindroom.external_triggers.models import TriggerDeliveryReadiness
+from mindroom.external_triggers.store import ExternalTriggerTarget, TriggerDeliverySnapshot
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
 from mindroom.orchestration.runtime import EntityStartResults
@@ -86,15 +86,35 @@ def _config_with_code_agent(
     )
 
 
-def _trigger_readiness(
+def _trigger_snapshot(
     *,
+    trigger_id: str = "campground",
     room_id: str = "!campground:example.org",
     enabled: bool = True,
-) -> TriggerDeliveryReadiness:
-    return TriggerDeliveryReadiness(
-        enabled=enabled,
-        target_agent="code",
+) -> TriggerDeliverySnapshot:
+    return TriggerDeliverySnapshot(
+        trigger_id=trigger_id,
+        uid=f"{trigger_id}-uid",
+        version=1,
+        auth_epoch=1,
+        owner_user_id="@owner:example.org",
+        description="",
+        created_by_agent_name="code",
+        created_in_room_id=room_id,
+        target=ExternalTriggerTarget(room_id=room_id, agent="code"),
         resolved_room_id=room_id,
+        auth="ed25519",
+        public_key="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        public_key_fingerprint="sha256:test",
+        key_id=f"{trigger_id}-main",
+        capability_token_hash=None,
+        delivery_mode="reusable",
+        allowed_kinds=(),
+        replay_window_seconds=300,
+        max_body_bytes=65536,
+        enabled=enabled,
+        config_generation=1,
+        replay_scope=f"{trigger_id}:scope",
     )
 
 
@@ -229,7 +249,7 @@ def test_external_trigger_runtime_binds_router_with_live_readiness_gate(tmp_path
     mock_bind.assert_called_once()
     assert mock_bind.call_args.kwargs["client"] is router_bot.client
     assert mock_bind.call_args.kwargs["conversation_cache"] is router_bot._conversation_cache
-    assert callable(mock_bind.call_args.kwargs["is_delivery_target_ready"])
+    assert callable(mock_bind.call_args.kwargs["is_trigger_snapshot_ready"])
 
 
 @pytest.mark.asyncio
@@ -255,11 +275,11 @@ async def test_external_trigger_readiness_is_per_trigger_room(tmp_path: Path) ->
 
     with patch("mindroom.orchestration.external_trigger_runtime.get_joined_rooms", side_effect=get_joined_room_ids):
         assert await orchestrator._external_trigger_runtime.is_ready(
-            _trigger_readiness(room_id="!campground:example.org"),
+            _trigger_snapshot(trigger_id="campground", room_id="!campground:example.org"),
             orchestrator.agent_bots,
         )
         assert not await orchestrator._external_trigger_runtime.is_ready(
-            _trigger_readiness(room_id="!other:example.org"),
+            _trigger_snapshot(trigger_id="campground_other", room_id="!other:example.org"),
             orchestrator.agent_bots,
         )
 
@@ -289,7 +309,7 @@ async def test_external_trigger_readiness_uses_matrix_joined_rooms(tmp_path: Pat
 
     with patch("mindroom.orchestration.external_trigger_runtime.get_joined_rooms", side_effect=get_joined_room_ids):
         assert await orchestrator._external_trigger_runtime.is_ready(
-            _trigger_readiness(),
+            _trigger_snapshot(),
             orchestrator.agent_bots,
         )
 

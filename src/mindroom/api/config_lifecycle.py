@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
-    from mindroom.external_triggers.models import TriggerDeliveryReadiness
+    from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.watch import KnowledgeSourceWatcher
 
@@ -79,12 +79,12 @@ class ApiState:
 
 @dataclass(frozen=True)
 class ExternalTriggerRuntime:
-    """Runtime objects needed to deliver accepted external triggers and callbacks."""
+    """Runtime objects needed to deliver accepted external triggers."""
 
     client: object
     conversation_cache: object
     config_generation: int
-    is_delivery_target_ready: Callable[[TriggerDeliveryReadiness], Awaitable[bool]]
+    is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]]
 
 
 @dataclass

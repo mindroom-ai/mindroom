@@ -99,6 +99,8 @@ class ExternalTriggerManagerTools(Toolkit):
         return {
             "trigger_id": record.trigger_id,
             "enabled": record.enabled,
+            "auth": record.auth,
+            "delivery_mode": record.delivery_mode,
             "description": record.description,
             "owner_user_id": record.owner_user_id,
             "target": record.target.model_dump(mode="json"),

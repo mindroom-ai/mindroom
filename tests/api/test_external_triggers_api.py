@@ -20,7 +20,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api import external_triggers as external_triggers_api
 from mindroom.api import main as api_main
 from mindroom.config.main import Config
-from mindroom.external_triggers.auth import sign_trigger_request
+from mindroom.external_triggers.auth import mint_trigger_capability, sign_trigger_request
 from mindroom.external_triggers.store import ExternalTriggerStore, ExternalTriggerTarget, TriggerDeliverySnapshot
 
 if TYPE_CHECKING:
@@ -28,8 +28,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from httpx import Response
-
-    from mindroom.external_triggers.models import TriggerDeliveryReadiness
 
 _OWNER = "@owner:example.org"
 
@@ -49,7 +47,7 @@ class TriggerApiContext:
     client: TestClient
     private_key: Ed25519PrivateKey
     runtime_paths: constants.RuntimePaths
-    ready_checks: list[TriggerDeliveryReadiness]
+    ready_snapshots: list[TriggerDeliverySnapshot]
 
 
 def _public_key_b64(private_key: Ed25519PrivateKey) -> str:
@@ -159,18 +157,43 @@ def _create_record(runtime_paths: constants.RuntimePaths, config: Config, public
     )
 
 
-def _bind_runtime(ready_checks: list[TriggerDeliveryReadiness]) -> object:
+def _create_capability_record(
+    trigger_api: TriggerApiContext,
+    *,
+    trigger_id: str = "callback_123",
+) -> tuple[str, TriggerDeliverySnapshot]:
+    config = Config.model_validate(_config_payload())
+    token, token_hash = mint_trigger_capability()
+    store = ExternalTriggerStore(trigger_api.runtime_paths)
+    record = store.create_single_use_capability_record(
+        trigger_id=trigger_id,
+        owner_user_id=_OWNER,
+        created_by_agent_name="research",
+        created_in_room_id="campground",
+        created_in_thread_id="$thread-root",
+        target=ExternalTriggerTarget(room_id="campground", thread_id="$thread-root", agent="research"),
+        capability_token_hash=token_hash,
+        description="background task",
+        allowed_kinds=["campground.availability"],
+        config=config,
+    )
+    snapshot = store.delivery_snapshot(record.trigger_id, config=config, config_generation=1)
+    assert snapshot is not None
+    return token, snapshot
+
+
+def _bind_runtime(ready_snapshots: list[TriggerDeliverySnapshot]) -> object:
     client = object()
 
-    async def is_delivery_target_ready(readiness: TriggerDeliveryReadiness) -> bool:
-        ready_checks.append(readiness)
+    async def is_trigger_snapshot_ready(snapshot: TriggerDeliverySnapshot) -> bool:
+        ready_snapshots.append(snapshot)
         return True
 
     api_main.bind_external_trigger_runtime(
         api_main.app,
         client=client,
         conversation_cache=object(),
-        is_delivery_target_ready=is_delivery_target_ready,
+        is_trigger_snapshot_ready=is_trigger_snapshot_ready,
     )
     return client
 
@@ -233,8 +256,8 @@ def _trigger_api_context(
     assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True
     _create_record(runtime_paths, config, _public_key_b64(private_key))
     api_main.unbind_external_trigger_runtime(api_main.app)
-    ready_checks: list[TriggerDeliveryReadiness] = []
-    _bind_runtime(ready_checks)
+    ready_snapshots: list[TriggerDeliverySnapshot] = []
+    _bind_runtime(ready_snapshots)
     monkeypatch.setattr("mindroom.api.external_triggers.is_external_trigger_owner_joined_target_room", _owner_joined)
 
     try:
@@ -243,7 +266,7 @@ def _trigger_api_context(
                 client=client,
                 private_key=private_key,
                 runtime_paths=runtime_paths,
-                ready_checks=ready_checks,
+                ready_snapshots=ready_snapshots,
             )
     finally:
         api_main.unbind_external_trigger_runtime(api_main.app)
@@ -281,6 +304,95 @@ def test_unknown_trigger_returns_404(trigger_api: TriggerApiContext) -> None:
     response = _post_signed(trigger_api, trigger_id="missing")
 
     assert response.status_code == 404
+
+
+@pytest.mark.parametrize("authorization", [None, "Bearer wrong"])
+def test_capability_trigger_hides_missing_or_wrong_bearer(
+    trigger_api: TriggerApiContext,
+    authorization: str | None,
+) -> None:
+    """Capability endpoints stay undiscoverable without the exact bearer secret."""
+    _token, snapshot = _create_capability_record(trigger_api)
+    headers = {} if authorization is None else {"Authorization": authorization}
+
+    response = trigger_api.client.post(
+        f"/api/triggers/{snapshot.trigger_id}",
+        content=_body(),
+        headers=headers,
+    )
+
+    assert response.status_code == 404
+    assert ExternalTriggerStore(trigger_api.runtime_paths).list_records(owner_user_id=_OWNER)
+
+
+def test_capability_trigger_delivers_once_and_consumes_record(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful capability delivery uses the normal trigger executor then disappears."""
+    token, snapshot = _create_capability_record(trigger_api)
+    execute_snapshots: list[TriggerDeliverySnapshot] = []
+
+    async def execute_external_trigger(*, snapshot: TriggerDeliverySnapshot, **_kwargs: object) -> str:
+        execute_snapshots.append(snapshot)
+        return "$matrix-event"
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+    response = trigger_api.client.post(
+        f"/api/triggers/{snapshot.trigger_id}",
+        content=_body(event_id="caller-controlled"),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "accepted": True,
+        "duplicate": False,
+        "trigger_id": snapshot.trigger_id,
+        "event_id": snapshot.uid,
+        "matrix_event_id": "$matrix-event",
+    }
+    assert len(execute_snapshots) == 1
+    assert execute_snapshots[0].uid == snapshot.uid
+    assert execute_snapshots[0].auth == "capability"
+    assert execute_snapshots[0].delivery_mode == "single_use"
+    assert (
+        ExternalTriggerStore(trigger_api.runtime_paths).delivery_snapshot(
+            snapshot.trigger_id,
+            config=Config.model_validate(_config_payload()),
+            config_generation=1,
+        )
+        is None
+    )
+
+
+def test_capability_trigger_survives_failed_delivery_for_retry(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One-shot consumption happens only after Matrix delivery succeeds."""
+    token, snapshot = _create_capability_record(trigger_api)
+    delivery_results: list[str | None] = [None, "$matrix-event"]
+
+    async def execute_external_trigger(**_kwargs: object) -> str | None:
+        return delivery_results.pop(0)
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+    request_kwargs = {
+        "content": _body(),
+        "headers": {"Authorization": f"Bearer {token}"},
+    }
+
+    first = trigger_api.client.post(f"/api/triggers/{snapshot.trigger_id}", **request_kwargs)
+    assert first.status_code == 502
+    assert ExternalTriggerStore(trigger_api.runtime_paths).list_records(owner_user_id=_OWNER)
+
+    second = trigger_api.client.post(f"/api/triggers/{snapshot.trigger_id}", **request_kwargs)
+    assert second.status_code == 202
+    assert second.json()["event_id"] == snapshot.uid
+
+    third = trigger_api.client.post(f"/api/triggers/{snapshot.trigger_id}", **request_kwargs)
+    assert third.status_code == 404
 
 
 def test_trigger_invalidated_by_current_config_returns_404_before_replay_claim(
@@ -389,9 +501,8 @@ def test_delivery_uses_single_snapshot_for_auth_readiness_and_execute(
 
     assert response.status_code == 202
     assert response.json()["matrix_event_id"] == "$matrix-event"
-    assert trigger_api.ready_checks
-    assert trigger_api.ready_checks[0].target_agent == execute_snapshots[0].target.agent
-    assert trigger_api.ready_checks[0].resolved_room_id == execute_snapshots[0].resolved_room_id
+    assert trigger_api.ready_snapshots
+    assert execute_snapshots[0] is trigger_api.ready_snapshots[0]
     assert execute_snapshots[0].owner_user_id == _OWNER
 
 
@@ -414,8 +525,8 @@ def test_post_external_trigger_accepts_private_agent_target(
 
     assert response.status_code == 202
     assert response.json()["matrix_event_id"] == "$delivered"
-    assert private_trigger_api.ready_checks
-    assert private_trigger_api.ready_checks[0].target_agent == "research"
+    assert private_trigger_api.ready_snapshots
+    assert execute_snapshots[0] is private_trigger_api.ready_snapshots[0]
     assert execute_snapshots[0].owner_user_id == _OWNER
     assert execute_snapshots[0].target.agent == "research"
 
@@ -463,8 +574,8 @@ def test_policy_caps_apply_at_request_time(
 
     lowered_config = _write_runtime_config(config_path, max_body_bytes=1024)
     assert config_lifecycle._publish_runtime_config_into_app(lowered_config, runtime_paths, api_main.app)
-    ready_checks: list[TriggerDeliveryReadiness] = []
-    _bind_runtime(ready_checks)
+    ready_snapshots: list[TriggerDeliverySnapshot] = []
+    _bind_runtime(ready_snapshots)
     monkeypatch.setattr("mindroom.api.external_triggers.is_external_trigger_owner_joined_target_room", _owner_joined)
 
     try:
@@ -488,7 +599,7 @@ def test_owner_permission_removed_blocks_delivery_before_replay_claim(
     runtime_paths = trigger_api.runtime_paths
     config = _write_runtime_config(runtime_paths.config_path, owner_authorized=False)
     assert config_lifecycle._publish_runtime_config_into_app(config, runtime_paths, api_main.app)
-    _bind_runtime(trigger_api.ready_checks)
+    _bind_runtime(trigger_api.ready_snapshots)
 
     response = _post_signed(trigger_api)
 

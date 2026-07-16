@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
+from mindroom.external_triggers.auth import mint_trigger_capability
 from mindroom.external_triggers.store import (
     ExternalTriggerRecord,
     ExternalTriggerStore,
@@ -79,6 +80,27 @@ def _create(store: ExternalTriggerStore, config: Config, trigger_id: str = "camp
     )
 
 
+def _create_capability(
+    store: ExternalTriggerStore,
+    config: Config,
+    trigger_id: str = "callback_123",
+) -> tuple[ExternalTriggerRecord, str]:
+    token, token_hash = mint_trigger_capability()
+    record = store.create_single_use_capability_record(
+        trigger_id=trigger_id,
+        owner_user_id=_OWNER,
+        created_by_agent_name="watcher",
+        created_in_room_id="!room:example.org",
+        created_in_thread_id="$thread",
+        target=ExternalTriggerTarget(room_id="lobby", thread_id="$thread", agent="watcher"),
+        capability_token_hash=token_hash,
+        description="background task",
+        allowed_kinds=["mindroom.callback.completed"],
+        config=config,
+    )
+    return record, token
+
+
 def test_target_rejects_thread_id_with_new_thread() -> None:
     """A trigger cannot both append to a thread and request a fresh thread."""
     with pytest.raises(ValidationError, match="thread_id and new_thread"):
@@ -95,6 +117,49 @@ def test_create_record_assigns_uid_version_and_auth_epoch(tmp_path: Path) -> Non
     assert record.version == 1
     assert record.auth_epoch == 1
     assert record.public_key_fingerprint.startswith("sha256:")
+
+
+def test_create_single_use_capability_stores_only_token_hash(tmp_path: Path) -> None:
+    """Capability triggers reuse trigger records without storing their bearer secret."""
+    store = ExternalTriggerStore(_runtime_paths(tmp_path))
+
+    record, token = _create_capability(store, _config())
+
+    assert record.auth == "capability"
+    assert record.delivery_mode == "single_use"
+    assert record.key_id is None
+    assert record.public_key is None
+    assert record.capability_token_hash == hashlib.sha256(token.encode()).hexdigest()
+    assert token not in store.store_path.read_text(encoding="utf-8")
+
+
+def test_consume_single_use_deletes_only_matching_record(tmp_path: Path) -> None:
+    """Consumption is bound to the immutable record uid from the delivery snapshot."""
+    store = ExternalTriggerStore(_runtime_paths(tmp_path))
+    record, _token = _create_capability(store, _config())
+
+    with pytest.raises(ExternalTriggerStoreError, match="changed"):
+        store.consume_single_use(record.trigger_id, expected_uid="different")
+
+    assert store.list_records() == [record]
+    store.consume_single_use(record.trigger_id, expected_uid=record.uid)
+    assert store.list_records() == []
+
+
+def test_capability_trigger_cannot_rotate_signing_key(tmp_path: Path) -> None:
+    """Bearer-authenticated triggers do not expose irrelevant key rotation."""
+    config = _config()
+    store = ExternalTriggerStore(_runtime_paths(tmp_path))
+    record, _token = _create_capability(store, config)
+
+    with pytest.raises(ExternalTriggerStoreError, match="ed25519"):
+        store.rotate_key(
+            record.trigger_id,
+            public_key=_PUBLIC_KEY,
+            key_id="rotated",
+            actor_user_id=_OWNER,
+            config=config,
+        )
 
 
 def test_trigger_id_must_be_route_safe(tmp_path: Path) -> None:
