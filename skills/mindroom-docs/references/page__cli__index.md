@@ -45,7 +45,7 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │                     service.                                                           │
 │ local-stack-setup   Start local Synapse + MindRoom Chat using Docker only.             │
 │ config              Manage MindRoom configuration files.                               │
-│ plugins             Validate external MindRoom plugins.                                │
+│ plugins             Validate and vendor external MindRoom plugins.                     │
 │ avatars             Generate and sync managed avatar assets.                           │
 │ threads             Export Matrix threads to local files.                              │
 │ service             Install and manage MindRoom as a background user service.          │
