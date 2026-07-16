@@ -45,12 +45,12 @@ def desktop_controller(
 ) -> None:
     """Print the cloud controller identity that the local bridge must pin."""
     from mindroom.cli.config import activate_cli_runtime  # noqa: PLC0415
-    from mindroom.desktop.identity import controller_identity_for_entity  # noqa: PLC0415
+    from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_entity  # noqa: PLC0415
 
     runtime_paths = activate_cli_runtime(config_path, storage_path=storage_path)
     try:
         identity = controller_identity_for_entity(entity, runtime_paths=runtime_paths)
-    except Exception as exc:
+    except DesktopIdentityError as exc:
         _error_console.print(f"[red]Controller identity lookup failed:[/red] {exc}")
         raise typer.Exit(1) from None
     _console.print("[green]Cloud Matrix controller:[/green]")
@@ -86,7 +86,7 @@ def desktop_login(
     """Log in once, create an Olm device, and save its access token privately."""
     from mindroom.cli.config import activate_cli_runtime  # noqa: PLC0415
     from mindroom.constants import runtime_matrix_homeserver  # noqa: PLC0415
-    from mindroom.desktop.session import desktop_session_path  # noqa: PLC0415
+    from mindroom.desktop.session import DesktopSessionError, desktop_session_path  # noqa: PLC0415
 
     runtime_paths = activate_cli_runtime(config_path, storage_path=storage_path)
     session_path = desktop_session_path(runtime_paths)
@@ -106,7 +106,7 @@ def desktop_login(
                 session_path=session_path,
             ),
         )
-    except Exception as exc:
+    except DesktopSessionError as exc:
         _error_console.print(f"[red]Desktop login failed:[/red] {exc}")
         raise typer.Exit(1) from None
 
@@ -219,8 +219,14 @@ def desktop_run(
 ) -> None:
     """Run the outbound-only Matrix sync loop and execute locally authorized commands."""
     from mindroom.cli.config import activate_cli_runtime  # noqa: PLC0415
-    from mindroom.desktop.session import desktop_session_path, load_desktop_session  # noqa: PLC0415
+    from mindroom.desktop.provider import DesktopProviderError  # noqa: PLC0415
+    from mindroom.desktop.session import (  # noqa: PLC0415
+        DesktopSessionError,
+        desktop_session_path,
+        load_desktop_session,
+    )
     from mindroom.logging_config import setup_logging  # noqa: PLC0415
+    from mindroom.matrix.olm_to_device import OlmToDeviceError  # noqa: PLC0415
 
     _validate_browser_options(
         enabled=browser_extension,
@@ -253,7 +259,7 @@ def desktop_run(
         )
     except KeyboardInterrupt:
         _console.print("\n[yellow]Desktop bridge stopped.[/yellow]")
-    except Exception as exc:
+    except (DesktopProviderError, DesktopSessionError, OlmToDeviceError) as exc:
         _error_console.print(f"[red]Desktop bridge failed:[/red] {exc}")
         raise typer.Exit(1) from None
 

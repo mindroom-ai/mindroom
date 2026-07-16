@@ -84,7 +84,7 @@ uv tool install 'mindroom[desktop]'
 
 macOS supports native semantic state through AXUIElement and requires Accessibility permission for state and control.
 macOS also requires Screen Recording permission for screenshots.
-Windows and Linux currently expose screenshot-only operation through the explicit `primary-screen` app ID, with PyAutoGUI input available during a control lease.
+Windows and Linux currently expose screenshot-only observation and state through the explicit `primary-screen` app ID, while coordinate input through PyAutoGUI is available during a control lease.
 Linux pixel operation currently targets an active X11 desktop because PyAutoGUI does not provide native Wayland control.
 A headless or locked graphical session is not a supported target.
 Playwright extension mode requires Node.js 18 or newer, a Chromium-family browser, and the official Playwright MCP Bridge extension installed in the browser profile that MindRoom will use.
@@ -278,7 +278,8 @@ CONTROL_ACTIONS = {
 
 
 def check(tool_name: str, arguments: dict[str, object], agent_name: str) -> bool:
-    return tool_name == "desktop" and arguments.get("action") in CONTROL_ACTIONS
+    action = arguments.get("action")
+    return tool_name == "desktop" and isinstance(action, str) and action in CONTROL_ACTIONS
 ```
 
 Reference that script from the cloud configuration:

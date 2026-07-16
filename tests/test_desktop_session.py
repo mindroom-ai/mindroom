@@ -63,6 +63,28 @@ def test_session_rejects_malformed_payload(tmp_path: Path) -> None:
         load_desktop_session(path)
 
 
+def test_session_missing_path_has_setup_instruction(tmp_path: Path) -> None:
+    """A genuinely absent session gets the actionable login instruction."""
+    with pytest.raises(DesktopSessionError, match="desktop login"):
+        load_desktop_session(tmp_path / "missing.json")
+
+
+def test_session_preserves_unexpected_filesystem_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Permission and device errors retain their native exception and traceback."""
+    path = tmp_path / "matrix_session.json"
+    path.write_text(json.dumps(_session().to_payload()), encoding="utf-8")
+    path.chmod(0o600)
+
+    def denied(*_args: object, **_kwargs: object) -> str:
+        message = "test permission failure"
+        raise PermissionError(message)
+
+    monkeypatch.setattr(path.__class__, "read_text", denied)
+
+    with pytest.raises(PermissionError, match="test permission failure"):
+        load_desktop_session(path)
+
+
 @pytest.mark.asyncio
 async def test_initial_crypto_sync_does_not_announce_bridge_online() -> None:
     """Presence stays offline until the command callback is registered and sync-forever starts."""

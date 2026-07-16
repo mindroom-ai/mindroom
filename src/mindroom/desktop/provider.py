@@ -165,6 +165,9 @@ class PyAutoGuiDesktopProvider:
         self._capture_screen: Callable[[], PillowImage] = (
             _capture_macos_primary_screen if sys.platform == "darwin" else pyautogui.screenshot
         )
+        self._capture_app_window: Callable[[int, DesktopRect], PillowImage] | None = (
+            _capture_macos_window if sys.platform == "darwin" else None
+        )
         self._max_screenshot_width = max_screenshot_width
         self._jpeg_quality = jpeg_quality
         self._accessibility = accessibility_backend or create_accessibility_backend(
@@ -200,18 +203,25 @@ class PyAutoGuiDesktopProvider:
         return self._accessibility.get_app_state(app_id)
 
     def screenshot(self, *, app_id: str, state_id: str) -> ScreenCapture:
-        """Revalidate, foreground, crop, and downscale one allowed app as JPEG."""
-        state = self._accessibility.prepare_capture(app_id, state_id)
+        """Revalidate, foreground, capture, and downscale one allowed app as JPEG."""
+        target = self._accessibility.prepare_capture(app_id, state_id)
+        state = target.state
         region = state.window
         screen_width, screen_height = self._screen_size()
         _validate_region(region, screen_width=screen_width, screen_height=screen_height)
-        image = self._capture_screen()
-        source_width, source_height = image.size
-        left = round(region.x * source_width / screen_width)
-        top = round(region.y * source_height / screen_height)
-        right = round((region.x + region.width) * source_width / screen_width)
-        bottom = round((region.y + region.height) * source_height / screen_height)
-        image = image.crop((left, top, right, bottom))
+        if target.process_id is None:
+            image = self._capture_screen()
+            source_width, source_height = image.size
+            left = round(region.x * source_width / screen_width)
+            top = round(region.y * source_height / screen_height)
+            right = round((region.x + region.width) * source_width / screen_width)
+            bottom = round((region.y + region.height) * source_height / screen_height)
+            image = image.crop((left, top, right, bottom))
+        else:
+            if self._capture_app_window is None:
+                msg = "Window-bound capture is unavailable for this accessibility backend."
+                raise DesktopProviderError(msg)
+            image = self._capture_app_window(target.process_id, region)
         image_width, image_height = image.size
         if image_width > self._max_screenshot_width:
             scaled_height = max(1, round(image_height * self._max_screenshot_width / image_width))
@@ -369,7 +379,6 @@ def _validate_region(region: DesktopRect, *, screen_width: int, screen_height: i
 def _capture_macos_primary_screen() -> PillowImage:
     """Capture the primary macOS display without spawning an unbounded child process."""
     import Quartz  # noqa: PLC0415
-    from PIL import Image  # noqa: PLC0415
 
     if not Quartz.CGPreflightScreenCaptureAccess():  # ty: ignore[unresolved-attribute]
         msg = "macOS Screen Recording permission is required for desktop screenshots."
@@ -379,6 +388,64 @@ def _capture_macos_primary_screen() -> PillowImage:
     if cg_image is None:
         msg = "macOS did not return a primary-display screenshot; check Screen Recording permission."
         raise DesktopProviderError(msg)
+    return _pillow_image_from_macos_capture(cg_image)
+
+
+def _capture_macos_window(process_id: int, region: DesktopRect) -> PillowImage:
+    """Capture the one on-screen Core Graphics window matching the revalidated AX target."""
+    import Quartz  # noqa: PLC0415
+
+    if not Quartz.CGPreflightScreenCaptureAccess():  # ty: ignore[unresolved-attribute]
+        msg = "macOS Screen Recording permission is required for desktop screenshots."
+        raise DesktopProviderError(msg)
+    on_screen_only = Quartz.kCGWindowListOptionOnScreenOnly  # ty: ignore[unresolved-attribute]
+    exclude_desktop = Quartz.kCGWindowListExcludeDesktopElements  # ty: ignore[unresolved-attribute]
+    options = on_screen_only | exclude_desktop
+    window_infos = Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID)  # ty: ignore[unresolved-attribute]
+    matching_window_ids: list[int] = []
+    for info in window_infos:
+        if int(info.get(Quartz.kCGWindowOwnerPID, -1)) != process_id:  # ty: ignore[unresolved-attribute]
+            continue
+        if int(info.get(Quartz.kCGWindowLayer, -1)) != 0:  # ty: ignore[unresolved-attribute]
+            continue
+        raw_bounds = info.get(Quartz.kCGWindowBounds)  # ty: ignore[unresolved-attribute]
+        if raw_bounds is None:
+            continue
+        converted, bounds = Quartz.CGRectMakeWithDictionaryRepresentation(raw_bounds, None)  # ty: ignore[unresolved-attribute]
+        if not converted:
+            continue
+        candidate = DesktopRect(
+            round(bounds.origin.x),
+            round(bounds.origin.y),
+            round(bounds.size.width),
+            round(bounds.size.height),
+        )
+        if candidate == region:
+            matching_window_ids.append(int(info[Quartz.kCGWindowNumber]))  # ty: ignore[unresolved-attribute]
+    if len(matching_window_ids) != 1:
+        msg = "macOS could not bind the accessibility target to one exact on-screen application window."
+        raise DesktopProviderError(msg)
+    null_rect = Quartz.CGRectNull  # ty: ignore[unresolved-attribute]
+    including_window = Quartz.kCGWindowListOptionIncludingWindow  # ty: ignore[unresolved-attribute]
+    ignore_framing = Quartz.kCGWindowImageBoundsIgnoreFraming  # ty: ignore[unresolved-attribute]
+    nominal_resolution = Quartz.kCGWindowImageNominalResolution  # ty: ignore[unresolved-attribute]
+    cg_image = Quartz.CGWindowListCreateImage(  # ty: ignore[unresolved-attribute]
+        null_rect,
+        including_window,
+        matching_window_ids[0],
+        ignore_framing | nominal_resolution,
+    )
+    if cg_image is None:
+        msg = "macOS did not return the bound application-window screenshot."
+        raise DesktopProviderError(msg)
+    return _pillow_image_from_macos_capture(cg_image)
+
+
+def _pillow_image_from_macos_capture(cg_image: object) -> PillowImage:
+    """Convert one 32-bit Core Graphics capture into a Pillow image."""
+    import Quartz  # noqa: PLC0415
+    from PIL import Image  # noqa: PLC0415
+
     width = int(Quartz.CGImageGetWidth(cg_image))  # ty: ignore[unresolved-attribute]
     height = int(Quartz.CGImageGetHeight(cg_image))  # ty: ignore[unresolved-attribute]
     bytes_per_row = int(Quartz.CGImageGetBytesPerRow(cg_image))  # ty: ignore[unresolved-attribute]

@@ -134,6 +134,14 @@ def test_act_mapping_covers_semantic_interaction_parity() -> None:
         {"element": "Updates", "name": "Updates", "target": "e5", "type": "checkbox", "value": "true"},
     ]
 
+    evaluate = _act_call({"kind": "evaluate", "fn": "element => element.textContent", "ref": "e6"})
+    assert evaluate.tool_name == "browser_evaluate"
+    assert evaluate.arguments == {
+        "function": "element => element.textContent",
+        "element": "e6",
+        "target": "e6",
+    }
+
 
 def test_provider_result_preserves_model_text_and_image() -> None:
     """Screenshots become bounded Matrix media while accessibility text stays structured."""

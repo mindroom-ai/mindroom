@@ -189,6 +189,7 @@ mindroom run
 - [Dashboard](dashboard.md) - Web UI for configuration
 - [OpenAI-Compatible API](openai-api.md) - Use agents from any OpenAI-compatible client
 - [Tools](tools/index.md) - Available tool integrations
+- [Matrix Desktop Bridge](tools/desktop.md) - Securely observe or locally lease desktop and signed-in browser control over Matrix
 - [OpenClaw Import](openclaw.md) - Reuse OpenClaw workspace files in MindRoom
 - [MCP](mcp.md) - Configure native MCP client servers and expose their tools to agents
 - [Skills](skills.md) - OpenClaw-compatible skills system

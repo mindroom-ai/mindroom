@@ -513,6 +513,12 @@ async def test_desktop_target_routes_snapshot_and_control_over_matrix(monkeypatc
     request = AsyncMock(
         side_effect=[
             DesktopResponse(
+                request_id="observe",
+                session_id="session",
+                ok=True,
+                result={"action": "snapshot", "provider": "playwright_mcp_extension", "result": "plain-tree"},
+            ),
+            DesktopResponse(
                 request_id="snapshot",
                 session_id="session",
                 ok=True,
@@ -539,25 +545,33 @@ async def test_desktop_target_routes_snapshot_and_control_over_matrix(monkeypatc
         device_ed25519="fingerprint",
     )
 
+    plain_snapshot = await tool.browser(action="snapshot", maxChars=1000)
     snapshot = await tool.browser(action="snapshot", targetId="2", maxChars=5000)
     click = await tool.browser(action="act", request={"kind": "click", "ref": "e3"})
 
+    assert isinstance(plain_snapshot, str)
     assert isinstance(snapshot, str)
     assert json.loads(snapshot)["provider"] == "playwright_mcp_extension"
     assert isinstance(click, str)
-    first_command = request.await_args_list[0].args[1]
-    second_command = request.await_args_list[1].args[1]
-    assert first_command.action == "browser_control"
-    assert first_command.parameters == {
+    observe_command = request.await_args_list[0].args[1]
+    snapshot_command = request.await_args_list[1].args[1]
+    click_command = request.await_args_list[2].args[1]
+    assert observe_command.action == "browser_observe"
+    assert observe_command.parameters == {
+        "browser_action": "snapshot",
+        "browser_parameters": {"maxChars": 1000},
+    }
+    assert snapshot_command.action == "browser_control"
+    assert snapshot_command.parameters == {
         "browser_action": "snapshot",
         "browser_parameters": {"targetId": "2", "maxChars": 5000},
     }
-    assert second_command.action == "browser_control"
-    assert second_command.parameters == {
+    assert click_command.action == "browser_control"
+    assert click_command.parameters == {
         "browser_action": "act",
         "browser_parameters": {"request": {"kind": "click", "ref": "e3"}},
     }
-    assert (first_command.sequence, second_command.sequence) == (0, 1)
+    assert (observe_command.sequence, snapshot_command.sequence, click_command.sequence) == (0, 1, 2)
 
 
 @pytest.mark.asyncio

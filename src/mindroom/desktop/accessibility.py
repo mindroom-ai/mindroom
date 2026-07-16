@@ -155,6 +155,14 @@ class AccessibilityState:
 
 
 @dataclass(frozen=True, slots=True)
+class AccessibilityCapture:
+    """One revalidated capture target kept local to the desktop bridge."""
+
+    state: AccessibilityState
+    process_id: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class DesktopApp:
     """One locally allowed application and its current running state."""
 
@@ -186,8 +194,8 @@ class AccessibilityBackend(Protocol):
         """Capture and cache one fresh semantic state."""
         ...
 
-    def prepare_capture(self, app_id: str, state_id: str) -> AccessibilityState:
-        """Revalidate state and foreground its app immediately before capture."""
+    def prepare_capture(self, app_id: str, state_id: str) -> AccessibilityCapture:
+        """Revalidate state and bind capture to its exact local process."""
         ...
 
     def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityState:
@@ -317,13 +325,17 @@ class MacAccessibilityBackend:
             return stored.public
         return self._fresh_state(app_id, state_id).public
 
-    def prepare_capture(self, app_id: str, state_id: str) -> AccessibilityState:
+    def prepare_capture(self, app_id: str, state_id: str) -> AccessibilityCapture:
         """Revalidate app identity and window geometry around foreground capture."""
         stored = self._current_capture_state(app_id, state_id)
         self._activate(stored.application)
         if stored.application is None:
-            return stored.public
-        return self._current_capture_state(app_id, state_id).public
+            return AccessibilityCapture(stored.public, None)
+        current = self._current_capture_state(app_id, state_id)
+        if current.application is None:
+            msg = "Allowed application process disappeared before capture."
+            raise AccessibilityError(msg)
+        return AccessibilityCapture(current.public, int(current.application.processIdentifier()))
 
     def element_for_action(
         self,
@@ -790,9 +802,9 @@ class ScreenshotOnlyAccessibilityBackend:
 
     def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityState:
         """Validate that coordinate fallback still targets the latest screen geometry."""
-        return self.prepare_capture(app_id, state_id)
+        return self.prepare_capture(app_id, state_id).state
 
-    def prepare_capture(self, app_id: str, state_id: str) -> AccessibilityState:
+    def prepare_capture(self, app_id: str, state_id: str) -> AccessibilityCapture:
         """Validate that capture still targets the latest screen geometry."""
         self._require_primary(app_id)
         if self._state is None or self._state.state_id != state_id:
@@ -803,7 +815,7 @@ class ScreenshotOnlyAccessibilityBackend:
             self._state = None
             msg = "Desktop geometry changed; request get_app_state again before acting."
             raise AccessibilityError(msg)
-        return self._state
+        return AccessibilityCapture(self._state, None)
 
     def element_for_action(
         self,
@@ -952,6 +964,7 @@ __all__ = [
     "PRIMARY_SCREEN_APP_ID",
     "AccessibilityActionOutcomeUnknownError",
     "AccessibilityBackend",
+    "AccessibilityCapture",
     "AccessibilityElement",
     "AccessibilityError",
     "AccessibilityState",

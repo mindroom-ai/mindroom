@@ -71,6 +71,80 @@ def test_browser_profile_paths_must_exist(tmp_path: Path) -> None:
     assert exc_info.value.exit_code == 2
 
 
+def test_controller_command_preserves_unexpected_environment_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Filesystem failures retain their traceback instead of becoming a generic CLI exit."""
+    runtime_paths = SimpleNamespace(storage_root=tmp_path)
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
+
+    def denied(*_args: object, **_kwargs: object) -> None:
+        message = "test identity permission failure"
+        raise PermissionError(message)
+
+    monkeypatch.setattr("mindroom.desktop.identity.controller_identity_for_entity", denied)
+
+    result = runner.invoke(desktop_app, ["controller", "--entity", "computer"])
+
+    assert isinstance(result.exception, PermissionError)
+
+
+def test_login_command_preserves_unexpected_environment_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Session persistence failures remain distinguishable from expected login errors."""
+    runtime_paths = SimpleNamespace(storage_root=tmp_path)
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
+    monkeypatch.setattr(desktop_cli, "_login_and_save", AsyncMock(side_effect=PermissionError("test write failure")))
+    monkeypatch.setenv("MINDROOM_DESKTOP_MATRIX_PASSWORD", "test-password")
+
+    result = runner.invoke(
+        desktop_app,
+        ["login", "--user-id", "@laptop:example.org", "--homeserver", "https://matrix.example.org"],
+    )
+
+    assert isinstance(result.exception, PermissionError)
+
+
+def test_run_command_preserves_unexpected_environment_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Unexpected session I/O errors are not flattened into a friendly domain failure."""
+    runtime_paths = SimpleNamespace(storage_root=tmp_path)
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
+    monkeypatch.setattr("mindroom.logging_config.setup_logging", lambda **_kwargs: None)
+
+    def denied(_path: Path) -> None:
+        message = "test session permission failure"
+        raise PermissionError(message)
+
+    monkeypatch.setattr("mindroom.desktop.session.load_desktop_session", denied)
+
+    result = runner.invoke(
+        desktop_app,
+        [
+            "run",
+            "--controller-user-id",
+            "@cloud:example.org",
+            "--controller-device-id",
+            "CLOUD",
+            "--controller-ed25519",
+            "fingerprint",
+            "--allow-requester",
+            "@alice:example.org",
+            "--allow-agent",
+            "computer",
+            "--allow-app",
+            "com.example.Editor",
+        ],
+    )
+
+    assert isinstance(result.exception, PermissionError)
+
+
 class _FakeBridgeClient:
     def __init__(self) -> None:
         self.to_device_callback: object | None = None

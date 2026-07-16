@@ -408,7 +408,8 @@ def test_mac_capture_allows_dynamic_content_after_foregrounding_app() -> None:
 
     captured = backend.prepare_capture(state.app_id, state.state_id)
 
-    assert captured.window == state.window
+    assert captured.state.window == state.window
+    assert captured.process_id == 42
     assert workspace.applications[0].activation_options == [0]
 
 

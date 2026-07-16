@@ -681,7 +681,7 @@ The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `googl
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `output_dir` | `text` | `no` | `null` | Optional directory for screenshots, PDFs, and other browser artifacts, with `<storage>/browser` as the runtime default when omitted. |
-| `allow_private_networks` | `boolean` | `no` | `false` | Allow navigation to trusted private or loopback addresses while continuing to block metadata and link-local destinations. |
+| `allow_private_networks` | `boolean` | `no` | `false` | Allow direct `open` and `navigate` calls to trusted private or loopback addresses while continuing to block metadata and link-local destinations; this does not sandbox or restrict the desktop target's normal browser network access. |
 | `default_target` | `select` | `no` | `host` | Use `host` for MindRoom's managed profile or `desktop` for the pinned local Playwright extension. |
 | `device_user_id` | `text` | `desktop only` | `null` | Dedicated Matrix user for the local desktop bridge. |
 | `device_id` | `text` | `desktop only` | `null` | Exact local Matrix device ID. |

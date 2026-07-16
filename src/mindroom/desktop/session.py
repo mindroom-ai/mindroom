@@ -79,7 +79,7 @@ def load_desktop_session(path: Path) -> DesktopMatrixSession:
     """Load one private Matrix session, refusing permissive Unix modes."""
     try:
         file_stat = path.stat()
-    except OSError as exc:
+    except FileNotFoundError as exc:
         msg = f"Desktop Matrix session not found at {path}. Run 'mindroom desktop login' first."
         raise DesktopSessionError(msg) from exc
     if os.name != "nt" and stat.S_IMODE(file_stat.st_mode) & 0o077:
@@ -87,7 +87,7 @@ def load_desktop_session(path: Path) -> DesktopMatrixSession:
         raise DesktopSessionError(msg)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (UnicodeError, json.JSONDecodeError) as exc:
         msg = f"Desktop Matrix session {path} is unreadable or malformed."
         raise DesktopSessionError(msg) from exc
     return DesktopMatrixSession.from_payload(raw)

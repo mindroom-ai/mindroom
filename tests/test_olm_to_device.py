@@ -229,6 +229,16 @@ def test_authenticated_sender_must_match_user_device_and_fingerprint() -> None:
                 event,
                 PinnedMatrixDevice(RECIPIENT, "OTHER", recipient_device.ed25519),
             )
+            assert not authenticated_sender_matches(
+                client,
+                event,
+                PinnedMatrixDevice("@other:example.org", "DESKTOP", recipient_device.ed25519),
+            )
+            assert not authenticated_sender_matches(
+                client,
+                event,
+                PinnedMatrixDevice(RECIPIENT, "DESKTOP", "wrong-fingerprint"),
+            )
         finally:
             sender.store.database.close()
             recipient.store.database.close()

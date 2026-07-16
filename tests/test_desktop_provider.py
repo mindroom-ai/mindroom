@@ -9,12 +9,13 @@ from typing import TYPE_CHECKING, ClassVar
 
 import pytest
 
-from mindroom.desktop.accessibility import AccessibilityState, DesktopRect
+from mindroom.desktop.accessibility import AccessibilityCapture, AccessibilityState, DesktopRect
 from mindroom.desktop.provider import (
     DesktopEmergencyStopError,
     DesktopProviderError,
     PyAutoGuiDesktopProvider,
     _capture_macos_primary_screen,
+    _capture_macos_window,
     _type_macos_unicode,
 )
 
@@ -111,10 +112,11 @@ class FakeAccessibilityBackend:
         """Record one allowlisted application launch."""
         self.calls.append(("launch_app", app_id))
 
-    def prepare_capture(self, app_id: str, state_id: str) -> AccessibilityState:
+    def prepare_capture(self, app_id: str, state_id: str) -> AccessibilityCapture:
         """Record capture validation and return the current app window."""
         self.calls.append(("prepare_capture", (app_id, state_id)))
-        return AccessibilityState(state_id, app_id, "Editor", self.window, (), False)
+        state = AccessibilityState(state_id, app_id, "Editor", self.window, (), False)
+        return AccessibilityCapture(state, 42)
 
     def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityState:
         """Record validation and return the current app window."""
@@ -132,32 +134,53 @@ def _provider() -> tuple[PyAutoGuiDesktopProvider, FakePyAutoGui, FakeAccessibil
     provider = object.__new__(PyAutoGuiDesktopProvider)
     provider._pyautogui = pyautogui
     provider._capture_screen = pyautogui.screenshot
+    provider._capture_app_window = lambda _process_id, region: FakeImage((region.width * 2, region.height * 2))
     provider._max_screenshot_width = 1600
     provider._jpeg_quality = 80
     provider._accessibility = accessibility
     return provider, pyautogui, accessibility
 
 
-def test_retina_capture_crops_logical_app_window() -> None:
-    """A logical app window maps correctly into a dense screenshot."""
+def test_app_capture_uses_window_bound_pixels() -> None:
+    """A semantic app capture uses pixels from its exact process/window binding."""
     provider, _, _ = _provider()
+    calls: list[tuple[int, DesktopRect]] = []
+
+    def capture_window(process_id: int, region: DesktopRect) -> FakeImage:
+        calls.append((process_id, region))
+        return FakeImage((1600, 1200))
+
+    provider._capture_app_window = capture_window
 
     capture = provider.screenshot(app_id="com.example.Editor", state_id="state-1")
 
+    assert calls == [(42, DesktopRect(100, 50, 800, 600))]
     assert (capture.screen_width, capture.screen_height) == (1512, 982)
     assert (capture.capture_x, capture.capture_y) == (100, 50)
     assert (capture.capture_width, capture.capture_height) == (800, 600)
     assert (capture.image_width, capture.image_height) == (1600, 1200)
 
 
-def test_launch_app_checks_emergency_stop_before_accessibility_backend() -> None:
-    """An app launch is local control and honors the same pointer fail-safe as input."""
+def test_launch_app_uses_accessibility_backend_without_pixel_input() -> None:
+    """A normal allowlisted app launch does not synthesize pixel input."""
     provider, pyautogui, accessibility = _provider()
 
     provider.launch_app("com.example.Editor")
 
     assert pyautogui.calls == []
     assert accessibility.calls == [("launch_app", "com.example.Editor")]
+
+
+def test_launch_app_checks_emergency_stop_before_accessibility_backend() -> None:
+    """An app launch is local control and honors the same pointer fail-safe as input."""
+    provider, pyautogui, accessibility = _provider()
+    pyautogui.cursor = (0, 0)
+
+    with pytest.raises(DesktopEmergencyStopError, match="emergency stop"):
+        provider.launch_app("com.example.Editor")
+
+    assert pyautogui.calls == []
+    assert accessibility.calls == []
 
 
 def test_capture_rejects_window_outside_primary_screen() -> None:
@@ -294,3 +317,55 @@ def test_macos_capture_requires_screen_recording_permission(monkeypatch: pytest.
 
     with pytest.raises(DesktopProviderError, match="Screen Recording permission"):
         _capture_macos_primary_screen()
+
+
+def test_macos_window_capture_binds_process_and_exact_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Another process or another window from the app cannot enter an app-scoped capture."""
+    captured_window_ids: list[int] = []
+
+    def bounds(rect: DesktopRect) -> SimpleNamespace:
+        return SimpleNamespace(
+            origin=SimpleNamespace(x=rect.x, y=rect.y),
+            size=SimpleNamespace(width=rect.width, height=rect.height),
+        )
+
+    infos = [
+        {"pid": 99, "layer": 0, "bounds": DesktopRect(100, 50, 800, 600), "number": 1},
+        {"pid": 42, "layer": 0, "bounds": DesktopRect(0, 0, 50, 50), "number": 2},
+        {"pid": 42, "layer": 0, "bounds": DesktopRect(100, 50, 800, 600), "number": 3},
+    ]
+    quartz = SimpleNamespace(
+        CGPreflightScreenCaptureAccess=lambda: True,
+        CGWindowListCopyWindowInfo=lambda _options, _window_id: infos,
+        CGRectMakeWithDictionaryRepresentation=lambda value, _result: (True, bounds(value)),
+        CGWindowListCreateImage=lambda _rect, _options, window_id, _image_options: (
+            captured_window_ids.append(
+                window_id,
+            )
+            or "cg-image"
+        ),
+        kCGWindowListOptionOnScreenOnly=1,
+        kCGWindowListExcludeDesktopElements=2,
+        kCGNullWindowID=0,
+        kCGWindowOwnerPID="pid",
+        kCGWindowLayer="layer",
+        kCGWindowBounds="bounds",
+        kCGWindowNumber="number",
+        CGRectNull="null",
+        kCGWindowListOptionIncludingWindow=8,
+        kCGWindowImageBoundsIgnoreFraming=1,
+        kCGWindowImageNominalResolution=16,
+    )
+    expected = FakeImage((800, 600))
+    monkeypatch.setitem(sys.modules, "Quartz", quartz)
+    monkeypatch.setattr("mindroom.desktop.provider._pillow_image_from_macos_capture", lambda _image: expected)
+
+    image = _capture_macos_window(42, DesktopRect(100, 50, 800, 600))
+
+    assert image is expected
+    assert captured_window_ids == [3]
+
+    infos.append({"pid": 42, "layer": 0, "bounds": DesktopRect(100, 50, 800, 600), "number": 4})
+    with pytest.raises(DesktopProviderError, match="one exact"):
+        _capture_macos_window(42, DesktopRect(100, 50, 800, 600))
+    assert captured_window_ids == [3]

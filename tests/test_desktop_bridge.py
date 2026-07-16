@@ -912,6 +912,10 @@ async def test_requester_agent_replay_and_sequence_are_enforced(transport: Async
     assert not _response(transport).ok
     assert provider.calls == []
 
+    await bridge.on_to_device_event(_event(_command(request_id="bad-agent", agent_name="other")))
+    assert not _response(transport).ok
+    assert provider.calls == []
+
     first = _command(request_id="request-2", sequence=2)
     await bridge.on_to_device_event(_event(first))
     first_response_content = transport.await_args.kwargs["content"]
