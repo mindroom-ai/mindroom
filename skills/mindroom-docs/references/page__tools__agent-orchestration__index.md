@@ -13,7 +13,7 @@ Use these tools when you need multi-agent coordination, reusable workflow runs, 
 - [`delegate`] - Run another configured agent as a one-shot specialist and return its answer inline.
 - [`dynamic_workflow`] - Create, update, run, and inspect saved Dynamic Workflows with persisted report artifacts.
 - [`report_publishing`] - Publish authorized report artifacts through revocable public links.
-- [`config_manager`] - Inspect MindRoom config and create, update, validate, or template agents and teams.
+- [`config_manager`] - Inspect and patch the full MindRoom configuration, and create, update, validate, or template agents and teams.
 - [`self_config`] - Let an agent read and update only its own configuration.
 - [`openclaw_compat`] - Config-only preset that expands to native MindRoom tools.
 - [`claude_agent`] - Persistent Claude Agent SDK sessions with optional gateway support and per-session labels.
@@ -358,15 +358,21 @@ revoke_public_report("pub_...")
 
 ## [`config_manager`]
 
-`config_manager` is the broad config-authoring toolkit for inspecting MindRoom and creating or updating agents and teams.
+`config_manager` is the full configuration control plane: it inspects and patches any authored `Config` field and creates or updates agents and teams through curated helpers.
 
 ### What It Does
 
-`config_manager` exposes `get_info()`, `manage_agent()`, and `manage_team()`.
+`config_manager` exposes `get_info()`, `manage_config()`, `manage_agent()`, and `manage_team()`.
 `get_info(info_type, name=None)` supports `mindroom_docs`, `config_schema`, `available_models`, `agents`, `teams`, `available_tools`, `tool_details`, `agent_config`, and `agent_template`.
 `tool_details` requires `name` and reads from live `TOOL_METADATA`, so it includes real config fields and statuses from the current worktree.
 `agent_config` returns the authored YAML for a specific agent.
 `agent_template` generates starter YAML for one of the built-in template types: `researcher`, `developer`, `social`, `communicator`, `analyst`, or `productivity`.
+`manage_config(operation, path, changes, dry_run)` addresses the authored document written to `config.yaml` with RFC 6901 JSON Pointer paths.
+`manage_config(operation="inspect", path=...)` returns one authored subtree as YAML with secret-bearing values redacted at every pointer depth.
+`manage_config(operation="patch", changes=[...])` applies an atomic batch of RFC 6902 `add`, `replace`, and `remove` entries across the full `Config` schema, validates the result against the active runtime, and persists only when validation passes.
+`dry_run=True` validates a patch and returns its receipt without writing.
+Patch receipts report the config path, changed paths, and validation and persistence status without echoing changed values.
+When the configuration is composed from multiple files via `!include`, inspection still works but structured patching is refused so source files are never flattened.
 `manage_agent()` supports `create`, `update`, and `validate`.
 Agent creates and updates validate tool names against the live registry and validate knowledge base IDs against the current config.
 When a plain string tool list replaces an existing tool list, `config_manager` preserves inline overrides for retained tools instead of flattening them away.
@@ -393,6 +399,14 @@ agents:
 ```python
 get_info("available_tools")
 get_info("tool_details", name="claude_agent")
+manage_config(operation="inspect", path="/authorization")
+manage_config(
+    operation="patch",
+    changes=[
+        {"op": "replace", "path": "/models/default/id", "value": "claude-sonnet-5"},
+        {"op": "add", "path": "/agents/triage/instructions/-", "value": "Escalate anything urgent."},
+    ],
+)
 manage_agent(
     operation="create",
     agent_name="triage",
