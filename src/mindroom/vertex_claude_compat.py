@@ -17,15 +17,45 @@ from mindroom.claude_prompt_cache import (
     TOOL_SEARCH_TOOL_TYPE,
     prepare_claude_request_kwargs,
 )
+from mindroom.error_handling import ModelSafeguardRefusalError
 from mindroom.logging_config import get_logger
 from mindroom.token_budget import estimate_compaction_input_tokens, stable_serialize
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+    from typing import NoReturn
 
     from agno.models.message import Message
     from agno.models.response import ModelResponse
     from agno.run.agent import RunOutput
+    from anthropic.lib.streaming._beta_types import (
+        BetaRawContentBlockStartEvent,
+        ParsedBetaContentBlockStopEvent,
+        ParsedBetaMessageStopEvent,
+    )
+    from anthropic.types import (
+        ContentBlockDeltaEvent,
+        ContentBlockStartEvent,
+        ContentBlockStopEvent,
+        MessageStopEvent,
+    )
+    from anthropic.types import (
+        Message as AnthropicMessage,
+    )
+    from anthropic.types.beta import BetaRawContentBlockDeltaEvent
+    from anthropic.types.beta.beta_message import BetaMessage
+
+    type ClaudeProviderResponse = AnthropicMessage | BetaMessage
+    type ClaudeProviderStreamEvent = (
+        ContentBlockStartEvent
+        | ContentBlockDeltaEvent
+        | ContentBlockStopEvent
+        | MessageStopEvent
+        | BetaRawContentBlockDeltaEvent
+        | BetaRawContentBlockStartEvent
+        | ParsedBetaContentBlockStopEvent
+        | ParsedBetaMessageStopEvent
+    )
 
 logger = get_logger(__name__)
 
@@ -38,6 +68,7 @@ _VERTEX_TOOL_SEARCH_HISTORY_BLOCK_TYPES = frozenset(
 # for the native regex search tool on both Claude Haiku 4.5 and Sonnet 4.6.
 # Keep a small margin because count_tokens cannot count that server-tool prefix.
 _VERTEX_TOOL_SEARCH_TOKEN_RESERVE = 256
+_CLAUDE_SAFEGUARD_STOP_REASON = "refusal"
 
 
 def _strip_vertex_claude_tool_strict(
@@ -442,6 +473,49 @@ class MindroomVertexAIClaude(VertexAIClaude):
             compress_tool_results=compress_tool_results,
         ):
             yield response
+
+    def _raise_for_safeguard_refusal(self, provider_response: object) -> None:
+        """Raise when Vertex Claude explicitly ends generation for safeguards."""
+        message = getattr(provider_response, "message", None)
+        response_with_stop_reason = message if message is not None else provider_response
+        stop_reason = getattr(response_with_stop_reason, "stop_reason", None)
+        if stop_reason != _CLAUDE_SAFEGUARD_STOP_REASON:
+            return
+        logger.warning(
+            "vertex_claude_safeguard_refusal",
+            model_id=self.id,
+            stop_reason=stop_reason,
+        )
+        raise ModelSafeguardRefusalError(
+            message="Vertex Claude returned stop_reason=refusal",
+            model_name=self.name,
+            model_id=self.id,
+        )
+
+    def _parse_provider_response(
+        self,
+        response: ClaudeProviderResponse,
+        response_format: dict[str, Any] | type[Any] | None = None,
+        **kwargs: object,
+    ) -> ModelResponse:
+        """Preserve Vertex Claude's non-streaming safeguard signal."""
+        self._raise_for_safeguard_refusal(response)
+        return super()._parse_provider_response(response, response_format=response_format, **kwargs)
+
+    def _parse_provider_response_delta(
+        self,
+        response: ClaudeProviderStreamEvent,
+        response_format: dict[str, Any] | type[Any] | None = None,
+    ) -> ModelResponse:
+        """Preserve Vertex Claude's final streaming safeguard signal."""
+        self._raise_for_safeguard_refusal(response)
+        return super()._parse_provider_response_delta(response, response_format=response_format)
+
+    def _handle_api_error(self, e: Exception) -> NoReturn:
+        """Keep typed safeguard refusals intact for MindRoom's user error path."""
+        if isinstance(e, ModelSafeguardRefusalError):
+            raise e
+        super()._handle_api_error(e)
 
     def _prepare_request_kwargs(
         self,
