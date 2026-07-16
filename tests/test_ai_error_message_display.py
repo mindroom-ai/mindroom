@@ -16,6 +16,7 @@ from agno.models.message import Message
 from agno.run.agent import RunCancelledEvent, RunContentEvent, RunOutput
 from agno.run.base import RunStatus
 
+from mindroom.ai import _PreparedAgentRun
 from mindroom.bot import AgentBot
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, request_task_cancel
 from mindroom.config.agent import AgentConfig
@@ -140,11 +141,11 @@ def _response_request(
     )
 
 
-def _prepared_run(agent: object, *, prompt: str = "Help me with something") -> SimpleNamespace:
+def _prepared_run(agent: object, *, prompt: str = "Help me with something") -> _PreparedAgentRun:
     """Return one minimal prepared-run stub for response-runner tests."""
-    return SimpleNamespace(
+    return _PreparedAgentRun(
         agent=agent,
-        run_input=[Message(role="user", content=prompt)],
+        messages=(Message(role="user", content=prompt),),
         unseen_event_ids=[],
         prepared_history=PreparedHistoryState(),
         runtime_model_name="default",
