@@ -161,17 +161,15 @@ def _render_retained_tool_context(snapshot: InterruptedReplaySnapshot) -> str:
             continue
 
         omitted = total_tools - index
-        omission_line = (
-            f"- {omitted} additional tool call(s) omitted from retained context "
-            "because the replay size limit was reached."
-        )
-        while len(lines) > 1 and len("\n".join([*lines, omission_line])) > _MAX_RETAINED_TOOL_CONTEXT_CHARS:
-            lines.pop()
-            omitted += 1
+        while True:
             omission_line = (
                 f"- {omitted} additional tool call(s) omitted from retained context "
                 "because the replay size limit was reached."
             )
+            if len(lines) == 1 or len("\n".join([*lines, omission_line])) <= _MAX_RETAINED_TOOL_CONTEXT_CHARS:
+                break
+            lines.pop()
+            omitted += 1
         lines.append(omission_line)
         break
 
