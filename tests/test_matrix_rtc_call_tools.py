@@ -457,6 +457,7 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
         session_id="!room:example.org:call:one",
         enable_responder=True,
         voice_instructions="Speak briefly.",
+        active_model_name="call_fast",
     )
 
     assert tooling.tools == ()
@@ -474,6 +475,7 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
     assert turn.entity_label == AGENT
     assert turn.requester_id == REQUESTER
     assert turn.session_id == "!room:example.org:call:one"
+    assert turn.active_model_name == "call_fast"
     assert turn.system_enrichment_items[0].text == "Speak briefly."
     assert kwargs["config"] is config
     assert kwargs["knowledge"] is knowledge

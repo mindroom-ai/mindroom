@@ -203,6 +203,7 @@ async def build_call_tools(
     session_id: str | None = None,
     enable_responder: bool = False,
     voice_instructions: str | None = None,
+    active_model_name: str | None = None,
 ) -> CallAgentTooling:
     """Materialize the agent for the selected voice backend."""
     session_id = session_id or create_session_id(room_id, None)
@@ -253,6 +254,7 @@ async def build_call_tools(
             session_id=session_id,
             voice_enrichment_items=voice_enrichment_items,
             response_tracker=response_tracker,
+            active_model_name=active_model_name,
         )
         return CallAgentTooling(
             tools=(),
@@ -359,6 +361,7 @@ async def _run_call_agent(
     session_id: str,
     voice_enrichment_items: tuple[EnrichmentItem, ...],
     response_tracker: _CallResponseTracker,
+    active_model_name: str | None,
 ) -> CallAgentResponse:
     """Run one finalized call transcript through the normal MindRoom agent."""
     from mindroom.ai import ResponseTurnContext, ai_response  # noqa: PLC0415 - heavy optional call path
@@ -388,6 +391,7 @@ async def _run_call_agent(
         thread_id=None,
         requester_id=requester_id,
         matrix_run_metadata=None,
+        active_model_name=active_model_name,
         system_enrichment_items=enrichment_items,
     )
 

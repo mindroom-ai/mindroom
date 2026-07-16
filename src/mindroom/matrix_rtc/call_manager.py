@@ -833,6 +833,7 @@ class CallManager:
             session_id=session_id,
             enable_responder=cascaded,
             voice_instructions=_VOICE_STYLE_ADDENDUM if cascaded else None,
+            active_model_name=self._call_config.model if cascaded else None,
         )
 
     def _start_logical_call(self, room_id: str, requester_id: str) -> _LogicalCallState:
