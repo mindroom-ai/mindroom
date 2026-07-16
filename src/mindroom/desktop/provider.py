@@ -71,7 +71,7 @@ class PyAutoGuiDesktopProvider:
         try:
             import pyautogui  # noqa: PLC0415
         except ImportError as exc:
-            msg = "Desktop bridge support is missing. Install MindRoom with the 'desktop-bridge' extra."
+            msg = "Desktop bridge support is missing. Install MindRoom with the 'desktop' extra."
             raise DesktopProviderError(msg) from exc
 
         pyautogui.FAILSAFE = True

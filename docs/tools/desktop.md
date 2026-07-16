@@ -43,7 +43,7 @@ The desktop account and the cloud MindRoom entity must use the same Matrix feder
 Install the optional local desktop dependency on the computer being controlled:
 
 ```bash
-uv tool install 'mindroom[desktop_bridge]'
+uv tool install 'mindroom[desktop]'
 ```
 
 macOS requires Screen Recording permission for observation and Accessibility permission for control.

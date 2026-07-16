@@ -433,7 +433,7 @@ zep = [
 zoom = [
   "requests",
 ]
-desktop-bridge = [
+desktop = [
     "pyautogui>=0.9.54",
 ]
 [project.scripts]

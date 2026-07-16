@@ -4087,7 +4087,7 @@ daytona = [
 desi-vocal = [
     { name = "requests" },
 ]
-desktop-bridge = [
+desktop = [
     { name = "pyautogui" },
 ]
 discord = [
@@ -4478,7 +4478,7 @@ requires-dist = [
     { name = "praw", marker = "extra == 'reddit'" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'" },
     { name = "py-trello", marker = "extra == 'trello'" },
-    { name = "pyautogui", marker = "extra == 'desktop-bridge'", specifier = ">=0.9.54" },
+    { name = "pyautogui", marker = "extra == 'desktop'", specifier = ">=0.9.54" },
     { name = "pycountry", marker = "extra == 'baidusearch'" },
     { name = "pydantic", specifier = ">=2" },
     { name = "pydantic", marker = "extra == 'config-manager'", specifier = ">=2" },
@@ -4539,7 +4539,7 @@ requires-dist = [
     { name = "youtube-transcript-api", marker = "extra == 'youtube'" },
     { name = "zep-cloud", marker = "extra == 'zep'", specifier = ">=3.3" },
 ]
-provides-extras = ["agent-vault-access", "agentql", "airflow", "apify", "approved-egress", "arxiv", "attachments", "aws-bedrock", "aws-lambda", "aws-ses", "baidusearch", "bitbucket", "brandfetch", "brightdata", "browser", "browserbase", "cal-com", "calculator", "cartesia", "claude-agent", "clickup", "coding", "compact-context", "composio", "config-manager", "confluence", "crawl4ai", "csv", "custom-api", "dalle", "daytona", "delegate", "desi-vocal", "desktop-bridge", "discord", "docker", "duckdb", "duckduckgo", "dynamic-tools", "dynamic-workflow", "e2b", "eleven-labs", "email", "exa", "external-trigger-manager", "fal", "file", "file-generation", "financial-datasets-api", "firecrawl", "gemini", "giphy", "github", "gmail", "google-bigquery", "google-calendar", "google-docs", "google-drive", "google-maps", "google-scholar", "google-sheets", "googlesearch", "groq", "hackernews", "homeassistant", "jina", "jira", "linear", "linkup", "lumalabs", "matrix-api", "matrix-calls", "matrix-e2ee", "matrix-message", "matrix-room", "matrix-voice-message", "mem0", "memory", "modelslabs", "moviepy-video-tools", "neo4j", "newspaper", "notion", "openai", "openbb", "openclaw-compat", "openweather", "oxylabs", "pandas", "postgres", "pubmed", "python", "reasoning", "reddit", "redshift", "replicate", "report-publishing", "resend", "scheduler", "scrapegraph", "searxng", "self-config", "sentence-transformers", "serpapi", "serper", "shell", "shopify", "slack", "sleep", "spider", "spotify", "sql", "subagents", "supabase", "tavily", "telegram", "thread-model", "thread-resolution", "thread-summary", "thread-tags", "todo", "todoist", "trafilatura", "trello", "twilio", "unsplash", "update-awareness", "visualization", "web-browser-tools", "webex", "website", "whatsapp", "wikipedia", "x", "yfinance", "youtube", "zendesk", "zep", "zoom"]
+provides-extras = ["agent-vault-access", "agentql", "airflow", "apify", "approved-egress", "arxiv", "attachments", "aws-bedrock", "aws-lambda", "aws-ses", "baidusearch", "bitbucket", "brandfetch", "brightdata", "browser", "browserbase", "cal-com", "calculator", "cartesia", "claude-agent", "clickup", "coding", "compact-context", "composio", "config-manager", "confluence", "crawl4ai", "csv", "custom-api", "dalle", "daytona", "delegate", "desi-vocal", "desktop", "discord", "docker", "duckdb", "duckduckgo", "dynamic-tools", "dynamic-workflow", "e2b", "eleven-labs", "email", "exa", "external-trigger-manager", "fal", "file", "file-generation", "financial-datasets-api", "firecrawl", "gemini", "giphy", "github", "gmail", "google-bigquery", "google-calendar", "google-docs", "google-drive", "google-maps", "google-scholar", "google-sheets", "googlesearch", "groq", "hackernews", "homeassistant", "jina", "jira", "linear", "linkup", "lumalabs", "matrix-api", "matrix-calls", "matrix-e2ee", "matrix-message", "matrix-room", "matrix-voice-message", "mem0", "memory", "modelslabs", "moviepy-video-tools", "neo4j", "newspaper", "notion", "openai", "openbb", "openclaw-compat", "openweather", "oxylabs", "pandas", "postgres", "pubmed", "python", "reasoning", "reddit", "redshift", "replicate", "report-publishing", "resend", "scheduler", "scrapegraph", "searxng", "self-config", "sentence-transformers", "serpapi", "serper", "shell", "shopify", "slack", "sleep", "spider", "spotify", "sql", "subagents", "supabase", "tavily", "telegram", "thread-model", "thread-resolution", "thread-summary", "thread-tags", "todo", "todoist", "trafilatura", "trello", "twilio", "unsplash", "update-awareness", "visualization", "web-browser-tools", "webex", "website", "whatsapp", "wikipedia", "x", "yfinance", "youtube", "zendesk", "zep", "zoom"]
 
 [package.metadata.requires-dev]
 dev = [
