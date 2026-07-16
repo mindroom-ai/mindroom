@@ -187,7 +187,7 @@ class TestConsolidatedConfigManager:
 
         assert entry_schema["properties"]["op"]["enum"] == ["add", "replace", "remove"]
         assert entry_schema["additionalProperties"] is False
-        assert entry_schema["properties"]["value"]["anyOf"][0] == {}
+        assert entry_schema["properties"]["value"] == {}
 
     def test_manage_config_patches_full_schema_atomically(self, tmp_path: Path) -> None:
         """One patch should update unrelated Config sections through shared validation."""
@@ -295,6 +295,34 @@ class TestConsolidatedConfigManager:
         result = _config_manager(config_path).manage_config(operation="patch", changes=[change])
 
         assert expected in result
+        assert "Changes were NOT applied" in result
+        assert config_path.read_bytes() == original
+
+    def test_manage_config_labels_patch_schema_errors_as_patch_errors(self, tmp_path: Path) -> None:
+        """A malformed request should not imply that the authored config is broken."""
+        config_path = _minimal_config_path(tmp_path)
+
+        result = _config_manager(config_path).manage_config(
+            operation="patch",
+            changes=[{"op": "move", "path": "/models/default"}],
+        )
+
+        assert "Invalid patch request" in result
+        assert "Invalid configuration" not in result
+        assert "Changes were NOT applied" in result
+
+    def test_manage_config_rejects_root_null_that_schema_normalizes_away(self, tmp_path: Path) -> None:
+        """A root null must fail rather than persist with removal semantics."""
+        config_path = _minimal_config_path(tmp_path)
+        original = config_path.read_bytes()
+
+        result = _config_manager(config_path).manage_config(
+            operation="patch",
+            changes=[{"op": "add", "path": "/tool_approval", "value": None}],
+        )
+
+        assert "cannot be set to null" in result
+        assert "schema normalizes null to unset/default" in result
         assert "Changes were NOT applied" in result
         assert config_path.read_bytes() == original
 

@@ -64,21 +64,42 @@ class _ConfigPatchChange(BaseModel):
 
     op: Literal["add", "replace", "remove"]
     path: str
-    value: JsonValue | None = None
+    value: JsonValue = None
 
 
 def _normalize_patch_changes(
     changes: Sequence[_ConfigPatchChange | dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Normalize tool-decoded models and direct-call dictionaries."""
-    return [
-        (
-            change.model_dump(exclude_unset=True)
-            if isinstance(change, _ConfigPatchChange)
-            else _ConfigPatchChange.model_validate(change).model_dump(exclude_unset=True)
+    normalized: list[dict[str, Any]] = []
+    for position, change in enumerate(changes):
+        try:
+            model = change if isinstance(change, _ConfigPatchChange) else _ConfigPatchChange.model_validate(change)
+        except ValidationError as exc:
+            details = "; ".join(
+                f"changes[{position}]{'.' if error['loc'] else ''}{'.'.join(map(str, error['loc']))}: {error['msg']}"
+                for error in exc.errors(include_input=False, include_url=False)
+            )
+            msg = f"Invalid patch request: {details}"
+            raise _ConfigPatchError(msg) from exc
+        normalized.append(model.model_dump(exclude_unset=True))
+    return normalized
+
+
+def _reject_normalized_root_nulls(changes: list[dict[str, Any]], validated_authored: dict[str, Any]) -> None:
+    """Reject root nulls that the Config schema silently normalizes away."""
+    missing = object()
+    for change in changes:
+        if change["op"] not in {"add", "replace"} or change.get("value", missing) is not None:
+            continue
+        tokens = _decode_json_pointer(change["path"])
+        if len(tokens) != 1 or validated_authored.get(tokens[0], missing) is None:
+            continue
+        msg = (
+            f"{change['path']!r} cannot be set to null because the schema normalizes null "
+            "to unset/default; use remove to unset it or provide a non-null value"
         )
-        for change in changes
-    ]
+        raise _ConfigPatchError(msg)
 
 
 def _decode_json_pointer(path: str) -> list[str]:
@@ -604,8 +625,10 @@ class ConfigManagerTools(Toolkit):
 
         try:
             authored = config.authored_model_dump()
-            candidate, changed_paths = _apply_config_patch(authored, _normalize_patch_changes(changes))
-            Config.validate_with_runtime(candidate, self.runtime_paths)
+            normalized_changes = _normalize_patch_changes(changes)
+            candidate, changed_paths = _apply_config_patch(authored, normalized_changes)
+            validated_config = Config.validate_with_runtime(candidate, self.runtime_paths)
+            _reject_normalized_root_nulls(normalized_changes, validated_config.authored_model_dump())
             if not dry_run:
                 validate_and_persist_config_payload(candidate, self.runtime_paths)
         except _ConfigPatchError as exc:

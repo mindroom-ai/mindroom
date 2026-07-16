@@ -68,6 +68,10 @@ subset of RFC 6902: `add`, `replace`, and `remove`. This avoids dotted-path
 ambiguity for Matrix IDs and arbitrary mapping keys, supports multiple atomic
 changes, and distinguishes removal from setting a value to `null`.
 
+When the `Config` schema itself normalizes a root-level `null` to an omitted/default
+section, the patch fails explicitly and directs the caller to `remove` or a non-null
+value rather than claiming that the null persisted.
+
 `add` supports the RFC 6902 `-` token to append to an array. `replace` requires
 an existing authored target and its error should suggest `add` when the field is
 currently unset.
