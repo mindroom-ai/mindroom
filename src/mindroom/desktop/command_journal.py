@@ -52,7 +52,7 @@ class DesktopCommandJournal:
         try:
             with path.open(encoding="utf-8") as journal_file:
                 if os.name != "nt" and stat.S_IMODE(os.fstat(journal_file.fileno()).st_mode) & 0o077:
-                    msg = f"Desktop command journal {path} must not be readable by group or other users."
+                    msg = f"Desktop command journal {path} must not grant permissions to group or other users."
                     raise DesktopCommandJournalError(msg)
                 raw = json.load(journal_file)
         except FileNotFoundError:
