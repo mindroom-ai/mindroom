@@ -6,7 +6,13 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, cast, runtime_checkable
 
-from mindroom.constants import SCHEDULED_HISTORY_LIMIT_KEY, SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
+from mindroom.constants import (
+    PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
+    PER_FIRE_THREAD_ROOT_KEY,
+    SCHEDULED_HISTORY_LIMIT_KEY,
+    SOURCE_KIND_KEY,
+    VISIBLE_ROUTER_VOICE_ECHO_KEY,
+)
 
 MESSAGE_SOURCE_KIND = "message"
 VOICE_SOURCE_KIND = "voice"
@@ -73,6 +79,7 @@ _PER_FIRE_THREAD_ROOT_SOURCE_KINDS: frozenset[str] = frozenset(
     {
         SCHEDULED_SOURCE_KIND,
         EXTERNAL_TRIGGER_SOURCE_KIND,
+        TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     },
 )
 
@@ -125,11 +132,6 @@ def source_kind_allows_trusted_original_sender(source_kind: str | None) -> bool:
     return source_kind in _TRUSTED_ORIGINAL_SENDER_SOURCE_KINDS
 
 
-def source_kind_owns_per_fire_thread_root(source_kind: str | None) -> bool:
-    """Return whether one automation fire roots its own per-fire thread and session."""
-    return source_kind in _PER_FIRE_THREAD_ROOT_SOURCE_KINDS
-
-
 def source_kind_allows_self_authored_ingress(source_kind: str | None) -> bool:
     """Return whether one self-authored Matrix event may enter dispatch."""
     return source_kind in _SELF_AUTHORED_INGRESS_SOURCE_KINDS
@@ -149,6 +151,17 @@ def source_kind_from_content(content: Mapping[str, Any]) -> str | None:
     """Return canonical source-kind metadata from Matrix content."""
     source_kind = content.get(SOURCE_KIND_KEY)
     return _source_kind_from_value(source_kind)
+
+
+def content_owns_per_fire_thread_root(content: Mapping[str, Any]) -> bool:
+    """Return whether trusted content explicitly owns a per-fire thread root."""
+    if content.get(PER_FIRE_THREAD_ROOT_KEY) is not True:
+        return False
+    source_kind = source_kind_from_content(content)
+    if source_kind in _PER_FIRE_THREAD_ROOT_SOURCE_KINDS:
+        return True
+    relayed_root_event_id = content.get(PER_FIRE_THREAD_ROOT_EVENT_ID_KEY)
+    return isinstance(relayed_root_event_id, str) and bool(relayed_root_event_id)
 
 
 def scheduled_history_limit_from_content(content: Mapping[str, Any]) -> int | None:

@@ -10,14 +10,19 @@ import nio
 from nio.responses import RoomGetEventError
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
-from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, HOOK_SOURCE_KEY, SKIP_MENTIONS_KEY
+from mindroom.constants import (
+    HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
+    HOOK_SOURCE_KEY,
+    PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
+    SKIP_MENTIONS_KEY,
+)
 from mindroom.dispatch_handoff import DispatchEvent, DispatchPayloadMetadata, PreparedTextEvent
 from mindroom.dispatch_source import (
     IMAGE_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
     VOICE_SOURCE_KIND,
+    content_owns_per_fire_thread_root,
     source_kind_from_content,
-    source_kind_owns_per_fire_thread_root,
 )
 from mindroom.dispatch_thread_context import (
     DispatchThreadContext,
@@ -327,9 +332,7 @@ class ConversationResolver:
     def _is_trusted_automation_fire(self, event_source: dict[str, Any]) -> bool:
         """Return whether one event is a per-fire automation delivery from a managed entity."""
         content = event_source.get("content")
-        if not isinstance(content, dict) or not source_kind_owns_per_fire_thread_root(
-            source_kind_from_content(content),
-        ):
+        if not isinstance(content, dict) or not content_owns_per_fire_thread_root(content):
             return False
         sender = event_source.get("sender")
         return isinstance(sender, str) and self._sender_is_managed_entity(sender)
@@ -356,11 +359,18 @@ class ConversationResolver:
             event_info = EventInfo.from_event(event_source)
             if event_info.can_be_thread_root and reply_to_event_id is not None:
                 thread_start_root_event_id = reply_to_event_id
-                # A scheduled or external-trigger fire that is its own root owns a
-                # per-fire thread and session even in room mode; otherwise every
-                # recurring fire in a room-mode room shares one room-level session
-                # and its history accumulates across fires.
-                automation_fire_root = self._is_trusted_automation_fire(event_source)
+            if self._is_trusted_automation_fire(event_source):
+                # Router handoffs are already threaded under the automation fire;
+                # their explicit root metadata survives room-mode relation flattening.
+                content = event_source.get("content")
+                relayed_root_event_id = (
+                    content.get(PER_FIRE_THREAD_ROOT_EVENT_ID_KEY) if isinstance(content, dict) else None
+                )
+                relayed_root_event_id = (
+                    relayed_root_event_id if isinstance(relayed_root_event_id, str) and relayed_root_event_id else None
+                )
+                thread_start_root_event_id = relayed_root_event_id or event_info.thread_id or thread_start_root_event_id
+                automation_fire_root = thread_start_root_event_id is not None
         return MessageTarget.resolve(
             room_id=room_id,
             thread_id=thread_id,

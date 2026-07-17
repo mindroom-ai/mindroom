@@ -6,7 +6,12 @@ import typing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.constants import ORIGINAL_SENDER_KEY, SCHEDULED_HISTORY_LIMIT_KEY, SOURCE_KIND_KEY
+from mindroom.constants import (
+    ORIGINAL_SENDER_KEY,
+    PER_FIRE_THREAD_ROOT_KEY,
+    SCHEDULED_HISTORY_LIMIT_KEY,
+    SOURCE_KIND_KEY,
+)
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.hooks import (
     EVENT_SCHEDULE_FIRED,
@@ -219,6 +224,8 @@ async def execute_scheduled_workflow(
             if workflow.created_by:
                 content[ORIGINAL_SENDER_KEY] = workflow.created_by
             content[SOURCE_KIND_KEY] = SCHEDULED_SOURCE_KIND
+            if workflow.new_thread:
+                content[PER_FIRE_THREAD_ROOT_KEY] = True
             if workflow.history_limit is not None:
                 content[SCHEDULED_HISTORY_LIMIT_KEY] = workflow.history_limit
             delivered = await send_and_track_message(client, workflow.room_id, content, conversation_cache)

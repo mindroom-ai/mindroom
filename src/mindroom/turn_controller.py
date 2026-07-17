@@ -24,6 +24,8 @@ from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
+    PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
+    PER_FIRE_THREAD_ROOT_KEY,
     ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
     STREAM_STATUS_COMPLETED,
@@ -57,6 +59,7 @@ from mindroom.dispatch_source import (
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
     ScheduledHistoryBudget,
+    content_owns_per_fire_thread_root,
     scheduled_history_limit_from_content,
     source_kind_allows_internal_relay_detection,
 )
@@ -1397,12 +1400,16 @@ class TurnController:
     def _router_handoff_extra_content(
         self,
         *,
+        event: DispatchEvent,
         extra_content: dict[str, Any] | None,
         suggested_entity: str | None,
         requester_user_id: str,
+        thread_event_id: str | None,
     ) -> dict[str, Any]:
         """Return router relay metadata normalized through the handoff origin policy."""
         routed_extra_content = dict(extra_content) if extra_content is not None else {}
+        routed_extra_content.pop(PER_FIRE_THREAD_ROOT_EVENT_ID_KEY, None)
+        routed_extra_content.pop(PER_FIRE_THREAD_ROOT_KEY, None)
         inherited_original_sender = routed_extra_content.get(ORIGINAL_SENDER_KEY)
         inherited_original_sender = inherited_original_sender if isinstance(inherited_original_sender, str) else None
         handoff_original_sender = original_sender_for_router_handoff(
@@ -1420,6 +1427,15 @@ class TurnController:
         if handoff_original_sender is not None:
             routed_extra_content[SOURCE_KIND_KEY] = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
             routed_extra_content[ORIGINAL_SENDER_KEY] = handoff_original_sender
+        event_content = event.source.get("content") if isinstance(event.source, dict) else None
+        if (
+            self.deps.ingress.sender_is_trusted_for_ingress_metadata(event.sender)
+            and isinstance(event_content, dict)
+            and content_owns_per_fire_thread_root(event_content)
+        ):
+            routed_extra_content[PER_FIRE_THREAD_ROOT_KEY] = True
+            if thread_event_id is not None:
+                routed_extra_content[PER_FIRE_THREAD_ROOT_EVENT_ID_KEY] = thread_event_id
         return routed_extra_content
 
     async def _execute_router_relay(
@@ -1496,9 +1512,11 @@ class TurnController:
         )
         thread_event_id = resolved_target.resolved_thread_id
         routed_extra_content = self._router_handoff_extra_content(
+            event=event,
             extra_content=extra_content,
             suggested_entity=suggested_entity,
             requester_user_id=requester_user_id,
+            thread_event_id=thread_event_id,
         )
         routed_media_events = list(media_events or [])
         if not routed_media_events and is_matrix_media_dispatch_event(event):

@@ -11,7 +11,12 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import ORIGINAL_SENDER_KEY, SCHEDULED_HISTORY_LIMIT_KEY, SOURCE_KIND_KEY
+from mindroom.constants import (
+    ORIGINAL_SENDER_KEY,
+    PER_FIRE_THREAD_ROOT_KEY,
+    SCHEDULED_HISTORY_LIMIT_KEY,
+    SOURCE_KIND_KEY,
+)
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import EVENT_SCHEDULE_FIRED, HookRegistry, ScheduleFiredContext, hook
@@ -190,6 +195,31 @@ async def test_fire_new_thread_task_posts_room_level_message(tmp_path: Path, sta
     content = mock_send.await_args.args[2]
     assert "⏰ [Automated Task]" not in content["body"]
     assert "m.relates_to" not in content
+    assert content[PER_FIRE_THREAD_ROOT_KEY] is True
+
+
+@pytest.mark.asyncio
+async def test_fire_room_level_task_without_new_thread_keeps_room_scope(tmp_path: Path) -> None:
+    """A room-level task without new_thread does not claim a per-fire root."""
+    config = _config(tmp_path)
+    workflow = _workflow("Check the shared queue", thread_id=None, new_thread=False)
+
+    with patch(
+        "mindroom.hooks.sender._send_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$delivered")),
+    ) as mock_send:
+        outcome = await execute_scheduled_workflow(
+            AsyncMock(),
+            workflow,
+            config,
+            runtime_paths_for(config),
+            _conversation_cache(),
+        )
+
+    assert outcome.delivered is True
+    content = mock_send.await_args.args[2]
+    assert "m.relates_to" not in content
+    assert PER_FIRE_THREAD_ROOT_KEY not in content
 
 
 @pytest.mark.asyncio
