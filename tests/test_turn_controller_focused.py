@@ -845,6 +845,35 @@ async def test_consecutive_scheduled_fires_resolve_distinct_sessions(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_concurrent_scheduled_fires_use_distinct_coalescing_threads(tmp_path: Path) -> None:
+    """Concurrent per-fire deliveries receive distinct keys before entering the gate."""
+    config = _single_agent_config(tmp_path, "room")
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    first_event = _scheduled_fire_event(
+        config,
+        extra_content={},
+        event_id="$fire-one:localhost",
+        new_thread=True,
+    )
+    second_event = _scheduled_fire_event(
+        config,
+        extra_content={},
+        event_id="$fire-two:localhost",
+        new_thread=True,
+    )
+
+    first_thread_id, second_thread_id = await asyncio.gather(
+        harness.controller.deps.resolver.coalescing_thread_id(room, first_event),
+        harness.controller.deps.resolver.coalescing_thread_id(room, second_event),
+    )
+
+    assert first_thread_id == first_event.event_id
+    assert second_thread_id == second_event.event_id
+    assert first_thread_id != second_thread_id
+
+
+@pytest.mark.asyncio
 async def test_scheduled_fire_into_persisted_thread_keeps_thread_session(config: Config, tmp_path: Path) -> None:
     """A scheduled fire delivered into its persisted thread keeps that thread's session."""
     persisted_thread_history = thread_history_result(

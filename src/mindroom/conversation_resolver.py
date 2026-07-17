@@ -337,6 +337,24 @@ class ConversationResolver:
         sender = event_source.get("sender")
         return isinstance(sender, str) and self._sender_is_managed_entity(sender)
 
+    def _trusted_automation_fire_root_event_id(
+        self,
+        event_source: dict[str, Any],
+        event_info: EventInfo,
+        *,
+        fallback_root_event_id: str | None,
+    ) -> str | None:
+        """Return the explicit root for one trusted per-fire automation delivery."""
+        if not self._is_trusted_automation_fire(event_source):
+            return None
+        content = event_source.get("content")
+        relayed_root_event_id = content.get(PER_FIRE_THREAD_ROOT_EVENT_ID_KEY) if isinstance(content, dict) else None
+        if isinstance(relayed_root_event_id, str) and relayed_root_event_id:
+            return relayed_root_event_id
+        if event_info.thread_id is not None:
+            return event_info.thread_id
+        return fallback_root_event_id if event_info.can_be_thread_root else None
+
     def build_message_target(
         self,
         *,
@@ -359,17 +377,13 @@ class ConversationResolver:
             event_info = EventInfo.from_event(event_source)
             if event_info.can_be_thread_root and reply_to_event_id is not None:
                 thread_start_root_event_id = reply_to_event_id
-            if self._is_trusted_automation_fire(event_source):
-                # Router handoffs are already threaded under the automation fire;
-                # their explicit root metadata survives room-mode relation flattening.
-                content = event_source.get("content")
-                relayed_root_event_id = (
-                    content.get(PER_FIRE_THREAD_ROOT_EVENT_ID_KEY) if isinstance(content, dict) else None
-                )
-                relayed_root_event_id = (
-                    relayed_root_event_id if isinstance(relayed_root_event_id, str) and relayed_root_event_id else None
-                )
-                thread_start_root_event_id = relayed_root_event_id or event_info.thread_id or thread_start_root_event_id
+            automation_root_event_id = self._trusted_automation_fire_root_event_id(
+                event_source,
+                event_info,
+                fallback_root_event_id=thread_start_root_event_id,
+            )
+            if automation_root_event_id is not None:
+                thread_start_root_event_id = automation_root_event_id
                 automation_fire_root = thread_start_root_event_id is not None
         return MessageTarget.resolve(
             room_id=room_id,
@@ -485,6 +499,7 @@ class ConversationResolver:
     ) -> str | None:
         """Return the coalescing thread scope for one inbound event."""
         config = self.deps.runtime.config
+        event_info = EventInfo.from_event(event.source)
         if (
             config.get_entity_thread_mode(
                 self.deps.agent_name,
@@ -493,11 +508,15 @@ class ConversationResolver:
             )
             == "room"
         ):
-            return None
+            return self._trusted_automation_fire_root_event_id(
+                event.source,
+                event_info,
+                fallback_root_event_id=event.event_id,
+            )
         try:
             resolution = await resolve_event_thread_membership(
                 room.room_id,
-                EventInfo.from_event(event.source),
+                event_info,
                 event_id=event.event_id,
                 access=self.thread_membership_access(
                     mode=ThreadReadMode.DISPATCH_SNAPSHOT,
