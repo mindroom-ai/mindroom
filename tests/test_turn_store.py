@@ -474,6 +474,38 @@ def test_redaction_sanitizes_coalesced_ledger_prompt_and_metadata(tmp_path: Path
     assert store.get_turn_record("$second") == sanitized
 
 
+@pytest.mark.parametrize("terminal", [False, True])
+def test_turn_merge_preserves_redacted_discovery_alias(tmp_path: Path, *, terminal: bool) -> None:
+    """Backfilled aliases must retain their tombstone and cleanup intent across turn merges."""
+    store = _store(tmp_path)
+    existing = TurnRecord.create(
+        ["$question"],
+        discovery_event_ids=["$selection"],
+        redacted_source_event_ids=["$selection"],
+        pending_redaction_cleanup_event_ids=["$selection"],
+        pending_redaction_room_id="!room:example.org",
+        completed=False,
+    )
+    store.record_pending_turn(existing)
+    incoming = TurnRecord.create(
+        ["$question"],
+        response_event_id="$response" if terminal else None,
+        completed=terminal,
+    )
+
+    if terminal:
+        store.record_turn(incoming)
+    else:
+        store.record_pending_turn(incoming)
+
+    merged = store.get_turn_record("$selection")
+    assert merged is not None
+    assert merged.discovery_event_ids == ("$selection",)
+    assert merged.redacted_source_event_ids == ("$selection",)
+    assert merged.pending_redaction_cleanup_event_ids == ("$selection",)
+    assert merged.pending_redaction_room_id == "!room:example.org"
+
+
 def test_missing_ledger_compacted_summary_recovers_from_source_scope(tmp_path: Path) -> None:
     """Source-derived context should clear an inactive summary after ledger expiry."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")

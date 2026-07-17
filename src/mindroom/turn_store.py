@@ -96,13 +96,13 @@ class TurnStore:
             )
             redacted_source_event_ids = tuple(
                 event_id
-                for event_id in turn_record.indexed_event_ids
+                for event_id in merged_record.indexed_event_ids
                 if event_id in turn_record.redacted_source_event_ids
                 or any(event_id in existing.redacted_source_event_ids for existing in compatible_existing_records)
             )
             pending_redaction_cleanup_event_ids = tuple(
                 event_id
-                for event_id in turn_record.indexed_event_ids
+                for event_id in merged_record.indexed_event_ids
                 if event_id in turn_record.pending_redaction_cleanup_event_ids
                 or any(
                     event_id in existing.pending_redaction_cleanup_event_ids for existing in compatible_existing_records
@@ -180,13 +180,13 @@ class TurnStore:
             )
             redacted_source_event_ids = tuple(
                 event_id
-                for event_id in pending_record.indexed_event_ids
+                for event_id in merged_record.indexed_event_ids
                 if event_id in pending_record.redacted_source_event_ids
                 or any(event_id in existing.redacted_source_event_ids for existing in compatible_existing_records)
             )
             pending_redaction_cleanup_event_ids = tuple(
                 event_id
-                for event_id in pending_record.indexed_event_ids
+                for event_id in merged_record.indexed_event_ids
                 if event_id in pending_record.pending_redaction_cleanup_event_ids
                 or any(
                     event_id in existing.pending_redaction_cleanup_event_ids for existing in compatible_existing_records

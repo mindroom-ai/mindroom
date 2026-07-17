@@ -99,7 +99,20 @@ async def test_missing_ledger_context_uses_source_requester_not_moderator() -> N
         requester_id=REQUESTER_ID,
         conversation_target=target,
     )
-    deps.turn_store.mark_source_redacted.side_effect = [tombstone, enriched]
+    ordering: list[str] = []
+
+    def mark_source_redacted(*_args: object, **kwargs: object) -> TurnRecord:
+        if kwargs.get("requester_user_id") is not None:
+            ordering.append("enriched-tombstone")
+            return enriched
+        ordering.append("tombstone")
+        return tombstone
+
+    async def apply_redaction(*_args: object) -> None:
+        ordering.append("cache")
+
+    deps.turn_store.mark_source_redacted.side_effect = mark_source_redacted
+    deps.conversation_cache.apply_redaction.side_effect = apply_redaction
     source_event = MagicMock(spec=nio.RoomMessageText)
     source_event.sender = REQUESTER_ID
     source_event.source = {
@@ -119,6 +132,7 @@ async def test_missing_ledger_context_uses_source_requester_not_moderator() -> N
 
     await cleanup.handle(room, _redaction_event())
 
+    assert ordering == ["tombstone", "enriched-tombstone", "cache"]
     deps.turn_store.mark_source_redacted.assert_any_call(
         EVENT_ID,
         room_id=ROOM_ID,
