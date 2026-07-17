@@ -600,10 +600,10 @@ def _scheduled_fire_event(
     )
 
 
-def _room_mode_config(tmp_path: Path) -> Config:
-    """Single room-mode agent bound to isolated runtime paths."""
+def _single_agent_config(tmp_path: Path, thread_mode: str) -> Config:
+    """One-agent config with the given thread mode, bound to isolated runtime paths."""
     return bind_runtime_paths(
-        Config(agents={"general": AgentConfig(display_name="General", thread_mode="room")}),
+        Config(agents={"general": AgentConfig(display_name="General", thread_mode=thread_mode)}),
         test_runtime_paths(tmp_path / "runtime"),
     )
 
@@ -709,10 +709,7 @@ async def test_user_message_cannot_spoof_scheduled_history_limit(config: Config,
 @pytest.mark.parametrize("thread_mode", ["thread", "room"])
 async def test_scheduled_fire_response_starts_per_fire_thread_session(tmp_path: Path, thread_mode: str) -> None:
     """A room-level scheduled fire roots a per-fire thread and session in both thread modes."""
-    config = bind_runtime_paths(
-        Config(agents={"general": AgentConfig(display_name="General", thread_mode=thread_mode)}),
-        test_runtime_paths(tmp_path / "runtime"),
-    )
+    config = _single_agent_config(tmp_path, thread_mode)
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")
     event = _scheduled_fire_event(config, extra_content={})
@@ -728,7 +725,7 @@ async def test_scheduled_fire_response_starts_per_fire_thread_session(tmp_path: 
 @pytest.mark.asyncio
 async def test_consecutive_scheduled_fires_resolve_distinct_sessions(tmp_path: Path) -> None:
     """Two fires of one recurring room-mode schedule never share a thread root or session."""
-    config = _room_mode_config(tmp_path)
+    config = _single_agent_config(tmp_path, "room")
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")
 
@@ -748,7 +745,6 @@ async def test_consecutive_scheduled_fires_resolve_distinct_sessions(tmp_path: P
 @pytest.mark.asyncio
 async def test_scheduled_fire_into_persisted_thread_keeps_thread_session(config: Config, tmp_path: Path) -> None:
     """A scheduled fire delivered into its persisted thread keeps that thread's session."""
-    fire_event_id = "$scheduled-in-thread:localhost"
     persisted_thread_history = thread_history_result(
         [
             make_visible_message(
@@ -762,21 +758,10 @@ async def test_scheduled_fire_into_persisted_thread_keeps_thread_session(config:
     )
     harness = _build_harness(config, tmp_path, thread_history=persisted_thread_history)
     room = _room_with_members(config, "general")
-    event = nio.RoomMessageText.from_dict(
-        {
-            "content": {
-                "body": "⏰ [Automated Task]\nPoll the queue",
-                "msgtype": "m.text",
-                constants.SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
-                constants.ORIGINAL_SENDER_KEY: _SENDER,
-                "m.relates_to": {"rel_type": "m.thread", "event_id": _THREAD_ROOT},
-            },
-            "event_id": fire_event_id,
-            "sender": _entity_user_id(config, "general"),
-            "origin_server_ts": 1_000_000,
-            "room_id": _ROOM_ID,
-            "type": "m.room.message",
-        },
+    event = _scheduled_fire_event(
+        config,
+        extra_content={"m.relates_to": {"rel_type": "m.thread", "event_id": _THREAD_ROOT}},
+        event_id="$scheduled-in-thread:localhost",
     )
 
     await harness.deliver(room, event)
@@ -790,7 +775,7 @@ async def test_scheduled_fire_into_persisted_thread_keeps_thread_session(config:
 @pytest.mark.asyncio
 async def test_room_mode_plain_user_message_keeps_room_session(tmp_path: Path) -> None:
     """Non-scheduled room-level messages keep the shared room session in room mode."""
-    config = _room_mode_config(tmp_path)
+    config = _single_agent_config(tmp_path, "room")
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")
     event = _text_event("hello there")
@@ -806,7 +791,7 @@ async def test_room_mode_plain_user_message_keeps_room_session(tmp_path: Path) -
 @pytest.mark.asyncio
 async def test_user_message_cannot_spoof_scheduled_thread_promotion(tmp_path: Path) -> None:
     """A scheduled marker on an untrusted user message must not force a per-fire thread."""
-    config = _room_mode_config(tmp_path)
+    config = _single_agent_config(tmp_path, "room")
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")
     event = nio.RoomMessageText.from_dict(

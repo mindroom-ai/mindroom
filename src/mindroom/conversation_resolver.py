@@ -266,9 +266,7 @@ class ConversationResolver:
             if isinstance(event, PreparedTextEvent)
             else None
         )
-        config = self.deps.runtime.config
-        registry = entity_identity_registry(config, self.deps.runtime_paths)
-        source_kind_sender_is_trusted = registry.current_entity_name_for_user_id(event.sender) is not None
+        source_kind_sender_is_trusted = self._sender_is_managed_entity(event.sender)
         if resolved_source_kind is None and isinstance(content, dict):
             source_kind_override = source_kind_from_content(content)
             if source_kind_override is not None and source_kind_sender_is_trusted:
@@ -321,16 +319,18 @@ class ConversationResolver:
             trusted_user_relay=trusted_human_relay,
         )
 
-    def _is_trusted_scheduled_root(self, event_source: dict[str, Any]) -> bool:
-        """Return whether one relation-free event is a scheduled fire from a managed entity."""
+    def _sender_is_managed_entity(self, user_id: str) -> bool:
+        """Return whether one Matrix user ID belongs to a managed entity."""
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        return registry.current_entity_name_for_user_id(user_id) is not None
+
+    def _is_trusted_scheduled_fire(self, event_source: dict[str, Any]) -> bool:
+        """Return whether one event is a scheduled fire from a managed entity."""
         content = event_source.get("content")
         if not isinstance(content, dict) or source_kind_from_content(content) != SCHEDULED_SOURCE_KIND:
             return False
         sender = event_source.get("sender")
-        if not isinstance(sender, str):
-            return False
-        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
-        return registry.current_entity_name_for_user_id(sender) is not None
+        return isinstance(sender, str) and self._sender_is_managed_entity(sender)
 
     def build_message_target(
         self,
@@ -358,7 +358,7 @@ class ConversationResolver:
                 # session even in room mode; otherwise every recurring fire in a
                 # room-mode room shares one room-level session and its history
                 # accumulates across fires.
-                scheduled_fire_root = self._is_trusted_scheduled_root(event_source)
+                scheduled_fire_root = self._is_trusted_scheduled_fire(event_source)
         return MessageTarget.resolve(
             room_id=room_id,
             thread_id=thread_id,
