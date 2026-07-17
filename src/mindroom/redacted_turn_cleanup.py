@@ -12,6 +12,7 @@ from mindroom.matrix.event_info import EventInfo
 
 if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
+    from mindroom.handled_turns import TurnRecord
     from mindroom.ingress_validation import IngressValidator
     from mindroom.matrix.conversation_cache import MatrixConversationCache
     from mindroom.message_target import MessageTarget
@@ -42,7 +43,39 @@ class RedactedTurnCleanup:
         turn_record = await asyncio.to_thread(
             self.deps.turn_store.mark_source_redacted,
             redacted_event_id,
+            room_id=room.room_id,
         )
+        await self._complete_cleanup(room=room, event=event, turn_record=turn_record)
+
+    async def resume_pending(self) -> None:
+        """Finish durable redactions interrupted before cache and history cleanup."""
+        pending_cleanups = await asyncio.to_thread(self.deps.turn_store.pending_redaction_cleanups)
+        for redacted_event_id, room_id in pending_cleanups:
+            turn_record = await asyncio.to_thread(self.deps.turn_store.get_turn_record, redacted_event_id)
+            if turn_record is None:
+                continue
+            room = nio.MatrixRoom(room_id=room_id, own_user_id="")
+            event = nio.RedactionEvent(
+                {
+                    "event_id": f"$redaction-recovery:{redacted_event_id.removeprefix('$')}",
+                    "sender": "",
+                    "origin_server_ts": 0,
+                    "type": "m.room.redaction",
+                    "content": {},
+                },
+                redacted_event_id,
+            )
+            await self._complete_cleanup(room=room, event=event, turn_record=turn_record)
+
+    async def _complete_cleanup(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        event: nio.RedactionEvent,
+        turn_record: TurnRecord | None,
+    ) -> None:
+        """Resolve one durable intent, sanitize cache state, and serialize history cleanup."""
+        redacted_event_id = event.redacts
         target = turn_record.conversation_target if turn_record is not None else None
         requester_user_id = turn_record.requester_id if turn_record is not None else None
         if target is None or requester_user_id is None:
@@ -55,6 +88,7 @@ class RedactedTurnCleanup:
             turn_record = await asyncio.to_thread(
                 self.deps.turn_store.mark_source_redacted,
                 redacted_event_id,
+                room_id=room.room_id,
                 requester_user_id=requester_user_id,
                 target_hint=target,
             )

@@ -77,6 +77,7 @@ class TurnRecord:
     discovery_event_ids: tuple[str, ...] = ()
     redacted_source_event_ids: tuple[str, ...] = ()
     pending_redaction_cleanup_event_ids: tuple[str, ...] = ()
+    pending_redaction_room_id: str | None = None
     anchor_event_id: str | None = None
     response_event_id: str | None = None
     completed: bool = True
@@ -111,6 +112,9 @@ class TurnRecord:
             for event_id in _normalize_source_event_ids(self.pending_redaction_cleanup_event_ids)
             if event_id in redacted_source_event_id_set
         )
+        pending_redaction_room_id = (
+            _normalize_string(self.pending_redaction_room_id) if pending_redaction_cleanup_event_ids else None
+        )
         anchor_event_id = _normalize_string(self.anchor_event_id)
         if anchor_event_id is None and source_event_ids:
             anchor_event_id = source_event_ids[-1]
@@ -122,6 +126,7 @@ class TurnRecord:
         object.__setattr__(self, "discovery_event_ids", discovery_event_ids)
         object.__setattr__(self, "redacted_source_event_ids", redacted_source_event_ids)
         object.__setattr__(self, "pending_redaction_cleanup_event_ids", pending_redaction_cleanup_event_ids)
+        object.__setattr__(self, "pending_redaction_room_id", pending_redaction_room_id)
         object.__setattr__(self, "anchor_event_id", anchor_event_id)
         object.__setattr__(self, "response_event_id", _normalize_string(self.response_event_id))
         object.__setattr__(self, "visible_echo_event_id", _normalize_string(self.visible_echo_event_id))
@@ -166,6 +171,7 @@ class TurnRecord:
         discovery_event_ids: Sequence[str] = (),
         redacted_source_event_ids: Sequence[str] = (),
         pending_redaction_cleanup_event_ids: Sequence[str] = (),
+        pending_redaction_room_id: str | None = None,
         anchor_event_id: str | None = None,
         response_event_id: str | None = None,
         completed: bool = True,
@@ -185,6 +191,7 @@ class TurnRecord:
             discovery_event_ids=tuple(discovery_event_ids),
             redacted_source_event_ids=tuple(redacted_source_event_ids),
             pending_redaction_cleanup_event_ids=tuple(pending_redaction_cleanup_event_ids),
+            pending_redaction_room_id=pending_redaction_room_id,
             anchor_event_id=anchor_event_id,
             response_event_id=response_event_id,
             completed=completed,
@@ -232,6 +239,7 @@ class TurnRecordCodec:
             "source_event_ids": list(record.source_event_ids),
             "redacted_source_event_ids": list(record.redacted_source_event_ids),
             "pending_redaction_cleanup_event_ids": list(record.pending_redaction_cleanup_event_ids),
+            "pending_redaction_room_id": record.pending_redaction_room_id,
             "response_event_id": record.response_event_id,
             "completed": record.completed,
             "timestamp": record.timestamp,
@@ -295,6 +303,7 @@ class TurnRecordCodec:
             pending_redaction_cleanup_event_ids=_normalize_source_event_ids(
                 raw_pending_redaction_cleanup_event_ids,
             ),
+            pending_redaction_room_id=_normalize_string(record.get("pending_redaction_room_id")),
             anchor_event_id=anchor_event_id,
             response_event_id=response_event_id,
             completed=completed,
@@ -463,7 +472,7 @@ class HandledTurnLedger:
         self._cleanup_old_events()
 
     def flush(self) -> None:
-        """Block until every scheduled best-effort persist attempt has completed."""
+        """Block until every scheduled persist completes, propagating write failures."""
         with self._state.lock:
             self._wait_for_pending_persists_locked()
 
@@ -551,6 +560,23 @@ class HandledTurnLedger:
                 ),
             )
 
+    def turn_records_for_conversation(
+        self,
+        *,
+        session_id: str,
+        requester_id: str,
+    ) -> tuple[TurnRecord, ...]:
+        """Return unique records that can identify persisted scopes for one conversation."""
+        with self._state.lock:
+            self._ensure_loaded_locked()
+            unique_records: dict[tuple[str, ...], TurnRecord] = {}
+            for record in self._responses.values():
+                target = record.conversation_target
+                if target is None or target.session_id != session_id or record.requester_id != requester_id:
+                    continue
+                unique_records[record.indexed_event_ids] = record
+            return tuple(unique_records.values())
+
     def _ensure_loaded_locked(self) -> None:
         """Load persisted records into shared memory once while the state lock is held."""
         if self._state.loaded:
@@ -587,6 +613,7 @@ class HandledTurnLedger:
                 agent=self.agent_name,
                 responses_file=str(self._responses_file),
             )
+            raise
 
     def _write_responses_file_locked(self, responses: dict[str, TurnRecord]) -> None:
         """Atomically write one versioned ledger payload while the file lock is held."""

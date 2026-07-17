@@ -75,6 +75,7 @@ async def test_handled_redaction_tombstones_before_cache_and_cleans_recorded_sco
     await cleanup.handle(room, _redaction_event())
 
     assert ordering == ["tombstone", "cache"]
+    deps.turn_store.mark_source_redacted.assert_called_once_with(EVENT_ID, room_id=ROOM_ID)
     deps.conversation_cache.get_event.assert_not_awaited()
     deps.turn_store.forget_redacted_turn.assert_called_once_with(
         room=room,
@@ -120,6 +121,7 @@ async def test_missing_ledger_context_uses_source_requester_not_moderator() -> N
 
     deps.turn_store.mark_source_redacted.assert_any_call(
         EVENT_ID,
+        room_id=ROOM_ID,
         requester_user_id=REQUESTER_ID,
         target_hint=target,
     )
@@ -145,3 +147,60 @@ async def test_unresolved_redaction_still_records_tombstone_before_cache_mutatio
     assert deps.turn_store.mark_source_redacted.call_count == 2
     deps.conversation_cache.apply_redaction.assert_awaited_once()
     deps.response_runner.run_serialized_state_mutation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_startup_resumes_contextless_cleanup_before_forgetting_intent() -> None:
+    """A crash after the locator write must recover context from the unsanitized durable cache."""
+    cleanup, deps = _cleanup()
+    target = MessageTarget.resolve(ROOM_ID, "$thread:example.org", EVENT_ID)
+    tombstone = TurnRecord.create(
+        [EVENT_ID],
+        redacted_source_event_ids=[EVENT_ID],
+        pending_redaction_cleanup_event_ids=[EVENT_ID],
+        pending_redaction_room_id=ROOM_ID,
+        completed=False,
+    )
+    enriched = TurnRecord.create(
+        [EVENT_ID],
+        redacted_source_event_ids=[EVENT_ID],
+        pending_redaction_cleanup_event_ids=[EVENT_ID],
+        pending_redaction_room_id=ROOM_ID,
+        requester_id=REQUESTER_ID,
+        conversation_target=target,
+        completed=False,
+    )
+    deps.turn_store.pending_redaction_cleanups.return_value = ((EVENT_ID, ROOM_ID),)
+    deps.turn_store.get_turn_record.return_value = tombstone
+    deps.turn_store.mark_source_redacted.return_value = enriched
+    source_event = MagicMock(spec=nio.RoomMessageText)
+    source_event.sender = REQUESTER_ID
+    source_event.source = {
+        "event_id": EVENT_ID,
+        "sender": REQUESTER_ID,
+        "content": {
+            "body": "secret",
+            "msgtype": "m.text",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread:example.org"},
+        },
+    }
+    response = MagicMock(spec=nio.RoomGetEventResponse)
+    response.event = source_event
+    deps.conversation_cache.get_event.return_value = response
+    deps.resolver.build_message_target.return_value = target
+    deps.ingress.requester_user_id.return_value = REQUESTER_ID
+
+    await cleanup.resume_pending()
+
+    deps.turn_store.mark_source_redacted.assert_called_once_with(
+        EVENT_ID,
+        room_id=ROOM_ID,
+        requester_user_id=REQUESTER_ID,
+        target_hint=target,
+    )
+    deps.conversation_cache.apply_redaction.assert_awaited_once()
+    applied_room_id, applied_event = deps.conversation_cache.apply_redaction.await_args.args
+    assert applied_room_id == ROOM_ID
+    assert isinstance(applied_event, nio.RedactionEvent)
+    assert applied_event.redacts == EVENT_ID
+    deps.turn_store.forget_redacted_turn.assert_called_once()

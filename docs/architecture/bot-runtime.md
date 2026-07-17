@@ -81,9 +81,10 @@ One runtime process owns each ledger's semantic ordering, while the advisory fil
 Unversioned pre-user ledger and run-metadata turn schemas are rejected instead of carrying migration scaffolding.
 
 Matrix source redactions are durably tombstoned before the advisory conversation cache is mutated.
-The same ledger row retains a cleanup intent until persisted replay state has been inspected successfully, so startup and the next response in that conversation can retry interrupted cleanup.
+The same ledger row retains the affected room and a cleanup intent until both advisory cache sanitization and persisted replay inspection have completed successfully.
+Startup resumes those intents before event callbacks are registered, while the next response in the conversation remains an under-lock fallback for interrupted history cleanup.
 Pending normal and interactive responses record their exact target and history scope before generation, and every source-backed response checks tombstones again under the lifecycle lock.
-Cleanup removes matching raw runs and later runs that consumed the source, clears summary-backed replay state, preserves compaction run tombstones, and sanitizes coalesced prompt metadata used by later edit regeneration.
+Cleanup removes the matching run and its causal suffix from every history scope recorded for the conversation, clears summary-backed replay state, preserves compaction run tombstones, and sanitizes coalesced prompt metadata used by later edit regeneration.
 Semantic memory backends such as Mem0 have a separate lifecycle and are not altered by persisted replay cleanup.
 
 ## Tool Dispatch Contracts

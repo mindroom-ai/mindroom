@@ -9,6 +9,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
@@ -477,6 +478,7 @@ def test_discovery_alias_redaction_and_cleanup_intent_persist(temp_dir: Path) ->
             discovery_event_ids=["$selection"],
             redacted_source_event_ids=["$selection"],
             pending_redaction_cleanup_event_ids=["$selection"],
+            pending_redaction_room_id="!room:example.com",
             completed=False,
         ),
     )
@@ -487,9 +489,20 @@ def test_discovery_alias_redaction_and_cleanup_intent_persist(temp_dir: Path) ->
     assert record is not None
     assert record.redacted_source_event_ids == ("$selection",)
     assert record.pending_redaction_cleanup_event_ids == ("$selection",)
+    assert record.pending_redaction_room_id == "!room:example.com"
     assert reloaded.pending_redaction_cleanup_event_ids() == ("$selection",)
     assert reloaded.has_responded("$selection") is True
     assert reloaded.has_responded("$question") is False
+
+
+def test_flush_propagates_persistence_failure(temp_dir: Path) -> None:
+    """Durability barriers must fail before callers mutate source cache state."""
+    tracker = HandledTurnLedger("test_persist_failure", base_path=temp_dir)
+
+    with patch.object(tracker, "_write_responses_file_locked", side_effect=OSError("disk full")):
+        tracker.record_handled_turn(TurnRecord.create(["$source"], completed=False))
+        with pytest.raises(OSError, match="disk full"):
+            tracker.flush()
 
 
 def test_persistence_round_trip_preserves_response_context(temp_dir: Path) -> None:

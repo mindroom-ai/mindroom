@@ -322,6 +322,31 @@ async def test_coalesced_sibling_edit_excludes_redacted_source_prompt(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_coalesced_edit_rechecks_every_snapshotted_source_under_lock(tmp_path: Path) -> None:
+    """A sibling redacted after prompt assembly must suppress the stale coalesced prompt."""
+    first_event_id = "$m1:example.org"
+    second_event_id = "$m2:example.org"
+    record = _turn_record(
+        source_event_ids=(first_event_id, second_event_id),
+        source_event_prompts={first_event_id: "first message", second_event_id: "second message"},
+    )
+    harness = _harness(tmp_path, turn_record=record)
+    harness.turn_store.prepare_response_for_redactions.return_value = True
+    event, event_info = _edit_event(original_event_id=second_event_id, new_body="edited second message")
+
+    await _handle_edit(harness, event, event_info)
+
+    request = harness.generate_response.await_args.args[0]
+    assert request.prepare_source_turn is not None
+    assert request.prepare_source_turn() is True
+    harness.turn_store.prepare_response_for_redactions.assert_called_once_with(
+        target=record.conversation_target,
+        requester_user_id=USER_ID,
+        source_event_ids=(first_event_id, second_event_id),
+    )
+
+
+@pytest.mark.asyncio
 async def test_edit_of_redacted_coalesced_source_is_ignored(tmp_path: Path) -> None:
     """A later edit cannot reintroduce a source already tombstoned by redaction."""
     first_event_id = "$m1:example.org"

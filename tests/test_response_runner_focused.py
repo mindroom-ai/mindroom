@@ -318,6 +318,49 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
 
 
 @pytest.mark.asyncio
+async def test_begin_locked_turn_settles_external_placeholder_when_source_is_redacted(tmp_path: Path) -> None:
+    """Suppression must not leave an interactive acknowledgement stuck on Processing."""
+    bot = _bot(tmp_path)
+    target = _target(thread_id="$thread", reply_to_event_id="$event")
+    envelope = _envelope(target, source_event_id="$event")
+    delivery_gateway = MagicMock(spec=DeliveryGateway)
+    delivery_gateway.deliver_cancelled_visible_note = AsyncMock(
+        return_value=FinalDeliveryOutcome(terminal_status="cancelled", event_id="$ack"),
+    )
+    runner = ResponseRunner(
+        replace(
+            unwrap_extracted_collaborator(bot._response_runner).deps,
+            delivery_gateway=delivery_gateway,
+        ),
+    )
+    request = ResponseRequest(
+        thread_history=[],
+        prompt="REDACTED_SECRET",
+        user_id="@user:localhost",
+        response_envelope=envelope,
+        existing_event_id="$ack",
+        existing_event_is_placeholder=True,
+        prepare_source_turn=lambda: True,
+    )
+
+    prepared_request = await runner._begin_locked_turn(
+        request,
+        resolved_target=target,
+        history_scope=runner.deps.state_writer.history_scope(),
+        execution_identity=runner.deps.tool_runtime.build_execution_identity(
+            target=target,
+            user_id=request.user_id,
+        ),
+    )
+
+    assert prepared_request is None
+    delivery_gateway.deliver_cancelled_visible_note.assert_awaited_once()
+    cancellation_request = delivery_gateway.deliver_cancelled_visible_note.await_args.args[0]
+    assert cancellation_request.event_id == "$ack"
+    assert cancellation_request.existing_event_is_placeholder is True
+
+
+@pytest.mark.asyncio
 async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_history(tmp_path: Path) -> None:
     """The early placeholder must not re-enter payload, memory, or summary inputs through refresh."""
     bot = _bot(tmp_path)
@@ -1030,6 +1073,45 @@ async def test_state_mutation_waits_for_response_and_runs_off_event_loop() -> No
 
     assert len(mutation_thread_ids) == 1
     assert mutation_thread_ids[0] != event_loop_thread_id
+
+
+@pytest.mark.asyncio
+async def test_cancelled_state_mutation_holds_lock_until_worker_finishes() -> None:
+    """Cancellation must not expose session state while its cleanup thread is still mutating it."""
+    runner = ResponseRunner(MagicMock())
+    target = _queued_envelope("$first").target
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+
+    def first_mutation() -> None:
+        first_started.set()
+        assert release_first.wait(timeout=2)
+
+    first_task = asyncio.create_task(
+        runner.run_serialized_state_mutation(target=target, mutation=first_mutation),
+    )
+    for _ in range(200):
+        if first_started.is_set():
+            break
+        await asyncio.sleep(0.01)
+    assert first_started.is_set()
+
+    first_task.cancel()
+    second_task = asyncio.create_task(
+        runner.run_serialized_state_mutation(
+            target=target,
+            mutation=lambda: second_started.set(),
+        ),
+    )
+    await asyncio.sleep(0.05)
+    assert second_started.is_set() is False
+
+    release_first.set()
+    with pytest.raises(asyncio.CancelledError):
+        await first_task
+    await asyncio.wait_for(second_task, timeout=2)
+    assert second_started.is_set() is True
 
 
 @pytest.mark.asyncio

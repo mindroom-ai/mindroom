@@ -1437,6 +1437,7 @@ class AgentBot:
             # Both load durable tracking state, and turn cleanup may inspect
             # session storage; keep that work off the event loop at startup.
             await asyncio.to_thread(self._turn_store.warm)
+            await self._redacted_turn_cleanup.resume_pending()
             await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)
             client = self.client
             assert client is not None

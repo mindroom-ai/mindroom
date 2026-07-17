@@ -540,6 +540,7 @@ class TestAgentBot(AgentBotTestBase):
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             )
+            await drain_coalescing(bot)
 
         mock_refresh_thread_history.assert_awaited_once()
         mock_build_payload.assert_awaited_once()
