@@ -367,7 +367,9 @@ def test_browser_metadata_documents_default_output_dir() -> None:
     output_dir_field = next(field for field in TOOL_METADATA["browser"].config_fields if field.name == "output_dir")
 
     assert output_dir_field.description is not None
+    assert "host target" in output_dir_field.description
     assert "storage path's browser/ directory" in output_dir_field.description
+    assert "desktop-browser" in output_dir_field.description
 
 
 def test_browser_private_network_metadata_defaults_to_false() -> None:

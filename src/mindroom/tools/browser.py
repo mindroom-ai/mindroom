@@ -39,8 +39,9 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             description=(
-                "Optional directory for browser screenshots, PDFs, and downloads. "
-                "Defaults to the active storage path's browser/ directory."
+                "Optional host target directory for browser screenshots, PDFs, and downloads. "
+                "Defaults to the active storage path's browser/ directory. "
+                "The desktop target instead uses its local storage path's desktop-browser/ directory."
             ),
         ),
         ConfigField(
