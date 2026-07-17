@@ -347,6 +347,7 @@ class TestThreadMutationHelpers:
         )
         event_cache.redact_event.assert_awaited_once_with("!room:localhost", "$target:localhost")
 
+
 class TestMatrixConversationCacheThreadReads:
     """Targeted read-path tests for invalidate-and-refetch behavior."""
 

@@ -302,6 +302,7 @@ class ResponseLifecycleCoordinator:
             )
             queued_signal.finish_response_turn()
 
+
 @dataclass(frozen=True)
 class _SessionStartedWatch:
     """Pre-computed session:started eligibility and emission arguments."""
