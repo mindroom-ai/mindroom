@@ -19,12 +19,14 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.attachments import AttachmentTools, send_context_attachments
+from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     get_tool_runtime_context,
     list_tool_runtime_attachment_ids,
+    register_tool_runtime_media_attachment,
     tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
@@ -616,6 +618,107 @@ async def test_send_context_attachments_sends_attachment_ids(tmp_path: Path) -> 
     assert result.attachment_event_ids == ["$file_evt"]
     assert result.resolved_attachment_ids == ["att_upload"]
     mocked.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_send_context_attachments_reuses_ephemeral_encrypted_media(tmp_path: Path) -> None:
+    """Turn-scoped media sends reuse MXC ciphertext and never create a local attachment file."""
+    context = _tool_context(tmp_path)
+    attachment = RuntimeEncryptedMediaAttachment(
+        attachment_id="att_screenshot",
+        filename="desktop-screenshot.png",
+        url="mxc://example.org/screenshot",
+        key="key",
+        iv="iv",
+        sha256="hash",
+        mime_type="image/png",
+        size=123,
+    )
+    register_tool_runtime_media_attachment(context, attachment)
+
+    with (
+        patch(
+            "mindroom.custom_tools.attachments.send_runtime_encrypted_media_message",
+            new=AsyncMock(return_value="$image_evt"),
+        ) as send_runtime_media,
+        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock()) as send_file,
+    ):
+        result, send_error = await send_context_attachments(
+            context,
+            attachment_ids=[attachment.attachment_id],
+            attachment_file_paths=[],
+        )
+
+    assert send_error is None
+    assert result is not None
+    assert result.attachment_event_ids == ["$image_evt"]
+    assert result.resolved_attachment_ids == [attachment.attachment_id]
+    send_runtime_media.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        attachment,
+        thread_id=context.resolved_thread_id,
+        latest_thread_event_id=context.resolved_thread_id,
+        conversation_cache=context.conversation_cache,
+    )
+    send_file.assert_not_awaited()
+    assert not (tmp_path / "attachments").exists()
+    assert not (tmp_path / "incoming_media").exists()
+
+    with tool_runtime_context(context):
+        payload = json.loads(await AttachmentTools().list_attachments(attachment.attachment_id))
+    assert payload["attachments"] == [attachment.tool_payload()]
+    assert payload["missing_attachment_ids"] == []
+
+
+@pytest.mark.parametrize("existing_registry", ["attachment_ids", "runtime_attachment_ids"])
+def test_runtime_media_registration_rejects_attachment_id_namespace_collisions(
+    tmp_path: Path,
+    existing_registry: str,
+) -> None:
+    """Runtime media must not shadow another attachment registry entry."""
+    attachment = RuntimeEncryptedMediaAttachment(
+        attachment_id="att_collision",
+        filename="desktop-screenshot.png",
+        url="mxc://example.org/screenshot",
+        key="key",
+        iv="iv",
+        sha256="hash",
+        mime_type="image/png",
+        size=123,
+    )
+    context = _tool_context(
+        tmp_path,
+        attachment_ids=(attachment.attachment_id,) if existing_registry == "attachment_ids" else (),
+    )
+    if existing_registry == "runtime_attachment_ids":
+        context.runtime_attachment_ids.append(attachment.attachment_id)
+
+    with pytest.raises(ValueError, match="Runtime attachment ID collision"):
+        register_tool_runtime_media_attachment(context, attachment)
+
+    assert context.runtime_media_attachments == {}
+
+
+def test_runtime_media_registration_is_idempotent(tmp_path: Path) -> None:
+    """The same runtime media handle may be registered repeatedly without duplication."""
+    context = _tool_context(tmp_path)
+    attachment = RuntimeEncryptedMediaAttachment(
+        attachment_id="att_screenshot",
+        filename="desktop-screenshot.png",
+        url="mxc://example.org/screenshot",
+        key="key",
+        iv="iv",
+        sha256="hash",
+        mime_type="image/png",
+        size=123,
+    )
+
+    register_tool_runtime_media_attachment(context, attachment)
+    register_tool_runtime_media_attachment(context, attachment)
+
+    assert context.runtime_media_attachments == {attachment.attachment_id: attachment}
+    assert context.runtime_attachment_ids == [attachment.attachment_id]
 
 
 @pytest.mark.asyncio

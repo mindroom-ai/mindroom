@@ -19,9 +19,17 @@ from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.constants import (
+    PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
+    PER_FIRE_THREAD_ROOT_KEY,
+    ROUTER_AGENT_NAME,
+    SOURCE_KIND_KEY,
+    resolve_runtime_paths,
+)
 from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import SendTextRequest
+from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.cache.event_cache import ThreadCacheState
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
@@ -1069,6 +1077,70 @@ class TestExtractMessageContextRoomMode:
         )
 
         assert target.reply_to_event_id == "$relation-event:localhost"
+        assert target.resolved_thread_id is None
+        assert target.session_id == create_session_id("!room:localhost", None)
+
+    def test_build_message_target_scheduled_root_starts_per_fire_thread_in_room_mode(
+        self,
+        room_mode_config: Config,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A trusted scheduled fire roots its own per-fire thread and session even in room mode."""
+        bot = _agent_bot(config=room_mode_config, agent_user=assistant_user, storage_path=tmp_path)
+        registry = entity_identity_registry(room_mode_config, runtime_paths_for(room_mode_config))
+
+        target = bot._conversation_resolver.build_message_target(
+            room_id="!room:localhost",
+            thread_id=None,
+            reply_to_event_id="$scheduled-fire:localhost",
+            event_source={
+                "content": {
+                    "body": "Kick off the weekly report",
+                    "msgtype": "m.text",
+                    SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
+                    PER_FIRE_THREAD_ROOT_KEY: True,
+                },
+                "event_id": "$scheduled-fire:localhost",
+                "sender": registry.current_id("assistant").full_id,
+                "origin_server_ts": 1234567890,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        assert target.resolved_thread_id == "$scheduled-fire:localhost"
+        assert target.session_id == create_session_id("!room:localhost", "$scheduled-fire:localhost")
+
+    def test_build_message_target_untrusted_scheduled_marker_keeps_room_mode(
+        self,
+        room_mode_config: Config,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A scheduled source-kind marker from a non-managed sender must not force a thread."""
+        bot = _agent_bot(config=room_mode_config, agent_user=assistant_user, storage_path=tmp_path)
+
+        target = bot._conversation_resolver.build_message_target(
+            room_id="!room:localhost",
+            thread_id=None,
+            reply_to_event_id="$spoofed-fire:localhost",
+            event_source={
+                "content": {
+                    "body": "pretend to be a scheduled fire",
+                    "msgtype": "m.text",
+                    SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
+                    PER_FIRE_THREAD_ROOT_KEY: True,
+                    PER_FIRE_THREAD_ROOT_EVENT_ID_KEY: "$spoofed-root:localhost",
+                },
+                "event_id": "$spoofed-fire:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+            },
+        )
+
         assert target.resolved_thread_id is None
         assert target.session_id == create_session_id("!room:localhost", None)
 

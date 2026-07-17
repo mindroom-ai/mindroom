@@ -10,7 +10,11 @@ import nio
 
 from mindroom.constants import ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY
 from mindroom.custom_tools.attachment_helpers import resolve_context_thread_id
-from mindroom.custom_tools.attachments import resolve_send_attachments, send_attachment_paths, send_context_attachments
+from mindroom.custom_tools.attachments import (
+    resolve_send_attachments,
+    send_context_attachments,
+    send_resolved_attachments,
+)
 from mindroom.interactive import (
     add_reaction_buttons,
     clear_interactive_question,
@@ -19,7 +23,7 @@ from mindroom.interactive import (
     should_create_interactive_question,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_delivery import edit_message_result, send_file_message, send_message_result
+from mindroom.matrix.client_delivery import edit_message_result, send_message_result
 from mindroom.matrix.client_thread_history import RoomThreadsPageError, get_room_threads_page
 from mindroom.matrix.client_visible_messages import extract_visible_message as extract_and_resolve_message
 from mindroom.matrix.client_visible_messages import (
@@ -211,7 +215,7 @@ class MatrixMessageOperations:
             )
             attachment_count = len(attachment_ids) + len(attachment_file_paths)
             if text is None and attachment_count > 1 and effective_thread_id is None and not room_mode:
-                attachment_paths, resolved_attachment_ids, newly_registered_attachment_ids, resolve_error = (
+                attachments, resolved_attachment_ids, newly_registered_attachment_ids, resolve_error = (
                     resolve_send_attachments(
                         context,
                         attachment_ids=attachment_ids,
@@ -230,22 +234,15 @@ class MatrixMessageOperations:
                         message=resolve_error,
                     )
 
-                first_attachment_path = attachment_paths[0]
-                remaining_attachment_paths = attachment_paths[1:]
-                latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
-                    room_id,
-                    effective_thread_id,
-                    caller_label="matrix_message_tool_attachment",
-                )
-                first_attachment_event_id = await send_file_message(
-                    context.client,
-                    room_id,
-                    first_attachment_path,
+                first_attachment = attachments[0]
+                remaining_attachments = attachments[1:]
+                first_attachment_event_ids, send_error = await send_resolved_attachments(
+                    context,
+                    room_id=room_id,
                     thread_id=effective_thread_id,
-                    latest_thread_event_id=latest_thread_event_id,
-                    conversation_cache=context.conversation_cache,
+                    attachments=[first_attachment],
                 )
-                if first_attachment_event_id is None:
+                if send_error is not None or not first_attachment_event_ids:
                     return self._result(
                         "error",
                         action=action,
@@ -256,16 +253,17 @@ class MatrixMessageOperations:
                         attachment_event_ids=[],
                         resolved_attachment_ids=resolved_attachment_ids,
                         newly_registered_attachment_ids=newly_registered_attachment_ids,
-                        message=f"Failed to send attachment: {first_attachment_path}",
+                        message=send_error or "Failed to send the first attachment.",
                     )
 
-                attachment_event_ids = [first_attachment_event_id]
+                first_attachment_event_id = first_attachment_event_ids[0]
+                attachment_event_ids = first_attachment_event_ids
                 attachment_thread_id = first_attachment_event_id
-                remaining_attachment_event_ids, send_error = await send_attachment_paths(
+                remaining_attachment_event_ids, send_error = await send_resolved_attachments(
                     context,
                     room_id=room_id,
                     thread_id=attachment_thread_id,
-                    attachment_paths=remaining_attachment_paths,
+                    attachments=remaining_attachments,
                 )
                 attachment_event_ids.extend(remaining_attachment_event_ids)
                 if send_error is not None:

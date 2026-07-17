@@ -5636,6 +5636,7 @@ class TestWorkerToolsOverride:
         "tool_name",
         [
             "callback_manager",
+            "desktop",
             "gmail",
             "google_calendar",
             "google_docs",
@@ -5650,7 +5651,7 @@ class TestWorkerToolsOverride:
         monkeypatch: pytest.MonkeyPatch,
         tool_name: str,
     ) -> None:
-        """Shared integrations marked local-only should stay in the primary runtime."""
+        """Tools marked local-only should stay in the primary runtime."""
         runtime_paths = _configure_proxy_runtime(
             monkeypatch,
             proxy_url="http://sandbox:8765",
@@ -5672,6 +5673,23 @@ class TestWorkerToolsOverride:
                 worker_tools_override=[tool_name],
             )
             is False
+        )
+
+    def test_browser_can_still_use_explicit_worker_routing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Host-browser isolation must not be disabled by the optional Matrix desktop target."""
+        runtime_paths = _configure_proxy_runtime(
+            monkeypatch,
+            proxy_url="http://sandbox:8765",
+            execution_mode="all",
+        )
+
+        assert (
+            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+                "browser",
+                runtime_paths=runtime_paths,
+                worker_tools_override=["browser"],
+            )
+            is True
         )
 
     def test_get_tool_by_name_keeps_homeassistant_local_even_when_listed(

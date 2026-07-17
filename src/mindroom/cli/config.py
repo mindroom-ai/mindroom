@@ -438,9 +438,9 @@ def config_init(
         help="Never prompt: keep an existing config.yaml unchanged, create anything missing, and use the default provider preset.",
     ),
 ) -> None:
-    """Create a starter config.yaml with example agents and models.
+    """Create a starter config.yaml with a personal agent and model.
 
-    Generates a YAML config with starter agents, one model, and sensible defaults.
+    Generates a YAML config with the Mind agent, one model, and sensible defaults.
     """
     target = _resolve_config_path(path)
     env_path = target.parent / ".env"
@@ -949,16 +949,6 @@ models:
 {model_block}{additional_models_block}{commented_model_options_block}
 
 agents:
-  assistant:
-    display_name: Assistant
-    role: A helpful general-purpose assistant
-    model: default
-    rooms:
-      - lobby
-    accept_invites: true
-    tools: []
-    instructions:
-      - Be helpful and conversational
   mind:
     display_name: Mind
     role: Personal assistant with persistent file-based identity and memory

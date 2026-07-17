@@ -443,7 +443,6 @@ class _PreparedResponseRuntime:
     session_id: str
     model_prompt: str
     tool_dispatch: ToolDispatchContext
-    room_mode: bool = False
 
 
 @dataclass
@@ -2037,17 +2036,16 @@ class ResponseRunner:
         finally:
             self.in_flight_response_count -= 1
 
-    async def _prepare_response_runtime_common(
+    @timed("prepare_response_runtime")
+    async def prepare_response_runtime(
         self,
         request: ResponseRequest,
-        *,
-        existing_event_uses_thread_id: bool,
-        room_mode: bool,
     ) -> _PreparedResponseRuntime:
+        """Resolve shared runtime context for one streaming or non-streaming response."""
         resolved_target = request.response_envelope.target
         response_thread_id = (
             request.thread_id
-            if request.existing_event_id and existing_event_uses_thread_id
+            if request.existing_event_id and not request.existing_event_is_placeholder
             else request.response_envelope.target.resolved_thread_id
         )
         resolved_target = resolved_target.with_thread_root(response_thread_id)
@@ -2083,39 +2081,6 @@ class ResponseRunner:
             session_id=session_id,
             model_prompt=resolved_model_prompt,
             tool_dispatch=tool_dispatch,
-            room_mode=room_mode,
-        )
-
-    @timed("prepare_non_streaming_runtime")
-    async def prepare_non_streaming_runtime(
-        self,
-        request: ResponseRequest,
-    ) -> _PreparedResponseRuntime:
-        """Resolve non-streaming runtime context."""
-        return await self._prepare_response_runtime_common(
-            request,
-            existing_event_uses_thread_id=not request.existing_event_is_placeholder,
-            room_mode=False,
-        )
-
-    @timed("prepare_streaming_runtime")
-    async def prepare_streaming_runtime(
-        self,
-        request: ResponseRequest,
-    ) -> _PreparedResponseRuntime:
-        """Resolve streaming runtime context."""
-        room_mode = (
-            self.deps.runtime.config.get_entity_thread_mode(
-                self.deps.agent_name,
-                self.deps.runtime_paths,
-                room_id=request.room_id,
-            )
-            == "room"
-        )
-        return await self._prepare_response_runtime_common(
-            request,
-            existing_event_uses_thread_id=not request.existing_event_is_placeholder,
-            room_mode=room_mode,
         )
 
     @timed("non_streaming_response_generation")
@@ -2339,7 +2304,7 @@ class ResponseRunner:
         """Process a message and send a response without streaming."""
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_start")
-        runtime = await self.prepare_non_streaming_runtime(request)
+        runtime = await self.prepare_response_runtime(request)
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
         request = self._request_with_locked_target(request, runtime.resolved_target)
@@ -2481,7 +2446,7 @@ class ResponseRunner:
         """Process a message and send a streamed response."""
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_start")
-        runtime = await self.prepare_streaming_runtime(request)
+        runtime = await self.prepare_response_runtime(request)
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
         request = self._request_with_locked_target(request, runtime.resolved_target)

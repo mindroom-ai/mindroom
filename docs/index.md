@@ -18,6 +18,7 @@ MindRoom is an AI agent orchestration system with Matrix integration. It provide
 - **Scheduled tasks** - Schedule agents to run at specific times with cron expressions or natural language
 - **Voice messages** - Speech-to-text transcription with intelligent command recognition
 - **Image analysis** - Pass images to vision-capable AI models for analysis
+- **Matrix desktop bridge** - Observe or locally lease control of a computer without opening inbound ports
 - **Authorization** - Fine-grained access control for users and rooms
 
 > [!TIP]
@@ -154,6 +155,7 @@ mindroom run
 | **Scheduling** | Schedule tasks with cron expressions or natural language |
 | **Voice** | Speech-to-text transcription for voice messages |
 | **Images** | Pass user-sent images to vision-capable AI models |
+| **Matrix Desktop Bridge** | Observe or locally lease control of a computer over pinned Matrix E2EE without opening inbound ports |
 | **File & Video Attachments** | Context-scoped file and video handling with attachment IDs |
 | **Cultures** | Shared evolving principles across groups of agents |
 | **Interactive Q&A** | Clickable multiple-choice questions via Matrix reactions |
@@ -187,6 +189,7 @@ mindroom run
 - [Dashboard](dashboard.md) - Web UI for configuration
 - [OpenAI-Compatible API](openai-api.md) - Use agents from any OpenAI-compatible client
 - [Tools](tools/index.md) - Available tool integrations
+- [Matrix Desktop Bridge](tools/desktop.md) - Securely observe or locally lease desktop and signed-in browser control over Matrix
 - [OpenClaw Import](openclaw.md) - Reuse OpenClaw workspace files in MindRoom
 - [MCP](mcp.md) - Configure native MCP client servers and expose their tools to agents
 - [Skills](skills.md) - OpenClaw-compatible skills system

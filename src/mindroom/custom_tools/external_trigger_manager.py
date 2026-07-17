@@ -133,8 +133,10 @@ class ExternalTriggerManagerTools(Toolkit):
             target_agent: Optional target agent/team; non-admin callers use the current one.
             target_room_id: Optional target room; non-admin callers use the current room.
             target_thread_id: Optional Matrix thread id for delivery; mutually exclusive with new_thread.
-            new_thread: Start a fresh thread instead of appending to target_thread_id; mutually exclusive
-                with target_thread_id.
+            new_thread: Start a fresh thread per delivery instead of appending to
+                target_thread_id; mutually exclusive with target_thread_id. Each
+                delivery posts a room-level root and the responding agent answers
+                in a new thread under it with a fresh session.
             allowed_kinds: Optional list of accepted payload kind values.
             replay_window_seconds: Optional replay window capped by config policy.
             max_body_bytes: Optional body cap capped by config policy.

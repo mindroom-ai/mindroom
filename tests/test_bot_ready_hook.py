@@ -294,8 +294,7 @@ async def test_sync_leave_section_forgets_invited_room_before_call_teardown(
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     room_id = "!agent-call:localhost"
     bot.client = client
-    bot._room_lifecycle.invited_rooms = {room_id}
-    bot._room_lifecycle.save_invited_rooms()
+    bot._room_lifecycle._update_invited_room(room_id, remember=True)
     call_manager = MagicMock()
 
     async def assert_invite_was_forgotten(**_kwargs: object) -> None:

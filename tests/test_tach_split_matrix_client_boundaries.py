@@ -325,8 +325,8 @@ def test_tach_rejects_forbidden_boundary_imports(tmp_path: Path) -> None:
     )
     attachments_path.write_text(
         original_text.replace(
-            "from mindroom.matrix.client_delivery import send_file_message\n",
-            f"{split_client_probe}from mindroom.matrix.client_delivery import send_file_message\n",
+            "from __future__ import annotations\n\n",
+            f"from __future__ import annotations\n\n{split_client_probe}",
         ),
     )
 

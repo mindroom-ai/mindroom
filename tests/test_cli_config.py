@@ -285,12 +285,13 @@ class TestConfigInit:
         assert config["models"]["default"]["provider"] == "openai"
         assert config["models"]["default"]["id"] == CONFIG_INIT_MODEL_PRESETS["openai"].id
 
-    def test_init_adds_mindroom_style_mind(self, tmp_path: Path) -> None:
-        """Starter config should include MindRoom-style Mind memory/context setup."""
+    def test_init_adds_only_mindroom_style_mind(self, tmp_path: Path) -> None:
+        """Starter config should include only the Mind agent in its personal room."""
         target = tmp_path / "config.yaml"
         result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
         assert result.exit_code == 0
         config = yaml.safe_load(target.read_text())
+        assert list(config["agents"]) == ["mind"]
         mind = config["agents"]["mind"]
 
         assert mind["display_name"] == "Mind"
