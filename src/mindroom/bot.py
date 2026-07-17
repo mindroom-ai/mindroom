@@ -1789,7 +1789,34 @@ class AgentBot:
     async def _on_redaction(self, room: nio.MatrixRoom, event: nio.Event) -> None:
         """Persist one redaction before updating advisory cache state."""
         assert isinstance(event, nio.RedactionEvent)
-        await self._redacted_turn_cleanup.handle(room, event)
+        try:
+            await self._redacted_turn_cleanup.handle(room, event)
+        except asyncio.CancelledError:
+            self._rewind_sync_after_redaction_failure()
+            raise
+        except Exception:
+            self._rewind_sync_after_redaction_failure()
+            raise
+
+    def _rewind_sync_after_redaction_failure(self) -> None:
+        """Replay a sync response whose critical redaction callback did not finish."""
+        client = self.client
+        if client is None:
+            return
+        checkpoint = self._sync_checkpoint
+        retry_token = checkpoint.token if checkpoint is not None else None
+        if retry_token is None:
+            try:
+                token_record = load_sync_token_record(self.storage_path, self.agent_name)
+            except OSError as exc:
+                self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
+            else:
+                retry_token = token_record.token if token_record is not None else None
+        cast("Any", client).next_batch = retry_token
+        self.logger.warning(
+            "matrix_redaction_callback_failed_replaying_sync",
+            has_retry_token=retry_token is not None,
+        )
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""

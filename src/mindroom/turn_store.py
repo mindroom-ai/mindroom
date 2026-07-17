@@ -174,6 +174,12 @@ class TurnStore:
                 merged_record,
                 compatible_existing_records,
             )
+            if _has_redaction_cleanup_context(merged_record):
+                pending_event_ids = set(pending_redaction_cleanup_event_ids)
+                pending_event_ids.update(redacted_source_event_ids)
+                pending_redaction_cleanup_event_ids = tuple(
+                    event_id for event_id in merged_record.indexed_event_ids if event_id in pending_event_ids
+                )
             return replace(
                 merged_record,
                 completed=False,
@@ -193,13 +199,16 @@ class TurnStore:
         def redacted_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
             existing_record = existing_records.get(source_event_id)
             authority = existing_record or TurnRecord.create([source_event_id], completed=False)
+            pending_redaction_cleanup_event_ids = authority.pending_redaction_cleanup_event_ids
+            if _has_redaction_cleanup_context(authority):
+                pending_redaction_cleanup_event_ids = (
+                    *pending_redaction_cleanup_event_ids,
+                    source_event_id,
+                )
             return replace(
                 authority,
                 redacted_source_event_ids=(*authority.redacted_source_event_ids, source_event_id),
-                pending_redaction_cleanup_event_ids=(
-                    *authority.pending_redaction_cleanup_event_ids,
-                    source_event_id,
-                ),
+                pending_redaction_cleanup_event_ids=pending_redaction_cleanup_event_ids,
                 timestamp=0.0,
             )
 
@@ -221,7 +230,6 @@ class TurnStore:
         self,
         *,
         target: MessageTarget,
-        requester_user_id: str,
         source_event_ids: tuple[str, ...],
     ) -> bool:
         """Finish owed cleanup in this locked conversation, then check current sources."""
@@ -230,16 +238,20 @@ class TurnStore:
             if turn_record is None:
                 continue
             recorded_target = turn_record.conversation_target
-            if recorded_target is not None and recorded_target.session_id != target.session_id:
-                continue
             recorded_requester_user_id = turn_record.requester_id
-            removed = self._remove_redacted_event_from_recorded_scopes(
-                target=recorded_target or target,
-                requester_user_id=recorded_requester_user_id or requester_user_id,
+            if not _has_redaction_cleanup_context(turn_record):
+                self._clear_pending_redaction_cleanup(redacted_event_id)
+                continue
+            assert recorded_target is not None
+            assert recorded_requester_user_id is not None
+            if recorded_target.session_id != target.session_id:
+                continue
+            self._remove_redacted_event_from_recorded_scopes(
+                target=recorded_target,
+                requester_user_id=recorded_requester_user_id,
                 redacted_event_id=redacted_event_id,
             )
-            if removed or (recorded_target is not None and recorded_requester_user_id is not None):
-                self._clear_pending_redaction_cleanup(redacted_event_id)
+            self._clear_pending_redaction_cleanup(redacted_event_id)
         return self.any_source_redacted(source_event_ids)
 
     def response_history_scope(
@@ -605,6 +617,15 @@ def _merged_redaction_markers(
         event_id for event_id in merged_record.indexed_event_ids if event_id in pending_cleanup_event_ids
     )
     return merged_redacted_event_ids, merged_pending_event_ids
+
+
+def _has_redaction_cleanup_context(turn_record: TurnRecord) -> bool:
+    """Return whether one record identifies the conversation to sanitize."""
+    return (
+        turn_record.requester_id is not None
+        and turn_record.history_scope is not None
+        and turn_record.conversation_target is not None
+    )
 
 
 def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) -> TurnRecord:

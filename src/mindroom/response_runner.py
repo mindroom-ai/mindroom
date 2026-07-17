@@ -120,6 +120,24 @@ if TYPE_CHECKING:
 type _MatrixEventId = str
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
+_StateMutationResult = TypeVar("_StateMutationResult")
+
+
+async def _run_locked_source_preparation(
+    operation: Callable[[], _StateMutationResult],
+) -> _StateMutationResult:
+    """Run blocking source preparation off-loop without releasing its lock early."""
+    worker_task = asyncio.create_task(asyncio.to_thread(operation))
+    try:
+        return await asyncio.shield(worker_task)
+    except asyncio.CancelledError:
+        while not worker_task.done():
+            try:
+                await asyncio.shield(worker_task)
+            except asyncio.CancelledError:
+                continue
+        worker_task.result()
+        raise
 
 
 def _merge_response_extra_content(
@@ -1047,7 +1065,9 @@ class ResponseRunner:
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = self._request_with_locked_target(request, resolved_target)
-        if request.prepare_source_turn is not None and request.prepare_source_turn():
+        if request.prepare_source_turn is not None and await _run_locked_source_preparation(
+            request.prepare_source_turn,
+        ):
             self.deps.logger.info(
                 "response_suppressed_for_redacted_source",
                 source_event_id=request.response_envelope.source_event_id,

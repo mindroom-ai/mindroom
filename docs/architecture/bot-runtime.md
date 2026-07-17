@@ -82,7 +82,7 @@ One runtime process owns each ledger's semantic ordering, while the advisory fil
 Unversioned pre-user ledger and run-metadata turn schemas are rejected instead of carrying migration scaffolding.
 
 Matrix source redactions are durably tombstoned before the advisory conversation cache is mutated.
-The same ledger row retains a cleanup intent until persisted replay has been inspected in the affected conversation.
+A tombstone becomes a retained cleanup intent once the entity has recorded the affected conversation context, while unrelated redactions remain bounded ledger barriers without storage probes.
 Pending normal and interactive responses record their exact target and history scope before generation, and every source-backed response checks tombstones again under the lifecycle lock.
 Before a response starts, `TurnStore` removes the matching run and its causal suffix from every history scope recorded for the conversation, clears summary-backed replay state, preserves compaction run tombstones, and sanitizes coalesced prompt metadata used by later edit regeneration.
 Redacted replay may remain in local session storage until that conversation's next response, but no model receives it.

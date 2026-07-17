@@ -311,9 +311,53 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
     )
 
     assert prepared_request is None
-    assert preparation_thread_ids == [response_thread_id]
+    assert len(preparation_thread_ids) == 1
+    assert preparation_thread_ids[0] != response_thread_id
     delivery_gateway.send_text.assert_not_awaited()
     request_preparer.prepare.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path: Path) -> None:
+    """Cancellation must not release the lifecycle lock while cleanup still mutates storage."""
+    bot = _bot(tmp_path)
+    target = _target(thread_id="$thread", reply_to_event_id="$event")
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    preparation_started = threading.Event()
+    allow_preparation_finish = threading.Event()
+
+    def prepare_source_turn() -> bool:
+        preparation_started.set()
+        allow_preparation_finish.wait(timeout=2)
+        return False
+
+    request = ResponseRequest(
+        thread_history=[],
+        prompt="prompt",
+        user_id="@user:localhost",
+        response_envelope=_envelope(target, source_event_id="$event"),
+        prepare_source_turn=prepare_source_turn,
+    )
+    preparation_task = asyncio.create_task(
+        runner._begin_locked_turn(
+            request,
+            resolved_target=target,
+            history_scope=runner.deps.state_writer.history_scope(),
+            execution_identity=runner.deps.tool_runtime.build_execution_identity(
+                target=target,
+                user_id=request.user_id,
+            ),
+        ),
+    )
+    await asyncio.wait_for(asyncio.to_thread(preparation_started.wait, 1), timeout=2)
+
+    preparation_task.cancel()
+    await asyncio.sleep(0)
+
+    assert preparation_task.done() is False
+    allow_preparation_finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await preparation_task
 
 
 @pytest.mark.asyncio

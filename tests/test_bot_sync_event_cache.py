@@ -1310,6 +1310,33 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         handle.assert_awaited_once_with(room, redaction_event)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure", [RuntimeError("persist failed"), RuntimeError("cache failed")])
+    async def test_live_redaction_failure_rewinds_to_last_certified_sync(
+        self,
+        bot: AgentBot,
+        failure: RuntimeError,
+    ) -> None:
+        """A critical redaction failure must replay the sync delta on the same client."""
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_agent:localhost")
+        redaction_event = MagicMock(spec=nio.RedactionEvent)
+        _save_certified_sync_token(bot, "s_before_redaction")
+        bot._sync_checkpoint = SyncCheckpoint("s_before_redaction")
+        bot.client.next_batch = "s_after_redaction"
+
+        with (
+            patch.object(
+                bot._redacted_turn_cleanup,
+                "handle",
+                AsyncMock(side_effect=failure),
+            ),
+            pytest.raises(RuntimeError, match=str(failure)),
+        ):
+            await bot._on_redaction(room, redaction_event)
+
+        assert bot.client.next_batch == "s_before_redaction"
+        assert _load_sync_token_value(bot.storage_path, bot.agent_name) == "s_before_redaction"
+
+    @pytest.mark.asyncio
     async def test_sync_timeline_redaction_does_not_resurrect_point_lookup_cache(self, bot: AgentBot) -> None:
         """A sync batch that contains both a message and its redaction must leave no cached lookup entry."""
         support = await _bind_owned_runtime_support(bot)

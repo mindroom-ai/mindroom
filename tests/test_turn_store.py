@@ -83,14 +83,19 @@ class _FakeAgentStorage:
         return None
 
 
-def _store_with_storage(tmp_path: Path, storage: _FakeAgentStorage) -> TurnStore:
+def _store_with_storage(
+    tmp_path: Path,
+    storage: _FakeAgentStorage,
+    *,
+    agent_name: str = "agent",
+) -> TurnStore:
     state_writer = MagicMock()
     state_writer.create_storage.return_value = storage
     state_writer.session_type_for_scope.return_value = SessionType.AGENT
     state_writer.history_scope.return_value = HistoryScope(kind="agent", scope_id="agent")
     return TurnStore(
         TurnStoreDeps(
-            agent_name="agent",
+            agent_name=agent_name,
             tracking_base_path=tmp_path,
             state_writer=state_writer,
             resolver=MagicMock(),
@@ -115,13 +120,11 @@ def _prepare_redaction(
     target: MessageTarget,
     *,
     redacted_event_id: str = "$user_msg",
-    requester_user_id: str = "@user:example.org",
 ) -> bool:
     """Tombstone one source and run the next response's locked cleanup gate."""
     store.mark_source_redacted(redacted_event_id)
     return store.prepare_response_for_redactions(
         target=target,
-        requester_user_id=requester_user_id,
         source_event_ids=("$later",),
     )
 
@@ -360,11 +363,7 @@ def test_prepare_redaction_cleans_later_owned_scopes_across_requesters(
         ),
     )
 
-    should_suppress = _prepare_redaction(
-        store,
-        target,
-        requester_user_id="@source:example.org",
-    )
+    should_suppress = _prepare_redaction(store, target)
 
     assert should_suppress is False
     assert team_session.runs == []
@@ -374,8 +373,8 @@ def test_prepare_redaction_cleans_later_owned_scopes_across_requesters(
     }
 
 
-def test_contextless_tombstone_cleans_current_conversation_on_next_response(tmp_path: Path) -> None:
-    """A tombstone without recorded context should use the next response's conversation."""
+def test_tombstone_gains_cleanup_context_when_the_source_turn_registers(tmp_path: Path) -> None:
+    """A redaction race should become cleanup work only when its source turn registers."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     session = AgentSession(
         session_id=target.session_id,
@@ -387,9 +386,10 @@ def test_contextless_tombstone_cleans_current_conversation_on_next_response(tmp_
     marked = store.mark_source_redacted("$user_msg")
     assert marked is not None
     assert marked.conversation_target is None
-    store.record_pending_turn(
+    assert marked.pending_redaction_cleanup_event_ids == ()
+    pending = store.record_pending_turn(
         TurnRecord.create(
-            ["$later"],
+            ["$user_msg"],
             completed=False,
             requester_id="@user:example.org",
             response_owner="agent",
@@ -397,14 +397,15 @@ def test_contextless_tombstone_cleans_current_conversation_on_next_response(tmp_
             conversation_target=target,
         ),
     )
+    assert pending is not None
+    assert pending.pending_redaction_cleanup_event_ids == ("$user_msg",)
 
     should_suppress = store.prepare_response_for_redactions(
         target=target,
-        requester_user_id="@user:example.org",
-        source_event_ids=("$later",),
+        source_event_ids=("$user_msg",),
     )
 
-    assert should_suppress is False
+    assert should_suppress is True
     assert session.runs == []
     cleaned = store.get_turn_record("$user_msg")
     assert cleaned is not None
@@ -540,7 +541,6 @@ def test_redaction_cleanup_clears_after_pending_coalesced_turn_splits(tmp_path: 
 
     should_suppress = store.prepare_response_for_redactions(
         target=target,
-        requester_user_id="@user:example.org",
         source_event_ids=("$second",),
     )
 
@@ -599,7 +599,6 @@ def test_active_ad_hoc_team_redaction_uses_pending_response_scope(tmp_path: Path
 
     should_suppress = store.prepare_response_for_redactions(
         target=target,
-        requester_user_id="@user:example.org",
         source_event_ids=("$later",),
     )
 
@@ -668,30 +667,63 @@ def test_turn_merge_preserves_redacted_discovery_alias(tmp_path: Path, *, termin
     assert merged.pending_redaction_cleanup_event_ids == ("$selection",)
 
 
-def test_contextless_tombstone_invalidates_current_conversation_summary(tmp_path: Path) -> None:
-    """The next response should clear a contextless source from compacted replay."""
+def test_multi_bot_redaction_only_queues_cleanup_for_the_bot_with_context(tmp_path: Path) -> None:
+    """Bots that never handled a source must not accumulate or probe cleanup work."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     scope = HistoryScope(kind="agent", scope_id="agent")
-    session = AgentSession(
+    owner_session = AgentSession(
         session_id=target.session_id,
-        agent_id="agent",
+        agent_id="owner",
         runs=[],
         summary=SessionSummary(summary="contains REDACTED_SECRET"),
     )
-    update_scope_seen_event_ids(session, scope, ["$user_msg"])
-    storage = _FakeAgentStorage(session)
-    store = _store_with_storage(tmp_path, storage)
-    store.mark_source_redacted("$user_msg")
+    update_scope_seen_event_ids(owner_session, scope, ["$user_msg"])
+    owner_store = _store_with_storage(
+        tmp_path,
+        _FakeAgentStorage(owner_session),
+        agent_name="owner",
+    )
+    owner_store.record_turn(
+        replace(
+            _owned_turn_record(target),
+            response_owner="owner",
+        ),
+    )
+    unrelated_session = AgentSession(
+        session_id=target.session_id,
+        agent_id="unrelated",
+        runs=[],
+        summary=SessionSummary(summary="unrelated"),
+    )
+    unrelated_store = _store_with_storage(
+        tmp_path,
+        _FakeAgentStorage(unrelated_session),
+        agent_name="unrelated",
+    )
 
-    should_suppress = store.prepare_response_for_redactions(
+    owner_marked = owner_store.mark_source_redacted("$user_msg")
+    unrelated_marked = unrelated_store.mark_source_redacted("$user_msg")
+
+    assert owner_marked is not None
+    assert owner_marked.pending_redaction_cleanup_event_ids == ("$user_msg",)
+    assert unrelated_marked is not None
+    assert unrelated_marked.redacted_source_event_ids == ("$user_msg",)
+    assert unrelated_marked.pending_redaction_cleanup_event_ids == ()
+
+    owner_store.prepare_response_for_redactions(
         target=target,
-        requester_user_id="@user:example.org",
+        source_event_ids=("$later",),
+    )
+    should_suppress = unrelated_store.prepare_response_for_redactions(
+        target=target,
         source_event_ids=("$later",),
     )
 
     assert should_suppress is False
-    assert session.summary is None
-    assert read_scope_seen_event_ids(session, scope) == set()
+    assert owner_session.summary is None
+    assert read_scope_seen_event_ids(owner_session, scope) == set()
+    assert unrelated_session.summary is not None
+    unrelated_store.deps.state_writer.create_storage.assert_not_called()
 
 
 def test_turn_store_constructs_private_ledger_from_tracking_base_path(tmp_path: Path) -> None:
@@ -760,7 +792,8 @@ def test_redaction_barrier_ignores_unrelated_prior_persist_failure(tmp_path: Pat
     _reset_handled_turn_ledger_runtime()
     durable_record = _store(tmp_path).get_turn_record("$redacted")
     assert durable_record is not None
-    assert durable_record.pending_redaction_cleanup_event_ids == ("$redacted",)
+    assert durable_record.redacted_source_event_ids == ("$redacted",)
+    assert durable_record.pending_redaction_cleanup_event_ids == ()
 
 
 def test_warm_preserves_lazy_cleanup_until_next_response(tmp_path: Path) -> None:
@@ -791,7 +824,6 @@ def test_warm_preserves_lazy_cleanup_until_next_response(tmp_path: Path) -> None
     assert (
         restarted_store.prepare_response_for_redactions(
             target=target,
-            requester_user_id="@user:example.org",
             source_event_ids=("$later",),
         )
         is False
@@ -817,7 +849,6 @@ def test_locked_response_preparation_sanitizes_and_acknowledges_history_cleanup(
 
     should_suppress = store.prepare_response_for_redactions(
         target=target,
-        requester_user_id="@user:example.org",
         source_event_ids=("$later",),
     )
 
