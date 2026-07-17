@@ -157,6 +157,7 @@ def _harness(tmp_path: Path, *, turn_record: TurnRecord | None) -> _Harness:
     turn_store = MagicMock(spec=TurnStore)
     turn_store.load_turn.return_value = turn_record
     turn_store.build_run_metadata.return_value = dict(RUN_METADATA)
+    turn_store.prepare_response_for_redactions.return_value = False
 
     ingress_hook_runner = MagicMock(spec=IngressHookRunner)
     ingress_hook_runner.emit_message_received_hooks.return_value = False
@@ -308,6 +309,13 @@ async def test_coalesced_sibling_edit_excludes_redacted_source_prompt(tmp_path: 
     request = harness.generate_response.await_args.args[0]
     assert request.prompt == coalesced_prompt(["edited second message"])
     assert "REDACTED_SECRET" not in request.prompt
+    assert request.prepare_source_turn is not None
+    assert request.prepare_source_turn() is False
+    harness.turn_store.prepare_response_for_redactions.assert_called_once_with(
+        target=record.conversation_target,
+        requester_user_id=USER_ID,
+        source_event_ids=(second_event_id,),
+    )
     handled_turn = harness.turn_store.build_run_metadata.call_args.args[0]
     assert handled_turn.redacted_source_event_ids == (first_event_id,)
     assert handled_turn.source_event_prompts == {second_event_id: "edited second message"}
@@ -329,6 +337,26 @@ async def test_edit_of_redacted_coalesced_source_is_ignored(tmp_path: Path) -> N
     await _handle_edit(harness, event, event_info)
 
     _assert_no_regeneration(harness)
+
+
+@pytest.mark.asyncio
+async def test_edit_request_rechecks_redaction_after_acquiring_response_lock(tmp_path: Path) -> None:
+    """A redaction that wins the lifecycle lock race must suppress stale regeneration."""
+    record = _turn_record()
+    harness = _harness(tmp_path, turn_record=record)
+    harness.turn_store.prepare_response_for_redactions.return_value = True
+    event, event_info = _edit_event()
+
+    await _handle_edit(harness, event, event_info)
+
+    request = harness.generate_response.await_args.args[0]
+    assert request.prepare_source_turn is not None
+    assert request.prepare_source_turn() is True
+    harness.turn_store.prepare_response_for_redactions.assert_called_once_with(
+        target=record.conversation_target,
+        requester_user_id=USER_ID,
+        source_event_ids=(ORIGINAL_EVENT_ID,),
+    )
 
 
 @pytest.mark.asyncio

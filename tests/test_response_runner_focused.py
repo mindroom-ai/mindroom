@@ -283,13 +283,20 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
             request_preparer=request_preparer,
         ),
     )
+    event_loop_thread_id = threading.get_ident()
+    preparation_thread_ids: list[int] = []
+
+    def prepare_source_turn() -> bool:
+        preparation_thread_ids.append(threading.get_ident())
+        return True
+
     request = ResponseRequest(
         thread_history=[],
         prompt="REDACTED_SECRET",
         user_id="@user:localhost",
         response_envelope=envelope,
         payload_preparation=_preparation(target, envelope),
-        source_turn_is_redacted=lambda: True,
+        prepare_source_turn=prepare_source_turn,
     )
 
     prepared_request = await runner._begin_locked_turn(
@@ -304,6 +311,8 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
     )
 
     assert prepared_request is None
+    assert preparation_thread_ids
+    assert preparation_thread_ids[0] != event_loop_thread_id
     delivery_gateway.send_text.assert_not_awaited()
     request_preparer.prepare.assert_not_awaited()
 

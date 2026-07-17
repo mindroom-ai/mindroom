@@ -1434,8 +1434,8 @@ class AgentBot:
             self._runtime_view.mark_runtime_started()
             self._restore_saved_sync_token()
             await self._set_avatar_if_available()
-            # Both load tracking state under advisory file locks; keep that
-            # off the event loop so per-bot startup never stalls dispatch.
+            # Both load durable tracking state, and turn cleanup may inspect
+            # session storage; keep that work off the event loop at startup.
             await asyncio.to_thread(self._turn_store.warm)
             await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)
             client = self.client

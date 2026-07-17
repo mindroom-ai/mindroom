@@ -129,6 +129,8 @@ class _RecordingResponseRunner:
         self.requests.append(request)
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
+        if request.prepare_source_turn is not None and request.prepare_source_turn():
+            return None
         if self.deferred_sync_restart_error is not None:
             assert self.response_event_id is not None
             assert request.on_sync_restart_cancelled is not None
@@ -148,6 +150,8 @@ class _RecordingResponseRunner:
         self.team_requests.append(request)
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
+        if request.prepare_source_turn is not None and request.prepare_source_turn():
+            return None
         return self.response_event_id
 
 
@@ -825,6 +829,52 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
 
     assert harness.turn_store.is_handled(selection.question_event_id) is True
     assert harness.turn_store.is_handled("$selection:localhost") is True
+
+
+@pytest.mark.asyncio
+async def test_interactive_selection_redacted_after_ack_is_suppressed_under_lock(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The selection must be pending before ack and recheck aliases at response startup."""
+    harness = _build_harness(config, tmp_path)
+    room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        question_text="Which option should I use?",
+        selection_key="1",
+        selected_label="Option 1",
+        selected_value="Option 1",
+        thread_id="$thread-root:localhost",
+    )
+    selection_event_id = "$selection:localhost"
+
+    async def send_ack_then_redact(request: SendTextRequest) -> str:
+        harness.gateway.sent.append(request)
+        marked = harness.turn_store.mark_source_redacted(selection_event_id)
+        assert marked is not None
+        assert marked.conversation_target is not None
+        assert marked.history_scope is not None
+        return "$ack:localhost"
+
+    monkeypatch.setattr(harness.gateway, "send_text", send_ack_then_redact)
+
+    await harness.controller.handle_interactive_selection(
+        room,
+        selection=selection,
+        user_id=_SENDER,
+        source_event_id=selection_event_id,
+    )
+
+    assert len(harness.runner.requests) == 1
+    record = harness.turn_store.get_turn_record(selection_event_id)
+    assert record is not None
+    assert record.redacted_source_event_ids == (selection_event_id,)
+    assert record.pending_redaction_cleanup_event_ids == ()
+    assert record.response_event_id is None
+    assert harness.turn_store.is_handled(selection_event_id) is True
+    assert harness.turn_store.is_handled(selection.question_event_id) is False
 
 
 @pytest.mark.asyncio

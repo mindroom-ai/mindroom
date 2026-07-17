@@ -137,6 +137,38 @@ def test_forget_redacted_turn_removes_persisted_run(tmp_path: Path) -> None:
     assert [run.metadata["matrix_event_id"] for run in session.runs or []] == ["$other"]
 
 
+def test_forget_redacted_turn_removes_runs_that_consumed_the_source(tmp_path: Path) -> None:
+    """A later run that consumed redacted context must not remain eligible for replay."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    session = AgentSession(
+        session_id=target.session_id,
+        agent_id="agent",
+        runs=[
+            RunOutput(
+                session_id=target.session_id,
+                metadata={
+                    constants.MATRIX_EVENT_ID_METADATA_KEY: "$later",
+                    constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$later"],
+                    constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$user_msg", "$later"],
+                },
+            ),
+        ],
+    )
+    storage = _FakeAgentStorage(session)
+    store = _store_with_storage(tmp_path, storage)
+    store.record_turn(_owned_turn_record(target))
+
+    removed = store.forget_redacted_turn(
+        room=MagicMock(room_id="!room:example.org"),
+        redacted_event_id="$user_msg",
+        requester_user_id="@user:example.org",
+        target_hint=target,
+    )
+
+    assert removed is True
+    assert session.runs == []
+
+
 def test_forget_redacted_turn_ignores_unhandled_event(tmp_path: Path) -> None:
     """Redactions of events without a handled turn must not touch session storage."""
     store = _store(tmp_path)
@@ -439,6 +471,59 @@ def test_redaction_tombstone_persists_across_ledger_reload(tmp_path: Path) -> No
     assert reloaded_record.source_event_prompts == {"$sibling": "keep"}
     assert reloaded_store.is_handled("$event") is True
     assert reloaded_store.is_handled("$sibling") is True
+
+
+def test_warm_retries_cleanup_left_pending_by_interrupted_redaction(tmp_path: Path) -> None:
+    """Startup must finish durable cleanup intent left behind by a cancelled callback."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    session = AgentSession(
+        session_id=target.session_id,
+        agent_id="agent",
+        runs=[RunOutput(session_id=target.session_id, metadata={"matrix_event_id": "$user_msg"})],
+    )
+    storage = _FakeAgentStorage(session)
+    store = _store_with_storage(tmp_path, storage)
+    store.record_turn(_owned_turn_record(target))
+    marked = store.mark_source_redacted("$user_msg")
+
+    assert marked is not None
+    assert marked.pending_redaction_cleanup_event_ids == ("$user_msg",)
+    _reset_handled_turn_ledger_runtime()
+    restarted_store = _store_with_storage(tmp_path, storage)
+
+    restarted_store.warm()
+
+    assert session.runs == []
+    restarted_record = restarted_store.get_turn_record("$user_msg")
+    assert restarted_record is not None
+    assert restarted_record.redacted_source_event_ids == ("$user_msg",)
+    assert restarted_record.pending_redaction_cleanup_event_ids == ()
+
+
+def test_locked_response_preparation_finishes_pending_cleanup_before_history_use(tmp_path: Path) -> None:
+    """The under-lock gate must reconcile owed cleanup before allowing a later turn."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    session = AgentSession(
+        session_id=target.session_id,
+        agent_id="agent",
+        runs=[RunOutput(session_id=target.session_id, metadata={"matrix_event_id": "$user_msg"})],
+    )
+    storage = _FakeAgentStorage(session)
+    store = _store_with_storage(tmp_path, storage)
+    store.record_turn(_owned_turn_record(target))
+    store.mark_source_redacted("$user_msg")
+
+    should_suppress = store.prepare_response_for_redactions(
+        target=target,
+        requester_user_id="@user:example.org",
+        source_event_ids=("$later",),
+    )
+
+    assert should_suppress is False
+    assert session.runs == []
+    record = store.get_turn_record("$user_msg")
+    assert record is not None
+    assert record.pending_redaction_cleanup_event_ids == ()
 
 
 def test_turn_record_codec_projects_and_parses_one_versioned_run_schema() -> None:

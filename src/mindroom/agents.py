@@ -943,8 +943,9 @@ def remove_run_by_event_id(
     event_id: str,
     *,
     session_type: SessionType = SessionType.AGENT,
+    include_seen_event_ids: bool = False,
 ) -> bool:
-    """Remove a run whose Matrix anchor or coalesced source membership matches.
+    """Remove a run whose Matrix source identity or consumed history matches.
 
     Returns True if a run was removed.
     """
@@ -966,6 +967,7 @@ def remove_run_by_event_id(
             continue
         raw_source_event_ids = run.metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
         raw_discovery_event_ids = run.metadata.get(constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY)
+        raw_seen_event_ids = run.metadata.get(constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY)
         source_event_ids = (
             [candidate for candidate in raw_source_event_ids if isinstance(candidate, str)]
             if isinstance(raw_source_event_ids, list)
@@ -976,8 +978,18 @@ def remove_run_by_event_id(
             if isinstance(raw_discovery_event_ids, list)
             else []
         )
+        seen_event_ids = (
+            [candidate for candidate in raw_seen_event_ids if isinstance(candidate, str)]
+            if include_seen_event_ids and isinstance(raw_seen_event_ids, list)
+            else []
+        )
         matches_event_id = run.metadata.get(constants.MATRIX_EVENT_ID_METADATA_KEY) == event_id
-        if matches_event_id or event_id in source_event_ids or event_id in discovery_event_ids:
+        if (
+            matches_event_id
+            or event_id in source_event_ids
+            or event_id in discovery_event_ids
+            or event_id in seen_event_ids
+        ):
             continue
         filtered_runs.append(run)
     session.runs = filtered_runs

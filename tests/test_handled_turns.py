@@ -468,6 +468,30 @@ def test_discovery_alias_persists_without_becoming_a_coalesced_source(temp_dir: 
     assert not question_record.is_coalesced
 
 
+def test_discovery_alias_redaction_and_cleanup_intent_persist(temp_dir: Path) -> None:
+    """Selection aliases must retain both their tombstone and owed cleanup across restart."""
+    tracker = HandledTurnLedger("test_discovery_redaction", base_path=temp_dir)
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$question"],
+            discovery_event_ids=["$selection"],
+            redacted_source_event_ids=["$selection"],
+            pending_redaction_cleanup_event_ids=["$selection"],
+            completed=False,
+        ),
+    )
+
+    reloaded = _reload_ledger("test_discovery_redaction", temp_dir)
+    record = reloaded.get_turn_record("$selection")
+
+    assert record is not None
+    assert record.redacted_source_event_ids == ("$selection",)
+    assert record.pending_redaction_cleanup_event_ids == ("$selection",)
+    assert reloaded.pending_redaction_cleanup_event_ids() == ("$selection",)
+    assert reloaded.has_responded("$selection") is True
+    assert reloaded.has_responded("$question") is False
+
+
 def test_persistence_round_trip_preserves_response_context(temp_dir: Path) -> None:
     """Reloaded ledgers should preserve response owner, history scope, and target metadata."""
     tracker1 = HandledTurnLedger("test_persist_context", base_path=temp_dir)

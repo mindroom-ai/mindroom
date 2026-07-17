@@ -275,7 +275,7 @@ class ResponseRequest:
     current_timestamp_ms: float | None = None
     current_prompt_is_structured: bool = False
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
-    source_turn_is_redacted: Callable[[], bool] | None = None
+    prepare_source_turn: Callable[[], bool] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None
     on_sync_restart_cancelled: Callable[[], None] | None = None
@@ -1064,7 +1064,7 @@ class ResponseRunner:
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = self._request_with_locked_target(request, resolved_target)
-        if request.source_turn_is_redacted is not None and request.source_turn_is_redacted():
+        if request.prepare_source_turn is not None and await asyncio.to_thread(request.prepare_source_turn):
             self.deps.logger.info(
                 "response_suppressed_for_redacted_source",
                 source_event_id=request.response_envelope.source_event_id,

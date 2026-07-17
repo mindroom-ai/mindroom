@@ -76,6 +76,7 @@ class TurnRecord:
     source_event_ids: tuple[str, ...]
     discovery_event_ids: tuple[str, ...] = ()
     redacted_source_event_ids: tuple[str, ...] = ()
+    pending_redaction_cleanup_event_ids: tuple[str, ...] = ()
     anchor_event_id: str | None = None
     response_event_id: str | None = None
     completed: bool = True
@@ -93,16 +94,22 @@ class TurnRecord:
         """Normalize every construction path into the canonical schema once."""
         source_event_ids = _normalize_source_event_ids(self.source_event_ids)
         source_event_id_set = set(source_event_ids)
-        redacted_source_event_ids = tuple(
-            event_id
-            for event_id in _normalize_source_event_ids(self.redacted_source_event_ids)
-            if event_id in source_event_id_set
-        )
-        redacted_source_event_id_set = set(redacted_source_event_ids)
         discovery_event_ids = tuple(
             event_id
             for event_id in _normalize_source_event_ids(self.discovery_event_ids)
             if event_id not in source_event_id_set
+        )
+        indexed_event_id_set = {*source_event_ids, *discovery_event_ids}
+        redacted_source_event_ids = tuple(
+            event_id
+            for event_id in _normalize_source_event_ids(self.redacted_source_event_ids)
+            if event_id in indexed_event_id_set
+        )
+        redacted_source_event_id_set = set(redacted_source_event_ids)
+        pending_redaction_cleanup_event_ids = tuple(
+            event_id
+            for event_id in _normalize_source_event_ids(self.pending_redaction_cleanup_event_ids)
+            if event_id in redacted_source_event_id_set
         )
         anchor_event_id = _normalize_string(self.anchor_event_id)
         if anchor_event_id is None and source_event_ids:
@@ -114,6 +121,7 @@ class TurnRecord:
         object.__setattr__(self, "source_event_ids", source_event_ids)
         object.__setattr__(self, "discovery_event_ids", discovery_event_ids)
         object.__setattr__(self, "redacted_source_event_ids", redacted_source_event_ids)
+        object.__setattr__(self, "pending_redaction_cleanup_event_ids", pending_redaction_cleanup_event_ids)
         object.__setattr__(self, "anchor_event_id", anchor_event_id)
         object.__setattr__(self, "response_event_id", _normalize_string(self.response_event_id))
         object.__setattr__(self, "visible_echo_event_id", _normalize_string(self.visible_echo_event_id))
@@ -157,6 +165,7 @@ class TurnRecord:
         *,
         discovery_event_ids: Sequence[str] = (),
         redacted_source_event_ids: Sequence[str] = (),
+        pending_redaction_cleanup_event_ids: Sequence[str] = (),
         anchor_event_id: str | None = None,
         response_event_id: str | None = None,
         completed: bool = True,
@@ -175,6 +184,7 @@ class TurnRecord:
             source_event_ids=tuple(source_event_ids),
             discovery_event_ids=tuple(discovery_event_ids),
             redacted_source_event_ids=tuple(redacted_source_event_ids),
+            pending_redaction_cleanup_event_ids=tuple(pending_redaction_cleanup_event_ids),
             anchor_event_id=anchor_event_id,
             response_event_id=response_event_id,
             completed=completed,
@@ -221,6 +231,7 @@ class TurnRecordCodec:
             "anchor_event_id": record.anchor_event_id,
             "source_event_ids": list(record.source_event_ids),
             "redacted_source_event_ids": list(record.redacted_source_event_ids),
+            "pending_redaction_cleanup_event_ids": list(record.pending_redaction_cleanup_event_ids),
             "response_event_id": record.response_event_id,
             "completed": record.completed,
             "timestamp": record.timestamp,
@@ -256,6 +267,7 @@ class TurnRecordCodec:
         raw_source_event_ids = record.get("source_event_ids")
         raw_discovery_event_ids = record.get("discovery_event_ids", [])
         raw_redacted_source_event_ids = record.get("redacted_source_event_ids", [])
+        raw_pending_redaction_cleanup_event_ids = record.get("pending_redaction_cleanup_event_ids", [])
         anchor_event_id = record.get("anchor_event_id")
         completed = record.get("completed")
         timestamp = record.get("timestamp")
@@ -264,6 +276,7 @@ class TurnRecordCodec:
             not isinstance(raw_source_event_ids, list)
             or not isinstance(raw_discovery_event_ids, list)
             or not isinstance(raw_redacted_source_event_ids, list)
+            or not isinstance(raw_pending_redaction_cleanup_event_ids, list)
             or not isinstance(anchor_event_id, str)
             or not anchor_event_id
             or not isinstance(completed, bool)
@@ -279,6 +292,9 @@ class TurnRecordCodec:
             source_event_ids,
             discovery_event_ids=_normalize_source_event_ids(raw_discovery_event_ids),
             redacted_source_event_ids=_normalize_source_event_ids(raw_redacted_source_event_ids),
+            pending_redaction_cleanup_event_ids=_normalize_source_event_ids(
+                raw_pending_redaction_cleanup_event_ids,
+            ),
             anchor_event_id=anchor_event_id,
             response_event_id=response_event_id,
             completed=completed,
@@ -522,6 +538,18 @@ class HandledTurnLedger:
         with self._state.lock:
             self._ensure_loaded_locked()
             return self._responses.get(source_event_id)
+
+    def pending_redaction_cleanup_event_ids(self) -> tuple[str, ...]:
+        """Return every durable redaction cleanup intent still awaiting completion."""
+        with self._state.lock:
+            self._ensure_loaded_locked()
+            return _normalize_source_event_ids(
+                tuple(
+                    event_id
+                    for record in self._responses.values()
+                    for event_id in record.pending_redaction_cleanup_event_ids
+                ),
+            )
 
     def _ensure_loaded_locked(self) -> None:
         """Load persisted records into shared memory once while the state lock is held."""
