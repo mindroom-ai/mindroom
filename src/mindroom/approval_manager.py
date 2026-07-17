@@ -62,7 +62,8 @@ _STARTUP_DISCARD_REASON = "Bot restarted before approval — original request wa
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
 # Complete-arguments payloads ride on the card event, so they must leave room for the preview,
 # card metadata, and E2EE base64 inflation inside the 64KB Matrix event limit.
-_MAX_FULL_ARGUMENTS_JSON_CHARS = 32_000
+_MAX_FULL_ARGUMENTS_JSON_BYTES = 32_000
+_MAX_FULL_ARGUMENT_STRING_CHARS = 32_000
 _MAX_FULL_ARGUMENT_COLLECTION_ITEMS = 500
 _MAX_FULL_ARGUMENT_DEPTH = 12
 _MAX_REMEMBERED_TERMINAL_CARD_IDS = 4096
@@ -178,15 +179,19 @@ def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str,
     return preview, True
 
 
+def _full_arguments_json_bytes(value: object) -> int:
+    return len(json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+
+
 def _build_full_event_arguments(arguments: dict[str, Any]) -> dict[str, Any] | None:
     """Return the complete redacted arguments when they fit on the card event, else None."""
-    # Gate on the raw size first: redaction cost grows superlinearly with input length,
-    # and a payload that is already over budget can never ship on the card.
-    if len(_compact_preview_text(arguments)) > _MAX_FULL_ARGUMENTS_JSON_CHARS:
+    # Cost pre-filter, not the authoritative bound: skip redaction work for payloads that are
+    # already over budget. The byte check on the sanitized result below is what gates shipping.
+    if len(_compact_preview_text(arguments).encode("utf-8")) > _MAX_FULL_ARGUMENTS_JSON_BYTES:
         return None
     sanitized = redact_sensitive_data(
         arguments,
-        max_string_length=_MAX_FULL_ARGUMENTS_JSON_CHARS,
+        max_string_length=_MAX_FULL_ARGUMENT_STRING_CHARS,
         max_collection_items=_MAX_FULL_ARGUMENT_COLLECTION_ITEMS,
         max_depth=_MAX_FULL_ARGUMENT_DEPTH,
     )
@@ -194,9 +199,23 @@ def _build_full_event_arguments(arguments: dict[str, Any]) -> dict[str, Any] | N
         return None
     if _contains_sanitizer_truncation(arguments, sanitized):
         return None
-    if _json_preview_length(sanitized) > _MAX_FULL_ARGUMENTS_JSON_CHARS:
+    if _full_arguments_json_bytes(sanitized) > _MAX_FULL_ARGUMENTS_JSON_BYTES:
         return None
     return sanitized
+
+
+async def _full_event_arguments_off_loop(arguments: dict[str, Any], *, tool_name: str) -> dict[str, Any] | None:
+    """Build complete card arguments off-loop; a failed build degrades to None, never raises.
+
+    Off-loop because redacting a card-sized payload can take whole seconds on adversarial
+    strings, and contained because full arguments are an enhancement — their failure must
+    yield a non-approvable card, not take down the approval flow.
+    """
+    try:
+        return await asyncio.to_thread(_build_full_event_arguments, arguments)
+    except Exception:
+        logger.warning("Failed to build full approval arguments", tool_name=tool_name, exc_info=True)
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,9 +331,8 @@ class _ApprovalManager:
         requested_at = _utcnow()
         expires_at = requested_at + timedelta(seconds=max(timeout_seconds, 0.0))
         event_arguments, arguments_truncated = _build_event_arguments_preview(arguments)
-        # Off-loop: redacting a card-sized payload can take whole seconds on adversarial strings.
         full_arguments = (
-            await asyncio.to_thread(_build_full_event_arguments, arguments) if arguments_truncated else None
+            await _full_event_arguments_off_loop(arguments, tool_name=tool_name) if arguments_truncated else None
         )
         content = self._pending_event_content(
             approval_id=approval_id,

@@ -910,6 +910,50 @@ async def test_request_approval_truncated_preview_with_full_arguments_can_be_app
 
 
 @pytest.mark.asyncio
+async def test_request_approval_survives_full_arguments_build_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed full-arguments build must degrade to a non-approvable card, not raise."""
+
+    def raise_unexpected(_arguments: dict[str, Any]) -> dict[str, Any] | None:
+        msg = "unexpected redaction failure"
+        raise ValueError(msg)
+
+    monkeypatch.setattr("mindroom.approval_manager._build_full_event_arguments", raise_unexpected)
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="write_file",
+            arguments={"content": "x" * 10_000},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender=sender)
+
+    card_content = sender.await_args.args[2]
+    assert card_content["arguments_truncated"] is True
+    assert card_content["approvable"] is False
+    assert "full_arguments" not in card_content
+
+    await _resolve_pending_approval(
+        store,
+        pending,
+        status="approved",
+    )
+    decision = await task
+
+    assert decision.status == "denied"
+    assert "too large to show in full" in (decision.reason or "")
+
+
+@pytest.mark.asyncio
 async def test_truncated_approval_action_sends_denial_notice(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
@@ -2336,6 +2380,12 @@ def test_full_event_arguments_redacts_secrets_without_bypassing_truncation_check
 
 def test_full_event_arguments_rejects_oversized_payload() -> None:
     assert _build_full_event_arguments({"content": "x" * 100_000}) is None
+
+
+def test_full_event_arguments_budgets_utf8_bytes_not_characters() -> None:
+    # 15k CJK chars stay under a character budget but encode to ~45KB, over the Matrix event limit.
+    assert _build_full_event_arguments({"content": "汉" * 15_000}) is None
+    assert _build_full_event_arguments({"content": "汉" * 8_000}) == {"content": "汉" * 8_000}
 
 
 def test_full_event_arguments_rejects_sanitizer_truncated_collections() -> None:
