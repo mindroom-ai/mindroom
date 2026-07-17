@@ -20,6 +20,9 @@ if TYPE_CHECKING:
     from mindroom.turn_store import TurnStore
 
 
+_DEFINITIVE_SOURCE_MISS_ERRCODES = frozenset({"M_NOT_FOUND", "M_FORBIDDEN"})
+
+
 @dataclass(frozen=True)
 class RedactedTurnCleanupDeps:
     """Collaborators needed to resolve and remove one redacted source turn."""
@@ -29,6 +32,15 @@ class RedactedTurnCleanupDeps:
     ingress: IngressValidator
     response_runner: ResponseRunner
     turn_store: TurnStore
+
+
+@dataclass(frozen=True)
+class _RecoveredSourceContext:
+    """Context recovered for one redacted source before cache mutation."""
+
+    target: MessageTarget | None
+    requester_user_id: str | None
+    source_definitively_gone: bool = False
 
 
 @dataclass
@@ -78,13 +90,17 @@ class RedactedTurnCleanup:
         redacted_event_id = event.redacts
         target = turn_record.conversation_target if turn_record is not None else None
         requester_user_id = turn_record.requester_id if turn_record is not None else None
+        source_definitively_gone = False
         if target is None or requester_user_id is None:
-            target, requester_user_id = await self._resolve_missing_context(
+            recovered = await self._resolve_missing_context(
                 room_id=room.room_id,
                 redacted_event_id=redacted_event_id,
                 target=target,
                 requester_user_id=requester_user_id,
             )
+            target = recovered.target
+            requester_user_id = recovered.requester_user_id
+            source_definitively_gone = recovered.source_definitively_gone
             turn_record = await asyncio.to_thread(
                 self.deps.turn_store.mark_source_redacted,
                 redacted_event_id,
@@ -98,6 +114,14 @@ class RedactedTurnCleanup:
 
         cache_sanitized = await self.deps.conversation_cache.apply_redaction(room.room_id, event)
         if target is None or requester_user_id is None:
+            # A definitively gone source can never regain context on retry, so
+            # once the cache is sanitized the durable intent has nothing left
+            # to clean and must not be retried at every startup forever.
+            if cache_sanitized and source_definitively_gone:
+                await asyncio.to_thread(
+                    self.deps.turn_store.clear_pending_redaction_cleanup,
+                    redacted_event_id,
+                )
             return
         await self.deps.response_runner.run_serialized_state_mutation(
             target=target,
@@ -117,7 +141,7 @@ class RedactedTurnCleanup:
         redacted_event_id: str,
         target: MessageTarget | None,
         requester_user_id: str | None,
-    ) -> tuple[MessageTarget | None, str | None]:
+    ) -> _RecoveredSourceContext:
         """Recover target and original requester before the cache applies redaction."""
         response = await self.deps.conversation_cache.get_event(
             room_id,
@@ -125,7 +149,14 @@ class RedactedTurnCleanup:
             persist_lookup_fill=False,
         )
         if not isinstance(response, nio.RoomGetEventResponse):
-            return target, requester_user_id
+            return _RecoveredSourceContext(
+                target=target,
+                requester_user_id=requester_user_id,
+                source_definitively_gone=(
+                    isinstance(response, nio.RoomGetEventError)
+                    and response.status_code in _DEFINITIVE_SOURCE_MISS_ERRCODES
+                ),
+            )
         source_event = response.event
         source = source_event.source if isinstance(source_event.source, dict) else None
         if target is None:
@@ -149,4 +180,4 @@ class RedactedTurnCleanup:
                 sender=source_event.sender,
                 source=source,
             )
-        return target, requester_user_id
+        return _RecoveredSourceContext(target=target, requester_user_id=requester_user_id)

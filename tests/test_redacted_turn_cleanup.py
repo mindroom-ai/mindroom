@@ -252,6 +252,54 @@ async def test_unresolved_redaction_still_records_tombstone_before_cache_mutatio
     assert deps.turn_store.mark_source_redacted.call_count == 2
     deps.conversation_cache.apply_redaction.assert_awaited_once()
     deps.response_runner.run_serialized_state_mutation.assert_not_awaited()
+    deps.turn_store.clear_pending_redaction_cleanup.assert_not_called()
+
+
+def _contextless_lookup_failure(cleanup_deps: RedactedTurnCleanupDeps, errcode: str | None) -> None:
+    tombstone = TurnRecord.create([EVENT_ID], redacted_source_event_ids=[EVENT_ID], completed=False)
+    cleanup_deps.turn_store.mark_source_redacted.return_value = tombstone
+    lookup_error = MagicMock(spec=nio.RoomGetEventError)
+    lookup_error.status_code = errcode
+    cleanup_deps.conversation_cache.get_event.return_value = lookup_error
+
+
+@pytest.mark.asyncio
+async def test_definitively_gone_source_clears_intent_after_cache_sanitization() -> None:
+    """An unfetchable source must not leave an immortal intent retried at every startup."""
+    cleanup, deps = _cleanup()
+    room = nio.MatrixRoom(room_id=ROOM_ID, own_user_id="@agent:example.org")
+    _contextless_lookup_failure(deps, "M_NOT_FOUND")
+
+    await cleanup.handle(room, _redaction_event())
+
+    deps.conversation_cache.apply_redaction.assert_awaited_once()
+    deps.response_runner.run_serialized_state_mutation.assert_not_awaited()
+    deps.turn_store.clear_pending_redaction_cleanup.assert_called_once_with(EVENT_ID)
+
+
+@pytest.mark.asyncio
+async def test_transient_source_lookup_failure_keeps_cleanup_intent() -> None:
+    """A retryable lookup failure must keep the durable intent for later recovery."""
+    cleanup, deps = _cleanup()
+    room = nio.MatrixRoom(room_id=ROOM_ID, own_user_id="@agent:example.org")
+    _contextless_lookup_failure(deps, "M_LIMIT_EXCEEDED")
+
+    await cleanup.handle(room, _redaction_event())
+
+    deps.turn_store.clear_pending_redaction_cleanup.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_definitively_gone_source_keeps_intent_when_cache_unsanitized() -> None:
+    """Cache sanitization failure must keep the intent even for an unfetchable source."""
+    cleanup, deps = _cleanup()
+    room = nio.MatrixRoom(room_id=ROOM_ID, own_user_id="@agent:example.org")
+    _contextless_lookup_failure(deps, "M_NOT_FOUND")
+    deps.conversation_cache.apply_redaction = AsyncMock(return_value=False)
+
+    await cleanup.handle(room, _redaction_event())
+
+    deps.turn_store.clear_pending_redaction_cleanup.assert_not_called()
 
 
 @pytest.mark.asyncio

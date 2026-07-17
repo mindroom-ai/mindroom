@@ -371,7 +371,7 @@ class TurnController:
 
     def _mark_source_events_responded(self, handled_turn: TurnRecord) -> None:
         """Mark one or more source events as handled by the same terminal outcome."""
-        self.deps.turn_store.record_turn(replace(handled_turn, completed=True, timestamp=0.0))
+        self.deps.turn_store.record_turn(handled_turn)
 
     def _has_newer_unresponded_in_thread(
         self,

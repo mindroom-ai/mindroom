@@ -410,7 +410,7 @@ class TurnStore:
             redacted_event_id=redacted_event_id,
         )
         if cache_sanitized:
-            self._clear_pending_redaction_cleanup(redacted_event_id)
+            self.clear_pending_redaction_cleanup(redacted_event_id)
         return removed
 
     def _retry_pending_redaction_cleanup(self, redacted_event_id: str) -> None:
@@ -476,8 +476,8 @@ class TurnStore:
             removed_any = removed or removed_any
         return removed_any
 
-    def _clear_pending_redaction_cleanup(self, redacted_event_id: str) -> None:
-        """Durably acknowledge cleanup only after session inspection succeeds."""
+    def clear_pending_redaction_cleanup(self, redacted_event_id: str) -> None:
+        """Durably acknowledge one cleanup intent that has nothing left to clean."""
 
         def cleared_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
             turn_record = existing_records[redacted_event_id]
