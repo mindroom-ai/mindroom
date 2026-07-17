@@ -347,6 +347,26 @@ class TestThreadMutationHelpers:
         )
         event_cache.redact_event.assert_awaited_once_with("!room:localhost", "$target:localhost")
 
+    @pytest.mark.asyncio
+    async def test_thread_redaction_mutation_disables_cache_when_deletion_raises(self) -> None:
+        """A failed cache deletion must prevent later reads from serving the redacted event."""
+        cache_ops, _logger, event_cache = _thread_mutation_cache_ops()
+        event_cache.redact_event = AsyncMock(side_effect=RuntimeError("cache write failed"))
+
+        result = await _apply_thread_redaction_mutation(
+            cache_ops=cache_ops,
+            room_id="!room:localhost",
+            redacted_event_id="$target:localhost",
+            impact=MutationThreadImpact.unknown(),
+            context="live",
+        )
+
+        assert result is False
+        event_cache.disable.assert_called_once_with(
+            "redaction_failed:!room:localhost:$target:localhost",
+        )
+        event_cache.mark_room_threads_stale.assert_not_awaited()
+
 
 class TestMatrixConversationCacheThreadReads:
     """Targeted read-path tests for invalidate-and-refetch behavior."""

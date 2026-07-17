@@ -163,7 +163,7 @@ class ThreadMutationCacheOps:
         failure_message: str,
         raise_on_failure: bool = False,
     ) -> bool:
-        """Apply one cached redaction fail-open and report whether a row changed."""
+        """Apply one cached redaction and disable the cache if deletion fails."""
         try:
             return bool(await self.runtime.event_cache.redact_event(room_id, redacted_event_id))
         except Exception as exc:
@@ -174,6 +174,7 @@ class ThreadMutationCacheOps:
                 redacted_event_id=redacted_event_id,
                 error=str(exc),
             )
+            self.runtime.event_cache.disable(f"redaction_failed:{room_id}:{redacted_event_id}")
             if raise_on_failure:
                 raise
             return False
