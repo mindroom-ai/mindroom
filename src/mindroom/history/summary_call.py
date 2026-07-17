@@ -380,7 +380,7 @@ async def generate_compaction_summary(
     if _summary_response_likely_truncated(
         response,
         output_token_limit=summary_output_limit,
-        include_reasoning_tokens=configured_model.provider == "Google",
+        include_reasoning_tokens=isinstance_of_loaded(configured_model, _GOOGLE_GEMINI_CLASS),
     ):
         msg = "compaction summary hit configured output token limit; refusing to persist incomplete summary"
         raise CompactionSummaryOutputLimitError(msg)

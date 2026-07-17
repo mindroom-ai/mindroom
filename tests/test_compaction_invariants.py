@@ -686,7 +686,7 @@ async def test_generate_compaction_summary_rejects_provider_output_cap_truncatio
 
 @pytest.mark.asyncio
 async def test_generate_compaction_summary_counts_gemini_thinking_toward_output_cap() -> None:
-    model = Gemini(id="gemini-3.5-flash", max_output_tokens=1_024)
+    model = Gemini(id="gemini-3.5-flash", provider="Custom Google", max_output_tokens=1_024)
     with (
         patch.object(
             model,
