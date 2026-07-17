@@ -273,7 +273,9 @@ For summary generation only, MindRoom first clamps `reserve_tokens` to at most h
 A cap that leaves no usable summary input budget makes compaction fail without deleting the raw history.
 Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place.
 Otherwise MindRoom leaves the session unchanged and relies on replay fitting for that reply.
-The budget uses a chars/4 approximation and reserves headroom for the current prompt and output.
+Replay planning and prompt headroom use a chars/4 approximation.
+Summary-input chunk sizing uses the summary model's tiktoken encoding when recognized and otherwise uses one token per UTF-8 byte as a conservative upper bound.
+Compaction logs record the selected summary-input estimation method and confidence without logging input contents.
 MindRoom does not mutate configured `num_history_runs` to fit the window.
 Instead, it computes the replay plan that actually fits the current call and uses compaction to keep future replay healthy.
 If needed, that replay plan can reduce raw replay, fall back to summary-only replay, or disable persisted replay entirely for the run.
