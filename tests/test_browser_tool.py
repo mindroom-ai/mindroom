@@ -501,6 +501,15 @@ async def test_browser_rejects_unsupported_or_unconfigured_targets() -> None:
     with pytest.raises(ValueError, match="node parameter is not supported in MindRoom"):
         await tool.browser(action="status", target="host", node="node-1")
 
+    configured_tool = BrowserTools(
+        TEST_RUNTIME_PATHS,
+        device_user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        device_ed25519="fingerprint",
+    )
+    with pytest.raises(ValueError, match="requires a live Matrix runtime context"):
+        await configured_tool.browser(action="status", target="desktop")
+
 
 @pytest.mark.asyncio
 async def test_desktop_target_routes_snapshot_and_control_over_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
