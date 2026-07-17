@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
@@ -1007,6 +1008,7 @@ async def test_completed_response_is_replayed_after_bridge_restart(tmp_path: Pat
     assert provider.calls == [("get_app_state", APP_ID), ("screenshot", (APP_ID, "state-1"))]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Unix permission bits are not authoritative on Windows")
 @pytest.mark.asyncio
 async def test_bridge_refuses_permissive_command_journal(tmp_path: Path, transport: AsyncMock) -> None:
     """A restored journal cannot expose retained desktop or browser response content."""
