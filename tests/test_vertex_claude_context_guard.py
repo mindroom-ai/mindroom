@@ -12,6 +12,7 @@ from agno.media import Image
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.models.vertexai.claude import Claude as VertexAIClaude
+from anthropic.lib.streaming import MessageStopEvent
 from anthropic.types import Message as AnthropicMessage
 from anthropic.types import Usage
 
@@ -87,7 +88,7 @@ def test_non_streaming_safeguard_refusal_raises_typed_error() -> None:
 def test_streaming_safeguard_refusal_raises_typed_error() -> None:
     """Streaming exposes stop_reason on the final message_stop payload."""
     model = _model()
-    message_stop = SimpleNamespace(message=_safeguard_refusal_message(), type="message_stop")
+    message_stop = MessageStopEvent(type="message_stop", message=_safeguard_refusal_message())
 
     with pytest.raises(ModelSafeguardRefusalError, match="stop_reason=refusal"):
         model._parse_provider_response_delta(message_stop)
@@ -106,6 +107,18 @@ def test_safeguard_refusal_survives_agno_error_translation() -> None:
         model._handle_api_error(error)
 
     assert raised.value is error
+
+
+def test_safeguard_refusal_is_not_retryable_by_agno() -> None:
+    """Agno's configured model retry loop must not repeat a refusal."""
+    model = _model()
+    error = ModelSafeguardRefusalError(
+        message="Vertex Claude returned stop_reason=refusal",
+        model_name=model.name,
+        model_id=model.id,
+    )
+
+    assert model._is_retryable_error(error) is False
 
 
 def test_estimate_request_input_tokens_uses_full_provider_payload() -> None:

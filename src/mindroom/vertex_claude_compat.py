@@ -6,10 +6,13 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
-from agno.exceptions import ContextWindowExceededError
+from agno.exceptions import ContextWindowExceededError, ModelProviderError
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.utils.models.claude import format_messages, format_tools_for_model
 from agno.utils.tokens import count_schema_tokens
+from anthropic.lib.streaming import MessageStopEvent, ParsedBetaMessageStopEvent
+from anthropic.types import Message as AnthropicMessage
+from anthropic.types.beta import BetaMessage
 
 from mindroom.claude_prompt_cache import (
     SERVER_TOOL_USE_BLOCK_TYPE,
@@ -448,9 +451,12 @@ class MindroomVertexAIClaude(VertexAIClaude):
 
     def _raise_for_safeguard_refusal(self, provider_response: object) -> None:
         """Raise when Vertex Claude explicitly ends generation for safeguards."""
-        message = getattr(provider_response, "message", None)
-        response_with_stop_reason = message if message is not None else provider_response
-        stop_reason = getattr(response_with_stop_reason, "stop_reason", None)
+        if isinstance(provider_response, (MessageStopEvent, ParsedBetaMessageStopEvent)):
+            stop_reason = provider_response.message.stop_reason
+        elif isinstance(provider_response, (AnthropicMessage, BetaMessage)):
+            stop_reason = provider_response.stop_reason
+        else:
+            return
         if stop_reason != _CLAUDE_SAFEGUARD_STOP_REASON:
             return
         logger.warning(
@@ -466,13 +472,13 @@ class MindroomVertexAIClaude(VertexAIClaude):
 
     def _parse_provider_response(
         self,
-        response: object,
+        response: AnthropicMessage | BetaMessage,
         response_format: dict[str, Any] | type[Any] | None = None,
         **kwargs: object,
     ) -> ModelResponse:
         """Preserve Vertex Claude's non-streaming safeguard signal."""
         self._raise_for_safeguard_refusal(response)
-        return super()._parse_provider_response(cast("Any", response), response_format=response_format, **kwargs)
+        return super()._parse_provider_response(response, response_format=response_format, **kwargs)
 
     def _parse_provider_response_delta(
         self,
@@ -488,6 +494,10 @@ class MindroomVertexAIClaude(VertexAIClaude):
         if isinstance(e, ModelSafeguardRefusalError):
             raise e
         return super()._handle_api_error(e)
+
+    def _is_retryable_error(self, error: ModelProviderError) -> bool:
+        """Exclude deterministic safeguard refusals from Agno's configured retries."""
+        return not isinstance(error, ModelSafeguardRefusalError) and super()._is_retryable_error(error)
 
     def _prepare_request_kwargs(
         self,
