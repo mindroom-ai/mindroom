@@ -384,7 +384,7 @@ class ConversationResolver:
             )
             if automation_root_event_id is not None:
                 thread_start_root_event_id = automation_root_event_id
-                automation_fire_root = thread_start_root_event_id is not None
+                automation_fire_root = True
         return MessageTarget.resolve(
             room_id=room_id,
             thread_id=thread_id,
