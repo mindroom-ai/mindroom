@@ -10,11 +10,12 @@ It enforces the call-side half of the compaction invariants
    at or above max_tokens is a 400 from Anthropic), SDK retries disabled, and
    one SDK timeout coordinated with the outer chunk budget
    (``MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS``) instead of two uncoordinated
-   constants in two modules. Summary output uses the loaded model's configured
-   output cap as the truncation guard. Gemini's guard includes its separately
-   reported thinking tokens because they consume the same output budget.
-   Unknown providers pass through untouched and rely on the outer chunk timeout
-   alone.
+   constants in two modules. Gemini and OpenAI Chat summary calls use one
+   candidate so provider usage describes the same response Agno retains.
+   Summary output uses the loaded model's configured output cap as the truncation
+   guard. Gemini's guard includes its separately reported thinking tokens because
+   they consume the same output budget. Unknown providers pass through untouched
+   and rely on the outer chunk timeout alone.
 
 4. Retry on provider failure is deterministic.
    ``SummaryRetryPolicy`` decides which error classes warrant a smaller retry
@@ -36,10 +37,11 @@ plugs in behind it without another cross-cutting diff.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
 from agno.models.message import Message
 from agno.session.summary import SessionSummary
@@ -48,16 +50,21 @@ from mindroom.cancellation import request_task_cancel
 from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
 from mindroom.logging_config import get_logger
+from mindroom.model_instance_checks import isinstance_of_loaded
 from mindroom.timing import timed
 from mindroom.token_budget import configured_model_max_output_tokens
 
 if TYPE_CHECKING:
     from agno.models.base import Model
+    from agno.models.google import Gemini
+    from agno.models.openai import OpenAIChat
     from agno.models.response import ModelResponse
 
 logger = get_logger(__name__)
 
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
+_GOOGLE_GEMINI_CLASS = ("agno.models.google.gemini", "Gemini")
+_OPENAI_CHAT_CLASS = ("agno.models.openai.chat", "OpenAIChat")
 
 _RETRYABLE_PROVIDER_ERROR_FRAGMENTS = (
     "timed out",
@@ -82,6 +89,13 @@ class CompactionSummaryOutputLimitError(RuntimeError):
 
 class _CompactionSummaryEmptyResultError(RuntimeError):
     """Raised when the summary model returns a success response with no text."""
+
+
+@runtime_checkable
+class _ConfigWithCandidateCount(Protocol):
+    """Typed surface for Gemini SDK request config objects."""
+
+    candidate_count: int | None
 
 
 @dataclass(frozen=True)
@@ -123,6 +137,65 @@ class SummaryRetryPolicy:
 DEFAULT_SUMMARY_RETRY_POLICY = SummaryRetryPolicy()
 
 
+def _multiple_candidates_requested(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 1
+
+
+def _force_single_gemini_candidate(model: Gemini) -> None:
+    effective_config = model.get_request_params().get("config")
+    if isinstance(effective_config, Mapping):
+        candidate_count = effective_config.get("candidate_count")
+    elif isinstance(effective_config, _ConfigWithCandidateCount):
+        candidate_count = effective_config.candidate_count
+    else:
+        return
+    if not _multiple_candidates_requested(candidate_count):
+        return
+
+    request_params = dict(model.request_params or {})
+    if "config" not in request_params:
+        generative_model_kwargs = dict(model.generative_model_kwargs or {})
+        generative_model_kwargs["candidate_count"] = 1
+        model.generative_model_kwargs = generative_model_kwargs
+        return
+
+    request_config = request_params["config"]
+    if isinstance(request_config, Mapping):
+        adjusted_config = dict(request_config)
+        adjusted_config["candidate_count"] = 1
+        request_params["config"] = adjusted_config
+        model.request_params = request_params
+    elif isinstance(request_config, _ConfigWithCandidateCount):
+        request_config.candidate_count = 1
+
+
+def _force_single_openai_chat_choice(model: OpenAIChat) -> None:
+    effective_request = model.get_request_params()
+    request_params = dict(model.request_params or {})
+    changed = False
+    if _multiple_candidates_requested(effective_request.get("n")):
+        request_params["n"] = 1
+        changed = True
+
+    extra_body = effective_request.get("extra_body")
+    if isinstance(extra_body, Mapping) and _multiple_candidates_requested(extra_body.get("n")):
+        adjusted_extra_body = dict(extra_body)
+        adjusted_extra_body["n"] = 1
+        request_params["extra_body"] = adjusted_extra_body
+        changed = True
+
+    if changed:
+        model.request_params = request_params
+
+
+def _force_single_summary_candidate(model: Model) -> None:
+    """Keep provider usage and Agno's retained first response on the same scope."""
+    if isinstance_of_loaded(model, _GOOGLE_GEMINI_CLASS):
+        _force_single_gemini_candidate(cast("Gemini", model))
+    elif isinstance_of_loaded(model, _OPENAI_CHAT_CLASS):
+        _force_single_openai_chat_choice(cast("OpenAIChat", model))
+
+
 def configure_summary_model(model: Model, *, timeout_seconds: float | None = None) -> Model:
     """Apply all compaction-specific provider tuning to one loaded model (invariant 3).
 
@@ -131,12 +204,13 @@ def configure_summary_model(model: Model, *, timeout_seconds: float | None = Non
     Mutating the instance is safe: ``get_model_instance`` builds a fresh model per
     call and compaction loads its own instance per run.
     """
+    _force_single_summary_candidate(model)
     claude_model = as_anthropic_claude(model)
     if claude_model is None:
         logger.debug(
-            "Compaction summary model tuning skipped",
+            "Compaction Claude-specific model tuning skipped",
             model_type=type(model).__name__,
-            reason="provider_specific_tuning_only_defined_for_claude",
+            reason="model_is_not_claude",
         )
         return model
     resolved_timeout = MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds

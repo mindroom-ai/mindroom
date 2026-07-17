@@ -478,6 +478,81 @@ def test_configure_summary_model_preserves_authored_output_cap() -> None:
     assert model.timeout == 30.0
 
 
+@pytest.mark.parametrize(
+    "model",
+    [
+        Gemini(
+            id="gemini-3.5-flash",
+            max_output_tokens=1024,
+            generation_config={"candidate_count": 2},
+        ),
+        Gemini(
+            id="gemini-3.5-flash",
+            max_output_tokens=1024,
+            generative_model_kwargs={"candidate_count": 2},
+        ),
+        Gemini(
+            id="gemini-3.5-flash",
+            request_params={
+                "config": {
+                    "candidate_count": 2,
+                    "max_output_tokens": 1024,
+                },
+            },
+        ),
+        Gemini(
+            id="gemini-3.5-flash",
+            request_params={
+                "config": GenerateContentConfig(
+                    candidate_count=2,
+                    max_output_tokens=1024,
+                ),
+            },
+        ),
+    ],
+)
+def test_configure_summary_model_forces_single_gemini_candidate(model: Gemini) -> None:
+    configure_summary_model(model)
+
+    request_config = model.get_request_params()["config"]
+    if isinstance(request_config, dict):
+        assert request_config["candidate_count"] == 1
+    else:
+        assert isinstance(request_config, GenerateContentConfig)
+        assert request_config.candidate_count == 1
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        OpenAIChat(
+            id="gpt-5.6",
+            max_completion_tokens=1024,
+            request_params={"n": 2},
+        ),
+        OpenAIChat(
+            id="gpt-5.6",
+            max_completion_tokens=1024,
+            extra_body={"n": 2},
+        ),
+        OpenAIChat(
+            id="gpt-5.6",
+            max_completion_tokens=1024,
+            request_params={"n": 2, "extra_body": {"n": 3}},
+        ),
+    ],
+)
+def test_configure_summary_model_forces_single_openai_chat_choice(model: OpenAIChat) -> None:
+    configure_summary_model(model)
+
+    request_params = model.get_request_params()
+    if "n" in request_params:
+        assert request_params["n"] == 1
+    extra_body = request_params.get("extra_body")
+    if isinstance(extra_body, dict):
+        assert extra_body.get("n") == 1
+
+
 def test_configure_summary_model_leaves_unknown_providers_untouched() -> None:
     model = FakeModel(id="test-model", provider="fake")
 

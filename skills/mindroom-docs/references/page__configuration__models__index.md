@@ -265,6 +265,7 @@ Manual `compact_context` remains available when a compaction model and context w
 It still uses the active runtime window for the final replay-fit step, but destructive compaction itself can be available whenever an explicit `compaction.model` has its own `context_window`.
 If you set `compaction.model`, that summary model must also define its own `context_window` for the durable summary-generation pass.
 MindRoom recognizes effective output caps exposed as `max_tokens`, `max_output_tokens`, `max_completion_tokens`, or Ollama `options.num_predict`, including final `request_params` and `extra_body` overrides.
+Compaction summary calls force one Gemini candidate or OpenAI Chat choice because only the first generated response is retained.
 For summary generation only, MindRoom first clamps `reserve_tokens` to at most half the summary model's context window, then computes input capacity using the larger of that normalized reserve and the loaded model's positive output cap.
 The truncation guard counts Gemini's reported candidate and thinking tokens together because both consume Gemini's output cap.
 A cap that leaves no usable summary input budget makes compaction fail without deleting the raw history.
