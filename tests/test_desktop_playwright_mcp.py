@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -210,6 +211,7 @@ async def test_provider_removes_only_its_transient_screenshot(
     unrelated = tmp_path / "page-keep.png"
     unrelated.write_bytes(b"keep")
     provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
+    monkeypatch.setattr(PlaywrightMCPBrowserProvider, "running", property(lambda _self: True))
 
     async def take_screenshot(tool_name: str, arguments: dict[str, object]) -> CallToolResult:
         assert tool_name == "browser_take_screenshot"
@@ -238,6 +240,7 @@ async def test_provider_removes_transient_screenshot_when_validation_fails(
 ) -> None:
     """An invalid MCP image cannot strand its generated plaintext file."""
     provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
+    monkeypatch.setattr(PlaywrightMCPBrowserProvider, "running", property(lambda _self: True))
 
     async def take_empty_screenshot(_tool_name: str, arguments: dict[str, object]) -> CallToolResult:
         filename = arguments["filename"]
@@ -246,6 +249,127 @@ async def test_provider_removes_transient_screenshot_when_validation_fails(
         return _text_result("Screenshot completed")
 
     monkeypatch.setattr(provider, "_call_tool", AsyncMock(side_effect=take_empty_screenshot))
+
+    with pytest.raises(PlaywrightBrowserError, match="must contain between"):
+        await provider.execute("screenshot", {})
+
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_observation_cannot_start_the_extension_without_control(tmp_path: Path) -> None:
+    """An observe-only command cannot launch or foreground the user's browser."""
+    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
+
+    with pytest.raises(PlaywrightBrowserError, match=r"browser\(action='start'"):
+        await provider.execute("tabs", {})
+
+    assert provider.running is False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix permission bits are not authoritative on Windows")
+@pytest.mark.asyncio
+async def test_actor_hardens_existing_browser_workspace_permissions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A permissive pre-existing scratch directory becomes owner-only before MCP starts."""
+    output_dir = tmp_path / "desktop-browser"
+    output_dir.mkdir(mode=0o777)
+    output_dir.chmod(0o777)
+    provider = PlaywrightMCPBrowserProvider(output_dir=output_dir)
+    monkeypatch.setattr("mindroom.desktop.playwright_mcp.shutil.which", lambda _command: "/usr/bin/npx")
+    monkeypatch.setattr(provider, "_run_actor", AsyncMock())
+    future: asyncio.Future[CallToolResult] = asyncio.get_running_loop().create_future()
+
+    provider._start_actor(_QueuedCall("browser_tabs", {"action": "list"}, future))
+    assert provider._actor_task is not None
+    await provider._actor_task
+
+    assert output_dir.stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.asyncio
+async def test_timed_out_screenshot_is_removed_after_late_mcp_completion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A screenshot written after the caller times out is removed by the actor that wrote it."""
+    screenshot_finished = asyncio.Event()
+
+    class FakeStdio:
+        async def __aenter__(self) -> tuple[object, object]:
+            return object(), object()
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    class FakeSession:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def initialize(self) -> None:
+            return None
+
+        async def call_tool(
+            self,
+            tool_name: str,
+            arguments: dict[str, object],
+            **_kwargs: object,
+        ) -> CallToolResult:
+            if tool_name == "browser_tabs":
+                return _text_result("started")
+            await asyncio.sleep(0.05)
+            filename = arguments["filename"]
+            assert isinstance(filename, str)
+            (tmp_path / filename).write_bytes(b"late screenshot")
+            screenshot_finished.set()
+            return _text_result("captured")
+
+    monkeypatch.setattr("mindroom.desktop.playwright_mcp.shutil.which", lambda _command: "/usr/bin/npx")
+    monkeypatch.setattr("mindroom.desktop.playwright_mcp.stdio_client", lambda _parameters: FakeStdio())
+    monkeypatch.setattr("mindroom.desktop.playwright_mcp.ClientSession", FakeSession)
+    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
+    provider._call_timeout_seconds = 0.01
+    await provider.execute("start", {})
+
+    with pytest.raises(PlaywrightBrowserError, match="did not answer"):
+        await provider.execute("screenshot", {})
+
+    await asyncio.wait_for(screenshot_finished.wait(), timeout=1)
+    await asyncio.sleep(0)
+    assert list(tmp_path.iterdir()) == []
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_oversized_screenshot_uses_a_bounded_file_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A huge MCP scratch file is rejected without calling the unbounded read_bytes helper."""
+    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
+    monkeypatch.setattr(PlaywrightMCPBrowserProvider, "running", property(lambda _self: True))
+
+    async def take_oversized_screenshot(_tool_name: str, arguments: dict[str, object]) -> CallToolResult:
+        filename = arguments["filename"]
+        assert isinstance(filename, str)
+        with (tmp_path / filename).open("wb") as image_file:
+            image_file.truncate(10 * 1024 * 1024 + 1)
+        return _text_result("captured")
+
+    def reject_unbounded_read(_path: Path) -> bytes:
+        message = "Path.read_bytes must not be used for MCP screenshots"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(provider, "_call_tool", AsyncMock(side_effect=take_oversized_screenshot))
+    monkeypatch.setattr(type(tmp_path), "read_bytes", reject_unbounded_read)
 
     with pytest.raises(PlaywrightBrowserError, match="must contain between"):
         await provider.execute("screenshot", {})

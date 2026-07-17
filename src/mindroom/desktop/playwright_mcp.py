@@ -121,7 +121,7 @@ class PlaywrightMCPBrowserProvider:
         self._actor_lock = asyncio.Lock()
         self._closed = False
 
-    async def execute(self, action: str, parameters: dict[str, object]) -> BrowserProviderResult:
+    async def execute(self, action: str, parameters: dict[str, object]) -> BrowserProviderResult:  # noqa: C901
         """Translate the stable MindRoom browser surface into Playwright MCP calls."""
         if action not in BROWSER_ACTIONS:
             msg = f"Unsupported Playwright browser action: {action}."
@@ -158,6 +158,13 @@ class PlaywrightMCPBrowserProvider:
                     "status": "ok",
                 },
             )
+
+        if not self.running and not browser_action_requires_control(action, parameters):
+            msg = (
+                "Playwright browser observation requires an active local connection. "
+                "Run browser(action='start', target='desktop') while the desktop control lease is active."
+            )
+            raise PlaywrightBrowserError(msg)
 
         if action == "upload":
             parameters = {**parameters, "paths": self._upload_paths(parameters)}
@@ -229,10 +236,22 @@ class PlaywrightMCPBrowserProvider:
             msg = f"Playwright browser support requires '{self._command}' on the local computer."
             raise PlaywrightBrowserError(msg)
         self._output_dir.mkdir(parents=True, exist_ok=True)
+        self._output_dir.chmod(0o700)
         queue: asyncio.Queue[_QueuedCall | None] = asyncio.Queue()
         queue.put_nowait(first_call)
         self._queue = queue
         self._actor_task = asyncio.create_task(self._run_actor(queue), name="playwright_mcp_extension")
+
+    def _remove_cancelled_call_screenshot(self, call: _QueuedCall) -> None:
+        """Remove a screenshot only after its timed-out MCP call has actually returned."""
+        if call.tool_name != "browser_take_screenshot":
+            return
+        filename = call.arguments.get("filename")
+        if not isinstance(filename, str) or Path(filename).name != filename:
+            return
+        path = (self._output_dir / filename).resolve()
+        if path.parent == self._output_dir:
+            path.unlink(missing_ok=True)
 
     async def _run_actor(self, queue: asyncio.Queue[_QueuedCall | None]) -> None:  # noqa: C901, PLR0912
         active: _QueuedCall | None = None
@@ -271,6 +290,8 @@ class PlaywrightMCPBrowserProvider:
                         if not active.future.done():
                             active.future.set_exception(_browser_error(active.tool_name, exc))
                     finally:
+                        if active.future.cancelled():
+                            self._remove_cancelled_call_screenshot(active)
                         active = None
         except Exception as exc:
             error = _browser_error(active.tool_name if active is not None else "startup", exc)
@@ -574,7 +595,9 @@ def _browser_image_file(path: Path, mime_type: str) -> BrowserImage:
     if not path.is_file():
         msg = "Playwright MCP did not create the requested screenshot file."
         raise PlaywrightBrowserError(msg)
-    return _validated_browser_image(path.read_bytes(), mime_type)
+    with path.open("rb") as image_file:
+        content = image_file.read(_MAX_IMAGE_BYTES + 1)
+    return _validated_browser_image(content, mime_type)
 
 
 def _provider_result_with_screenshot(
