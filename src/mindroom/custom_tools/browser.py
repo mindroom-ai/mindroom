@@ -711,7 +711,9 @@ class BrowserTools(Toolkit):
                 "snapshotFormat": snapshotFormat,
                 "timeoutMs": timeoutMs,
             }
-            provided_unsupported = sorted(name for name, value in unsupported.items() if value is not None)
+            provided_unsupported = sorted(
+                name for name, value in unsupported.items() if value is not None and value is not False
+            )
             if provided_unsupported:
                 msg = f"Browser target=desktop does not support: {', '.join(provided_unsupported)}."
                 raise ValueError(msg)
@@ -956,7 +958,7 @@ class BrowserTools(Toolkit):
             sequence=next(self._command_sequences),
             issued_at_ms=now_ms,
             expires_at_ms=now_ms + round(self._timeout_seconds * 1000),
-            action="browser_control" if browser_action_requires_control(action, parameters) else "browser_observe",
+            action="browser_control" if browser_action_requires_control(action) else "browser_observe",
             requester_id=context.requester_id,
             agent_name=context.agent_name,
             parameters={"browser_action": action, "browser_parameters": parameters},

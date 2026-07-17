@@ -639,6 +639,42 @@ async def test_desktop_target_rejects_unsupported_host_arguments(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("arguments", [{"interactive": False}, {"compact": False}, {"labels": False}])
+async def test_desktop_target_accepts_false_noop_host_hints(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict[str, bool],
+) -> None:
+    """Explicit false values for host-only hints preserve the desktop default behavior."""
+    context = SimpleNamespace(requester_id="@alice:example.org", agent_name="computer", client=object())
+    response = DesktopResponse(
+        request_id="snapshot",
+        session_id="session",
+        ok=True,
+        result={"action": "snapshot", "provider": "playwright_mcp_extension"},
+    )
+    request = AsyncMock(return_value=response)
+    monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.desktop_response_router",
+        lambda _client: SimpleNamespace(request=request),
+    )
+    tool = BrowserTools(
+        TEST_RUNTIME_PATHS,
+        default_target="desktop",
+        device_user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        device_ed25519="fingerprint",
+    )
+
+    result = await tool.browser(action="snapshot", **arguments)
+
+    assert json.loads(result) == {"action": "snapshot", "provider": "playwright_mcp_extension"}
+    command = request.await_args.args[1]
+    assert command.action == "browser_observe"
+    assert command.parameters == {"browser_action": "snapshot", "browser_parameters": {}}
+
+
+@pytest.mark.asyncio
 async def test_desktop_target_returns_decrypted_browser_screenshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

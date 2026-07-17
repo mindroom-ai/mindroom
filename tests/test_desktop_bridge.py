@@ -401,8 +401,8 @@ async def test_browser_observation_uses_optional_provider_without_control_lease(
 
 
 @pytest.mark.asyncio
-async def test_browser_tab_selection_cannot_hide_inside_observe_action(transport: AsyncMock) -> None:
-    """Selecting a tab mutates visible browser state and therefore requires a control command and lease."""
+async def test_rejected_browser_tab_selection_does_not_upgrade_observation_to_control(transport: AsyncMock) -> None:
+    """A forbidden targetId cannot turn an otherwise observational action into control."""
     browser = FakeBrowserProvider()
     bridge = DesktopBridge(
         client=object(),
@@ -415,7 +415,7 @@ async def test_browser_tab_selection_cannot_hide_inside_observe_action(transport
     await bridge.on_to_device_event(
         _event(
             _command(
-                "browser_observe",
+                "browser_control",
                 parameters={"browser_action": "snapshot", "browser_parameters": {"targetId": "1"}},
             ),
         ),

@@ -47,7 +47,6 @@ def test_browser_action_policy_keeps_observation_available_without_control() -> 
     """Snapshots stay observe-only while navigation and form actions require the lease."""
     assert browser_action_requires_control("tabs") is False
     assert browser_action_requires_control("snapshot") is False
-    assert browser_action_requires_control("snapshot", {"targetId": "2"}) is True
     assert browser_action_requires_control("screenshot") is False
     assert browser_action_requires_control("navigate") is True
     assert browser_action_requires_control("act") is True

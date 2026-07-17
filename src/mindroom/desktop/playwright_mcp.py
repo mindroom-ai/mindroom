@@ -159,7 +159,7 @@ class PlaywrightMCPBrowserProvider:
                 },
             )
 
-        if not self.running and not browser_action_requires_control(action, parameters):
+        if not self.running and not browser_action_requires_control(action):
             msg = (
                 "Playwright browser observation requires an active local connection. "
                 "Run browser(action='start', target='desktop') while the desktop control lease is active."
@@ -180,7 +180,7 @@ class PlaywrightMCPBrowserProvider:
             provider_result = _provider_result(action, last_result, max_chars=_result_max_chars(parameters))
             return _provider_result_with_screenshot(provider_result, screenshot_output)
         except PlaywrightBrowserError as exc:
-            if browser_action_requires_control(action, parameters):
+            if browser_action_requires_control(action):
                 raise PlaywrightActionOutcomeUnknownError(str(exc)) from exc
             raise
         finally:
@@ -361,12 +361,12 @@ class PlaywrightMCPBrowserProvider:
         return calls, _ScreenshotOutput(path=path, mime_type=f"image/{image_type}")
 
 
-def browser_action_requires_control(action: str, parameters: Mapping[str, object] | None = None) -> bool:
+def browser_action_requires_control(action: str) -> bool:
     """Return whether one browser action mutates browser or page state."""
     if action not in BROWSER_ACTIONS:
         msg = f"Unsupported Playwright browser action: {action}."
         raise PlaywrightBrowserError(msg)
-    return action in _CONTROL_ACTIONS or (parameters is not None and parameters.get("targetId") is not None)
+    return action in _CONTROL_ACTIONS
 
 
 def _mcp_calls(  # noqa: C901, PLR0911, PLR0912
