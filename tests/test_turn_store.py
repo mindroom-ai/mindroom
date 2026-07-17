@@ -686,7 +686,6 @@ def test_locked_response_preparation_finishes_pending_cleanup_before_history_use
 
     should_suppress = store.prepare_response_for_redactions(
         target=target,
-        requester_user_id="@user:example.org",
         source_event_ids=("$later",),
     )
 

@@ -253,7 +253,6 @@ class TurnStore:
         self,
         *,
         target: MessageTarget,
-        requester_user_id: str,
         source_event_ids: tuple[str, ...],
     ) -> bool:
         """Finish owed cleanup in this locked conversation, then check current sources."""
@@ -263,7 +262,6 @@ class TurnStore:
                 turn_record is None
                 or turn_record.conversation_target is None
                 or turn_record.conversation_target.session_id != target.session_id
-                or turn_record.requester_id != requester_user_id
             ):
                 continue
             self._retry_pending_redaction_cleanup(redacted_event_id)

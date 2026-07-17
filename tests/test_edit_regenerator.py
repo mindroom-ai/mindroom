@@ -313,7 +313,6 @@ async def test_coalesced_sibling_edit_excludes_redacted_source_prompt(tmp_path: 
     assert request.prepare_source_turn() is False
     harness.turn_store.prepare_response_for_redactions.assert_called_once_with(
         target=record.conversation_target,
-        requester_user_id=USER_ID,
         source_event_ids=(second_event_id,),
     )
     handled_turn = harness.turn_store.build_run_metadata.call_args.args[0]
@@ -341,7 +340,6 @@ async def test_coalesced_edit_rechecks_every_snapshotted_source_under_lock(tmp_p
     assert request.prepare_source_turn() is True
     harness.turn_store.prepare_response_for_redactions.assert_called_once_with(
         target=record.conversation_target,
-        requester_user_id=USER_ID,
         source_event_ids=(first_event_id, second_event_id),
     )
 
@@ -379,7 +377,6 @@ async def test_edit_request_rechecks_redaction_after_acquiring_response_lock(tmp
     assert request.prepare_source_turn() is True
     harness.turn_store.prepare_response_for_redactions.assert_called_once_with(
         target=record.conversation_target,
-        requester_user_id=USER_ID,
         source_event_ids=(ORIGINAL_EVENT_ID,),
     )
 
