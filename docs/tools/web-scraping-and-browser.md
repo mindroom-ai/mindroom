@@ -672,7 +672,8 @@ It creates tabs, tracks the active tab, records console entries, and resolves te
 `snapshot()` can return either `ai` or `aria` format.
 `act()` currently supports `click`, `type`, `press`, `hover`, `drag`, `select`, `fill`, `resize`, `wait`, `evaluate`, and `close`.
 The desktop target uses the browser's real signed-in state and requires the Matrix desktop bridge, the local extension option, and a local control lease for interactive actions.
-Desktop screenshots are model-visible by default, while `returnAttachment=true` additionally returns a current-turn `att_*` handle that can be sent through `matrix_message` without retaining plaintext pixels or uploading the encrypted media again.
+Desktop screenshots are model-visible by default, while `returnAttachment=true` additionally returns a current-turn `att_*` handle that can be sent through `matrix_message` without creating a separate plaintext attachment copy or uploading the encrypted media again.
+Agno's normal agent-session persistence can retain model-visible screenshot pixels in the session database.
 Playwright MCP briefly writes its requested screenshot into the local browser workspace, and MindRoom reads and removes that exact scratch file before returning the tool result.
 Safari and other unsupported browsers can still be operated through the separate accessibility-first `desktop` tool.
 If `output_dir` is unset, Playwright MCP uses `<storage>/browser` for transient screenshot scratch files and retained PDFs.

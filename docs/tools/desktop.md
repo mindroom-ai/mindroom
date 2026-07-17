@@ -7,7 +7,8 @@ icon: lucide/monitor-up
 The `desktop` tool lets a cloud-hosted MindRoom agent inspect and operate explicitly allowlisted applications on a local computer without opening an inbound port.
 The local computer runs an outbound Matrix sync client, while commands and responses use Olm-encrypted to-device events addressed to exact pinned Matrix devices.
 App screenshots are encrypted before upload to Matrix media, and their decryption keys travel only inside the encrypted response.
-By default, the screenshot is model-visible but MindRoom does not create a durable plaintext screenshot file on the cloud host.
+By default, the screenshot is model-visible and MindRoom does not create a separate plaintext attachment file on the cloud host.
+Agno's normal agent-session persistence can retain model-visible screenshot pixels in the session database, so protect and expire that storage according to the sensitivity of the controlled applications.
 When a user asks to receive the image, `desktop(action="screenshot", return_attachment=true)` returns a turn-scoped `att_*` handle that can be sent with `matrix_message`.
 That handle reuses the existing encrypted Matrix media instead of saving or uploading the screenshot again, and it expires when the turn ends.
 
@@ -151,6 +152,7 @@ agents:
 ```
 
 The `desktop` tool runs in the primary agent process because it needs that live agent's Matrix device and room requester identity.
+The `browser` tool also stays in the primary process because its optional desktop target needs the same live Matrix context.
 It is hidden from OpenAI-compatible API runs when approval policy requires Matrix approval because those runs have no Matrix approval transport.
 
 To use the same device with the `browser` tool, configure its desktop target on that agent:
@@ -200,7 +202,8 @@ mindroom desktop run \
 Every requester, agent, and application value is an exact local allowlist entry, and each option can be repeated when more than one exact identity is needed.
 Wildcards are not accepted as authority.
 The process opens outbound HTTPS connections to Matrix and does not listen on a network port.
-Wait until the terminal says `Desktop bridge online` before calling the cloud tool because startup sync messages are not treated as queued work.
+Authenticated, unexpired commands received by the initial Matrix sync are dispatched during startup, including control commands when the new process has a valid local control lease.
+Wait until the terminal says `Desktop bridge online` before sending new work when the caller needs confirmation that startup and device pinning completed.
 
 To grant semantic and fallback control for fifteen minutes, stop the observe-only process and restart it locally with an explicit lease:
 
