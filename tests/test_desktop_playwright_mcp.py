@@ -15,6 +15,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 from mindroom.desktop.playwright_mcp import (
     _MAX_RESULT_JSON_BYTES,
     PLAYWRIGHT_MCP_PACKAGE,
+    PlaywrightActionOutcomeUnknownError,
     PlaywrightBrowserError,
     PlaywrightMCPBrowserProvider,
     _act_call,
@@ -369,6 +370,22 @@ async def test_oversized_screenshot_uses_a_bounded_file_read(
         await provider.execute("screenshot", {})
 
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_failed_control_action_reports_unknown_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed control call may have taken effect before the extension disconnected."""
+    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
+    call_tool = AsyncMock(return_value=_text_result("extension disconnected", error=True))
+    monkeypatch.setattr(provider, "_call_tool", call_tool)
+
+    with pytest.raises(PlaywrightActionOutcomeUnknownError, match="extension disconnected"):
+        await provider.execute("navigate", {"targetUrl": "https://example.com/checkout"})
+
+    call_tool.assert_awaited_once_with("browser_navigate", {"url": "https://example.com/checkout"})
 
 
 @pytest.mark.parametrize("action", ["focus", "snapshot", "navigate", "close"])

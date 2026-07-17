@@ -341,6 +341,8 @@ def test_browser_function_schema_documents_actions_and_act_request() -> None:
     assert "request.kind" in request_description
     assert "click" in request_description
     assert "evaluate" in request_description
+    for field_name in ("compact", "frame", "interactive", "labels", "limit", "mode", "refs", "snapshotFormat"):
+        assert "Host-target" in properties[field_name]["description"]
 
 
 def test_browser_schema_description_requires_registered_browser_function() -> None:

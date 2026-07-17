@@ -652,17 +652,17 @@ class BrowserTools(Toolkit):
             profile: Host-target browser profile name (defaults to ``mindroom``).
             targetUrl: URL for ``open`` and ``navigate`` actions.
             targetId: Opaque host-browser tab id. Unsupported for the desktop target, which operates the current tab.
-            limit: Snapshot item limit.
+            limit: Host-target snapshot item limit.
             maxChars: Snapshot text limit.
-            mode: Snapshot mode (supports ``efficient``).
-            snapshotFormat: ``ai`` or ``aria``.
-            refs: Snapshot refs mode (accepted for compatibility).
-            interactive: Snapshot interactive filtering.
-            compact: Snapshot compact mode hint.
+            mode: Host-target snapshot mode (supports ``efficient``).
+            snapshotFormat: Host-target snapshot format (``ai`` or ``aria``).
+            refs: Host-target snapshot refs mode (accepted for compatibility).
+            interactive: Host-target snapshot interactive filtering.
+            compact: Host-target snapshot compact mode hint.
             depth: Snapshot traversal depth.
             selector: Root selector for snapshot.
-            frame: Frame selector (accepted for compatibility; ignored for now).
-            labels: Snapshot label hint (accepted for compatibility; ignored for now).
+            frame: Host-target frame selector (accepted for compatibility; ignored for now).
+            labels: Host-target snapshot label hint (accepted for compatibility; ignored for now).
             fullPage: Full-page capture for screenshots.
             ref: Snapshot ref id or CSS selector.
             element: CSS selector for element-specific actions.
