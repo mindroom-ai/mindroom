@@ -19,7 +19,7 @@ dependencies = [
   "agno[anthropic,google,ollama,openai]==2.6.12",
   "aiohttp>=3.13.3",
   "aiosqlite>=0.20",
-  "anthropic>=0.70",
+  "anthropic>=0.77",
   "anyio>=4.10",
   "authlib>=1.6",
   "cerebras-cloud-sdk>=1.46",
