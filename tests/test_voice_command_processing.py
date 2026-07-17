@@ -793,6 +793,7 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.record_pending_turn = MagicMock(wraps=turn_store.record_pending_turn)
     turn_store.record_turn = MagicMock(wraps=turn_store.record_turn)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
@@ -824,26 +825,33 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
     assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}[Attached voice message]")
     assert call_kwargs["attachment_ids"] == [expected_attachment_id]
     assert list(call_kwargs["media"].audio)
-    turn_store.record_turn.assert_called_once_with(
-        replace(
-            TurnRecord.create(
-                ["$voice_event"],
-                response_event_id="$response",
-                source_event_prompts={"$voice_event": f"{VOICE_PREFIX}[Attached voice message]"},
-            ),
-            response_owner="home",
-            requester_id="@alice:example.com",
-            correlation_id="$voice_event",
-            history_scope=HistoryScope(kind="agent", scope_id="home"),
-            conversation_target=MessageTarget(
-                room_id=room.room_id,
-                source_thread_id=None,
-                resolved_thread_id="$voice_event",
-                reply_to_event_id="$voice_event",
-                session_id=f"{room.room_id}:$voice_event",
-            ),
+    expected_record = replace(
+        TurnRecord.create(
+            ["$voice_event"],
+            response_event_id="$response",
+            source_event_prompts={"$voice_event": f"{VOICE_PREFIX}[Attached voice message]"},
+        ),
+        response_owner="home",
+        requester_id="@alice:example.com",
+        correlation_id="$voice_event",
+        history_scope=HistoryScope(kind="agent", scope_id="home"),
+        conversation_target=MessageTarget(
+            room_id=room.room_id,
+            source_thread_id=None,
+            resolved_thread_id="$voice_event",
+            reply_to_event_id="$voice_event",
+            session_id=f"{room.room_id}:$voice_event",
         ),
     )
+    turn_store.record_pending_turn.assert_called_once()
+    pending_input = turn_store.record_pending_turn.call_args.args[0]
+    assert replace(pending_input, response_event_id="$response") == expected_record
+    turn_store.record_turn.assert_called_once()
+    terminal_input = turn_store.record_turn.call_args.args[0]
+    assert replace(terminal_input, completed=True, timestamp=0.0) == expected_record
+    persisted_record = turn_store.get_turn_record("$voice_event")
+    assert persisted_record is not None
+    assert persisted_record.completed is True
 
 
 @pytest.mark.asyncio
