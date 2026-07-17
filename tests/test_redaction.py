@@ -281,6 +281,13 @@ def test_redact_sensitive_text_redacts_secret_assignments_with_long_keys() -> No
     assert redact_sensitive_text(f"{key}=hunter2") == f"{key}={REDACTED}"
 
 
+def test_redact_sensitive_text_preserves_long_inter_assignment_whitespace() -> None:
+    """Linear lookahead must not consume whitespace that separates assignments."""
+    separator = " " * 256
+
+    assert redact_sensitive_text(f"api_key=hunter2{separator}mode=safe") == f"api_key={REDACTED}{separator}mode=safe"
+
+
 def test_redact_sensitive_text_still_redacts_assignments_at_run_boundaries() -> None:
     """The assignment key guard must not lose ordinary key=value redaction."""
     redacted = redact_sensitive_text('api_key=hunter2 "password": "abc"')
