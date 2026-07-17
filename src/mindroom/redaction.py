@@ -27,8 +27,11 @@ _API_KEY_MESSAGE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _NEXT_ASSIGNMENT_PATTERN = r"\s+(?:and\s+)?[\"']?[A-Za-z0-9_.-]+[\"']?\s*[:=]"
+# The key must start at a run boundary and stay length-bounded: an open-ended key run makes
+# the scan quadratic on long unbroken [A-Za-z0-9_.-] blobs (base64url, JWTs, hex dumps).
 _SECRET_ASSIGNMENT_PATTERN = re.compile(
-    r"(?P<prefix>[\"']?(?P<key>[A-Za-z0-9_.-]+)[\"']?\s*[:=]\s*)"
+    r"(?<![A-Za-z0-9_.-])"
+    r"(?P<prefix>[\"']?(?P<key>[A-Za-z0-9_.-]{1,128})[\"']?\s*[:=]\s*)"
     rf"(?:(?P<quote>[\"'])(?P<quoted_value>.*?)(?P=quote)|(?P<value>.+?))"
     rf"(?=(?:{_NEXT_ASSIGNMENT_PATTERN})|[\r\n,&)\]}}]|$)",
     re.IGNORECASE,

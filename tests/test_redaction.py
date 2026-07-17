@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import time
 
-from mindroom.redaction import REDACTED, redact_sensitive_data
+from mindroom.redaction import REDACTED, redact_sensitive_data, redact_sensitive_text
 
 
 def test_redact_sensitive_data_redacts_nested_dicts_lists_and_header_variants() -> None:
@@ -255,3 +256,20 @@ def test_redact_sensitive_data_keeps_values_for_non_schema_label_keys() -> None:
         {"parameter": "client_secret_required", "value": False},
         {"variable": "secret_sauce_recipe", "value": "tomatoes"},
     ]
+
+
+def test_redact_sensitive_text_stays_linear_on_long_unbroken_runs() -> None:
+    """Long base64url/hex-like blobs must scan linearly, not quadratically."""
+    blob = "Ab3" * 40_000
+    start = time.perf_counter()
+    assert redact_sensitive_text(blob) == blob
+    assert time.perf_counter() - start < 5.0
+
+
+def test_redact_sensitive_text_still_redacts_assignments_at_run_boundaries() -> None:
+    """Bounding the assignment key must not lose ordinary key=value redaction."""
+    redacted = redact_sensitive_text('api_key=hunter2 "password": "abc"')
+
+    assert "hunter2" not in redacted
+    assert "abc" not in redacted
+    assert "api_key" in redacted
