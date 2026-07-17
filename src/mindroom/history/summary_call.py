@@ -10,8 +10,8 @@ It enforces the call-side half of the compaction invariants
    at or above max_tokens is a 400 from Anthropic), SDK retries disabled, and
    one SDK timeout coordinated with the outer chunk budget
    (``MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS``) instead of two uncoordinated
-   constants in two modules. Gemini and OpenAI Chat summary calls use one
-   candidate so provider usage describes the same response Agno retains.
+   constants in two modules. Gemini, OpenAI Chat, and Cerebras summary calls use
+   one candidate so provider usage describes the same response Agno retains.
    Summary output uses the loaded model's configured output cap as the truncation
    guard. Gemini's guard includes its separately reported thinking tokens because
    they consume the same output budget. Unknown providers pass through untouched
@@ -56,6 +56,7 @@ from mindroom.token_budget import configured_model_max_output_tokens
 
 if TYPE_CHECKING:
     from agno.models.base import Model
+    from agno.models.cerebras import Cerebras
     from agno.models.google import Gemini
     from agno.models.openai import OpenAIChat
     from agno.models.response import ModelResponse
@@ -63,6 +64,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
+_CEREBRAS_CLASS = ("agno.models.cerebras.cerebras", "Cerebras")
 _GOOGLE_GEMINI_CLASS = ("agno.models.google.gemini", "Gemini")
 _OPENAI_CHAT_CLASS = ("agno.models.openai.chat", "OpenAIChat")
 
@@ -188,12 +190,33 @@ def _force_single_openai_chat_choice(model: OpenAIChat) -> None:
         model.request_params = request_params
 
 
+def _force_single_cerebras_choice(model: Cerebras) -> None:
+    effective_request = model.get_request_params()
+    request_params = dict(model.request_params or {})
+    if _multiple_candidates_requested(effective_request.get("n")):
+        request_params["n"] = 1
+        model.request_params = request_params
+
+    extra_body = effective_request.get("extra_body")
+    if not isinstance(extra_body, Mapping) or not _multiple_candidates_requested(extra_body.get("n")):
+        return
+    adjusted_extra_body = dict(extra_body)
+    adjusted_extra_body["n"] = 1
+    if "extra_body" in request_params:
+        request_params["extra_body"] = adjusted_extra_body
+        model.request_params = request_params
+    else:
+        model.extra_body = adjusted_extra_body
+
+
 def _force_single_summary_candidate(model: Model) -> None:
     """Keep provider usage and Agno's retained first response on the same scope."""
     if isinstance_of_loaded(model, _GOOGLE_GEMINI_CLASS):
         _force_single_gemini_candidate(cast("Gemini", model))
     elif isinstance_of_loaded(model, _OPENAI_CHAT_CLASS):
         _force_single_openai_chat_choice(cast("OpenAIChat", model))
+    elif isinstance_of_loaded(model, _CEREBRAS_CLASS):
+        _force_single_cerebras_choice(cast("Cerebras", model))
 
 
 def configure_summary_model(model: Model, *, timeout_seconds: float | None = None) -> Model:

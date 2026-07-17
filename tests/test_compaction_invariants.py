@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from agno.agent import Agent
 from agno.models.anthropic import Claude
+from agno.models.cerebras import Cerebras
 from agno.models.google import Gemini
 from agno.models.message import Message, MessageMetrics
 from agno.models.ollama import Ollama
@@ -543,6 +544,37 @@ def test_configure_summary_model_forces_single_gemini_candidate(model: Gemini) -
     ],
 )
 def test_configure_summary_model_forces_single_openai_chat_choice(model: OpenAIChat) -> None:
+    configure_summary_model(model)
+
+    request_params = model.get_request_params()
+    if "n" in request_params:
+        assert request_params["n"] == 1
+    extra_body = request_params.get("extra_body")
+    if isinstance(extra_body, dict):
+        assert extra_body.get("n") == 1
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        Cerebras(
+            id="llama-4-scout-17b-16e-instruct",
+            max_completion_tokens=1024,
+            request_params={"n": 2},
+        ),
+        Cerebras(
+            id="llama-4-scout-17b-16e-instruct",
+            max_completion_tokens=1024,
+            extra_body={"n": 2},
+        ),
+        Cerebras(
+            id="llama-4-scout-17b-16e-instruct",
+            max_completion_tokens=1024,
+            request_params={"n": 2, "extra_body": {"n": 3}},
+        ),
+    ],
+)
+def test_configure_summary_model_forces_single_cerebras_choice(model: Cerebras) -> None:
     configure_summary_model(model)
 
     request_params = model.get_request_params()
