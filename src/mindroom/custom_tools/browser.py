@@ -355,9 +355,14 @@ def _desktop_browser_parameters(  # noqa: C901, PLR0911, PLR0912, PLR0915
     request: dict[str, Any] | None,
     allow_private_networks: bool,
 ) -> dict[str, object]:
+    if target_id is not None:
+        msg = (
+            "Browser target=desktop does not support targetId because Playwright MCP tab indices can change; "
+            "operate the current tab or open a new one."
+        )
+        raise ValueError(msg)
     if action in {"status", "start", "stop", "profiles", "tabs"}:
         return {}
-    normalized_target_id = _clean_str(target_id)
     if action in {"open", "navigate"}:
         normalized_url = _clean_str(target_url)
         if normalized_url is None:
@@ -365,20 +370,14 @@ def _desktop_browser_parameters(  # noqa: C901, PLR0911, PLR0912, PLR0915
             raise ValueError(msg)
         normalized_url = validate_server_fetch_url(normalized_url, allow_private_networks=allow_private_networks)
         parameters: dict[str, object] = {"targetUrl": normalized_url}
-        if action == "navigate" and normalized_target_id is not None:
-            parameters["targetId"] = normalized_target_id
         return parameters
     if action == "focus":
-        if normalized_target_id is None:
-            msg = "targetId required for action=focus"
-            raise ValueError(msg)
-        return {"targetId": normalized_target_id}
+        msg = "Browser target=desktop does not support focus because Playwright MCP exposes only mutable tab indices."
+        raise ValueError(msg)
     if action == "close":
-        return {"targetId": normalized_target_id} if normalized_target_id is not None else {}
+        return {}
     if action == "snapshot":
         parameters: dict[str, object] = {}
-        if normalized_target_id is not None:
-            parameters["targetId"] = normalized_target_id
         normalized_selector = _clean_str(selector)
         if normalized_selector is not None:
             parameters["selector"] = normalized_selector
@@ -390,7 +389,6 @@ def _desktop_browser_parameters(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if action == "screenshot":
         parameters: dict[str, object] = {"fullPage": bool(full_page)}
         for key, value in (
-            ("targetId", normalized_target_id),
             ("ref", _clean_str(ref)),
             ("element", _clean_str(element)),
             ("type", _clean_str(image_type)),
@@ -400,26 +398,23 @@ def _desktop_browser_parameters(  # noqa: C901, PLR0911, PLR0912, PLR0915
         return parameters
     if action == "console":
         parameters: dict[str, object] = {}
-        if normalized_target_id is not None:
-            parameters["targetId"] = normalized_target_id
         normalized_level = _clean_str(level)
         if normalized_level is not None:
             parameters["level"] = normalized_level
         return parameters
     if action == "pdf":
-        return {"targetId": normalized_target_id} if normalized_target_id is not None else {}
+        return {}
     if action == "upload":
         if not paths:
             msg = "paths required for action=upload"
             raise ValueError(msg)
+        if ref is not None or element is not None:
+            msg = "Browser target=desktop upload does not support ref or element; use the active file chooser."
+            raise ValueError(msg)
         parameters: dict[str, object] = {"paths": paths}
-        if normalized_target_id is not None:
-            parameters["targetId"] = normalized_target_id
         return parameters
     if action == "dialog":
         parameters: dict[str, object] = {"accept": bool(accept)}
-        if normalized_target_id is not None:
-            parameters["targetId"] = normalized_target_id
         normalized_prompt = _clean_str(prompt_text)
         if normalized_prompt is not None:
             parameters["promptText"] = normalized_prompt
@@ -428,10 +423,7 @@ def _desktop_browser_parameters(  # noqa: C901, PLR0911, PLR0912, PLR0915
         if not isinstance(request, dict):
             msg = "request required for action=act"
             raise ValueError(msg)
-        parameters: dict[str, object] = {"request": request}
-        if normalized_target_id is not None:
-            parameters["targetId"] = normalized_target_id
-        return parameters
+        return {"request": request}
     msg = f"Unsupported desktop browser action: {action}"
     raise ValueError(msg)
 
@@ -576,6 +568,13 @@ class BrowserTools(Toolkit):
         target_schema["enum"] = ["host", "desktop"]
         properties["target"] = target_schema
 
+        target_id_schema = dict(properties.get("targetId") or {})
+        target_id_schema["description"] = (
+            "Opaque host-browser tab ID. The desktop target operates only the current tab and rejects targetId because "
+            "Playwright MCP exposes mutable numeric indices."
+        )
+        properties["targetId"] = target_id_schema
+
         attachment_schema = dict(properties.get("returnAttachment") or {})
         attachment_schema["description"] = (
             "For action=screenshot with target=desktop, return a turn-scoped att_* handle so matrix_message can "
@@ -638,9 +637,9 @@ class BrowserTools(Toolkit):
             action: Browser action (status/start/stop/profiles/tabs/open/focus/close/snapshot/screenshot/navigate/console/pdf/upload/dialog/act/help/actions)
             target: Browser target location: ``host`` or the configured ``desktop`` Matrix device.
             node: Node id compatibility field; unsupported in MindRoom runtime.
-            profile: Browser profile name (defaults to ``mindroom``).
+            profile: Host-target browser profile name (defaults to ``mindroom``).
             targetUrl: URL for ``open`` and ``navigate`` actions.
-            targetId: Tab target id for actions that address a specific tab.
+            targetId: Opaque host-browser tab id. Unsupported for the desktop target, which operates the current tab.
             limit: Snapshot item limit.
             maxChars: Snapshot text limit.
             mode: Snapshot mode (supports ``efficient``).
@@ -659,8 +658,8 @@ class BrowserTools(Toolkit):
             returnAttachment: For desktop screenshots, expose an ephemeral handle that matrix_message can send.
             level: Console log level filter.
             paths: Upload file paths.
-            inputRef: Upload input selector or ref.
-            timeoutMs: Timeout for wait/upload/dialog actions.
+            inputRef: Host-target upload input selector or ref.
+            timeoutMs: Host-target timeout for upload/dialog actions.
             accept: Whether to accept dialog.
             promptText: Prompt text for dialog accept.
             request: Act request object.
@@ -687,6 +686,23 @@ class BrowserTools(Toolkit):
             msg = "returnAttachment requires target=desktop."
             raise ValueError(msg)
         if resolved_target == "desktop":
+            unsupported = {
+                "compact": compact,
+                "frame": frame,
+                "inputRef": inputRef,
+                "interactive": interactive,
+                "labels": labels,
+                "limit": limit,
+                "mode": mode,
+                "profile": profile,
+                "refs": refs,
+                "snapshotFormat": snapshotFormat,
+                "timeoutMs": timeoutMs,
+            }
+            provided_unsupported = sorted(name for name, value in unsupported.items() if value is not None)
+            if provided_unsupported:
+                msg = f"Browser target=desktop does not support: {', '.join(provided_unsupported)}."
+                raise ValueError(msg)
             return await self._desktop_browser(
                 action=normalized_action,
                 target_url=targetUrl,

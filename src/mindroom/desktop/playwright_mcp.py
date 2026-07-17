@@ -369,12 +369,16 @@ def browser_action_requires_control(action: str, parameters: Mapping[str, object
     return action in _CONTROL_ACTIONS or (parameters is not None and parameters.get("targetId") is not None)
 
 
-def _mcp_calls(  # noqa: C901, PLR0911, PLR0912, PLR0915
+def _mcp_calls(  # noqa: C901, PLR0911, PLR0912
     action: str,
     parameters: dict[str, object],
 ) -> list[_MCPCall]:
-    target_id = _optional_str(parameters, "targetId")
-    prefix = _tab_selection_call(target_id)
+    if parameters.get("targetId") is not None:
+        msg = (
+            "Playwright extension targetId is unsupported because MCP tab indices can change; "
+            "operate the current tab or open a new one."
+        )
+        raise PlaywrightBrowserError(msg)
     if action in {"start", "status", "tabs"}:
         _reject_unexpected(parameters, frozenset())
         return [_MCPCall("browser_tabs", {"action": "list"})]
@@ -382,16 +386,13 @@ def _mcp_calls(  # noqa: C901, PLR0911, PLR0912, PLR0915
         _reject_unexpected(parameters, frozenset({"targetUrl"}))
         return [_MCPCall("browser_tabs", {"action": "new", "url": _required_str(parameters, "targetUrl")})]
     if action == "focus":
-        _reject_unexpected(parameters, frozenset({"targetId"}))
-        return [_MCPCall("browser_tabs", {"action": "select", "index": _tab_index(target_id)})]
+        msg = "Playwright extension focus is unsupported because MCP exposes only mutable tab indices."
+        raise PlaywrightBrowserError(msg)
     if action == "close":
-        _reject_unexpected(parameters, frozenset({"targetId"}))
-        arguments: dict[str, object] = {"action": "close"}
-        if target_id is not None:
-            arguments["index"] = _tab_index(target_id)
-        return [_MCPCall("browser_tabs", arguments)]
+        _reject_unexpected(parameters, frozenset())
+        return [_MCPCall("browser_tabs", {"action": "close"})]
     if action == "snapshot":
-        allowed = frozenset({"targetId", "selector", "depth", "maxChars"})
+        allowed = frozenset({"selector", "depth", "maxChars"})
         _reject_unexpected(parameters, allowed)
         arguments: dict[str, object] = {}
         selector = _optional_str(parameters, "selector")
@@ -400,9 +401,9 @@ def _mcp_calls(  # noqa: C901, PLR0911, PLR0912, PLR0915
         depth = _optional_positive_int(parameters, "depth")
         if depth is not None:
             arguments["depth"] = depth
-        return [*prefix, _MCPCall("browser_snapshot", arguments)]
+        return [_MCPCall("browser_snapshot", arguments)]
     if action == "screenshot":
-        allowed = frozenset({"targetId", "fullPage", "ref", "element", "type"})
+        allowed = frozenset({"fullPage", "ref", "element", "type"})
         _reject_unexpected(parameters, allowed)
         target = _optional_str(parameters, "ref") or _optional_str(parameters, "element")
         arguments: dict[str, object] = {
@@ -412,32 +413,32 @@ def _mcp_calls(  # noqa: C901, PLR0911, PLR0912, PLR0915
         }
         if target is not None:
             arguments.update({"element": target, "target": target})
-        return [*prefix, _MCPCall("browser_take_screenshot", arguments)]
+        return [_MCPCall("browser_take_screenshot", arguments)]
     if action == "navigate":
-        _reject_unexpected(parameters, frozenset({"targetId", "targetUrl"}))
-        return [*prefix, _MCPCall("browser_navigate", {"url": _required_str(parameters, "targetUrl")})]
+        _reject_unexpected(parameters, frozenset({"targetUrl"}))
+        return [_MCPCall("browser_navigate", {"url": _required_str(parameters, "targetUrl")})]
     if action == "console":
-        _reject_unexpected(parameters, frozenset({"targetId", "level"}))
+        _reject_unexpected(parameters, frozenset({"level"}))
         level = _optional_str(parameters, "level") or "info"
-        return [*prefix, _MCPCall("browser_console_messages", {"level": level})]
+        return [_MCPCall("browser_console_messages", {"level": level})]
     if action == "pdf":
-        _reject_unexpected(parameters, frozenset({"targetId"}))
-        return [*prefix, _MCPCall("browser_pdf_save", {})]
+        _reject_unexpected(parameters, frozenset())
+        return [_MCPCall("browser_pdf_save", {})]
     if action == "upload":
-        _reject_unexpected(parameters, frozenset({"targetId", "paths"}))
-        return [*prefix, _MCPCall("browser_file_upload", {"paths": _required_str_list(parameters, "paths")})]
+        _reject_unexpected(parameters, frozenset({"paths"}))
+        return [_MCPCall("browser_file_upload", {"paths": _required_str_list(parameters, "paths")})]
     if action == "dialog":
-        _reject_unexpected(parameters, frozenset({"targetId", "accept", "promptText"}))
+        _reject_unexpected(parameters, frozenset({"accept", "promptText"}))
         arguments: dict[str, object] = {"accept": bool(parameters.get("accept", False))}
         prompt_text = _optional_str(parameters, "promptText")
         if prompt_text is not None:
             arguments["promptText"] = prompt_text
-        return [*prefix, _MCPCall("browser_handle_dialog", arguments)]
+        return [_MCPCall("browser_handle_dialog", arguments)]
     if action == "act":
-        _reject_unexpected(parameters, frozenset({"targetId", "request"}))
+        _reject_unexpected(parameters, frozenset({"request"}))
         error = "Browser act requires a request object with string keys."
         request = _string_keyed_object(parameters.get("request"), error)
-        return [*prefix, _act_call(request)]
+        return [_act_call(request)]
     msg = f"Unsupported Playwright browser action: {action}."
     raise PlaywrightBrowserError(msg)
 
@@ -626,19 +627,6 @@ def _validated_browser_image(content: bytes, mime_type: str) -> BrowserImage:
         msg = f"Playwright MCP image must contain between 1 and {_MAX_IMAGE_BYTES} bytes."
         raise PlaywrightBrowserError(msg)
     return BrowserImage(content=content, mime_type=mime_type)
-
-
-def _tab_selection_call(target_id: str | None) -> list[_MCPCall]:
-    if target_id is None:
-        return []
-    return [_MCPCall("browser_tabs", {"action": "select", "index": _tab_index(target_id)})]
-
-
-def _tab_index(value: str | None) -> int:
-    if value is None or not value.isdecimal():
-        msg = "Playwright extension targetId must be a tab index returned by browser(action='tabs')."
-        raise PlaywrightBrowserError(msg)
-    return int(value)
 
 
 def _result_max_chars(parameters: Mapping[str, object]) -> int:

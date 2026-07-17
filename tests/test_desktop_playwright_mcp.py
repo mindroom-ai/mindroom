@@ -15,7 +15,6 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 from mindroom.desktop.playwright_mcp import (
     _MAX_RESULT_JSON_BYTES,
     PLAYWRIGHT_MCP_PACKAGE,
-    PlaywrightActionOutcomeUnknownError,
     PlaywrightBrowserError,
     PlaywrightMCPBrowserProvider,
     _act_call,
@@ -95,9 +94,8 @@ def test_browser_actions_map_to_high_level_playwright_mcp_tools() -> None:
         "action": "new",
         "url": "https://example.com",
     }
-    navigate = _mcp_calls("navigate", {"targetId": "2", "targetUrl": "https://example.com/form"})
+    navigate = _mcp_calls("navigate", {"targetUrl": "https://example.com/form"})
     assert [(call.tool_name, call.arguments) for call in navigate] == [
-        ("browser_tabs", {"action": "select", "index": 2}),
         ("browser_navigate", {"url": "https://example.com/form"}),
     ]
     snapshot = _mcp_calls("snapshot", {"selector": "main", "depth": 8, "maxChars": 4000})
@@ -180,25 +178,22 @@ def test_provider_result_rejects_mcp_tool_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_provider_executes_multi_step_tab_selection_before_navigation(
+async def test_provider_navigates_only_the_current_extension_tab(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """One Matrix command may select a tab and then navigate it in-order locally."""
+    """One Matrix command navigates without trusting a mutable tab-list index."""
     provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
-    call_tool = AsyncMock(side_effect=[_text_result("selected"), _text_result("navigated")])
+    call_tool = AsyncMock(return_value=_text_result("navigated"))
     monkeypatch.setattr(provider, "_call_tool", call_tool)
 
     result = await provider.execute(
         "navigate",
-        {"targetId": "1", "targetUrl": "https://example.com/checkout"},
+        {"targetUrl": "https://example.com/checkout"},
     )
 
     assert result.payload["result"] == "navigated"
-    assert [call.args for call in call_tool.await_args_list] == [
-        ("browser_tabs", {"action": "select", "index": 1}),
-        ("browser_navigate", {"url": "https://example.com/checkout"}),
-    ]
+    call_tool.assert_awaited_once_with("browser_navigate", {"url": "https://example.com/checkout"})
 
 
 @pytest.mark.asyncio
@@ -377,42 +372,15 @@ async def test_oversized_screenshot_uses_a_bounded_file_read(
     assert list(tmp_path.iterdir()) == []
 
 
-@pytest.mark.asyncio
-async def test_failed_tab_selection_never_mutates_the_previous_tab(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """An MCP error from the selection prefix aborts before the navigation call."""
-    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
-    call_tool = AsyncMock(return_value=_text_result("tab vanished", error=True))
-    monkeypatch.setattr(provider, "_call_tool", call_tool)
+@pytest.mark.parametrize("action", ["focus", "snapshot", "navigate", "close"])
+def test_mutable_playwright_tab_indices_are_rejected(action: str) -> None:
+    """The desktop extension never treats a mutable tab-list index as a stable target."""
+    parameters: dict[str, object] = {"targetId": "1"}
+    if action == "navigate":
+        parameters["targetUrl"] = "https://example.com/checkout"
 
-    with pytest.raises(PlaywrightActionOutcomeUnknownError, match="tab vanished"):
-        await provider.execute(
-            "navigate",
-            {"targetId": "1", "targetUrl": "https://example.com/checkout"},
-        )
-
-    call_tool.assert_awaited_once_with("browser_tabs", {"action": "select", "index": 1})
-
-
-@pytest.mark.asyncio
-async def test_failed_observation_after_tab_selection_reports_unknown_outcome(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A failed observation still reports the preceding tab switch as a possible side effect."""
-    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
-    call_tool = AsyncMock(side_effect=[_text_result("selected"), _text_result("extension disconnected", error=True)])
-    monkeypatch.setattr(provider, "_call_tool", call_tool)
-
-    with pytest.raises(PlaywrightActionOutcomeUnknownError, match="extension disconnected"):
-        await provider.execute("snapshot", {"targetId": "1"})
-
-    assert [call.args for call in call_tool.await_args_list] == [
-        ("browser_tabs", {"action": "select", "index": 1}),
-        ("browser_snapshot", {}),
-    ]
+    with pytest.raises(PlaywrightBrowserError, match="tab indices can change"):
+        _mcp_calls(action, parameters)
 
 
 @pytest.mark.asyncio

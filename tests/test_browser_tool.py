@@ -528,10 +528,10 @@ async def test_desktop_target_routes_snapshot_and_control_over_matrix(monkeypatc
                 result={"action": "snapshot", "provider": "playwright_mcp_extension", "result": "plain-tree"},
             ),
             DesktopResponse(
-                request_id="snapshot",
+                request_id="navigate",
                 session_id="session",
                 ok=True,
-                result={"action": "snapshot", "provider": "playwright_mcp_extension", "result": "tree"},
+                result={"action": "navigate", "provider": "playwright_mcp_extension", "result": "navigated"},
             ),
             DesktopResponse(
                 request_id="click",
@@ -555,32 +555,72 @@ async def test_desktop_target_routes_snapshot_and_control_over_matrix(monkeypatc
     )
 
     plain_snapshot = await tool.browser(action="snapshot", maxChars=1000)
-    snapshot = await tool.browser(action="snapshot", targetId="2", maxChars=5000)
+    navigate = await tool.browser(action="navigate", targetUrl="https://example.com")
     click = await tool.browser(action="act", request={"kind": "click", "ref": "e3"})
 
     assert isinstance(plain_snapshot, str)
-    assert isinstance(snapshot, str)
-    assert json.loads(snapshot)["provider"] == "playwright_mcp_extension"
+    assert isinstance(navigate, str)
+    assert json.loads(navigate)["provider"] == "playwright_mcp_extension"
     assert isinstance(click, str)
     observe_command = request.await_args_list[0].args[1]
-    snapshot_command = request.await_args_list[1].args[1]
+    navigate_command = request.await_args_list[1].args[1]
     click_command = request.await_args_list[2].args[1]
     assert observe_command.action == "browser_observe"
     assert observe_command.parameters == {
         "browser_action": "snapshot",
         "browser_parameters": {"maxChars": 1000},
     }
-    assert snapshot_command.action == "browser_control"
-    assert snapshot_command.parameters == {
-        "browser_action": "snapshot",
-        "browser_parameters": {"targetId": "2", "maxChars": 5000},
+    assert navigate_command.action == "browser_control"
+    assert navigate_command.parameters == {
+        "browser_action": "navigate",
+        "browser_parameters": {"targetUrl": "https://example.com"},
     }
     assert click_command.action == "browser_control"
     assert click_command.parameters == {
         "browser_action": "act",
         "browser_parameters": {"request": {"kind": "click", "ref": "e3"}},
     }
-    assert (observe_command.sequence, snapshot_command.sequence, click_command.sequence) == (0, 1, 2)
+    assert (observe_command.sequence, navigate_command.sequence, click_command.sequence) == (0, 1, 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "arguments", "expected"),
+    [
+        ("snapshot", {"targetId": "1"}, "does not support targetId"),
+        ("snapshot", {"snapshotFormat": "aria"}, "does not support: snapshotFormat"),
+        ("status", {"profile": "chrome"}, "does not support: profile"),
+        ("upload", {"paths": ["invoice.pdf"], "inputRef": "e1"}, "does not support: inputRef"),
+        ("dialog", {"timeoutMs": 1000}, "does not support: timeoutMs"),
+        ("focus", {}, "does not support focus"),
+    ],
+)
+async def test_desktop_target_rejects_unsupported_host_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    arguments: dict[str, object],
+    expected: str,
+) -> None:
+    """Desktop routing fails closed instead of pretending host-only arguments were honored."""
+    context = SimpleNamespace(requester_id="@alice:example.org", agent_name="computer", client=object())
+    request = AsyncMock()
+    monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.desktop_response_router",
+        lambda _client: SimpleNamespace(request=request),
+    )
+    tool = BrowserTools(
+        TEST_RUNTIME_PATHS,
+        default_target="desktop",
+        device_user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        device_ed25519="fingerprint",
+    )
+
+    with pytest.raises(ValueError, match=expected):
+        await tool.browser(action=action, **arguments)
+
+    request.assert_not_awaited()
 
 
 @pytest.mark.asyncio
