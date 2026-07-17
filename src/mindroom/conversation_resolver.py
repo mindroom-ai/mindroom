@@ -10,18 +10,14 @@ import nio
 from nio.responses import RoomGetEventError
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
-from mindroom.constants import (
-    HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
-    HOOK_SOURCE_KEY,
-    PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
-    SKIP_MENTIONS_KEY,
-)
+from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, HOOK_SOURCE_KEY, SKIP_MENTIONS_KEY
 from mindroom.dispatch_handoff import DispatchEvent, DispatchPayloadMetadata, PreparedTextEvent
 from mindroom.dispatch_source import (
     IMAGE_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
     VOICE_SOURCE_KIND,
     content_owns_per_fire_thread_root,
+    per_fire_thread_root_event_id_from_content,
     source_kind_from_content,
 )
 from mindroom.dispatch_thread_context import (
@@ -348,8 +344,10 @@ class ConversationResolver:
         if not self._is_trusted_automation_fire(event_source):
             return None
         content = event_source.get("content")
-        relayed_root_event_id = content.get(PER_FIRE_THREAD_ROOT_EVENT_ID_KEY) if isinstance(content, dict) else None
-        if isinstance(relayed_root_event_id, str) and relayed_root_event_id:
+        relayed_root_event_id = (
+            per_fire_thread_root_event_id_from_content(content) if isinstance(content, dict) else None
+        )
+        if relayed_root_event_id is not None:
             return relayed_root_event_id
         if event_info.thread_id is not None:
             return event_info.thread_id

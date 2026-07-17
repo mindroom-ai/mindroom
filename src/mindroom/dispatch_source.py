@@ -153,15 +153,21 @@ def source_kind_from_content(content: Mapping[str, Any]) -> str | None:
     return _source_kind_from_value(source_kind)
 
 
+def per_fire_thread_root_event_id_from_content(content: Mapping[str, Any]) -> str | None:
+    """Return the relayed per-fire thread root annotated on Matrix content."""
+    relayed_root_event_id = content.get(PER_FIRE_THREAD_ROOT_EVENT_ID_KEY)
+    if isinstance(relayed_root_event_id, str) and relayed_root_event_id:
+        return relayed_root_event_id
+    return None
+
+
 def content_owns_per_fire_thread_root(content: Mapping[str, Any]) -> bool:
     """Return whether trusted content explicitly owns a per-fire thread root."""
     if content.get(PER_FIRE_THREAD_ROOT_KEY) is not True:
         return False
-    source_kind = source_kind_from_content(content)
-    if source_kind in _PER_FIRE_THREAD_ROOT_SOURCE_KINDS:
+    if source_kind_from_content(content) in _PER_FIRE_THREAD_ROOT_SOURCE_KINDS:
         return True
-    relayed_root_event_id = content.get(PER_FIRE_THREAD_ROOT_EVENT_ID_KEY)
-    return isinstance(relayed_root_event_id, str) and bool(relayed_root_event_id)
+    return per_fire_thread_root_event_id_from_content(content) is not None
 
 
 def scheduled_history_limit_from_content(content: Mapping[str, Any]) -> int | None:
