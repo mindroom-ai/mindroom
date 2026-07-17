@@ -6,6 +6,7 @@ from anthropic import AuthenticationError as AnthropicAuthError
 from openai import AuthenticationError as OpenAIAuthError
 
 from mindroom.error_handling import (
+    MODEL_SAFEGUARD_REFUSAL_MESSAGE,
     ModelSafeguardRefusalError,
     _extract_provider_from_error,
     get_user_friendly_error_message,
@@ -71,6 +72,17 @@ def test_model_safeguard_refusal_gives_actionable_guidance() -> None:
     )
 
     message = get_user_friendly_error_message(error, "mind")
+
+    assert message == (
+        "[mind] ⚠️ This model's safeguards blocked the request. "
+        "Choose a different model (`!model list`) or revise the prompt, then try again."
+    )
+    assert "stop_reason" not in message
+
+
+def test_stringified_model_safeguard_refusal_gives_actionable_guidance() -> None:
+    """Agno run errors preserve provider failures as text rather than exception types."""
+    message = get_user_friendly_error_message(Exception(MODEL_SAFEGUARD_REFUSAL_MESSAGE), "mind")
 
     assert message == (
         "[mind] ⚠️ This model's safeguards blocked the request. "

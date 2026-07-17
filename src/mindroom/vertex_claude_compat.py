@@ -20,7 +20,7 @@ from mindroom.claude_prompt_cache import (
     TOOL_SEARCH_TOOL_TYPE,
     prepare_claude_request_kwargs,
 )
-from mindroom.error_handling import ModelSafeguardRefusalError
+from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
 from mindroom.logging_config import get_logger
 from mindroom.token_budget import estimate_compaction_input_tokens, stable_serialize
 
@@ -465,7 +465,7 @@ class MindroomVertexAIClaude(VertexAIClaude):
             stop_reason=stop_reason,
         )
         raise ModelSafeguardRefusalError(
-            message="Vertex Claude returned stop_reason=refusal",
+            message=MODEL_SAFEGUARD_REFUSAL_MESSAGE,
             model_name=self.name,
             model_id=self.id,
         )
