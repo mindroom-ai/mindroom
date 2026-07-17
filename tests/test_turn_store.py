@@ -251,21 +251,82 @@ def test_forget_redacted_turn_ignores_unhandled_event(tmp_path: Path) -> None:
     store.deps.state_writer.create_storage.assert_not_called()
 
 
-def test_forget_redacted_turn_ignores_turn_owned_by_other_entity(tmp_path: Path) -> None:
-    """Only the entity that owns the response removes its persisted runs."""
+@pytest.mark.parametrize("source_owner", [None, "other"])
+def test_forget_redacted_turn_cleans_later_owned_scopes_across_requesters(
+    tmp_path: Path,
+    *,
+    source_owner: str | None,
+) -> None:
+    """An unowned source can still contaminate a later private response scope."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
-    store = _store(tmp_path)
-    store.record_turn(replace(_owned_turn_record(target), response_owner="other"))
+    default_scope = HistoryScope(kind="agent", scope_id="agent")
+    team_scope = HistoryScope(kind="team", scope_id="team_private")
+    team_session = TeamSession(
+        session_id=target.session_id,
+        team_id=team_scope.scope_id,
+        runs=[
+            TeamRunOutput(
+                session_id=target.session_id,
+                team_id=team_scope.scope_id,
+                metadata={
+                    constants.MATRIX_EVENT_ID_METADATA_KEY: "$later",
+                    constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$user_msg", "$later"],
+                },
+            ),
+        ],
+    )
+    storages = {
+        (default_scope.key, "@source:example.org"): _FakeAgentStorage(None),
+        (team_scope.key, "@later:example.org"): _FakeAgentStorage(team_session),
+    }
+    state_writer = MagicMock()
+    state_writer.history_scope.return_value = default_scope
+    state_writer.create_storage.side_effect = lambda identity, *, scope: storages[(scope.key, identity)]
+    state_writer.session_type_for_scope.side_effect = lambda scope: (
+        SessionType.TEAM if scope.kind == "team" else SessionType.AGENT
+    )
+    tool_runtime = MagicMock()
+    tool_runtime.build_execution_identity.side_effect = lambda *, target, user_id: user_id  # noqa: ARG005
+    store = TurnStore(
+        TurnStoreDeps(
+            agent_name="agent",
+            tracking_base_path=tmp_path,
+            state_writer=state_writer,
+            resolver=MagicMock(),
+            tool_runtime=tool_runtime,
+        ),
+    )
+    store.record_turn(
+        replace(
+            _owned_turn_record(target),
+            response_owner=source_owner,
+            requester_id="@source:example.org",
+        ),
+    )
+    store.record_turn(
+        TurnRecord.create(
+            ["$later"],
+            response_event_id="$later-reply",
+            response_owner="agent",
+            requester_id="@later:example.org",
+            history_scope=team_scope,
+            conversation_target=target,
+        ),
+    )
 
     removed = store.forget_redacted_turn(
         room=MagicMock(room_id="!room:example.org"),
         redacted_event_id="$user_msg",
-        requester_user_id="@user:example.org",
+        requester_user_id="@source:example.org",
         target_hint=target,
     )
 
-    assert removed is False
-    store.deps.state_writer.create_storage.assert_not_called()
+    assert removed is True
+    assert team_session.runs == []
+    assert {call.kwargs["user_id"] for call in tool_runtime.build_execution_identity.call_args_list} == {
+        "@source:example.org",
+        "@later:example.org",
+    }
 
 
 def test_forget_redacted_turn_recovers_missing_response_context(tmp_path: Path) -> None:
@@ -291,9 +352,13 @@ def test_forget_redacted_turn_recovers_missing_response_context(tmp_path: Path) 
 
     assert removed is True
     assert session.runs == []
-    store.deps.tool_runtime.build_execution_identity.assert_called_once_with(
+    store.deps.tool_runtime.build_execution_identity.assert_any_call(
         target=target,
         user_id="@source-user:example.org",
+    )
+    store.deps.tool_runtime.build_execution_identity.assert_any_call(
+        target=target,
+        user_id="@metadata-user:example.org",
     )
 
 

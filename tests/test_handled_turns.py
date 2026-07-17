@@ -730,6 +730,51 @@ def test_cleanup_by_age_removes_old_records(temp_dir: Path) -> None:
         assert not tracker.has_responded(f"old_event{index}")
 
 
+def test_cleanup_by_age_retains_pending_redaction_intent(temp_dir: Path) -> None:
+    """Age retention must not discard cleanup work before startup can resume it."""
+    tracker = HandledTurnLedger("test_pending_age_cleanup", base_path=temp_dir)
+    old_timestamp = time.time() - (40 * 24 * 60 * 60)
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$pending"],
+            redacted_source_event_ids=["$pending"],
+            pending_redaction_cleanup_event_ids=["$pending"],
+            pending_redaction_room_id="!room:example.org",
+            timestamp=old_timestamp,
+        ),
+    )
+    tracker.record_handled_turn(TurnRecord.create(["$ordinary"], timestamp=old_timestamp))
+    tracker.flush()
+
+    tracker._cleanup_old_events(max_events=100, max_age_days=30)
+
+    assert tracker.get_turn_record("$pending") is not None
+    assert tracker.pending_redaction_cleanup_event_ids() == ("$pending",)
+    assert tracker.get_turn_record("$ordinary") is None
+
+
+def test_cleanup_by_count_retains_pending_redaction_intent(temp_dir: Path) -> None:
+    """Count retention may exceed its limit rather than lose owed cleanup work."""
+    tracker = HandledTurnLedger("test_pending_count_cleanup", base_path=temp_dir)
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$pending"],
+            redacted_source_event_ids=["$pending"],
+            pending_redaction_cleanup_event_ids=["$pending"],
+            pending_redaction_room_id="!room:example.org",
+            timestamp=time.time() - 2,
+        ),
+    )
+    tracker.record_handled_turn(TurnRecord.create(["$newest"], timestamp=time.time()))
+    tracker.flush()
+
+    tracker._cleanup_old_events(max_events=1, max_age_days=30)
+
+    assert tracker.get_turn_record("$pending") is not None
+    assert tracker.pending_redaction_cleanup_event_ids() == ("$pending",)
+    assert tracker.get_turn_record("$newest") is not None
+
+
 def test_concurrent_access_keeps_json_valid(temp_dir: Path) -> None:
     """Concurrent writes should keep the persisted file readable."""
     tracker = HandledTurnLedger("test_concurrent", base_path=temp_dir)

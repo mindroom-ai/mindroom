@@ -413,27 +413,15 @@ class TurnStore:
                 )
                 or turn_record
             )
-        if turn_record is None or turn_record.response_owner != self.deps.agent_name:
-            if turn_record is not None and turn_record.response_owner is not None:
-                self._clear_pending_redaction_cleanup(redacted_event_id)
-                return False
-            fallback_target = (
-                turn_record.conversation_target
-                if turn_record is not None and turn_record.conversation_target is not None
-                else target_hint
-            )
-            if fallback_target is None:
-                return False
-            removed = self._remove_redacted_event_from_scope(
-                target=fallback_target,
-                history_scope=self.deps.state_writer.history_scope(),
-                requester_user_id=requester_user_id,
-                redacted_event_id=redacted_event_id,
-            )
-            self._clear_pending_redaction_cleanup(redacted_event_id)
-            return removed
+        fallback_target = (
+            turn_record.conversation_target
+            if turn_record is not None and turn_record.conversation_target is not None
+            else target_hint
+        )
+        if fallback_target is None:
+            return False
         removed = self._remove_redacted_event_from_recorded_scopes(
-            turn_record=turn_record,
+            target=fallback_target,
             requester_user_id=requester_user_id,
             redacted_event_id=redacted_event_id,
         )
@@ -450,57 +438,55 @@ class TurnStore:
             or turn_record.conversation_target is None
         ):
             return
-        if turn_record.response_owner not in (None, self.deps.agent_name):
-            self._clear_pending_redaction_cleanup(redacted_event_id)
-            return
-        if turn_record.response_owner == self.deps.agent_name and turn_record.history_scope is not None:
-            self._remove_redacted_event_from_recorded_scopes(
-                turn_record=turn_record,
-                requester_user_id=turn_record.requester_id,
-                redacted_event_id=redacted_event_id,
-            )
-        else:
-            self._remove_redacted_event_from_scope(
-                target=turn_record.conversation_target,
-                history_scope=self.deps.state_writer.history_scope(),
-                requester_user_id=turn_record.requester_id,
-                redacted_event_id=redacted_event_id,
-            )
+        self._remove_redacted_event_from_recorded_scopes(
+            target=turn_record.conversation_target,
+            requester_user_id=turn_record.requester_id,
+            redacted_event_id=redacted_event_id,
+        )
         self._clear_pending_redaction_cleanup(redacted_event_id)
 
     def _remove_redacted_event_from_recorded_scopes(
         self,
         *,
-        turn_record: TurnRecord,
+        target: MessageTarget,
         requester_user_id: str,
         redacted_event_id: str,
     ) -> bool:
-        """Remove causal replay from every ledger-recorded scope in one conversation."""
-        assert turn_record.conversation_target is not None
-        candidate_records = (
-            turn_record,
-            *self._ledger.turn_records_for_conversation(
-                session_id=turn_record.conversation_target.session_id,
-                requester_id=requester_user_id,
+        """Remove causal replay from every self-owned scope in one conversation."""
+        candidate_records = self._ledger.turn_records_for_conversation(session_id=target.session_id)
+        fallback_scope = self.deps.state_writer.history_scope()
+        contexts: dict[tuple[str, str, str], tuple[MessageTarget, HistoryScope, str]] = {
+            (target.session_id, fallback_scope.key, requester_user_id): (
+                target,
+                fallback_scope,
+                requester_user_id,
             ),
-        )
-        contexts: dict[tuple[str, str], tuple[MessageTarget, HistoryScope]] = {}
+        }
         for candidate in candidate_records:
             if (
                 candidate.response_owner != self.deps.agent_name
+                or candidate.requester_id is None
                 or candidate.conversation_target is None
                 or candidate.history_scope is None
             ):
                 continue
-            key = (candidate.conversation_target.session_id, candidate.history_scope.key)
-            contexts[key] = (candidate.conversation_target, candidate.history_scope)
+            key = (
+                candidate.conversation_target.session_id,
+                candidate.history_scope.key,
+                candidate.requester_id,
+            )
+            contexts[key] = (
+                candidate.conversation_target,
+                candidate.history_scope,
+                candidate.requester_id,
+            )
 
         removed_any = False
-        for target, history_scope in contexts.values():
+        for candidate_target, history_scope, candidate_requester_id in contexts.values():
             removed = self._remove_redacted_event_from_scope(
-                target=target,
+                target=candidate_target,
                 history_scope=history_scope,
-                requester_user_id=requester_user_id,
+                requester_user_id=candidate_requester_id,
                 redacted_event_id=redacted_event_id,
             )
             removed_any = removed or removed_any

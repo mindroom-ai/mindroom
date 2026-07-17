@@ -129,9 +129,17 @@ class RedactedTurnCleanup:
         source = source_event.source if isinstance(source_event.source, dict) else None
         if target is None:
             event_info = EventInfo.from_event(source)
+            thread_id = event_info.thread_id or event_info.thread_id_from_edit
+            related_event_id = event_info.next_related_event_id(redacted_event_id)
+            if thread_id is None and related_event_id is not None:
+                thread_id = await self.deps.resolver.resolve_related_event_thread_id_dispatch_snapshot_best_effort(
+                    room_id,
+                    related_event_id,
+                    caller_label="redacted_turn_cleanup",
+                )
             target = self.deps.resolver.build_message_target(
                 room_id=room_id,
-                thread_id=event_info.thread_id,
+                thread_id=thread_id,
                 reply_to_event_id=redacted_event_id,
                 event_source=source,
             )

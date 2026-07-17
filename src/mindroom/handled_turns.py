@@ -564,7 +564,6 @@ class HandledTurnLedger:
         self,
         *,
         session_id: str,
-        requester_id: str,
     ) -> tuple[TurnRecord, ...]:
         """Return unique records that can identify persisted scopes for one conversation."""
         with self._state.lock:
@@ -572,7 +571,7 @@ class HandledTurnLedger:
             unique_records: dict[tuple[str, ...], TurnRecord] = {}
             for record in self._responses.values():
                 target = record.conversation_target
-                if target is None or target.session_id != session_id or record.requester_id != requester_id:
+                if target is None or target.session_id != session_id:
                     continue
                 unique_records[record.indexed_event_ids] = record
             return tuple(unique_records.values())
@@ -858,9 +857,22 @@ def _cleaned_responses(
     """Remove stale turn groups while keeping coalesced groups intact."""
     current_time = time.time()
     max_age_seconds = max_age_days * 24 * 60 * 60
-    fresh_groups = [group for group in _response_groups(responses) if current_time - group.timestamp < max_age_seconds]
+    fresh_groups = [
+        group
+        for group in _response_groups(responses)
+        if any(record.pending_redaction_cleanup_event_ids for record in group.records.values())
+        or current_time - group.timestamp < max_age_seconds
+    ]
     if len(fresh_groups) > max_events:
-        fresh_groups = fresh_groups[-max_events:]
+        pending_groups = [
+            group
+            for group in fresh_groups
+            if any(record.pending_redaction_cleanup_event_ids for record in group.records.values())
+        ]
+        pending_group_ids = {id(group) for group in pending_groups}
+        ordinary_groups = [group for group in fresh_groups if id(group) not in pending_group_ids]
+        kept_ordinary_groups = ordinary_groups[-max_events:] if max_events else []
+        fresh_groups = sorted((*pending_groups, *kept_ordinary_groups), key=lambda group: group.timestamp)
     cleaned_responses: dict[str, TurnRecord] = {}
     for group in fresh_groups:
         cleaned_responses.update(group.records)
