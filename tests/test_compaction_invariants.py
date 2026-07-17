@@ -29,8 +29,10 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
+from google.genai.types import GenerateContentConfig
 
 from mindroom.agent_storage import create_session_storage, get_agent_session
+from mindroom.codex_model import CodexResponses
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
@@ -811,7 +813,23 @@ def test_loaded_model_output_cap_supports_provider_parameter_names(model: Model)
         (Claude(id="claude-sonnet-5", max_tokens=64_000, request_params={"max_tokens": 1_024}), 1_024),
         (OpenAIResponses(id="gpt-5.6", request_params={"max_output_tokens": 64_000}), 64_000),
         (OpenAIChat(id="gpt-5.6", request_params={"max_completion_tokens": 64_000}), 64_000),
-        (Gemini(id="gemini-3.5-flash", request_params={"max_output_tokens": 64_000}), 64_000),
+        (Gemini(id="gemini-3.5-flash", request_params={"config": {"max_output_tokens": 64_000}}), 64_000),
+        (
+            Gemini(
+                id="gemini-3.5-flash",
+                max_output_tokens=64_000,
+                request_params={"config": {"max_output_tokens": 1_024}},
+            ),
+            1_024,
+        ),
+        (
+            Gemini(
+                id="gemini-3.5-flash",
+                max_output_tokens=64_000,
+                request_params={"config": GenerateContentConfig(max_output_tokens=1_024)},
+            ),
+            1_024,
+        ),
         (
             Ollama(
                 id="llama3.1",
@@ -828,10 +846,10 @@ def test_loaded_model_output_cap_honors_request_parameter_overrides(model: Model
 
 @pytest.mark.asyncio
 async def test_generate_compaction_summary_uses_effective_request_output_cap() -> None:
-    model = Claude(
-        id="claude-sonnet-5",
-        max_tokens=64_000,
-        request_params={"max_tokens": 1_024},
+    model = Gemini(
+        id="gemini-3.5-flash",
+        max_output_tokens=64_000,
+        request_params={"config": {"max_output_tokens": 1_024}},
     )
     with (
         patch.object(
@@ -851,6 +869,40 @@ async def test_generate_compaction_summary_uses_effective_request_output_cap() -
             summary_input="conversation payload",
             summary_prompt="Summarize the conversation.",
         )
+
+
+def test_codex_stripped_output_cap_does_not_reduce_compaction_input_budget() -> None:
+    model = CodexResponses(id="gpt-5.6", max_output_tokens=40_000)
+
+    assert "max_output_tokens" not in model.get_request_params()
+    assert configured_model_max_output_tokens(model) is None
+    assert compute_compaction_input_budget(
+        100_000,
+        reserve_tokens=16_384,
+        model_max_output_tokens=configured_model_max_output_tokens(model),
+    ) == compute_compaction_input_budget(100_000, reserve_tokens=16_384)
+
+
+@pytest.mark.asyncio
+async def test_generate_compaction_summary_allows_codex_response_without_wire_cap() -> None:
+    model = CodexResponses(id="gpt-5.6", max_output_tokens=40)
+    with patch.object(
+        model,
+        "aresponse",
+        new=AsyncMock(
+            return_value=ModelResponse(
+                content="durable summary ended cleanly.",
+                output_tokens=40,
+            ),
+        ),
+    ):
+        summary = await generate_compaction_summary(
+            model=model,
+            summary_input="conversation payload",
+            summary_prompt="Summarize the conversation.",
+        )
+
+    assert summary.summary == "durable summary ended cleanly."
 
 
 @pytest.mark.asyncio

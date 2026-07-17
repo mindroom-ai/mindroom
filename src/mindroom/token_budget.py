@@ -44,38 +44,18 @@ class _CompactionTokenEstimator:
 
 
 @runtime_checkable
-class _ModelWithMaxTokens(Protocol):
-    """Typed surface shared by loaded models with an authored output cap."""
+class _ModelWithRequestParams(Protocol):
+    """Typed surface for models that expose their normalized request."""
 
-    max_tokens: int | None
+    def get_request_params(self) -> Mapping[str, object]:
+        """Return provider-shaped request parameters."""
 
 
 @runtime_checkable
-class _ModelWithMaxOutputTokens(Protocol):
-    """Typed surface for models using the Responses-style output cap."""
+class _ConfigWithMaxOutputTokens(Protocol):
+    """Typed surface for Gemini SDK request config objects."""
 
     max_output_tokens: int | None
-
-
-@runtime_checkable
-class _ModelWithMaxCompletionTokens(Protocol):
-    """Typed surface for models using the Chat Completions output cap."""
-
-    max_completion_tokens: int | None
-
-
-@runtime_checkable
-class _ModelWithOptions(Protocol):
-    """Typed surface for models with nested request options."""
-
-    options: Mapping[str, object] | None
-
-
-@runtime_checkable
-class _ModelWithRequestParams(Protocol):
-    """Typed surface for loaded models with final request overrides."""
-
-    request_params: Mapping[str, object] | None
 
 
 def estimate_text_tokens(value: str | list[str] | None) -> int:
@@ -121,30 +101,23 @@ def estimate_compaction_input_tokens(
 
 def configured_model_max_output_tokens(model: Model) -> int | None:
     """Return the largest positive output cap in a loaded model's effective request."""
-    candidates: dict[str, object] = {}
-    if isinstance(model, _ModelWithMaxTokens):
-        candidates["max_tokens"] = model.max_tokens
-    if isinstance(model, _ModelWithMaxOutputTokens):
-        candidates["max_output_tokens"] = model.max_output_tokens
-    if isinstance(model, _ModelWithMaxCompletionTokens):
-        candidates["max_completion_tokens"] = model.max_completion_tokens
-    if isinstance(model, _ModelWithOptions) and isinstance(model.options, Mapping):
-        candidates["num_predict"] = model.options.get("num_predict")
-    if isinstance(model, _ModelWithRequestParams) and isinstance(model.request_params, Mapping):
-        for parameter_name in ("max_tokens", "max_output_tokens", "max_completion_tokens"):
-            if parameter_name in model.request_params:
-                candidates[parameter_name] = model.request_params[parameter_name]
-        if "options" in model.request_params:
-            request_options = model.request_params["options"]
-            request_options_mapping = (
-                cast("Mapping[str, object]", request_options) if isinstance(request_options, Mapping) else None
-            )
-            candidates["num_predict"] = (
-                request_options_mapping.get("num_predict") if request_options_mapping is not None else None
-            )
-    positive_caps = [
-        cap for cap in candidates.values() if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0
+    if not isinstance(model, _ModelWithRequestParams):
+        return None
+    request_params = model.get_request_params()
+    candidates = [
+        request_params.get("max_tokens"),
+        request_params.get("max_output_tokens"),
+        request_params.get("max_completion_tokens"),
     ]
+    request_options = request_params.get("options")
+    if isinstance(request_options, Mapping):
+        candidates.append(cast("Mapping[str, object]", request_options).get("num_predict"))
+    request_config = request_params.get("config")
+    if isinstance(request_config, Mapping):
+        candidates.append(cast("Mapping[str, object]", request_config).get("max_output_tokens"))
+    elif isinstance(request_config, _ConfigWithMaxOutputTokens):
+        candidates.append(request_config.max_output_tokens)
+    positive_caps = [cap for cap in candidates if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0]
     return max(positive_caps, default=None)
 
 
