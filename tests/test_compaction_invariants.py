@@ -14,12 +14,15 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from agno.agent import Agent
 from agno.models.anthropic import Claude
+from agno.models.google import Gemini
 from agno.models.message import Message
+from agno.models.openai import OpenAIChat, OpenAIResponses
 from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
@@ -63,6 +66,9 @@ from mindroom.token_budget import (
 )
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 from tests.conftest import FakeModel, bind_runtime_paths, prepare_history_for_run_for_test
+
+if TYPE_CHECKING:
+    from agno.models.base import Model
 
 _SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
 _HISTORY_SETTINGS = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
@@ -752,6 +758,18 @@ def test_compaction_budget_reserves_loaded_model_output_cap() -> None:
         )
         == 24_000
     )
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        OpenAIResponses(id="gpt-5.6", max_output_tokens=64_000),
+        OpenAIChat(id="gpt-5.6", max_completion_tokens=64_000),
+        Gemini(id="gemini-3.5-flash", max_output_tokens=64_000),
+    ],
+)
+def test_loaded_model_output_cap_supports_provider_parameter_names(model: Model) -> None:
+    assert configured_model_max_output_tokens(model) == 64_000
 
 
 @pytest.mark.asyncio

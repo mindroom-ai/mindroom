@@ -49,6 +49,20 @@ class _ModelWithMaxTokens(Protocol):
     max_tokens: int | None
 
 
+@runtime_checkable
+class _ModelWithMaxOutputTokens(Protocol):
+    """Typed surface for models using the Responses-style output cap."""
+
+    max_output_tokens: int | None
+
+
+@runtime_checkable
+class _ModelWithMaxCompletionTokens(Protocol):
+    """Typed surface for models using the Chat Completions output cap."""
+
+    max_completion_tokens: int | None
+
+
 def estimate_text_tokens(value: str | list[str] | None) -> int:
     """Estimate token count using chars / 4."""
     if value is None:
@@ -91,13 +105,16 @@ def estimate_compaction_input_tokens(
 
 
 def configured_model_max_output_tokens(model: Model) -> int | None:
-    """Return a loaded model's positive ``max_tokens`` cap when its type exposes one."""
-    if not isinstance(model, _ModelWithMaxTokens):
-        return None
-    max_tokens = model.max_tokens
-    if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0:
-        return None
-    return max_tokens
+    """Return the largest positive output cap exposed by a loaded model."""
+    candidates: list[int | None] = []
+    if isinstance(model, _ModelWithMaxTokens):
+        candidates.append(model.max_tokens)
+    if isinstance(model, _ModelWithMaxOutputTokens):
+        candidates.append(model.max_output_tokens)
+    if isinstance(model, _ModelWithMaxCompletionTokens):
+        candidates.append(model.max_completion_tokens)
+    positive_caps = [cap for cap in candidates if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0]
+    return max(positive_caps, default=None)
 
 
 def compute_compaction_input_budget(

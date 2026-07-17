@@ -74,7 +74,7 @@ def test_prepare_scope_history_boundary_does_not_accept_execution_identity() -> 
     assert "execution_identity" not in inspect.signature(prepare_scope_history).parameters
 
 
-def test_effective_summary_input_budget_reuses_normalized_reserve_policy() -> None:
+def test_effective_summary_input_budget_applies_loaded_output_cap_safely() -> None:
     execution_plan = ResolvedHistoryExecutionPlan(
         authored_compaction_enabled=True,
         destructive_compaction_available=True,
@@ -90,6 +90,8 @@ def test_effective_summary_input_budget_reuses_normalized_reserve_policy() -> No
     )
 
     assert _effective_summary_input_budget(execution_plan, model_max_output_tokens=64_000) == 24_000
+    with pytest.raises(ValueError, match="no usable summary input budget"):
+        _effective_summary_input_budget(execution_plan, model_max_output_tokens=100_000)
 
 
 @pytest.mark.asyncio

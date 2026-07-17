@@ -576,11 +576,15 @@ def _effective_summary_input_budget(
         execution_plan.reserve_tokens,
         execution_plan.compaction_context_window,
     )
-    return compute_compaction_input_budget(
+    effective_budget = compute_compaction_input_budget(
         execution_plan.compaction_context_window,
         reserve_tokens=normalized_reserve_tokens,
         model_max_output_tokens=model_max_output_tokens,
     )
+    if effective_budget <= 0:
+        msg = "Compaction model leaves no usable summary input budget after its configured output cap."
+        raise ValueError(msg)
+    return effective_budget
 
 
 def finalize_history_preparation(
