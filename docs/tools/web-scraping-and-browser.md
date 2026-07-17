@@ -667,23 +667,25 @@ get_page_content()
 
 `browser` exposes one callable, `browser(action=...)`, with actions such as `status`, `start`, `stop`, `profiles`, `tabs`, `open`, `focus`, `close`, `snapshot`, `screenshot`, `navigate`, `console`, `pdf`, `upload`, `dialog`, `act`, `help`, and `actions`.
 With `target="host"`, it manages named browser profiles on the MindRoom host, with `mindroom` as the default profile name.
-With `target="desktop"`, it routes the same stable action vocabulary over pinned Matrix encryption to the official Playwright MCP extension in the user's existing local Chrome or Brave profile.
-It creates tabs, tracks the active tab, records console entries, and resolves temporary element refs from `snapshot()` into later `act()` and `screenshot()` calls.
-`snapshot()` can return either `ai` or `aria` format.
+With `target="desktop"`, it routes the supported action subset over pinned Matrix encryption to the official Playwright MCP extension in the user's existing local Chrome or Brave profile.
+The desktop target operates the current tab and rejects `targetId` and `focus`, because Playwright MCP exposes mutable numeric indices that can point at a different tab after the tab list changes.
+It creates tabs, records console entries, and resolves temporary element refs from `snapshot()` into later `act()` and `screenshot()` calls.
+The host target's `snapshot()` can return either `ai` or `aria` format, while the desktop target returns Playwright MCP's native accessibility snapshot.
 `act()` currently supports `click`, `type`, `press`, `hover`, `drag`, `select`, `fill`, `resize`, `wait`, `evaluate`, and `close`.
 The desktop target uses the browser's real signed-in state and requires the Matrix desktop bridge, the local extension option, and a local control lease for interactive actions.
 Desktop screenshots are model-visible by default, while `returnAttachment=true` additionally returns a current-turn `att_*` handle that can be sent through `matrix_message` without creating a separate plaintext attachment copy or uploading the encrypted media again.
 Agno's normal agent-session persistence can retain model-visible screenshot pixels in the session database.
 Playwright MCP briefly writes its requested screenshot into the local browser workspace, and MindRoom reads and removes that exact scratch file before returning the tool result.
 Safari and other unsupported browsers can still be operated through the separate accessibility-first `desktop` tool.
-If `output_dir` is unset, Playwright MCP uses `<storage>/browser` for transient screenshot scratch files and retained PDFs.
+For the host target, `output_dir` defaults to `<storage>/browser` for screenshots, PDFs, and other artifacts.
+The local desktop bridge always uses `<storage>/desktop-browser` for its transient screenshot scratch files, retained PDFs, and upload inputs; the cloud tool's `output_dir` option does not change that local path.
 The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable` when available.
 
 #### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `output_dir` | `text` | `no` | `null` | Optional directory for screenshots, PDFs, and other browser artifacts, with `<storage>/browser` as the runtime default when omitted. |
+| `output_dir` | `text` | `host only` | `null` | Optional host-target directory for screenshots, PDFs, and other browser artifacts, with `<storage>/browser` as the runtime default when omitted. |
 | `allow_private_networks` | `boolean` | `no` | `false` | Allow direct `open` and `navigate` calls to trusted private or loopback addresses while continuing to block metadata and link-local destinations; this does not sandbox or restrict the desktop target's normal browser network access. |
 | `default_target` | `select` | `no` | `host` | Use `host` for MindRoom's managed profile or `desktop` for the pinned local Playwright extension. |
 | `device_user_id` | `text` | `desktop only` | `null` | Dedicated Matrix user for the local desktop bridge. |
@@ -698,7 +700,6 @@ agents:
   browser_worker:
     tools:
       - browser:
-          output_dir: browser-artifacts
           default_target: desktop
           device_user_id: "@my-laptop:example.org"
           device_id: "ABCDEFGHIJ"
@@ -716,6 +717,7 @@ browser(action="screenshot", target="desktop", fullPage=True, returnAttachment=T
 #### Notes
 
 - The host target uses MindRoom's managed Playwright profile, while the desktop target uses the user's connected local browser profile through Matrix.
+- Host-only options such as `profile`, `targetId`, snapshot formatting hints, `inputRef`, and `timeoutMs` are rejected for the desktop target instead of being silently ignored.
 - `returnAttachment` is accepted only by `action="screenshot"` with `target="desktop"`, and the returned handle expires when the current turn ends.
 - See the [Matrix Desktop Bridge](desktop.md) guide for extension installation, Brave paths, the local lease, and the full trust model.
 

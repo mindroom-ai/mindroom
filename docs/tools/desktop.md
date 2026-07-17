@@ -69,11 +69,12 @@ It operates only the currently logged-in graphical session and cannot bypass ope
 The optional Playwright MCP extension path is a separate browser capability on the same pinned Matrix transport and local control lease.
 It returns semantic page snapshots and stable element references from the browser, which are usually more precise for forms and interactive websites than desktop coordinates.
 Its observation actions are `status`, `profiles`, `tabs`, `snapshot`, `screenshot`, and `console`.
-Its control actions are `start`, `stop`, `open`, `focus`, `close`, `navigate`, `pdf`, `upload`, `dialog`, and `act`.
+Its supported control actions are `start`, `stop`, `open`, current-tab `close`, `navigate`, `pdf`, `upload`, `dialog`, and `act`.
 The browser `act` action supports semantic click, type, key press, hover, drag, select, multi-field fill, resize, wait, evaluate, and close operations.
 Enabling the extension grants access to the tabs and signed-in state in the connected browser profile, and the desktop application allowlist does not narrow that access to one tab or origin.
 Extension mode is not a network sandbox: MindRoom validates URLs passed directly to `open` and `navigate`, but redirects, page scripts, and evaluated JavaScript retain the connected profile's normal network reach.
 The local MCP process is pinned to the documented package version and can read upload files only from its `<storage>/desktop-browser` workspace.
+The desktop browser target operates the extension's current tab and rejects `targetId` and `focus`, because Playwright MCP exposes mutable numeric tab indices that can point at a different signed-in tab after another tab closes.
 The browser extension and MCP process communicate over a machine-local loopback connection, while every cloud-to-local command still travels through pinned Matrix Olm encryption.
 
 Matrix protects the local-to-cloud transport, but accessibility state and screenshots become model input after MindRoom decrypts them in the cloud process.
@@ -206,6 +207,7 @@ The process opens outbound HTTPS connections to Matrix and does not listen on a 
 Authenticated, unexpired commands received by the initial Matrix sync are dispatched during startup, including control commands when the new process has a valid local control lease.
 Wait until the terminal says `Desktop bridge online` before sending new work when the caller needs confirmation that startup and device pinning completed.
 The bridge durably journals an accepted command before local execution, so a Matrix redelivery after a crash returns the cached response or an unknown-outcome warning instead of repeating a started control.
+Completed journal records retain bounded desktop or browser response content and screenshot decryption metadata in `<storage>/desktop_bridge/command_journal.json`, which MindRoom requires to be owner-only (`0600`) before reading.
 
 To grant semantic and fallback control for fifteen minutes, stop the observe-only process and restart it locally with an explicit lease:
 
@@ -271,7 +273,7 @@ If the user asks to receive the screenshot, the agent calls `desktop(action="scr
 
 For browser work, the agent first uses `browser(action="start", target="desktop")` while the local control lease is active, then calls `browser(action="tabs", target="desktop")` or `browser(action="snapshot", target="desktop")`.
 The snapshot returns semantic roles, names, current values, and element references from the current page.
-Reading the current tab is observation-only, while supplying `targetId` first selects that tab and therefore requires the local control lease.
+Reading and operating the current tab avoids treating Playwright MCP's mutable tab-list indices as durable identities.
 Element references are opaque and may include frame identity, so the agent must pass each returned reference through unchanged.
 The agent passes those references to `browser(action="act", target="desktop", request=...)` for form filling and interactive steps.
 After navigation or a significant page update, the agent requests a new snapshot instead of reusing old references.
@@ -322,7 +324,8 @@ Rotate the local desktop Matrix device with `mindroom desktop login --replace`, 
 The `--replace` option creates a fresh saved session but cannot revoke the old device by itself.
 If the cloud agent receives a new Matrix device, run `mindroom desktop controller --entity <name>` again and update the three controller options used locally.
 A device ID or Ed25519 mismatch is a hard failure and should be treated as a rotation or possible substitution, not bypassed.
-Use `Ctrl+C` to stop the local bridge immediately.
+Use `Ctrl+C` to stop accepting new bridge commands and begin shutdown.
+Desktop input already dispatched through a native worker thread and active Playwright MCP calls are not preemptible, so an in-flight control can still finish before shutdown returns; observe local state before deciding whether to retry it.
 For stronger isolation, run the bridge in a dedicated operating-system account and expose only a non-sensitive desktop session.
 
 ## Current Limits
