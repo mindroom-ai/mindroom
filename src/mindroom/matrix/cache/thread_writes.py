@@ -932,10 +932,10 @@ class ThreadLiveWritePolicy:
             event_info=event_info,
         )
 
-    async def apply_redaction(self, room_id: str, event: nio.RedactionEvent) -> None:
-        """Apply one redaction to the advisory cache when the affected thread is known."""
+    async def apply_redaction(self, room_id: str, event: nio.RedactionEvent) -> bool:
+        """Apply one redaction and report whether the advisory cache is sanitized."""
         if not self._cache_ops.cache_runtime_available():
-            return
+            return False
 
         impact = await _resolve_thread_redaction_mutation_impact(
             resolver=self._resolver,
@@ -946,28 +946,33 @@ class ThreadLiveWritePolicy:
         )
         thread_id = impact.thread_id
 
-        async def redact_and_invalidate() -> bool:
-            return await _apply_thread_redaction_mutation(
+        async def redact_and_invalidate() -> None:
+            await _apply_thread_redaction_mutation(
                 cache_ops=self._cache_ops,
                 room_id=room_id,
                 redacted_event_id=event.redacts,
                 impact=impact,
                 context="live",
+                raise_on_cache_write_failure=True,
             )
 
-        if thread_id is not None:
-            await self._cache_ops.queue_thread_cache_update(
-                room_id,
-                thread_id,
-                redact_and_invalidate,
-                name="matrix_cache_apply_redaction",
-            )
-            return
-        await self._cache_ops.queue_room_cache_update(
-            room_id,
-            redact_and_invalidate,
-            name="matrix_cache_apply_redaction",
-        )
+        try:
+            if thread_id is not None:
+                await self._cache_ops.queue_thread_cache_update(
+                    room_id,
+                    thread_id,
+                    redact_and_invalidate,
+                    name="matrix_cache_apply_redaction",
+                )
+            else:
+                await self._cache_ops.queue_room_cache_update(
+                    room_id,
+                    redact_and_invalidate,
+                    name="matrix_cache_apply_redaction",
+                )
+        except Exception:
+            return False
+        return self._cache_ops.cache_runtime_available()
 
 
 class ThreadSyncWritePolicy:

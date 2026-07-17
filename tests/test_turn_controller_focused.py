@@ -852,7 +852,7 @@ async def test_interactive_selection_redacted_after_ack_is_suppressed_under_lock
 
     async def send_ack_then_redact(request: SendTextRequest) -> str:
         harness.gateway.sent.append(request)
-        marked = harness.turn_store.mark_source_redacted(selection_event_id)
+        marked = harness.turn_store.mark_source_redacted(selection_event_id, room_id=_ROOM_ID)
         assert marked is not None
         assert marked.conversation_target is not None
         assert marked.history_scope is not None
@@ -871,7 +871,8 @@ async def test_interactive_selection_redacted_after_ack_is_suppressed_under_lock
     record = harness.turn_store.get_turn_record(selection_event_id)
     assert record is not None
     assert record.redacted_source_event_ids == (selection_event_id,)
-    assert record.pending_redaction_cleanup_event_ids == ()
+    assert record.pending_redaction_cleanup_event_ids == (selection_event_id,)
+    assert record.pending_redaction_room_id == _ROOM_ID
     assert record.response_event_id is None
     assert harness.turn_store.is_handled(selection_event_id) is True
     assert harness.turn_store.is_handled(selection.question_event_id) is False

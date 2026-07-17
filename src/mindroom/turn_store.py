@@ -94,19 +94,10 @@ class TurnStore:
                 if existing_record is not None
                 else turn_record
             )
-            redacted_source_event_ids = tuple(
-                event_id
-                for event_id in merged_record.indexed_event_ids
-                if event_id in turn_record.redacted_source_event_ids
-                or any(event_id in existing.redacted_source_event_ids for existing in compatible_existing_records)
-            )
-            pending_redaction_cleanup_event_ids = tuple(
-                event_id
-                for event_id in merged_record.indexed_event_ids
-                if event_id in turn_record.pending_redaction_cleanup_event_ids
-                or any(
-                    event_id in existing.pending_redaction_cleanup_event_ids for existing in compatible_existing_records
-                )
+            redacted_source_event_ids, pending_redaction_cleanup_event_ids = _merged_redaction_markers(
+                turn_record,
+                merged_record,
+                compatible_existing_records,
             )
             visible_echo_event_id = merged_record.visible_echo_event_id or next(
                 (
@@ -178,19 +169,10 @@ class TurnStore:
                 if existing_record is not None
                 else pending_record
             )
-            redacted_source_event_ids = tuple(
-                event_id
-                for event_id in merged_record.indexed_event_ids
-                if event_id in pending_record.redacted_source_event_ids
-                or any(event_id in existing.redacted_source_event_ids for existing in compatible_existing_records)
-            )
-            pending_redaction_cleanup_event_ids = tuple(
-                event_id
-                for event_id in merged_record.indexed_event_ids
-                if event_id in pending_record.pending_redaction_cleanup_event_ids
-                or any(
-                    event_id in existing.pending_redaction_cleanup_event_ids for existing in compatible_existing_records
-                )
+            redacted_source_event_ids, pending_redaction_cleanup_event_ids = _merged_redaction_markers(
+                pending_record,
+                merged_record,
+                compatible_existing_records,
             )
             return replace(
                 merged_record,
@@ -379,12 +361,14 @@ class TurnStore:
         redacted_event_id: str,
         requester_user_id: str | None,
         target_hint: MessageTarget | None,
+        cache_sanitized: bool,
     ) -> bool:
         """Remove persisted runs for one handled turn whose source message was redacted.
 
         The disk-backed ledger is normally the trigger. ``target_hint`` also
         permits post-lock recovery when an active response persisted its run
-        just before recording the terminal ledger outcome.
+        just before recording the terminal ledger outcome. Cleanup intent is
+        acknowledged only after the cache confirms durable sanitization.
         """
         ledger_record = self._ledger.get_turn_record(redacted_event_id)
         if ledger_record is None and target_hint is None:
@@ -423,11 +407,12 @@ class TurnStore:
             requester_user_id=requester_user_id,
             redacted_event_id=redacted_event_id,
         )
-        self._clear_pending_redaction_cleanup(redacted_event_id)
+        if cache_sanitized:
+            self._clear_pending_redaction_cleanup(redacted_event_id)
         return removed
 
     def _retry_pending_redaction_cleanup(self, redacted_event_id: str) -> None:
-        """Finish one durable cleanup intent without Matrix source recovery."""
+        """Sanitize persisted replay while async cache recovery remains owed."""
         turn_record = self._ledger.get_turn_record(redacted_event_id)
         if (
             turn_record is None
@@ -441,7 +426,6 @@ class TurnStore:
             requester_user_id=turn_record.requester_id,
             redacted_event_id=redacted_event_id,
         )
-        self._clear_pending_redaction_cleanup(redacted_event_id)
 
     def _remove_redacted_event_from_recorded_scopes(
         self,
@@ -681,6 +665,26 @@ class TurnStore:
                 history_scope=turn_record.history_scope.key,
             )
         return removed_any
+
+
+def _merged_redaction_markers(
+    candidate: TurnRecord,
+    merged_record: TurnRecord,
+    compatible_existing_records: tuple[TurnRecord, ...],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Merge tombstones and pending cleanup markers across compatible aliases."""
+    redacted_event_ids = set(candidate.redacted_source_event_ids)
+    pending_cleanup_event_ids = set(candidate.pending_redaction_cleanup_event_ids)
+    for existing in compatible_existing_records:
+        redacted_event_ids.update(existing.redacted_source_event_ids)
+        pending_cleanup_event_ids.update(existing.pending_redaction_cleanup_event_ids)
+    merged_redacted_event_ids = tuple(
+        event_id for event_id in merged_record.indexed_event_ids if event_id in redacted_event_ids
+    )
+    merged_pending_event_ids = tuple(
+        event_id for event_id in merged_record.indexed_event_ids if event_id in pending_cleanup_event_ids
+    )
+    return merged_redacted_event_ids, merged_pending_event_ids
 
 
 def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) -> TurnRecord:

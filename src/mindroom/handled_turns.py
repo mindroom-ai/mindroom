@@ -595,7 +595,11 @@ class HandledTurnLedger:
     def _schedule_persist_locked(self, turn_record: TurnRecord) -> None:
         """Queue one write-behind disk merge for records already applied to memory."""
         future = _persist_executor().submit(self._persist_record, turn_record)
-        self._state.pending_persists = [pending for pending in self._state.pending_persists if not pending.done()]
+        self._state.pending_persists = [
+            pending
+            for pending in self._state.pending_persists
+            if not pending.done() or pending.cancelled() or pending.exception() is not None
+        ]
         self._state.pending_persists.append(future)
 
     def _persist_record(self, turn_record: TurnRecord) -> None:

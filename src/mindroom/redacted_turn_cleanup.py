@@ -96,7 +96,7 @@ class RedactedTurnCleanup:
                 target = turn_record.conversation_target or target
                 requester_user_id = turn_record.requester_id or requester_user_id
 
-        await self.deps.conversation_cache.apply_redaction(room.room_id, event)
+        cache_sanitized = await self.deps.conversation_cache.apply_redaction(room.room_id, event)
         if target is None or requester_user_id is None:
             return
         await self.deps.response_runner.run_serialized_state_mutation(
@@ -106,6 +106,7 @@ class RedactedTurnCleanup:
                 redacted_event_id=redacted_event_id,
                 requester_user_id=requester_user_id,
                 target_hint=target,
+                cache_sanitized=cache_sanitized,
             ),
         )
 

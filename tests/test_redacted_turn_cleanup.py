@@ -41,7 +41,7 @@ def _cleanup() -> tuple[RedactedTurnCleanup, RedactedTurnCleanupDeps]:
         del target
         return mutation()
 
-    deps.conversation_cache.apply_redaction = AsyncMock()
+    deps.conversation_cache.apply_redaction = AsyncMock(return_value=True)
     deps.conversation_cache.get_event = AsyncMock()
     deps.response_runner.run_serialized_state_mutation = AsyncMock(side_effect=run_mutation)
     return RedactedTurnCleanup(deps), deps
@@ -66,8 +66,9 @@ async def test_handled_redaction_tombstones_before_cache_and_cleans_recorded_sco
         ordering.append("tombstone") or turn_record
     )
 
-    async def apply_redaction(*_args: object) -> None:
+    async def apply_redaction(*_args: object) -> bool:
         ordering.append("cache")
+        return True
 
     deps.conversation_cache.apply_redaction.side_effect = apply_redaction
     deps.turn_store.forget_redacted_turn.return_value = True
@@ -82,6 +83,7 @@ async def test_handled_redaction_tombstones_before_cache_and_cleans_recorded_sco
         redacted_event_id=EVENT_ID,
         requester_user_id=REQUESTER_ID,
         target_hint=target,
+        cache_sanitized=True,
     )
 
 
@@ -108,8 +110,9 @@ async def test_missing_ledger_context_uses_source_requester_not_moderator() -> N
         ordering.append("tombstone")
         return tombstone
 
-    async def apply_redaction(*_args: object) -> None:
+    async def apply_redaction(*_args: object) -> bool:
         ordering.append("cache")
+        return True
 
     deps.turn_store.mark_source_redacted.side_effect = mark_source_redacted
     deps.conversation_cache.apply_redaction.side_effect = apply_redaction
@@ -144,6 +147,7 @@ async def test_missing_ledger_context_uses_source_requester_not_moderator() -> N
         redacted_event_id=EVENT_ID,
         requester_user_id=REQUESTER_ID,
         target_hint=target,
+        cache_sanitized=True,
     )
 
 
@@ -200,6 +204,37 @@ async def test_missing_context_resolves_transitive_plain_reply_thread() -> None:
         redacted_event_id=EVENT_ID,
         requester_user_id=REQUESTER_ID,
         target_hint=target,
+        cache_sanitized=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_cache_redaction_keeps_durable_cleanup_intent() -> None:
+    """Session cleanup may run, but failed cache sanitization must remain retryable."""
+    cleanup, deps = _cleanup()
+    room = nio.MatrixRoom(room_id=ROOM_ID, own_user_id="@agent:example.org")
+    target = MessageTarget.resolve(ROOM_ID, "$thread:example.org", EVENT_ID)
+    turn_record = TurnRecord.create(
+        [EVENT_ID],
+        redacted_source_event_ids=[EVENT_ID],
+        pending_redaction_cleanup_event_ids=[EVENT_ID],
+        pending_redaction_room_id=ROOM_ID,
+        requester_id=REQUESTER_ID,
+        response_owner="agent",
+        history_scope=HistoryScope(kind="agent", scope_id="agent"),
+        conversation_target=target,
+    )
+    deps.turn_store.mark_source_redacted.return_value = turn_record
+    deps.conversation_cache.apply_redaction.return_value = False
+
+    await cleanup.handle(room, _redaction_event())
+
+    deps.turn_store.forget_redacted_turn.assert_called_once_with(
+        room=room,
+        redacted_event_id=EVENT_ID,
+        requester_user_id=REQUESTER_ID,
+        target_hint=target,
+        cache_sanitized=False,
     )
 
 

@@ -505,6 +505,33 @@ def test_flush_propagates_persistence_failure(temp_dir: Path) -> None:
             tracker.flush()
 
 
+def test_later_record_does_not_prune_unobserved_persistence_failure(temp_dir: Path) -> None:
+    """A later write must not hide an earlier completed persistence failure."""
+    tracker = HandledTurnLedger("test_interleaved_persist_failure", base_path=temp_dir)
+    tracker.warm()
+    real_persist = tracker._persist_record
+    first_failed = threading.Event()
+    second_completed = threading.Event()
+
+    def persist_with_first_failure(turn_record: TurnRecord) -> None:
+        if "$redacted" in turn_record.indexed_event_ids:
+            first_failed.set()
+            message = "redaction persist failed"
+            raise OSError(message)
+        real_persist(turn_record)
+        second_completed.set()
+
+    with patch.object(tracker, "_persist_record", side_effect=persist_with_first_failure):
+        tracker.record_handled_turn(TurnRecord.create(["$redacted"], completed=False))
+        assert first_failed.wait(timeout=5)
+        failure = tracker._state.pending_persists[0].exception(timeout=5)
+        assert isinstance(failure, OSError)
+        tracker.record_handled_turn(TurnRecord.create(["$later"], completed=False))
+        assert second_completed.wait(timeout=5)
+        with pytest.raises(OSError, match="redaction persist failed"):
+            tracker.flush()
+
+
 def test_persistence_round_trip_preserves_response_context(temp_dir: Path) -> None:
     """Reloaded ledgers should preserve response owner, history scope, and target metadata."""
     tracker1 = HandledTurnLedger("test_persist_context", base_path=temp_dir)

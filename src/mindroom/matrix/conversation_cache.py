@@ -929,9 +929,9 @@ class MatrixConversationCache(ConversationCacheProtocol):
         """Append one live threaded event into the advisory cache when the thread is known."""
         await self._live.append_live_event(room_id, event, event_info=event_info)
 
-    async def apply_redaction(self, room_id: str, event: nio.RedactionEvent) -> None:
-        """Apply one redaction to the advisory cache when the affected thread is known."""
-        await self._live.apply_redaction(room_id, event)
+    async def apply_redaction(self, room_id: str, event: nio.RedactionEvent) -> bool:
+        """Apply one redaction and report whether the advisory cache is sanitized."""
+        return await self._live.apply_redaction(room_id, event)
 
     def cache_sync_timeline(
         self,

@@ -130,11 +130,38 @@ def test_forget_redacted_turn_removes_causal_run_suffix(tmp_path: Path) -> None:
         redacted_event_id="$user_msg",
         requester_user_id="@user:example.org",
         target_hint=target,
+        cache_sanitized=True,
     )
 
     assert removed is True
     assert storage.upserted_session is session
     assert session.runs == []
+
+
+def test_failed_cache_sanitization_keeps_cleanup_pending_after_history_removal(tmp_path: Path) -> None:
+    """A cache failure must remain retryable even after session replay is sanitized."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    session = AgentSession(
+        session_id=target.session_id,
+        agent_id="agent",
+        runs=[RunOutput(session_id=target.session_id, metadata={"matrix_event_id": "$user_msg"})],
+    )
+    storage = _FakeAgentStorage(session)
+    store = _store_with_storage(tmp_path, storage)
+    store.record_turn(_owned_turn_record(target))
+    store.mark_source_redacted("$user_msg", room_id="!room:example.org")
+
+    removed = store.forget_redacted_turn(
+        room=MagicMock(room_id="!room:example.org"),
+        redacted_event_id="$user_msg",
+        requester_user_id="@user:example.org",
+        target_hint=target,
+        cache_sanitized=False,
+    )
+
+    assert removed is True
+    assert session.runs == []
+    assert store.pending_redaction_cleanups() == (("$user_msg", "!room:example.org"),)
 
 
 def test_forget_redacted_turn_removes_runs_that_consumed_the_source(tmp_path: Path) -> None:
@@ -163,6 +190,7 @@ def test_forget_redacted_turn_removes_runs_that_consumed_the_source(tmp_path: Pa
         redacted_event_id="$user_msg",
         requester_user_id="@user:example.org",
         target_hint=target,
+        cache_sanitized=True,
     )
 
     assert removed is True
@@ -229,6 +257,7 @@ def test_forget_redacted_turn_removes_source_from_every_recorded_history_scope(t
         redacted_event_id="$user_msg",
         requester_user_id="@user:example.org",
         target_hint=target,
+        cache_sanitized=True,
     )
 
     assert removed is True
@@ -245,6 +274,7 @@ def test_forget_redacted_turn_ignores_unhandled_event(tmp_path: Path) -> None:
         redacted_event_id="$unknown",
         requester_user_id="@user:example.org",
         target_hint=None,
+        cache_sanitized=True,
     )
 
     assert removed is False
@@ -319,6 +349,7 @@ def test_forget_redacted_turn_cleans_later_owned_scopes_across_requesters(
         redacted_event_id="$user_msg",
         requester_user_id="@source:example.org",
         target_hint=target,
+        cache_sanitized=True,
     )
 
     assert removed is True
@@ -348,6 +379,7 @@ def test_forget_redacted_turn_recovers_missing_response_context(tmp_path: Path) 
             redacted_event_id="$user_msg",
             requester_user_id="@source-user:example.org",
             target_hint=target,
+            cache_sanitized=True,
         )
 
     assert removed is True
@@ -392,6 +424,7 @@ def test_forget_redacted_turn_invalidates_compacted_replay(tmp_path: Path) -> No
         redacted_event_id="$user_msg",
         requester_user_id="@user:example.org",
         target_hint=target,
+        cache_sanitized=True,
     )
 
     assert removed is True
@@ -419,6 +452,7 @@ def test_forget_redacted_turn_recovers_without_ledger_after_active_response(tmp_
             redacted_event_id="$user_msg",
             requester_user_id="@user:example.org",
             target_hint=target,
+            cache_sanitized=True,
         )
 
     assert removed is True
@@ -502,6 +536,7 @@ def test_active_ad_hoc_team_redaction_uses_pending_response_scope(tmp_path: Path
         redacted_event_id="$user_msg",
         requester_user_id="@user:example.org",
         target_hint=target,
+        cache_sanitized=True,
     )
 
     assert removed is True
@@ -595,6 +630,7 @@ def test_missing_ledger_compacted_summary_recovers_from_source_scope(tmp_path: P
         redacted_event_id="$user_msg",
         requester_user_id="@user:example.org",
         target_hint=target,
+        cache_sanitized=True,
     )
 
     assert removed is True
@@ -671,8 +707,8 @@ def test_warm_preserves_cleanup_for_async_cache_recovery(tmp_path: Path) -> None
     assert restarted_store.pending_redaction_cleanups() == (("$user_msg", "!room:example.org"),)
 
 
-def test_locked_response_preparation_finishes_pending_cleanup_before_history_use(tmp_path: Path) -> None:
-    """The under-lock gate must reconcile owed cleanup before allowing a later turn."""
+def test_locked_response_preparation_sanitizes_history_without_acknowledging_cache(tmp_path: Path) -> None:
+    """The under-lock gate removes replay while async cache cleanup remains owed."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     session = AgentSession(
         session_id=target.session_id,
@@ -693,7 +729,7 @@ def test_locked_response_preparation_finishes_pending_cleanup_before_history_use
     assert session.runs == []
     record = store.get_turn_record("$user_msg")
     assert record is not None
-    assert record.pending_redaction_cleanup_event_ids == ()
+    assert record.pending_redaction_cleanup_event_ids == ("$user_msg",)
 
 
 def test_turn_record_codec_projects_and_parses_one_versioned_run_schema() -> None:

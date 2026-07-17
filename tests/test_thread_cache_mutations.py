@@ -381,6 +381,29 @@ class TestMatrixConversationCacheThreadReads:
         assert not hasattr(access, "_writes")
         assert not hasattr(access, "_run_fail_open_outbound_write")
 
+    @pytest.mark.asyncio
+    async def test_live_redaction_reports_failed_cache_sanitization(self) -> None:
+        """The cleanup owner must know when durable cache deletion did not land."""
+        event_cache = _runtime_event_cache()
+        event_cache.redact_event = AsyncMock(side_effect=RuntimeError("cache write failed"))
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(event_cache=event_cache),
+        )
+        access._live._resolver.resolve_redaction_thread_impact = AsyncMock(
+            return_value=MutationThreadImpact.unknown(),
+        )
+        redaction_event = MagicMock(spec=nio.RedactionEvent)
+        redaction_event.event_id = "$redaction:localhost"
+        redaction_event.redacts = "$target:localhost"
+
+        sanitized = await access.apply_redaction("!room:localhost", redaction_event)
+
+        assert sanitized is False
+        event_cache.disable.assert_called_once_with(
+            "redaction_failed:!room:localhost:$target:localhost",
+        )
+
     @pytest.mark.parametrize(
         "error",
         [
