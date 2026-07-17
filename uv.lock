@@ -4373,7 +4373,7 @@ requires-dist = [
     { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], specifier = "==2.6.12" },
     { name = "aiohttp", specifier = ">=3.13.3" },
     { name = "aiosqlite", specifier = ">=0.20" },
-    { name = "anthropic", specifier = ">=0.70" },
+    { name = "anthropic", specifier = ">=0.77" },
     { name = "anyio", specifier = ">=4.10" },
     { name = "apify-client", marker = "platform_machine != 'aarch64' and extra == 'apify'", specifier = ">=1.12.2" },
     { name = "arxiv", marker = "extra == 'arxiv'" },
