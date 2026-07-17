@@ -5635,7 +5635,9 @@ class TestWorkerToolsOverride:
     @pytest.mark.parametrize(
         "tool_name",
         [
+            "browser",
             "callback_manager",
+            "desktop",
             "gmail",
             "google_calendar",
             "google_docs",
@@ -5650,7 +5652,7 @@ class TestWorkerToolsOverride:
         monkeypatch: pytest.MonkeyPatch,
         tool_name: str,
     ) -> None:
-        """Shared integrations marked local-only should stay in the primary runtime."""
+        """Tools marked local-only should stay in the primary runtime."""
         runtime_paths = _configure_proxy_runtime(
             monkeypatch,
             proxy_url="http://sandbox:8765",
