@@ -21,7 +21,7 @@ import pytest
 from agno.agent import Agent
 from agno.models.anthropic import Claude
 from agno.models.google import Gemini
-from agno.models.message import Message
+from agno.models.message import Message, MessageMetrics
 from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat, OpenAIResponses
 from agno.models.response import ModelResponse
@@ -553,7 +553,6 @@ async def test_generate_compaction_summary_uses_configured_output_cap() -> None:
     [
         OpenAIResponses(id="gpt-5.6", max_output_tokens=1_024),
         OpenAIChat(id="gpt-5.6", max_completion_tokens=1_024),
-        Gemini(id="gemini-3.5-flash", max_output_tokens=1_024),
     ],
 )
 @pytest.mark.asyncio
@@ -576,6 +575,51 @@ async def test_generate_compaction_summary_rejects_provider_output_cap_truncatio
             summary_input="conversation payload",
             summary_prompt="Summarize the conversation.",
         )
+
+
+@pytest.mark.asyncio
+async def test_generate_compaction_summary_counts_gemini_thinking_toward_output_cap() -> None:
+    model = Gemini(id="gemini-3.5-flash", max_output_tokens=1_024)
+    with (
+        patch.object(
+            model,
+            "aresponse",
+            new=AsyncMock(
+                return_value=ModelResponse(
+                    content="durable summary was truncated after extensive thinking.",
+                    response_usage=MessageMetrics(output_tokens=24, reasoning_tokens=1_000),
+                ),
+            ),
+        ),
+        pytest.raises(CompactionSummaryOutputLimitError, match="output token limit"),
+    ):
+        await generate_compaction_summary(
+            model=model,
+            summary_input="conversation payload",
+            summary_prompt="Summarize the conversation.",
+        )
+
+
+@pytest.mark.asyncio
+async def test_generate_compaction_summary_does_not_double_count_openai_reasoning_tokens() -> None:
+    model = OpenAIResponses(id="gpt-5.6", max_output_tokens=1_024)
+    with patch.object(
+        model,
+        "aresponse",
+        new=AsyncMock(
+            return_value=ModelResponse(
+                content="durable summary ended cleanly.",
+                response_usage=MessageMetrics(output_tokens=1_023, reasoning_tokens=1_000),
+            ),
+        ),
+    ):
+        summary = await generate_compaction_summary(
+            model=model,
+            summary_input="conversation payload",
+            summary_prompt="Summarize the conversation.",
+        )
+
+    assert summary.summary == "durable summary ended cleanly."
 
 
 @pytest.mark.asyncio

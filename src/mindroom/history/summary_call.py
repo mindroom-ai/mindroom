@@ -11,8 +11,10 @@ It enforces the call-side half of the compaction invariants
    one SDK timeout coordinated with the outer chunk budget
    (``MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS``) instead of two uncoordinated
    constants in two modules. Summary output uses the loaded model's configured
-   output cap as the truncation guard. Unknown providers pass through untouched
-   and rely on the outer chunk timeout alone.
+   output cap as the truncation guard. Gemini's guard includes its separately
+   reported thinking tokens because they consume the same output budget.
+   Unknown providers pass through untouched and rely on the outer chunk timeout
+   alone.
 
 4. Retry on provider failure is deterministic.
    ``SummaryRetryPolicy`` decides which error classes warrant a smaller retry
@@ -278,7 +280,11 @@ async def generate_compaction_summary(
             f"has_reasoning={bool(response.reasoning_content or response.redacted_reasoning_content)})"
         )
         raise _CompactionSummaryEmptyResultError(msg)
-    if _summary_response_likely_truncated(response, output_token_limit=summary_output_limit):
+    if _summary_response_likely_truncated(
+        response,
+        output_token_limit=summary_output_limit,
+        include_reasoning_tokens=configured_model.provider == "Google",
+    ):
         msg = "compaction summary hit configured output token limit; refusing to persist incomplete summary"
         raise CompactionSummaryOutputLimitError(msg)
     return SessionSummary(summary=normalized_text, updated_at=datetime.now(UTC))
@@ -295,11 +301,19 @@ def _normalize_compaction_summary_text(raw_text: str) -> str:
     return normalized
 
 
-def _summary_response_likely_truncated(response: ModelResponse, *, output_token_limit: int | None) -> bool:
+def _summary_response_likely_truncated(
+    response: ModelResponse,
+    *,
+    output_token_limit: int | None,
+    include_reasoning_tokens: bool = False,
+) -> bool:
     if output_token_limit is None:
         return False
     output_tokens = _response_output_tokens(response)
-    return output_tokens is not None and output_tokens >= output_token_limit
+    if output_tokens is None:
+        return False
+    reasoning_tokens = _response_reasoning_tokens(response) if include_reasoning_tokens else 0
+    return output_tokens + (reasoning_tokens or 0) >= output_token_limit
 
 
 def _response_output_tokens(response: ModelResponse) -> int | None:
@@ -308,3 +322,11 @@ def _response_output_tokens(response: ModelResponse) -> int | None:
     if response.response_usage is None:
         return None
     return response.response_usage.output_tokens
+
+
+def _response_reasoning_tokens(response: ModelResponse) -> int | None:
+    if response.reasoning_tokens is not None:
+        return response.reasoning_tokens
+    if response.response_usage is None:
+        return None
+    return response.response_usage.reasoning_tokens
