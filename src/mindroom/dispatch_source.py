@@ -69,6 +69,12 @@ _INTERNAL_RELAY_DETECTION_SOURCE_KINDS: frozenset[str] = frozenset(
         TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     },
 )
+_PER_FIRE_THREAD_ROOT_SOURCE_KINDS: frozenset[str] = frozenset(
+    {
+        SCHEDULED_SOURCE_KIND,
+        EXTERNAL_TRIGGER_SOURCE_KIND,
+    },
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +123,11 @@ def source_kind_bypasses_coalescing(source_kind: str | None) -> bool:
 def source_kind_allows_trusted_original_sender(source_kind: str | None) -> bool:
     """Return whether trusted senders may promote original-sender metadata for this source kind."""
     return source_kind in _TRUSTED_ORIGINAL_SENDER_SOURCE_KINDS
+
+
+def source_kind_owns_per_fire_thread_root(source_kind: str | None) -> bool:
+    """Return whether one automation fire roots its own per-fire thread and session."""
+    return source_kind in _PER_FIRE_THREAD_ROOT_SOURCE_KINDS
 
 
 def source_kind_allows_self_authored_ingress(source_kind: str | None) -> bool:

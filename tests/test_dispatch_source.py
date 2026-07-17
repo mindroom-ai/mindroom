@@ -19,6 +19,7 @@ from mindroom.dispatch_source import (
     source_kind_allows_self_authored_ingress,
     source_kind_allows_trusted_original_sender,
     source_kind_bypasses_coalescing,
+    source_kind_owns_per_fire_thread_root,
 )
 
 
@@ -96,6 +97,29 @@ def test_source_kind_allows_trusted_original_sender_for_internal_provenance(sour
 def test_source_kind_allows_trusted_original_sender_rejects_plain_turns(source_kind: str | None) -> None:
     """Plain user-controlled source kinds must not promote original-sender metadata."""
     assert not source_kind_allows_trusted_original_sender(source_kind)
+
+
+@pytest.mark.parametrize("source_kind", [SCHEDULED_SOURCE_KIND, EXTERNAL_TRIGGER_SOURCE_KIND])
+def test_source_kind_owns_per_fire_thread_root_for_automation_fires(source_kind: str) -> None:
+    """Scheduled and external-trigger fires root their own per-fire thread and session."""
+    assert source_kind_owns_per_fire_thread_root(source_kind)
+
+
+@pytest.mark.parametrize(
+    "source_kind",
+    [
+        HOOK_SOURCE_KIND,
+        HOOK_DISPATCH_SOURCE_KIND,
+        TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        MESSAGE_SOURCE_KIND,
+        VOICE_SOURCE_KIND,
+        None,
+        "",
+    ],
+)
+def test_source_kind_owns_per_fire_thread_root_rejects_other_turns(source_kind: str | None) -> None:
+    """Hook, relay, and interactive turns never force a per-fire thread root."""
+    assert not source_kind_owns_per_fire_thread_root(source_kind)
 
 
 @pytest.mark.parametrize(

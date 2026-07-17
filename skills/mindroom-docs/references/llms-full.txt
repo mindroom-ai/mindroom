@@ -14510,6 +14510,7 @@ Example tool arguments:
 For a non-admin caller, the target agent and room are the current agent and current room, and either `target_thread_id` or `new_thread` may still choose placement inside that room.
 
 `target_thread_id` and `new_thread` are mutually exclusive.
+With `new_thread`, each delivery posts a room-level root and the responding agent answers in a new thread under it with a fresh session.
 
 For an admin caller, `target_agent` and `target_room_id` can additionally target a different agent, team, or room.
 

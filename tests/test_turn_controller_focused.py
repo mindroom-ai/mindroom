@@ -33,6 +33,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from mindroom.dispatch_source import (
+    EXTERNAL_TRIGGER_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     ScheduledHistoryBudget,
@@ -720,6 +721,36 @@ async def test_scheduled_fire_response_starts_per_fire_thread_session(tmp_path: 
     target = harness.runner.requests[0].response_envelope.target
     assert target.resolved_thread_id == "$scheduled:localhost"
     assert target.session_id == f"{_ROOM_ID}:$scheduled:localhost"
+
+
+@pytest.mark.asyncio
+async def test_external_trigger_fire_response_starts_per_fire_thread_session(tmp_path: Path) -> None:
+    """A room-level external trigger delivery roots a per-fire thread and session in room mode."""
+    config = _single_agent_config(tmp_path, "room")
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "@general poll the webhook queue",
+                "msgtype": "m.text",
+                constants.SOURCE_KIND_KEY: EXTERNAL_TRIGGER_SOURCE_KIND,
+                constants.ORIGINAL_SENDER_KEY: _SENDER,
+            },
+            "event_id": "$trigger:localhost",
+            "sender": _entity_user_id(config, "general"),
+            "origin_server_ts": 1_000_000,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    target = harness.runner.requests[0].response_envelope.target
+    assert target.resolved_thread_id == "$trigger:localhost"
+    assert target.session_id == f"{_ROOM_ID}:$trigger:localhost"
 
 
 @pytest.mark.asyncio
