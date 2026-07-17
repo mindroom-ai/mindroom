@@ -615,6 +615,8 @@ async def test_desktop_target_routes_snapshot_and_control_over_matrix(monkeypatc
         ("snapshot", {"snapshotFormat": "aria"}, "does not support: snapshotFormat"),
         ("status", {"profile": "chrome"}, "does not support: profile"),
         ("upload", {"paths": ["invoice.pdf"], "inputRef": "e1"}, "does not support: inputRef"),
+        ("upload", {"paths": ["invoice.pdf"], "ref": "e1"}, "does not support ref or element"),
+        ("upload", {"paths": ["invoice.pdf"], "element": "File input"}, "does not support ref or element"),
         ("dialog", {"timeoutMs": 1000}, "does not support: timeoutMs"),
         ("focus", {}, "does not support focus"),
     ],
