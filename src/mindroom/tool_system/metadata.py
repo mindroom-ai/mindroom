@@ -57,7 +57,23 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _SAFE_TOOL_INIT_OVERRIDE_FIELDS = frozenset({"base_dir", "shell_path_prepend"})
-_TEXT_CONFIG_FIELD_TYPES = frozenset({"password", "select", "text", "url"})
+_TEXT_CONFIG_FIELD_TYPES = frozenset({"password", "select", "string[]", "text", "url"})
+_TOOLKIT_FILTER_CONFIG_FIELDS = (
+    ConfigField(
+        name="include_tools",
+        label="Include Tools",
+        type="string[]",
+        required=False,
+        description="Optional allowlist of functions to register from this toolkit.",
+    ),
+    ConfigField(
+        name="exclude_tools",
+        label="Exclude Tools",
+        type="string[]",
+        required=False,
+        description="Optional denylist of functions to register from this toolkit.",
+    ),
+)
 _AUTHORED_OVERRIDE_INHERIT = "__MINDROOM_INHERIT__"
 _VALIDATION_PLUGIN_MODULE_SUFFIX = "__validation__"
 _OMIT_TOOL_CONFIG_ARG = object()
@@ -144,6 +160,13 @@ def _agent_override_field(
     return next((candidate for candidate in metadata.agent_override_fields if candidate.name == field_name), None)
 
 
+def _tool_config_fields(metadata: ToolMetadata | ToolValidationInfo) -> tuple[ConfigField, ...]:
+    """Return declared fields plus the filters supported by every Agno toolkit."""
+    fields = tuple(metadata.config_fields or ())
+    declared_names = {field.name for field in fields}
+    return fields + tuple(field for field in _TOOLKIT_FILTER_CONFIG_FIELDS if field.name not in declared_names)
+
+
 def _validate_text_authored_override_value(
     tool_name: str,
     field: ConfigField,
@@ -153,6 +176,13 @@ def _validate_text_authored_override_value(
     tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo] | None = None,
 ) -> object:
     """Validate one authored override for a text-like config field."""
+    if field.type == "string[]":
+        try:
+            return _normalize_string_array_override(value)
+        except TypeError as exc:
+            msg = f"{full_path}: {exc}."
+            raise ToolConfigOverrideError(msg) from exc
+
     agent_override_field = _agent_override_field(tool_name, field.name, tool_metadata=tool_metadata)
     if agent_override_field is not None and agent_override_field.type == "string[]":
         try:
@@ -229,7 +259,7 @@ def _validate_authored_overrides(
         msg = f"Unknown tool '{tool_name}'."
         raise ToolConfigOverrideError(msg)
 
-    fields_by_name = {field.name: field for field in metadata.config_fields or []}
+    fields_by_name = {field.name: field for field in _tool_config_fields(metadata)}
     unexpected_fields = sorted(set(overrides) - set(fields_by_name))
     if unexpected_fields:
         unexpected = ", ".join(unexpected_fields)
@@ -437,11 +467,8 @@ def _build_tool_config_init_kwargs(
     runtime_overrides: dict[str, object] | None,
 ) -> dict[str, object]:
     """Collect safe config-field kwargs for one tool constructor."""
-    if not metadata.config_fields:
-        return {}
-
     init_kwargs: dict[str, object] = {}
-    fields = tuple(metadata.config_fields)
+    fields = _tool_config_fields(metadata)
     _apply_tool_config_init_values(init_kwargs, tool_name=tool_name, fields=fields, values=credentials)
     _apply_tool_config_init_values(
         init_kwargs,

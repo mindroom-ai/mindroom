@@ -18,7 +18,7 @@ import mindroom.tool_system.metadata as metadata_module
 # Import tools to trigger tool registration
 import mindroom.tools  # noqa: F401
 import mindroom.tools.custom_api as custom_api_module
-from mindroom.config.main import Config, load_config
+from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.redaction import REDACTED
 from mindroom.server_fetch_url import ServerFetchUrlError
@@ -764,6 +764,69 @@ def test_validate_authored_overrides_rejects_bad_types_and_password_fields() -> 
     finally:
         TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
+
+
+def test_searxng_include_tools_override_filters_registered_functions(tmp_path: Path) -> None:
+    """Universal Agno toolkit filters should reach toolkit constructors."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    tool = get_tool_by_name(
+        "searxng",
+        runtime_paths,
+        credential_overrides={"host": "https://search.example.com"},
+        tool_config_overrides={
+            "include_tools": ["search_web", "news_search", "image_search"],
+        },
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert set(tool.functions) == {"search_web", "news_search", "image_search"}
+
+
+def test_config_load_rejects_unknown_tool_override_key(tmp_path: Path) -> None:
+    """Config runtime validation should name the tool and unknown override key."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        Config.validate_with_runtime(
+            {
+                "models": {
+                    "default": {
+                        "provider": "openai",
+                        "id": "gpt-5.6",
+                    },
+                },
+                "router": {"model": "default"},
+                "agents": {
+                    "research": {
+                        "display_name": "Research",
+                        "role": "Search the web",
+                        "model": "default",
+                        "tools": [
+                            {
+                                "searxng": {
+                                    "host": "https://search.example.com",
+                                    "fixed_max_results": 10,
+                                    "unknown_filter": ["search_web"],
+                                },
+                            },
+                        ],
+                    },
+                },
+            },
+            runtime_paths,
+        )
+
+    message = str(exc_info.value)
+    assert "searxng.unknown_filter" in message
+    assert "unknown authored override field" in message
 
 
 def test_tool_validation_snapshot_round_trips_mcp_override_validation(tmp_path: Path) -> None:
