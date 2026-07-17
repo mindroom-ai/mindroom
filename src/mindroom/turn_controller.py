@@ -1316,7 +1316,10 @@ class TurnController:
             history_scope=self.deps.turn_store.response_history_scope(ResponseAction(kind="individual")),
             conversation_target=response_target,
         )
-        pending_turn = self.deps.turn_store.record_pending_turn(selection_handled_turn)
+        pending_turn = await asyncio.to_thread(
+            self.deps.turn_store.record_pending_turn,
+            selection_handled_turn,
+        )
         if pending_turn is None or pending_turn.completed or pending_turn.redacted_source_event_ids:
             return
         selection_handled_turn = pending_turn

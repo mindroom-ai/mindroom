@@ -15,6 +15,7 @@ interactive selection path.
 from __future__ import annotations
 
 import asyncio
+import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, cast
@@ -67,6 +68,7 @@ if TYPE_CHECKING:
 
     from mindroom.coalescing_batch import CoalescedBatch
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
+    from mindroom.handled_turns import TurnRecord
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.cache import ThreadHistoryResult
     from mindroom.matrix.event_info import EventInfo
@@ -579,6 +581,44 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
     assert harness.turn_store.is_handled(event.event_id) is True
 
 
+@pytest.mark.asyncio
+async def test_response_waits_for_pending_context_persistence_before_generation(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Session-backed generation must not start before its cleanup context is durable."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _text_event("persist my response context first")
+    real_persist = harness.turn_store._ledger._persist_record
+    persist_started = threading.Event()
+    release_persist = threading.Event()
+
+    def persist_with_barrier(turn_record: TurnRecord) -> None:
+        if event.event_id in turn_record.indexed_event_ids and not turn_record.completed:
+            persist_started.set()
+            if not release_persist.wait(timeout=5):
+                msg = "test did not release pending-context persistence"
+                raise TimeoutError(msg)
+        real_persist(turn_record)
+
+    monkeypatch.setattr(harness.turn_store._ledger, "_persist_record", persist_with_barrier)
+    delivery = asyncio.create_task(harness.deliver(room, event))
+    try:
+        assert await asyncio.to_thread(persist_started.wait, 5)
+        assert harness.runner.requests == []
+    finally:
+        release_persist.set()
+
+    await asyncio.wait_for(delivery, timeout=5)
+
+    assert len(harness.runner.requests) == 1
+    persisted = harness.turn_store.get_turn_record(event.event_id)
+    assert persisted is not None
+    assert persisted.completed is True
+
+
 def _scheduled_fire_event(config: Config, *, extra_content: dict[str, Any]) -> nio.RoomMessageText:
     """Build a self-authored scheduled-fire event as the scheduling executor sends it."""
     return nio.RoomMessageText.from_dict(
@@ -829,6 +869,45 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
 
     assert harness.turn_store.is_handled(selection.question_event_id) is True
     assert harness.turn_store.is_handled("$selection:localhost") is True
+
+
+@pytest.mark.asyncio
+async def test_interactive_selection_persistence_failure_prevents_ack_and_generation(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed pending-context write must escape before any visible or persisted response."""
+    harness = _build_harness(config, tmp_path)
+    room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        question_text="Which option should I use?",
+        selection_key="1",
+        selected_label="Option 1",
+        selected_value="Option 1",
+        thread_id="$thread-root:localhost",
+    )
+    real_persist = harness.turn_store._ledger._persist_record
+
+    def fail_pending_persist(turn_record: TurnRecord) -> None:
+        if selection.question_event_id in turn_record.indexed_event_ids and not turn_record.completed:
+            msg = "pending context write failed"
+            raise OSError(msg)
+        real_persist(turn_record)
+
+    monkeypatch.setattr(harness.turn_store._ledger, "_persist_record", fail_pending_persist)
+
+    with pytest.raises(OSError, match="pending context write failed"):
+        await harness.controller.handle_interactive_selection(
+            room,
+            selection=selection,
+            user_id=_SENDER,
+            source_event_id="$selection:localhost",
+        )
+
+    assert harness.gateway.sent == []
+    assert harness.runner.requests == []
 
 
 @pytest.mark.asyncio

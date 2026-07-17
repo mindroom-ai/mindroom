@@ -388,7 +388,10 @@ async def _apply_turn_plan(
         history_scope=response_history_scope,
         conversation_target=prepared.dispatch.target,
     )
-    pending_turn = controller.deps.turn_store.record_pending_turn(handled_turn)
+    pending_turn = await asyncio.to_thread(
+        controller.deps.turn_store.record_pending_turn,
+        handled_turn,
+    )
     if pending_turn is None or pending_turn.completed or pending_turn.redacted_source_event_ids:
         return
     handled_turn = pending_turn

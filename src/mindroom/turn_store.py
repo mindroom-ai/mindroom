@@ -188,7 +188,11 @@ class TurnStore:
                 timestamp=0.0,
             )
 
-        return self._ledger.update_handled_turn(pending_record.indexed_event_ids, merge_pending)
+        return self._ledger.update_handled_turn(
+            pending_record.indexed_event_ids,
+            merge_pending,
+            wait_for_persist=True,
+        )
 
     def mark_source_redacted(
         self,

@@ -781,7 +781,7 @@ def test_redaction_barrier_ignores_unrelated_prior_persist_failure(tmp_path: Pat
         real_persist(turn_record)
 
     with patch.object(store._ledger, "_persist_record", side_effect=persist_with_unrelated_failure):
-        store.record_pending_turn(TurnRecord.create(["$unrelated"], completed=False))
+        store.record_visible_echo("$unrelated", "$echo")
         assert unrelated_failed.wait(timeout=5)
         marked = store.mark_source_redacted("$redacted")
 
