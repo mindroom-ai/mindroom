@@ -1236,10 +1236,11 @@ def test_replay_safe_tool_search_results_drops_unavailable_references() -> None:
     result_block = {
         **_DIRTY_TOOL_SEARCH_RESULT_BLOCK,
         "content": {
-            "type": "tool_search_tool_search_result",
             "tool_references": [
                 {"type": "tool_reference", "tool_name": "get_weather"},
                 {"type": "tool_reference", "tool_name": "retired_weather"},
+                {"type": "tool_reference"},
+                "malformed-reference",
             ],
         },
     }
@@ -1257,9 +1258,15 @@ def test_replay_safe_tool_search_results_drops_unavailable_references() -> None:
 
     assert prepared["messages"][0]["content"] == [
         _SERVER_TOOL_USE_BLOCK,
-        _TOOL_SEARCH_RESULT_BLOCK,
+        {
+            "type": "tool_search_tool_result",
+            "tool_use_id": "srvtoolu_01ABC",
+            "content": {
+                "tool_references": [{"type": "tool_reference", "tool_name": "get_weather"}],
+            },
+        },
     ]
-    assert len(request_kwargs["messages"][0]["content"][1]["content"]["tool_references"]) == 2
+    assert len(request_kwargs["messages"][0]["content"][1]["content"]["tool_references"]) == 4
     assert "citations" in request_kwargs["messages"][0]["content"][1]
     assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
 
@@ -1290,6 +1297,51 @@ def test_replay_safe_tool_search_results_drops_pair_when_all_references_are_unav
     assert request_kwargs["messages"][0]["content"][1] == _SERVER_TOOL_USE_BLOCK
     assert request_kwargs["messages"][0]["content"][2] == _DIRTY_TOOL_SEARCH_RESULT_BLOCK
     assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
+
+
+def test_replay_safe_tool_search_results_drops_pairs_without_a_tools_array() -> None:
+    """Missing current tools means every replayed tool reference is stale."""
+    request_kwargs = {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [
+                    dict(_OTHER_SERVER_TOOL_USE_BLOCK),
+                    dict(_SERVER_TOOL_USE_BLOCK),
+                    dict(_TOOL_SEARCH_RESULT_BLOCK),
+                ],
+            },
+        ],
+    }
+
+    prepared = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+
+    assert prepared["messages"][0]["content"] == [_OTHER_SERVER_TOOL_USE_BLOCK]
+    assert request_kwargs["messages"][0]["content"] == [
+        _OTHER_SERVER_TOOL_USE_BLOCK,
+        _SERVER_TOOL_USE_BLOCK,
+        _TOOL_SEARCH_RESULT_BLOCK,
+    ]
+    assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
+
+
+def test_replay_safe_tool_search_results_returns_original_when_references_are_available() -> None:
+    """A clean replay should preserve both payload bytes and object identity."""
+    request_kwargs = {
+        "tools": [_wire_tool("get_weather")],
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [
+                    dict(_SERVER_TOOL_USE_BLOCK),
+                    dict(_TOOL_SEARCH_RESULT_BLOCK),
+                    dict(_OTHER_SERVER_TOOL_USE_BLOCK),
+                ],
+            },
+        ],
+    }
+
+    assert _request_kwargs_with_replay_safe_tool_search_results(request_kwargs) is request_kwargs
 
 
 @pytest.mark.asyncio

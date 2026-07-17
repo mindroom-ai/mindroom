@@ -72,7 +72,6 @@ _NATIVE_TOOL_SEARCH_PROVIDERS = frozenset({"anthropic", "vertexai_claude"})
 
 SERVER_TOOL_USE_BLOCK_TYPE = "server_tool_use"
 TOOL_SEARCH_RESULT_BLOCK_TYPE = "tool_search_tool_result"
-_TOOL_SEARCH_RESULT_CONTENT_TYPE = "tool_search_tool_search_result"
 # The request schema for replayed tool-search results accepts only these keys
 # (ToolSearchToolResultBlockParam); response blocks additionally carry
 # citations/parsed_output/text, which the API rejects as extra inputs.
@@ -272,7 +271,7 @@ def _replay_safe_tool_search_result(
     changed = not block_dict.keys() <= _TOOL_SEARCH_RESULT_INPUT_KEYS
     prepared_block = {key: value for key, value in block_dict.items() if key in _TOOL_SEARCH_RESULT_INPUT_KEYS}
     content = _as_dict(prepared_block.get("content"))
-    if content is None or content.get("type") != _TOOL_SEARCH_RESULT_CONTENT_TYPE:
+    if content is None:
         return prepared_block, changed
     tool_references = content.get("tool_references")
     if not isinstance(tool_references, list):
@@ -282,14 +281,14 @@ def _replay_safe_tool_search_result(
     for reference in tool_references:
         reference_dict = _as_dict(reference)
         tool_name = reference_dict.get("tool_name") if reference_dict is not None else None
-        if isinstance(tool_name, str) and tool_name not in available_tool_names:
+        if not isinstance(tool_name, str) or tool_name not in available_tool_names:
             changed = True
             continue
         available_references.append(reference)
-    if len(available_references) == len(tool_references):
-        return prepared_block, changed
     if not available_references:
         return None, True
+    if len(available_references) == len(tool_references):
+        return prepared_block, changed
 
     prepared_content = dict(content)
     prepared_content["tool_references"] = available_references
