@@ -10,7 +10,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, cast, runtime_checkable
 
 import tiktoken
 
@@ -71,6 +71,13 @@ class _ModelWithOptions(Protocol):
     options: Mapping[str, object] | None
 
 
+@runtime_checkable
+class _ModelWithRequestParams(Protocol):
+    """Typed surface for loaded models with final request overrides."""
+
+    request_params: Mapping[str, object] | None
+
+
 def estimate_text_tokens(value: str | list[str] | None) -> int:
     """Estimate token count using chars / 4."""
     if value is None:
@@ -113,17 +120,31 @@ def estimate_compaction_input_tokens(
 
 
 def configured_model_max_output_tokens(model: Model) -> int | None:
-    """Return the largest positive output cap exposed by a loaded model."""
-    candidates: list[object] = []
+    """Return the largest positive output cap in a loaded model's effective request."""
+    candidates: dict[str, object] = {}
     if isinstance(model, _ModelWithMaxTokens):
-        candidates.append(model.max_tokens)
+        candidates["max_tokens"] = model.max_tokens
     if isinstance(model, _ModelWithMaxOutputTokens):
-        candidates.append(model.max_output_tokens)
+        candidates["max_output_tokens"] = model.max_output_tokens
     if isinstance(model, _ModelWithMaxCompletionTokens):
-        candidates.append(model.max_completion_tokens)
+        candidates["max_completion_tokens"] = model.max_completion_tokens
     if isinstance(model, _ModelWithOptions) and isinstance(model.options, Mapping):
-        candidates.append(model.options.get("num_predict"))
-    positive_caps = [cap for cap in candidates if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0]
+        candidates["num_predict"] = model.options.get("num_predict")
+    if isinstance(model, _ModelWithRequestParams) and isinstance(model.request_params, Mapping):
+        for parameter_name in ("max_tokens", "max_output_tokens", "max_completion_tokens"):
+            if parameter_name in model.request_params:
+                candidates[parameter_name] = model.request_params[parameter_name]
+        if "options" in model.request_params:
+            request_options = model.request_params["options"]
+            request_options_mapping = (
+                cast("Mapping[str, object]", request_options) if isinstance(request_options, Mapping) else None
+            )
+            candidates["num_predict"] = (
+                request_options_mapping.get("num_predict") if request_options_mapping is not None else None
+            )
+    positive_caps = [
+        cap for cap in candidates.values() if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0
+    ]
     return max(positive_caps, default=None)
 
 

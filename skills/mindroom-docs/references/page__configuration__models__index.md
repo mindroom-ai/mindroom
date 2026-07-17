@@ -264,8 +264,8 @@ Manual `compact_context` records a durable request that runs before the next rep
 Manual `compact_context` remains available when a compaction model and context window are configured.
 It still uses the active runtime window for the final replay-fit step, but destructive compaction itself can be available whenever an explicit `compaction.model` has its own `context_window`.
 If you set `compaction.model`, that summary model must also define its own `context_window` for the durable summary-generation pass.
-MindRoom recognizes output caps exposed as `max_tokens`, `max_output_tokens`, `max_completion_tokens`, or Ollama `options.num_predict`.
-For summary generation only, MindRoom computes input capacity using the larger of `reserve_tokens` and the loaded summary model's positive output cap.
+MindRoom recognizes effective output caps exposed as `max_tokens`, `max_output_tokens`, `max_completion_tokens`, or Ollama `options.num_predict`, including final `request_params` overrides.
+For summary generation only, MindRoom first clamps `reserve_tokens` to at most half the summary model's context window, then computes input capacity using the larger of that normalized reserve and the loaded model's positive output cap.
 A cap that leaves no usable summary input budget makes compaction fail without deleting the raw history.
 Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place.
 Otherwise MindRoom leaves the session unchanged and relies on replay fitting for that reply.

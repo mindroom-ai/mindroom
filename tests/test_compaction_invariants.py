@@ -804,6 +804,55 @@ def test_loaded_model_output_cap_supports_provider_parameter_names(model: Model)
     assert configured_model_max_output_tokens(model) == 64_000
 
 
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        (Claude(id="claude-sonnet-5", max_tokens=8_192, request_params={"max_tokens": 64_000}), 64_000),
+        (Claude(id="claude-sonnet-5", max_tokens=64_000, request_params={"max_tokens": 1_024}), 1_024),
+        (OpenAIResponses(id="gpt-5.6", request_params={"max_output_tokens": 64_000}), 64_000),
+        (OpenAIChat(id="gpt-5.6", request_params={"max_completion_tokens": 64_000}), 64_000),
+        (Gemini(id="gemini-3.5-flash", request_params={"max_output_tokens": 64_000}), 64_000),
+        (
+            Ollama(
+                id="llama3.1",
+                options={"num_predict": 1_024},
+                request_params={"options": {"num_predict": 64_000}},
+            ),
+            64_000,
+        ),
+    ],
+)
+def test_loaded_model_output_cap_honors_request_parameter_overrides(model: Model, expected: int) -> None:
+    assert configured_model_max_output_tokens(model) == expected
+
+
+@pytest.mark.asyncio
+async def test_generate_compaction_summary_uses_effective_request_output_cap() -> None:
+    model = Claude(
+        id="claude-sonnet-5",
+        max_tokens=64_000,
+        request_params={"max_tokens": 1_024},
+    )
+    with (
+        patch.object(
+            model,
+            "aresponse",
+            new=AsyncMock(
+                return_value=ModelResponse(
+                    content="durable summary ended at its output cap.",
+                    output_tokens=1_024,
+                ),
+            ),
+        ),
+        pytest.raises(CompactionSummaryOutputLimitError, match="output token limit"),
+    ):
+        await generate_compaction_summary(
+            model=model,
+            summary_input="conversation payload",
+            summary_prompt="Summarize the conversation.",
+        )
+
+
 @pytest.mark.asyncio
 async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_path: Path) -> None:
     """An empty summary response retries with a smaller input."""
