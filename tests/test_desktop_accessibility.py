@@ -479,6 +479,18 @@ def test_mac_launches_only_the_exact_allowlisted_bundle_id(monkeypatch: pytest.M
     assert launched.activation_options == [0]
 
 
+def test_mac_launch_rejects_invalid_bundle_id_before_request() -> None:
+    """Invalid allowlist entries fail definitively before any launch side effect."""
+    backend, _, workspace = _fake_mac_backend()
+    backend._allowed_app_ids = frozenset({"invalid_app"})
+    workspace.applications = []
+
+    with pytest.raises(AccessibilityError, match="invalid bundle identifier") as exc_info:
+        backend.launch_app("invalid_app")
+
+    assert type(exc_info.value) is AccessibilityError
+
+
 def test_mac_launch_timeout_has_unknown_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
     """An accepted launch request that never appears cannot be presented as safe to repeat."""
     backend, _, workspace = _fake_mac_backend()
