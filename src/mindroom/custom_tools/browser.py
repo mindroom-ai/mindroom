@@ -435,6 +435,12 @@ def _desktop_browser_parameters(  # noqa: C901, PLR0911, PLR0912, PLR0915
         if not isinstance(request, dict):
             msg = "request required for action=act"
             raise ValueError(msg)
+        if request.get("targetId") is not None:
+            msg = (
+                "Browser target=desktop does not support request.targetId because Playwright MCP tab indices can "
+                "change; operate the current tab or open a new one."
+            )
+            raise ValueError(msg)
         return {"request": request}
     msg = f"Unsupported desktop browser action: {action}"
     raise ValueError(msg)

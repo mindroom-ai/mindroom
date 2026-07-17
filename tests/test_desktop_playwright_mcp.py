@@ -399,6 +399,16 @@ def test_mutable_playwright_tab_indices_are_rejected(action: str) -> None:
         _mcp_calls(action, parameters)
 
 
+def test_mutable_playwright_tab_index_inside_act_request_is_rejected() -> None:
+    """Nested act requests cannot bypass the mutable tab-index guard."""
+    parameters: dict[str, object] = {
+        "request": {"kind": "click", "ref": "e1", "targetId": "1"},
+    }
+
+    with pytest.raises(PlaywrightBrowserError, match="tab indices can change"):
+        _mcp_calls("act", parameters)
+
+
 @pytest.mark.asyncio
 async def test_uploads_are_confined_to_the_browser_workspace(
     monkeypatch: pytest.MonkeyPatch,

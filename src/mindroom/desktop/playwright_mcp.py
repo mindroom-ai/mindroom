@@ -369,7 +369,7 @@ def browser_action_requires_control(action: str) -> bool:
     return action in _CONTROL_ACTIONS
 
 
-def _mcp_calls(  # noqa: C901, PLR0911, PLR0912
+def _mcp_calls(  # noqa: C901, PLR0911, PLR0912, PLR0915
     action: str,
     parameters: dict[str, object],
 ) -> list[_MCPCall]:
@@ -438,6 +438,12 @@ def _mcp_calls(  # noqa: C901, PLR0911, PLR0912
         _reject_unexpected(parameters, frozenset({"request"}))
         error = "Browser act requires a request object with string keys."
         request = _string_keyed_object(parameters.get("request"), error)
+        if request.get("targetId") is not None:
+            msg = (
+                "Playwright extension request.targetId is unsupported because MCP tab indices can change; "
+                "operate the current tab or open a new one."
+            )
+            raise PlaywrightBrowserError(msg)
         return [_act_call(request)]
     msg = f"Unsupported Playwright browser action: {action}."
     raise PlaywrightBrowserError(msg)

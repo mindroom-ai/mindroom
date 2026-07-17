@@ -605,6 +605,11 @@ async def test_desktop_target_routes_snapshot_and_control_over_matrix(monkeypatc
     ("action", "arguments", "expected"),
     [
         ("snapshot", {"targetId": "1"}, "does not support targetId"),
+        (
+            "act",
+            {"request": {"kind": "click", "ref": "e1", "targetId": "1"}},
+            "does not support request.targetId",
+        ),
         ("snapshot", {"snapshotFormat": "aria"}, "does not support: snapshotFormat"),
         ("status", {"profile": "chrome"}, "does not support: profile"),
         ("upload", {"paths": ["invoice.pdf"], "inputRef": "e1"}, "does not support: inputRef"),
