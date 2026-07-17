@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
+    from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 
 logger = get_logger(__name__)
 
@@ -474,6 +475,45 @@ async def send_file_message(
     return delivered.event_id if delivered is not None else None
 
 
+async def send_runtime_encrypted_media_message(
+    client: nio.AsyncClient,
+    room_id: str,
+    attachment: RuntimeEncryptedMediaAttachment,
+    *,
+    thread_id: str | None = None,
+    caption: str | None = None,
+    latest_thread_event_id: str | None = None,
+    conversation_cache: ConversationCacheProtocol | None = None,
+) -> str | None:
+    """Send an existing encrypted MXC object without writing or uploading plaintext bytes."""
+    msgtype = _msgtype_for_mimetype(attachment.mime_type)
+    content: dict[str, Any] = {
+        "msgtype": msgtype,
+        "body": caption or attachment.filename,
+        "info": {"size": attachment.size, "mimetype": attachment.mime_type},
+        "file": attachment.encrypted_file_content(),
+    }
+    if msgtype == "m.file":
+        content["filename"] = attachment.filename
+    thread_relation = _thread_relation_content(thread_id, latest_thread_event_id)
+    if thread_relation is not None:
+        content["m.relates_to"] = thread_relation
+
+    delivered = await send_message_result(
+        client,
+        room_id,
+        content,
+        operation="send_runtime_encrypted_media_message",
+    )
+    if delivered is not None and conversation_cache is not None:
+        conversation_cache.notify_outbound_message(
+            room_id,
+            delivered.event_id,
+            delivered.content_sent,
+        )
+    return delivered.event_id if delivered is not None else None
+
+
 async def send_audio_message(
     client: nio.AsyncClient,
     room_id: str,
@@ -624,4 +664,5 @@ __all__ = [
     "send_audio_message",
     "send_file_message",
     "send_message_result",
+    "send_runtime_encrypted_media_message",
 ]

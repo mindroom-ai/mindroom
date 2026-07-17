@@ -859,13 +859,9 @@ async def test_matrix_message_send_multiple_attachments_only_auto_threads_under_
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_conversation_operations.send_file_message",
-            new=AsyncMock(return_value="$file_root"),
-        ) as mock_send_file,
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.send_attachment_paths",
-            new=AsyncMock(return_value=(["$file_child"], None)),
-        ) as mock_send_attachment_paths,
+            "mindroom.custom_tools.matrix_conversation_operations.send_resolved_attachments",
+            new=AsyncMock(side_effect=[(["$file_root"], None), (["$file_child"], None)]),
+        ) as mock_send_attachments,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
@@ -881,25 +877,17 @@ async def test_matrix_message_send_multiple_attachments_only_auto_threads_under_
     assert payload["attachment_thread_id"] == "$file_root"
     assert payload["attachment_event_ids"] == ["$file_root", "$file_child"]
     assert payload["resolved_attachment_ids"] == ["att_first", "att_second"]
-    mock_send_file.assert_awaited_once_with(
-        ctx.client,
-        ctx.room_id,
-        first_attachment.local_path,
-        thread_id=None,
-        latest_thread_event_id=None,
-        conversation_cache=ctx.conversation_cache,
-    )
-    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
-        ctx.room_id,
-        None,
-        caller_label="matrix_message_tool_attachment",
-    )
-    mock_send_attachment_paths.assert_awaited_once()
-    assert mock_send_attachment_paths.await_args.args == (ctx,)
-    assert mock_send_attachment_paths.await_args.kwargs == {
+    assert mock_send_attachments.await_args_list[0].args == (ctx,)
+    assert mock_send_attachments.await_args_list[0].kwargs == {
+        "room_id": ctx.room_id,
+        "thread_id": None,
+        "attachments": [first_attachment.local_path],
+    }
+    assert mock_send_attachments.await_args_list[1].args == (ctx,)
+    assert mock_send_attachments.await_args_list[1].kwargs == {
         "room_id": ctx.room_id,
         "thread_id": "$file_root",
-        "attachment_paths": [second_attachment.local_path],
+        "attachments": [second_attachment.local_path],
     }
 
 
@@ -937,10 +925,6 @@ async def test_matrix_message_send_multiple_attachments_only_in_room_mode_stays_
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_conversation_operations.send_file_message",
-            new=AsyncMock(return_value="$unexpected_root"),
-        ) as mock_matrix_send_file,
-        patch(
             "mindroom.custom_tools.attachments.send_file_message",
             new=AsyncMock(side_effect=["$file_one", "$file_two"]),
         ) as mock_send_file,
@@ -959,7 +943,6 @@ async def test_matrix_message_send_multiple_attachments_only_in_room_mode_stays_
     assert payload["attachment_thread_id"] is None
     assert payload["attachment_event_ids"] == ["$file_one", "$file_two"]
     assert payload["resolved_attachment_ids"] == ["att_room_first", "att_room_second"]
-    mock_matrix_send_file.assert_not_awaited()
     assert len(mock_send_file.await_args_list) == 2
     first_call = mock_send_file.await_args_list[0]
     second_call = mock_send_file.await_args_list[1]
@@ -1137,13 +1120,9 @@ async def test_matrix_message_send_multiple_attachments_only_returns_error_when_
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_conversation_operations.send_file_message",
-            new=AsyncMock(return_value=None),
-        ) as mock_send_file,
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.send_attachment_paths",
-            new=AsyncMock(return_value=([], None)),
-        ) as mock_send_attachment_paths,
+            "mindroom.custom_tools.matrix_conversation_operations.send_resolved_attachments",
+            new=AsyncMock(return_value=([], "Failed to send attachment: first")),
+        ) as mock_send_attachments,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
@@ -1161,15 +1140,12 @@ async def test_matrix_message_send_multiple_attachments_only_returns_error_when_
     assert payload["resolved_attachment_ids"] == ["att_first_fail", "att_second_fail"]
     assert payload["newly_registered_attachment_ids"] == []
     assert "Failed to send attachment" in payload["message"]
-    mock_send_file.assert_awaited_once_with(
-        ctx.client,
-        ctx.room_id,
-        first_attachment.local_path,
+    mock_send_attachments.assert_awaited_once_with(
+        ctx,
+        room_id=ctx.room_id,
         thread_id=None,
-        latest_thread_event_id=None,
-        conversation_cache=ctx.conversation_cache,
+        attachments=[first_attachment.local_path],
     )
-    mock_send_attachment_paths.assert_not_awaited()
 
 
 @pytest.mark.asyncio

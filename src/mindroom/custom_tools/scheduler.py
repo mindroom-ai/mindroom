@@ -36,8 +36,9 @@ class SchedulerTools(Toolkit):
         Args:
             request: The scheduling request, e.g. "in 5 minutes remind me to check logs"
             new_thread: Required delivery choice. Use `False` to post in the current
-                room/thread scope. Use `True` to schedule a future room-level root
-                message that can become its own thread when someone replies later.
+                room/thread scope. Use `True` to start a fresh thread per fire: each
+                fire posts a room-level root and the responding agent answers in a
+                new thread under it with a fresh session.
             history_limit: Max recent thread messages included as context each time
                 the task fires. Use 0 for no history (recommended for recurring
                 polling tasks), or leave unset for full history.

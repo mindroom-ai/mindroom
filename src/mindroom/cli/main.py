@@ -21,6 +21,7 @@ from .config import (
     load_config_quiet,
     print_config_search_locations,
 )
+from .desktop import desktop_app
 from .local_stack import local_stack_setup
 from .migrate import config_migrate
 from .plugins import plugins_app
@@ -59,6 +60,7 @@ threads_app = typer.Typer(help="Export Matrix threads to local files.")
 config_app.command("migrate")(config_migrate)
 app.add_typer(config_app, name="config")
 app.add_typer(plugins_app, name="plugins")
+app.add_typer(desktop_app, name="desktop")
 app.add_typer(avatars_app, name="avatars")
 app.add_typer(threads_app, name="threads")
 app.add_typer(service_app, name="service")

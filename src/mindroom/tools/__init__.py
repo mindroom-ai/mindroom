@@ -55,6 +55,7 @@ from mindroom.tools.custom_api import custom_api_tools
 from mindroom.tools.dalle import dalle_tools
 from mindroom.tools.daytona import daytona_tools
 from mindroom.tools.desi_vocal import desi_vocal_tools
+from mindroom.tools.desktop import desktop_tools
 from mindroom.tools.discord import discord_tools
 from mindroom.tools.docker import docker_tools
 from mindroom.tools.duckdb import duckdb_tools
@@ -185,6 +186,7 @@ __all__ = [
     "dalle_tools",
     "daytona_tools",
     "desi_vocal_tools",
+    "desktop_tools",
     "discord_tools",
     "docker_tools",
     "duckdb_tools",

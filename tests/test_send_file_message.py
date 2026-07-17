@@ -18,8 +18,10 @@ from mindroom.matrix.client_delivery import (
     send_audio_message,
     send_file_message,
     send_message_result,
+    send_runtime_encrypted_media_message,
 )
 from mindroom.matrix.media import extract_media_caption
+from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -145,6 +147,84 @@ class TestUploadFileAsMxc:
 
         assert mxc_uri is None
         assert payload is None
+
+
+class TestSendRuntimeEncryptedMediaMessage:
+    """Tests for resending turn-scoped encrypted MXC media."""
+
+    @staticmethod
+    def _attachment() -> RuntimeEncryptedMediaAttachment:
+        return RuntimeEncryptedMediaAttachment(
+            attachment_id="att_screenshot",
+            filename="desktop-screenshot.png",
+            url="mxc://localhost/existing",
+            key="key",
+            iv="iv",
+            sha256="hash",
+            mime_type="image/png",
+            size=321,
+        )
+
+    @pytest.mark.asyncio
+    async def test_reuses_encrypted_media_without_upload(self) -> None:
+        """A runtime image sends the existing MXC object and keys inside the encrypted room event."""
+        client = _mock_client(encrypted=True)
+        attachment = self._attachment()
+
+        with patch(
+            "mindroom.matrix.client_delivery.send_message_result",
+            new=AsyncMock(
+                side_effect=lambda _client, _room, content, **_kwargs: DeliveredMatrixEvent(
+                    event_id="$image:localhost",
+                    content_sent=content,
+                ),
+            ),
+        ) as send_message:
+            event_id = await send_runtime_encrypted_media_message(
+                client,
+                "!room:localhost",
+                attachment,
+                thread_id="$thread:localhost",
+                latest_thread_event_id="$latest:localhost",
+            )
+
+        assert event_id == "$image:localhost"
+        content = send_message.await_args.args[2]
+        assert content["msgtype"] == "m.image"
+        assert content["body"] == attachment.filename
+        assert content["info"] == {"size": 321, "mimetype": "image/png"}
+        assert content["file"] == attachment.encrypted_file_content()
+        assert content["m.relates_to"] == {
+            "rel_type": "m.thread",
+            "event_id": "$thread:localhost",
+            "is_falling_back": True,
+            "m.in_reply_to": {"event_id": "$latest:localhost"},
+        }
+        client.upload.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_reuses_encrypted_media_in_unencrypted_room(self) -> None:
+        """An unencrypted room can receive the existing encrypted MXC object without another upload."""
+        client = _mock_client(encrypted=False)
+
+        with patch(
+            "mindroom.matrix.client_delivery.send_message_result",
+            new=AsyncMock(
+                side_effect=lambda _client, _room, content, **_kwargs: DeliveredMatrixEvent(
+                    event_id="$image:localhost",
+                    content_sent=content,
+                ),
+            ),
+        ) as send_message:
+            event_id = await send_runtime_encrypted_media_message(
+                client,
+                "!room:localhost",
+                self._attachment(),
+            )
+
+        assert event_id == "$image:localhost"
+        assert send_message.await_args.args[2]["file"] == self._attachment().encrypted_file_content()
+        client.upload.assert_not_awaited()
 
 
 class TestSendFileMessage:

@@ -12,7 +12,13 @@ from nio.responses import RoomGetEventError
 from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, HOOK_SOURCE_KEY, SKIP_MENTIONS_KEY
 from mindroom.dispatch_handoff import DispatchEvent, DispatchPayloadMetadata, PreparedTextEvent
-from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MESSAGE_SOURCE_KIND, VOICE_SOURCE_KIND, source_kind_from_content
+from mindroom.dispatch_source import (
+    IMAGE_SOURCE_KIND,
+    MESSAGE_SOURCE_KIND,
+    VOICE_SOURCE_KIND,
+    source_kind_from_content,
+    source_kind_owns_per_fire_thread_root,
+)
 from mindroom.dispatch_thread_context import (
     DispatchThreadContext,
     context_with_dispatch_thread_context,
@@ -260,9 +266,7 @@ class ConversationResolver:
             if isinstance(event, PreparedTextEvent)
             else None
         )
-        config = self.deps.runtime.config
-        registry = entity_identity_registry(config, self.deps.runtime_paths)
-        source_kind_sender_is_trusted = registry.current_entity_name_for_user_id(event.sender) is not None
+        source_kind_sender_is_trusted = self._sender_is_managed_entity(event.sender)
         if resolved_source_kind is None and isinstance(content, dict):
             source_kind_override = source_kind_from_content(content)
             if source_kind_override is not None and source_kind_sender_is_trusted:
@@ -315,6 +319,21 @@ class ConversationResolver:
             trusted_user_relay=trusted_human_relay,
         )
 
+    def _sender_is_managed_entity(self, user_id: str) -> bool:
+        """Return whether one Matrix user ID belongs to a managed entity."""
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        return registry.current_entity_name_for_user_id(user_id) is not None
+
+    def _is_trusted_automation_fire(self, event_source: dict[str, Any]) -> bool:
+        """Return whether one event is a per-fire automation delivery from a managed entity."""
+        content = event_source.get("content")
+        if not isinstance(content, dict) or not source_kind_owns_per_fire_thread_root(
+            source_kind_from_content(content),
+        ):
+            return False
+        sender = event_source.get("sender")
+        return isinstance(sender, str) and self._sender_is_managed_entity(sender)
+
     def build_message_target(
         self,
         *,
@@ -332,16 +351,22 @@ class ConversationResolver:
             room_id=room_id,
         )
         thread_start_root_event_id = None
+        automation_fire_root = False
         if event_source is not None:
             event_info = EventInfo.from_event(event_source)
             if event_info.can_be_thread_root and reply_to_event_id is not None:
                 thread_start_root_event_id = reply_to_event_id
+                # A scheduled or external-trigger fire that is its own root owns a
+                # per-fire thread and session even in room mode; otherwise every
+                # recurring fire in a room-mode room shares one room-level session
+                # and its history accumulates across fires.
+                automation_fire_root = self._is_trusted_automation_fire(event_source)
         return MessageTarget.resolve(
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             thread_start_root_event_id=thread_start_root_event_id,
-            room_mode=effective_thread_mode == "room",
+            room_mode=effective_thread_mode == "room" and not automation_fire_root,
         )
 
     def build_message_envelope(
