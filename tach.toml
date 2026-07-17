@@ -1035,6 +1035,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.model_instance_checks",
     "mindroom.timing",
+    "mindroom.token_budget",
 ]
 
 [[modules]]
