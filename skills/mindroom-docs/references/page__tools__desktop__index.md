@@ -148,7 +148,8 @@ agents:
 ```
 
 The `desktop` tool runs in the primary agent process because it needs that live agent's Matrix device and room requester identity.
-The `browser` tool also stays in the primary process because its optional desktop target needs the same live Matrix context.
+The `browser` tool remains worker-routable for host-browser isolation, but its Matrix desktop target requires the primary process's live Matrix context.
+Do not list `browser` in `worker_tools` for an agent that uses `target: desktop`; a worker-routed desktop call fails closed with a live-context error.
 It is hidden from OpenAI-compatible API runs when approval policy requires Matrix approval because those runs have no Matrix approval transport.
 
 To use the same device with the `browser` tool, configure its desktop target on that agent:
@@ -200,6 +201,7 @@ Wildcards are not accepted as authority.
 The process opens outbound HTTPS connections to Matrix and does not listen on a network port.
 Authenticated, unexpired commands received by the initial Matrix sync are dispatched during startup, including control commands when the new process has a valid local control lease.
 Wait until the terminal says `Desktop bridge online` before sending new work when the caller needs confirmation that startup and device pinning completed.
+The bridge durably journals an accepted command before local execution, so a Matrix redelivery after a crash returns the cached response or an unknown-outcome warning instead of repeating a started control.
 
 To grant semantic and fallback control for fifteen minutes, stop the observe-only process and restart it locally with an explicit lease:
 
@@ -241,7 +243,8 @@ mindroom desktop run \
 ```
 
 For Chrome, omit the two explicit path options to use Playwright MCP's normal Chrome discovery, or provide the matching Chrome executable and user-data root.
-The first browser call starts `@playwright/mcp@0.0.78` locally through `npx` and opens the extension connection page in that profile.
+An explicit `browser(action="start", target="desktop")` call starts `@playwright/mcp@0.0.78` locally through `npx` and opens the extension connection page in that profile.
+Starting that connection requires the local control lease; observation calls cannot launch or foreground the browser on an observe-only bridge.
 The connection page lets the user choose an initial tab and displays a reconnect token.
 To reconnect after local bridge restarts without another browser prompt, store that value as `PLAYWRIGHT_MCP_EXTENSION_TOKEN` in the local MindRoom `.env` file with owner-only permissions.
 Treat the reconnect token like a local browser-control credential, never commit it, and regenerate it from the extension page if it is exposed.
@@ -262,7 +265,7 @@ If an action outcome is unknown or its follow-up state is incomplete, the agent 
 Some applications change their UI successfully and then return an accessibility error, so a fresh observation is the only safe way to resolve an unknown outcome.
 If the user asks to receive the screenshot, the agent calls `desktop(action="screenshot", app="...", return_attachment=true)` and then sends the returned `attachment_id` in the same turn with `matrix_message`.
 
-For browser work, the agent starts with `browser(action="tabs", target="desktop")` or `browser(action="snapshot", target="desktop")`.
+For browser work, the agent first uses `browser(action="start", target="desktop")` while the local control lease is active, then calls `browser(action="tabs", target="desktop")` or `browser(action="snapshot", target="desktop")`.
 The snapshot returns semantic roles, names, current values, and element references from the current page.
 Reading the current tab is observation-only, while supplying `targetId` first selects that tab and therefore requires the local control lease.
 Element references are opaque and may include frame identity, so the agent must pass each returned reference through unchanged.
@@ -271,7 +274,7 @@ After navigation or a significant page update, the agent requests a new snapshot
 The `screenshot` action is useful for visual context, but semantic actions should use snapshot references rather than guessing image coordinates.
 For a browser screenshot that the user should receive, the agent passes `returnAttachment=true` with `target="desktop"` and sends the returned `attachment_id` through `matrix_message` in the same turn.
 
-## 6. Add Matrix Approval for Control Actions
+## 6. Add Matrix Approval for Desktop-App Control Actions
 
 The local lease is the hard authority boundary, while MindRoom's existing approval cards can add per-action human confirmation in the Matrix conversation.
 Create `approval_scripts/desktop_control.py` beside the cloud config:
@@ -305,7 +308,8 @@ tool_approval:
       script: ./approval_scripts/desktop_control.py
 ```
 
-With this policy, observation remains immediately available while each control action waits for the original Matrix requester to approve it.
+With this policy, observation remains immediately available while each `desktop` app-control action waits for the original Matrix requester to approve it.
+This example does not cover the separate `browser` tool; add a browser-specific rule if browser calls also need Matrix approval.
 Approval does not override an absent or expired local control lease.
 
 ## Operations
