@@ -199,6 +199,15 @@ async def _prepare_text_dispatch(
         refreshed_prompts = dict(handled_turn.source_event_prompts or {})
         refreshed_prompts[event.event_id] = event.body
         handled_turn = replace(handled_turn, source_event_prompts=refreshed_prompts)
+    routed_original_event_id = controller.deps.ingress.router_relay_original_event_id(event)
+    if routed_original_event_id is not None:
+        # Keep the routed turn discoverable by the human message the router
+        # relayed, so edits and redactions of that message reach this
+        # responder's persisted runs.
+        handled_turn = replace(
+            handled_turn,
+            discovery_event_ids=(*handled_turn.discovery_event_ids, routed_original_event_id),
+        )
 
     command = _parsed_command_for_event(
         controller,
