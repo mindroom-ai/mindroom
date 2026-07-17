@@ -210,9 +210,11 @@ class TurnStore:
                 timestamp=0.0,
             )
 
-        turn_record = self._ledger.update_handled_turn((source_event_id,), redacted_record)
-        self._ledger.flush()
-        return turn_record
+        return self._ledger.update_handled_turn(
+            (source_event_id,),
+            redacted_record,
+            wait_for_persist=True,
+        )
 
     def pending_redaction_cleanups(self) -> tuple[tuple[str, str], ...]:
         """Return durable source/room locators still owed asynchronous recovery."""
@@ -491,8 +493,11 @@ class TurnStore:
 
         if self._ledger.get_turn_record(redacted_event_id) is None:
             return
-        self._ledger.update_handled_turn((redacted_event_id,), cleared_record)
-        self._ledger.flush()
+        self._ledger.update_handled_turn(
+            (redacted_event_id,),
+            cleared_record,
+            wait_for_persist=True,
+        )
 
     def _remove_redacted_event_from_scope(
         self,

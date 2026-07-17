@@ -487,8 +487,10 @@ class HandledTurnLedger:
         self,
         lookup_event_ids: Sequence[str],
         update: Callable[[Mapping[str, TurnRecord]], TurnRecord],
+        *,
+        wait_for_persist: bool = False,
     ) -> TurnRecord | None:
-        """Atomically validate and update one record against completed identities."""
+        """Atomically update one record, optionally waiting for its exact persist."""
         normalized_lookup_event_ids = _normalize_source_event_ids(lookup_event_ids)
         if not normalized_lookup_event_ids:
             return None
@@ -512,7 +514,9 @@ class HandledTurnLedger:
                 return None
             for event_id in persisted_record.indexed_event_ids:
                 self._responses[event_id] = persisted_record
-            self._schedule_persist_locked(persisted_record)
+            persist_future = self._schedule_persist_locked(persisted_record)
+        if wait_for_persist:
+            persist_future.result()
         logger.debug("handled_turn_recorded", indexed_event_count=len(persisted_record.indexed_event_ids))
         return persisted_record
 
@@ -589,10 +593,17 @@ class HandledTurnLedger:
         """Wait for queued disk merges while the state lock is held."""
         pending = list(self._state.pending_persists)
         self._state.pending_persists.clear()
+        first_error: Exception | None = None
         for future in pending:
-            future.result()
+            try:
+                future.result()
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
-    def _schedule_persist_locked(self, turn_record: TurnRecord) -> None:
+    def _schedule_persist_locked(self, turn_record: TurnRecord) -> Future[None]:
         """Queue one write-behind disk merge for records already applied to memory."""
         future = _persist_executor().submit(self._persist_record, turn_record)
         self._state.pending_persists = [
@@ -601,6 +612,7 @@ class HandledTurnLedger:
             if not pending.done() or pending.cancelled() or pending.exception() is not None
         ]
         self._state.pending_persists.append(future)
+        return future
 
     def _persist_record(self, turn_record: TurnRecord) -> None:
         """Merge already-applied records into the persisted ledger from a worker thread."""

@@ -679,6 +679,34 @@ def test_redaction_tombstone_persists_across_ledger_reload(tmp_path: Path) -> No
     assert reloaded_store.is_handled("$sibling") is True
 
 
+def test_redaction_barrier_ignores_unrelated_prior_persist_failure(tmp_path: Path) -> None:
+    """An older failed write must not prevent the redaction tombstone from becoming durable."""
+    store = _store(tmp_path)
+    real_persist = store._ledger._persist_record
+    unrelated_failed = threading.Event()
+
+    def persist_with_unrelated_failure(turn_record: TurnRecord) -> None:
+        if "$unrelated" in turn_record.indexed_event_ids:
+            unrelated_failed.set()
+            message = "unrelated persist failed"
+            raise OSError(message)
+        real_persist(turn_record)
+
+    with patch.object(store._ledger, "_persist_record", side_effect=persist_with_unrelated_failure):
+        store.record_pending_turn(TurnRecord.create(["$unrelated"], completed=False))
+        assert unrelated_failed.wait(timeout=5)
+        marked = store.mark_source_redacted("$redacted", room_id="!room:example.org")
+
+        assert marked is not None
+        with pytest.raises(OSError, match="unrelated persist failed"):
+            store._ledger.flush()
+
+    _reset_handled_turn_ledger_runtime()
+    durable_record = _store(tmp_path).get_turn_record("$redacted")
+    assert durable_record is not None
+    assert durable_record.pending_redaction_cleanup_event_ids == ("$redacted",)
+
+
 def test_warm_preserves_cleanup_for_async_cache_recovery(tmp_path: Path) -> None:
     """Ledger warmup must leave cache sanitization and history cleanup as one async intent."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")

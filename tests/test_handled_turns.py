@@ -9,7 +9,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -503,6 +503,21 @@ def test_flush_propagates_persistence_failure(temp_dir: Path) -> None:
         tracker.record_handled_turn(TurnRecord.create(["$source"], completed=False))
         with pytest.raises(OSError, match="disk full"):
             tracker.flush()
+
+
+def test_flush_waits_for_every_captured_persist_before_raising(temp_dir: Path) -> None:
+    """One failed persist must not drop later captured work from the barrier."""
+    tracker = HandledTurnLedger("test_flush_drains", base_path=temp_dir)
+    first_future = MagicMock()
+    first_future.result.side_effect = OSError("first persist failed")
+    second_future = MagicMock()
+    tracker._state.pending_persists = [first_future, second_future]
+
+    with pytest.raises(OSError, match="first persist failed"):
+        tracker.flush()
+
+    first_future.result.assert_called_once_with()
+    second_future.result.assert_called_once_with()
 
 
 def test_later_record_does_not_prune_unobserved_persistence_failure(temp_dir: Path) -> None:
