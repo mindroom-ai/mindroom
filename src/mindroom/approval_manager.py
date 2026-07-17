@@ -23,6 +23,7 @@ from mindroom.approval_events import (
     terminal_edit_matches_card_sender,
 )
 from mindroom.logging_config import get_logger
+from mindroom.redaction import redact_sensitive_data
 from mindroom.tool_system.tool_calls import sanitize_failure_text, sanitize_failure_value
 
 if TYPE_CHECKING:
@@ -52,11 +53,18 @@ _DEFAULT_SEND_FAILURE_REASON = "Tool approval request could not be delivered to 
 DEFAULT_SHUTDOWN_REASON = "MindRoom shut down before approval completed."
 _DEFAULT_TIMEOUT_REASON = "Tool approval request timed out."
 _DEFAULT_TRUNCATED_APPROVAL_REASON = (
-    "Cannot approve: the displayed arguments are truncated. "
-    "Ask the agent to retry with a smaller payload, or approve via the script-based approval rule."
+    "Cannot approve: the tool arguments are too large to show in full, so a human cannot review "
+    "exactly what would run. Retry with a smaller payload — for example save large content to a "
+    "workspace file via `mindroom_output_path` or send it as a file attachment with a short message "
+    "body — or auto-approve this tool via a script-based approval rule."
 )
 _STARTUP_DISCARD_REASON = "Bot restarted before approval — original request was cancelled."
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
+# Complete-arguments payloads ride on the card event, so they must leave room for the preview,
+# card metadata, and E2EE base64 inflation inside the 64KB Matrix event limit.
+_MAX_FULL_ARGUMENTS_JSON_CHARS = 32_000
+_MAX_FULL_ARGUMENT_COLLECTION_ITEMS = 500
+_MAX_FULL_ARGUMENT_DEPTH = 12
 _MAX_REMEMBERED_TERMINAL_CARD_IDS = 4096
 _SANITIZER_TRUNCATION_MARKER = "... [truncated]"
 _MANAGER: _ApprovalManager | None = None
@@ -168,6 +176,27 @@ def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str,
         }
         return summary, True
     return preview, True
+
+
+def _build_full_event_arguments(arguments: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the complete redacted arguments when they fit on the card event, else None."""
+    # Gate on the raw size first: redaction cost grows superlinearly with input length,
+    # and a payload that is already over budget can never ship on the card.
+    if len(_compact_preview_text(arguments)) > _MAX_FULL_ARGUMENTS_JSON_CHARS:
+        return None
+    sanitized = redact_sensitive_data(
+        arguments,
+        max_string_length=_MAX_FULL_ARGUMENTS_JSON_CHARS,
+        max_collection_items=_MAX_FULL_ARGUMENT_COLLECTION_ITEMS,
+        max_depth=_MAX_FULL_ARGUMENT_DEPTH,
+    )
+    if not isinstance(sanitized, dict):
+        return None
+    if _contains_sanitizer_truncation(arguments, sanitized):
+        return None
+    if _json_preview_length(sanitized) > _MAX_FULL_ARGUMENTS_JSON_CHARS:
+        return None
+    return sanitized
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,11 +312,16 @@ class _ApprovalManager:
         requested_at = _utcnow()
         expires_at = requested_at + timedelta(seconds=max(timeout_seconds, 0.0))
         event_arguments, arguments_truncated = _build_event_arguments_preview(arguments)
+        # Off-loop: redacting a card-sized payload can take whole seconds on adversarial strings.
+        full_arguments = (
+            await asyncio.to_thread(_build_full_event_arguments, arguments) if arguments_truncated else None
+        )
         content = self._pending_event_content(
             approval_id=approval_id,
             tool_name=tool_name,
             arguments=event_arguments,
             arguments_truncated=arguments_truncated,
+            full_arguments=full_arguments,
             agent_name=agent_name,
             workflow_id=workflow_id,
             participant_id=participant_id,
@@ -1082,6 +1116,7 @@ class _ApprovalManager:
         status: PendingApprovalStatus,
         workflow_id: str | None = None,
         participant_id: str | None = None,
+        full_arguments: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         content: dict[str, Any] = {
             "msgtype": "io.mindroom.tool_approval",
@@ -1109,6 +1144,10 @@ class _ApprovalManager:
             content["participant_id"] = participant_id
         if arguments_truncated:
             content["arguments_truncated"] = True
+            if full_arguments is not None:
+                content["full_arguments"] = full_arguments
+            else:
+                content["approvable"] = False
         if requester_id is not None:
             content["requester_id"] = requester_id
         return content
@@ -1190,7 +1229,7 @@ class _ApprovalManager:
         status: _ResolutionStatus,
         reason: str | None,
     ) -> tuple[_ApprovalStatus, str | None, bool]:
-        if status == "approved" and pending.arguments_preview_truncated:
+        if status == "approved" and pending.arguments_preview_truncated and not pending.full_arguments_available:
             return "denied", _DEFAULT_TRUNCATED_APPROVAL_REASON, True
         return status, reason, False
 

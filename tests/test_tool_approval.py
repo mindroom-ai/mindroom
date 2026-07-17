@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, call
@@ -22,6 +23,7 @@ from mindroom.approval_manager import (
     SentApprovalEvent,
     _ApprovalManager,
     _build_event_arguments_preview,
+    _build_full_event_arguments,
     _LiveApprovalWaiter,
     get_approval_store,
     initialize_approval_store,
@@ -847,7 +849,7 @@ async def test_request_approval_truncated_approval_fails_closed(tmp_path: Path) 
     task = asyncio.create_task(
         store.request_approval(
             tool_name="write_file",
-            arguments={"content": "x" * 10_000},
+            arguments={"content": "x" * 100_000},
             room_id="!room:localhost",
             requester_id="@user:localhost",
             approver_user_id="@user:localhost",
@@ -855,6 +857,11 @@ async def test_request_approval_truncated_approval_fails_closed(tmp_path: Path) 
         ),
     )
     pending = await _wait_for_pending(store, sender=sender)
+
+    card_content = sender.await_args.args[2]
+    assert card_content["arguments_truncated"] is True
+    assert card_content["approvable"] is False
+    assert "full_arguments" not in card_content
 
     await _resolve_pending_approval(
         store,
@@ -864,8 +871,42 @@ async def test_request_approval_truncated_approval_fails_closed(tmp_path: Path) 
     decision = await task
 
     assert decision.status == "denied"
-    assert "displayed arguments are truncated" in (decision.reason or "")
+    assert "too large to show in full" in (decision.reason or "")
     assert editor.await_args.args[2]["status"] == "denied"
+
+
+@pytest.mark.asyncio
+async def test_request_approval_truncated_preview_with_full_arguments_can_be_approved(tmp_path: Path) -> None:
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="write_file",
+            arguments={"content": "x" * 10_000},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender=sender)
+
+    card_content = sender.await_args.args[2]
+    assert card_content["arguments_truncated"] is True
+    assert card_content["full_arguments"] == {"content": "x" * 10_000}
+    assert "approvable" not in card_content
+
+    await _resolve_pending_approval(
+        store,
+        pending,
+        status="approved",
+    )
+    decision = await task
+
+    assert decision.status == "approved"
+    assert editor.await_args.args[2]["status"] == "approved"
 
 
 @pytest.mark.asyncio
@@ -877,7 +918,7 @@ async def test_truncated_approval_action_sends_denial_notice(tmp_path: Path) -> 
     task = asyncio.create_task(
         store.request_approval(
             tool_name="write_file",
-            arguments={"content": "x" * 10_000},
+            arguments={"content": "x" * 100_000},
             room_id="!room:localhost",
             thread_id="$thread",
             requester_id="@user:localhost",
@@ -2275,6 +2316,38 @@ def test_approval_arguments_preview_does_not_mark_literal_truncation_marker() ->
 
     assert preview == arguments
     assert truncated is False
+
+
+def test_full_event_arguments_returns_complete_payload() -> None:
+    arguments = {"content": "x" * 10_000, "path": "notes.txt"}
+
+    assert _build_full_event_arguments(arguments) == arguments
+
+
+def test_full_event_arguments_redacts_secrets_without_bypassing_truncation_checks() -> None:
+    arguments = {"api_key": "sk-live-1234567890abcdef", "content": "x" * 5_000}
+
+    full_arguments = _build_full_event_arguments(arguments)
+
+    assert full_arguments is not None
+    assert full_arguments["content"] == "x" * 5_000
+    assert "sk-live-1234567890abcdef" not in json.dumps(full_arguments)
+
+
+def test_full_event_arguments_rejects_oversized_payload() -> None:
+    assert _build_full_event_arguments({"content": "x" * 100_000}) is None
+
+
+def test_full_event_arguments_rejects_sanitizer_truncated_collections() -> None:
+    assert _build_full_event_arguments({"items": list(range(1_000))}) is None
+
+
+def test_pending_approval_parses_full_arguments_availability() -> None:
+    card = _approval_card(arguments_truncated=True)
+    assert PendingApproval.from_card_event(card, room_id="!room:localhost").full_arguments_available is False
+
+    card["content"]["full_arguments"] = {"content": "x" * 10_000}
+    assert PendingApproval.from_card_event(card, room_id="!room:localhost").full_arguments_available is True
 
 
 @pytest.mark.asyncio

@@ -27,6 +27,7 @@ class PendingApproval:
     arguments_preview_truncated: bool
     timeout_seconds: int
     created_at_ms: int
+    full_arguments_available: bool = False
     thread_id: str | None = None
     agent_name: str | None = None
     workflow_id: str | None = None
@@ -83,6 +84,7 @@ class PendingApproval:
             arguments_preview_truncated=bool(content.get("arguments_truncated")),
             timeout_seconds=timeout_seconds,
             created_at_ms=created_at_ms,
+            full_arguments_available=isinstance(content.get("full_arguments"), dict),
             thread_id=thread_id,
             agent_name=agent_name,
             workflow_id=workflow_id,
