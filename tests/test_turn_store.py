@@ -6,13 +6,15 @@ import ast
 import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from agno.db.base import SessionType
 from agno.run.agent import RunOutput
+from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
+from agno.session.team import TeamSession
 
 from mindroom import constants
 from mindroom.bot import AgentBot
@@ -85,6 +87,7 @@ def _store_with_storage(tmp_path: Path, storage: _FakeAgentStorage) -> TurnStore
     state_writer = MagicMock()
     state_writer.create_storage.return_value = storage
     state_writer.session_type_for_scope.return_value = SessionType.AGENT
+    state_writer.history_scope.return_value = HistoryScope(kind="agent", scope_id="agent")
     return TurnStore(
         TurnStoreDeps(
             agent_name="agent",
@@ -226,7 +229,7 @@ def test_forget_redacted_turn_invalidates_compacted_replay(tmp_path: Path) -> No
     assert storage.upserted_session is session
     assert session.summary is None
     assert read_scope_seen_event_ids(session, scope) == set()
-    assert read_scope_state(session, scope) == HistoryScopeState()
+    assert read_scope_state(session, scope) == HistoryScopeState(compacted_run_ids=("$compacted-run",))
 
 
 def test_forget_redacted_turn_recovers_without_ledger_after_active_response(tmp_path: Path) -> None:
@@ -252,6 +255,151 @@ def test_forget_redacted_turn_recovers_without_ledger_after_active_response(tmp_
     assert session.runs == []
 
 
+def test_redaction_before_response_registration_tombstones_pending_coalesced_turn(tmp_path: Path) -> None:
+    """A source redacted before response startup must suppress its later pending batch."""
+    store = _store(tmp_path)
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$second")
+    team_scope = HistoryScope(kind="team", scope_id="team_private")
+
+    store.mark_source_redacted(
+        "$first",
+        requester_user_id="@user:example.org",
+        target_hint=target,
+    )
+    pending = store.record_pending_turn(
+        TurnRecord.create(
+            ["$first", "$second"],
+            source_event_prompts={"$first": "REDACTED_SECRET", "$second": "keep"},
+            requester_id="@user:example.org",
+            response_owner="agent",
+            history_scope=team_scope,
+            conversation_target=target,
+        ),
+    )
+
+    assert pending is not None
+    assert pending.completed is False
+    assert pending.redacted_source_event_ids == ("$first",)
+    assert pending.source_event_prompts == {"$second": "keep"}
+    assert pending.history_scope == team_scope
+    assert store.is_handled("$first") is True
+    assert store.is_handled("$second") is False
+
+
+def test_active_ad_hoc_team_redaction_uses_pending_response_scope(tmp_path: Path) -> None:
+    """Post-lock cleanup must retain the exact team scope recorded before generation."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    scope = HistoryScope(kind="team", scope_id="team_private")
+    session = TeamSession(
+        session_id=target.session_id,
+        team_id=scope.scope_id,
+        runs=[
+            TeamRunOutput(
+                session_id=target.session_id,
+                team_id=scope.scope_id,
+                metadata={constants.MATRIX_EVENT_ID_METADATA_KEY: "$user_msg"},
+            ),
+        ],
+    )
+    storage = MagicMock()
+    storage.get_session.return_value = session
+    state_writer = MagicMock()
+    state_writer.create_storage.return_value = storage
+    state_writer.session_type_for_scope.return_value = SessionType.TEAM
+    state_writer.history_scope.return_value = HistoryScope(kind="agent", scope_id="agent")
+    store = TurnStore(
+        TurnStoreDeps(
+            agent_name="agent",
+            tracking_base_path=tmp_path,
+            state_writer=state_writer,
+            resolver=MagicMock(),
+            tool_runtime=MagicMock(),
+        ),
+    )
+    response_record = TurnRecord.create(
+        ["$user_msg"],
+        requester_id="@user:example.org",
+        response_owner="agent",
+        history_scope=scope,
+        conversation_target=target,
+    )
+    store.record_pending_turn(response_record)
+    store.mark_source_redacted("$user_msg")
+    store.record_turn(replace(response_record, response_event_id="$reply"))
+
+    removed = store.forget_redacted_turn(
+        room=MagicMock(room_id="!room:example.org"),
+        redacted_event_id="$user_msg",
+        requester_user_id="@user:example.org",
+        target_hint=target,
+    )
+
+    assert removed is True
+    assert session.runs == []
+    state_writer.create_storage.assert_called_with(ANY, scope=scope)
+
+
+def test_redaction_sanitizes_coalesced_ledger_prompt_and_metadata(tmp_path: Path) -> None:
+    """Sibling edit regeneration must not recover a redacted coalesced prompt."""
+    store = _store(tmp_path)
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$second")
+    store.record_turn(
+        TurnRecord.create(
+            ["$first", "$second"],
+            source_event_prompts={"$first": "REDACTED_SECRET", "$second": "keep"},
+            source_event_metadata={
+                "$first": SourceEventMetadata(sender="@first:example.org"),
+                "$second": SourceEventMetadata(sender="@second:example.org"),
+            },
+            requester_id="@user:example.org",
+            response_owner="agent",
+            history_scope=HistoryScope(kind="agent", scope_id="agent"),
+            conversation_target=target,
+        ),
+    )
+
+    sanitized = store.mark_source_redacted("$first")
+
+    assert sanitized is not None
+    assert sanitized.redacted_source_event_ids == ("$first",)
+    assert sanitized.source_event_prompts == {"$second": "keep"}
+    assert sanitized.source_event_metadata == {
+        "$second": SourceEventMetadata(sender="@second:example.org"),
+    }
+    assert store.get_turn_record("$second") == sanitized
+
+
+def test_missing_ledger_compacted_summary_recovers_from_source_scope(tmp_path: Path) -> None:
+    """Source-derived context should clear an inactive summary after ledger expiry."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    scope = HistoryScope(kind="agent", scope_id="agent")
+    session = AgentSession(
+        session_id=target.session_id,
+        agent_id="agent",
+        runs=[],
+        summary=SessionSummary(summary="contains REDACTED_SECRET"),
+    )
+    update_scope_seen_event_ids(session, scope, ["$user_msg"])
+    storage = _FakeAgentStorage(session)
+    store = _store_with_storage(tmp_path, storage)
+    store.mark_source_redacted(
+        "$user_msg",
+        requester_user_id="@user:example.org",
+        target_hint=target,
+    )
+
+    removed = store.forget_redacted_turn(
+        room=MagicMock(room_id="!room:example.org"),
+        redacted_event_id="$user_msg",
+        requester_user_id="@user:example.org",
+        target_hint=target,
+    )
+
+    assert removed is True
+    assert session.summary is None
+    assert read_scope_seen_event_ids(session, scope) == set()
+
+
 def test_turn_store_constructs_private_ledger_from_tracking_base_path(tmp_path: Path) -> None:
     """TurnStore should own its private ledger and persist through the tracking base path."""
     store = _store(tmp_path)
@@ -266,6 +414,33 @@ def test_turn_store_constructs_private_ledger_from_tracking_base_path(tmp_path: 
     assert turn_record.response_event_id == "$response"
 
 
+def test_redaction_tombstone_persists_across_ledger_reload(tmp_path: Path) -> None:
+    """A crash after cache mutation must not lose the source-redaction barrier."""
+    store = _store(tmp_path)
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$event")
+    store.record_turn(
+        TurnRecord.create(
+            ["$event", "$sibling"],
+            source_event_prompts={"$event": "REDACTED_SECRET", "$sibling": "keep"},
+            requester_id="@user:example.org",
+            response_owner="agent",
+            history_scope=HistoryScope(kind="agent", scope_id="agent"),
+            conversation_target=target,
+        ),
+    )
+
+    store.mark_source_redacted("$event")
+    _reset_handled_turn_ledger_runtime()
+    reloaded_store = _store(tmp_path)
+
+    reloaded_record = reloaded_store.get_turn_record("$event")
+    assert reloaded_record is not None
+    assert reloaded_record.redacted_source_event_ids == ("$event",)
+    assert reloaded_record.source_event_prompts == {"$sibling": "keep"}
+    assert reloaded_store.is_handled("$event") is True
+    assert reloaded_store.is_handled("$sibling") is True
+
+
 def test_turn_record_codec_projects_and_parses_one_versioned_run_schema() -> None:
     """The same codec should own both run projection and recovery parsing."""
     history_scope = HistoryScope(kind="agent", scope_id="agent")
@@ -273,6 +448,7 @@ def test_turn_record_codec_projects_and_parses_one_versioned_run_schema() -> Non
     turn_record = TurnRecord.create(
         ["$first", "$anchor"],
         discovery_event_ids=["$selection"],
+        redacted_source_event_ids=["$first"],
         response_event_id="$response",
         source_event_prompts={"$first": "first", "$anchor": "anchor"},
         source_event_metadata={
@@ -298,6 +474,7 @@ def test_turn_record_codec_projects_and_parses_one_versioned_run_schema() -> Non
 
     assert metadata[constants.MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY] == TurnRecordCodec.schema_version()
     assert metadata[constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY] == ["$selection"]
+    assert metadata[constants.MATRIX_TURN_REDACTED_SOURCE_EVENT_IDS_METADATA_KEY] == ["$first"]
     assert parsed == turn_record
 
 

@@ -371,7 +371,7 @@ class TurnController:
 
     def _mark_source_events_responded(self, handled_turn: TurnRecord) -> None:
         """Mark one or more source events as handled by the same terminal outcome."""
-        self.deps.turn_store.record_turn(handled_turn)
+        self.deps.turn_store.record_turn(replace(handled_turn, completed=True, timestamp=0.0))
 
     def _has_newer_unresponded_in_thread(
         self,
@@ -1757,6 +1757,9 @@ class TurnController:
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
+                            source_turn_is_redacted=lambda: self.deps.turn_store.any_source_redacted(
+                                handled_turn.source_event_ids,
+                            ),
                             on_sync_restart_cancelled=register_sync_restart_retry,
                             sync_restart_retry_source_event_id=sync_restart_retry_source_event_id,
                             on_deferred_outcome_handled=record_deferred_outcome,
@@ -1781,6 +1784,9 @@ class TurnController:
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
+                            source_turn_is_redacted=lambda: self.deps.turn_store.any_source_redacted(
+                                handled_turn.source_event_ids,
+                            ),
                             on_sync_restart_cancelled=register_sync_restart_retry,
                             sync_restart_retry_source_event_id=sync_restart_retry_source_event_id,
                             on_deferred_outcome_handled=record_deferred_outcome,

@@ -22,6 +22,9 @@ It should send, edit, redact, and finalize already-generated responses.
 `EditRegenerator` owns the edited-message replay workflow.
 It is still coupled to the current persistence split, but its workflow boundary is real.
 
+`RedactedTurnCleanup` owns source-redaction tombstoning and persisted replay cleanup.
+`AgentBot` only delegates the Matrix redaction callback to that collaborator.
+
 ## Current Problems
 
 `TurnController` is the real turn owner now, but it is still too large.
@@ -76,6 +79,11 @@ Run metadata supplies a complete record when the ledger row is absent and otherw
 `TurnStore` immediately writes a recovered or enriched record back to the ledger, so callers never own backfill or repair decisions.
 One runtime process owns each ledger's semantic ordering, while the advisory file lock protects exact durable writes without defining cross-process turn precedence.
 Unversioned pre-user ledger and run-metadata turn schemas are rejected instead of carrying migration scaffolding.
+
+Matrix source redactions are durably tombstoned before the advisory conversation cache is mutated.
+Pending responses record their exact target and history scope before generation, and response startup checks tombstones again under the lifecycle lock.
+Cleanup removes matching raw runs, clears summary-backed replay state, preserves compaction run tombstones, and sanitizes coalesced prompt metadata used by later edit regeneration.
+Semantic memory backends such as Mem0 have a separate lifecycle and are not altered by persisted replay cleanup.
 
 ## Tool Dispatch Contracts
 

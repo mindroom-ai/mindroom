@@ -2395,6 +2395,7 @@ depends_on = [
     "mindroom.matrix_rtc.call_manager",
     "mindroom.memory",
     "mindroom.post_response_effects",
+    "mindroom.redacted_turn_cleanup",
     "mindroom.response_payload_preparation",
     "mindroom.response_runner",
     "mindroom.scheduling",
@@ -2409,6 +2410,11 @@ depends_on = [
     "mindroom.turn_policy",
     "mindroom.turn_store",
 ]
+
+[[modules]]
+path = "mindroom.redacted_turn_cleanup"
+depends_on = ["mindroom.matrix.event_info"]
+visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.cli"

@@ -267,6 +267,48 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
 
 
 @pytest.mark.asyncio
+async def test_begin_locked_turn_suppresses_source_redacted_before_response_registration(tmp_path: Path) -> None:
+    """A durable tombstone observed under the lock must prevent every persistence side effect."""
+    bot = _bot(tmp_path)
+    target = _target(thread_id="$thread", reply_to_event_id="$event")
+    envelope = _envelope(target, source_event_id="$event")
+    delivery_gateway = MagicMock(spec=DeliveryGateway)
+    delivery_gateway.send_text = AsyncMock(return_value="$placeholder")
+    request_preparer = MagicMock(spec=ResponsePayloadPreparer)
+    request_preparer.prepare = AsyncMock()
+    runner = ResponseRunner(
+        replace(
+            unwrap_extracted_collaborator(bot._response_runner).deps,
+            delivery_gateway=delivery_gateway,
+            request_preparer=request_preparer,
+        ),
+    )
+    request = ResponseRequest(
+        thread_history=[],
+        prompt="REDACTED_SECRET",
+        user_id="@user:localhost",
+        response_envelope=envelope,
+        payload_preparation=_preparation(target, envelope),
+        source_turn_is_redacted=lambda: True,
+    )
+
+    prepared_request = await runner._begin_locked_turn(
+        request,
+        resolved_target=target,
+        history_scope=runner.deps.state_writer.history_scope(),
+        execution_identity=runner.deps.tool_runtime.build_execution_identity(
+            target=target,
+            user_id=request.user_id,
+        ),
+        placeholder_message="Thinking...",
+    )
+
+    assert prepared_request is None
+    delivery_gateway.send_text.assert_not_awaited()
+    request_preparer.prepare.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_history(tmp_path: Path) -> None:
     """The early placeholder must not re-enter payload, memory, or summary inputs through refresh."""
     bot = _bot(tmp_path)

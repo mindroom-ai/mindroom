@@ -12,8 +12,6 @@ import pytest
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
-from mindroom.handled_turns import TurnRecord
-from mindroom.history.types import HistoryScope
 from mindroom.hooks import EVENT_AGENT_STARTED
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
@@ -22,7 +20,6 @@ from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint
 from mindroom.matrix.sync_tokens import load_sync_token_record
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.message_target import MessageTarget
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.runtime_support import (
     StartupThreadPrewarmRegistry,
@@ -1292,99 +1289,15 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert cached_event is None
 
     @pytest.mark.asyncio
-    async def test_live_redaction_callback_forgets_persisted_turn_state(self, bot: AgentBot) -> None:
-        """Live redaction callbacks should drop the handled turn's persisted runs too."""
+    async def test_live_redaction_callback_delegates_to_cleanup(self, bot: AgentBot) -> None:
+        """The bot composition root should only delegate source-redaction policy."""
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_agent:localhost")
-        target = MessageTarget.resolve(room.room_id, "$thread:localhost", "$user_msg:localhost")
-        turn_record = TurnRecord.create(
-            ["$user_msg:localhost"],
-            response_owner=bot.agent_name,
-            requester_id="@requester:localhost",
-            history_scope=HistoryScope(kind="agent", scope_id=bot.agent_name),
-            conversation_target=target,
-        )
         redaction_event = MagicMock(spec=nio.RedactionEvent)
-        redaction_event.redacts = "$user_msg:localhost"
-        redaction_event.sender = "@moderator:localhost"
 
-        with (
-            patch.object(bot._turn_store, "get_turn_record", return_value=turn_record),
-            patch.object(bot._conversation_cache, "get_event", new_callable=AsyncMock) as mock_get_event,
-            patch.object(bot._conversation_cache, "apply_redaction", new_callable=AsyncMock) as mock_apply,
-            patch.object(bot._turn_store, "forget_redacted_turn") as mock_forget,
-            patch.object(
-                bot._response_runner,
-                "run_serialized_state_mutation",
-                new_callable=AsyncMock,
-            ) as mock_run_mutation,
-        ):
+        with patch.object(bot._redacted_turn_cleanup, "handle", new_callable=AsyncMock) as cleanup:
             await bot._on_redaction(room, redaction_event)
-            mock_run_mutation.await_args.kwargs["mutation"]()
 
-        mock_apply.assert_awaited_once_with("!test:localhost", redaction_event)
-        mock_get_event.assert_not_awaited()
-        mock_run_mutation.assert_awaited_once()
-        assert mock_run_mutation.await_args.kwargs["target"] == target
-        mock_forget.assert_called_once_with(
-            room=room,
-            redacted_event_id="$user_msg:localhost",
-            requester_user_id="@requester:localhost",
-            target_hint=target,
-        )
-
-    @pytest.mark.asyncio
-    async def test_live_redaction_uses_source_requester_for_incomplete_ledger(self, bot: AgentBot) -> None:
-        """Moderator redaction recovery must keep the original requester's private state scope."""
-        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_agent:localhost")
-        target = MessageTarget.resolve(room.room_id, "$thread:localhost", "$user_msg:localhost")
-        incomplete_record = TurnRecord.create(
-            ["$user_msg:localhost"],
-            response_owner=bot.agent_name,
-            history_scope=HistoryScope(kind="agent", scope_id=bot.agent_name),
-            conversation_target=target,
-        )
-        source_event = MagicMock(spec=nio.RoomMessageText)
-        source_event.sender = "@requester:localhost"
-        source_event.source = {
-            "event_id": "$user_msg:localhost",
-            "sender": "@requester:localhost",
-            "content": {
-                "body": "secret",
-                "msgtype": "m.text",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread:localhost"},
-            },
-        }
-        lookup = MagicMock(spec=nio.RoomGetEventResponse)
-        lookup.event = source_event
-        redaction_event = MagicMock(spec=nio.RedactionEvent)
-        redaction_event.redacts = "$user_msg:localhost"
-        redaction_event.sender = "@moderator:localhost"
-
-        with (
-            patch.object(bot._turn_store, "get_turn_record", return_value=incomplete_record),
-            patch.object(bot._conversation_cache, "get_event", AsyncMock(return_value=lookup)) as mock_get_event,
-            patch.object(bot._conversation_cache, "apply_redaction", new_callable=AsyncMock),
-            patch.object(bot._turn_store, "forget_redacted_turn") as mock_forget,
-            patch.object(
-                bot._response_runner,
-                "run_serialized_state_mutation",
-                new_callable=AsyncMock,
-            ) as mock_run_mutation,
-        ):
-            await bot._on_redaction(room, redaction_event)
-            mock_run_mutation.await_args.kwargs["mutation"]()
-
-        mock_get_event.assert_awaited_once_with(
-            room.room_id,
-            "$user_msg:localhost",
-            persist_lookup_fill=False,
-        )
-        mock_forget.assert_called_once_with(
-            room=room,
-            redacted_event_id="$user_msg:localhost",
-            requester_user_id="@requester:localhost",
-            target_hint=target,
-        )
+        cleanup.assert_awaited_once_with(room, redaction_event)
 
     @pytest.mark.asyncio
     async def test_sync_timeline_redaction_does_not_resurrect_point_lookup_cache(self, bot: AgentBot) -> None:

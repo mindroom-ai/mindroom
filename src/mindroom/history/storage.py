@@ -302,7 +302,10 @@ def invalidate_compacted_replay(
         changed = True
 
     state = read_scope_state(session, scope)
-    reset_state = HistoryScopeState(force_compact_before_next_run=state.force_compact_before_next_run)
+    reset_state = HistoryScopeState(
+        compacted_run_ids=state.compacted_run_ids,
+        force_compact_before_next_run=state.force_compact_before_next_run,
+    )
     if state != reset_state:
         write_scope_state(session, scope, reset_state)
         changed = True

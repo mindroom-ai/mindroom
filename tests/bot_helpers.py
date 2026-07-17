@@ -239,6 +239,7 @@ def _turn_store(bot: AgentBot | TeamBot) -> TurnStore:
 
 def _set_turn_store_tracker(bot: AgentBot | TeamBot, tracker: MagicMock) -> MagicMock:
     """Swap the private handled-turn ledger behind one turn store for test assertions."""
+    stored_records: dict[str, TurnRecord] = {}
 
     def update_handled_turn(
         lookup_event_ids: Sequence[str],
@@ -247,10 +248,19 @@ def _set_turn_store_tracker(bot: AgentBot | TeamBot, tracker: MagicMock) -> Magi
         existing_records = {
             source_event_id: turn_record
             for source_event_id in lookup_event_ids
-            if isinstance((turn_record := tracker.get_turn_record(source_event_id)), TurnRecord)
+            if isinstance(
+                (turn_record := tracker.get_turn_record(source_event_id)),
+                TurnRecord,
+            )
+            or isinstance((turn_record := stored_records.get(source_event_id)), TurnRecord)
         }
         turn_record = update(existing_records)
-        tracker.record_handled_turn(turn_record)
+        for source_event_id in turn_record.indexed_event_ids:
+            stored_records[source_event_id] = turn_record
+        if turn_record.completed:
+            tracker.record_handled_turn(turn_record)
+        else:
+            tracker.record_pending_turn(turn_record)
         return turn_record
 
     tracker.update_handled_turn.side_effect = update_handled_turn

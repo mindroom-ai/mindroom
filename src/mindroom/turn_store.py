@@ -14,7 +14,7 @@ from agno.run.team import TeamRunOutput
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.agents import remove_run_by_event_id
 from mindroom.handled_turns import HandledTurnLedger, TurnRecord, TurnRecordCodec, same_turn_identity
-from mindroom.history.storage import invalidate_compacted_replay
+from mindroom.history.storage import invalidate_compacted_replay, read_scope_seen_event_ids
 from mindroom.session_ids import create_session_id
 
 if TYPE_CHECKING:
@@ -94,6 +94,14 @@ class TurnStore:
                 if existing_record is not None
                 else turn_record
             )
+            redacted_source_event_ids = tuple(
+                source_event_id
+                for source_event_id in turn_record.source_event_ids
+                if source_event_id in turn_record.redacted_source_event_ids
+                or any(
+                    source_event_id in existing.redacted_source_event_ids for existing in compatible_existing_records
+                )
+            )
             visible_echo_event_id = merged_record.visible_echo_event_id or next(
                 (
                     existing.visible_echo_event_id
@@ -105,6 +113,7 @@ class TurnStore:
             return replace(
                 merged_record,
                 completed=True,
+                redacted_source_event_ids=redacted_source_event_ids,
                 visible_echo_event_id=visible_echo_event_id,
                 timestamp=0.0,
             )
@@ -139,6 +148,77 @@ class TurnStore:
     def get_turn_record(self, source_event_id: str) -> TurnRecord | None:
         """Return the ledger-backed canonical record for one source event."""
         return self._ledger.get_turn_record(source_event_id)
+
+    def record_pending_turn(self, turn_record: TurnRecord) -> TurnRecord | None:
+        """Persist exact response context before generation reaches session storage."""
+        if not turn_record.source_event_ids:
+            return None
+        pending_record = replace(turn_record, completed=False, timestamp=0.0)
+
+        def merge_pending(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
+            compatible_existing_records = tuple(
+                existing
+                for existing in existing_records.values()
+                if not existing.completed or same_turn_identity(existing, pending_record)
+            )
+            existing_record = max(
+                compatible_existing_records,
+                key=lambda record: (record.completed, record.timestamp),
+                default=None,
+            )
+            merged_record = (
+                _backfill_missing_turn_facts(pending_record, existing_record)
+                if existing_record is not None
+                else pending_record
+            )
+            redacted_source_event_ids = tuple(
+                source_event_id
+                for source_event_id in pending_record.source_event_ids
+                if source_event_id in pending_record.redacted_source_event_ids
+                or any(
+                    source_event_id in existing.redacted_source_event_ids for existing in compatible_existing_records
+                )
+            )
+            return replace(
+                merged_record,
+                completed=False,
+                redacted_source_event_ids=redacted_source_event_ids,
+                timestamp=0.0,
+            )
+
+        return self._ledger.update_handled_turn(pending_record.indexed_event_ids, merge_pending)
+
+    def mark_source_redacted(
+        self,
+        source_event_id: str,
+        *,
+        requester_user_id: str | None = None,
+        target_hint: MessageTarget | None = None,
+    ) -> TurnRecord | None:
+        """Durably tombstone and sanitize one source event before asynchronous cleanup."""
+
+        def redacted_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
+            existing_record = existing_records.get(source_event_id)
+            authority = existing_record or TurnRecord.create([source_event_id], completed=False)
+            return replace(
+                authority,
+                redacted_source_event_ids=(*authority.redacted_source_event_ids, source_event_id),
+                requester_id=authority.requester_id or requester_user_id,
+                conversation_target=authority.conversation_target or target_hint,
+                timestamp=0.0,
+            )
+
+        turn_record = self._ledger.update_handled_turn((source_event_id,), redacted_record)
+        self._ledger.flush()
+        return turn_record
+
+    def any_source_redacted(self, source_event_ids: tuple[str, ...]) -> bool:
+        """Return whether durable state tombstones any source in one pending response."""
+        return any(
+            (record := self._ledger.get_turn_record(source_event_id)) is not None
+            and source_event_id in record.redacted_source_event_ids
+            for source_event_id in source_event_ids
+        )
 
     def response_history_scope(
         self,
@@ -285,13 +365,67 @@ class TurnStore:
                 or turn_record
             )
         if turn_record is None or turn_record.response_owner != self.deps.agent_name:
-            return False
+            if turn_record is not None and turn_record.response_owner is not None:
+                return False
+            fallback_target = (
+                turn_record.conversation_target
+                if turn_record is not None and turn_record.conversation_target is not None
+                else target_hint
+            )
+            if fallback_target is None:
+                return False
+            return self._remove_redacted_event_from_scope(
+                target=fallback_target,
+                history_scope=self.deps.state_writer.history_scope(),
+                requester_user_id=requester_user_id,
+                redacted_event_id=redacted_event_id,
+            )
         return self._remove_stale_runs_for_turn_record(
             turn_record=turn_record,
             requester_user_id=requester_user_id,
             reason="redacted",
             invalidate_summary=True,
         )
+
+    def _remove_redacted_event_from_scope(
+        self,
+        *,
+        target: MessageTarget,
+        history_scope: HistoryScope,
+        requester_user_id: str,
+        redacted_event_id: str,
+    ) -> bool:
+        """Remove source-backed replay from one source-derived fallback scope."""
+        execution_identity = self.deps.tool_runtime.build_execution_identity(
+            target=target,
+            user_id=requester_user_id,
+        )
+        storage = self.deps.state_writer.create_storage(execution_identity, scope=history_scope)
+        session_type = self.deps.state_writer.session_type_for_scope(history_scope)
+        try:
+            removed_run = remove_run_by_event_id(
+                storage,
+                target.session_id,
+                redacted_event_id,
+                session_type=session_type,
+            )
+            session = (
+                get_team_session(storage, target.session_id)
+                if session_type is SessionType.TEAM
+                else get_agent_session(storage, target.session_id)
+            )
+            summary_contains_source = session is not None and redacted_event_id in read_scope_seen_event_ids(
+                session,
+                history_scope,
+            )
+            invalidated_summary = False
+            if session is not None and (removed_run or summary_contains_source):
+                invalidated_summary = invalidate_compacted_replay(session, history_scope)
+                if invalidated_summary:
+                    storage.upsert_session(session)
+            return removed_run or invalidated_summary
+        finally:
+            storage.close()
 
     def _latest_matching_persisted_turn_record(
         self,
@@ -440,6 +574,10 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
     return replace(
         authority,
         discovery_event_ids=(*authority.discovery_event_ids, *recovery.discovery_event_ids),
+        redacted_source_event_ids=(
+            *authority.redacted_source_event_ids,
+            *recovery.redacted_source_event_ids,
+        ),
         response_event_id=authority.response_event_id or recovery.response_event_id,
         visible_echo_event_id=authority.visible_echo_event_id or recovery.visible_echo_event_id,
         source_event_prompts=(
@@ -485,6 +623,10 @@ def _reconcile_ledger_and_recovery(
     recovered_record = replace(
         ledger_record,
         discovery_event_ids=(*ledger_record.discovery_event_ids, *recovery_record.discovery_event_ids),
+        redacted_source_event_ids=(
+            *ledger_record.redacted_source_event_ids,
+            *recovery_record.redacted_source_event_ids,
+        ),
         response_event_id=recovery_record.response_event_id,
         completed=recovery_record.completed,
         source_event_prompts=recovery_record.source_event_prompts or ledger_record.source_event_prompts,

@@ -23,6 +23,7 @@ from mindroom.constants import (
 from mindroom.history.compaction import scope_visible_runs
 from mindroom.history.storage import (
     invalidate_compacted_replay,
+    prune_reintroduced_runs,
     read_scope_seen_event_ids,
     read_scope_state,
     record_compaction_chunk,
@@ -83,8 +84,15 @@ def test_invalidate_compacted_replay_clears_summary_and_rebuild_markers(tmp_path
     assert session.summary is None
     assert read_scope_seen_event_ids(session, scope) == set()
     assert read_scope_seen_event_ids(session, other_scope) == {"other-event"}
-    assert read_scope_state(session, scope) == HistoryScopeState(force_compact_before_next_run=True)
+    assert read_scope_state(session, scope) == HistoryScopeState(
+        compacted_run_ids=("run-1",),
+        force_compact_before_next_run=True,
+    )
     assert read_scope_state(session, other_scope) == HistoryScopeState(last_summary_model="other-model")
+
+    session.runs = [_completed_run("run-1")]
+    assert prune_reintroduced_runs(session, read_scope_state(session, scope)) is True
+    assert session.runs == []
 
 
 def test_set_force_compaction_state_updates_only_force_flag(tmp_path: Path) -> None:

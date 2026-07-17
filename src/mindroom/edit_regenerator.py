@@ -164,6 +164,12 @@ class EditRegenerator:
                 response_owner=regeneration_response_owner,
             )
             return
+        if original_event_id in turn_record.redacted_source_event_ids:
+            self._logger().debug(
+                "Ignoring edit for redacted source message",
+                original_event_id=original_event_id,
+            )
+            return
         coalesced_source_event_prompts = turn_record.source_event_prompts
 
         self._logger().info(
@@ -199,7 +205,7 @@ class EditRegenerator:
             updated_prompt_map = dict(coalesced_source_event_prompts)
             updated_prompt_map[original_event_id] = edited_content
             rebuilt_prompt_parts: list[str] = []
-            for source_event_id in regeneration_turn_record.source_event_ids:
+            for source_event_id in regeneration_turn_record.replay_source_event_ids:
                 prompt_part = updated_prompt_map.get(source_event_id)
                 if prompt_part is None:
                     self._logger().warning(
@@ -214,7 +220,7 @@ class EditRegenerator:
             current_prompt_is_structured = False
             if regeneration_turn_record.source_event_metadata is not None:
                 tagged_prompt = tagged_coalesced_prompt(
-                    list(regeneration_turn_record.source_event_ids),
+                    list(regeneration_turn_record.replay_source_event_ids),
                     updated_prompt_map,
                     dict(regeneration_turn_record.source_event_metadata),
                     timestamp_formatter=self.deps.timestamp_formatter,
