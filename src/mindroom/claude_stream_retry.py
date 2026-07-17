@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, cast
 from agno.exceptions import ContextWindowExceededError, ModelProviderError
 
 from mindroom.claude_prompt_cache import as_anthropic_claude
-from mindroom.error_handling import TRANSIENT_PROVIDER_STATUS_CODES
+from mindroom.error_handling import TRANSIENT_PROVIDER_STATUS_CODES, ModelSafeguardRefusalError
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -51,7 +51,7 @@ _RETRY_BASE_DELAY_SECONDS = 1.0
 
 def _is_transient_model_error(error: BaseException) -> bool:
     """Return whether one model-call failure is worth re-issuing the request."""
-    if isinstance(error, ContextWindowExceededError):
+    if isinstance(error, (ContextWindowExceededError, ModelSafeguardRefusalError)):
         return False
     return isinstance(error, ModelProviderError) and error.status_code in TRANSIENT_PROVIDER_STATUS_CODES
 

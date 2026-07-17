@@ -11,6 +11,7 @@ from agno.models.message import Message
 from agno.models.openai import OpenAIChat
 
 from mindroom import ai_runtime
+from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
 from mindroom.media_fallback import (
     ModelMediaRoute,
     build_model_media_route,
@@ -91,6 +92,24 @@ def test_no_media_present_never_retries() -> None:
     decision = retry_media_inputs_after_failure(_route(), "audio input is not supported", MediaInputs())
 
     assert decision.should_retry is False
+    assert decision.removed_kinds == frozenset()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ModelSafeguardRefusalError(message=MODEL_SAFEGUARD_REFUSAL_MESSAGE),
+        MODEL_SAFEGUARD_REFUSAL_MESSAGE,
+    ],
+)
+def test_safeguard_refusal_never_retries_without_media(error: Exception | str) -> None:
+    """A deterministic refusal must not enter the generic media fallback loop."""
+    media = _media_inputs()
+
+    decision = retry_media_inputs_after_failure(_route(), error, media)
+
+    assert decision.should_retry is False
+    assert decision.media_inputs == media
     assert decision.removed_kinds == frozenset()
 
 

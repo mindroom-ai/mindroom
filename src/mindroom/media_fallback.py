@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from agno.exceptions import ContextWindowExceededError, ModelProviderError
 
+from mindroom.error_handling import is_model_safeguard_refusal
 from mindroom.media_inputs import MediaInputs, MediaKind
 
 if TYPE_CHECKING:
@@ -129,6 +130,8 @@ def retry_media_inputs_after_failure(
     ``extra_present_kinds`` (media pinned to thread-history messages in the
     run input).
     """
+    if is_model_safeguard_refusal(error):
+        return _no_media_retry_decision(media_inputs)
     present_kinds = media_inputs.kinds() | extra_present_kinds
     if not present_kinds:
         return _no_media_retry_decision(media_inputs)
