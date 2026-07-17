@@ -490,6 +490,27 @@ def test_mac_launch_timeout_has_unknown_outcome(monkeypatch: pytest.MonkeyPatch)
         backend.launch_app("com.example.Editor")
 
 
+@pytest.mark.parametrize("already_running", [False, True])
+def test_mac_launch_activation_timeout_has_unknown_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    already_running: bool,
+) -> None:
+    """A failed foreground wait stays unknown after either launch or direct activation was requested."""
+    backend, _, workspace = _fake_mac_backend()
+    application = FakeRunningApplication(active=False)
+    workspace.applications = [application] if already_running else []
+
+    def request_activation(_app_id: str) -> None:
+        if not already_running:
+            workspace.applications.append(application)
+
+    monkeypatch.setattr("mindroom.desktop.accessibility._request_application_activation", request_activation)
+    monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(AccessibilityActionOutcomeUnknownError, match="outcome is unknown"):
+        backend.launch_app("com.example.Editor")
+
+
 def test_mac_element_scroll_rejects_bounds_outside_allowed_window() -> None:
     """Element-scoped pixel scrolling cannot land on a different visible application."""
     backend, services, _ = _fake_mac_backend()

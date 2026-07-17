@@ -277,9 +277,21 @@ class MacAccessibilityBackend:
         try:
             application = self._running_application(app_id)
         except AccessibilityError:
-            _request_application_activation(app_id)
-            application = self._wait_for_running_application(app_id)
-        self._activate(application)
+            try:
+                _request_application_activation(app_id)
+                application = self._wait_for_running_application(app_id)
+            except AccessibilityActionOutcomeUnknownError:
+                raise
+            except AccessibilityError as exc:
+                msg = "Application launch was requested, but its outcome is unknown; request list_apps before retrying."
+                raise AccessibilityActionOutcomeUnknownError(msg) from exc
+        try:
+            self._activate(application)
+        except AccessibilityActionOutcomeUnknownError:
+            raise
+        except AccessibilityError as exc:
+            msg = "Application activation was requested, but its outcome is unknown; request list_apps before retrying."
+            raise AccessibilityActionOutcomeUnknownError(msg) from exc
         self._states.pop(app_id, None)
 
     def get_app_state(self, app_id: str) -> AccessibilityState:

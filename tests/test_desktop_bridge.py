@@ -17,6 +17,7 @@ from mindroom.desktop.accessibility import (
     DesktopRect,
 )
 from mindroom.desktop.bridge import DesktopBridge, DesktopBridgePolicy
+from mindroom.desktop.command_journal import DesktopCommandJournalError
 from mindroom.desktop.media import DesktopMediaError
 from mindroom.desktop.playwright_mcp import (
     BrowserImage,
@@ -1004,6 +1005,31 @@ async def test_completed_response_is_replayed_after_bridge_restart(tmp_path: Pat
 
     assert transport.await_args.kwargs["content"] == first_response_content
     assert provider.calls == [("get_app_state", APP_ID), ("screenshot", (APP_ID, "state-1"))]
+
+
+@pytest.mark.asyncio
+async def test_bridge_refuses_permissive_command_journal(tmp_path: Path, transport: AsyncMock) -> None:
+    """A restored journal cannot expose retained desktop or browser response content."""
+    journal_path = tmp_path / "desktop_bridge" / "command_journal.json"
+    bridge = DesktopBridge(
+        client=object(),
+        provider=FakeProvider(),
+        policy=_policy(),
+        clock=lambda: NOW_SECONDS,
+        journal_path=journal_path,
+    )
+    await bridge.on_to_device_event(_event(_command()))
+    transport.assert_awaited_once()
+    journal_path.chmod(0o644)
+
+    with pytest.raises(DesktopCommandJournalError, match="group or other users"):
+        DesktopBridge(
+            client=object(),
+            provider=FakeProvider(),
+            policy=_policy(),
+            clock=lambda: NOW_SECONDS,
+            journal_path=journal_path,
+        )
 
 
 @pytest.mark.asyncio

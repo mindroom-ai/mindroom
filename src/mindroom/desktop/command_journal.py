@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NoReturn, cast
@@ -48,7 +50,11 @@ class DesktopCommandJournal:
         if path is None:
             return journal
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
+            with path.open(encoding="utf-8") as journal_file:
+                if os.name != "nt" and stat.S_IMODE(os.fstat(journal_file.fileno()).st_mode) & 0o077:
+                    msg = f"Desktop command journal {path} must not be readable by group or other users."
+                    raise DesktopCommandJournalError(msg)
+                raw = json.load(journal_file)
         except FileNotFoundError:
             return journal
         except (UnicodeError, json.JSONDecodeError) as exc:
