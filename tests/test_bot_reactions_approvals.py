@@ -418,7 +418,7 @@ class TestAgentBot(AgentBotTestBase):
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
         _store, pending, task, editor = await _start_live_approval(
             runtime_paths,
-            arguments={"content": "x" * 100_000},
+            arguments={"content": "x" * 3_000_000},
         )
 
         try:
@@ -469,7 +469,7 @@ class TestAgentBot(AgentBotTestBase):
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
         _store, pending, task, editor = await _start_live_approval(
             runtime_paths,
-            arguments={"content": "x" * 100_000},
+            arguments={"content": "x" * 3_000_000},
         )
 
         try:

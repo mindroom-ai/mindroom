@@ -440,12 +440,13 @@ def _sidecar_upload_has_encrypted_metadata(mxc_uri: str, file_info: dict[str, An
     )
 
 
-def _sidecar_upload_is_usable(
+def sidecar_upload_is_usable(
     mxc_uri: str | None,
     file_info: dict[str, Any] | None,
     *,
     room_encrypted: bool,
 ) -> bool:
+    """Return whether one uploaded sidecar carries the metadata clients need to fetch it."""
     if not mxc_uri or file_info is None:
         return False
 
@@ -453,6 +454,21 @@ def _sidecar_upload_is_usable(
         return False
 
     return not room_encrypted or _sidecar_upload_has_encrypted_metadata(mxc_uri, file_info)
+
+
+def content_fits_normal_event(content: dict[str, Any]) -> bool:
+    """Return whether one content payload fits a normal Matrix event send."""
+    return _calculate_event_size(content) <= _NORMAL_MESSAGE_LIMIT
+
+
+async def upload_json_sidecar(
+    client: nio.AsyncClient,
+    room_id: str,
+    payload: dict[str, Any],
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Upload one JSON payload as an MXC sidecar and return ``(mxc_uri, file_info)``."""
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return await _upload_text_as_mxc(client, text, room_id, mimetype="application/json")
 
 
 def _build_text_fallback_content(
@@ -484,8 +500,7 @@ async def _upload_content_json_sidecar(
     full_content: dict[str, Any],
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Upload full original content JSON for supported-client hydration."""
-    upload_text = json.dumps(full_content, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return await _upload_text_as_mxc(client, upload_text, room_id, mimetype="application/json")
+    return await upload_json_sidecar(client, room_id, full_content)
 
 
 async def prepare_large_message(
@@ -527,7 +542,7 @@ async def prepare_large_message(
             original_size_bytes=current_size,
         )
         mxc_uri, file_info = await _upload_content_json_sidecar(client, room_id, content)
-        if not _sidecar_upload_is_usable(mxc_uri, file_info, room_encrypted=room_encrypted):
+        if not sidecar_upload_is_usable(mxc_uri, file_info, room_encrypted=room_encrypted):
             logger.warning(
                 "large_message_sidecar_unavailable_using_inline_preview",
                 room_id=room_id,
@@ -574,7 +589,7 @@ async def prepare_large_message(
         size_limit,
     )
 
-    if _sidecar_upload_is_usable(mxc_uri, file_info, room_encrypted=room_encrypted):
+    if sidecar_upload_is_usable(mxc_uri, file_info, room_encrypted=room_encrypted):
         _copy_preview_metadata(source_content, modified_content)
         _add_sidecar_metadata(
             modified_content,

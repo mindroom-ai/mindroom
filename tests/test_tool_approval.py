@@ -849,7 +849,7 @@ async def test_request_approval_truncated_approval_fails_closed(tmp_path: Path) 
     task = asyncio.create_task(
         store.request_approval(
             tool_name="write_file",
-            arguments={"content": "x" * 100_000},
+            arguments={"content": "x" * 3_000_000},
             room_id="!room:localhost",
             requester_id="@user:localhost",
             approver_user_id="@user:localhost",
@@ -954,6 +954,48 @@ async def test_request_approval_survives_full_arguments_build_failure(
 
 
 @pytest.mark.asyncio
+async def test_request_approval_honors_transport_stripped_full_arguments(tmp_path: Path) -> None:
+    """When the transport strips full arguments (failed sidecar upload), approve must fail closed."""
+    runtime_paths = test_runtime_paths(tmp_path)
+
+    async def send_without_full_arguments(
+        _room_id: str,
+        _thread_id: str | None,
+        content: dict[str, Any],
+    ) -> SentApprovalEvent:
+        sent_content = {key: value for key, value in content.items() if key != "full_arguments"}
+        sent_content["approvable"] = False
+        return SentApprovalEvent(event_id="$approval", sent_content=sent_content)
+
+    sender = AsyncMock(side_effect=send_without_full_arguments)
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="write_file",
+            arguments={"content": "x" * 10_000},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender=sender)
+
+    assert pending.full_arguments_available is False
+
+    await _resolve_pending_approval(
+        store,
+        pending,
+        status="approved",
+    )
+    decision = await task
+
+    assert decision.status == "denied"
+    assert "too large to show in full" in (decision.reason or "")
+
+
+@pytest.mark.asyncio
 async def test_truncated_approval_action_sends_denial_notice(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
@@ -962,7 +1004,7 @@ async def test_truncated_approval_action_sends_denial_notice(tmp_path: Path) -> 
     task = asyncio.create_task(
         store.request_approval(
             tool_name="write_file",
-            arguments={"content": "x" * 100_000},
+            arguments={"content": "x" * 3_000_000},
             room_id="!room:localhost",
             thread_id="$thread",
             requester_id="@user:localhost",
@@ -1337,7 +1379,107 @@ async def test_approval_transport_returns_event_after_successful_send_without_se
         },
     )
 
-    assert sent == SentApprovalEvent(event_id="$approval")
+    assert sent == SentApprovalEvent(
+        event_id="$approval",
+        sent_content={
+            "approval_id": "approval-1",
+            "tool_name": "read_file",
+            "arguments": {"path": "notes.txt"},
+            "status": "pending",
+        },
+    )
+
+
+def _approval_transport_orchestrator(tmp_path: Path) -> tuple[_MultiAgentOrchestrator, MagicMock]:
+    runtime_paths = test_runtime_paths(tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
+    orchestrator._capture_runtime_loop()
+
+    client = MagicMock()
+    client.user_id = "@mindroom_router:localhost"
+    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
+    client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"))
+    bot = MagicMock(agent_name="router", running=True, client=client)
+    orchestrator.agent_bots = {"router": bot}
+    orchestrator._approval_transport.cache_approval_event_now = AsyncMock()
+    return orchestrator, client
+
+
+@pytest.mark.asyncio
+async def test_approval_transport_keeps_small_full_arguments_inline(tmp_path: Path) -> None:
+    orchestrator, client = _approval_transport_orchestrator(tmp_path)
+    client.upload = AsyncMock()
+
+    content = {
+        "approval_id": "approval-1",
+        "tool_name": "write_file",
+        "arguments": {"content": "preview"},
+        "arguments_truncated": True,
+        "full_arguments": {"content": "x" * 2_000},
+        "status": "pending",
+    }
+    sent = await orchestrator._approval_transport.send_approval_event_now("!room:localhost", None, content)
+
+    assert sent is not None
+    assert sent.sent_content == content
+    client.upload.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_approval_transport_offloads_oversized_full_arguments_to_sidecar(tmp_path: Path) -> None:
+    orchestrator, client = _approval_transport_orchestrator(tmp_path)
+    client.upload = AsyncMock(return_value=(nio.UploadResponse("mxc://localhost/full-args"), None))
+
+    full_arguments = {"content": "word " * 20_000}
+    sent = await orchestrator._approval_transport.send_approval_event_now(
+        "!room:localhost",
+        None,
+        {
+            "approval_id": "approval-1",
+            "tool_name": "write_file",
+            "arguments": {"content": "preview"},
+            "arguments_truncated": True,
+            "full_arguments": full_arguments,
+            "status": "pending",
+        },
+    )
+
+    assert sent is not None
+    sent_content = client.room_send.await_args.kwargs["content"]
+    assert "full_arguments" not in sent_content
+    assert sent_content["full_arguments_url"] == "mxc://localhost/full-args"
+    assert sent_content["full_arguments_info"]["mimetype"] == "application/json"
+    assert sent.sent_content == sent_content
+
+    uploaded_bytes = client.upload.await_args.kwargs["data_provider"](None, None).read()
+    assert json.loads(uploaded_bytes) == full_arguments
+
+
+@pytest.mark.asyncio
+async def test_approval_transport_marks_card_non_approvable_when_sidecar_upload_fails(tmp_path: Path) -> None:
+    orchestrator, client = _approval_transport_orchestrator(tmp_path)
+    client.upload = AsyncMock(return_value=(nio.UploadError("boom"), None))
+
+    sent = await orchestrator._approval_transport.send_approval_event_now(
+        "!room:localhost",
+        None,
+        {
+            "approval_id": "approval-1",
+            "tool_name": "write_file",
+            "arguments": {"content": "preview"},
+            "arguments_truncated": True,
+            "full_arguments": {"content": "word " * 20_000},
+            "status": "pending",
+        },
+    )
+
+    assert sent is not None
+    sent_content = client.room_send.await_args.kwargs["content"]
+    assert "full_arguments" not in sent_content
+    assert "full_arguments_url" not in sent_content
+    assert sent_content["approvable"] is False
+    assert sent.sent_content == sent_content
 
 
 @pytest.mark.asyncio
@@ -1426,7 +1568,9 @@ async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Pa
         },
     )
 
-    assert sent == SentApprovalEvent(event_id="$approval")
+    assert sent is not None
+    assert sent.event_id == "$approval"
+    assert sent.sent_content == sent_contents[0]
     assert edited is True
     assert sent_contents[0]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$code-latest"
     assert sent_contents[1]["m.new_content"]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$code-latest"
@@ -2378,18 +2522,24 @@ def test_full_event_arguments_redacts_secrets_without_bypassing_truncation_check
     assert "sk-live-1234567890abcdef" not in json.dumps(full_arguments)
 
 
-def test_full_event_arguments_rejects_oversized_payload() -> None:
-    assert _build_full_event_arguments({"content": "x" * 100_000}) is None
+def test_full_event_arguments_rejects_payload_over_completeness_cap() -> None:
+    assert _build_full_event_arguments({"content": "x" * 3_000_000}) is None
+
+
+def test_full_event_arguments_accepts_sidecar_sized_payload() -> None:
+    payload = {"content": "x" * 100_000}
+
+    assert _build_full_event_arguments(payload) == payload
 
 
 def test_full_event_arguments_budgets_utf8_bytes_not_characters() -> None:
-    # 15k CJK chars stay under a character budget but encode to ~45KB, over the Matrix event limit.
-    assert _build_full_event_arguments({"content": "汉" * 15_000}) is None
+    # 800k CJK chars stay under a character-based cap but encode to ~2.4MB, over the byte cap.
+    assert _build_full_event_arguments({"content": "汉" * 800_000}) is None
     assert _build_full_event_arguments({"content": "汉" * 8_000}) == {"content": "汉" * 8_000}
 
 
 def test_full_event_arguments_rejects_sanitizer_truncated_collections() -> None:
-    assert _build_full_event_arguments({"items": list(range(1_000))}) is None
+    assert _build_full_event_arguments({"items": list(range(60_000))}) is None
 
 
 def test_pending_approval_parses_full_arguments_availability() -> None:
@@ -2398,6 +2548,16 @@ def test_pending_approval_parses_full_arguments_availability() -> None:
 
     card["content"]["full_arguments"] = {"content": "x" * 10_000}
     assert PendingApproval.from_card_event(card, room_id="!room:localhost").full_arguments_available is True
+
+
+def test_pending_approval_parses_sidecar_full_arguments_availability() -> None:
+    url_card = _approval_card(arguments_truncated=True)
+    url_card["content"]["full_arguments_url"] = "mxc://localhost/full-args"
+    assert PendingApproval.from_card_event(url_card, room_id="!room:localhost").full_arguments_available is True
+
+    file_card = _approval_card(arguments_truncated=True)
+    file_card["content"]["full_arguments_file"] = {"url": "mxc://localhost/full-args", "v": "v2"}
+    assert PendingApproval.from_card_event(file_card, room_id="!room:localhost").full_arguments_available is True
 
 
 @pytest.mark.asyncio

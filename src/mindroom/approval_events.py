@@ -84,7 +84,7 @@ class PendingApproval:
             arguments_preview_truncated=bool(content.get("arguments_truncated")),
             timeout_seconds=timeout_seconds,
             created_at_ms=created_at_ms,
-            full_arguments_available=isinstance(content.get("full_arguments"), dict),
+            full_arguments_available=_full_arguments_available(content),
             thread_id=thread_id,
             agent_name=agent_name,
             workflow_id=workflow_id,
@@ -104,6 +104,16 @@ class PendingApproval:
         if status in {"pending", "approved", "denied", "expired"}:
             return cast("PendingApprovalStatus", status)
         return "pending"
+
+
+def _full_arguments_available(content: dict[str, Any]) -> bool:
+    """Return whether one card delivers the complete arguments inline or via a sidecar."""
+    if isinstance(content.get("full_arguments"), dict):
+        return True
+    if isinstance(content.get("full_arguments_file"), dict):
+        return True
+    url = content.get("full_arguments_url")
+    return isinstance(url, str) and url != ""
 
 
 def is_original_approval_card(event: dict[str, Any]) -> bool:

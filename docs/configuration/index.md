@@ -121,8 +121,9 @@ React to the approval card with `✅` to approve the tool call.
 Reply to the approval card with a message to deny the tool call and record that text as the denial reason.
 Only the original human requester can approve or deny their pending tool call.
 Approval cards show a redacted preview of the tool arguments in the `arguments` content field, and set `arguments_truncated: true` when that preview is shortened for display.
-When the preview is truncated but the complete redacted arguments still fit in the Matrix event, the card also carries them in a `full_arguments` content field so clients can render them behind a "show full arguments" expander and the call stays approvable.
-When the complete arguments cannot be delivered on the card at all, the card sets `approvable: false` and any approve action is converted into a denial, because a human must be able to review exactly what would run.
+When the preview is truncated, the complete redacted arguments are delivered with the card so clients can render them behind a "show full arguments" expander and the call stays approvable.
+They ride inline in a `full_arguments` content field when they fit the Matrix event, and otherwise as an uploaded JSON sidecar referenced by `full_arguments_url` plus `full_arguments_info` in plain rooms or `full_arguments_file` (standard Matrix encrypted-file schema) in encrypted rooms.
+When the complete redacted arguments cannot be produced or delivered at all — over the 2MB completeness cap, redaction-incomplete, or the sidecar upload failed — the card sets `approvable: false` and any approve action is converted into a denial, because a human must be able to review exactly what would run.
 Clients should disable or hide the approve action when `approvable` is `false`.
 Approval responses only resolve the live Matrix approval card in the same room; approval IDs are used only as a live client hint.
 If MindRoom restarts before a tool call is approved, the live tool call is cancelled.

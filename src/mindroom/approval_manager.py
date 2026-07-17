@@ -60,11 +60,12 @@ _DEFAULT_TRUNCATED_APPROVAL_REASON = (
 )
 _STARTUP_DISCARD_REASON = "Bot restarted before approval — original request was cancelled."
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
-# Complete-arguments payloads ride on the card event, so they must leave room for the preview,
-# card metadata, and E2EE base64 inflation inside the 64KB Matrix event limit.
-_MAX_FULL_ARGUMENTS_JSON_BYTES = 32_000
-_MAX_FULL_ARGUMENT_STRING_CHARS = 32_000
-_MAX_FULL_ARGUMENT_COLLECTION_ITEMS = 500
+# Absolute completeness cap for full arguments. Payloads under this cap are embedded on the
+# card when they fit and offloaded to an uploaded JSON sidecar by the transport when they do
+# not; payloads over it can never be shown completely, so their cards are not approvable.
+_MAX_FULL_ARGUMENTS_JSON_BYTES = 2_000_000
+_MAX_FULL_ARGUMENT_STRING_CHARS = 2_000_000
+_MAX_FULL_ARGUMENT_COLLECTION_ITEMS = 50_000
 _MAX_FULL_ARGUMENT_DEPTH = 12
 _MAX_REMEMBERED_TERMINAL_CARD_IDS = 4096
 _SANITIZER_TRUNCATION_MARKER = "... [truncated]"
@@ -184,7 +185,7 @@ def _full_arguments_json_bytes(value: object) -> int:
 
 
 def _build_full_event_arguments(arguments: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the complete redacted arguments when they fit on the card event, else None."""
+    """Return the complete redacted arguments when they can be delivered to a human, else None."""
     # Cost pre-filter, not the authoritative bound: skip redaction work for payloads that are
     # already over budget. The byte check on the sanitized result below is what gates shipping.
     if len(_compact_preview_text(arguments).encode("utf-8")) > _MAX_FULL_ARGUMENTS_JSON_BYTES:
@@ -233,6 +234,9 @@ class SentApprovalEvent:
     """One delivered approval event."""
 
     event_id: str
+    # Content the transport actually sent when it diverges from the requested content,
+    # e.g. after offloading full arguments to an uploaded sidecar.
+    sent_content: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -624,7 +628,7 @@ class _ApprovalManager:
     ) -> _LiveApprovalWaiter:
         card_event = self._card_event_from_content(
             event_id=sent_event.event_id,
-            content=content,
+            content=sent_event.sent_content if sent_event.sent_content is not None else content,
             requested_at=requested_at,
         )
         waiter = _LiveApprovalWaiter(
