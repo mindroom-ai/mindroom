@@ -311,6 +311,21 @@ async def test_browser_discovery_actions_return_action_table(action: str) -> Non
     assert any(entry["action"] == "act" for entry in payload["actionTable"])
 
 
+@pytest.mark.asyncio
+async def test_browser_discovery_distinguishes_host_and_desktop_semantics() -> None:
+    """Discovery must not direct desktop agents toward rejected host-only arguments."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+
+    payload = json.loads(await tool.browser(action="help", target="desktop"))
+    descriptions = {entry["action"]: entry["description"] for entry in payload["actionTable"]}
+
+    assert "Host target only" in descriptions["focus"]
+    assert "desktop closes its current extension tab" in descriptions["close"]
+    assert "current desktop extension tab" in descriptions["navigate"]
+    assert "active desktop file chooser" in descriptions["upload"]
+    assert "desktop removes its transient scratch file" in descriptions["screenshot"]
+
+
 def test_browser_function_schema_documents_actions_and_act_request() -> None:
     """Tool schema should make browser actions and act request kinds discoverable."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
