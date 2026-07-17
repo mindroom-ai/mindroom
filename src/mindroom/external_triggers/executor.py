@@ -27,7 +27,7 @@ _EXTERNAL_TRIGGER_EVENT_ID_KEY = "io.mindroom.external_trigger.event_id"
 
 
 def _build_external_trigger_text(target_text: str, payload: ExternalTriggerPayload) -> str:
-    """Build visible trigger text from a target mention and unmodified signed payload."""
+    """Build visible trigger text from a target mention and unmodified request payload."""
     if payload.title:
         sections = [
             f"{target_text} {payload.title}",

@@ -1181,6 +1181,34 @@ describe("AgentEditor", () => {
     });
   });
 
+  it("preserves replay-window-only compaction overrides as enabled", () => {
+    expect(
+      normalizeAgentUpdates(mockAgent, {
+        compaction: { replay_window_tokens: 200_000 },
+      }).compaction,
+    ).toEqual({
+      enabled: true,
+      replay_window_tokens: 200_000,
+    });
+  });
+
+  it("authors a replay window from the editor", async () => {
+    render(<AgentEditor />);
+
+    fireEvent.change(screen.getByLabelText("Replay Window Tokens"), {
+      target: { value: "200000" },
+    });
+
+    await waitFor(() => {
+      expect(mockStore.updateAgent).toHaveBeenCalledWith(
+        "test_agent",
+        expect.objectContaining({
+          compaction: { replay_window_tokens: 200_000 },
+        }),
+      );
+    });
+  });
+
   it("treats authored compaction overrides as enabled in the editor", () => {
     const compactionAgent: Agent = {
       ...mockAgent,
@@ -1320,6 +1348,35 @@ describe("AgentEditor", () => {
     expect(
       screen.getByLabelText("Enable automatic required compaction"),
     ).not.toBeChecked();
+  });
+
+  it("shows replay-window-only compaction as enabled when defaults are disabled", () => {
+    const compactionAgent: Agent = {
+      ...mockAgent,
+      compaction: { replay_window_tokens: 200_000 },
+    };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [compactionAgent],
+      config: {
+        ...mockConfig,
+        defaults: {
+          ...mockConfig.defaults,
+          compaction: {
+            enabled: false,
+            reserve_tokens: 16384,
+            threshold_percent: 0.8,
+          },
+        },
+        agents: { test_agent: compactionAgent },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    expect(
+      screen.getByLabelText("Enable automatic required compaction"),
+    ).toBeChecked();
   });
 
   it("shows automatic required compaction as enabled when defaults.compaction is omitted", () => {

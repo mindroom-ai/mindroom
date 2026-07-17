@@ -567,7 +567,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ init       Create a starter config.yaml with example agents and models.                │
+│ init       Create a starter config.yaml with a personal agent and model.               │
 │ show       Display the current config file with syntax highlighting.                   │
 │ edit       Open config.yaml in your default editor.                                    │
 │ validate   Validate config.yaml and check for common issues.                           │
@@ -583,7 +583,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 
 ### config init
 
-Create a starter `config.yaml` with example agents, models, memory, and sensible defaults.
+Create a starter `config.yaml` with the personal Mind agent, one model, file-based memory, and sensible defaults.
 
 Matrix server presets (`--matrix-server`) choose where MindRoom should create Matrix users and rooms: `mindroom.chat` (default hosted Matrix) or `self-hosted` (your own homeserver).
 Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`.

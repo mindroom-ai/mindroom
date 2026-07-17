@@ -66,6 +66,7 @@ def _representative_config() -> Config:
             compaction=CompactionConfig(
                 enabled=False,
                 threshold_tokens=12_000,
+                replay_window_tokens=24_000,
                 reserve_tokens=2_048,
                 model="summary-model",
             ),
@@ -107,6 +108,7 @@ def test_compaction_resolution() -> None:
     assert merged.enabled is True
     assert merged.threshold_tokens is None
     assert merged.threshold_percent == 0.6
+    assert merged.replay_window_tokens == 24_000
     assert merged.reserve_tokens == 2_048
     assert merged.model == "summary-model"
 
@@ -119,6 +121,7 @@ def test_compaction_resolution() -> None:
         assert inherited == CompactionConfig(
             enabled=False,
             threshold_tokens=12_000,
+            replay_window_tokens=24_000,
             reserve_tokens=2_048,
             model="summary-model",
         )

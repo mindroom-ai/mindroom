@@ -19,6 +19,7 @@ from rich.console import Console
 from rich.syntax import Syntax
 
 from mindroom import constants
+from mindroom.cli.agent_docs import ensure_config_agent_docs
 from mindroom.cli.env_file import write_private_env_text
 from mindroom.model_defaults import (
     CONFIG_INIT_MODEL_ALTERNATIVES,
@@ -437,9 +438,9 @@ def config_init(
         help="Never prompt: keep an existing config.yaml unchanged, create anything missing, and use the default provider preset.",
     ),
 ) -> None:
-    """Create a starter config.yaml with example agents and models.
+    """Create a starter config.yaml with a personal agent and model.
 
-    Generates a YAML config with starter agents, one model, and sensible defaults.
+    Generates a YAML config with the Mind agent, one model, and sensible defaults.
     """
     target = _resolve_config_path(path)
     env_path = target.parent / ".env"
@@ -494,6 +495,15 @@ def config_init(
         target.write_text(content, encoding="utf-8")
 
     _ensure_mind_workspace(_default_mind_workspace(storage_root), config_path=target, force=force)
+
+    created_docs = ensure_config_agent_docs(
+        target.parent,
+        config_path=target,
+        storage_root=storage_root,
+        force=force,
+    )
+    if created_docs:
+        console.print(f"[green]Agent docs created:[/green] {', '.join(doc.name for doc in created_docs)}")
 
     env_changed = _write_env_file(
         env_path,
@@ -939,16 +949,6 @@ models:
 {model_block}{additional_models_block}{commented_model_options_block}
 
 agents:
-  assistant:
-    display_name: Assistant
-    role: A helpful general-purpose assistant
-    model: default
-    rooms:
-      - lobby
-    accept_invites: true
-    tools: []
-    instructions:
-      - Be helpful and conversational
   mind:
     display_name: Mind
     role: Personal assistant with persistent file-based identity and memory

@@ -239,7 +239,12 @@ class CompactionOverrideConfig(BaseModel):
         default=None,
         gt=0,
         lt=1,
-        description="Soft replay trigger budget as a fraction of the context window",
+        description="Soft replay trigger budget as a fraction of the effective replay window",
+    )
+    replay_window_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional context-window cap used only for persisted replay and compaction planning",
     )
     reserve_tokens: int | None = Field(
         default=None,
@@ -271,13 +276,21 @@ class CompactionConfig(BaseModel):
     threshold_tokens: int | None = Field(
         default=None,
         ge=1,
-        description="Soft replay trigger budget in tokens (defaults to 80% of context window when both thresholds are None)",
+        description=(
+            "Soft replay trigger budget in tokens "
+            "(defaults to 80% of the effective replay window when both thresholds are None)"
+        ),
     )
     threshold_percent: float | None = Field(
         default=None,
         gt=0,
         lt=1,
-        description="Soft replay trigger budget as a fraction of the context window",
+        description="Soft replay trigger budget as a fraction of the effective replay window",
+    )
+    replay_window_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional context-window cap used only for persisted replay and compaction planning",
     )
     reserve_tokens: int = Field(
         default=16384,
@@ -538,7 +551,12 @@ class ModelConfig(BaseModel):
     context_window: int | None = Field(
         default=None,
         ge=1,
-        description="Context window size in tokens. MindRoom needs it on the active runtime model to enforce replay budgets, an explicit compaction.model also needs its own context_window for destructive compaction, and on vertexai_claude models it additionally enables request-time fitting that trims replayed history when a request would exceed the window",
+        description=(
+            "Actual provider context window size in tokens. MindRoom uses it as the default replay-planning "
+            "window unless compaction.replay_window_tokens sets a smaller cap. An explicit compaction.model "
+            "also needs its own context_window for summary generation. On vertexai_claude models it additionally "
+            "enables request-time fitting that trims replayed history when a request would exceed the window"
+        ),
     )
 
 
