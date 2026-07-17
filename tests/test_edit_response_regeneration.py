@@ -1038,6 +1038,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
             stored_target.session_id,
             "$original:example.com",
             session_type=SessionType.TEAM,
+            remove_following_runs=True,
         ),
     ]
     mock_team_response.assert_awaited_once()
@@ -1491,12 +1492,14 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
                     "!test:example.com",
                     "$first:example.com",
                     session_type=SessionType.AGENT,
+                    remove_following_runs=True,
                 ),
                 call(
                     mock_create_storage.return_value,
                     "!test:example.com",
                     "$primary:example.com",
                     session_type=SessionType.AGENT,
+                    remove_following_runs=True,
                 ),
             ],
         )
@@ -2006,12 +2009,14 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
                     "!test:example.com",
                     "$first:example.com",
                     session_type=SessionType.AGENT,
+                    remove_following_runs=True,
                 ),
                 call(
                     storage,
                     "!test:example.com",
                     "$primary:example.com",
                     session_type=SessionType.AGENT,
+                    remove_following_runs=True,
                 ),
             ],
         )

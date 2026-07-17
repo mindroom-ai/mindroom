@@ -22,7 +22,8 @@ It should send, edit, redact, and finalize already-generated responses.
 `EditRegenerator` owns the edited-message replay workflow.
 It is still coupled to the current persistence split, but its workflow boundary is real.
 
-`RedactedTurnCleanup` owns source-redaction tombstoning and persisted replay cleanup.
+`RedactedTurnCleanup` owns durable source-redaction tombstoning and advisory cache sanitization.
+`TurnStore` removes redacted persisted replay before the next response starts in the affected conversation.
 `AgentBot` only delegates the Matrix redaction callback to that collaborator.
 
 ## Current Problems
@@ -81,10 +82,10 @@ One runtime process owns each ledger's semantic ordering, while the advisory fil
 Unversioned pre-user ledger and run-metadata turn schemas are rejected instead of carrying migration scaffolding.
 
 Matrix source redactions are durably tombstoned before the advisory conversation cache is mutated.
-The same ledger row retains the affected room and a cleanup intent until both advisory cache sanitization and persisted replay inspection have completed successfully.
-Startup resumes those intents before event callbacks are registered, while the next response in the conversation remains an under-lock fallback for interrupted history cleanup.
+The same ledger row retains a cleanup intent until persisted replay has been inspected in the affected conversation.
 Pending normal and interactive responses record their exact target and history scope before generation, and every source-backed response checks tombstones again under the lifecycle lock.
-Cleanup removes the matching run and its causal suffix from every history scope recorded for the conversation, clears summary-backed replay state, preserves compaction run tombstones, and sanitizes coalesced prompt metadata used by later edit regeneration.
+Before a response starts, `TurnStore` removes the matching run and its causal suffix from every history scope recorded for the conversation, clears summary-backed replay state, preserves compaction run tombstones, and sanitizes coalesced prompt metadata used by later edit regeneration.
+Redacted replay may remain in local session storage until that conversation's next response, but no model receives it.
 Semantic memory backends such as Mem0 have a separate lifecycle and are not altered by persisted replay cleanup.
 
 ## Tool Dispatch Contracts

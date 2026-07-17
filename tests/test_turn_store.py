@@ -110,7 +110,23 @@ def _owned_turn_record(target: MessageTarget) -> TurnRecord:
     )
 
 
-def test_forget_redacted_turn_removes_causal_run_suffix(tmp_path: Path) -> None:
+def _prepare_redaction(
+    store: TurnStore,
+    target: MessageTarget,
+    *,
+    redacted_event_id: str = "$user_msg",
+    requester_user_id: str = "@user:example.org",
+) -> bool:
+    """Tombstone one source and run the next response's locked cleanup gate."""
+    store.mark_source_redacted(redacted_event_id)
+    return store.prepare_response_for_redactions(
+        target=target,
+        requester_user_id=requester_user_id,
+        source_event_ids=("$later",),
+    )
+
+
+def test_prepare_redaction_removes_causal_run_suffix(tmp_path: Path) -> None:
     """Redacting a source must delete later output that may depend on that run."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     session = AgentSession(
@@ -125,46 +141,74 @@ def test_forget_redacted_turn_removes_causal_run_suffix(tmp_path: Path) -> None:
     store = _store_with_storage(tmp_path, storage)
     store.record_turn(_owned_turn_record(target))
 
-    removed = store.forget_redacted_turn(
-        room=MagicMock(room_id="!room:example.org"),
-        redacted_event_id="$user_msg",
-        requester_user_id="@user:example.org",
-        target_hint=target,
-        cache_sanitized=True,
-    )
+    should_suppress = _prepare_redaction(store, target)
 
-    assert removed is True
+    assert should_suppress is False
     assert storage.upserted_session is session
     assert session.runs == []
 
 
-def test_failed_cache_sanitization_keeps_cleanup_pending_after_history_removal(tmp_path: Path) -> None:
-    """A cache failure must remain retryable even after session replay is sanitized."""
-    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+def test_edit_then_redaction_never_replays_the_old_causal_suffix(tmp_path: Path) -> None:
+    """Editing a source must remove later output before its replacement is persisted."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$source")
+    scope = HistoryScope(kind="agent", scope_id="agent")
     session = AgentSession(
         session_id=target.session_id,
         agent_id="agent",
-        runs=[RunOutput(session_id=target.session_id, metadata={"matrix_event_id": "$user_msg"})],
+        runs=[
+            RunOutput(
+                session_id=target.session_id,
+                metadata={
+                    constants.MATRIX_EVENT_ID_METADATA_KEY: "$source",
+                    constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$source"],
+                    constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$source"],
+                },
+            ),
+            RunOutput(
+                session_id=target.session_id,
+                metadata={
+                    constants.MATRIX_EVENT_ID_METADATA_KEY: "$dependent",
+                    constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$dependent"],
+                    constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$dependent"],
+                },
+            ),
+        ],
     )
     storage = _FakeAgentStorage(session)
     store = _store_with_storage(tmp_path, storage)
-    store.record_turn(_owned_turn_record(target))
-    store.mark_source_redacted("$user_msg", room_id="!room:example.org")
-
-    removed = store.forget_redacted_turn(
-        room=MagicMock(room_id="!room:example.org"),
-        redacted_event_id="$user_msg",
-        requester_user_id="@user:example.org",
-        target_hint=target,
-        cache_sanitized=False,
+    source_record = TurnRecord.create(
+        ["$source"],
+        response_event_id="$reply",
+        response_owner="agent",
+        requester_id="@user:example.org",
+        history_scope=scope,
+        conversation_target=target,
     )
+    store.record_turn(source_record)
 
-    assert removed is True
+    store.remove_stale_runs_for_edit(
+        turn_record=source_record,
+        requester_user_id="@user:example.org",
+    )
     assert session.runs == []
-    assert store.pending_redaction_cleanups() == (("$user_msg", "!room:example.org"),)
+
+    session.runs = [
+        RunOutput(
+            session_id=target.session_id,
+            metadata={
+                constants.MATRIX_EVENT_ID_METADATA_KEY: "$source",
+                constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$source"],
+                constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$source"],
+            },
+        ),
+    ]
+    should_suppress = _prepare_redaction(store, target, redacted_event_id="$source")
+
+    assert should_suppress is False
+    assert session.runs == []
 
 
-def test_forget_redacted_turn_removes_runs_that_consumed_the_source(tmp_path: Path) -> None:
+def test_prepare_redaction_removes_runs_that_consumed_the_source(tmp_path: Path) -> None:
     """A later run that consumed redacted context must not remain eligible for replay."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     session = AgentSession(
@@ -185,19 +229,13 @@ def test_forget_redacted_turn_removes_runs_that_consumed_the_source(tmp_path: Pa
     store = _store_with_storage(tmp_path, storage)
     store.record_turn(_owned_turn_record(target))
 
-    removed = store.forget_redacted_turn(
-        room=MagicMock(room_id="!room:example.org"),
-        redacted_event_id="$user_msg",
-        requester_user_id="@user:example.org",
-        target_hint=target,
-        cache_sanitized=True,
-    )
+    should_suppress = _prepare_redaction(store, target)
 
-    assert removed is True
+    assert should_suppress is False
     assert session.runs == []
 
 
-def test_forget_redacted_turn_removes_source_from_every_recorded_history_scope(tmp_path: Path) -> None:
+def test_prepare_redaction_removes_source_from_every_recorded_history_scope(tmp_path: Path) -> None:
     """Later ad-hoc responses must not retain a source consumed outside its original scope."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     agent_scope = HistoryScope(kind="agent", scope_id="agent")
@@ -252,37 +290,15 @@ def test_forget_redacted_turn_removes_source_from_every_recorded_history_scope(t
         ),
     )
 
-    removed = store.forget_redacted_turn(
-        room=MagicMock(room_id="!room:example.org"),
-        redacted_event_id="$user_msg",
-        requester_user_id="@user:example.org",
-        target_hint=target,
-        cache_sanitized=True,
-    )
+    should_suppress = _prepare_redaction(store, target)
 
-    assert removed is True
+    assert should_suppress is False
     assert agent_session.runs == []
     assert team_session.runs == []
 
 
-def test_forget_redacted_turn_ignores_unhandled_event(tmp_path: Path) -> None:
-    """Redactions of events without a handled turn must not touch session storage."""
-    store = _store(tmp_path)
-
-    removed = store.forget_redacted_turn(
-        room=MagicMock(room_id="!room:example.org"),
-        redacted_event_id="$unknown",
-        requester_user_id="@user:example.org",
-        target_hint=None,
-        cache_sanitized=True,
-    )
-
-    assert removed is False
-    store.deps.state_writer.create_storage.assert_not_called()
-
-
 @pytest.mark.parametrize("source_owner", [None, "other"])
-def test_forget_redacted_turn_cleans_later_owned_scopes_across_requesters(
+def test_prepare_redaction_cleans_later_owned_scopes_across_requesters(
     tmp_path: Path,
     *,
     source_owner: str | None,
@@ -344,15 +360,13 @@ def test_forget_redacted_turn_cleans_later_owned_scopes_across_requesters(
         ),
     )
 
-    removed = store.forget_redacted_turn(
-        room=MagicMock(room_id="!room:example.org"),
-        redacted_event_id="$user_msg",
+    should_suppress = _prepare_redaction(
+        store,
+        target,
         requester_user_id="@source:example.org",
-        target_hint=target,
-        cache_sanitized=True,
     )
 
-    assert removed is True
+    assert should_suppress is False
     assert team_session.runs == []
     assert {call.kwargs["user_id"] for call in tool_runtime.build_execution_identity.call_args_list} == {
         "@source:example.org",
@@ -360,8 +374,8 @@ def test_forget_redacted_turn_cleans_later_owned_scopes_across_requesters(
     }
 
 
-def test_forget_redacted_turn_recovers_missing_response_context(tmp_path: Path) -> None:
-    """A ledger record without response context should repair from persisted run metadata."""
+def test_contextless_tombstone_cleans_current_conversation_on_next_response(tmp_path: Path) -> None:
+    """A tombstone without recorded context should use the next response's conversation."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     session = AgentSession(
         session_id=target.session_id,
@@ -370,31 +384,34 @@ def test_forget_redacted_turn_recovers_missing_response_context(tmp_path: Path) 
     )
     storage = _FakeAgentStorage(session)
     store = _store_with_storage(tmp_path, storage)
-    store.record_turn(TurnRecord.create(["$user_msg"], response_event_id="$reply"))
+    marked = store.mark_source_redacted("$user_msg")
+    assert marked is not None
+    assert marked.conversation_target is None
+    store.record_pending_turn(
+        TurnRecord.create(
+            ["$later"],
+            completed=False,
+            requester_id="@user:example.org",
+            response_owner="agent",
+            history_scope=HistoryScope(kind="agent", scope_id="agent"),
+            conversation_target=target,
+        ),
+    )
 
-    recovered_record = replace(_owned_turn_record(target), requester_id="@metadata-user:example.org")
-    with patch.object(store, "_load_persisted_turn_record", return_value=recovered_record):
-        removed = store.forget_redacted_turn(
-            room=MagicMock(room_id="!room:example.org"),
-            redacted_event_id="$user_msg",
-            requester_user_id="@source-user:example.org",
-            target_hint=target,
-            cache_sanitized=True,
-        )
+    should_suppress = store.prepare_response_for_redactions(
+        target=target,
+        requester_user_id="@user:example.org",
+        source_event_ids=("$later",),
+    )
 
-    assert removed is True
+    assert should_suppress is False
     assert session.runs == []
-    store.deps.tool_runtime.build_execution_identity.assert_any_call(
-        target=target,
-        user_id="@source-user:example.org",
-    )
-    store.deps.tool_runtime.build_execution_identity.assert_any_call(
-        target=target,
-        user_id="@metadata-user:example.org",
-    )
+    cleaned = store.get_turn_record("$user_msg")
+    assert cleaned is not None
+    assert cleaned.pending_redaction_cleanup_event_ids == ()
 
 
-def test_forget_redacted_turn_invalidates_compacted_replay(tmp_path: Path) -> None:
+def test_prepare_redaction_invalidates_compacted_replay(tmp_path: Path) -> None:
     """Redaction must remove content already folded into the durable summary."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     scope = HistoryScope(kind="agent", scope_id="agent")
@@ -419,44 +436,14 @@ def test_forget_redacted_turn_invalidates_compacted_replay(tmp_path: Path) -> No
     store = _store_with_storage(tmp_path, storage)
     store.record_turn(_owned_turn_record(target))
 
-    removed = store.forget_redacted_turn(
-        room=MagicMock(room_id="!room:example.org"),
-        redacted_event_id="$user_msg",
-        requester_user_id="@user:example.org",
-        target_hint=target,
-        cache_sanitized=True,
-    )
+    should_suppress = _prepare_redaction(store, target)
 
-    assert removed is True
+    assert should_suppress is False
     assert storage.upserted_session is session
     assert session.runs == []
     assert session.summary is None
     assert read_scope_seen_event_ids(session, scope) == set()
     assert read_scope_state(session, scope) == HistoryScopeState(compacted_run_ids=("$compacted-run",))
-
-
-def test_forget_redacted_turn_recovers_without_ledger_after_active_response(tmp_path: Path) -> None:
-    """Post-lock cleanup can recover a run persisted before its ledger outcome was recorded."""
-    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
-    session = AgentSession(
-        session_id=target.session_id,
-        agent_id="agent",
-        runs=[RunOutput(session_id=target.session_id, metadata={"matrix_event_id": "$user_msg"})],
-    )
-    storage = _FakeAgentStorage(session)
-    store = _store_with_storage(tmp_path, storage)
-
-    with patch.object(store, "_load_persisted_turn_record", return_value=_owned_turn_record(target)):
-        removed = store.forget_redacted_turn(
-            room=MagicMock(room_id="!room:example.org"),
-            redacted_event_id="$user_msg",
-            requester_user_id="@user:example.org",
-            target_hint=target,
-            cache_sanitized=True,
-        )
-
-    assert removed is True
-    assert session.runs == []
 
 
 def test_redaction_before_response_registration_tombstones_pending_coalesced_turn(tmp_path: Path) -> None:
@@ -465,11 +452,7 @@ def test_redaction_before_response_registration_tombstones_pending_coalesced_tur
     target = MessageTarget.resolve("!room:example.org", "$thread", "$second")
     team_scope = HistoryScope(kind="team", scope_id="team_private")
 
-    store.mark_source_redacted(
-        "$first",
-        requester_user_id="@user:example.org",
-        target_hint=target,
-    )
+    store.mark_source_redacted("$first")
     pending = store.record_pending_turn(
         TurnRecord.create(
             ["$first", "$second"],
@@ -488,6 +471,89 @@ def test_redaction_before_response_registration_tombstones_pending_coalesced_tur
     assert pending.history_scope == team_scope
     assert store.is_handled("$first") is True
     assert store.is_handled("$second") is False
+
+
+def test_redaction_detaches_from_a_pending_coalesced_turn_after_sibling_completion(tmp_path: Path) -> None:
+    """A split sibling identity must not veto the remaining source tombstone."""
+    store = _store(tmp_path)
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$second")
+    scope = HistoryScope(kind="agent", scope_id="agent")
+    pending = TurnRecord.create(
+        ["$first", "$second"],
+        completed=False,
+        requester_id="@user:example.org",
+        response_owner="agent",
+        history_scope=scope,
+        conversation_target=target,
+    )
+    store.record_pending_turn(pending)
+    store.record_turn(
+        TurnRecord.create(
+            ["$second"],
+            response_event_id="$second-reply",
+            requester_id="@user:example.org",
+            response_owner="agent",
+            history_scope=scope,
+            conversation_target=target,
+        ),
+    )
+
+    marked = store.mark_source_redacted("$first")
+
+    assert marked is not None
+    assert marked.source_event_ids == ("$first",)
+    assert marked.anchor_event_id == "$first"
+    assert marked.redacted_source_event_ids == ("$first",)
+    assert marked.pending_redaction_cleanup_event_ids == ("$first",)
+    completed_sibling = store.get_turn_record("$second")
+    assert completed_sibling is not None
+    assert completed_sibling.source_event_ids == ("$second",)
+    assert completed_sibling.response_event_id == "$second-reply"
+
+
+def test_redaction_cleanup_clears_after_pending_coalesced_turn_splits(tmp_path: Path) -> None:
+    """A completed sibling must not leave an old alias cleanup pending forever."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$second")
+    scope = HistoryScope(kind="agent", scope_id="agent")
+    storage = _FakeAgentStorage(None)
+    store = _store_with_storage(tmp_path, storage)
+    pending = TurnRecord.create(
+        ["$first", "$second"],
+        completed=False,
+        requester_id="@user:example.org",
+        response_owner="agent",
+        history_scope=scope,
+        conversation_target=target,
+    )
+    store.record_pending_turn(pending)
+    store.mark_source_redacted("$first")
+    store.record_turn(
+        TurnRecord.create(
+            ["$second"],
+            response_event_id="$second-reply",
+            requester_id="@user:example.org",
+            response_owner="agent",
+            history_scope=scope,
+            conversation_target=target,
+        ),
+    )
+
+    should_suppress = store.prepare_response_for_redactions(
+        target=target,
+        requester_user_id="@user:example.org",
+        source_event_ids=("$second",),
+    )
+
+    assert should_suppress is False
+    cleaned = store.get_turn_record("$first")
+    assert cleaned is not None
+    assert cleaned.source_event_ids == ("$first",)
+    assert cleaned.redacted_source_event_ids == ("$first",)
+    assert cleaned.pending_redaction_cleanup_event_ids == ()
+    completed_sibling = store.get_turn_record("$second")
+    assert completed_sibling is not None
+    assert completed_sibling.source_event_ids == ("$second",)
+    assert completed_sibling.response_event_id == "$second-reply"
 
 
 def test_active_ad_hoc_team_redaction_uses_pending_response_scope(tmp_path: Path) -> None:
@@ -531,15 +597,13 @@ def test_active_ad_hoc_team_redaction_uses_pending_response_scope(tmp_path: Path
     store.mark_source_redacted("$user_msg")
     store.record_turn(replace(response_record, response_event_id="$reply"))
 
-    removed = store.forget_redacted_turn(
-        room=MagicMock(room_id="!room:example.org"),
-        redacted_event_id="$user_msg",
+    should_suppress = store.prepare_response_for_redactions(
+        target=target,
         requester_user_id="@user:example.org",
-        target_hint=target,
-        cache_sanitized=True,
+        source_event_ids=("$later",),
     )
 
-    assert removed is True
+    assert should_suppress is False
     assert session.runs == []
     state_writer.create_storage.assert_called_with(ANY, scope=scope)
 
@@ -583,7 +647,6 @@ def test_turn_merge_preserves_redacted_discovery_alias(tmp_path: Path, *, termin
         discovery_event_ids=["$selection"],
         redacted_source_event_ids=["$selection"],
         pending_redaction_cleanup_event_ids=["$selection"],
-        pending_redaction_room_id="!room:example.org",
         completed=False,
     )
     store.record_pending_turn(existing)
@@ -603,11 +666,10 @@ def test_turn_merge_preserves_redacted_discovery_alias(tmp_path: Path, *, termin
     assert merged.discovery_event_ids == ("$selection",)
     assert merged.redacted_source_event_ids == ("$selection",)
     assert merged.pending_redaction_cleanup_event_ids == ("$selection",)
-    assert merged.pending_redaction_room_id == "!room:example.org"
 
 
-def test_missing_ledger_compacted_summary_recovers_from_source_scope(tmp_path: Path) -> None:
-    """Source-derived context should clear an inactive summary after ledger expiry."""
+def test_contextless_tombstone_invalidates_current_conversation_summary(tmp_path: Path) -> None:
+    """The next response should clear a contextless source from compacted replay."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     scope = HistoryScope(kind="agent", scope_id="agent")
     session = AgentSession(
@@ -619,21 +681,15 @@ def test_missing_ledger_compacted_summary_recovers_from_source_scope(tmp_path: P
     update_scope_seen_event_ids(session, scope, ["$user_msg"])
     storage = _FakeAgentStorage(session)
     store = _store_with_storage(tmp_path, storage)
-    store.mark_source_redacted(
-        "$user_msg",
+    store.mark_source_redacted("$user_msg")
+
+    should_suppress = store.prepare_response_for_redactions(
+        target=target,
         requester_user_id="@user:example.org",
-        target_hint=target,
+        source_event_ids=("$later",),
     )
 
-    removed = store.forget_redacted_turn(
-        room=MagicMock(room_id="!room:example.org"),
-        redacted_event_id="$user_msg",
-        requester_user_id="@user:example.org",
-        target_hint=target,
-        cache_sanitized=True,
-    )
-
-    assert removed is True
+    assert should_suppress is False
     assert session.summary is None
     assert read_scope_seen_event_ids(session, scope) == set()
 
@@ -695,7 +751,7 @@ def test_redaction_barrier_ignores_unrelated_prior_persist_failure(tmp_path: Pat
     with patch.object(store._ledger, "_persist_record", side_effect=persist_with_unrelated_failure):
         store.record_pending_turn(TurnRecord.create(["$unrelated"], completed=False))
         assert unrelated_failed.wait(timeout=5)
-        marked = store.mark_source_redacted("$redacted", room_id="!room:example.org")
+        marked = store.mark_source_redacted("$redacted")
 
         assert marked is not None
         with pytest.raises(OSError, match="unrelated persist failed"):
@@ -707,8 +763,8 @@ def test_redaction_barrier_ignores_unrelated_prior_persist_failure(tmp_path: Pat
     assert durable_record.pending_redaction_cleanup_event_ids == ("$redacted",)
 
 
-def test_warm_preserves_cleanup_for_async_cache_recovery(tmp_path: Path) -> None:
-    """Ledger warmup must leave cache sanitization and history cleanup as one async intent."""
+def test_warm_preserves_lazy_cleanup_until_next_response(tmp_path: Path) -> None:
+    """A restart must retain replay cleanup for the conversation's next response."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     session = AgentSession(
         session_id=target.session_id,
@@ -718,7 +774,7 @@ def test_warm_preserves_cleanup_for_async_cache_recovery(tmp_path: Path) -> None
     storage = _FakeAgentStorage(session)
     store = _store_with_storage(tmp_path, storage)
     store.record_turn(_owned_turn_record(target))
-    marked = store.mark_source_redacted("$user_msg", room_id="!room:example.org")
+    marked = store.mark_source_redacted("$user_msg")
 
     assert marked is not None
     assert marked.pending_redaction_cleanup_event_ids == ("$user_msg",)
@@ -732,11 +788,22 @@ def test_warm_preserves_cleanup_for_async_cache_recovery(tmp_path: Path) -> None
     assert restarted_record is not None
     assert restarted_record.redacted_source_event_ids == ("$user_msg",)
     assert restarted_record.pending_redaction_cleanup_event_ids == ("$user_msg",)
-    assert restarted_store.pending_redaction_cleanups() == (("$user_msg", "!room:example.org"),)
+    assert (
+        restarted_store.prepare_response_for_redactions(
+            target=target,
+            requester_user_id="@user:example.org",
+            source_event_ids=("$later",),
+        )
+        is False
+    )
+    assert session.runs == []
+    cleaned_record = restarted_store.get_turn_record("$user_msg")
+    assert cleaned_record is not None
+    assert cleaned_record.pending_redaction_cleanup_event_ids == ()
 
 
-def test_locked_response_preparation_sanitizes_history_without_acknowledging_cache(tmp_path: Path) -> None:
-    """The under-lock gate removes replay while async cache cleanup remains owed."""
+def test_locked_response_preparation_sanitizes_and_acknowledges_history_cleanup(tmp_path: Path) -> None:
+    """The under-lock gate removes replay and acknowledges the completed work."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     session = AgentSession(
         session_id=target.session_id,
@@ -750,6 +817,7 @@ def test_locked_response_preparation_sanitizes_history_without_acknowledging_cac
 
     should_suppress = store.prepare_response_for_redactions(
         target=target,
+        requester_user_id="@user:example.org",
         source_event_ids=("$later",),
     )
 
@@ -757,7 +825,7 @@ def test_locked_response_preparation_sanitizes_history_without_acknowledging_cac
     assert session.runs == []
     record = store.get_turn_record("$user_msg")
     assert record is not None
-    assert record.pending_redaction_cleanup_event_ids == ("$user_msg",)
+    assert record.pending_redaction_cleanup_event_ids == ()
 
 
 def test_turn_record_codec_projects_and_parses_one_versioned_run_schema() -> None:

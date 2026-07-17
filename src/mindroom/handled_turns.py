@@ -77,7 +77,6 @@ class TurnRecord:
     discovery_event_ids: tuple[str, ...] = ()
     redacted_source_event_ids: tuple[str, ...] = ()
     pending_redaction_cleanup_event_ids: tuple[str, ...] = ()
-    pending_redaction_room_id: str | None = None
     anchor_event_id: str | None = None
     response_event_id: str | None = None
     completed: bool = True
@@ -112,9 +111,6 @@ class TurnRecord:
             for event_id in _normalize_source_event_ids(self.pending_redaction_cleanup_event_ids)
             if event_id in redacted_source_event_id_set
         )
-        pending_redaction_room_id = (
-            _normalize_string(self.pending_redaction_room_id) if pending_redaction_cleanup_event_ids else None
-        )
         anchor_event_id = _normalize_string(self.anchor_event_id)
         if anchor_event_id is None and source_event_ids:
             anchor_event_id = source_event_ids[-1]
@@ -126,7 +122,6 @@ class TurnRecord:
         object.__setattr__(self, "discovery_event_ids", discovery_event_ids)
         object.__setattr__(self, "redacted_source_event_ids", redacted_source_event_ids)
         object.__setattr__(self, "pending_redaction_cleanup_event_ids", pending_redaction_cleanup_event_ids)
-        object.__setattr__(self, "pending_redaction_room_id", pending_redaction_room_id)
         object.__setattr__(self, "anchor_event_id", anchor_event_id)
         object.__setattr__(self, "response_event_id", _normalize_string(self.response_event_id))
         object.__setattr__(self, "visible_echo_event_id", _normalize_string(self.visible_echo_event_id))
@@ -171,7 +166,6 @@ class TurnRecord:
         discovery_event_ids: Sequence[str] = (),
         redacted_source_event_ids: Sequence[str] = (),
         pending_redaction_cleanup_event_ids: Sequence[str] = (),
-        pending_redaction_room_id: str | None = None,
         anchor_event_id: str | None = None,
         response_event_id: str | None = None,
         completed: bool = True,
@@ -191,7 +185,6 @@ class TurnRecord:
             discovery_event_ids=tuple(discovery_event_ids),
             redacted_source_event_ids=tuple(redacted_source_event_ids),
             pending_redaction_cleanup_event_ids=tuple(pending_redaction_cleanup_event_ids),
-            pending_redaction_room_id=pending_redaction_room_id,
             anchor_event_id=anchor_event_id,
             response_event_id=response_event_id,
             completed=completed,
@@ -239,7 +232,6 @@ class TurnRecordCodec:
             "source_event_ids": list(record.source_event_ids),
             "redacted_source_event_ids": list(record.redacted_source_event_ids),
             "pending_redaction_cleanup_event_ids": list(record.pending_redaction_cleanup_event_ids),
-            "pending_redaction_room_id": record.pending_redaction_room_id,
             "response_event_id": record.response_event_id,
             "completed": record.completed,
             "timestamp": record.timestamp,
@@ -303,7 +295,6 @@ class TurnRecordCodec:
             pending_redaction_cleanup_event_ids=_normalize_source_event_ids(
                 raw_pending_redaction_cleanup_event_ids,
             ),
-            pending_redaction_room_id=_normalize_string(record.get("pending_redaction_room_id")),
             anchor_event_id=anchor_event_id,
             response_event_id=response_event_id,
             completed=completed,
@@ -745,14 +736,18 @@ def _resolve_turn_record(
     existing_records: Mapping[str, TurnRecord],
 ) -> TurnRecord | None:
     """Resolve one candidate against completed identities and newer same-turn rows."""
-    for event_id in turn_record.source_event_ids:
-        existing_record = existing_records.get(event_id)
-        if (
-            existing_record is not None
-            and existing_record.completed
-            and not same_turn_identity(existing_record, turn_record)
-        ):
+    conflicting_source_event_ids = tuple(
+        event_id
+        for event_id in turn_record.source_event_ids
+        if (existing_record := existing_records.get(event_id)) is not None
+        and existing_record.completed
+        and not same_turn_identity(existing_record, turn_record)
+    )
+    if conflicting_source_event_ids:
+        projected_turn_record = _project_redaction_alias(turn_record, conflicting_source_event_ids)
+        if projected_turn_record is None:
             return None
+        turn_record = projected_turn_record
     same_identity_records = (
         existing_record
         for event_id in turn_record.indexed_event_ids
@@ -777,6 +772,35 @@ def _resolve_turn_record(
         or same_turn_identity(existing_record, resolved_record)
     )
     return replace(resolved_record, discovery_event_ids=discovery_event_ids)
+
+
+def _project_redaction_alias(
+    turn_record: TurnRecord,
+    conflicting_source_event_ids: tuple[str, ...],
+) -> TurnRecord | None:
+    """Detach redaction markers from source aliases now owned by another completed turn."""
+    if not turn_record.redacted_source_event_ids:
+        return None
+    conflicting_ids = set(conflicting_source_event_ids)
+    retained_source_event_ids = tuple(
+        event_id for event_id in turn_record.source_event_ids if event_id not in conflicting_ids
+    )
+    if not retained_source_event_ids:
+        retained_source_event_ids = tuple(
+            event_id for event_id in turn_record.redacted_source_event_ids if event_id not in conflicting_ids
+        )
+    if not retained_source_event_ids:
+        return None
+    anchor_event_id = (
+        turn_record.anchor_event_id
+        if turn_record.anchor_event_id in retained_source_event_ids
+        else retained_source_event_ids[-1]
+    )
+    return replace(
+        turn_record,
+        source_event_ids=retained_source_event_ids,
+        anchor_event_id=anchor_event_id,
+    )
 
 
 def _merge_same_identity_records(candidate: TurnRecord, existing: TurnRecord) -> TurnRecord:

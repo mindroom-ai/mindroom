@@ -68,6 +68,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ):
                 await bot.start()
                 assert bot.client is start_client
+                redaction_callback = next(
+                    callback.args[0]
+                    for callback in start_client.add_event_callback.call_args_list
+                    if callback.args[1] is nio.RedactionEvent
+                )
+                assert redaction_callback == bot._on_redaction
 
                 await bot.stop()
 
@@ -1290,14 +1296,18 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
     @pytest.mark.asyncio
     async def test_live_redaction_callback_delegates_to_cleanup(self, bot: AgentBot) -> None:
-        """The bot composition root should only delegate source-redaction policy."""
+        """The bot should await durable tombstoning and advisory cache cleanup."""
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_agent:localhost")
         redaction_event = MagicMock(spec=nio.RedactionEvent)
 
-        with patch.object(bot._redacted_turn_cleanup, "handle", new_callable=AsyncMock) as cleanup:
+        with patch.object(
+            bot._redacted_turn_cleanup,
+            "handle",
+            AsyncMock(),
+        ) as handle:
             await bot._on_redaction(room, redaction_event)
 
-        cleanup.assert_awaited_once_with(room, redaction_event)
+        handle.assert_awaited_once_with(room, redaction_event)
 
     @pytest.mark.asyncio
     async def test_sync_timeline_redaction_does_not_resurrect_point_lookup_cache(self, bot: AgentBot) -> None:

@@ -542,9 +542,6 @@ class AgentBot:
         self._redacted_turn_cleanup = RedactedTurnCleanup(
             RedactedTurnCleanupDeps(
                 conversation_cache=self._conversation_cache,
-                resolver=self._conversation_resolver,
-                ingress=self._ingress_validator,
-                response_runner=self._response_runner,
                 turn_store=self._turn_store,
             ),
         )
@@ -1434,10 +1431,8 @@ class AgentBot:
             self._runtime_view.mark_runtime_started()
             self._restore_saved_sync_token()
             await self._set_avatar_if_available()
-            # Both load durable tracking state, and turn cleanup may inspect
-            # session storage; keep that work off the event loop at startup.
+            # Keep durable tracking-state loading off the event loop at startup.
             await asyncio.to_thread(self._turn_store.warm)
-            await self._redacted_turn_cleanup.resume_pending()
             await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)
             client = self.client
             assert client is not None
@@ -1453,7 +1448,7 @@ class AgentBot:
                 nio.RoomMessageText,
             )
             client.add_event_callback(
-                _create_task_wrapper(self._on_redaction, owner=self._runtime_view, on_error=self._mark_callback_failed),
+                self._on_redaction,
                 nio.RedactionEvent,
             )
             client.add_event_callback(
@@ -1791,8 +1786,9 @@ class AgentBot:
             if early_reservation_owner is not None:
                 await early_reservation_owner.release()
 
-    async def _on_redaction(self, room: nio.MatrixRoom, event: nio.RedactionEvent) -> None:
-        """Keep cached history and persisted turn state consistent when Matrix redactions arrive."""
+    async def _on_redaction(self, room: nio.MatrixRoom, event: nio.Event) -> None:
+        """Persist one redaction before updating advisory cache state."""
+        assert isinstance(event, nio.RedactionEvent)
         await self._redacted_turn_cleanup.handle(room, event)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:

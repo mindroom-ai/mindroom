@@ -275,6 +275,7 @@ class EditRegenerator:
                 ),
                 prepare_source_turn=lambda: self.deps.turn_store.prepare_response_for_redactions(
                     target=regeneration_target,
+                    requester_user_id=requester_user_id,
                     source_event_ids=tuple(
                         dict.fromkeys((*regeneration_turn_record.replay_source_event_ids, original_event_id)),
                     ),

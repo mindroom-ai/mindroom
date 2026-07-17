@@ -478,7 +478,6 @@ def test_discovery_alias_redaction_and_cleanup_intent_persist(temp_dir: Path) ->
             discovery_event_ids=["$selection"],
             redacted_source_event_ids=["$selection"],
             pending_redaction_cleanup_event_ids=["$selection"],
-            pending_redaction_room_id="!room:example.com",
             completed=False,
         ),
     )
@@ -489,7 +488,6 @@ def test_discovery_alias_redaction_and_cleanup_intent_persist(temp_dir: Path) ->
     assert record is not None
     assert record.redacted_source_event_ids == ("$selection",)
     assert record.pending_redaction_cleanup_event_ids == ("$selection",)
-    assert record.pending_redaction_room_id == "!room:example.com"
     assert reloaded.pending_redaction_cleanup_event_ids() == ("$selection",)
     assert reloaded.has_responded("$selection") is True
     assert reloaded.has_responded("$question") is False
@@ -773,7 +771,7 @@ def test_cleanup_by_age_removes_old_records(temp_dir: Path) -> None:
 
 
 def test_cleanup_by_age_retains_pending_redaction_intent(temp_dir: Path) -> None:
-    """Age retention must not discard cleanup work before startup can resume it."""
+    """Age retention must not discard cleanup work before the next response."""
     tracker = HandledTurnLedger("test_pending_age_cleanup", base_path=temp_dir)
     old_timestamp = time.time() - (40 * 24 * 60 * 60)
     tracker.record_handled_turn(
@@ -781,7 +779,6 @@ def test_cleanup_by_age_retains_pending_redaction_intent(temp_dir: Path) -> None
             ["$pending"],
             redacted_source_event_ids=["$pending"],
             pending_redaction_cleanup_event_ids=["$pending"],
-            pending_redaction_room_id="!room:example.org",
             timestamp=old_timestamp,
         ),
     )
@@ -803,7 +800,6 @@ def test_cleanup_by_count_retains_pending_redaction_intent(temp_dir: Path) -> No
             ["$pending"],
             redacted_source_event_ids=["$pending"],
             pending_redaction_cleanup_event_ids=["$pending"],
-            pending_redaction_room_id="!room:example.org",
             timestamp=time.time() - 2,
         ),
     )

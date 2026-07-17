@@ -187,12 +187,8 @@ class TurnStore:
     def mark_source_redacted(
         self,
         source_event_id: str,
-        *,
-        room_id: str | None = None,
-        requester_user_id: str | None = None,
-        target_hint: MessageTarget | None = None,
     ) -> TurnRecord | None:
-        """Durably tombstone and sanitize one source event before asynchronous cleanup."""
+        """Durably tombstone one source event before later replay cleanup."""
 
         def redacted_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
             existing_record = existing_records.get(source_event_id)
@@ -204,9 +200,6 @@ class TurnStore:
                     *authority.pending_redaction_cleanup_event_ids,
                     source_event_id,
                 ),
-                pending_redaction_room_id=room_id or authority.pending_redaction_room_id,
-                requester_id=authority.requester_id or requester_user_id,
-                conversation_target=authority.conversation_target or target_hint,
                 timestamp=0.0,
             )
 
@@ -215,15 +208,6 @@ class TurnStore:
             redacted_record,
             wait_for_persist=True,
         )
-
-    def pending_redaction_cleanups(self) -> tuple[tuple[str, str], ...]:
-        """Return durable source/room locators still owed asynchronous recovery."""
-        cleanups: list[tuple[str, str]] = []
-        for event_id in self._ledger.pending_redaction_cleanup_event_ids():
-            turn_record = self._ledger.get_turn_record(event_id)
-            if turn_record is not None and turn_record.pending_redaction_room_id is not None:
-                cleanups.append((event_id, turn_record.pending_redaction_room_id))
-        return tuple(cleanups)
 
     def any_source_redacted(self, source_event_ids: tuple[str, ...]) -> bool:
         """Return whether durable state tombstones any source in one pending response."""
@@ -237,18 +221,25 @@ class TurnStore:
         self,
         *,
         target: MessageTarget,
+        requester_user_id: str,
         source_event_ids: tuple[str, ...],
     ) -> bool:
         """Finish owed cleanup in this locked conversation, then check current sources."""
         for redacted_event_id in self._ledger.pending_redaction_cleanup_event_ids():
             turn_record = self._ledger.get_turn_record(redacted_event_id)
-            if (
-                turn_record is None
-                or turn_record.conversation_target is None
-                or turn_record.conversation_target.session_id != target.session_id
-            ):
+            if turn_record is None:
                 continue
-            self._retry_pending_redaction_cleanup(redacted_event_id)
+            recorded_target = turn_record.conversation_target
+            if recorded_target is not None and recorded_target.session_id != target.session_id:
+                continue
+            recorded_requester_user_id = turn_record.requester_id
+            removed = self._remove_redacted_event_from_recorded_scopes(
+                target=recorded_target or target,
+                requester_user_id=recorded_requester_user_id or requester_user_id,
+                redacted_event_id=redacted_event_id,
+            )
+            if removed or (recorded_target is not None and recorded_requester_user_id is not None):
+                self._clear_pending_redaction_cleanup(redacted_event_id)
         return self.any_source_redacted(source_event_ids)
 
     def response_history_scope(
@@ -356,79 +347,6 @@ class TurnStore:
             reason="edited",
         )
 
-    def forget_redacted_turn(
-        self,
-        *,
-        room: nio.MatrixRoom,
-        redacted_event_id: str,
-        requester_user_id: str | None,
-        target_hint: MessageTarget | None,
-        cache_sanitized: bool,
-    ) -> bool:
-        """Remove persisted runs for one handled turn whose source message was redacted.
-
-        The disk-backed ledger is normally the trigger. ``target_hint`` also
-        permits post-lock recovery when an active response persisted its run
-        just before recording the terminal ledger outcome. Cleanup intent is
-        acknowledged only after the cache confirms durable sanitization.
-        """
-        ledger_record = self._ledger.get_turn_record(redacted_event_id)
-        if ledger_record is None and target_hint is None:
-            return False
-        if ledger_record is not None and ledger_record.requester_id is not None:
-            requester_user_id = ledger_record.requester_id
-        if requester_user_id is None:
-            return False
-        turn_record = ledger_record
-        if turn_record is None or turn_record.conversation_target is None or turn_record.history_scope is None:
-            thread_id = (
-                ledger_record.conversation_target.resolved_thread_id
-                if ledger_record is not None and ledger_record.conversation_target is not None
-                else target_hint.resolved_thread_id
-                if target_hint is not None
-                else None
-            )
-            turn_record = (
-                self.load_turn(
-                    room=room,
-                    thread_id=thread_id,
-                    original_event_id=redacted_event_id,
-                    requester_user_id=requester_user_id,
-                )
-                or turn_record
-            )
-        fallback_target = (
-            turn_record.conversation_target
-            if turn_record is not None and turn_record.conversation_target is not None
-            else target_hint
-        )
-        if fallback_target is None:
-            return False
-        removed = self._remove_redacted_event_from_recorded_scopes(
-            target=fallback_target,
-            requester_user_id=requester_user_id,
-            redacted_event_id=redacted_event_id,
-        )
-        if cache_sanitized:
-            self.clear_pending_redaction_cleanup(redacted_event_id)
-        return removed
-
-    def _retry_pending_redaction_cleanup(self, redacted_event_id: str) -> None:
-        """Sanitize persisted replay while async cache recovery remains owed."""
-        turn_record = self._ledger.get_turn_record(redacted_event_id)
-        if (
-            turn_record is None
-            or redacted_event_id not in turn_record.pending_redaction_cleanup_event_ids
-            or turn_record.requester_id is None
-            or turn_record.conversation_target is None
-        ):
-            return
-        self._remove_redacted_event_from_recorded_scopes(
-            target=turn_record.conversation_target,
-            requester_user_id=turn_record.requester_id,
-            redacted_event_id=redacted_event_id,
-        )
-
     def _remove_redacted_event_from_recorded_scopes(
         self,
         *,
@@ -476,8 +394,8 @@ class TurnStore:
             removed_any = removed or removed_any
         return removed_any
 
-    def clear_pending_redaction_cleanup(self, redacted_event_id: str) -> None:
-        """Durably acknowledge one cleanup intent that has nothing left to clean."""
+    def _clear_pending_redaction_cleanup(self, redacted_event_id: str) -> None:
+        """Acknowledge one cleanup intent after its conversation has been cleaned."""
 
         def cleared_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
             turn_record = existing_records[redacted_event_id]
@@ -493,11 +411,7 @@ class TurnStore:
 
         if self._ledger.get_turn_record(redacted_event_id) is None:
             return
-        self._ledger.update_handled_turn(
-            (redacted_event_id,),
-            cleared_record,
-            wait_for_persist=True,
-        )
+        self._ledger.update_handled_turn((redacted_event_id,), cleared_record)
 
     def _remove_redacted_event_from_scope(
         self,
@@ -657,6 +571,7 @@ class TurnStore:
                     session_id,
                     source_event_id,
                     session_type=session_type,
+                    remove_following_runs=True,
                 )
                 removed_any = removed_source or removed_any
         finally:
@@ -710,7 +625,6 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
             *authority.pending_redaction_cleanup_event_ids,
             *recovery.pending_redaction_cleanup_event_ids,
         ),
-        pending_redaction_room_id=authority.pending_redaction_room_id or recovery.pending_redaction_room_id,
         response_event_id=authority.response_event_id or recovery.response_event_id,
         visible_echo_event_id=authority.visible_echo_event_id or recovery.visible_echo_event_id,
         source_event_prompts=(

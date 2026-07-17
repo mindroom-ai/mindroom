@@ -120,22 +120,6 @@ if TYPE_CHECKING:
 type _MatrixEventId = str
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
-_StateMutationResult = TypeVar("_StateMutationResult")
-
-
-async def _run_sync_to_completion_on_cancel(operation: Callable[[], _StateMutationResult]) -> _StateMutationResult:
-    """Keep a worker-backed mutation alive and awaited when its caller is cancelled."""
-    worker_task = asyncio.create_task(asyncio.to_thread(operation))
-    try:
-        return await asyncio.shield(worker_task)
-    except asyncio.CancelledError:
-        while not worker_task.done():
-            try:
-                await asyncio.shield(worker_task)
-            except asyncio.CancelledError:
-                continue
-        worker_task.result()
-        raise
 
 
 def _merge_response_extra_content(
@@ -691,22 +675,6 @@ class ResponseRunner:
         """Wait until one canonical room/thread has no active response turn."""
         await self._lifecycle_coordinator.wait_for_thread_idle(room_id, thread_id)
 
-    async def run_serialized_state_mutation(
-        self,
-        *,
-        target: MessageTarget,
-        mutation: Callable[[], _StateMutationResult],
-    ) -> _StateMutationResult:
-        """Offload one state mutation under the target's response lifecycle lock."""
-
-        async def run_mutation(_target: MessageTarget) -> _StateMutationResult:
-            return await _run_sync_to_completion_on_cancel(mutation)
-
-        return await self._lifecycle_coordinator.run_locked_state_mutation(
-            target=target,
-            locked_operation=run_mutation,
-        )
-
     def reserve_waiting_human_message(
         self,
         *,
@@ -1079,9 +1047,7 @@ class ResponseRunner:
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = self._request_with_locked_target(request, resolved_target)
-        if request.prepare_source_turn is not None and await _run_sync_to_completion_on_cancel(
-            request.prepare_source_turn,
-        ):
+        if request.prepare_source_turn is not None and request.prepare_source_turn():
             self.deps.logger.info(
                 "response_suppressed_for_redacted_source",
                 source_event_id=request.response_envelope.source_event_id,

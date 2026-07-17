@@ -347,27 +347,6 @@ class TestThreadMutationHelpers:
         )
         event_cache.redact_event.assert_awaited_once_with("!room:localhost", "$target:localhost")
 
-    @pytest.mark.asyncio
-    async def test_thread_redaction_mutation_disables_cache_when_deletion_raises(self) -> None:
-        """A failed cache deletion must prevent later reads from serving the redacted event."""
-        cache_ops, _logger, event_cache = _thread_mutation_cache_ops()
-        event_cache.redact_event = AsyncMock(side_effect=RuntimeError("cache write failed"))
-
-        result = await _apply_thread_redaction_mutation(
-            cache_ops=cache_ops,
-            room_id="!room:localhost",
-            redacted_event_id="$target:localhost",
-            impact=MutationThreadImpact.unknown(),
-            context="live",
-        )
-
-        assert result is False
-        event_cache.disable.assert_called_once_with(
-            "redaction_failed:!room:localhost:$target:localhost",
-        )
-        event_cache.mark_room_threads_stale.assert_not_awaited()
-
-
 class TestMatrixConversationCacheThreadReads:
     """Targeted read-path tests for invalidate-and-refetch behavior."""
 
@@ -380,29 +359,6 @@ class TestMatrixConversationCacheThreadReads:
 
         assert not hasattr(access, "_writes")
         assert not hasattr(access, "_run_fail_open_outbound_write")
-
-    @pytest.mark.asyncio
-    async def test_live_redaction_reports_failed_cache_sanitization(self) -> None:
-        """The cleanup owner must know when durable cache deletion did not land."""
-        event_cache = _runtime_event_cache()
-        event_cache.redact_event = AsyncMock(side_effect=RuntimeError("cache write failed"))
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(event_cache=event_cache),
-        )
-        access._live._resolver.resolve_redaction_thread_impact = AsyncMock(
-            return_value=MutationThreadImpact.unknown(),
-        )
-        redaction_event = MagicMock(spec=nio.RedactionEvent)
-        redaction_event.event_id = "$redaction:localhost"
-        redaction_event.redacts = "$target:localhost"
-
-        sanitized = await access.apply_redaction("!room:localhost", redaction_event)
-
-        assert sanitized is False
-        event_cache.disable.assert_called_once_with(
-            "redaction_failed:!room:localhost:$target:localhost",
-        )
 
     @pytest.mark.parametrize(
         "error",

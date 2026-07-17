@@ -283,7 +283,7 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
             request_preparer=request_preparer,
         ),
     )
-    event_loop_thread_id = threading.get_ident()
+    response_thread_id = threading.get_ident()
     preparation_thread_ids: list[int] = []
 
     def prepare_source_turn() -> bool:
@@ -311,8 +311,7 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
     )
 
     assert prepared_request is None
-    assert preparation_thread_ids
-    assert preparation_thread_ids[0] != event_loop_thread_id
+    assert preparation_thread_ids == [response_thread_id]
     delivery_gateway.send_text.assert_not_awaited()
     request_preparer.prepare.assert_not_awaited()
 
@@ -1030,88 +1029,6 @@ def test_reserve_waiting_human_message_requires_active_turn() -> None:
     envelope = _queued_envelope("$first")
 
     assert coordinator.reserve_waiting_human_message(target=envelope.target, response_envelope=envelope) is None
-
-
-@pytest.mark.asyncio
-async def test_state_mutation_waits_for_response_and_runs_off_event_loop() -> None:
-    """Persisted-state cleanup should serialize with generation without blocking asyncio."""
-    runner = ResponseRunner(MagicMock())
-    envelope = _queued_envelope("$first")
-    response_started = asyncio.Event()
-    release_response = asyncio.Event()
-    mutation_thread_ids: list[int] = []
-
-    async def active_response(_target: MessageTarget) -> str:
-        response_started.set()
-        await release_response.wait()
-        return "response"
-
-    response_task = asyncio.create_task(
-        runner._lifecycle_coordinator.run_locked_response(
-            target=envelope.target,
-            response_envelope=envelope,
-            queued_notice_reservation=None,
-            pipeline_timing=None,
-            locked_operation=active_response,
-        ),
-    )
-    await asyncio.wait_for(response_started.wait(), timeout=2)
-    event_loop_thread_id = threading.get_ident()
-    mutation_task = asyncio.create_task(
-        runner.run_serialized_state_mutation(
-            target=envelope.target,
-            mutation=lambda: mutation_thread_ids.append(threading.get_ident()),
-        ),
-    )
-    for _ in range(10):
-        await asyncio.sleep(0)
-    assert mutation_thread_ids == []
-
-    release_response.set()
-    assert await asyncio.wait_for(response_task, timeout=2) == "response"
-    await asyncio.wait_for(mutation_task, timeout=2)
-
-    assert len(mutation_thread_ids) == 1
-    assert mutation_thread_ids[0] != event_loop_thread_id
-
-
-@pytest.mark.asyncio
-async def test_cancelled_state_mutation_holds_lock_until_worker_finishes() -> None:
-    """Cancellation must not expose session state while its cleanup thread is still mutating it."""
-    runner = ResponseRunner(MagicMock())
-    target = _queued_envelope("$first").target
-    first_started = threading.Event()
-    release_first = threading.Event()
-    second_started = threading.Event()
-
-    def first_mutation() -> None:
-        first_started.set()
-        assert release_first.wait(timeout=2)
-
-    first_task = asyncio.create_task(
-        runner.run_serialized_state_mutation(target=target, mutation=first_mutation),
-    )
-    for _ in range(200):
-        if first_started.is_set():
-            break
-        await asyncio.sleep(0.01)
-    assert first_started.is_set()
-
-    first_task.cancel()
-    second_task = asyncio.create_task(
-        runner.run_serialized_state_mutation(
-            target=target,
-            mutation=lambda: second_started.set(),
-        ),
-    )
-    await asyncio.sleep(0.05)
-    assert second_started.is_set() is False
-
-    release_first.set()
-    with pytest.raises(asyncio.CancelledError):
-        await first_task
-    await asyncio.wait_for(second_task, timeout=2)
-    assert second_started.is_set() is True
 
 
 @pytest.mark.asyncio

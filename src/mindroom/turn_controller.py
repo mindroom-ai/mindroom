@@ -1393,6 +1393,7 @@ class TurnController:
                 matrix_run_metadata=selection_matrix_run_metadata,
                 prepare_source_turn=lambda: self.deps.turn_store.prepare_response_for_redactions(
                     target=response_target,
+                    requester_user_id=user_id,
                     source_event_ids=selection_handled_turn.indexed_event_ids,
                 ),
             ),
@@ -1767,6 +1768,7 @@ class TurnController:
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
                             prepare_source_turn=lambda: self.deps.turn_store.prepare_response_for_redactions(
                                 target=dispatch.target,
+                                requester_user_id=dispatch.requester_user_id,
                                 source_event_ids=handled_turn.indexed_event_ids,
                             ),
                             on_sync_restart_cancelled=register_sync_restart_retry,
@@ -1795,6 +1797,7 @@ class TurnController:
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
                             prepare_source_turn=lambda: self.deps.turn_store.prepare_response_for_redactions(
                                 target=dispatch.target,
+                                requester_user_id=dispatch.requester_user_id,
                                 source_event_ids=handled_turn.indexed_event_ids,
                             ),
                             on_sync_restart_cancelled=register_sync_restart_retry,

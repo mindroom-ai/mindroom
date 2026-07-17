@@ -2413,7 +2413,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.redacted_turn_cleanup"
-depends_on = ["mindroom.matrix.event_info"]
+depends_on = []
 visibility = ["mindroom.bot"]
 
 [[modules]]
