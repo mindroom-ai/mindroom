@@ -104,20 +104,27 @@ def configured_model_max_output_tokens(model: Model) -> int | None:
     if not isinstance(model, _ModelWithRequestParams):
         return None
     request_params = model.get_request_params()
-    candidates = [
-        request_params.get("max_tokens"),
-        request_params.get("max_output_tokens"),
-        request_params.get("max_completion_tokens"),
-    ]
+    cap_parameter_names = ("max_tokens", "max_output_tokens", "max_completion_tokens")
+    candidates = {parameter_name: request_params.get(parameter_name) for parameter_name in cap_parameter_names}
+    extra_body = request_params.get("extra_body")
+    if isinstance(extra_body, Mapping):
+        extra_body_mapping = cast("Mapping[str, object]", extra_body)
+        for parameter_name in cap_parameter_names:
+            if parameter_name in extra_body_mapping:
+                candidates[parameter_name] = extra_body_mapping[parameter_name]
     request_options = request_params.get("options")
     if isinstance(request_options, Mapping):
-        candidates.append(cast("Mapping[str, object]", request_options).get("num_predict"))
+        candidates["num_predict"] = cast("Mapping[str, object]", request_options).get("num_predict")
     request_config = request_params.get("config")
     if isinstance(request_config, Mapping):
-        candidates.append(cast("Mapping[str, object]", request_config).get("max_output_tokens"))
+        candidates["config.max_output_tokens"] = cast("Mapping[str, object]", request_config).get(
+            "max_output_tokens",
+        )
     elif isinstance(request_config, _ConfigWithMaxOutputTokens):
-        candidates.append(request_config.max_output_tokens)
-    positive_caps = [cap for cap in candidates if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0]
+        candidates["config.max_output_tokens"] = request_config.max_output_tokens
+    positive_caps = [
+        cap for cap in candidates.values() if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0
+    ]
     return max(positive_caps, default=None)
 
 

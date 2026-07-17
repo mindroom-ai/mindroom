@@ -813,6 +813,33 @@ def test_loaded_model_output_cap_supports_provider_parameter_names(model: Model)
         (Claude(id="claude-sonnet-5", max_tokens=64_000, request_params={"max_tokens": 1_024}), 1_024),
         (OpenAIResponses(id="gpt-5.6", request_params={"max_output_tokens": 64_000}), 64_000),
         (OpenAIChat(id="gpt-5.6", request_params={"max_completion_tokens": 64_000}), 64_000),
+        (OpenAIResponses(id="gpt-5.6", extra_body={"max_output_tokens": 64_000}), 64_000),
+        (
+            OpenAIResponses(
+                id="gpt-5.6",
+                max_output_tokens=64_000,
+                extra_body={"max_output_tokens": 1_024},
+            ),
+            1_024,
+        ),
+        (
+            OpenAIResponses(
+                id="gpt-5.6",
+                max_output_tokens=1_024,
+                extra_body={"max_output_tokens": 64_000},
+            ),
+            64_000,
+        ),
+        (OpenAIResponses(id="gpt-5.6", max_output_tokens=64_000, extra_body={"max_output_tokens": None}), None),
+        (OpenAIChat(id="gpt-5.6", extra_body={"max_completion_tokens": 64_000}), 64_000),
+        (
+            OpenAIChat(
+                id="gpt-5.6",
+                max_completion_tokens=64_000,
+                extra_body={"max_completion_tokens": 1_024},
+            ),
+            1_024,
+        ),
         (Gemini(id="gemini-3.5-flash", request_params={"config": {"max_output_tokens": 64_000}}), 64_000),
         (
             Gemini(
@@ -845,12 +872,27 @@ def test_loaded_model_output_cap_honors_request_parameter_overrides(model: Model
 
 
 @pytest.mark.asyncio
-async def test_generate_compaction_summary_uses_effective_request_output_cap() -> None:
-    model = Gemini(
-        id="gemini-3.5-flash",
-        max_output_tokens=64_000,
-        request_params={"config": {"max_output_tokens": 1_024}},
-    )
+@pytest.mark.parametrize(
+    "model",
+    [
+        Gemini(
+            id="gemini-3.5-flash",
+            max_output_tokens=64_000,
+            request_params={"config": {"max_output_tokens": 1_024}},
+        ),
+        OpenAIResponses(
+            id="gpt-5.6",
+            max_output_tokens=64_000,
+            extra_body={"max_output_tokens": 1_024},
+        ),
+        OpenAIChat(
+            id="gpt-5.6",
+            max_completion_tokens=64_000,
+            extra_body={"max_completion_tokens": 1_024},
+        ),
+    ],
+)
+async def test_generate_compaction_summary_uses_effective_request_output_cap(model: Model) -> None:
     with (
         patch.object(
             model,
