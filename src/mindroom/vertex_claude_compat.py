@@ -10,7 +10,7 @@ from agno.exceptions import ContextWindowExceededError, ModelProviderError
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.utils.models.claude import format_messages, format_tools_for_model
 from agno.utils.tokens import count_schema_tokens
-from anthropic.lib.streaming import MessageStopEvent, ParsedBetaMessageStopEvent
+from anthropic.lib.streaming import MessageStopEvent, ParsedBetaMessageStopEvent, ParsedMessageStopEvent
 from anthropic.types import Message as AnthropicMessage
 from anthropic.types.beta import BetaMessage
 
@@ -451,7 +451,7 @@ class MindroomVertexAIClaude(VertexAIClaude):
 
     def _raise_for_safeguard_refusal(self, provider_response: object) -> None:
         """Raise when Vertex Claude explicitly ends generation for safeguards."""
-        if isinstance(provider_response, (MessageStopEvent, ParsedBetaMessageStopEvent)):
+        if isinstance(provider_response, (MessageStopEvent, ParsedMessageStopEvent, ParsedBetaMessageStopEvent)):
             stop_reason = provider_response.message.stop_reason
         elif isinstance(provider_response, (AnthropicMessage, BetaMessage)):
             stop_reason = provider_response.stop_reason

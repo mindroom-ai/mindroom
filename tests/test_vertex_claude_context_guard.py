@@ -12,9 +12,9 @@ from agno.media import Image
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.models.vertexai.claude import Claude as VertexAIClaude
-from anthropic.lib.streaming import MessageStopEvent
+from anthropic.lib.streaming import ParsedMessageStopEvent
 from anthropic.types import Message as AnthropicMessage
-from anthropic.types import Usage
+from anthropic.types import ParsedMessage, Usage
 
 from mindroom.claude_prompt_cache import (
     SERVER_TOOL_USE_BLOCK_TYPE,
@@ -88,7 +88,8 @@ def test_non_streaming_safeguard_refusal_raises_typed_error() -> None:
 def test_streaming_safeguard_refusal_raises_typed_error() -> None:
     """Streaming exposes stop_reason on the final message_stop payload."""
     model = _model()
-    message_stop = MessageStopEvent(type="message_stop", message=_safeguard_refusal_message())
+    parsed_message = ParsedMessage[object].model_validate(_safeguard_refusal_message().model_dump())
+    message_stop = ParsedMessageStopEvent(type="message_stop", message=parsed_message)
 
     with pytest.raises(ModelSafeguardRefusalError, match="stop_reason=refusal"):
         model._parse_provider_response_delta(message_stop)
