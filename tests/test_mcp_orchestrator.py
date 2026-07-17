@@ -756,6 +756,57 @@ async def test_external_trigger_target_restart_unbinds_runtime_before_stop(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_entity_replacement_recovers_rooms_from_the_old_bots_retry_queue(tmp_path: Path) -> None:
+    """A replacement bot should recover terminal markers that its old generation queued for retry."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    config = _config_with_code_agent(tmp_path)
+    orchestrator.config = config
+    old_bot = MagicMock(spec=AgentBot)
+    old_bot.pending_sync_restart_retry_room_ids = frozenset()
+    new_bot = MagicMock(spec=AgentBot)
+    new_bot.agent_name = "code"
+    orchestrator.agent_bots = {"code": old_bot}
+    plan = ConfigUpdatePlan(
+        new_config=config,
+        changed_mcp_servers=set(),
+        configured_entities={"code"},
+        entities_to_restart={"code"},
+        new_entities=set(),
+        removed_entities=set(),
+        mindroom_user_changed=False,
+        matrix_room_access_changed=False,
+        matrix_space_changed=False,
+        authorization_changed=False,
+    )
+
+    async def stop_mid_tool_turn(*_args: object, **_kwargs: object) -> None:
+        old_bot.pending_sync_restart_retry_room_ids = frozenset({"!interrupted:example.org"})
+
+    with (
+        patch(
+            "mindroom.orchestrator.stop_entities",
+            new=AsyncMock(side_effect=stop_mid_tool_turn),
+        ) as mock_stop_entities,
+        patch.object(
+            orchestrator,
+            "_create_and_start_entities",
+            new=AsyncMock(return_value=EntityStartResults(started_bots=[new_bot])),
+        ),
+        patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()) as mock_recover,
+    ):
+        await orchestrator._restart_changed_entities(plan)
+
+    mock_stop_entities.assert_awaited_once()
+    assert mock_stop_entities.await_args.kwargs["restart_entities"] == {"code"}
+    mock_recover.assert_awaited_once()
+    assert mock_recover.await_args.args[0] == [new_bot]
+    assert mock_recover.await_args.args[1] is config
+    assert isinstance(mock_recover.await_args.args[2], int)
+    assert mock_recover.await_args.args[3] == set()
+    assert mock_recover.await_args.kwargs["target_room_ids"] == {"!interrupted:example.org"}
+
+
+@pytest.mark.asyncio
 async def test_apply_config_update_plan_unbinds_runtime_before_restarted_entity_stop(
     tmp_path: Path,
 ) -> None:

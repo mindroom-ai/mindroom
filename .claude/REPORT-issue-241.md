@@ -6,7 +6,7 @@ The reported Matrix thread was not interrupted by the 09:51 systemd restart.
 The systemd journal shows PID 1034630 stopping at 09:51:48 and the replacement PID 1974470 starting at 09:51:59.
 Startup stale-stream recovery ran from 09:52:36 through 09:53:56 in PID 1974470.
 The affected placeholder event `$dAw5iTGPvSZAFGxe4Jd6piivYXojd0sA9D1BxW9C-EA` was created later, at 13:16:56, according to `mindroom_data/event_cache.db`.
-The same process, PID 1974470, began a forced config reload at 13:20:39 and cancelled the openclaw bot sync task at 13:21:29.
+The same process, PID 1974470, was still deferring a config reload at 13:20:39, forced it at 13:21:08, and cancelled the openclaw bot sync task at 13:21:29.
 At 13:21:34 the journal recorded `Streaming response interrupted by sync restart` for thread `$3Puh1tAoPXxMrBrXtYjsQ0RHQhh32i_43bkguPPaN1k`.
 At 13:21:35 the old openclaw bot logged `sync_restart_retry_queued`, but no later `sync_restart_retry_started` exists.
 The config replacement completed at 13:22:14 with a newly constructed bot and therefore a newly constructed retry queue.

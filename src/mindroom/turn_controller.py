@@ -1627,7 +1627,7 @@ class TurnController:
                     sync_restart_retry_source_event_id=event.event_id,
                 )
 
-            self.deps.restart_retry.register(event.event_id, retry)
+            self.deps.restart_retry.register(event.event_id, retry, room_id=room.room_id)
 
         def record_deferred_outcome(response_event_id: str) -> None:
             self._mark_source_events_responded(replace(handled_turn, response_event_id=response_event_id))

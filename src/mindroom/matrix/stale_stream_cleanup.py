@@ -194,13 +194,14 @@ async def recover_stale_streaming_messages(
     runtime_paths: RuntimePaths,
     startup_cutoff_ms: int,
     scanned_room_ids: set[str],
+    target_room_ids: set[str] | None = None,
     room_concurrency: int = _RECOVERY_ROOM_CONCURRENCY,
 ) -> _StaleStreamRecoveryResult:
     """Recover stale streams through one concurrent Matrix-history path."""
     room_actors = {
         room_id: joined_actors
         for room_id, joined_actors in (await _joined_room_actors(actors)).items()
-        if room_id not in scanned_room_ids
+        if room_id not in scanned_room_ids and (target_room_ids is None or room_id in target_room_ids)
     }
     scanned_room_ids.update(room_actors)
     if not room_actors:
@@ -1742,7 +1743,11 @@ def _should_skip_for_startup_cleanup_window(
     timestamp_ms = state.latest_timestamp
     if _is_at_or_after_startup_cutoff(timestamp_ms, startup_cutoff_ms=scan_policy.startup_cutoff_ms):
         return True
-    if _is_recent_timestamp(timestamp_ms, now_ms=now_ms):
+    # A terminal interruption cannot still be receiving chunks, and the cutoff
+    # already proves it belongs to the previous bot generation.
+    if _is_recent_timestamp(timestamp_ms, now_ms=now_ms) and not (
+        scan_policy.collect_terminal_interrupted_for_resume and _has_resumable_interrupted_note(state)
+    ):
         return True
     if _is_older_than_cleanup_window(timestamp_ms, now_ms=now_ms):
         return not (scan_policy.collect_terminal_interrupted_for_resume and _has_resumable_interrupted_note(state))

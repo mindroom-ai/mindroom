@@ -1002,6 +1002,8 @@ class _MultiAgentOrchestrator:
         config: Config,
         startup_cutoff_ms: int,
         scanned_room_ids: set[str],
+        *,
+        target_room_ids: set[str] | None = None,
     ) -> None:
         """Recover interrupted responses from one concurrent room scan."""
         actors: dict[str, StaleStreamCleanupActor] = {}
@@ -1024,6 +1026,7 @@ class _MultiAgentOrchestrator:
             runtime_paths=self.runtime_paths,
             startup_cutoff_ms=startup_cutoff_ms,
             scanned_room_ids=scanned_room_ids,
+            target_room_ids=target_room_ids,
         )
         logger.info(
             "Completed stale stream recovery",
@@ -1225,6 +1228,11 @@ class _MultiAgentOrchestrator:
     ) -> tuple[set[str], list[str], list[str]]:
         """Restart or create entities affected by the config change."""
         entities_to_stop = plan.entities_to_restart - (already_stopped_entities or set())
+        stopped_bots = {
+            entity_name: self.agent_bots[entity_name]
+            for entity_name in entities_to_stop
+            if entity_name in self.agent_bots
+        }
         if entities_to_stop:
             self._external_trigger_runtime.unbind_for_entity_changes(entities_to_stop)
             for entity_name in entities_to_stop:
@@ -1236,6 +1244,10 @@ class _MultiAgentOrchestrator:
                 restart_entities=entities_to_stop & plan.configured_entities,
             )
 
+        restart_cutoff_ms = int(time.time() * 1000)
+        interrupted_room_ids = set().union(
+            *(bot.pending_sync_restart_retry_room_ids for bot in stopped_bots.values()),
+        )
         entities_to_recreate = plan.entities_to_restart & plan.configured_entities
         changed_entities = entities_to_recreate | plan.new_entities
         start_results = await self._create_and_start_entities(
@@ -1243,6 +1255,15 @@ class _MultiAgentOrchestrator:
             plan.new_config,
             start_sync_tasks=True,
         )
+        restarted_bots = [bot for bot in start_results.started_bots if bot.agent_name in stopped_bots]
+        if interrupted_room_ids and restarted_bots and plan.new_config.defaults.auto_resume_after_restart:
+            await self._recover_stale_streams_after_restart(
+                restarted_bots,
+                plan.new_config,
+                restart_cutoff_ms,
+                set(),
+                target_room_ids=interrupted_room_ids,
+            )
 
         removed_restarted_entities = plan.entities_to_restart - plan.configured_entities
         for entity_name in removed_restarted_entities:

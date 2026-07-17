@@ -46,7 +46,7 @@ from mindroom.matrix.stale_stream_cleanup import (
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_projection import latest_visible_thread_event_id_by_thread
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.streaming import build_restart_interrupted_body
+from mindroom.streaming import build_cancelled_response_update, build_restart_interrupted_body
 from mindroom.tool_system.events import _TOOL_TRACE_KEY
 from tests.conftest import (
     bind_runtime_paths,
@@ -1879,6 +1879,87 @@ async def test_cleanup_returns_restart_marked_terminal_thread_for_auto_resume(tm
             original_sender_id=USER_ID,
         ),
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("newer_human_activity", [False, True])
+async def test_recent_mid_tool_shutdown_marker_resumes_only_without_newer_human_activity(
+    tmp_path: Path,
+    *,
+    newer_human_activity: bool,
+) -> None:
+    """A replaced mid-tool turn should be collected immediately while freshness still gates its relay."""
+    config = _make_config(tmp_path)
+    config.defaults.auto_resume_after_restart = True
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    interrupted_body, stream_status = build_cancelled_response_update(
+        "Checking disk usage",
+        cancel_source="sync_restart",
+    )
+    target_timestamp_ms = NOW_MS - 1_000
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread-root",
+            body="Find the largest directory",
+            sender=USER_ID,
+            timestamp_ms=target_timestamp_ms - 1_000,
+        ),
+        _make_message_event(
+            event_id="$mid-tool-response",
+            body=interrupted_body,
+            timestamp_ms=target_timestamp_ms,
+            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={
+                STREAM_STATUS_KEY: stream_status,
+                _TOOL_TRACE_KEY: {
+                    "version": 1,
+                    "events": [{"type": "tool_call_started", "tool_name": "shell"}],
+                },
+            },
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    cleaned, interrupted = await _run_cleanup(
+        client,
+        config,
+        joined_rooms=[ROOM_ID],
+        startup_cutoff_ms=NOW_MS,
+    )
+
+    assert cleaned == 0
+    assert [candidate.target_event_id for candidate in interrupted] == ["$mid-tool-response"]
+    history_messages = [
+        _history_message("$mid-tool-response", timestamp=target_timestamp_ms),
+    ]
+    if newer_human_activity:
+        history_messages.append(
+            _history_message(
+                "$newer-human-message",
+                sender=USER_ID,
+                timestamp=target_timestamp_ms + 1,
+            ),
+        )
+    conversation_cache = AsyncMock()
+    conversation_cache.get_strict_thread_history.return_value = _authoritative_history(*history_messages)
+    conversation_cache.notify_outbound_message = Mock()
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.send_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$auto-resume")),
+    ) as send_resume:
+        resumed_count = await auto_resume_interrupted_threads(
+            client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            conversation_cache=conversation_cache,
+            delay=0,
+        )
+
+    assert resumed_count == (0 if newer_human_activity else 1)
+    assert send_resume.await_count == resumed_count
 
 
 @pytest.mark.asyncio
