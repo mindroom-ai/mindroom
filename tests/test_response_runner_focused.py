@@ -9,6 +9,7 @@ orchestrator/bot boot, so shrinking ``response_runner.py`` has a safety net.
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -935,6 +936,49 @@ def test_reserve_waiting_human_message_requires_active_turn() -> None:
     envelope = _queued_envelope("$first")
 
     assert coordinator.reserve_waiting_human_message(target=envelope.target, response_envelope=envelope) is None
+
+
+@pytest.mark.asyncio
+async def test_state_mutation_waits_for_response_and_runs_off_event_loop() -> None:
+    """Persisted-state cleanup should serialize with generation without blocking asyncio."""
+    runner = ResponseRunner(MagicMock())
+    envelope = _queued_envelope("$first")
+    response_started = asyncio.Event()
+    release_response = asyncio.Event()
+    mutation_thread_ids: list[int] = []
+
+    async def active_response(_target: MessageTarget) -> str:
+        response_started.set()
+        await release_response.wait()
+        return "response"
+
+    response_task = asyncio.create_task(
+        runner._lifecycle_coordinator.run_locked_response(
+            target=envelope.target,
+            response_envelope=envelope,
+            queued_notice_reservation=None,
+            pipeline_timing=None,
+            locked_operation=active_response,
+        ),
+    )
+    await asyncio.wait_for(response_started.wait(), timeout=2)
+    event_loop_thread_id = threading.get_ident()
+    mutation_task = asyncio.create_task(
+        runner.run_serialized_state_mutation(
+            target=envelope.target,
+            mutation=lambda: mutation_thread_ids.append(threading.get_ident()),
+        ),
+    )
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert mutation_thread_ids == []
+
+    release_response.set()
+    assert await asyncio.wait_for(response_task, timeout=2) == "response"
+    await asyncio.wait_for(mutation_task, timeout=2)
+
+    assert len(mutation_thread_ids) == 1
+    assert mutation_thread_ids[0] != event_loop_thread_id
 
 
 @pytest.mark.asyncio

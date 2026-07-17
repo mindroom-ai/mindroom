@@ -2945,6 +2945,7 @@ depends_on = [
     "mindroom.agents",
     "mindroom.constants",
     "mindroom.handled_turns",
+    "mindroom.history.storage",
     "mindroom.thread_utils",
 ]
 

@@ -12,6 +12,7 @@ import pytest
 from agno.db.base import SessionType
 from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
+from agno.session.summary import SessionSummary
 
 from mindroom import constants
 from mindroom.bot import AgentBot
@@ -22,7 +23,13 @@ from mindroom.handled_turns import (
     TurnRecordCodec,
     _reset_handled_turn_ledger_runtime,
 )
-from mindroom.history.types import HistoryScope
+from mindroom.history.storage import (
+    read_scope_seen_event_ids,
+    read_scope_state,
+    update_scope_seen_event_ids,
+    write_scope_state,
+)
+from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.turn_store import TurnStore, TurnStoreDeps
@@ -118,7 +125,8 @@ def test_forget_redacted_turn_removes_persisted_run(tmp_path: Path) -> None:
     removed = store.forget_redacted_turn(
         room=MagicMock(room_id="!room:example.org"),
         redacted_event_id="$user_msg",
-        redactor_user_id="@user:example.org",
+        requester_user_id="@user:example.org",
+        target_hint=target,
     )
 
     assert removed is True
@@ -133,7 +141,8 @@ def test_forget_redacted_turn_ignores_unhandled_event(tmp_path: Path) -> None:
     removed = store.forget_redacted_turn(
         room=MagicMock(room_id="!room:example.org"),
         redacted_event_id="$unknown",
-        redactor_user_id="@user:example.org",
+        requester_user_id="@user:example.org",
+        target_hint=None,
     )
 
     assert removed is False
@@ -149,7 +158,8 @@ def test_forget_redacted_turn_ignores_turn_owned_by_other_entity(tmp_path: Path)
     removed = store.forget_redacted_turn(
         room=MagicMock(room_id="!room:example.org"),
         redacted_event_id="$user_msg",
-        redactor_user_id="@user:example.org",
+        requester_user_id="@user:example.org",
+        target_hint=target,
     )
 
     assert removed is False
@@ -168,11 +178,74 @@ def test_forget_redacted_turn_recovers_missing_response_context(tmp_path: Path) 
     store = _store_with_storage(tmp_path, storage)
     store.record_turn(TurnRecord.create(["$user_msg"], response_event_id="$reply"))
 
+    recovered_record = replace(_owned_turn_record(target), requester_id="@metadata-user:example.org")
+    with patch.object(store, "_load_persisted_turn_record", return_value=recovered_record):
+        removed = store.forget_redacted_turn(
+            room=MagicMock(room_id="!room:example.org"),
+            redacted_event_id="$user_msg",
+            requester_user_id="@source-user:example.org",
+            target_hint=target,
+        )
+
+    assert removed is True
+    assert session.runs == []
+    store.deps.tool_runtime.build_execution_identity.assert_called_once_with(
+        target=target,
+        user_id="@source-user:example.org",
+    )
+
+
+def test_forget_redacted_turn_invalidates_compacted_replay(tmp_path: Path) -> None:
+    """Redaction must remove content already folded into the durable summary."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    scope = HistoryScope(kind="agent", scope_id="agent")
+    session = AgentSession(
+        session_id=target.session_id,
+        agent_id="agent",
+        runs=[],
+        summary=SessionSummary(summary="The user disclosed REDACTED_SECRET."),
+    )
+    update_scope_seen_event_ids(session, scope, ["$user_msg", "$older"])
+    write_scope_state(
+        session,
+        scope,
+        HistoryScopeState(last_summary_model="summary-model", compacted_run_ids=("$compacted-run",)),
+    )
+    storage = _FakeAgentStorage(session)
+    store = _store_with_storage(tmp_path, storage)
+    store.record_turn(_owned_turn_record(target))
+
+    removed = store.forget_redacted_turn(
+        room=MagicMock(room_id="!room:example.org"),
+        redacted_event_id="$user_msg",
+        requester_user_id="@user:example.org",
+        target_hint=target,
+    )
+
+    assert removed is True
+    assert storage.upserted_session is session
+    assert session.summary is None
+    assert read_scope_seen_event_ids(session, scope) == set()
+    assert read_scope_state(session, scope) == HistoryScopeState()
+
+
+def test_forget_redacted_turn_recovers_without_ledger_after_active_response(tmp_path: Path) -> None:
+    """Post-lock cleanup can recover a run persisted before its ledger outcome was recorded."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    session = AgentSession(
+        session_id=target.session_id,
+        agent_id="agent",
+        runs=[RunOutput(session_id=target.session_id, metadata={"matrix_event_id": "$user_msg"})],
+    )
+    storage = _FakeAgentStorage(session)
+    store = _store_with_storage(tmp_path, storage)
+
     with patch.object(store, "_load_persisted_turn_record", return_value=_owned_turn_record(target)):
         removed = store.forget_redacted_turn(
             room=MagicMock(room_id="!room:example.org"),
             redacted_event_id="$user_msg",
-            redactor_user_id="@user:example.org",
+            requester_user_id="@user:example.org",
+            target_hint=target,
         )
 
     assert removed is True

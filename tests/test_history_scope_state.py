@@ -22,6 +22,7 @@ from mindroom.constants import (
 )
 from mindroom.history.compaction import scope_visible_runs
 from mindroom.history.storage import (
+    invalidate_compacted_replay,
     read_scope_seen_event_ids,
     read_scope_state,
     record_compaction_chunk,
@@ -56,6 +57,34 @@ def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path) -> None
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
 
     assert read_scope_seen_event_ids(session, scope) == {"event-1"}
+
+
+def test_invalidate_compacted_replay_clears_summary_and_rebuild_markers(tmp_path: Path) -> None:
+    _config, _runtime_paths_value = _make_config(tmp_path)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    other_scope = HistoryScope(kind="team", scope_id="other-team")
+    session = _session("session-1")
+    session.summary = SessionSummary(summary="contains redacted history")
+    update_scope_seen_event_ids(session, scope, ["redacted-event", "old-event"])
+    update_scope_seen_event_ids(session, other_scope, ["other-event"])
+    write_scope_state(
+        session,
+        scope,
+        HistoryScopeState(
+            last_summary_model="summary-model",
+            compacted_run_ids=("run-1",),
+            force_compact_before_next_run=True,
+        ),
+    )
+    write_scope_state(session, other_scope, HistoryScopeState(last_summary_model="other-model"))
+
+    assert invalidate_compacted_replay(session, scope) is True
+
+    assert session.summary is None
+    assert read_scope_seen_event_ids(session, scope) == set()
+    assert read_scope_seen_event_ids(session, other_scope) == {"other-event"}
+    assert read_scope_state(session, scope) == HistoryScopeState(force_compact_before_next_run=True)
+    assert read_scope_state(session, other_scope) == HistoryScopeState(last_summary_model="other-model")
 
 
 def test_set_force_compaction_state_updates_only_force_flag(tmp_path: Path) -> None:

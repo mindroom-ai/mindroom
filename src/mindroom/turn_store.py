@@ -14,6 +14,7 @@ from agno.run.team import TeamRunOutput
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.agents import remove_run_by_event_id
 from mindroom.handled_turns import HandledTurnLedger, TurnRecord, TurnRecordCodec, same_turn_identity
+from mindroom.history.storage import invalidate_compacted_replay
 from mindroom.session_ids import create_session_id
 
 if TYPE_CHECKING:
@@ -249,23 +250,29 @@ class TurnStore:
         *,
         room: nio.MatrixRoom,
         redacted_event_id: str,
-        redactor_user_id: str,
+        requester_user_id: str | None,
+        target_hint: MessageTarget | None,
     ) -> bool:
         """Remove persisted runs for one handled turn whose source message was redacted.
 
-        The disk-backed ledger is the trigger: redactions of events this entity
-        never handled (agent placeholders, reactions, other entities' turns)
-        exit without touching session storage.
+        The disk-backed ledger is normally the trigger. ``target_hint`` also
+        permits post-lock recovery when an active response persisted its run
+        just before recording the terminal ledger outcome.
         """
         ledger_record = self._ledger.get_turn_record(redacted_event_id)
-        if ledger_record is None:
+        if ledger_record is None and target_hint is None:
             return False
-        requester_user_id = ledger_record.requester_id or redactor_user_id
+        if ledger_record is not None and ledger_record.requester_id is not None:
+            requester_user_id = ledger_record.requester_id
+        if requester_user_id is None:
+            return False
         turn_record = ledger_record
-        if turn_record.conversation_target is None or turn_record.history_scope is None:
+        if turn_record is None or turn_record.conversation_target is None or turn_record.history_scope is None:
             thread_id = (
                 ledger_record.conversation_target.resolved_thread_id
-                if ledger_record.conversation_target is not None
+                if ledger_record is not None and ledger_record.conversation_target is not None
+                else target_hint.resolved_thread_id
+                if target_hint is not None
                 else None
             )
             turn_record = (
@@ -277,12 +284,13 @@ class TurnStore:
                 )
                 or turn_record
             )
-        if turn_record.response_owner != self.deps.agent_name:
+        if turn_record is None or turn_record.response_owner != self.deps.agent_name:
             return False
         return self._remove_stale_runs_for_turn_record(
             turn_record=turn_record,
-            requester_user_id=turn_record.requester_id or redactor_user_id,
+            requester_user_id=requester_user_id,
             reason="redacted",
+            invalidate_summary=True,
         )
 
     def _latest_matching_persisted_turn_record(
@@ -373,6 +381,7 @@ class TurnStore:
         turn_record: TurnRecord,
         requester_user_id: str,
         reason: str,
+        invalidate_summary: bool = False,
     ) -> bool:
         """Remove persisted runs using the exact recorded target and history scope."""
         if turn_record.conversation_target is None or turn_record.history_scope is None:
@@ -399,11 +408,20 @@ class TurnStore:
                     )
                     or removed_any
                 )
+            if invalidate_summary:
+                session = (
+                    get_team_session(storage, session_id)
+                    if session_type is SessionType.TEAM
+                    else get_agent_session(storage, session_id)
+                )
+                if session is not None and invalidate_compacted_replay(session, turn_record.history_scope):
+                    storage.upsert_session(session)
+                    removed_any = True
         finally:
             storage.close()
         if removed_any:
             self.deps.state_writer.deps.logger.info(
-                "Removed stale persisted runs for handled turn",
+                "Removed stale persisted history for handled turn",
                 reason=reason,
                 source_event_ids=list(turn_record.source_event_ids),
                 session_id=session_id,

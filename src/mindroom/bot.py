@@ -1781,12 +1781,67 @@ class AgentBot:
 
     async def _on_redaction(self, room: nio.MatrixRoom, event: nio.RedactionEvent) -> None:
         """Keep cached history and persisted turn state consistent when Matrix redactions arrive."""
-        await self._conversation_cache.apply_redaction(room.room_id, event)
-        self._turn_store.forget_redacted_turn(
-            room=room,
+        target, requester_user_id, should_cleanup = await self._redacted_turn_cleanup_context(
+            room_id=room.room_id,
             redacted_event_id=event.redacts,
-            redactor_user_id=event.sender,
         )
+        await self._conversation_cache.apply_redaction(room.room_id, event)
+        if not should_cleanup or target is None:
+            return
+        await self._response_runner.run_serialized_state_mutation(
+            target=target,
+            mutation=lambda: self._turn_store.forget_redacted_turn(
+                room=room,
+                redacted_event_id=event.redacts,
+                requester_user_id=requester_user_id,
+                target_hint=target,
+            ),
+        )
+
+    async def _redacted_turn_cleanup_context(
+        self,
+        *,
+        room_id: str,
+        redacted_event_id: str,
+    ) -> tuple[MessageTarget | None, str | None, bool]:
+        """Resolve cleanup identity before the advisory cache applies the redaction."""
+        ledger_record = await asyncio.to_thread(self._turn_store.get_turn_record, redacted_event_id)
+        target = ledger_record.conversation_target if ledger_record is not None else None
+        requester_user_id = ledger_record.requester_id if ledger_record is not None else None
+        source_event: nio.Event | None = None
+        if ledger_record is None or target is None or requester_user_id is None:
+            response = await self._conversation_cache.get_event(
+                room_id,
+                redacted_event_id,
+                persist_lookup_fill=False,
+            )
+            if isinstance(response, nio.RoomGetEventResponse):
+                source_event = response.event
+        if source_event is not None:
+            source = source_event.source if isinstance(source_event.source, dict) else None
+            if target is None:
+                event_info = EventInfo.from_event(source)
+                target = self._conversation_resolver.build_message_target(
+                    room_id=room_id,
+                    thread_id=event_info.thread_id,
+                    reply_to_event_id=redacted_event_id,
+                    event_source=source,
+                )
+            if requester_user_id is None:
+                requester_user_id = self._ingress_validator.requester_user_id(
+                    sender=source_event.sender,
+                    source=source,
+                )
+        if target is None and ledger_record is not None:
+            target = self._conversation_resolver.build_message_target(
+                room_id=room_id,
+                thread_id=None,
+                reply_to_event_id=redacted_event_id,
+            )
+        should_cleanup = ledger_record is not None or (
+            target is not None and self._response_runner.has_active_response_for_target(target)
+        )
+        return target, requester_user_id, should_cleanup
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""

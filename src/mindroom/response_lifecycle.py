@@ -302,6 +302,16 @@ class ResponseLifecycleCoordinator:
             )
             queued_signal.finish_response_turn()
 
+    async def run_locked_state_mutation(
+        self,
+        *,
+        target: MessageTarget,
+        locked_operation: Callable[[MessageTarget], Awaitable[_LockedResponseResult]],
+    ) -> _LockedResponseResult:
+        """Serialize one persisted-state mutation with response work for the target."""
+        async with self._response_lifecycle_lock(target):
+            return await locked_operation(target)
+
 
 @dataclass(frozen=True)
 class _SessionStartedWatch:

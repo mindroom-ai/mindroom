@@ -120,6 +120,7 @@ if TYPE_CHECKING:
 type _MatrixEventId = str
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
+_StateMutationResult = TypeVar("_StateMutationResult")
 
 
 def _merge_response_extra_content(
@@ -673,6 +674,22 @@ class ResponseRunner:
     async def wait_for_thread_response_idle(self, room_id: str, thread_id: str | None) -> None:
         """Wait until one canonical room/thread has no active response turn."""
         await self._lifecycle_coordinator.wait_for_thread_idle(room_id, thread_id)
+
+    async def run_serialized_state_mutation(
+        self,
+        *,
+        target: MessageTarget,
+        mutation: Callable[[], _StateMutationResult],
+    ) -> _StateMutationResult:
+        """Offload one state mutation under the target's response lifecycle lock."""
+
+        async def run_mutation(_target: MessageTarget) -> _StateMutationResult:
+            return await asyncio.to_thread(mutation)
+
+        return await self._lifecycle_coordinator.run_locked_state_mutation(
+            target=target,
+            locked_operation=run_mutation,
+        )
 
     def reserve_waiting_human_message(
         self,
