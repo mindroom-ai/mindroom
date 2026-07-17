@@ -51,6 +51,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.llm_request_logging import record_llm_request_tools
 from mindroom.model_defaults import TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES
 from mindroom.model_instance_checks import isinstance_of_loaded
 
@@ -410,10 +411,11 @@ def prepare_claude_request_kwargs(
         prepared_kwargs,
         _model_deferred_tool_names(model),
     )
-    if not model.cache_system_prompt:
-        return prepared_kwargs
-    cache_control = _prompt_cache_control(extended_cache_time=model.extended_cache_time is True)
-    return _request_kwargs_with_prompt_cache_ladder(prepared_kwargs, cache_control)
+    if model.cache_system_prompt:
+        cache_control = _prompt_cache_control(extended_cache_time=model.extended_cache_time is True)
+        prepared_kwargs = _request_kwargs_with_prompt_cache_ladder(prepared_kwargs, cache_control)
+    record_llm_request_tools(prepared_kwargs.get("tools"))
+    return prepared_kwargs
 
 
 class _PromptCacheBetaProxy:
