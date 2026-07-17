@@ -244,7 +244,10 @@ def _set_turn_store_tracker(bot: AgentBot | TeamBot, tracker: MagicMock) -> Magi
     def update_handled_turn(
         lookup_event_ids: Sequence[str],
         update: Callable[[Mapping[str, TurnRecord]], TurnRecord],
+        *,
+        wait_for_persist: bool = False,
     ) -> TurnRecord:
+        del wait_for_persist  # The fake applies updates synchronously.
         existing_records = {
             source_event_id: turn_record
             for source_event_id in lookup_event_ids
