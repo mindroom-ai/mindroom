@@ -1183,6 +1183,7 @@ def test_server_tool_blocks_replay_to_non_anthropic_provider_without_crashing() 
 def test_replay_safe_tool_search_results_strips_response_only_fields() -> None:
     """Replayed tool-search results must carry only request-schema fields."""
     request_kwargs = {
+        "tools": [_wire_tool("get_weather")],
         "messages": [
             {
                 "role": "assistant",
@@ -1202,6 +1203,7 @@ def test_replay_safe_tool_search_results_strips_response_only_fields() -> None:
 def test_replay_safe_tool_search_results_drops_only_orphaned_search_uses() -> None:
     """Only regex-search uses missing a same-message result should be removed."""
     request_kwargs = {
+        "tools": [_wire_tool("get_weather")],
         "messages": [
             {
                 "role": "assistant",
@@ -1226,6 +1228,67 @@ def test_replay_safe_tool_search_results_drops_only_orphaned_search_uses() -> No
     ]
     assert request_kwargs["messages"][0]["content"][0] == _ORPHAN_TOOL_SEARCH_USE_BLOCK
     assert "citations" in request_kwargs["messages"][0]["content"][3]
+    assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
+
+
+def test_replay_safe_tool_search_results_drops_unavailable_references() -> None:
+    """A replayed search result should retain only tools available on the current request."""
+    result_block = {
+        **_DIRTY_TOOL_SEARCH_RESULT_BLOCK,
+        "content": {
+            "type": "tool_search_tool_search_result",
+            "tool_references": [
+                {"type": "tool_reference", "tool_name": "get_weather"},
+                {"type": "tool_reference", "tool_name": "retired_weather"},
+            ],
+        },
+    }
+    request_kwargs = {
+        "tools": [_wire_tool("get_weather")],
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [dict(_SERVER_TOOL_USE_BLOCK), result_block],
+            },
+        ],
+    }
+
+    prepared = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+
+    assert prepared["messages"][0]["content"] == [
+        _SERVER_TOOL_USE_BLOCK,
+        _TOOL_SEARCH_RESULT_BLOCK,
+    ]
+    assert len(request_kwargs["messages"][0]["content"][1]["content"]["tool_references"]) == 2
+    assert "citations" in request_kwargs["messages"][0]["content"][1]
+    assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
+
+
+def test_replay_safe_tool_search_results_drops_pair_when_all_references_are_unavailable() -> None:
+    """A search use and result should both disappear when no referenced tool remains available."""
+    request_kwargs = {
+        "tools": [_wire_tool("other_tool")],
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [
+                    dict(_OTHER_SERVER_TOOL_USE_BLOCK),
+                    dict(_SERVER_TOOL_USE_BLOCK),
+                    dict(_DIRTY_TOOL_SEARCH_RESULT_BLOCK),
+                    {"type": "text", "text": "found it"},
+                ],
+            },
+        ],
+    }
+
+    prepared = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+
+    assert prepared["messages"][0]["content"] == [
+        _OTHER_SERVER_TOOL_USE_BLOCK,
+        {"type": "text", "text": "found it"},
+    ]
+    assert request_kwargs["messages"][0]["content"][1] == _SERVER_TOOL_USE_BLOCK
+    assert request_kwargs["messages"][0]["content"][2] == _DIRTY_TOOL_SEARCH_RESULT_BLOCK
     assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
 
 
@@ -1325,14 +1388,14 @@ def _wire_tool_search_results(wire_messages: list[dict[str, object]]) -> list[ob
 
 
 def test_prompt_cache_hook_sanitizes_replayed_tool_search_results() -> None:
-    """A persisted tool-search result with response-only fields must not reach the wire."""
+    """A replayed search pair with no currently available tool must not reach the wire."""
     model = _vertex_claude_model()
     captured_kwargs = _install_fake_sync_client(model)
     install_claude_prompt_cache_hook(model)
 
     model.response(messages=_dirty_replay_messages(), compression_manager=None)
 
-    assert _wire_tool_search_results(captured_kwargs[0]["messages"]) == [_TOOL_SEARCH_RESULT_BLOCK]
+    assert _wire_tool_search_results(captured_kwargs[0]["messages"]) == []
 
 
 def test_prompt_cache_hook_sanitizes_replay_with_cache_disabled_and_no_deferred_tools() -> None:
@@ -1350,7 +1413,7 @@ def test_prompt_cache_hook_sanitizes_replay_with_cache_disabled_and_no_deferred_
     model.response(messages=_dirty_replay_messages(), compression_manager=None)
 
     wire_messages = captured_kwargs[0]["messages"]
-    assert _wire_tool_search_results(wire_messages) == [_TOOL_SEARCH_RESULT_BLOCK]
+    assert _wire_tool_search_results(wire_messages) == []
     assert _count_cache_markers({"messages": list(wire_messages)}) == 0
 
 
