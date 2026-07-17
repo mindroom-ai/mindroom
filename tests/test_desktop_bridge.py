@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
@@ -31,6 +33,9 @@ from mindroom.desktop.protocol import (
 from mindroom.desktop.provider import DesktopEmergencyStopError, DesktopProviderError, ScreenCapture
 from mindroom.matrix.olm_to_device import PinnedMatrixDevice
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 NOW_SECONDS = 10.0
 APP_ID = "com.example.Editor"
@@ -929,6 +934,76 @@ async def test_requester_agent_replay_and_sequence_are_enforced(transport: Async
 
     await bridge.on_to_device_event(_event(_command(request_id="request-3", sequence=2)))
     assert "sequence" in (_response(transport).error or "")
+
+
+@pytest.mark.asyncio
+async def test_started_control_is_not_repeated_after_bridge_restart(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    transport: AsyncMock,
+) -> None:
+    """A redelivered command with an interrupted durable record returns an unknown outcome."""
+    journal_path = tmp_path / "desktop_bridge" / "command_journal.json"
+    provider = FakeProvider()
+    command = _command(
+        "click",
+        parameters={"app": APP_ID, "state_id": "state-1", "x": 10, "y": 20, "button": "left"},
+    )
+    first_bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(allow_control=True),
+        clock=lambda: NOW_SECONDS,
+        journal_path=journal_path,
+    )
+    monkeypatch.setattr(first_bridge, "_execute_safely", AsyncMock(side_effect=asyncio.CancelledError))
+
+    with pytest.raises(asyncio.CancelledError):
+        await first_bridge.on_to_device_event(_event(command))
+
+    transport.assert_not_awaited()
+    restarted_bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(allow_control=True),
+        clock=lambda: NOW_SECONDS,
+        journal_path=journal_path,
+    )
+    await restarted_bridge.on_to_device_event(_event(command))
+
+    response = _response(transport)
+    assert response.ok
+    assert response.result["action_outcome"] == "unknown"
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_completed_response_is_replayed_after_bridge_restart(tmp_path: Path, transport: AsyncMock) -> None:
+    """A completed durable record returns its cached response without repeating local work."""
+    journal_path = tmp_path / "desktop_bridge" / "command_journal.json"
+    provider = FakeProvider()
+    command = _command()
+    first_bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(),
+        clock=lambda: NOW_SECONDS,
+        journal_path=journal_path,
+    )
+    await first_bridge.on_to_device_event(_event(command))
+    first_response_content = transport.await_args.kwargs["content"]
+
+    restarted_bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(),
+        clock=lambda: NOW_SECONDS,
+        journal_path=journal_path,
+    )
+    await restarted_bridge.on_to_device_event(_event(command))
+
+    assert transport.await_args.kwargs["content"] == first_response_content
+    assert provider.calls == [("get_app_state", APP_ID), ("screenshot", (APP_ID, "state-1"))]
 
 
 @pytest.mark.asyncio

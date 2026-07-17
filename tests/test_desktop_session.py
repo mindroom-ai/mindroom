@@ -10,16 +10,19 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
 from mindroom.desktop.session import (
     DesktopMatrixSession,
     DesktopSessionError,
     _prepare_crypto,
     load_desktop_session,
+    login_desktop_client,
+    open_desktop_client,
     save_desktop_session,
 )
+from mindroom.matrix.client_session import PermanentMatrixStartupError
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _session() -> DesktopMatrixSession:
@@ -97,3 +100,33 @@ async def test_initial_crypto_sync_does_not_announce_bridge_online() -> None:
     await _prepare_crypto(client)
 
     client.sync.assert_awaited_once_with(timeout=0, full_state=False, set_presence="offline")
+
+
+@pytest.mark.asyncio
+async def test_login_translates_expected_matrix_authentication_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bad desktop credentials become one actionable session-domain error."""
+    monkeypatch.setattr(
+        "mindroom.desktop.session.login",
+        AsyncMock(side_effect=PermanentMatrixStartupError("invalid credentials")),
+    )
+
+    with pytest.raises(DesktopSessionError, match="invalid credentials"):
+        await login_desktop_client(
+            homeserver="https://matrix.example.org",
+            user_id="@desktop:example.org",
+            password="wrong-password",  # noqa: S106 - Test-only invalid credential.
+            runtime_paths=SimpleNamespace(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_restore_translates_expected_revoked_session_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A revoked saved access token becomes one actionable session-domain error."""
+    monkeypatch.setattr("mindroom.desktop.session.olm_store_exists", lambda *_args: True)
+    monkeypatch.setattr(
+        "mindroom.desktop.session.restore_login",
+        AsyncMock(side_effect=PermanentMatrixStartupError("access token revoked")),
+    )
+
+    with pytest.raises(DesktopSessionError, match="access token revoked"):
+        await open_desktop_client(_session(), runtime_paths=SimpleNamespace())

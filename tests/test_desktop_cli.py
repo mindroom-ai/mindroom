@@ -170,11 +170,15 @@ class _FakeBridgeClient:
 
 
 @pytest.mark.asyncio
-async def test_bridge_registers_command_callback_before_initial_sync(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Queued encrypted commands are dispatched instead of consumed during startup."""
+async def test_bridge_pins_controller_before_consuming_initial_sync(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Fresh stores can authenticate queued commands before the initial sync acknowledges them."""
     client = _FakeBridgeClient()
     bridge = SimpleNamespace(on_to_device_event=AsyncMock())
     lifecycle: list[str] = []
+    controller_resolved = False
 
     async def open_client(*_args: object, **_kwargs: object) -> _FakeBridgeClient:
         lifecycle.append("open")
@@ -182,6 +186,7 @@ async def test_bridge_registers_command_callback_before_initial_sync(monkeypatch
 
     async def prepare_client(preparing_client: _FakeBridgeClient) -> None:
         lifecycle.append("prepare")
+        assert controller_resolved
         assert preparing_client.to_device_callback is not None
         event = AuthenticatedToDeviceEvent(
             source={"content": {}},
@@ -193,7 +198,9 @@ async def test_bridge_registers_command_callback_before_initial_sync(monkeypatch
         await asyncio.sleep(0)
 
     async def resolve_device(*_args: object, **_kwargs: object) -> None:
+        nonlocal controller_resolved
         lifecycle.append("resolve")
+        controller_resolved = True
 
     monkeypatch.setattr("mindroom.desktop.session.open_desktop_client", open_client)
     monkeypatch.setattr("mindroom.desktop.session.prepare_desktop_client", prepare_client)
@@ -202,7 +209,7 @@ async def test_bridge_registers_command_callback_before_initial_sync(monkeypatch
     monkeypatch.setattr("mindroom.desktop.bridge.DesktopBridge", lambda **_kwargs: bridge)
 
     await desktop_cli._run_bridge(
-        runtime_paths=SimpleNamespace(),
+        runtime_paths=SimpleNamespace(storage_root=tmp_path),
         session=DesktopMatrixSession(
             homeserver="https://matrix.example.org",
             user_id="@desktop:example.org",
@@ -221,7 +228,7 @@ async def test_bridge_registers_command_callback_before_initial_sync(monkeypatch
         jpeg_quality=80,
     )
 
-    assert lifecycle == ["open", "prepare", "resolve"]
+    assert lifecycle == ["open", "resolve", "prepare"]
     bridge.on_to_device_event.assert_awaited_once()
 
 

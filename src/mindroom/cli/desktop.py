@@ -219,6 +219,7 @@ def desktop_run(
 ) -> None:
     """Run the outbound-only Matrix sync loop and execute locally authorized commands."""
     from mindroom.cli.config import activate_cli_runtime  # noqa: PLC0415
+    from mindroom.desktop.command_journal import DesktopCommandJournalError  # noqa: PLC0415
     from mindroom.desktop.provider import DesktopProviderError  # noqa: PLC0415
     from mindroom.desktop.session import (  # noqa: PLC0415
         DesktopSessionError,
@@ -259,7 +260,7 @@ def desktop_run(
         )
     except KeyboardInterrupt:
         _console.print("\n[yellow]Desktop bridge stopped.[/yellow]")
-    except (DesktopProviderError, DesktopSessionError, OlmToDeviceError) as exc:
+    except (DesktopCommandJournalError, DesktopProviderError, DesktopSessionError, OlmToDeviceError) as exc:
         _error_console.print(f"[red]Desktop bridge failed:[/red] {exc}")
         raise typer.Exit(1) from None
 
@@ -351,6 +352,7 @@ async def _run_bridge(
                 browser_enabled=browser_extension,
             ),
             browser_provider=browser_provider,
+            journal_path=runtime_paths.storage_root / "desktop_bridge" / "command_journal.json",
         )
 
         def schedule_event(event: nio.ToDeviceEvent) -> None:
@@ -369,8 +371,8 @@ async def _run_bridge(
                 _error_console.print(f"[red]Desktop command task failed:[/red] {error}")
 
         client.add_to_device_callback(schedule_event, AuthenticatedToDeviceEvent)
-        await prepare_desktop_client(client)
         await resolve_pinned_device(client, controller)
+        await prepare_desktop_client(client)
 
         mode = f"control enabled for {lease_minutes} minute(s)" if allow_control else "observe-only"
         _console.print(f"[green]Desktop bridge online:[/green] {mode}")

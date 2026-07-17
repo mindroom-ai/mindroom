@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, cast
 import nio
 
 from mindroom.durable_write import write_json_file_durable
-from mindroom.matrix.client_session import login, olm_store_exists, restore_login
+from mindroom.matrix.client_session import PermanentMatrixStartupError, login, olm_store_exists, restore_login
 from mindroom.matrix.cross_signing import ensure_agent_cross_signing
 from mindroom.matrix.users import AgentMatrixUser
 
@@ -101,7 +101,11 @@ async def login_desktop_client(
     runtime_paths: RuntimePaths,
 ) -> tuple[nio.AsyncClient, DesktopMatrixSession]:
     """Create a fresh cross-signed Matrix desktop device and its restorable session."""
-    client = await login(homeserver, user_id, password, runtime_paths)
+    try:
+        client = await login(homeserver, user_id, password, runtime_paths)
+    except (PermanentMatrixStartupError, ValueError) as exc:
+        msg = f"Desktop Matrix login failed: {exc}"
+        raise DesktopSessionError(msg) from exc
     try:
         await _prepare_crypto(client)
         authenticated_session = _session_from_authenticated_client(client, homeserver=homeserver)
@@ -158,13 +162,17 @@ async def open_desktop_client(
     if not olm_store_exists(session.user_id, session.device_id, runtime_paths):
         msg = "Desktop Matrix encryption store is missing; run 'mindroom desktop login --replace' for a fresh device."
         raise DesktopSessionError(msg)
-    return await restore_login(
-        session.homeserver,
-        session.user_id,
-        session.device_id,
-        session.access_token,
-        runtime_paths,
-    )
+    try:
+        return await restore_login(
+            session.homeserver,
+            session.user_id,
+            session.device_id,
+            session.access_token,
+            runtime_paths,
+        )
+    except (PermanentMatrixStartupError, ValueError) as exc:
+        msg = f"Desktop Matrix session restore failed: {exc}"
+        raise DesktopSessionError(msg) from exc
 
 
 async def prepare_desktop_client(client: nio.AsyncClient) -> None:

@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 import time
-from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -14,6 +13,7 @@ from mindroom.desktop.accessibility import (
     AccessibilityActionOutcomeUnknownError,
     AccessibilityError,
 )
+from mindroom.desktop.command_journal import DesktopCommandJournal
 from mindroom.desktop.media import DesktopMediaError, upload_encrypted_screenshot
 from mindroom.desktop.playwright_mcp import (
     BrowserImage,
@@ -46,6 +46,7 @@ from mindroom.matrix.olm_to_device import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     import nio
 
@@ -53,8 +54,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_MAX_REPLAY_RESPONSES = 1024
-_MAX_TRACKED_SESSIONS = 128
 _MAX_FUTURE_SKEW_MS = 30_000
 _MAX_PARAMETER_TEXT_LENGTH = 2_000
 _MAX_PARAMETER_IDENTIFIER_LENGTH = 256
@@ -113,12 +112,6 @@ class _Execution:
     browser_image: BrowserImage | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class _CachedDesktopResponse:
-    command_fingerprint: str
-    response: DesktopResponse
-
-
 @dataclass
 class DesktopBridge:
     """Validate, execute, and answer pinned encrypted desktop commands."""
@@ -129,8 +122,8 @@ class DesktopBridge:
     browser_provider: BrowserProvider | None = None
     clock: Callable[[], float] = time.time
     monotonic_clock: Callable[[], float] = time.monotonic
-    _responses: OrderedDict[str, _CachedDesktopResponse] = field(default_factory=OrderedDict, init=False)
-    _sequence_high_watermarks: OrderedDict[str, int] = field(default_factory=OrderedDict, init=False)
+    journal_path: Path | None = None
+    _journal: DesktopCommandJournal = field(init=False)
     _in_flight: set[str] = field(default_factory=set, init=False)
     _execution_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _control_revoked: bool = field(default=False, init=False)
@@ -138,6 +131,7 @@ class DesktopBridge:
 
     def __post_init__(self) -> None:
         """Convert the wall-clock lease label into a rollback-safe local deadline."""
+        self._journal = DesktopCommandJournal.load(self.journal_path)
         if self.policy.browser_enabled != (self.browser_provider is not None):
             msg = "Desktop browser policy and local browser provider must be enabled together."
             raise ValueError(msg)
@@ -163,9 +157,10 @@ class DesktopBridge:
             logger.warning("desktop_command_malformed", reason=str(exc))
             return
 
-        cached = self._responses.get(command.request_id)
+        command_fingerprint = _command_fingerprint(command)
+        cached = self._journal.get(command.request_id)
         if cached is not None:
-            if cached.command_fingerprint != _command_fingerprint(command):
+            if cached.command_fingerprint != command_fingerprint:
                 logger.warning(
                     "desktop_command_request_id_reused",
                     request_id=command.request_id,
@@ -177,15 +172,19 @@ class DesktopBridge:
                     self._error_response(command, "Desktop request ID was reused with different command content."),
                 )
                 return
+            response = cached.response
+            if response is None:
+                response = self._interrupted_response(command)
+                self._journal.remember_response(command, command_fingerprint, response)
             logger.info(
                 "desktop_command_replayed",
                 request_id=command.request_id,
                 action=command.action,
                 requester_id=command.requester_id,
                 agent_name=command.agent_name,
-                ok=cached.response.ok,
+                ok=response.ok,
             )
-            await self._send_response(cached.response)
+            await self._send_response(response)
             return
         if command.request_id in self._in_flight:
             return
@@ -193,8 +192,8 @@ class DesktopBridge:
         self._in_flight.add(command.request_id)
         try:
             async with self._execution_lock:
-                response = await self._process(command)
-            self._remember_response(command, response)
+                response = await self._process(command, command_fingerprint)
+            self._journal.remember_response(command, command_fingerprint, response)
             logger.info(
                 "desktop_command_completed",
                 request_id=command.request_id,
@@ -208,13 +207,14 @@ class DesktopBridge:
         finally:
             self._in_flight.discard(command.request_id)
 
-    async def _process(self, command: DesktopCommand) -> DesktopResponse:  # noqa: PLR0911
+    async def _process(self, command: DesktopCommand, command_fingerprint: str) -> DesktopResponse:  # noqa: PLR0911
         policy_error = self._policy_error(command)
         if policy_error is not None:
             return self._error_response(command, policy_error)
-        sequence_error = self._record_sequence(command)
+        sequence_error = self._journal.sequence_error(command)
         if sequence_error is not None:
             return self._error_response(command, sequence_error)
+        self._journal.remember_started(command, command_fingerprint)
         execution = await self._execute_safely(command)
         if isinstance(execution, DesktopResponse):
             return execution
@@ -391,21 +391,6 @@ class DesktopBridge:
             return "Desktop emergency stop is latched; restart the bridge locally before granting control again."
         if not self._control_available():
             return "Local desktop control lease has expired."
-        return None
-
-    def _record_sequence(self, command: DesktopCommand) -> str | None:
-        previous = self._sequence_high_watermarks.get(command.session_id)
-        if previous is not None and command.sequence <= previous:
-            return "Desktop command sequence was already used or arrived out of order."
-        self._sequence_high_watermarks[command.session_id] = command.sequence
-        self._sequence_high_watermarks.move_to_end(command.session_id)
-        while len(self._sequence_high_watermarks) > _MAX_TRACKED_SESSIONS:
-            evicted_session_id, _ = self._sequence_high_watermarks.popitem(last=False)
-            logger.warning(
-                "desktop_sequence_session_evicted",
-                session_id=evicted_session_id,
-                tracked_session_limit=_MAX_TRACKED_SESSIONS,
-            )
         return None
 
     async def _execute(self, command: DesktopCommand) -> _Execution:
@@ -649,14 +634,13 @@ class DesktopBridge:
             result={"action": command.action, "action_outcome": "unknown", "warning": warning},
         )
 
-    def _remember_response(self, command: DesktopCommand, response: DesktopResponse) -> None:
-        self._responses[response.request_id] = _CachedDesktopResponse(
-            command_fingerprint=_command_fingerprint(command),
-            response=response,
+    def _interrupted_response(self, command: DesktopCommand) -> DesktopResponse:
+        if command.action in DESKTOP_CONTROL_ACTIONS:
+            return self._unknown_control_response(command)
+        return self._error_response(
+            command,
+            "Desktop observation was interrupted before its outcome was recorded; retry with a new request.",
         )
-        self._responses.move_to_end(response.request_id)
-        while len(self._responses) > _MAX_REPLAY_RESPONSES:
-            self._responses.popitem(last=False)
 
     async def _send_response(self, response: DesktopResponse) -> None:
         try:
