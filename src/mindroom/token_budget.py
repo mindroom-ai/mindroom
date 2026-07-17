@@ -7,6 +7,7 @@ Agno replay helpers and compaction serialization stay in their own modules.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
@@ -63,6 +64,13 @@ class _ModelWithMaxCompletionTokens(Protocol):
     max_completion_tokens: int | None
 
 
+@runtime_checkable
+class _ModelWithOptions(Protocol):
+    """Typed surface for models with nested request options."""
+
+    options: Mapping[str, object] | None
+
+
 def estimate_text_tokens(value: str | list[str] | None) -> int:
     """Estimate token count using chars / 4."""
     if value is None:
@@ -106,13 +114,15 @@ def estimate_compaction_input_tokens(
 
 def configured_model_max_output_tokens(model: Model) -> int | None:
     """Return the largest positive output cap exposed by a loaded model."""
-    candidates: list[int | None] = []
+    candidates: list[object] = []
     if isinstance(model, _ModelWithMaxTokens):
         candidates.append(model.max_tokens)
     if isinstance(model, _ModelWithMaxOutputTokens):
         candidates.append(model.max_output_tokens)
     if isinstance(model, _ModelWithMaxCompletionTokens):
         candidates.append(model.max_completion_tokens)
+    if isinstance(model, _ModelWithOptions) and isinstance(model.options, Mapping):
+        candidates.append(model.options.get("num_predict"))
     positive_caps = [cap for cap in candidates if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0]
     return max(positive_caps, default=None)
 

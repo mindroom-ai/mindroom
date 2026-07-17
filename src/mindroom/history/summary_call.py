@@ -10,8 +10,8 @@ It enforces the call-side half of the compaction invariants
    at or above max_tokens is a 400 from Anthropic), SDK retries disabled, and
    one SDK timeout coordinated with the outer chunk budget
    (``MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS``) instead of two uncoordinated
-   constants in two modules. Claude summary output uses the loaded model's own
-   max_tokens as the truncation guard. Unknown providers pass through untouched
+   constants in two modules. Summary output uses the loaded model's configured
+   output cap as the truncation guard. Unknown providers pass through untouched
    and rely on the outer chunk timeout alone.
 
 4. Retry on provider failure is deterministic.
@@ -47,6 +47,7 @@ from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
+from mindroom.token_budget import configured_model_max_output_tokens
 
 if TYPE_CHECKING:
     from agno.models.base import Model
@@ -225,7 +226,7 @@ async def generate_compaction_summary(
     """Issue one compaction summary call with tuned provider config and one timeout."""
     resolved_timeout = MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     configured_model = configure_summary_model(model, timeout_seconds=resolved_timeout)
-    summary_output_limit = _summary_output_token_limit(configured_model)
+    summary_output_limit = configured_model_max_output_tokens(configured_model)
 
     async def _request_summary() -> ModelResponse:
         try:
@@ -292,11 +293,6 @@ def _normalize_compaction_summary_text(raw_text: str) -> str:
         if first_newline != -1:
             normalized = normalized[first_newline + 1 : -3].strip()
     return normalized
-
-
-def _summary_output_token_limit(model: Model) -> int | None:
-    claude_model = as_anthropic_claude(model)
-    return claude_model.max_tokens if claude_model is not None else None
 
 
 def _summary_response_likely_truncated(response: ModelResponse, *, output_token_limit: int | None) -> bool:

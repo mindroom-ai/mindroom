@@ -22,6 +22,7 @@ from agno.agent import Agent
 from agno.models.anthropic import Claude
 from agno.models.google import Gemini
 from agno.models.message import Message
+from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat, OpenAIResponses
 from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
@@ -545,6 +546,36 @@ async def test_generate_compaction_summary_uses_configured_output_cap() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "model",
+    [
+        OpenAIResponses(id="gpt-5.6", max_output_tokens=1_024),
+        OpenAIChat(id="gpt-5.6", max_completion_tokens=1_024),
+        Gemini(id="gemini-3.5-flash", max_output_tokens=1_024),
+    ],
+)
+@pytest.mark.asyncio
+async def test_generate_compaction_summary_rejects_provider_output_cap_truncation(model: Model) -> None:
+    with (
+        patch.object(
+            model,
+            "aresponse",
+            new=AsyncMock(
+                return_value=ModelResponse(
+                    content="durable summary ended at its output cap.",
+                    output_tokens=1_024,
+                ),
+            ),
+        ),
+        pytest.raises(CompactionSummaryOutputLimitError, match="output token limit"),
+    ):
+        await generate_compaction_summary(
+            model=model,
+            summary_input="conversation payload",
+            summary_prompt="Summarize the conversation.",
+        )
+
+
 @pytest.mark.asyncio
 async def test_generate_compaction_summary_allows_claude_summary_below_output_cap() -> None:
     summary = await generate_compaction_summary(
@@ -766,6 +797,7 @@ def test_compaction_budget_reserves_loaded_model_output_cap() -> None:
         OpenAIResponses(id="gpt-5.6", max_output_tokens=64_000),
         OpenAIChat(id="gpt-5.6", max_completion_tokens=64_000),
         Gemini(id="gemini-3.5-flash", max_output_tokens=64_000),
+        Ollama(id="llama3.1", options={"num_predict": 64_000}),
     ],
 )
 def test_loaded_model_output_cap_supports_provider_parameter_names(model: Model) -> None:

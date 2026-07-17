@@ -259,7 +259,7 @@ You can tune compaction behavior with these settings:
 
 - Use `threshold_tokens` or `threshold_percent` to set the soft trigger budget. Crossing this soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting for that reply.
 - Use `replay_window_tokens` to keep persisted replay and required compaction within a smaller operational window without presenting that smaller value as the provider's request limit.
-- Use `reserve_tokens` to leave hard-budget headroom for the current prompt and output.
+- Use `reserve_tokens` to leave hard-budget headroom for the current prompt and output; MindRoom reserves the larger of this value and the loaded summary model's positive output cap.
 
 When the active runtime model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
 When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
@@ -268,6 +268,8 @@ Manual `compact_context` records a durable request that runs before the next rep
 Manual `compact_context` remains available when a compaction model and context window are configured.
 It still uses the active runtime window for the final replay-fit step, but destructive compaction itself can be available whenever an explicit `compaction.model` has its own `context_window`.
 If you set `compaction.model`, that summary model must also define its own `context_window` for the durable summary-generation pass.
+MindRoom recognizes output caps exposed as `max_tokens`, `max_output_tokens`, `max_completion_tokens`, or Ollama `options.num_predict`.
+A cap that leaves no usable summary input budget makes compaction fail without deleting the raw history.
 Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place.
 Otherwise MindRoom leaves the session unchanged and relies on replay fitting for that reply.
 The budget uses a chars/4 approximation and reserves headroom for the current prompt and output.

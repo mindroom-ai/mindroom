@@ -190,7 +190,7 @@ Crossing that soft trigger while still within the hard budget leaves the stored 
 You can tune compaction behavior with these settings:
 
 - Use `replay_window_tokens` to cap persisted replay and required-compaction planning below the model's real context window without lowering the provider request limit.
-- Use `reserve_tokens` to leave hard-budget headroom.
+- Use `reserve_tokens` to leave hard-budget headroom; MindRoom reserves the larger of this value and the loaded summary model's positive output cap.
 - Use `model` to choose the summary model.
 - Set `enabled: false` to disable automatic pre-reply compaction for this agent.
 
