@@ -25,6 +25,7 @@ import tempfile
 import time
 import wave
 import zlib
+from contextlib import closing
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -355,7 +356,11 @@ class MatrixApi:
             detail = f" ({errcode})" if isinstance(errcode, str) else ""
             msg = f"Matrix {operation} failed with HTTP {response.status_code}{detail}"
             raise MatrixAuditError(msg)
-        parsed = response.json()
+        try:
+            parsed = response.json()
+        except ValueError as exc:
+            msg = f"Matrix {operation} returned malformed JSON"
+            raise MatrixAuditError(msg) from exc
         if not isinstance(parsed, dict):
             msg = f"Matrix {operation} returned a non-object response"
             raise MatrixAuditError(msg)
@@ -1253,8 +1258,8 @@ async def _strict_thread_read_sequence(
     )
     client.access_token = config.access_token
     reads: list[ThreadReadRecord] = []
-    await cache.initialize()
     try:
+        await cache.initialize()
         strict_child_id = await api.send_event(
             room_id,
             "m.room.message",
@@ -1342,7 +1347,7 @@ async def _strict_thread_read_sequence(
 def read_cache_snapshot(cache_db_path: Path, room_id: str) -> CacheSnapshot:
     """Read cache evidence through SQLite read-only/query-only mode."""
     database_uri = f"file:{quote(str(cache_db_path.resolve()))}?mode=ro"
-    with sqlite3.connect(database_uri, uri=True) as db:
+    with closing(sqlite3.connect(database_uri, uri=True)) as db:
         db.execute("PRAGMA query_only = ON")
         quick_check_row = db.execute("PRAGMA quick_check").fetchone()
         active_event_ids = tuple(

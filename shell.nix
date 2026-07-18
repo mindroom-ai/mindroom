@@ -36,6 +36,7 @@ pkgs.mkShell {
     # Node.js and bun for running the widget
     nodejs_24
     bun
+    ffmpeg-headless
 
     # uv for Python package management
     uv

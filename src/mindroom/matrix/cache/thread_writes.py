@@ -110,14 +110,6 @@ def _threaded_sync_event_cache_update(
     room_id: str,
     event: nio.Event,
 ) -> tuple[str, dict[str, object]] | None:
-    event_source = event.source if isinstance(event.source, dict) else {}
-    event_info = EventInfo.from_event(event_source)
-    event_type = event_source.get("type")
-    if not is_thread_affecting_relation(
-        event_info,
-        event_type=event_type if isinstance(event_type, str) else None,
-    ):
-        return None
     event_id = event.event_id
     if not isinstance(event_id, str) or not event_id:
         return None

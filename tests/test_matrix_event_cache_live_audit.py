@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 import httpx
 import pytest
 
 from tests.manual.matrix_event_cache_live_audit import (
+    AuditConfig,
     AuditEvidence,
     CacheSnapshot,
     InteractionRecord,
@@ -16,10 +19,14 @@ from tests.manual.matrix_event_cache_live_audit import (
     MatrixAuditError,
     ThreadReadRecord,
     _secret_free_evidence,
+    _strict_thread_read_sequence,
     media_fixtures,
     new_transaction_id,
     validate_interaction_expectations,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _empty_evidence() -> AuditEvidence:
@@ -128,6 +135,74 @@ async def test_authenticated_media_round_trip_keeps_token_out_of_evidence() -> N
         "download:tiny.png",
     ]
     assert secret not in repr(api.timings)
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_rejects_malformed_json_without_exposing_body() -> None:
+    """Malformed upstream JSON should fail without copying the response body into the error."""
+    sensitive_body = "not-json-sensitive-upstream-content"
+    access_token = UUID("10000000-0000-4000-8000-000000000003").hex
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=sensitive_body)
+
+    async with MatrixApi(
+        base_url="https://matrix.example",
+        access_token=access_token,
+        transport=httpx.MockTransport(handler),
+    ) as api:
+        with pytest.raises(MatrixAuditError, match="returned malformed JSON") as exc_info:
+            await api.whoami()
+
+    assert sensitive_body not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_strict_read_closes_resources_when_cache_initialization_fails(
+    tmp_path: Path,
+) -> None:
+    """Both isolated resources should close when cache initialization fails."""
+    cache = AsyncMock()
+    cache.initialize.side_effect = RuntimeError("initialization failed")
+    client = AsyncMock()
+    access_token = UUID("10000000-0000-4000-8000-000000000004").hex
+    config = AuditConfig(
+        base_url="https://matrix.example",
+        access_token=access_token,
+        invite_access_token=None,
+        evidence_path=tmp_path / "evidence.json",
+        cache_db_path=tmp_path / "service.db",
+        strict_read_cache_db_path=tmp_path / "strict.db",
+        invite_user_id=None,
+        trigger_user_id=None,
+        strict_thread_reads=True,
+        settle_seconds=0.0,
+        trigger_wait_seconds=0.0,
+    )
+
+    with (
+        patch(
+            "tests.manual.matrix_event_cache_live_audit.SqliteEventCache",
+            return_value=cache,
+        ),
+        patch(
+            "tests.manual.matrix_event_cache_live_audit.nio.AsyncClient",
+            return_value=client,
+        ),
+        pytest.raises(RuntimeError, match="initialization failed"),
+    ):
+        await _strict_thread_read_sequence(
+            AsyncMock(),
+            config=config,
+            room_id="!audit:example",
+            root_id="$root",
+            user_id="@audit:example",
+            device_id="DEVICE",
+            records=[],
+        )
+
+    client.close.assert_awaited_once()
+    cache.close.assert_awaited_once()
 
 
 def _thread_read(
