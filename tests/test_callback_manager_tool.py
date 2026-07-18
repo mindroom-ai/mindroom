@@ -7,28 +7,28 @@ import os
 import stat
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
+
+import pytest
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.custom_tools.callback_manager import CallbackManagerTools
 from mindroom.external_triggers.store import ExternalTriggerStore
 from mindroom.message_target import MessageTarget
+from mindroom.runtime_state import reset_runtime_state, set_api_server_address
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-
-if TYPE_CHECKING:
-    import pytest
 
 
 class _Client:
     user_id = "@mindroom_coder:example.org"
 
 
-def _runtime_paths(tmp_path: Path) -> RuntimePaths:
+def _runtime_paths(tmp_path: Path, process_env: dict[str, str] | None = None) -> RuntimePaths:
     return resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "mindroom_data",
-        process_env={},
+        process_env=process_env or {},
     )
 
 
@@ -46,14 +46,19 @@ def _config() -> Config:
     )
 
 
-def _context(tmp_path: Path, *, requester_id: str = "@owner:example.org") -> ToolRuntimeContext:
+def _context(
+    tmp_path: Path,
+    *,
+    requester_id: str = "@owner:example.org",
+    process_env: dict[str, str] | None = None,
+) -> ToolRuntimeContext:
     return ToolRuntimeContext(
         agent_name="coder",
         target=MessageTarget.resolve(room_id="lobby", thread_id="$thread", reply_to_event_id=None),
         requester_id=requester_id,
         client=cast("Any", _Client()),
         config=_config(),
-        runtime_paths=_runtime_paths(tmp_path),
+        runtime_paths=_runtime_paths(tmp_path, process_env),
         event_cache=cast("Any", object()),
         conversation_cache=cast("Any", object()),
     )
@@ -90,9 +95,61 @@ def test_mint_callback_writes_one_bound_script(tmp_path: Path) -> None:
     assert record.allowed_kinds == ("mindroom.callback.completed",)
 
     script_text = script_path.read_text(encoding="utf-8")
-    assert f"/api/triggers/{callback_id}" in script_text
+    assert f"CALLBACK_URL=http://127.0.0.1:8765/api/triggers/{callback_id}" in script_text
     assert "CALLBACK_TOKEN=mrt_" in script_text
     assert "mrt_" not in store.store_path.read_text(encoding="utf-8")
+
+
+def test_mint_callback_targets_bound_api_server_port(tmp_path: Path) -> None:
+    """The script URL follows the port the running API server actually bound."""
+    set_api_server_address("0.0.0.0", 8766)  # noqa: S104
+    try:
+        with tool_runtime_context(_context(tmp_path)):
+            payload = _payload(CallbackManagerTools().mint_callback("non-default port"))
+    finally:
+        reset_runtime_state()
+
+    script_text = Path(payload["script_path"]).read_text(encoding="utf-8")
+    assert "CALLBACK_URL=http://127.0.0.1:8766/api/triggers/callback_" in script_text
+    assert ":8765" not in script_text
+
+
+@pytest.mark.parametrize(
+    ("host", "expected_base_url"),
+    [
+        ("::", "http://[::1]:8766"),
+        ("::1", "http://[::1]:8766"),
+    ],
+)
+def test_mint_callback_formats_ipv6_api_server_address(
+    tmp_path: Path,
+    host: str,
+    expected_base_url: str,
+) -> None:
+    """IPv6 bind addresses produce reachable, bracketed callback URLs."""
+    set_api_server_address(host, 8766)
+    try:
+        with tool_runtime_context(_context(tmp_path)):
+            payload = _payload(CallbackManagerTools().mint_callback("IPv6 address"))
+    finally:
+        reset_runtime_state()
+
+    script_text = Path(payload["script_path"]).read_text(encoding="utf-8")
+    assert f"{expected_base_url}/api/triggers/callback_" in script_text
+
+
+def test_mint_callback_prefers_explicit_mindroom_url(tmp_path: Path) -> None:
+    """An explicit MINDROOM_URL wins over the bound API server address."""
+    set_api_server_address("0.0.0.0", 8766)  # noqa: S104
+    try:
+        env = {"MINDROOM_URL": "https://hub.example.org/"}
+        with tool_runtime_context(_context(tmp_path, process_env=env)):
+            payload = _payload(CallbackManagerTools().mint_callback("explicit url"))
+    finally:
+        reset_runtime_state()
+
+    script_text = Path(payload["script_path"]).read_text(encoding="utf-8")
+    assert "CALLBACK_URL=https://hub.example.org/api/triggers/callback_" in script_text
 
 
 def test_generated_script_posts_summary_and_deletes_itself(tmp_path: Path) -> None:
