@@ -557,6 +557,7 @@ async def _generate_compaction_summary_with_retry(
             retry_budget = retry_policy.retry_budget(attempt=attempt, budget=budget, error=exc)
             if retry_budget is not None:
                 if retry_budget == budget:
+                    await asyncio.sleep(retry_policy.same_input_retry_delay_seconds)
                     attempt += 1
                     continue
                 rebuilt_input, rebuilt_runs = _build_summary_input(

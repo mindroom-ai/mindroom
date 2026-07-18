@@ -91,13 +91,15 @@ class SummaryRetryPolicy:
 
     The schedule is deterministic: each shrinkable failure divides the input
     budget by ``shrink_divisor`` (clamped to ``floor_tokens``), while transient
-    provider errors keep the same input. Once the budget can no longer shrink,
-    or ``max_attempts`` is reached, the error propagates.
+    provider errors wait ``same_input_retry_delay_seconds`` and keep the same
+    input. Once the budget can no longer shrink, or ``max_attempts`` is reached,
+    the error propagates.
     """
 
     max_attempts: int = 2
     shrink_divisor: int = 2
     floor_tokens: int = 1_000
+    same_input_retry_delay_seconds: float = 1.0
 
     def should_shrink(self, error: Exception) -> bool:
         """Return whether a smaller summary input may resolve this provider failure."""

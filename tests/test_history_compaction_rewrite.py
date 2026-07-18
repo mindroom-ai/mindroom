@@ -35,7 +35,7 @@ from mindroom.history.storage import (
     record_compaction_chunk,
     write_scope_state,
 )
-from mindroom.history.summary_call import CompactionSummaryOutputLimitError
+from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, CompactionSummaryOutputLimitError
 from mindroom.history.types import (
     CompactionLifecycleProgress,
     HistoryPolicy,
@@ -80,13 +80,16 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
     from agno.session.agent import AgentSession
 
+    from mindroom.history.compaction import _CompactionRewriteResult
+
 
 async def _rewrite_single_run(
     *,
     storage: BaseDb,
     working_session: AgentSession,
+    selected_run_ids: tuple[str, ...] = ("run-1",),
     summary_input_budget: int = 8_000,
-) -> object:
+) -> _CompactionRewriteResult | None:
     return await _rewrite_working_session_for_compaction(
         storage=storage,
         persisted_session=working_session,
@@ -98,10 +101,10 @@ async def _rewrite_single_run(
         state=HistoryScopeState(force_compact_before_next_run=True),
         history_settings=_ALL_HISTORY_SETTINGS,
         available_history_budget=None,
-        selected_run_ids=("run-1",),
+        selected_run_ids=selected_run_ids,
         summary_input_budget=summary_input_budget,
         before_tokens=0,
-        runs_before=1,
+        runs_before=len(working_session.runs or []),
         threshold_tokens=None,
         summary_prompt=COMPACTION_SUMMARY_PROMPT,
         lifecycle_notice_event_id=None,
@@ -339,7 +342,14 @@ async def test_rewrite_retries_safeguard_refusal_with_smaller_chunk(tmp_path: Pa
             _completed_run(
                 "run-1",
                 messages=[
-                    Message(role="user", content="u" * 8_000),
+                    Message(role="user", content="RUN1-MARKER " + ("u" * 8_000)),
+                    Message(role="assistant", content="a" * 8_000),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="user", content="RUN2-MARKER " + ("u" * 8_000)),
                     Message(role="assistant", content="a" * 8_000),
                 ],
             ),
@@ -348,25 +358,42 @@ async def test_rewrite_retries_safeguard_refusal_with_smaller_chunk(tmp_path: Pa
     summary_mock = AsyncMock(
         side_effect=[
             ModelSafeguardRefusalError(message="Vertex Claude returned stop_reason=refusal"),
+            SessionSummary(summary="first chunk summary", updated_at=datetime.now(UTC)),
             SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
         ],
     )
+    retry_sleep = AsyncMock()
 
     with (
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
+        patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
         patch(
             "mindroom.history.compaction.record_compaction_chunk",
             wraps=record_compaction_chunk,
         ) as persist_spy,
     ):
-        rewrite_result = await _rewrite_single_run(storage=storage, working_session=working_session)
+        rewrite_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            selected_run_ids=("run-1", "run-2"),
+            summary_input_budget=12_000,
+        )
 
     assert rewrite_result is not None
     summary_inputs = [call.kwargs["summary_input"] for call in summary_mock.await_args_list]
-    assert len(summary_inputs) == 2
+    assert len(summary_inputs) == 3
+    assert "RUN1-MARKER" in summary_inputs[0]
+    assert "RUN2-MARKER" in summary_inputs[0]
     assert estimate_text_tokens(summary_inputs[1]) < estimate_text_tokens(summary_inputs[0])
-    assert persist_spy.call_count == 1
-    assert persist_spy.call_args.kwargs["compacted_run_ids"] == ("run-1",)
+    assert "RUN1-MARKER" in summary_inputs[1]
+    assert "RUN2-MARKER" not in summary_inputs[1]
+    assert "RUN2-MARKER" in summary_inputs[2]
+    retry_sleep.assert_not_awaited()
+    assert [call.kwargs["compacted_run_ids"] for call in persist_spy.call_args_list] == [
+        ("run-1",),
+        ("run-2",),
+    ]
+    assert rewrite_result.compacted_run_ids == ("run-1", "run-2")
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
     assert persisted.summary is not None
@@ -407,9 +434,11 @@ async def test_rewrite_retries_transient_provider_error_with_same_input_and_one_
             SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
         ],
     )
+    retry_sleep = AsyncMock()
 
     with (
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
+        patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
         patch(
             "mindroom.history.compaction.record_compaction_chunk",
             wraps=record_compaction_chunk,
@@ -421,6 +450,7 @@ async def test_rewrite_retries_transient_provider_error_with_same_input_and_one_
     summary_inputs = [call.kwargs["summary_input"] for call in summary_mock.await_args_list]
     assert len(summary_inputs) == 2
     assert summary_inputs[1] == summary_inputs[0]
+    retry_sleep.assert_awaited_once_with(DEFAULT_SUMMARY_RETRY_POLICY.same_input_retry_delay_seconds)
     assert persist_spy.call_count == 1
     assert persist_spy.call_args.kwargs["compacted_run_ids"] == ("run-1",)
 
@@ -498,6 +528,45 @@ async def test_rewrite_propagates_cancellation_without_retrying_or_persisting(tm
 
     assert summary_mock.await_count == 1
     persist_spy.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_rewrite_propagates_cancellation_during_transient_retry_delay(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    working_session = _session("session-1", runs=[_completed_run("run-1")])
+    summary_mock = AsyncMock(
+        side_effect=[
+            ModelRateLimitError(message="rate limited", status_code=429),
+            SessionSummary(summary="must not run", updated_at=datetime.now(UTC)),
+        ],
+    )
+    delay_started = asyncio.Event()
+
+    async def wait_for_cancellation(_seconds: float) -> None:
+        delay_started.set()
+        await asyncio.Future()
+
+    retry_sleep = AsyncMock(side_effect=wait_for_cancellation)
+    with (
+        patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
+        patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
+        patch(
+            "mindroom.history.compaction.record_compaction_chunk",
+            wraps=record_compaction_chunk,
+        ) as persist_spy,
+    ):
+        rewrite_task = asyncio.create_task(_rewrite_single_run(storage=storage, working_session=working_session))
+        await delay_started.wait()
+        rewrite_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await rewrite_task
+
+    assert summary_mock.await_count == 1
+    retry_sleep.assert_awaited_once_with(DEFAULT_SUMMARY_RETRY_POLICY.same_input_retry_delay_seconds)
+    persist_spy.assert_not_called()
+    assert working_session.summary is None
+    assert [run.run_id for run in working_session.runs or []] == ["run-1"]
 
 
 def test_compaction_hook_events_are_registered() -> None:

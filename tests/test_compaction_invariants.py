@@ -648,7 +648,8 @@ def test_retry_policy_halves_budget_for_typed_safeguard_refusal() -> None:
 @pytest.mark.parametrize(
     "error",
     [
-        ModelRateLimitError(message="rate limited", status_code=429),
+        ModelRateLimitError(message="input too long; rate limited", status_code=429),
+        ModelProviderError(message="upstream timed out", status_code=504),
         ModelProviderError(message="request timed out while provider unavailable", status_code=503),
         ModelRateLimitError(message="overloaded", status_code=529),
     ],
