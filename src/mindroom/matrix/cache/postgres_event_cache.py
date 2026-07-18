@@ -6,7 +6,7 @@ import asyncio
 import time
 import uuid
 from collections import OrderedDict
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -800,8 +800,17 @@ class PostgresEventCache:
 
     async def refresh_runtime_diagnostics(self) -> dict[str, object]:
         """Force an exact metrics refresh without changing cache availability on telemetry failure."""
-        await self._cancel_metrics_refresh(disable=False)
-        return await self._collect_runtime_diagnostics()
+        try:
+            await self._cancel_metrics_refresh(disable=False)
+            return await self._collect_runtime_diagnostics()
+        finally:
+            if (
+                self._metrics_refresh_enabled
+                and self._runtime._metrics.dirty
+                and self._runtime.is_initialized
+                and not self._runtime.is_disabled
+            ):
+                self._schedule_metrics_refresh()
 
     async def _collect_runtime_diagnostics(self) -> dict[str, object]:
         """Collect one exact PostgreSQL storage snapshot."""
@@ -981,11 +990,13 @@ class PostgresEventCache:
 
     async def _refresh_metrics_after_delay(self) -> None:
         """Refresh metrics after the shared throttle interval."""
+        refresh_task = asyncio.current_task()
         try:
             await asyncio.sleep(self._runtime._metrics.refresh_delay_seconds)
             await self._collect_runtime_diagnostics()
         finally:
-            self._metrics_refresh_task = None
+            if self._metrics_refresh_task is refresh_task:
+                self._metrics_refresh_task = None
             if (
                 self._metrics_refresh_enabled
                 and self._runtime._metrics.dirty
@@ -1000,15 +1011,19 @@ class PostgresEventCache:
         self._metrics_refresh_enabled = False
         task = self._metrics_refresh_task
         self._metrics_refresh_task = None
-        if task is None:
+        try:
+            if task is None:
+                return
+            task.cancel()
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                caller = asyncio.current_task()
+                if caller is not None and caller.cancelling():
+                    raise
+        finally:
             if not disable:
                 self._metrics_refresh_enabled = refresh_was_enabled
-            return
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
-        if not disable:
-            self._metrics_refresh_enabled = refresh_was_enabled
 
     async def _flush_pending_invalidations(
         self,
