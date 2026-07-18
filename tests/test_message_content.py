@@ -14,6 +14,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_WARMUP_SUFFIX_KEY, RuntimePaths
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.matrix.cache.event_cache_events import event_mxc_urls
 from mindroom.matrix.client_visible_messages import (
     extract_visible_edit_body,
     message_preview,
@@ -26,6 +27,7 @@ from mindroom.matrix.message_content import (
     extract_edit_body,
     resolve_event_source_content,
 )
+from mindroom.matrix.sidecar_content import sidecar_mxc_url
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.visible_body import (
     strip_matrix_rich_reply_fallback,
@@ -77,6 +79,22 @@ class TestResolvedMessageExtraction:
         """Clear cache before each test."""
         mxc_plaintext_cache_module._mxc_cache.clear()
         mxc_plaintext_cache_module._mxc_cache_total_bytes = 0
+
+    def test_download_and_durable_ownership_share_sidecar_url_validation(self) -> None:
+        """Hydration and reference tracking must choose the same valid MXC URL."""
+        content = {
+            "body": "Preview body",
+            "msgtype": "m.file",
+            "io.mindroom.long_text": {
+                "version": 2,
+                "encoding": "matrix_event_content_json",
+            },
+            "url": "https://example.test/not-mxc",
+            "file": {"url": "mxc://server/encrypted-sidecar"},
+        }
+
+        assert sidecar_mxc_url(content) == "mxc://server/encrypted-sidecar"
+        assert event_mxc_urls({"content": content}) == frozenset({"mxc://server/encrypted-sidecar"})
 
     @pytest.mark.asyncio
     async def test_extract_and_resolve_message_hydrates_v2_sidecar_content(self) -> None:

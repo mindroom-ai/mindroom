@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.sidecar_content import sidecar_mxc_url
 
 _EDITABLE_EVENT_TYPES = frozenset({"m.room.message", "io.mindroom.tool_approval"})
-_LONG_TEXT_METADATA_KEY = "io.mindroom.long_text"
 
 type _CachedEventValue = tuple[str, dict[str, Any]]
 
@@ -84,25 +84,6 @@ def serialize_cacheable_events(cacheable_events: list[_CachedEventValue]) -> lis
     return [serialize_cached_event(event_id, event) for event_id, event in cacheable_events]
 
 
-def _sidecar_mxc_url(content: dict[str, Any]) -> str | None:
-    """Return the MXC URL for one supported v2 long-text sidecar payload."""
-    metadata = content.get(_LONG_TEXT_METADATA_KEY)
-    if not isinstance(metadata, dict) or metadata.get("version") != 2:
-        return None
-    if metadata.get("encoding") != "matrix_event_content_json":
-        return None
-    url = content.get("url")
-    if isinstance(url, str) and url.startswith("mxc://"):
-        return url
-    encrypted_file = content.get("file")
-    if not isinstance(encrypted_file, dict):
-        return None
-    encrypted_url = encrypted_file.get("url")
-    if isinstance(encrypted_url, str) and encrypted_url.startswith("mxc://"):
-        return encrypted_url
-    return None
-
-
 def event_mxc_urls(event: dict[str, Any]) -> frozenset[str]:
     """Return room-scoped sidecar MXCs visibly referenced by one event.
 
@@ -119,7 +100,7 @@ def event_mxc_urls(event: dict[str, Any]) -> frozenset[str]:
     return frozenset(
         mxc_url
         for candidate_content in candidate_contents
-        if (mxc_url := _sidecar_mxc_url(candidate_content)) is not None
+        if (mxc_url := sidecar_mxc_url(candidate_content)) is not None
     )
 
 

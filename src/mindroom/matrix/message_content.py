@@ -19,6 +19,7 @@ from mindroom.matrix.mxc_plaintext_cache import (
     remove_cached_mxc_plaintext,
     touch_cached_mxc_plaintext,
 )
+from mindroom.matrix.sidecar_content import sidecar_mxc_url
 from mindroom.matrix.visible_body import has_trusted_stream_body_metadata, visible_body_from_content
 
 if TYPE_CHECKING:
@@ -53,12 +54,7 @@ def is_v2_sidecar_text_preview(event_source: dict[str, Any]) -> bool:
     if content.get("msgtype") != "m.file":
         return False
 
-    long_text_meta = content.get("io.mindroom.long_text")
-    if not isinstance(long_text_meta, dict):
-        return False
-    if long_text_meta.get("version") != 2 or long_text_meta.get("encoding") != "matrix_event_content_json":
-        return False
-    return _sidecar_mxc_url(content) is not None
+    return sidecar_mxc_url(content) is not None
 
 
 def _sidecar_content_for_resolution(content: dict[str, Any]) -> dict[str, Any] | None:
@@ -71,20 +67,6 @@ def _sidecar_content_for_resolution(content: dict[str, Any]) -> dict[str, Any] |
         return new_content
 
     return None
-
-
-def _sidecar_mxc_url(content: dict[str, Any]) -> str | None:
-    """Return the MXC URL referenced by one sidecar-backed content dict."""
-    url = content.get("url")
-    if isinstance(url, str):
-        return url
-
-    file_info = content.get("file")
-    if not isinstance(file_info, dict):
-        return None
-
-    file_url = file_info.get("url")
-    return file_url if isinstance(file_url, str) else None
 
 
 async def _register_sidecar_owner(
@@ -455,9 +437,7 @@ async def _resolve_canonical_content(
     if client is None or sidecar_content is None:
         return content
 
-    long_text_meta = sidecar_content.get("io.mindroom.long_text")
-    long_text_version = long_text_meta.get("version") if isinstance(long_text_meta, dict) else None
-    mxc_url = _sidecar_mxc_url(sidecar_content) if long_text_version == 2 else None
+    mxc_url = sidecar_mxc_url(sidecar_content)
     if mxc_url is None:
         return content
 
