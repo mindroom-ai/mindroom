@@ -261,6 +261,24 @@ defaults:
         enable_run_shell_command: true     # global default for all agents
 ```
 
+### Filtering Toolkit Functions
+
+Registered Agno Toolkit integrations accept `include_tools` and `exclude_tools` inline overrides even when those fields are not declared by the concrete toolkit constructor.
+`include_tools` is an allowlist, while `exclude_tools` is a denylist applied after the toolkit registers its functions.
+Use the function names exposed by the tool catalog.
+Unsupported non-Toolkit integrations reject these fields during config validation.
+
+```yaml
+agents:
+  research:
+    tools:
+      - searxng:
+          include_tools:
+            - search_web
+            - news_search
+            - image_search
+```
+
 ### Clearing An Inherited Override
 
 Use `__MINDROOM_INHERIT__` when an agent should keep the tool but stop inheriting one authored field from `defaults.tools`.

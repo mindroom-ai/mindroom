@@ -35,9 +35,7 @@ if TYPE_CHECKING:
             type="string[]",
             required=False,
             default=None,
-            description=(
-                "Optional allowlist of Docker command functions to expose. Leave empty to expose all Docker commands."
-            ),
+            description="Optional allowlist of Docker command functions to expose. Leave unset to expose all commands.",
         ),
     ],
     dependencies=["docker"],

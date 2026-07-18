@@ -57,7 +57,23 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _SAFE_TOOL_INIT_OVERRIDE_FIELDS = frozenset({"base_dir", "shell_path_prepend"})
-_TEXT_CONFIG_FIELD_TYPES = frozenset({"password", "select", "text", "url"})
+_TEXT_CONFIG_FIELD_TYPES = frozenset({"password", "select", "string[]", "text", "url"})
+_TOOLKIT_FILTER_CONFIG_FIELDS = (
+    ConfigField(
+        name="include_tools",
+        label="Include Tools",
+        type="string[]",
+        required=False,
+        description="Optional allowlist of functions to register from this toolkit.",
+    ),
+    ConfigField(
+        name="exclude_tools",
+        label="Exclude Tools",
+        type="string[]",
+        required=False,
+        description="Optional denylist of functions to register from this toolkit.",
+    ),
+)
 _AUTHORED_OVERRIDE_INHERIT = "__MINDROOM_INHERIT__"
 _VALIDATION_PLUGIN_MODULE_SUFFIX = "__validation__"
 _OMIT_TOOL_CONFIG_ARG = object()
@@ -144,6 +160,15 @@ def _agent_override_field(
     return next((candidate for candidate in metadata.agent_override_fields if candidate.name == field_name), None)
 
 
+def _tool_config_fields(metadata: ToolMetadata | ToolValidationInfo) -> tuple[ConfigField, ...]:
+    """Return declared fields plus universal Agno Toolkit filters."""
+    fields = tuple(metadata.config_fields or ())
+    if not metadata.supports_toolkit_filters:
+        return fields
+    declared_names = {field.name for field in fields}
+    return fields + tuple(field for field in _TOOLKIT_FILTER_CONFIG_FIELDS if field.name not in declared_names)
+
+
 def _validate_text_authored_override_value(
     tool_name: str,
     field: ConfigField,
@@ -153,6 +178,13 @@ def _validate_text_authored_override_value(
     tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo] | None = None,
 ) -> object:
     """Validate one authored override for a text-like config field."""
+    if field.type == "string[]":
+        try:
+            return _normalize_string_array_override(value, preserve_empty_list=True)
+        except TypeError as exc:
+            msg = f"{full_path}: {exc}."
+            raise ToolConfigOverrideError(msg) from exc
+
     agent_override_field = _agent_override_field(tool_name, field.name, tool_metadata=tool_metadata)
     if agent_override_field is not None and agent_override_field.type == "string[]":
         try:
@@ -229,7 +261,7 @@ def _validate_authored_overrides(
         msg = f"Unknown tool '{tool_name}'."
         raise ToolConfigOverrideError(msg)
 
-    fields_by_name = {field.name: field for field in metadata.config_fields or []}
+    fields_by_name = {field.name: field for field in _tool_config_fields(metadata)}
     unexpected_fields = sorted(set(overrides) - set(fields_by_name))
     if unexpected_fields:
         unexpected = ", ".join(unexpected_fields)
@@ -437,11 +469,8 @@ def _build_tool_config_init_kwargs(
     runtime_overrides: dict[str, object] | None,
 ) -> dict[str, object]:
     """Collect safe config-field kwargs for one tool constructor."""
-    if not metadata.config_fields:
-        return {}
-
     init_kwargs: dict[str, object] = {}
-    fields = tuple(metadata.config_fields)
+    fields = _tool_config_fields(metadata)
     _apply_tool_config_init_values(init_kwargs, tool_name=tool_name, fields=fields, values=credentials)
     _apply_tool_config_init_values(
         init_kwargs,
@@ -455,6 +484,61 @@ def _build_tool_config_init_kwargs(
     if "base_dir" in init_kwargs and isinstance(init_kwargs["base_dir"], str):
         init_kwargs["base_dir"] = Path(init_kwargs["base_dir"])
     return init_kwargs
+
+
+def _pop_implicit_toolkit_filters(
+    metadata: ToolMetadata,
+    init_kwargs: dict[str, object],
+) -> tuple[list[str] | None, list[str] | None]:
+    """Remove universal filters that the concrete constructor did not declare."""
+    declared_names = {field.name for field in metadata.config_fields or ()}
+    include_tools = (
+        None
+        if "include_tools" in declared_names
+        else _normalize_string_array_override(
+            init_kwargs.pop("include_tools", None),
+            preserve_empty_list=True,
+        )
+    )
+    exclude_tools = (
+        None
+        if "exclude_tools" in declared_names
+        else _normalize_string_array_override(
+            init_kwargs.pop("exclude_tools", None),
+            preserve_empty_list=True,
+        )
+    )
+    return include_tools, exclude_tools
+
+
+def _apply_implicit_toolkit_filters(
+    toolkit: Toolkit,
+    *,
+    include_tools: list[str] | None,
+    exclude_tools: list[str] | None,
+) -> None:
+    """Apply Agno-equivalent filters after constructing a Toolkit subclass."""
+    if include_tools is None and exclude_tools is None:
+        return
+
+    available_tools = {*toolkit.functions, *toolkit.async_functions}
+    missing_includes = sorted(set(include_tools or ()) - available_tools)
+    if missing_includes:
+        msg = f"Included tool(s) not present in the toolkit: {', '.join(missing_includes)}"
+        raise ValueError(msg)
+    missing_excludes = sorted(set(exclude_tools or ()) - available_tools)
+    if missing_excludes:
+        msg = f"Excluded tool(s) not present in the toolkit: {', '.join(missing_excludes)}"
+        raise ValueError(msg)
+
+    toolkit.include_tools = include_tools
+    toolkit.exclude_tools = exclude_tools
+    included_names = set(include_tools) if include_tools is not None else None
+    excluded_names = set(exclude_tools or ())
+    for registered_functions in (toolkit.functions, toolkit.async_functions):
+        for function_name in tuple(registered_functions):
+            if (included_names is not None and function_name not in included_names) or function_name in excluded_names:
+                del registered_functions[function_name]
 
 
 def _build_managed_tool_init_kwargs(
@@ -579,8 +663,14 @@ def _build_tool_instance(
             worker_tools_override=worker_tools_override,
         ),
     )
+    include_tools, exclude_tools = _pop_implicit_toolkit_filters(metadata, init_kwargs)
 
     toolkit = cast("Any", tool_class)(**init_kwargs)
+    _apply_implicit_toolkit_filters(
+        toolkit,
+        include_tools=include_tools,
+        exclude_tools=exclude_tools,
+    )
     output_file_policy = (
         ToolOutputFilePolicy.from_runtime(
             tool_output_workspace_root,
@@ -966,6 +1056,7 @@ def _tool_validation_snapshot_from_state(
             config_fields=tuple(metadata.config_fields or ()),
             agent_override_fields=tuple(metadata.agent_override_fields or ()),
             authored_override_validator=metadata.authored_override_validator,
+            supports_toolkit_filters=metadata.supports_toolkit_filters,
             requires_room_context=metadata.requires_room_context,
             runtime_loadable=tool_name in tool_registry,
             unavailable_due_to_plugin_load_error=tool_name in unavailable_plugin_tool_names,
@@ -1109,6 +1200,7 @@ def serialize_tool_validation_snapshot(
             "config_fields": [asdict(field) for field in info.config_fields],
             "agent_override_fields": [asdict(field) for field in info.agent_override_fields],
             "authored_override_validator": info.authored_override_validator.value,
+            "supports_toolkit_filters": info.supports_toolkit_filters,
             "requires_room_context": info.requires_room_context,
             "runtime_loadable": info.runtime_loadable,
             "unavailable_due_to_plugin_load_error": info.unavailable_due_to_plugin_load_error,
@@ -1176,6 +1268,10 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
         if not isinstance(raw_requires_room_context, bool):
             msg = f"Tool validation snapshot entry for '{tool_name}' must set requires_room_context to a boolean."
             raise TypeError(msg)
+        raw_supports_toolkit_filters = raw_info_mapping.get("supports_toolkit_filters", False)
+        if not isinstance(raw_supports_toolkit_filters, bool):
+            msg = f"Tool validation snapshot entry for '{tool_name}' must set supports_toolkit_filters to a boolean."
+            raise TypeError(msg)
         snapshot[tool_name] = ToolValidationInfo(
             name=tool_name,
             config_fields=_deserialize_tool_validation_fields(
@@ -1187,6 +1283,7 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
                 field_name=f"{tool_name}.agent_override_fields",
             ),
             authored_override_validator=authored_override_validator,
+            supports_toolkit_filters=raw_supports_toolkit_filters,
             requires_room_context=raw_requires_room_context,
             runtime_loadable=raw_runtime_loadable,
             unavailable_due_to_plugin_load_error=raw_unavailable_due_to_plugin_load_error,
@@ -1217,6 +1314,7 @@ def export_tools_metadata(tool_metadata: dict[str, ToolMetadata] | None = None) 
         tool_dict["default_execution_target"] = metadata.default_execution_target.value
         tool_dict.pop("authored_override_validator", None)
         tool_dict.pop("managed_init_args", None)
+        tool_dict.pop("supports_toolkit_filters", None)
         tool_dict.pop("factory", None)
         tools.append(tool_dict)
 
@@ -1224,7 +1322,11 @@ def export_tools_metadata(tool_metadata: dict[str, ToolMetadata] | None = None) 
     return tools
 
 
-def _normalize_string_array_override(value: object) -> list[str] | None:
+def _normalize_string_array_override(
+    value: object,
+    *,
+    preserve_empty_list: bool = False,
+) -> list[str] | None:
     """Normalize a string-array authored override from a list or legacy text value."""
     if value is None:
         return None
@@ -1242,7 +1344,9 @@ def _normalize_string_array_override(value: object) -> list[str] | None:
         stripped = entry.strip()
         if stripped:
             normalized.append(stripped)
-    return normalized or None
+    if normalized or preserve_empty_list:
+        return normalized
+    return None
 
 
 def _normalize_agent_override_field_value(field: ConfigField, value: object) -> object | None:

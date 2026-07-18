@@ -26,6 +26,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.llm_request_logging import record_llm_request_tools
 from mindroom.model_defaults import OPENAI_TOOL_SEARCH_MIN_GPT_VERSION
 from mindroom.model_instance_checks import isinstance_of_loaded
 
@@ -111,6 +112,7 @@ def request_params_with_deferred_tool_search(
     """
     tools = request_params.get("tools")
     if not deferred_tool_names or not isinstance(tools, list):
+        record_llm_request_tools(tools)
         return request_params
     non_deferred_tools: list[Any] = []
     deferred_tools: list[dict[str, Any]] = []
@@ -125,10 +127,12 @@ def request_params_with_deferred_tool_search(
         else:
             non_deferred_tools.append(tool)
     if not deferred_tools:
+        record_llm_request_tools(tools)
         return request_params
     deferred_tools.sort(key=lambda tool: str(tool.get("name")))
     prepared_params = dict(request_params)
     prepared_params["tools"] = [{"type": "tool_search"}, *non_deferred_tools, *deferred_tools]
+    record_llm_request_tools(prepared_params["tools"])
     return prepared_params
 
 

@@ -90,6 +90,7 @@ class ToolValidationInfo:
     config_fields: tuple[ConfigField, ...] = ()
     agent_override_fields: tuple[ConfigField, ...] = ()
     authored_override_validator: ToolAuthoredOverrideValidator = ToolAuthoredOverrideValidator.DEFAULT
+    supports_toolkit_filters: bool = False
     requires_room_context: bool = False
     runtime_loadable: bool = True
     unavailable_due_to_plugin_load_error: bool = False
@@ -119,4 +120,5 @@ class ToolMetadata:
     helper_text: str | None = None
     function_names: tuple[str, ...] = ()
     managed_init_args: tuple[ToolManagedInitArg, ...] = ()
+    supports_toolkit_filters: bool = False
     factory: Callable[[], type] | None = None

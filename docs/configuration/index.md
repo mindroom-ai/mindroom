@@ -667,9 +667,9 @@ No plaintext-to-encrypted migration is performed automatically, so configure the
 Every completed model request emits a privacy-safe structured `LLM usage` log event with provider and model identifiers.
 When provider usage data is available, the event also includes provider-normalized context input tokens, uncached input tokens, and a cache-read ratio without prompt content.
 When provider usage data is unavailable, the event sets `usage_available` to false and omits token and prompt-cache counters.
-`debug.log_llm_requests` additionally enables pre-provider request assembly logging for troubleshooting.
+`debug.log_llm_requests` additionally enables best-effort provider-request logging for troubleshooting without changing model-call success or failure.
 When enabled, MindRoom writes JSONL request records under `debug.llm_request_log_dir` or `mindroom_data/logs/llm_requests` by default.
-Those records include prompts, messages, tool schemas, model parameters, correlation IDs, requester metadata, and source Matrix event metadata.
+Those records include prompts, messages, the final provider-prepared tool array after MindRoom wire transformations, model parameters, correlation IDs, requester metadata, and source Matrix event metadata.
 The same flag also records successful tool-call rows in `mindroom_data/tracking/tool_calls.jsonl` so tool activity can be correlated with LLM request logs.
 Tool failures are always recorded in `tool_calls.jsonl`, even when request logging is disabled.
 Tool-call rows include a `timing` object with result-ready, before-hook, approval, and tool-body durations when those phases are measured.

@@ -18,7 +18,7 @@ import mindroom.tool_system.metadata as metadata_module
 # Import tools to trigger tool registration
 import mindroom.tools  # noqa: F401
 import mindroom.tools.custom_api as custom_api_module
-from mindroom.config.main import Config, load_config
+from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.redaction import REDACTED
 from mindroom.server_fetch_url import ServerFetchUrlError
@@ -766,6 +766,139 @@ def test_validate_authored_overrides_rejects_bad_types_and_password_fields() -> 
         TOOL_METADATA.pop(tool_name, None)
 
 
+def test_searxng_include_tools_override_filters_registered_functions(tmp_path: Path) -> None:
+    """Universal Agno toolkit filters should retain selected functions."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    tool = get_tool_by_name(
+        "searxng",
+        runtime_paths,
+        credential_overrides={"host": "https://search.example.com"},
+        tool_config_overrides={
+            "include_tools": ["search_web", "news_search", "image_search"],
+        },
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert set(tool.functions) == {"search_web", "news_search", "image_search"}
+
+
+def test_searxng_empty_include_tools_override_filters_all_functions(tmp_path: Path) -> None:
+    """An explicit empty universal allowlist should expose no toolkit functions."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    tool = get_tool_by_name(
+        "searxng",
+        runtime_paths,
+        credential_overrides={"host": "https://search.example.com"},
+        tool_config_overrides={"include_tools": []},
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert not tool.functions
+
+
+def test_file_empty_exclude_patterns_override_reaches_constructor(tmp_path: Path) -> None:
+    """Declared string-array fields should preserve an explicit empty list."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    tool = get_tool_by_name(
+        "file",
+        runtime_paths,
+        tool_config_overrides={"exclude_patterns": []},
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert tool.exclude_patterns == []
+
+
+def test_custom_toolkit_exclude_tools_override_filters_async_functions(tmp_path: Path) -> None:
+    """Universal filters should work when a Toolkit subclass omits filter constructor kwargs."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    tool = get_tool_by_name(
+        "scheduler",
+        runtime_paths,
+        tool_config_overrides={"exclude_tools": ["cancel_schedule"]},
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert set(tool.async_functions) == {
+        "schedule",
+        "edit_schedule",
+        "list_schedules",
+    }
+
+
+@pytest.mark.parametrize("tool_name", ["composio", "memory"])
+def test_non_toolkit_registration_rejects_universal_filters(tool_name: str) -> None:
+    """Universal filters should not validate for non-Toolkit catalog entries."""
+    with pytest.raises(ToolConfigOverrideError, match="unknown authored override field"):
+        _validate_authored_overrides(
+            tool_name,
+            {"include_tools": ["GITHUB_CREATE_ISSUE"]},
+            config_path_prefix="agents.code.tools[0]",
+        )
+
+
+def test_config_load_rejects_unknown_tool_override_key(tmp_path: Path) -> None:
+    """Config runtime validation should name the tool and unknown override key."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        Config.validate_with_runtime(
+            {
+                "models": {
+                    "default": {
+                        "provider": "openai",
+                        "id": "gpt-5.6",
+                    },
+                },
+                "router": {"model": "default"},
+                "agents": {
+                    "research": {
+                        "display_name": "Research",
+                        "role": "Search the web",
+                        "model": "default",
+                        "tools": [
+                            {
+                                "searxng": {
+                                    "host": "https://search.example.com",
+                                    "fixed_max_results": 10,
+                                    "unknown_filter": ["search_web"],
+                                },
+                            },
+                        ],
+                    },
+                },
+            },
+            runtime_paths,
+        )
+
+    message = str(exc_info.value)
+    assert "searxng.unknown_filter" in message
+    assert "unknown authored override field" in message
+
+
 def test_tool_validation_snapshot_round_trips_mcp_override_validation(tmp_path: Path) -> None:
     """Validation snapshots should preserve explicit MCP override-validator semantics."""
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml")
@@ -823,6 +956,22 @@ def test_deserialize_tool_validation_snapshot_rejects_non_boolean_room_context()
                     "agent_override_fields": [],
                     "authored_override_validator": "default",
                     "requires_room_context": "yes",
+                    "runtime_loadable": True,
+                },
+            },
+        )
+
+
+def test_deserialize_tool_validation_snapshot_rejects_non_boolean_toolkit_filter_support() -> None:
+    """Validation snapshot payloads should type-check toolkit-filter support strictly."""
+    with pytest.raises(TypeError, match="supports_toolkit_filters to a boolean"):
+        deserialize_tool_validation_snapshot(
+            {
+                "todo": {
+                    "config_fields": [],
+                    "agent_override_fields": [],
+                    "authored_override_validator": "default",
+                    "supports_toolkit_filters": "yes",
                     "runtime_loadable": True,
                 },
             },
