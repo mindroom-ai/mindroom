@@ -1143,7 +1143,17 @@ class ThreadSyncWritePolicy:
         if not self._cache_ops.cache_runtime_available():
             return []
         room_plain_events, room_threaded_events, room_redactions = self._group_sync_timeline_updates(response)
-        tasks: list[asyncio.Task[object]] = []
+        left_rooms = response.rooms.leave if isinstance(response.rooms.leave, dict) else {}
+        tasks: list[asyncio.Task[object]] = [
+            (
+                self._cache_ops.queue_room_cache_update(
+                    room_id,
+                    lambda room_id=room_id: self._cache_ops.purge_room(room_id),
+                    name="matrix_cache_purge_left_room",
+                )
+            )
+            for room_id in left_rooms
+        ]
         for room_id in set(room_plain_events) | set(room_threaded_events) | set(room_redactions):
             plain_events = room_plain_events.get(room_id, ())
             threaded_events = room_threaded_events.get(room_id, ())

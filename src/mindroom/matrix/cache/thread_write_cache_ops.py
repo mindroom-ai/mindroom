@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from mindroom.matrix.mxc_plaintext_cache import purge_principal_room_mxc_plaintext
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact, MutationThreadImpactState
 
 from .event_cache import EventCacheBackendUnavailableError
@@ -99,12 +100,17 @@ class ThreadMutationCacheOps:
     ) -> asyncio.Task[object]:
         """Run one cache mutation under the room-ordered write barrier."""
         coordinator = self.runtime.event_cache_write_coordinator
+        scoped_coalesce_key = (
+            None
+            if coalesce_key is None
+            else (f"{self.runtime.event_cache.principal_id}:{coalesce_key[0]}", coalesce_key[1])
+        )
         return coordinator.queue_room_update(
             room_id,
             update_coro_factory,
             name=name,
             emit_timing=emit_timing,
-            coalesce_key=coalesce_key,
+            coalesce_key=scoped_coalesce_key,
             coalesce_log_context=coalesce_log_context,
         )
 
@@ -121,13 +127,18 @@ class ThreadMutationCacheOps:
     ) -> asyncio.Task[object]:
         """Run one thread-specific cache mutation under the same-thread write barrier."""
         coordinator = self.runtime.event_cache_write_coordinator
+        scoped_coalesce_key = (
+            None
+            if coalesce_key is None
+            else (f"{self.runtime.event_cache.principal_id}:{coalesce_key[0]}", coalesce_key[1])
+        )
         return coordinator.queue_thread_update(
             room_id,
             thread_id,
             update_coro_factory,
             name=name,
             emit_timing=emit_timing,
-            coalesce_key=coalesce_key,
+            coalesce_key=scoped_coalesce_key,
             coalesce_log_context=coalesce_log_context,
         )
 
@@ -154,6 +165,17 @@ class ThreadMutationCacheOps:
             if raise_on_failure:
                 raise
 
+    async def purge_room(self, room_id: str) -> None:
+        """Delete this bot principal's cache rows after an authoritative departure."""
+        try:
+            await self.runtime.event_cache.purge_room(room_id)
+        finally:
+            self._purge_process_plaintext(room_id)
+
+    def _purge_process_plaintext(self, room_id: str) -> None:
+        """Evict heavyweight process-local plaintext for this principal and room."""
+        purge_principal_room_mxc_plaintext(self.runtime.event_cache.principal_id, room_id)
+
     async def redact_cached_event(
         self,
         room_id: str,
@@ -165,8 +187,9 @@ class ThreadMutationCacheOps:
     ) -> bool:
         """Apply one cached redaction fail-open and report whether a row changed."""
         try:
-            return bool(await self.runtime.event_cache.redact_event(room_id, redacted_event_id))
+            redacted = bool(await self.runtime.event_cache.redact_event(room_id, redacted_event_id))
         except Exception as exc:
+            self._purge_process_plaintext(room_id)
             self.logger.warning(
                 failure_message,
                 room_id=room_id,
@@ -177,6 +200,8 @@ class ThreadMutationCacheOps:
             if raise_on_failure:
                 raise
             return False
+        self._purge_process_plaintext(room_id)
+        return redacted
 
     async def invalidate_after_redaction(
         self,

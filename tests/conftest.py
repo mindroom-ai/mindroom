@@ -778,6 +778,8 @@ def delivered_matrix_side_effect(event_id: str) -> Callable[..., Awaitable[Deliv
 def make_event_cache_mock() -> AsyncMock:
     """Return an async mock shaped like the event cache protocol."""
     event_cache = AsyncMock(spec=SqliteEventCache)
+    event_cache.principal_id = "@mindroom_test:localhost"
+    event_cache.cache_generation = "test-cache-generation"
     event_cache.durable_writes_available = True
     event_cache.get_event.return_value = None
     event_cache.get_latest_edit.return_value = None
@@ -793,6 +795,7 @@ def make_event_cache_mock() -> AsyncMock:
     event_cache.flush_pending_durable_writes.return_value = None
     event_cache.append_event.return_value = True
     event_cache.redact_event.return_value = False
+    event_cache.store_mxc_text.return_value = True
     return event_cache
 
 

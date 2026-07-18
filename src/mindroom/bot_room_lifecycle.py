@@ -62,6 +62,7 @@ class BotRoomLifecycleDeps:
     get_configured_rooms: Callable[[], Sequence[str]]
     send_response: _SendRoomResponse
     on_configured_room_joined: Callable[[str], Awaitable[None]]
+    on_rooms_left: Callable[[Sequence[str]], Awaitable[None]]
 
 
 class BotRoomLifecycle:
@@ -182,10 +183,11 @@ class BotRoomLifecycle:
     async def leave_unconfigured_rooms(self, room_ids: list[str] | None = None) -> None:
         """Leave any rooms this bot is no longer configured for."""
         client = self._client()
-        await leave_non_dm_rooms(
+        left_room_ids = await leave_non_dm_rooms(
             client,
             room_ids if room_ids is not None else await self.rooms_to_leave(),
         )
+        await self.deps.on_rooms_left(left_room_ids or [])
 
     async def rooms_to_leave(self) -> list[str]:
         """Return joined rooms this bot should now leave before DM filtering."""

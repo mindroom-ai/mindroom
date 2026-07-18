@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
@@ -31,7 +32,9 @@ if TYPE_CHECKING:
     from .event_cache import ThreadCacheState
 
 
-_POSTGRES_EVENT_CACHE_SCHEMA_VERSION = 1
+_POSTGRES_EVENT_CACHE_SCHEMA_VERSION = 2
+_DEFAULT_PRINCIPAL_ID = "__mindroom_default_principal__"
+_POSTGRES_SCHEMA_LOCK_NAME = "mindroom_event_cache_schema"
 _LOCK_WAIT_LOG_THRESHOLD_SECONDS = 0.1
 _MAX_CACHED_ROOM_LOCKS = 256
 _MAX_TRANSIENT_OPERATION_ATTEMPTS = 2
@@ -97,6 +100,18 @@ def _cache_backend_unavailable(operation: str, exc: BaseException) -> EventCache
     return EventCacheBackendUnavailableError(f"Postgres event cache unavailable during {operation}: {detail}")
 
 
+def _require_compatible_postgres_schema_version(current_schema_version: int | None) -> None:
+    """Reject an initialized cache schema from an unsupported future version."""
+    if current_schema_version in (None, _POSTGRES_EVENT_CACHE_SCHEMA_VERSION):
+        return
+    msg = (
+        "PostgreSQL Matrix event cache schema version "
+        f"{current_schema_version} is not compatible with expected version "
+        f"{_POSTGRES_EVENT_CACHE_SCHEMA_VERSION}"
+    )
+    raise RuntimeError(msg)
+
+
 async def _rollback_postgres_connection_best_effort(
     db: psycopg.AsyncConnection,
     *,
@@ -143,6 +158,23 @@ async def _initialize_postgres_event_cache_db(
     """Open the PostgreSQL database and ensure the event-cache schema exists."""
     db = await psycopg.AsyncConnection.connect(database_url)
     try:
+        await db.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s))",
+            (_POSTGRES_SCHEMA_LOCK_NAME,),
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mindroom_event_cache_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """,
+        )
+        current_schema_version = await _postgres_schema_version(db)
+        if current_schema_version == 1:
+            await _migrate_postgres_event_cache_v1_to_v2(db)
+        else:
+            _require_compatible_postgres_schema_version(current_schema_version)
         await _create_postgres_event_cache_schema(db)
         await _validate_postgres_event_cache_schema(db)
         await db.commit()
@@ -186,7 +218,7 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
             event_json TEXT NOT NULL,
             cached_at DOUBLE PRECISION NOT NULL,
             write_seq BIGINT NOT NULL DEFAULT nextval('mindroom_event_cache_write_seq'),
-            PRIMARY KEY (namespace, event_id)
+            PRIMARY KEY (namespace, room_id, event_id)
         )
         """,
     )
@@ -204,7 +236,7 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
             room_id TEXT NOT NULL,
             original_event_id TEXT NOT NULL,
             origin_server_ts BIGINT NOT NULL,
-            PRIMARY KEY (namespace, edit_event_id)
+            PRIMARY KEY (namespace, room_id, edit_event_id)
         )
         """,
     )
@@ -251,11 +283,29 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
         """
         CREATE TABLE IF NOT EXISTS mindroom_event_cache_mxc_text (
             namespace TEXT NOT NULL,
+            room_id TEXT NOT NULL,
             mxc_url TEXT NOT NULL,
             text_content TEXT NOT NULL,
             cached_at DOUBLE PRECISION NOT NULL,
-            PRIMARY KEY (namespace, mxc_url)
+            PRIMARY KEY (namespace, room_id, mxc_url)
         )
+        """,
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mindroom_event_cache_event_mxc_references (
+            namespace TEXT NOT NULL,
+            room_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            mxc_url TEXT NOT NULL,
+            PRIMARY KEY (namespace, room_id, event_id, mxc_url)
+        )
+        """,
+    )
+    await db.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_mindroom_event_cache_mxc_references_plaintext
+        ON mindroom_event_cache_event_mxc_references(namespace, room_id, mxc_url, event_id)
         """,
     )
     await db.execute(
@@ -282,13 +332,52 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
         )
         """,
     )
+
+
+async def _migrate_postgres_event_cache_v1_to_v2(db: AsyncConnection) -> None:
+    """Migrate global cache tables transactionally without deleting any namespace."""
     await db.execute(
         """
-        CREATE TABLE IF NOT EXISTS mindroom_event_cache_metadata (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )
+        ALTER TABLE mindroom_event_cache_events
+            DROP CONSTRAINT mindroom_event_cache_events_pkey,
+            ADD PRIMARY KEY (namespace, room_id, event_id)
         """,
+    )
+    await db.execute(
+        """
+        ALTER TABLE mindroom_event_cache_event_edits
+            DROP CONSTRAINT mindroom_event_cache_event_edits_pkey,
+            ADD PRIMARY KEY (namespace, room_id, edit_event_id)
+        """,
+    )
+    await db.execute(
+        """
+        ALTER TABLE mindroom_event_cache_mxc_text
+            ADD COLUMN room_id TEXT
+        """,
+    )
+    await db.execute(
+        """
+        UPDATE mindroom_event_cache_mxc_text
+        SET room_id = ''
+        WHERE room_id IS NULL
+        """,
+    )
+    await db.execute(
+        """
+        ALTER TABLE mindroom_event_cache_mxc_text
+            ALTER COLUMN room_id SET NOT NULL,
+            DROP CONSTRAINT mindroom_event_cache_mxc_text_pkey,
+            ADD PRIMARY KEY (namespace, room_id, mxc_url)
+        """,
+    )
+    await db.execute(
+        """
+        UPDATE mindroom_event_cache_metadata
+        SET value = %s
+        WHERE key = 'schema_version'
+        """,
+        (str(_POSTGRES_EVENT_CACHE_SCHEMA_VERSION),),
     )
 
 
@@ -653,11 +742,69 @@ class _PostgresEventCacheRuntime:
             self._room_locks.pop(evicted_room_id, None)
 
 
+class _PostgresRuntimeRegistry:
+    """Own the per-principal PostgreSQL runtimes behind one shared cache service."""
+
+    def __init__(self, database_url: str) -> None:
+        self._database_url = database_url
+        self._runtimes: dict[str, _PostgresEventCacheRuntime] = {}
+
+    def runtime(self, namespace: str) -> _PostgresEventCacheRuntime:
+        """Return the one connection runtime assigned to a principal namespace."""
+        runtime = self._runtimes.get(namespace)
+        if runtime is None:
+            runtime = _PostgresEventCacheRuntime(self._database_url, namespace)
+            self._runtimes[namespace] = runtime
+        return runtime
+
+    async def close(self) -> None:
+        """Close every principal runtime created by this shared service."""
+        await asyncio.gather(*(runtime.close() for runtime in self._runtimes.values()))
+
+
+def _principal_namespace(base_namespace: str, principal_id: str) -> str:
+    """Derive an opaque, stable PostgreSQL namespace for one Matrix account."""
+    if principal_id == _DEFAULT_PRINCIPAL_ID:
+        return base_namespace
+    principal_digest = hashlib.sha256(principal_id.encode()).hexdigest()
+    return f"{base_namespace}:principal:{principal_digest}"
+
+
 class PostgresEventCache:
     """PostgreSQL-backed ConversationEventCache implementation."""
 
-    def __init__(self, *, database_url: str, namespace: str) -> None:
-        self._runtime = _PostgresEventCacheRuntime(database_url, namespace)
+    def __init__(
+        self,
+        *,
+        database_url: str,
+        namespace: str,
+        principal_id: str = _DEFAULT_PRINCIPAL_ID,
+        _registry: _PostgresRuntimeRegistry | None = None,
+        _base_namespace: str | None = None,
+    ) -> None:
+        self._principal_id = principal_id
+        self._base_namespace = namespace if _base_namespace is None else _base_namespace
+        self._registry = _PostgresRuntimeRegistry(database_url) if _registry is None else _registry
+        self._runtime = self._registry.runtime(_principal_namespace(self._base_namespace, principal_id))
+
+    @property
+    def principal_id(self) -> str:
+        """Return the Matrix principal owning this namespace."""
+        return self._principal_id
+
+    def for_principal(self, principal_id: str) -> PostgresEventCache:
+        """Return a cache view backed by a principal-exclusive namespace."""
+        normalized_principal_id = principal_id.strip()
+        if not normalized_principal_id:
+            msg = "Matrix event cache principal_id must be non-empty"
+            raise ValueError(msg)
+        return PostgresEventCache(
+            database_url=self.database_url,
+            namespace=self._base_namespace,
+            principal_id=normalized_principal_id,
+            _registry=self._registry,
+            _base_namespace=self._base_namespace,
+        )
 
     @property
     def database_url(self) -> str:
@@ -678,6 +825,11 @@ class PostgresEventCache:
     def durable_writes_available(self) -> bool:
         """Return whether cache writes can durably persist data."""
         return self._runtime.durable_writes_available
+
+    @property
+    def cache_generation(self) -> str:
+        """Return the principal namespace's current schema generation."""
+        return f"postgres-v{_POSTGRES_EVENT_CACHE_SCHEMA_VERSION}:{self.namespace}"
 
     async def initialize(self) -> None:
         """Open the PostgreSQL database and create the cache schema."""
@@ -710,7 +862,7 @@ class PostgresEventCache:
 
     async def close(self) -> None:
         """Close the PostgreSQL connection when the cache is no longer needed."""
-        await self._runtime.close()
+        await self._registry.close()
 
     async def _read_operation(
         self,
@@ -882,6 +1034,7 @@ class PostgresEventCache:
             reader=lambda db: postgres_event_cache_events.load_event(
                 db,
                 namespace=self._runtime.namespace,
+                room_id=room_id,
                 event_id=event_id,
             ),
         )
@@ -953,8 +1106,8 @@ class PostgresEventCache:
             ),
         )
 
-    async def get_mxc_text(self, room_id: str, mxc_url: str) -> str | None:
-        """Return one durably cached MXC text payload when present."""
+    async def get_mxc_text(self, room_id: str, event_id: str, mxc_url: str) -> str | None:
+        """Return plaintext only through a surviving event reference."""
         return await self._read_operation(
             room_id,
             operation="get_mxc_text",
@@ -962,6 +1115,8 @@ class PostgresEventCache:
             reader=lambda db: postgres_event_cache_events.load_mxc_text(
                 db,
                 namespace=self._runtime.namespace,
+                room_id=room_id,
+                event_id=event_id,
                 mxc_url=mxc_url,
             ),
         )
@@ -992,18 +1147,22 @@ class PostgresEventCache:
                 ),
             )
 
-    async def store_mxc_text(self, room_id: str, mxc_url: str, text: str) -> None:
-        """Insert or replace one durably cached MXC text payload."""
-        await self._write_operation(
-            room_id,
-            operation="store_mxc_text",
-            disabled_result=None,
-            writer=lambda db: postgres_event_cache_events.persist_mxc_text(
-                db,
-                namespace=self._runtime.namespace,
-                mxc_url=mxc_url,
-                text=text,
-                cached_at=time.time(),
+    async def store_mxc_text(self, room_id: str, event_id: str, mxc_url: str, text: str) -> bool:
+        """Persist plaintext only through a surviving event reference."""
+        return bool(
+            await self._write_operation(
+                room_id,
+                operation="store_mxc_text",
+                disabled_result=False,
+                writer=lambda db: postgres_event_cache_events.persist_mxc_text(
+                    db,
+                    namespace=self._runtime.namespace,
+                    room_id=room_id,
+                    event_id=event_id,
+                    mxc_url=mxc_url,
+                    text=text,
+                    cached_at=time.time(),
+                ),
             ),
         )
 
@@ -1188,5 +1347,18 @@ class PostgresEventCache:
                     room_id=room_id,
                     event_id=event_id,
                 ),
+            ),
+        )
+
+    async def purge_room(self, room_id: str) -> None:
+        """Delete this principal namespace's rows for one departed room."""
+        await self._write_operation(
+            room_id,
+            operation="purge_room",
+            disabled_result=None,
+            writer=lambda db: postgres_event_cache_events.purge_room_locked(
+                db,
+                namespace=self._runtime.namespace,
+                room_id=room_id,
             ),
         )

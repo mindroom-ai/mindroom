@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import uuid
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, Mock
+from urllib.parse import quote
 
 import psycopg
 import pytest
@@ -97,6 +99,95 @@ def _edit_event(
     }
 
 
+def _postgres_schema_url(database_url: str, schema_name: str) -> str:
+    """Return a disposable URL pinned to one isolated PostgreSQL schema."""
+    separator = "&" if "?" in database_url else "?"
+    options = quote(f"-csearch_path={schema_name}", safe="")
+    return f"{database_url}{separator}options={options}"
+
+
+async def _seed_postgres_v1_schema(database_url: str, schema_name: str) -> str:
+    """Create a minimal legacy schema in the disposable PostgreSQL test database."""
+    admin = await psycopg.AsyncConnection.connect(database_url)
+    await admin.execute(f'CREATE SCHEMA "{schema_name}"')
+    await admin.commit()
+    await admin.close()
+    isolated_url = _postgres_schema_url(database_url, schema_name)
+    db = await psycopg.AsyncConnection.connect(isolated_url)
+    await db.execute("CREATE SEQUENCE mindroom_event_cache_write_seq")
+    await db.execute(
+        """
+        CREATE TABLE mindroom_event_cache_events (
+            namespace TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            room_id TEXT NOT NULL,
+            origin_server_ts BIGINT NOT NULL,
+            event_json TEXT NOT NULL,
+            cached_at DOUBLE PRECISION NOT NULL,
+            write_seq BIGINT NOT NULL DEFAULT nextval('mindroom_event_cache_write_seq'),
+            PRIMARY KEY (namespace, event_id)
+        )
+        """,
+    )
+    await db.execute(
+        """
+        CREATE TABLE mindroom_event_cache_event_edits (
+            namespace TEXT NOT NULL,
+            edit_event_id TEXT NOT NULL,
+            room_id TEXT NOT NULL,
+            original_event_id TEXT NOT NULL,
+            origin_server_ts BIGINT NOT NULL,
+            PRIMARY KEY (namespace, edit_event_id)
+        )
+        """,
+    )
+    await db.execute(
+        """
+        CREATE TABLE mindroom_event_cache_mxc_text (
+            namespace TEXT NOT NULL,
+            mxc_url TEXT NOT NULL,
+            text_content TEXT NOT NULL,
+            cached_at DOUBLE PRECISION NOT NULL,
+            PRIMARY KEY (namespace, mxc_url)
+        )
+        """,
+    )
+    await db.execute(
+        """
+        CREATE TABLE mindroom_event_cache_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """,
+    )
+    await db.execute(
+        """
+        INSERT INTO mindroom_event_cache_metadata(key, value)
+        VALUES ('schema_version', '1')
+        """,
+    )
+    for namespace in ("legacy_a", "legacy_b"):
+        await db.execute(
+            """
+            INSERT INTO mindroom_event_cache_events(
+                namespace, event_id, room_id, origin_server_ts, event_json, cached_at
+            )
+            VALUES (%s, '$legacy', '!legacy:localhost', 1, '{}', 1)
+            """,
+            (namespace,),
+        )
+        await db.execute(
+            """
+            INSERT INTO mindroom_event_cache_mxc_text(namespace, mxc_url, text_content, cached_at)
+            VALUES (%s, 'mxc://legacy/value', 'legacy plaintext', 1)
+            """,
+            (namespace,),
+        )
+    await db.commit()
+    await db.close()
+    return isolated_url
+
+
 def _runtime_paths(tmp_path: Path, *, env: dict[str, str] | None = None) -> RuntimePaths:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
@@ -167,8 +258,29 @@ async def _assert_edit_snapshot_and_mxc_behavior(
     assert snapshot.content["body"] == "latest edit"
     assert snapshot.origin_server_ts == 1030
 
-    await cache.store_mxc_text(room_id, "mxc://localhost/media", "downloaded text")
-    assert await cache.get_mxc_text(room_id, "mxc://localhost/media") == "downloaded text"
+    mxc_owner = _message_event(
+        event_id="$mxc-owner",
+        sender=sender,
+        body="preview",
+        origin_server_ts=1040,
+    )
+    mxc_owner["content"] = {
+        "body": "preview",
+        "msgtype": "m.file",
+        "url": "mxc://localhost/media",
+        "io.mindroom.long_text": {
+            "version": 2,
+            "encoding": "matrix_event_content_json",
+        },
+    }
+    await cache.store_event("$mxc-owner", room_id, mxc_owner)
+    assert await cache.store_mxc_text(
+        room_id,
+        "$mxc-owner",
+        "mxc://localhost/media",
+        "downloaded text",
+    )
+    assert await cache.get_mxc_text(room_id, "$mxc-owner", "mxc://localhost/media") == "downloaded text"
 
 
 async def _assert_staleness_and_redaction_behavior(
@@ -257,7 +369,13 @@ async def test_sqlite_event_cache_write_operation_rolls_back_cancelled_writer(
     )
 
     @asynccontextmanager
-    async def acquire_db_operation(room_id: str, *, operation: str) -> AsyncIterator[object]:
+    async def acquire_db_operation(
+        principal_id: str,
+        room_id: str,
+        *,
+        operation: str,
+    ) -> AsyncIterator[object]:
+        assert principal_id == "__mindroom_default_principal__"
         assert room_id == "!room:example.test"
         assert operation == "cancelled_writer"
         yield db
@@ -314,6 +432,60 @@ async def test_sqlite_event_cache_initialize_closes_db_after_cancellation(
     db.close.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_sqlite_v10_reset_is_atomic_and_creates_new_generation(tmp_path: Path) -> None:
+    """SQLite v10 contents reset transactionally into the principal-owned v11 schema."""
+    db_path = tmp_path / "event_cache.db"
+    legacy = sqlite3.connect(db_path)
+    legacy.execute("CREATE TABLE events(event_id TEXT PRIMARY KEY, event_json TEXT)")
+    legacy.execute("INSERT INTO events VALUES ('$legacy', '{}')")
+    legacy.execute("PRAGMA user_version = 10")
+    legacy.commit()
+    legacy.close()
+
+    cache = SqliteEventCache(db_path)
+    await cache.initialize()
+    try:
+        assert cache.cache_generation
+        assert await cache.get_event("!room:localhost", "$legacy") is None
+        assert cache._runtime.db is not None
+        version_row = await (await cache._runtime.db.execute("PRAGMA user_version")).fetchone()
+        assert version_row == (11,)
+    finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_v10_reset_rolls_back_on_schema_creation_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation cannot commit a cache reset while leaving an old checkpoint plausible."""
+    db_path = tmp_path / "event_cache.db"
+    legacy = sqlite3.connect(db_path)
+    legacy.execute("CREATE TABLE events(event_id TEXT PRIMARY KEY, event_json TEXT)")
+    legacy.execute("INSERT INTO events VALUES ('$legacy', '{}')")
+    legacy.execute("PRAGMA user_version = 10")
+    legacy.commit()
+    legacy.close()
+
+    cancel_reason = "schema cancelled"
+
+    async def cancelled_schema(_db: object) -> None:
+        raise asyncio.CancelledError(cancel_reason)
+
+    monkeypatch.setattr(sqlite_event_cache, "_create_event_cache_schema", cancelled_schema)
+    with pytest.raises(asyncio.CancelledError, match="schema cancelled"):
+        await sqlite_event_cache._initialize_event_cache_db(db_path)
+
+    inspected = sqlite3.connect(db_path)
+    try:
+        assert inspected.execute("PRAGMA user_version").fetchone() == (10,)
+        assert inspected.execute("SELECT event_id FROM events").fetchall() == [("$legacy",)]
+    finally:
+        inspected.close()
+
+
 def test_build_event_cache_uses_postgres_when_configured(tmp_path: Path) -> None:
     """The runtime factory should construct the Postgres cache backend only when requested."""
     runtime_paths = _runtime_paths(
@@ -340,6 +512,7 @@ async def test_postgres_event_cache_initialize_attempts_cleanup_without_masking_
         commit=AsyncMock(),
         rollback=AsyncMock(side_effect=RuntimeError("rollback failed")),
         close=AsyncMock(side_effect=RuntimeError("close failed")),
+        execute=AsyncMock(),
     )
 
     async def connect(_database_url: str) -> object:
@@ -349,6 +522,10 @@ async def test_postgres_event_cache_initialize_attempts_cleanup_without_masking_
         raise asyncio.CancelledError(cancel_reason)
 
     monkeypatch.setattr("mindroom.matrix.cache.postgres_event_cache.psycopg.AsyncConnection.connect", connect)
+    monkeypatch.setattr(
+        "mindroom.matrix.cache.postgres_event_cache._postgres_schema_version",
+        AsyncMock(return_value=None),
+    )
     monkeypatch.setattr("mindroom.matrix.cache.postgres_event_cache._create_postgres_event_cache_schema", create_schema)
 
     with pytest.raises(asyncio.CancelledError, match=cancel_reason):
@@ -360,6 +537,89 @@ async def test_postgres_event_cache_initialize_attempts_cleanup_without_masking_
     db.rollback.assert_awaited_once()
     db.close.assert_awaited_once()
     db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_postgres_v1_migration_is_concurrent_and_namespace_preserving(
+    postgres_event_cache_url: str,
+) -> None:
+    """The advisory-locked v2 migration preserves every legacy namespace."""
+    schema_name = f"cache_migration_{uuid.uuid4().hex}"
+    isolated_url = await _seed_postgres_v1_schema(postgres_event_cache_url, schema_name)
+    cache_a = PostgresEventCache(database_url=isolated_url, namespace="runtime_a")
+    cache_b = PostgresEventCache(database_url=isolated_url, namespace="runtime_b")
+    await asyncio.gather(cache_a.initialize(), cache_b.initialize())
+    try:
+        db = await psycopg.AsyncConnection.connect(isolated_url)
+        version = await (
+            await db.execute(
+                "SELECT value FROM mindroom_event_cache_metadata WHERE key = 'schema_version'",
+            )
+        ).fetchone()
+        namespaces = await (
+            await db.execute(
+                "SELECT namespace FROM mindroom_event_cache_events ORDER BY namespace",
+            )
+        ).fetchall()
+        quarantined_mxc = await (
+            await db.execute(
+                """
+            SELECT namespace, room_id
+            FROM mindroom_event_cache_mxc_text
+            ORDER BY namespace
+            """,
+            )
+        ).fetchall()
+        await db.close()
+        assert version == ("2",)
+        assert namespaces == [("legacy_a",), ("legacy_b",)]
+        assert quarantined_mxc == [("legacy_a", ""), ("legacy_b", "")]
+    finally:
+        await asyncio.gather(cache_a.close(), cache_b.close())
+
+
+@pytest.mark.asyncio
+async def test_postgres_v1_migration_rolls_back_on_cancellation(
+    postgres_event_cache_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelled PostgreSQL DDL leaves the legacy version and constraints intact."""
+    schema_name = f"cache_migration_cancel_{uuid.uuid4().hex}"
+    isolated_url = await _seed_postgres_v1_schema(postgres_event_cache_url, schema_name)
+    from mindroom.matrix.cache import postgres_event_cache as postgres_module  # noqa: PLC0415
+
+    original_migration = postgres_module._migrate_postgres_event_cache_v1_to_v2
+    cancel_reason = "migration cancelled"
+
+    async def cancelled_migration(db: object) -> None:
+        await original_migration(cast("psycopg.AsyncConnection", db))
+        raise asyncio.CancelledError(cancel_reason)
+
+    monkeypatch.setattr(postgres_module, "_migrate_postgres_event_cache_v1_to_v2", cancelled_migration)
+    cache = PostgresEventCache(database_url=isolated_url, namespace="runtime")
+    with pytest.raises(asyncio.CancelledError, match="migration cancelled"):
+        await cache.initialize()
+
+    db = await psycopg.AsyncConnection.connect(isolated_url)
+    version = await (
+        await db.execute(
+            "SELECT value FROM mindroom_event_cache_metadata WHERE key = 'schema_version'",
+        )
+    ).fetchone()
+    columns = await (
+        await db.execute(
+            """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'mindroom_event_cache_mxc_text'
+        ORDER BY ordinal_position
+        """,
+        )
+    ).fetchall()
+    await db.close()
+    assert version == ("1",)
+    assert "room_id" not in {str(row[0]) for row in columns}
 
 
 @pytest.mark.asyncio

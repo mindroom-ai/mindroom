@@ -119,7 +119,7 @@ from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
     from datetime import datetime
     from pathlib import Path
 
@@ -374,6 +374,7 @@ class AgentBot:
                 get_configured_rooms=lambda: self.rooms,
                 send_response=send_room_lifecycle_response,
                 on_configured_room_joined=lambda room_id: self._post_join_room_setup(room_id),
+                on_rooms_left=self._purge_left_rooms,
             ),
         )
         self._init_runtime_components()
@@ -792,7 +793,7 @@ class AgentBot:
                 )
         finally:
             if not completed:
-                await self.startup_thread_prewarm_registry.release(room_id)
+                await self.startup_thread_prewarm_registry.release(self.event_cache.principal_id, room_id)
 
     async def _run_startup_thread_prewarm(self) -> None:
         """Prewarm recent thread snapshots per joined room without blocking live dispatch behind cache seeding."""
@@ -801,7 +802,7 @@ class AgentBot:
             for room_id in joined_rooms:
                 if self._sync_shutting_down:
                     return
-                if not await self.startup_thread_prewarm_registry.try_claim(room_id):
+                if not await self.startup_thread_prewarm_registry.try_claim(self.event_cache.principal_id, room_id):
                     continue
                 await self._prewarm_claimed_startup_thread_room(room_id)
         finally:
@@ -1030,6 +1031,14 @@ class AgentBot:
             return None
         if token_record is None:
             return None
+        if (
+            token_record.checkpoint is not None
+            and token_record.checkpoint.cache_generation is not None
+            and token_record.checkpoint.cache_generation != self.event_cache.cache_generation
+        ):
+            self.logger.warning("matrix_sync_token_cache_generation_mismatch")
+            self._clear_saved_sync_token()
+            return None
         self.logger.info(
             "matrix_sync_token_restored",
             certified=token_record.certified,
@@ -1060,6 +1069,7 @@ class AgentBot:
                 self.storage_path,
                 self.agent_name,
                 checkpoint.token,
+                cache_generation=self.event_cache.cache_generation,
             )
         except (OSError, ValueError) as exc:
             self.logger.warning("matrix_sync_token_save_failed", error=str(exc))
@@ -1414,6 +1424,7 @@ class AgentBot:
         """Apply invited-room cleanup before optional call reconciliation."""
         if event.state_key == self.agent_user.user_id and event.membership in {"leave", "ban"}:
             self._room_lifecycle.forget_invited_room(room.room_id)
+            await self._conversation_cache.purge_room(room.room_id)
         call_manager = self._call_manager
         if call_manager is not None:
             await call_manager.on_room_membership_event(room, event)
@@ -1552,12 +1563,18 @@ class AgentBot:
         try:
             joined_rooms = await get_joined_rooms(self.client)
             if joined_rooms:
-                await leave_non_dm_rooms(self.client, joined_rooms)
+                left_room_ids = await leave_non_dm_rooms(self.client, joined_rooms)
+                await self._purge_left_rooms(left_room_ids)
         except Exception:
             self.logger.exception("Error leaving rooms during cleanup")
 
         # Stop the bot
         await self.stop(shutdown_intent=ENTITY_REMOVED_SHUTDOWN)
+
+    async def _purge_left_rooms(self, room_ids: Sequence[str]) -> None:
+        """Purge principal-owned cache rows only after confirmed room departures."""
+        for room_id in room_ids:
+            await self._conversation_cache.purge_room(room_id)
 
     async def stop(
         self,

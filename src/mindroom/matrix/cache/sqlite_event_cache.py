@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -27,20 +28,23 @@ if TYPE_CHECKING:
     from .agent_message_snapshot import AgentMessageSnapshot
     from .event_cache import ThreadCacheState
 
-_EVENT_CACHE_SCHEMA_VERSION = 10
+_EVENT_CACHE_SCHEMA_VERSION = 11
 _EVENT_CACHE_TABLES = (
     "thread_events",
     "events",
     "event_edits",
     "event_threads",
     "redacted_events",
+    "event_mxc_references",
     "mxc_text_cache",
     "thread_cache_state",
     "room_cache_state",
+    "event_cache_metadata",
 )
 _REQUIRED_EVENT_CACHE_TABLES = frozenset(_EVENT_CACHE_TABLES)
 _LOCK_WAIT_LOG_THRESHOLD_SECONDS = 0.1
 _MAX_CACHED_ROOM_LOCKS = 256
+_DEFAULT_PRINCIPAL_ID = "__mindroom_default_principal__"
 _T = TypeVar("_T")
 
 logger = get_logger(__name__)
@@ -79,9 +83,14 @@ async def _initialize_event_cache_db(db_path: Path) -> aiosqlite.Connection:
     try:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA busy_timeout=5000")
-        await _reset_stale_cache_if_needed(db, db_path=db_path)
-        await _create_event_cache_schema(db)
-        await db.commit()
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            await _reset_stale_cache_if_needed(db, db_path=db_path)
+            await _create_event_cache_schema(db)
+            await db.commit()
+        except BaseException:
+            await _rollback_sqlite_connection_best_effort(db, operation="initialize")
+            raise
     except BaseException:
         await _close_sqlite_connection_best_effort(db, operation="initialize")
         raise
@@ -93,108 +102,159 @@ async def _create_event_cache_schema(db: aiosqlite.Connection) -> None:
     await db.execute(
         """
         CREATE TABLE IF NOT EXISTS thread_events (
+            principal_id TEXT NOT NULL,
             room_id TEXT NOT NULL,
             thread_id TEXT NOT NULL,
             event_id TEXT NOT NULL,
             origin_server_ts INTEGER NOT NULL,
             event_json TEXT NOT NULL,
-            PRIMARY KEY (room_id, event_id)
+            PRIMARY KEY (principal_id, room_id, event_id)
         )
         """,
     )
     await db.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_thread_events_room_thread_ts
-        ON thread_events(room_id, thread_id, origin_server_ts)
+        ON thread_events(principal_id, room_id, thread_id, origin_server_ts)
         """,
     )
     await db.execute(
         """
         CREATE TABLE IF NOT EXISTS events (
-            event_id TEXT PRIMARY KEY,
+            principal_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
             room_id TEXT NOT NULL,
             origin_server_ts INTEGER NOT NULL,
             event_json TEXT NOT NULL,
-            cached_at REAL NOT NULL
+            cached_at REAL NOT NULL,
+            PRIMARY KEY (principal_id, room_id, event_id)
         )
         """,
     )
     await db.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_events_room_origin_ts
-        ON events(room_id, origin_server_ts DESC)
+        ON events(principal_id, room_id, origin_server_ts DESC)
         """,
     )
     await db.execute(
         """
         CREATE TABLE IF NOT EXISTS event_edits (
-            edit_event_id TEXT PRIMARY KEY,
+            principal_id TEXT NOT NULL,
+            edit_event_id TEXT NOT NULL,
             room_id TEXT NOT NULL,
             original_event_id TEXT NOT NULL,
-            origin_server_ts INTEGER NOT NULL
+            origin_server_ts INTEGER NOT NULL,
+            PRIMARY KEY (principal_id, room_id, edit_event_id)
         )
         """,
     )
     await db.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_event_edits_room_original_ts
-        ON event_edits(room_id, original_event_id, origin_server_ts DESC, edit_event_id DESC)
+        ON event_edits(principal_id, room_id, original_event_id, origin_server_ts DESC, edit_event_id DESC)
         """,
     )
     await db.execute(
         """
         CREATE TABLE IF NOT EXISTS event_threads (
+            principal_id TEXT NOT NULL,
             room_id TEXT NOT NULL,
             event_id TEXT NOT NULL,
             thread_id TEXT NOT NULL,
-            PRIMARY KEY (room_id, event_id)
+            PRIMARY KEY (principal_id, room_id, event_id)
         )
         """,
     )
     await db.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_event_threads_room_thread
-        ON event_threads(room_id, thread_id, event_id)
+        ON event_threads(principal_id, room_id, thread_id, event_id)
         """,
     )
     await db.execute(
         """
         CREATE TABLE IF NOT EXISTS redacted_events (
+            principal_id TEXT NOT NULL,
             room_id TEXT NOT NULL,
             event_id TEXT NOT NULL,
-            PRIMARY KEY (room_id, event_id)
+            PRIMARY KEY (principal_id, room_id, event_id)
         )
         """,
     )
     await db.execute(
         """
         CREATE TABLE IF NOT EXISTS mxc_text_cache (
-            mxc_url TEXT PRIMARY KEY,
+            principal_id TEXT NOT NULL,
+            room_id TEXT NOT NULL,
+            mxc_url TEXT NOT NULL,
             text_content TEXT NOT NULL,
-            cached_at REAL NOT NULL
+            cached_at REAL NOT NULL,
+            PRIMARY KEY (principal_id, room_id, mxc_url)
         )
         """,
     )
     await db.execute(
         """
+        CREATE TABLE IF NOT EXISTS event_mxc_references (
+            principal_id TEXT NOT NULL,
+            room_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            mxc_url TEXT NOT NULL,
+            PRIMARY KEY (principal_id, room_id, event_id, mxc_url)
+        )
+        """,
+    )
+    await db.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_event_mxc_references_plaintext
+        ON event_mxc_references(principal_id, room_id, mxc_url, event_id)
+        """,
+    )
+    await db.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_event_mxc_references_event
+        ON event_mxc_references(principal_id, room_id, event_id, mxc_url)
+        """,
+    )
+    await db.execute(
+        """
         CREATE TABLE IF NOT EXISTS thread_cache_state (
+            principal_id TEXT NOT NULL,
             room_id TEXT NOT NULL,
             thread_id TEXT NOT NULL,
             validated_at REAL,
             invalidated_at REAL,
             invalidation_reason TEXT,
-            PRIMARY KEY (room_id, thread_id)
+            PRIMARY KEY (principal_id, room_id, thread_id)
         )
         """,
     )
     await db.execute(
         """
         CREATE TABLE IF NOT EXISTS room_cache_state (
-            room_id TEXT PRIMARY KEY,
+            principal_id TEXT NOT NULL,
+            room_id TEXT NOT NULL,
             invalidated_at REAL,
-            invalidation_reason TEXT
+            invalidation_reason TEXT,
+            PRIMARY KEY (principal_id, room_id)
         )
         """,
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS event_cache_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """,
+    )
+    await db.execute(
+        """
+        INSERT OR IGNORE INTO event_cache_metadata(key, value)
+        VALUES ('generation', ?)
+        """,
+        (uuid.uuid4().hex,),
     )
     await db.execute(f"PRAGMA user_version = {_EVENT_CACHE_SCHEMA_VERSION}")
 
@@ -242,11 +302,9 @@ async def _reset_stale_cache_if_needed(
         _schema_version=current_schema_version,
         existing_tables=sorted(current_table_names),
     )
-    await db.executescript(
-        "\n".join(f"DROP TABLE IF EXISTS {table_name};" for table_name in _EVENT_CACHE_TABLES),
-    )
+    for table_name in _EVENT_CACHE_TABLES:
+        await db.execute(f"DROP TABLE IF EXISTS {table_name}")
     await db.execute("PRAGMA user_version = 0")
-    await db.commit()
 
 
 @dataclass
@@ -265,7 +323,8 @@ class _SqliteEventCacheRuntime:
         self._db: aiosqlite.Connection | None = None
         self._disabled_reason: str | None = None
         self._db_lock = asyncio.Lock()
-        self._room_locks: OrderedDict[str, _RoomLockEntry] = OrderedDict()
+        self._room_locks: OrderedDict[tuple[str, str], _RoomLockEntry] = OrderedDict()
+        self._generation: str | None = None
 
     @property
     def db_path(self) -> Path:
@@ -287,6 +346,14 @@ class _SqliteEventCacheRuntime:
         """Return whether the advisory cache is disabled for this runtime."""
         return self._disabled_reason is not None
 
+    @property
+    def generation(self) -> str:
+        """Return the durable cache generation created with the active schema."""
+        if self._generation is None:
+            msg = "SqliteEventCache must be initialized before reading its generation"
+            raise RuntimeError(msg)
+        return self._generation
+
     def disable(self, reason: str) -> None:
         """Disable the advisory cache for the rest of the runtime."""
         if self._disabled_reason is not None:
@@ -303,7 +370,18 @@ class _SqliteEventCacheRuntime:
         async with self._db_lock:
             if self._disabled_reason is not None or self._db is not None:
                 return
-            self._db = await _initialize_event_cache_db(self._db_path)
+            db = await _initialize_event_cache_db(self._db_path)
+            cursor = await db.execute(
+                "SELECT value FROM event_cache_metadata WHERE key = 'generation'",
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None:
+                await _close_sqlite_connection_best_effort(db, operation="initialize_generation")
+                msg = "SQLite event cache generation metadata is missing"
+                raise RuntimeError(msg)
+            self._db = db
+            self._generation = str(row[0])
 
     async def close(self) -> None:
         """Close the SQLite connection when the cache is no longer needed."""
@@ -312,24 +390,38 @@ class _SqliteEventCacheRuntime:
                 return
             await self._db.close()
             self._db = None
+            self._generation = None
             self._room_locks.clear()
 
-    def room_lock_entry(self, room_id: str, *, active_user_increment: int = 0) -> _RoomLockEntry:
+    def room_lock_entry(
+        self,
+        principal_id: str,
+        room_id: str,
+        *,
+        active_user_increment: int = 0,
+    ) -> _RoomLockEntry:
         """Return the cached room lock entry, creating it on demand."""
-        entry = self._room_locks.get(room_id)
+        key = (principal_id, room_id)
+        entry = self._room_locks.get(key)
         if entry is None:
             entry = _RoomLockEntry(active_users=active_user_increment)
         else:
             entry.active_users += active_user_increment
-        self._room_locks[room_id] = entry
-        self._room_locks.move_to_end(room_id)
+        self._room_locks[key] = entry
+        self._room_locks.move_to_end(key)
         self._prune_room_locks()
         return entry
 
     @asynccontextmanager
-    async def acquire_room_lock(self, room_id: str, *, operation: str) -> AsyncIterator[None]:
+    async def acquire_room_lock(
+        self,
+        principal_id: str,
+        room_id: str,
+        *,
+        operation: str,
+    ) -> AsyncIterator[None]:
         """Serialize runtime-visible work for one room."""
-        entry = self.room_lock_entry(room_id, active_user_increment=1)
+        entry = self.room_lock_entry(principal_id, room_id, active_user_increment=1)
         wait_started = time.perf_counter()
         acquired = False
         try:
@@ -339,6 +431,7 @@ class _SqliteEventCacheRuntime:
             if wait_time > _LOCK_WAIT_LOG_THRESHOLD_SECONDS:
                 logger.debug(
                     "Waited for SqliteEventCache room lock",
+                    principal_id=principal_id,
                     room_id=room_id,
                     operation=operation,
                     wait_time_ms=milliseconds(wait_time, ndigits=2),
@@ -354,6 +447,7 @@ class _SqliteEventCacheRuntime:
     @asynccontextmanager
     async def acquire_db_operation(
         self,
+        principal_id: str,
         room_id: str,
         *,
         operation: str,
@@ -361,7 +455,7 @@ class _SqliteEventCacheRuntime:
         """Serialize one DB operation with lifecycle changes and room ordering."""
         if self._db is None:
             await self.initialize()
-        async with self._db_lock, self.acquire_room_lock(room_id, operation=operation):
+        async with self._db_lock, self.acquire_room_lock(principal_id, room_id, operation=operation):
             yield self.require_db()
 
     def require_db(self) -> aiosqlite.Connection:
@@ -373,22 +467,46 @@ class _SqliteEventCacheRuntime:
 
     def _prune_room_locks(self) -> None:
         while len(self._room_locks) > _MAX_CACHED_ROOM_LOCKS:
-            evicted_room_id: str | None = None
-            for cached_room_id, cached_entry in self._room_locks.items():
+            evicted_room_key: tuple[str, str] | None = None
+            for cached_room_key, cached_entry in self._room_locks.items():
                 if cached_entry.active_users > 0:
                     continue
-                evicted_room_id = cached_room_id
+                evicted_room_key = cached_room_key
                 break
-            if evicted_room_id is None:
+            if evicted_room_key is None:
                 return
-            self._room_locks.pop(evicted_room_id, None)
+            self._room_locks.pop(evicted_room_key, None)
 
 
 class SqliteEventCache:
     """SQLite-backed ConversationEventCache implementation."""
 
-    def __init__(self, db_path: Path) -> None:
-        self._runtime = _SqliteEventCacheRuntime(db_path)
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        principal_id: str = _DEFAULT_PRINCIPAL_ID,
+        _runtime: _SqliteEventCacheRuntime | None = None,
+    ) -> None:
+        self._runtime = _SqliteEventCacheRuntime(db_path) if _runtime is None else _runtime
+        self._principal_id = principal_id
+
+    @property
+    def principal_id(self) -> str:
+        """Return the Matrix principal bound to this cache view."""
+        return self._principal_id
+
+    def for_principal(self, principal_id: str) -> SqliteEventCache:
+        """Return a view restricted to one stable Matrix user ID."""
+        normalized_principal_id = principal_id.strip()
+        if not normalized_principal_id:
+            msg = "Matrix event cache principal_id must be non-empty"
+            raise ValueError(msg)
+        return SqliteEventCache(
+            self.db_path,
+            principal_id=normalized_principal_id,
+            _runtime=self._runtime,
+        )
 
     @property
     def db_path(self) -> Path:
@@ -404,6 +522,11 @@ class SqliteEventCache:
     def durable_writes_available(self) -> bool:
         """Return whether cache writes can durably persist data."""
         return self._runtime.is_initialized and not self._runtime.is_disabled
+
+    @property
+    def cache_generation(self) -> str:
+        """Return the generation that certified sync checkpoints must match."""
+        return self._runtime.generation
 
     def runtime_diagnostics(self) -> dict[str, object]:
         """Return log-safe runtime state for sync certification diagnostics."""
@@ -443,7 +566,7 @@ class SqliteEventCache:
     ) -> _T:
         if self._runtime.is_disabled:
             return disabled_result
-        async with self._runtime.acquire_db_operation(room_id, operation=operation) as db:
+        async with self._runtime.acquire_db_operation(self.principal_id, room_id, operation=operation) as db:
             return await reader(db)
 
     async def _write_operation(
@@ -456,7 +579,7 @@ class SqliteEventCache:
     ) -> _T:
         if self._runtime.is_disabled:
             return disabled_result
-        async with self._runtime.acquire_db_operation(room_id, operation=operation) as db:
+        async with self._runtime.acquire_db_operation(self.principal_id, room_id, operation=operation) as db:
             try:
                 result = await writer(db)
                 await db.commit()
@@ -473,6 +596,7 @@ class SqliteEventCache:
             disabled_result=None,
             reader=lambda db: sqlite_event_cache_threads.load_thread_events(
                 db,
+                principal_id=self.principal_id,
                 room_id=room_id,
                 thread_id=thread_id,
             ),
@@ -486,6 +610,7 @@ class SqliteEventCache:
             disabled_result=[],
             reader=lambda db: sqlite_event_cache_threads.load_recent_room_thread_ids(
                 db,
+                principal_id=self.principal_id,
                 room_id=room_id,
                 limit=limit,
             ),
@@ -499,6 +624,7 @@ class SqliteEventCache:
             disabled_result=None,
             reader=lambda db: sqlite_event_cache_threads.load_thread_cache_state(
                 db,
+                principal_id=self.principal_id,
                 room_id=room_id,
                 thread_id=thread_id,
             ),
@@ -510,7 +636,12 @@ class SqliteEventCache:
             room_id,
             operation="get_event",
             disabled_result=None,
-            reader=lambda db: sqlite_event_cache_events.load_event(db, event_id=event_id),
+            reader=lambda db: sqlite_event_cache_events.load_event(
+                db,
+                principal_id=self.principal_id,
+                room_id=room_id,
+                event_id=event_id,
+            ),
         )
 
     async def get_recent_room_events(
@@ -528,6 +659,7 @@ class SqliteEventCache:
             disabled_result=[],
             reader=lambda db: sqlite_event_cache_events.load_recent_room_events(
                 db,
+                principal_id=self.principal_id,
                 room_id=room_id,
                 event_type=event_type,
                 since_ts_ms=since_ts_ms,
@@ -549,6 +681,7 @@ class SqliteEventCache:
             disabled_result=None,
             reader=lambda db: sqlite_event_cache_events.load_latest_edit(
                 db,
+                principal_id=self.principal_id,
                 room_id=room_id,
                 original_event_id=original_event_id,
                 sender=sender,
@@ -570,6 +703,7 @@ class SqliteEventCache:
             disabled_result=None,
             reader=lambda db: load_sqlite_agent_message_snapshot(
                 db,
+                principal_id=self.principal_id,
                 room_id=room_id,
                 thread_id=thread_id,
                 sender=sender,
@@ -577,14 +711,17 @@ class SqliteEventCache:
             ),
         )
 
-    async def get_mxc_text(self, room_id: str, mxc_url: str) -> str | None:
-        """Return one durably cached MXC text payload when present."""
+    async def get_mxc_text(self, room_id: str, event_id: str, mxc_url: str) -> str | None:
+        """Return MXC plaintext only while a visible owning event references it."""
         return await self._read_operation(
             room_id,
             operation="get_mxc_text",
             disabled_result=None,
             reader=lambda db: sqlite_event_cache_events.load_mxc_text(
                 db,
+                principal_id=self.principal_id,
+                room_id=room_id,
+                event_id=event_id,
                 mxc_url=mxc_url,
             ),
         )
@@ -607,6 +744,7 @@ class SqliteEventCache:
                 writer=lambda db, room_id=room_id, room_events=room_events, cached_at=cached_at: (
                     sqlite_event_cache_events.persist_lookup_events(
                         db,
+                        principal_id=self.principal_id,
                         room_id=room_id,
                         room_events=room_events,
                         cached_at=cached_at,
@@ -614,17 +752,22 @@ class SqliteEventCache:
                 ),
             )
 
-    async def store_mxc_text(self, room_id: str, mxc_url: str, text: str) -> None:
-        """Insert or replace one durably cached MXC text payload."""
-        await self._write_operation(
-            room_id,
-            operation="store_mxc_text",
-            disabled_result=None,
-            writer=lambda db: sqlite_event_cache_events.persist_mxc_text(
-                db,
-                mxc_url=mxc_url,
-                text=text,
-                cached_at=time.time(),
+    async def store_mxc_text(self, room_id: str, event_id: str, mxc_url: str, text: str) -> bool:
+        """Cache MXC plaintext only for a visible, non-tombstoned owning event."""
+        return bool(
+            await self._write_operation(
+                room_id,
+                operation="store_mxc_text",
+                disabled_result=False,
+                writer=lambda db: sqlite_event_cache_events.persist_mxc_text(
+                    db,
+                    principal_id=self.principal_id,
+                    room_id=room_id,
+                    event_id=event_id,
+                    mxc_url=mxc_url,
+                    text=text,
+                    cached_at=time.time(),
+                ),
             ),
         )
 
@@ -646,6 +789,7 @@ class SqliteEventCache:
         async def replace_if_still_safe(db: aiosqlite.Connection) -> bool:
             return await sqlite_event_cache_threads.replace_thread_locked_if_not_newer(
                 db,
+                principal_id=self.principal_id,
                 room_id=room_id,
                 thread_id=thread_id,
                 events=events,
@@ -670,6 +814,7 @@ class SqliteEventCache:
             disabled_result=None,
             writer=lambda db: sqlite_event_cache_threads.invalidate_thread_locked(
                 db,
+                principal_id=self.principal_id,
                 room_id=room_id,
                 thread_id=thread_id,
             ),
@@ -683,6 +828,7 @@ class SqliteEventCache:
             disabled_result=None,
             writer=lambda db: sqlite_event_cache_threads.invalidate_room_threads_locked(
                 db,
+                principal_id=self.principal_id,
                 room_id=room_id,
             ),
         )
@@ -695,6 +841,7 @@ class SqliteEventCache:
             disabled_result=None,
             writer=lambda db: sqlite_event_cache_threads.mark_thread_stale_locked(
                 db,
+                principal_id=self.principal_id,
                 room_id=room_id,
                 thread_id=thread_id,
                 reason=reason,
@@ -709,6 +856,7 @@ class SqliteEventCache:
             disabled_result=None,
             writer=lambda db: sqlite_event_cache_threads.mark_room_stale_locked(
                 db,
+                principal_id=self.principal_id,
                 room_id=room_id,
                 reason=reason,
             ),
@@ -724,6 +872,7 @@ class SqliteEventCache:
                 disabled_result=False,
                 writer=lambda db: sqlite_event_cache_threads.append_existing_thread_event(
                     db,
+                    principal_id=self.principal_id,
                     room_id=room_id,
                     thread_id=thread_id,
                     normalized_event=normalized_event,
@@ -744,6 +893,7 @@ class SqliteEventCache:
                 disabled_result=False,
                 writer=lambda db: sqlite_event_cache_threads.revalidate_thread_after_incremental_update_locked(
                     db,
+                    principal_id=self.principal_id,
                     room_id=room_id,
                     thread_id=thread_id,
                 ),
@@ -758,6 +908,7 @@ class SqliteEventCache:
             disabled_result=None,
             reader=lambda db: sqlite_event_cache_events.load_thread_id_for_event(
                 db,
+                principal_id=self.principal_id,
                 room_id=room_id,
                 event_id=event_id,
             ),
@@ -776,8 +927,22 @@ class SqliteEventCache:
                 disabled_result=False,
                 writer=lambda db: sqlite_event_cache_events.redact_event_locked(
                     db,
+                    principal_id=self.principal_id,
                     room_id=room_id,
                     event_id=event_id,
                 ),
+            ),
+        )
+
+    async def purge_room(self, room_id: str) -> None:
+        """Delete only this principal's cached ownership for one left or banned room."""
+        await self._write_operation(
+            room_id,
+            operation="purge_room",
+            disabled_result=None,
+            writer=lambda db: sqlite_event_cache_events.purge_room_locked(
+                db,
+                principal_id=self.principal_id,
+                room_id=room_id,
             ),
         )

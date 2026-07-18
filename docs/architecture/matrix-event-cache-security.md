@@ -1,0 +1,43 @@
+# Matrix event-cache security and plaintext lifecycle
+
+The Matrix event cache is a runtime-wide storage service that exposes a principal-bound view for each authenticated Matrix account.
+
+Room membership is not used as the plaintext authorization boundary because two joined bots can have different encryption keys and decryption results.
+
+The stable principal is the full Matrix user ID, not the device ID or the configured entity name.
+
+SQLite stores the principal ID and room ID in every event, index, tombstone, state, reference, and plaintext key.
+
+PostgreSQL derives an opaque SHA-256 namespace from the configured base namespace and full Matrix user ID, and every row remains room-scoped inside that principal-exclusive namespace.
+
+The default constructor principal exists for standalone cache consumers and tests, while the orchestrator, approval transport, startup prewarm, and thread exporter use explicit principal views.
+
+An event lookup is keyed by principal, room, and event ID.
+
+A decrypted sidecar row is keyed by principal, room, and MXC URL, and reads additionally require a surviving reference from the requested event ID.
+
+Reference rows are derived from version 2 `io.mindroom.long_text` metadata in top-level content and `m.new_content`.
+
+Both unencrypted `url` and encrypted `file.url` MXC representations are tracked.
+
+Plaintext persistence succeeds only while the owning event and its reference are visible and not tombstoned.
+
+Process-local plaintext entries include principal, room, event, and MXC identity, and durable-cache use revalidates ownership before every hit.
+
+Redaction runs in the same database transaction as event, dependent-edit, thread-index, edit-index, and reference removal.
+
+Candidate plaintext is deleted only when no surviving reference in the same principal and room remains.
+
+Redaction tombstones prevent late event delivery or late hydration from recreating a removed event or plaintext row.
+
+Thread replacement and invalidation use the same reference cleanup path, so non-redaction event deletion cannot orphan decrypted plaintext.
+
+An authoritative sync leave, a live own-user leave or ban, and a successful proactive leave purge only the departed principal's rows for that room.
+
+Another principal that remains joined keeps its events, references, plaintext, tombstones, and freshness state.
+
+SQLite schema version 11 resets older advisory cache contents inside one rollback-safe transaction and creates a durable cache-generation identifier.
+
+PostgreSQL schema version 2 migrates under a global transaction-scoped advisory lock, preserves every namespace, expands event and plaintext keys with room scope, and quarantines legacy unscoped plaintext under an unreachable empty room ID.
+
+Certified sync-token records use version 2 and include the cache generation, so an old schema or a reset cache cannot skip the history required to rebuild ownership rows.

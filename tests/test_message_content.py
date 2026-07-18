@@ -9,6 +9,7 @@ import nio
 import pytest
 
 import mindroom.matrix.message_content as message_content_module
+import mindroom.matrix.mxc_plaintext_cache as mxc_plaintext_cache_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_WARMUP_SUFFIX_KEY, RuntimePaths
@@ -74,8 +75,8 @@ class TestResolvedMessageExtraction:
 
     def setup_method(self) -> None:
         """Clear cache before each test."""
-        message_content_module._mxc_cache.clear()
-        message_content_module._mxc_cache_total_bytes = 0
+        mxc_plaintext_cache_module._mxc_cache.clear()
+        mxc_plaintext_cache_module._mxc_cache_total_bytes = 0
 
     @pytest.mark.asyncio
     async def test_extract_and_resolve_message_hydrates_v2_sidecar_content(self) -> None:
@@ -735,8 +736,8 @@ class TestDownloadMxcText:
 
     def setup_method(self) -> None:
         """Clear cache before each test."""
-        message_content_module._mxc_cache.clear()
-        message_content_module._mxc_cache_total_bytes = 0
+        mxc_plaintext_cache_module._mxc_cache.clear()
+        mxc_plaintext_cache_module._mxc_cache_total_bytes = 0
 
     @pytest.mark.asyncio
     async def test_invalid_mxc_url(self) -> None:
@@ -765,6 +766,51 @@ class TestDownloadMxcText:
         client.download.assert_called_once_with(mxc="mxc://server/media123")
 
     @pytest.mark.asyncio
+    async def test_process_cache_scopes_same_mxc_url_by_matrix_principal(self) -> None:
+        """A process-local plaintext hit from one Matrix account must not serve another."""
+        mxc_url = "mxc://server/shared"
+        alice = AsyncMock()
+        alice.user_id = "@alice:localhost"
+        alice_response = MagicMock(spec=nio.DownloadResponse)
+        alice_response.body = b"alice plaintext"
+        alice.download.return_value = alice_response
+        bob = AsyncMock()
+        bob.user_id = "@bob:localhost"
+        bob_response = MagicMock(spec=nio.DownloadResponse)
+        bob_response.body = b"bob plaintext"
+        bob.download.return_value = bob_response
+
+        assert await _download_mxc_text(alice, mxc_url) == "alice plaintext"
+        assert await _download_mxc_text(bob, mxc_url) == "bob plaintext"
+        assert alice.download.await_count == 1
+        assert bob.download.await_count == 1
+
+    def test_process_cache_purge_removes_only_principal_room_plaintext(self) -> None:
+        """Redaction and leave cleanup must not evict another joined principal's plaintext."""
+        alice_key = ("@alice:localhost", "!room:localhost", "$event", "mxc://server/shared")
+        bob_key = ("@bob:localhost", "!room:localhost", "$event", "mxc://server/shared")
+        message_content_module._cache_mxc_text(
+            "mxc://server/shared",
+            "alice plaintext",
+            time.time(),
+            cache_key=alice_key,
+        )
+        message_content_module._cache_mxc_text(
+            "mxc://server/shared",
+            "bob plaintext",
+            time.time(),
+            cache_key=bob_key,
+        )
+
+        mxc_plaintext_cache_module.purge_principal_room_mxc_plaintext(
+            "@alice:localhost",
+            "!room:localhost",
+        )
+
+        assert alice_key not in mxc_plaintext_cache_module._mxc_cache
+        assert bob_key in mxc_plaintext_cache_module._mxc_cache
+
+    @pytest.mark.asyncio
     async def test_download_failure(self) -> None:
         """Test handling of download failure."""
         client = AsyncMock()
@@ -776,7 +822,7 @@ class TestDownloadMxcText:
     @pytest.mark.asyncio
     async def test_download_rejects_plaintext_over_byte_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Oversized sidecar bytes should not be decoded, cached, or persisted."""
-        monkeypatch.setattr(message_content_module, "_mxc_text_max_bytes", 5, raising=False)
+        monkeypatch.setattr(message_content_module, "MXC_TEXT_MAX_BYTES", 5)
         client = AsyncMock()
         response = MagicMock(spec=nio.DownloadResponse)
         response.body = b"123456"
@@ -792,7 +838,7 @@ class TestDownloadMxcText:
         )
 
         assert result is None
-        assert "mxc://server/oversized" not in message_content_module._mxc_cache
+        assert "mxc://server/oversized" not in mxc_plaintext_cache_module._mxc_cache
         event_cache.store_mxc_text.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -801,7 +847,7 @@ class TestDownloadMxcText:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Oversized encrypted sidecars should be rejected before decryption allocates plaintext."""
-        monkeypatch.setattr(message_content_module, "_mxc_text_max_bytes", 5, raising=False)
+        monkeypatch.setattr(message_content_module, "MXC_TEXT_MAX_BYTES", 5)
         client = AsyncMock()
         response = MagicMock(spec=nio.DownloadResponse)
         response.body = b"123456"
@@ -817,7 +863,7 @@ class TestDownloadMxcText:
     @pytest.mark.asyncio
     async def test_download_rejects_decrypted_sidecar_over_byte_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Decrypted sidecar bytes should be capped before UTF-8 decode and JSON parsing."""
-        monkeypatch.setattr(message_content_module, "_mxc_text_max_bytes", 5, raising=False)
+        monkeypatch.setattr(message_content_module, "MXC_TEXT_MAX_BYTES", 5)
         client = AsyncMock()
         response = MagicMock(spec=nio.DownloadResponse)
         response.body = b"small"
@@ -828,14 +874,14 @@ class TestDownloadMxcText:
             result = await _download_mxc_text(client, "mxc://server/decrypted-oversized", file_info)
 
         assert result is None
-        assert "mxc://server/decrypted-oversized" not in message_content_module._mxc_cache
+        assert "mxc://server/decrypted-oversized" not in mxc_plaintext_cache_module._mxc_cache
 
     @pytest.mark.asyncio
     async def test_mxc_cache_uses_lru_eviction(self) -> None:
         """A cache hit should refresh recency so the oldest untouched entry is evicted first."""
         client = AsyncMock()
         now = time.time()
-        for index in range(message_content_module._mxc_cache_max_entries):
+        for index in range(mxc_plaintext_cache_module._mxc_cache_max_entries):
             message_content_module._cache_mxc_text(f"mxc://server/{index}", str(index), now)
 
         assert await _download_mxc_text(client, "mxc://server/0") == "0"
@@ -846,14 +892,14 @@ class TestDownloadMxcText:
         client.download.return_value = overflow_response
 
         assert await _download_mxc_text(client, "mxc://server/overflow") == "overflow"
-        assert "mxc://server/0" in message_content_module._mxc_cache
-        assert "mxc://server/1" not in message_content_module._mxc_cache
+        assert "mxc://server/0" in mxc_plaintext_cache_module._mxc_cache
+        assert "mxc://server/1" not in mxc_plaintext_cache_module._mxc_cache
 
     @pytest.mark.asyncio
     async def test_mxc_cache_prunes_by_total_bytes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The in-memory sidecar cache should be bounded by bytes as well as entry count."""
-        monkeypatch.setattr(message_content_module, "_mxc_cache_max_entries", 10)
-        monkeypatch.setattr(message_content_module, "_mxc_cache_max_bytes", 10, raising=False)
+        monkeypatch.setattr(mxc_plaintext_cache_module, "_mxc_cache_max_entries", 10)
+        monkeypatch.setattr(mxc_plaintext_cache_module, "_mxc_cache_max_bytes", 10)
         client = AsyncMock()
         first_response = MagicMock(spec=nio.DownloadResponse)
         first_response.body = b"123456"
@@ -864,8 +910,8 @@ class TestDownloadMxcText:
         assert await _download_mxc_text(client, "mxc://server/first") == "123456"
         assert await _download_mxc_text(client, "mxc://server/second") == "abcdef"
 
-        assert "mxc://server/first" not in message_content_module._mxc_cache
-        assert "mxc://server/second" in message_content_module._mxc_cache
+        assert "mxc://server/first" not in mxc_plaintext_cache_module._mxc_cache
+        assert "mxc://server/second" in mxc_plaintext_cache_module._mxc_cache
 
 
 class TestCanonicalContentResolution:
@@ -873,8 +919,8 @@ class TestCanonicalContentResolution:
 
     def setup_method(self) -> None:
         """Clear cache before each test."""
-        message_content_module._mxc_cache.clear()
-        message_content_module._mxc_cache_total_bytes = 0
+        mxc_plaintext_cache_module._mxc_cache.clear()
+        mxc_plaintext_cache_module._mxc_cache_total_bytes = 0
 
     @pytest.mark.asyncio
     async def test_extract_and_resolve_message_hydrates_v2_content_metadata(self) -> None:

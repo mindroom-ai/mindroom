@@ -26,7 +26,20 @@ class EventCacheBackendUnavailableError(RuntimeError):
 
 @runtime_checkable
 class ConversationEventCache(Protocol):
-    """Storage-agnostic cache API for Matrix event and thread lookups."""
+    """Principal-bound cache API for Matrix event and thread lookups.
+
+    Every returned row belongs to ``principal_id`` and ``room_id``.
+    A runtime-wide storage service must expose one bound view per authenticated Matrix
+    account instead of sharing this interface directly between bots.
+    """
+
+    @property
+    def principal_id(self) -> str:
+        """Return the Matrix user ID that owns every row visible through this view."""
+
+    @property
+    def cache_generation(self) -> str:
+        """Return the durable generation used to certify restart checkpoints."""
 
     @property
     def durable_writes_available(self) -> bool:
@@ -83,8 +96,8 @@ class ConversationEventCache(Protocol):
     ) -> AgentMessageSnapshot | None:
         """Return the latest visible cached message from one sender in the given scope."""
 
-    async def get_mxc_text(self, room_id: str, mxc_url: str) -> str | None:
-        """Return one durably cached MXC text payload when present."""
+    async def get_mxc_text(self, room_id: str, event_id: str, mxc_url: str) -> str | None:
+        """Return MXC plaintext only while a visible owning event still references it."""
 
     async def store_event(self, event_id: str, room_id: str, event_data: dict[str, Any]) -> None:
         """Insert or replace one individually cached Matrix event."""
@@ -92,8 +105,8 @@ class ConversationEventCache(Protocol):
     async def store_events_batch(self, events: list[tuple[str, str, dict[str, Any]]]) -> None:
         """Insert or replace a batch of individually cached Matrix events."""
 
-    async def store_mxc_text(self, room_id: str, mxc_url: str, text: str) -> None:
-        """Insert or replace one durably cached MXC text payload."""
+    async def store_mxc_text(self, room_id: str, event_id: str, mxc_url: str, text: str) -> bool:
+        """Cache MXC plaintext only for a visible, non-tombstoned owning event."""
 
     async def replace_thread_if_not_newer(
         self,
@@ -138,6 +151,9 @@ class ConversationEventCache(Protocol):
     ) -> bool:
         """Delete one cached event after a redaction."""
 
+    async def purge_room(self, room_id: str) -> None:
+        """Delete only this principal's cached ownership for one left or banned room."""
+
     def disable(self, reason: str) -> None:
         """Disable the advisory cache for the rest of the runtime."""
 
@@ -149,3 +165,28 @@ class ConversationEventCache(Protocol):
 
     async def flush_pending_durable_writes(self, room_id: str) -> None:
         """Persist runtime-only writes for one room before certifying a sync token."""
+
+
+@runtime_checkable
+class SharedConversationEventCache(Protocol):
+    """Runtime-owned cache storage that creates isolated principal views."""
+
+    @property
+    def durable_writes_available(self) -> bool:
+        """Return whether cache writes can durably persist data."""
+
+    @property
+    def is_initialized(self) -> bool:
+        """Return whether the backing storage is currently initialized."""
+
+    async def initialize(self) -> None:
+        """Initialize any backing storage."""
+
+    async def close(self) -> None:
+        """Close any backing storage."""
+
+    def disable(self, reason: str) -> None:
+        """Disable the advisory cache for the rest of the runtime."""
+
+    def for_principal(self, principal_id: str) -> ConversationEventCache:
+        """Return a cache view that can access only ``principal_id`` rows."""

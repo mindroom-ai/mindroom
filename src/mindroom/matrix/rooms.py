@@ -714,8 +714,9 @@ async def filter_non_dm_rooms(client: nio.AsyncClient, room_ids: list[str]) -> l
 async def leave_non_dm_rooms(
     client: nio.AsyncClient,
     room_ids: list[str],
-) -> None:
-    """Leave all rooms in *room_ids* that are not DM rooms."""
+) -> list[str]:
+    """Leave non-DM rooms and return only confirmed successful room IDs."""
+    left_room_ids: list[str] = []
     for room_id in room_ids:
         if await is_dm_room(client, room_id):
             logger.debug("dm_room_preserved", room_id=room_id)
@@ -723,5 +724,7 @@ async def leave_non_dm_rooms(
         success = await leave_room(client, room_id)
         if success:
             logger.info("room_left", room_id=room_id)
+            left_room_ids.append(room_id)
         else:
             logger.error("room_leave_failed", room_id=room_id)
+    return left_room_ids

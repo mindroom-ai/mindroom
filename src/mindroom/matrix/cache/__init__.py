@@ -26,7 +26,7 @@ Main invariants:
 """
 
 from .agent_message_snapshot import AgentMessageSnapshot
-from .event_cache import ConversationEventCache, ThreadCacheState
+from .event_cache import ConversationEventCache, SharedConversationEventCache, ThreadCacheState
 from .event_normalization import normalize_nio_event_for_cache
 from .thread_cache_helpers import thread_cache_rejection_reason
 from .thread_history_result import ThreadHistoryResult, thread_history_result
@@ -36,6 +36,7 @@ __all__ = [
     "AgentMessageSnapshot",
     "ConversationEventCache",
     "EventCacheWriteCoordinator",
+    "SharedConversationEventCache",
     "ThreadCacheState",
     "ThreadHistoryResult",
     "normalize_nio_event_for_cache",

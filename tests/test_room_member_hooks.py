@@ -21,7 +21,7 @@ from mindroom.hooks import EVENT_ROOM_MEMBER_JOINED, HookRegistry, RoomMemberJoi
 from mindroom.matrix import room_member_joins
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncTrustState
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, test_runtime_paths
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, make_event_cache_mock, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -117,6 +117,7 @@ def _router_bot(
     bot = AgentBot(_router_user(), tmp_path, config=config, runtime_paths=runtime_paths)
     bot.client = MagicMock()
     bot.client.homeserver = "http://localhost:8008"
+    bot.event_cache = make_event_cache_mock()
     bot._first_sync_done = True
     bot._room_member_join_hooks_armed = True
     return bot

@@ -12,7 +12,7 @@ from mindroom.matrix.sync_token_values import normalize_sync_token
 if TYPE_CHECKING:
     from pathlib import Path
 
-_SYNC_TOKEN_RECORD_VERSION = "mindroom-sync-token-v1"  # noqa: S105
+_SYNC_TOKEN_RECORD_VERSION = "mindroom-sync-token-v2"  # noqa: S105
 
 
 @dataclass(frozen=True)
@@ -49,13 +49,16 @@ def _record_from_json(text: str) -> _SyncTokenRecord | None:
     token = normalize_sync_token(payload.get("token"))
     if token is None:
         return None
-    checkpoint = SyncCheckpoint(token=token)
+    cache_generation_value = payload.get("cache_generation")
+    cache_generation = cache_generation_value if isinstance(cache_generation_value, str) else None
+    checkpoint = SyncCheckpoint(token=token, cache_generation=cache_generation)
     return _SyncTokenRecord(token=token, checkpoint=checkpoint)
 
 
 def _record_json(checkpoint: SyncCheckpoint) -> str:
     """Return the durable JSON token record for one certified checkpoint."""
     payload = {
+        "cache_generation": checkpoint.cache_generation,
         "token": checkpoint.token,
         "version": _SYNC_TOKEN_RECORD_VERSION,
     }
@@ -66,6 +69,8 @@ def save_sync_token(
     storage_path: Path,
     agent_name: str,
     token: str,
+    *,
+    cache_generation: str | None = None,
 ) -> None:
     """Persist one cache-certified sync token checkpoint."""
     token_path = _sync_token_path(storage_path, agent_name)
@@ -73,7 +78,7 @@ def save_sync_token(
     if token_value is None:
         msg = "Certified sync tokens require a non-empty token"
         raise ValueError(msg)
-    checkpoint = SyncCheckpoint(token=token_value)
+    checkpoint = SyncCheckpoint(token=token_value, cache_generation=cache_generation)
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_text(_record_json(checkpoint), encoding="utf-8")
     _sync_token_certification_path(storage_path, agent_name).unlink(missing_ok=True)

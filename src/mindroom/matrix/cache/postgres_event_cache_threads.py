@@ -215,7 +215,12 @@ async def _replace_thread_locked(
         (namespace, room_id, thread_id),
     )
     if existing_event_ids:
-        await delete_cached_events(db, namespace=namespace, event_ids=existing_event_ids)
+        await delete_cached_events(
+            db,
+            namespace=namespace,
+            room_id=room_id,
+            event_ids=existing_event_ids,
+        )
         await delete_event_edit_rows(
             db,
             namespace,
@@ -291,7 +296,7 @@ async def invalidate_thread_locked(
         (namespace, room_id, thread_id),
     )
     if event_ids:
-        await delete_cached_events(db, namespace=namespace, event_ids=event_ids)
+        await delete_cached_events(db, namespace=namespace, room_id=room_id, event_ids=event_ids)
         await delete_event_edit_rows(
             db,
             namespace,
@@ -330,7 +335,7 @@ async def invalidate_room_threads_locked(
         (namespace, room_id),
     )
     if event_ids:
-        await delete_cached_events(db, namespace=namespace, event_ids=event_ids)
+        await delete_cached_events(db, namespace=namespace, room_id=room_id, event_ids=event_ids)
         await delete_event_edit_rows(
             db,
             namespace,

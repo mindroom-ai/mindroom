@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -23,6 +23,7 @@ class SyncCheckpoint:
     """A sync token saved after its sync response was durably cached."""
 
     token: str
+    cache_generation: str | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)

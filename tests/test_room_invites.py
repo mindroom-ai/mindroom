@@ -29,6 +29,7 @@ from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_runtime_cache_support,
     install_send_response_mock,
     make_matrix_client_mock,
     runtime_paths_for,
@@ -936,6 +937,7 @@ async def test_agent_leaves_unconfigured_rooms(monkeypatch: pytest.MonkeyPatch, 
         return response
 
     mock_client.room_leave = mock_room_leave
+    install_runtime_cache_support(bot)
 
     # Test that the bot leaves unconfigured rooms
     await bot.leave_unconfigured_rooms()
@@ -943,6 +945,7 @@ async def test_agent_leaves_unconfigured_rooms(monkeypatch: pytest.MonkeyPatch, 
     # Verify the bot left room2 (unconfigured) but not room1 (configured)
     assert len(left_rooms) == 1
     assert "!room2:localhost" in left_rooms
+    bot.event_cache.purge_room.assert_awaited_once_with("!room2:localhost")
 
 
 @pytest.mark.asyncio

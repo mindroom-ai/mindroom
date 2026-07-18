@@ -140,8 +140,9 @@ def test_save_sync_token_round_trip(tmp_path: Path) -> None:
 
     token_path = _token_path(tmp_path)
     assert json.loads(token_path.read_text(encoding="utf-8")) == {
+        "cache_generation": None,
         "token": "s12345",
-        "version": "mindroom-sync-token-v1",
+        "version": "mindroom-sync-token-v2",
     }
     assert not _certification_path(tmp_path).exists()
     assert _load_sync_token_value(tmp_path, "code") == "s12345"
@@ -149,6 +150,18 @@ def test_save_sync_token_round_trip(tmp_path: Path) -> None:
     assert token_record is not None
     assert token_record.certified is True
     assert token_record.checkpoint == SyncCheckpoint("s12345")
+
+
+def test_v1_certified_record_is_invalidated_by_principal_owned_cache_schema(tmp_path: Path) -> None:
+    """Pre-v11 certified records cannot establish cache trust after the schema reset."""
+    token_path = _token_path(tmp_path)
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    token_path.write_text(
+        '{"token":"s_old","version":"mindroom-sync-token-v1"}\n',
+        encoding="utf-8",
+    )
+
+    assert load_sync_token_record(tmp_path, "code") is None
 
 
 def test_legacy_marker_file_does_not_certify_plaintext_token(tmp_path: Path) -> None:
@@ -204,6 +217,32 @@ async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
         await bot.start()
 
     assert client.next_batch == "s_saved"
+
+
+@pytest.mark.asyncio
+async def test_bot_start_rejects_checkpoint_from_reset_cache_generation(tmp_path: Path) -> None:
+    """A certified token cannot skip history after its backing cache was reset."""
+    bot = _agent_bot(tmp_path)
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_stale",
+        cache_generation="stale-cache-generation",
+    )
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.next_batch = None
+
+    with (
+        patch.object(bot, "ensure_user_account", AsyncMock()),
+        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch.object(bot, "_set_avatar_if_available", AsyncMock()),
+        patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+        patch("mindroom.bot.interactive.init_persistence"),
+    ):
+        await bot.start()
+
+    assert client.next_batch is None
+    assert load_sync_token_record(tmp_path, bot.agent_name) is None
 
 
 @pytest.mark.asyncio

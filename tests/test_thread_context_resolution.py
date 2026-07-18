@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import nio
 import pytest
 
-import mindroom.matrix.message_content as message_content_module
+import mindroom.matrix.mxc_plaintext_cache as mxc_plaintext_cache_module
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
@@ -1024,7 +1024,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         bot: AgentBot,
     ) -> None:
         """Dispatch policy context should inherit an existing explicit thread across plain replies."""
-        message_content_module._mxc_cache.clear()
+        mxc_plaintext_cache_module._mxc_cache.clear()
+        mxc_plaintext_cache_module._mxc_cache_total_bytes = 0
         room = _matrix_room(name="Test Room")
 
         event = nio.RoomMessageText.from_dict(

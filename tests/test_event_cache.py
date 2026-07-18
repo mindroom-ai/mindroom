@@ -15,7 +15,7 @@ import pytest
 from nio.api import RelationshipType
 
 import mindroom.matrix.cache.sqlite_event_cache as event_cache_module
-import mindroom.matrix.message_content as message_content_module
+import mindroom.matrix.mxc_plaintext_cache as mxc_plaintext_cache_module
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -885,6 +885,7 @@ async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path
     try:
         await sqlite_event_cache_threads._replace_thread_locked(
             db,
+            principal_id="__mindroom_default_principal__",
             room_id="!room:localhost",
             thread_id="$thread_root",
             events=[
@@ -901,12 +902,14 @@ async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path
         with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=200.0):
             await sqlite_event_cache_threads.mark_thread_stale_locked(
                 db,
+                principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 thread_id="$thread_root",
                 reason="thread_stale",
             )
             await sqlite_event_cache_threads.mark_room_stale_locked(
                 db,
+                principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 reason="room_stale",
             )
@@ -914,6 +917,7 @@ async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path
 
         state = await sqlite_event_cache_threads.load_thread_cache_state(
             db,
+            principal_id="__mindroom_default_principal__",
             room_id="!room:localhost",
             thread_id="$thread_root",
         )
@@ -938,24 +942,28 @@ async def test_sqlite_stale_markers_are_monotonic(tmp_path: Path) -> None:
         with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=200.0):
             await sqlite_event_cache_threads.mark_thread_stale_locked(
                 db,
+                principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 thread_id="$thread_root",
                 reason="newer_thread_marker",
             )
             await sqlite_event_cache_threads.mark_room_stale_locked(
                 db,
+                principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 reason="newer_room_marker",
             )
         with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=100.0):
             await sqlite_event_cache_threads.mark_thread_stale_locked(
                 db,
+                principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 thread_id="$thread_root",
                 reason="older_thread_marker",
             )
             await sqlite_event_cache_threads.mark_room_stale_locked(
                 db,
+                principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 reason="older_room_marker",
             )
@@ -963,6 +971,7 @@ async def test_sqlite_stale_markers_are_monotonic(tmp_path: Path) -> None:
 
         state = await sqlite_event_cache_threads.load_thread_cache_state(
             db,
+            principal_id="__mindroom_default_principal__",
             room_id="!room:localhost",
             thread_id="$thread_root",
         )
@@ -1460,10 +1469,10 @@ def test_event_cache_room_lock_cache_evicts_idle_rooms(tmp_path: Path) -> None:
     runtime = event_cache_module._SqliteEventCacheRuntime(tmp_path / "event_cache.db")
 
     for index in range(event_cache_module._MAX_CACHED_ROOM_LOCKS + 8):
-        _ = runtime.room_lock_entry(f"!room-{index}:localhost").lock
+        _ = runtime.room_lock_entry("__mindroom_default_principal__", f"!room-{index}:localhost").lock
 
     assert len(runtime._room_locks) == event_cache_module._MAX_CACHED_ROOM_LOCKS
-    assert "!room-0:localhost" not in runtime._room_locks
+    assert ("__mindroom_default_principal__", "!room-0:localhost") not in runtime._room_locks
 
 
 @pytest.mark.asyncio
@@ -1479,19 +1488,19 @@ async def test_event_cache_room_lock_cache_keeps_contended_room_waiters(tmp_path
     post_release_snapshot: dict[str, object] = {}
 
     async def first_holder() -> None:
-        async with runtime.acquire_room_lock(room_id, operation="first_holder"):
+        async with runtime.acquire_room_lock("__mindroom_default_principal__", room_id, operation="first_holder"):
             holder_entered.set()
             await release_holder.wait()
         for index in range(event_cache_module._MAX_CACHED_ROOM_LOCKS + 8):
-            _ = runtime.room_lock_entry(f"!churn-{index}:localhost").lock
-        entry = runtime._room_locks.get(room_id)
+            _ = runtime.room_lock_entry("__mindroom_default_principal__", f"!churn-{index}:localhost").lock
+        entry = runtime._room_locks.get(("__mindroom_default_principal__", room_id))
         post_release_snapshot["room_present"] = entry is not None
         post_release_snapshot["active_users"] = entry.active_users if entry is not None else None
         post_release_snapshot["lock_locked"] = entry.lock.locked() if entry is not None else None
         pruned_after_release.set()
 
     async def queued_waiter() -> None:
-        async with runtime.acquire_room_lock(room_id, operation="queued_waiter"):
+        async with runtime.acquire_room_lock("__mindroom_default_principal__", room_id, operation="queued_waiter"):
             waiter_acquired.set()
             await allow_waiter_exit.wait()
 
@@ -1500,7 +1509,7 @@ async def test_event_cache_room_lock_cache_keeps_contended_room_waiters(tmp_path
         waiter_registered = loop.create_future()
 
         def check_waiter_registration() -> None:
-            if runtime._room_locks[room_id].active_users >= 2:
+            if runtime._room_locks[("__mindroom_default_principal__", room_id)].active_users >= 2:
                 waiter_registered.set_result(None)
                 return
             loop.call_soon(check_waiter_registration)
@@ -1514,7 +1523,7 @@ async def test_event_cache_room_lock_cache_keeps_contended_room_waiters(tmp_path
     await asyncio.wait_for(holder_entered.wait(), timeout=1.0)
     await wait_for_waiter_registration()
 
-    busy_lock = runtime.room_lock_entry(room_id).lock
+    busy_lock = runtime.room_lock_entry("__mindroom_default_principal__", room_id).lock
     release_holder.set()
     await asyncio.wait_for(pruned_after_release.wait(), timeout=1.0)
 
@@ -1523,7 +1532,7 @@ async def test_event_cache_room_lock_cache_keeps_contended_room_waiters(tmp_path
         "active_users": 1,
         "lock_locked": False,
     }
-    assert runtime.room_lock_entry(room_id).lock is busy_lock
+    assert runtime.room_lock_entry("__mindroom_default_principal__", room_id).lock is busy_lock
 
     await asyncio.wait_for(waiter_acquired.wait(), timeout=1.0)
     allow_waiter_exit.set()
@@ -1544,19 +1553,31 @@ async def test_event_cache_room_lock_cache_keeps_new_active_room_at_capacity(tmp
 
     async def hold_active_room(room_id: str) -> None:
         nonlocal active_room_count
-        async with runtime.acquire_room_lock(room_id, operation="hold_active_room"):
+        async with runtime.acquire_room_lock(
+            "__mindroom_default_principal__",
+            room_id,
+            operation="hold_active_room",
+        ):
             active_room_count += 1
             if active_room_count == event_cache_module._MAX_CACHED_ROOM_LOCKS:
                 active_rooms_registered.set()
             await release_active_rooms.wait()
 
     async def hold_new_room() -> None:
-        async with runtime.acquire_room_lock(new_room_id, operation="hold_new_room"):
+        async with runtime.acquire_room_lock(
+            "__mindroom_default_principal__",
+            new_room_id,
+            operation="hold_new_room",
+        ):
             new_room_holder_entered.set()
             await release_new_room_holder.wait()
 
     async def wait_for_new_room() -> None:
-        async with runtime.acquire_room_lock(new_room_id, operation="wait_for_new_room"):
+        async with runtime.acquire_room_lock(
+            "__mindroom_default_principal__",
+            new_room_id,
+            operation="wait_for_new_room",
+        ):
             new_room_waiter_acquired.set()
 
     active_room_tasks = [
@@ -1611,11 +1632,18 @@ async def test_event_cache_close_waits_for_in_flight_operation(tmp_path: Path) -
     async def blocking_load_event(
         db: object,
         *,
+        principal_id: str,
+        room_id: str,
         event_id: str,
     ) -> dict[str, object] | None:
         operation_started.set()
         await allow_operation_finish.wait()
-        return await original_load_event(db, event_id=event_id)
+        return await original_load_event(
+            db,
+            principal_id=principal_id,
+            room_id=room_id,
+            event_id=event_id,
+        )
 
     try:
         with patch(
@@ -2645,16 +2673,41 @@ async def test_mxc_text_cache_round_trips_across_event_cache_reopen(
     """Durable MXC text rows should survive closing and reopening the event cache."""
     cache = event_cache_factory()
     await cache.initialize()
+    owner_event = {
+        "event_id": "$sidecar-owner",
+        "origin_server_ts": 1000,
+        "type": "m.room.message",
+        "sender": "@agent:localhost",
+        "content": {
+            "body": "preview",
+            "msgtype": "m.file",
+            "url": "mxc://server/sidecar",
+            "io.mindroom.long_text": {
+                "version": 2,
+                "encoding": "matrix_event_content_json",
+            },
+        },
+    }
 
     try:
-        await cache.store_mxc_text("!room:localhost", "mxc://server/sidecar", "Full text sidecar")
+        await cache.store_event("$sidecar-owner", "!room:localhost", owner_event)
+        assert await cache.store_mxc_text(
+            "!room:localhost",
+            "$sidecar-owner",
+            "mxc://server/sidecar",
+            "Full text sidecar",
+        )
     finally:
         await cache.close()
 
     reopened_cache = event_cache_factory()
     await reopened_cache.initialize()
     try:
-        cached_text = await reopened_cache.get_mxc_text("!room:localhost", "mxc://server/sidecar")
+        cached_text = await reopened_cache.get_mxc_text(
+            "!room:localhost",
+            "$sidecar-owner",
+            "mxc://server/sidecar",
+        )
     finally:
         await reopened_cache.close()
 
@@ -2666,7 +2719,8 @@ async def test_fetch_thread_history_reuses_durable_mxc_text_after_restart(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
     """Cached full-history reads should reuse durable sidecar text after a restart."""
-    message_content_module._mxc_cache.clear()
+    mxc_plaintext_cache_module._mxc_cache.clear()
+    mxc_plaintext_cache_module._mxc_cache_total_bytes = 0
     try:
         cache = event_cache_factory()
         await cache.initialize()
@@ -2724,7 +2778,8 @@ async def test_fetch_thread_history_reuses_durable_mxc_text_after_restart(
         finally:
             await cache.close()
 
-        message_content_module._mxc_cache.clear()
+        mxc_plaintext_cache_module._mxc_cache.clear()
+        mxc_plaintext_cache_module._mxc_cache_total_bytes = 0
 
         reopened_cache = event_cache_factory()
         await reopened_cache.initialize()
@@ -2746,7 +2801,8 @@ async def test_fetch_thread_history_reuses_durable_mxc_text_after_restart(
         finally:
             await reopened_cache.close()
     finally:
-        message_content_module._mxc_cache.clear()
+        mxc_plaintext_cache_module._mxc_cache.clear()
+        mxc_plaintext_cache_module._mxc_cache_total_bytes = 0
 
     assert [message.body for message in first_history] == ["Root message", "Full reply"]
     assert [message.body for message in second_history] == ["Root message", "Full reply"]
@@ -2758,5 +2814,17 @@ def test_event_cache_uses_distinct_locks_per_room(tmp_path: Path) -> None:
     """Event cache should keep independent locks per room."""
     runtime = event_cache_module._SqliteEventCacheRuntime(tmp_path / "event_cache.db")
 
-    assert runtime.room_lock_entry("!room:localhost").lock is runtime.room_lock_entry("!room:localhost").lock
-    assert runtime.room_lock_entry("!room:localhost").lock is not runtime.room_lock_entry("!other:localhost").lock
+    assert (
+        runtime.room_lock_entry(
+            "__mindroom_default_principal__",
+            "!room:localhost",
+        ).lock
+        is runtime.room_lock_entry("__mindroom_default_principal__", "!room:localhost").lock
+    )
+    assert (
+        runtime.room_lock_entry(
+            "__mindroom_default_principal__",
+            "!room:localhost",
+        ).lock
+        is not runtime.room_lock_entry("__mindroom_default_principal__", "!other:localhost").lock
+    )
