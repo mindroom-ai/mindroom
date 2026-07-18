@@ -55,7 +55,7 @@ logger = get_logger(__name__)
 
 _WRAPPER_OVERHEAD_TOKENS = 200
 _OVERSIZED_RUN_NOTE = "Run truncated to fit compaction budget."
-_EXCERPT_METADATA_OMIT_KEYS = frozenset(
+_SUMMARY_METADATA_OMIT_KEYS = frozenset(
     {
         "model_params",
         "tools_schema",
@@ -733,9 +733,9 @@ def _compaction_replay_messages(
 def _excerpt_blocks(run: RunOutput | TeamRunOutput, history_settings: ResolvedHistorySettings) -> list[_ExcerptBlock]:
     blocks: list[_ExcerptBlock] = []
     if run.metadata:
-        blocks.append(
-            _ExcerptBlock("<run_metadata>", stable_serialize(_metadata_for_excerpt(run.metadata)), "</run_metadata>"),
-        )
+        metadata = _metadata_for_summary(run.metadata)
+        if metadata:
+            blocks.append(_ExcerptBlock("<run_metadata>", stable_serialize(metadata), "</run_metadata>"))
     for message in _compaction_replay_messages(run, history_settings):
         content = _render_message_content(message)
         if not content:
@@ -744,9 +744,9 @@ def _excerpt_blocks(run: RunOutput | TeamRunOutput, history_settings: ResolvedHi
     return blocks
 
 
-def _metadata_for_excerpt(metadata: dict[str, object]) -> dict[str, object]:
-    """Keep compact identity metadata for oversized excerpts without tool schema bulk."""
-    return {key: value for key, value in metadata.items() if key not in _EXCERPT_METADATA_OMIT_KEYS}
+def _metadata_for_summary(metadata: dict[str, object]) -> dict[str, object]:
+    """Omit bulky request metadata from compaction summary inputs."""
+    return {key: value for key, value in metadata.items() if key not in _SUMMARY_METADATA_OMIT_KEYS}
 
 
 def _truncate_excerpt(text: str, max_chars: int) -> str:
@@ -788,8 +788,9 @@ def _messages_for_runs(
 def _serialize_run(run: RunOutput | TeamRunOutput, index: int, history_settings: ResolvedHistorySettings) -> str:
     lines = [_run_open_tag(run, index)]
     if run.metadata:
-        metadata = _metadata_for_excerpt(run.metadata)
-        lines.extend(["<run_metadata>", _escape_xml_content(stable_serialize(metadata)), "</run_metadata>"])
+        metadata = _metadata_for_summary(run.metadata)
+        if metadata:
+            lines.extend(["<run_metadata>", _escape_xml_content(stable_serialize(metadata)), "</run_metadata>"])
     for message in _compaction_replay_messages(run, history_settings):
         lines.extend(_serialize_message(message))
     lines.append("</run>")

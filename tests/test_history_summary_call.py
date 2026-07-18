@@ -455,6 +455,49 @@ def test_build_summary_input_oversized_run_preserves_messages_before_tool_schema
     assert "tools_schema" not in summary_input
 
 
+def test_build_summary_input_oversized_run_omits_empty_filtered_metadata() -> None:
+    run = _completed_run(
+        "run-big-bulky-metadata",
+        messages=[
+            Message(role="user", content="u" * 800),
+            Message(role="assistant", content="a" * 800),
+        ],
+    )
+    run.metadata = {
+        "tools_schema": [{"name": "deployment_status", "description": "x" * 2_000}],
+        "model_params": {"temperature": 0.2},
+    }
+
+    summary_input, included_runs = _build_summary_input(
+        previous_summary=None,
+        compacted_runs=[run],
+        max_input_tokens=220,
+        history_settings=_ALL_HISTORY_SETTINGS,
+    )
+
+    assert included_runs == [run]
+    assert "Run truncated to fit compaction budget." in summary_input
+    assert "<run_metadata>" not in summary_input
+
+
+def test_build_summary_input_normal_run_omits_empty_filtered_metadata() -> None:
+    run = _completed_run("run-bulky-metadata")
+    run.metadata = {
+        "tools_schema": [{"name": "deployment_status", "description": "x" * 1_000}],
+        "model_params": {"temperature": 0.2},
+    }
+
+    summary_input, included_runs = _build_summary_input(
+        previous_summary=None,
+        compacted_runs=[run],
+        max_input_tokens=10_000,
+        history_settings=_ALL_HISTORY_SETTINGS,
+    )
+
+    assert included_runs == [run]
+    assert "<run_metadata>" not in summary_input
+
+
 def test_build_summary_input_normal_run_omits_only_bulky_metadata() -> None:
     run = _completed_run(
         "run-normal-metadata",
@@ -480,13 +523,14 @@ def test_build_summary_input_normal_run_omits_only_bulky_metadata() -> None:
             Message(role="assistant", content="The deployment succeeded."),
         ],
     )
-    run.metadata = {
+    metadata = {
         "matrix_event_id": "$request",
         "started_at": "2026-07-17T20:00:00Z",
         "durable_outcome": {"state": "delivered"},
         "tools_schema": [{"name": "deployment_status", "description": "x" * 1_000}],
         "model_params": {"temperature": 0.2},
     }
+    run.metadata = metadata.copy()
 
     summary_input, included_runs = _build_summary_input(
         previous_summary=None,
@@ -496,6 +540,7 @@ def test_build_summary_input_normal_run_omits_only_bulky_metadata() -> None:
     )
 
     assert included_runs == [run]
+    assert run.metadata == metadata
     assert "tools_schema" not in summary_input
     assert "model_params" not in summary_input
     assert "$request" in summary_input
