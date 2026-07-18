@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
@@ -17,6 +18,7 @@ from mindroom.desktop.accessibility import (
     DesktopRect,
 )
 from mindroom.desktop.bridge import DesktopBridge, DesktopBridgePolicy
+from mindroom.desktop.command_journal import DesktopCommandJournalError
 from mindroom.desktop.media import DesktopMediaError
 from mindroom.desktop.playwright_mcp import (
     BrowserImage,
@@ -399,8 +401,8 @@ async def test_browser_observation_uses_optional_provider_without_control_lease(
 
 
 @pytest.mark.asyncio
-async def test_browser_tab_selection_cannot_hide_inside_observe_action(transport: AsyncMock) -> None:
-    """Selecting a tab mutates visible browser state and therefore requires a control command and lease."""
+async def test_rejected_browser_tab_selection_does_not_upgrade_observation_to_control(transport: AsyncMock) -> None:
+    """A forbidden targetId cannot turn an otherwise observational action into control."""
     browser = FakeBrowserProvider()
     bridge = DesktopBridge(
         client=object(),
@@ -413,7 +415,7 @@ async def test_browser_tab_selection_cannot_hide_inside_observe_action(transport
     await bridge.on_to_device_event(
         _event(
             _command(
-                "browser_observe",
+                "browser_control",
                 parameters={"browser_action": "snapshot", "browser_parameters": {"targetId": "1"}},
             ),
         ),
@@ -1004,6 +1006,32 @@ async def test_completed_response_is_replayed_after_bridge_restart(tmp_path: Pat
 
     assert transport.await_args.kwargs["content"] == first_response_content
     assert provider.calls == [("get_app_state", APP_ID), ("screenshot", (APP_ID, "state-1"))]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix permission bits are not authoritative on Windows")
+@pytest.mark.asyncio
+async def test_bridge_refuses_permissive_command_journal(tmp_path: Path, transport: AsyncMock) -> None:
+    """A restored journal cannot expose retained desktop or browser response content."""
+    journal_path = tmp_path / "desktop_bridge" / "command_journal.json"
+    bridge = DesktopBridge(
+        client=object(),
+        provider=FakeProvider(),
+        policy=_policy(),
+        clock=lambda: NOW_SECONDS,
+        journal_path=journal_path,
+    )
+    await bridge.on_to_device_event(_event(_command()))
+    transport.assert_awaited_once()
+    journal_path.chmod(0o644)
+
+    with pytest.raises(DesktopCommandJournalError, match="group or other users"):
+        DesktopBridge(
+            client=object(),
+            provider=FakeProvider(),
+            policy=_policy(),
+            clock=lambda: NOW_SECONDS,
+            journal_path=journal_path,
+        )
 
 
 @pytest.mark.asyncio

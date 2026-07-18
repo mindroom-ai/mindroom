@@ -376,8 +376,8 @@ class DesktopBridge:
         if not self.policy.browser_enabled or self.browser_provider is None:
             return "Playwright browser extension support is disabled on this desktop bridge."
         try:
-            browser_action, browser_parameters = _browser_command_parameters(command.parameters)
-            requires_control = browser_action_requires_control(browser_action, browser_parameters)
+            browser_action, _browser_parameters = _browser_command_parameters(command.parameters)
+            requires_control = browser_action_requires_control(browser_action)
         except (DesktopProtocolError, PlaywrightBrowserError) as exc:
             return str(exc)
         expected_action = "browser_control" if requires_control else "browser_observe"
