@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-18T21:18:53.857218+00:00",
+  "production_source_commit": "7098e66daec37df4ea511060541db69aeebece97",
+  "homeserver": "https://mindroom.chat",
+  "service": "mindroom-chat",
+  "service_active": true,
+  "service_restarts": 0,
+  "user_id": "@mindroom_code:mindroom.chat",
+  "joined_members": [
+    "@mindroom_code:mindroom.chat"
+  ],
+  "room_id": "!lIUGVbPQmXc3ZiQ9PI:mindroom.chat",
+  "thread_root_id": "$rPFdvdy8jyHbR6xUldWQDvg2andeEvn3qE0zOel8PtA",
+  "interaction_count": 57,
+  "request_count": 75,
+  "request_total_ms": 12912.83,
+  "homeserver_event_count": 65,
+  "homeserver_redaction_count": 5,
+  "cache": {
+    "active_event_count": 50,
+    "tombstone_count": 7,
+    "edit_index_count": 1,
+    "thread_index_count": 6,
+    "thread_state_rows": 1,
+    "orphan_edit_rows": 0,
+    "orphan_thread_rows": 0,
+    "cache_only_event_count": 0,
+    "quick_check": "ok"
+  },
+  "accounting_gap": [
+    {
+      "event_id": "$R1SxQTNa-Pwhj9aP0s3oqXNWdUB5uu7iYnwhKLNN44w",
+      "family": "relation_less_reply"
+    },
+    {
+      "event_id": "$FwUjT6Fae-8aki2XRX6j8ohTrS4LL5AiKdF9SvQZtUk",
+      "family": "relation_less_reply_edit"
+    },
+    {
+      "event_id": "$2KmhpkwLaWMgNmMEBh4Jfd4QMzAg4cI704SDWErOAgs",
+      "family": "reference"
+    }
+  ],
+  "media": [
+    {
+      "filename": "tiny.txt",
+      "bytes": 28,
+      "sha256": "f8529cbbaa1403b3c5a2992e85056df953aa85c1a3e3d6cfbded9444a9f52d45",
+      "verified_authenticated_download": true
+    },
+    {
+      "filename": "tiny.png",
+      "bytes": 68,
+      "sha256": "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
+      "verified_authenticated_download": true
+    },
+    {
+      "filename": "silence.wav",
+      "bytes": 364,
+      "sha256": "5341a0da3824f5be899ff8ba691f9bf28b9702de7c27752043c69e60a96ffa1c",
+      "verified_authenticated_download": true
+    },
+    {
+      "filename": "black.webm",
+      "bytes": 522,
+      "sha256": "6aedcc50ca4eeed45b81eb6ab1c82d445b7a9941652eb9fca9148935cdfab5e4",
+      "verified_authenticated_download": true
+    }
+  ],
+  "thread_reads": [
+    {
+      "sequence": 1,
+      "mode": "full_scan",
+      "source": "homeserver",
+      "elapsed_ms": 541.872,
+      "cache_read_ms": 0.0,
+      "homeserver_fetch_ms": 510.2,
+      "homeserver_scan_pages": 1,
+      "homeserver_scanned_event_count": 24,
+      "visible_event_count": 4,
+      "cache_reject_reason": "cache_never_validated",
+      "degraded": false,
+      "error": null
+    },
+    {
+      "sequence": 2,
+      "mode": "cache_hit",
+      "source": "cache",
+      "elapsed_ms": 2.795,
+      "cache_read_ms": 2.4,
+      "homeserver_fetch_ms": 0.0,
+      "homeserver_scan_pages": 0,
+      "homeserver_scanned_event_count": 0,
+      "visible_event_count": 4,
+      "cache_reject_reason": null,
+      "degraded": false,
+      "error": null
+    },
+    {
+      "sequence": 3,
+      "mode": "full_scan",
+      "source": "homeserver",
+      "elapsed_ms": 215.827,
+      "cache_read_ms": 0.0,
+      "homeserver_fetch_ms": 208.7,
+      "homeserver_scan_pages": 1,
+      "homeserver_scanned_event_count": 24,
+      "visible_event_count": 2,
+      "cache_reject_reason": "thread_invalidated_after_validation",
+      "degraded": false,
+      "error": null
+    }
+  ]
+}
