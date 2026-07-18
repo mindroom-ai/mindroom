@@ -277,9 +277,22 @@ class MacAccessibilityBackend:
         try:
             application = self._running_application(app_id)
         except AccessibilityError:
-            _request_application_activation(app_id)
-            application = self._wait_for_running_application(app_id)
-        self._activate(application)
+            _require_valid_activation_app_id(app_id)
+            try:
+                _request_application_activation(app_id)
+                application = self._wait_for_running_application(app_id)
+            except AccessibilityActionOutcomeUnknownError:
+                raise
+            except AccessibilityError as exc:
+                msg = "Application launch was requested, but its outcome is unknown; request list_apps before retrying."
+                raise AccessibilityActionOutcomeUnknownError(msg) from exc
+        try:
+            self._activate(application)
+        except AccessibilityActionOutcomeUnknownError:
+            raise
+        except AccessibilityError as exc:
+            msg = "Application activation was requested, but its outcome is unknown; request list_apps before retrying."
+            raise AccessibilityActionOutcomeUnknownError(msg) from exc
         self._states.pop(app_id, None)
 
     def get_app_state(self, app_id: str) -> AccessibilityState:
@@ -859,13 +872,18 @@ def _wait_for_activation(application: _RunningApplication, *, attempts: int) -> 
     return False
 
 
-def _request_application_activation(app_id: str) -> None:
-    """Ask macOS to activate one exact bundle ID through a bounded Apple event."""
-    import AppKit  # noqa: PLC0415
-
+def _require_valid_activation_app_id(app_id: str) -> None:
+    """Reject bundle IDs that cannot be embedded in the activation AppleScript."""
     if re.fullmatch(r"[A-Za-z0-9.-]+", app_id) is None:
         msg = "Allowed application has an invalid bundle identifier for activation."
         raise AccessibilityError(msg)
+
+
+def _request_application_activation(app_id: str) -> None:
+    """Ask macOS to activate one exact bundle ID through a bounded Apple event."""
+    _require_valid_activation_app_id(app_id)
+    import AppKit  # noqa: PLC0415
+
     source = f'with timeout of 2 seconds\ntell application id "{app_id}" to activate\nend timeout'
     script = AppKit.NSAppleScript.alloc().initWithSource_(source)  # ty: ignore[unresolved-attribute]
     _result, error = script.executeAndReturnError_(None)
