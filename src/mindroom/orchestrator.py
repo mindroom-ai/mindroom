@@ -64,7 +64,14 @@ from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
-from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_runtime_ready, set_runtime_starting
+from mindroom.runtime_state import (
+    clear_api_server_address,
+    reset_runtime_state,
+    set_api_server_address,
+    set_runtime_failed,
+    set_runtime_ready,
+    set_runtime_starting,
+)
 from mindroom.scheduling_executor import set_scheduling_hook_registry
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.startup_maintenance import StartupMaintenanceController
@@ -114,6 +121,7 @@ from .runtime_support import (
 )
 
 if TYPE_CHECKING:
+    import socket
     from collections.abc import Awaitable, Callable, Iterable
     from pathlib import Path
     from types import FrameType
@@ -182,6 +190,22 @@ class _SignalAwareUvicornServer(uvicorn.Server):
     def __init__(self, config: uvicorn.Config, shutdown_requested: asyncio.Event | None) -> None:
         super().__init__(config)
         self._shutdown_requested = shutdown_requested
+
+    async def startup(self, sockets: list[socket.socket] | None = None) -> None:
+        """Publish the API address only after Uvicorn successfully binds it."""
+        await super().startup(sockets=sockets)
+        if not self.started:
+            return
+        listeners = self.servers[0].sockets
+        assert listeners is not None
+        bound_address = cast(
+            "tuple[str, int] | tuple[str, int, int, int]",
+            listeners[0].getsockname(),
+        )
+        bound_host = bound_address[0]
+        bound_port = bound_address[1]
+        set_api_server_address(bound_host, bound_port)
+        logger.info("embedded_api_server_started", host=bound_host, port=bound_port)
 
     def handle_exit(self, sig: int, frame: FrameType | None) -> None:
         """Mirror Uvicorn signal handling and surface shutdown to the orchestrator."""
@@ -1896,11 +1920,14 @@ async def _run_api_server(
         api_main.bind_orchestrator_knowledge_refresh_scheduler(api_main.app, knowledge_refresh_scheduler)
     config = uvicorn.Config(api_main.app, host=host, port=port, log_level=log_level.lower())
     server = _SignalAwareUvicornServer(config, shutdown_requested)
-    logger.info("embedded_api_server_started", **api_server.log_context())
+    logger.info("embedded_api_server_starting", **api_server.log_context())
     try:
-        await server.serve()
-    except SystemExit as exc:
-        _raise_embedded_api_server_exit(api_server, reason="server.serve() raised SystemExit", cause=exc)
+        try:
+            await server.serve()
+        except SystemExit as exc:
+            _raise_embedded_api_server_exit(api_server, reason="server.serve() raised SystemExit", cause=exc)
+    finally:
+        clear_api_server_address()
     shutdown_expected = shutdown_requested.is_set() if shutdown_requested is not None else False
     logger.info(
         "embedded_api_server_serve_returned",
