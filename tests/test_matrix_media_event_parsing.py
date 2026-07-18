@@ -226,37 +226,34 @@ async def test_text_message_with_file_extension_uses_cached_response() -> None:
 
 
 @pytest.mark.asyncio
-async def test_non_message_event_with_media_extensions_keeps_event_type() -> None:
+async def test_non_message_event_with_media_extensions_keeps_event_type(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Media-shaped extension fields should not retype a non-message event."""
-    event_source = {
-        "type": "m.reaction",
-        "event_id": "$synthetic-reaction:example.test",
-        "sender": "@synthetic:example.test",
-        "origin_server_ts": 4,
-        "content": {
-            "msgtype": "m.image",
-            "body": "harmless extension metadata",
-            "file": {},
-            "m.relates_to": {
-                "rel_type": "m.annotation",
-                "event_id": "$synthetic-target:example.test",
-                "key": "harmless-reaction",
-            },
-        },
+    event_source = _encrypted_media_source()
+    event_source["type"] = "m.reaction"
+    content = event_source["content"]
+    assert isinstance(content, dict)
+    content["m.relates_to"] = {
+        "rel_type": "m.annotation",
+        "event_id": "$synthetic-target:example.test",
+        "key": "harmless-reaction",
     }
     client = AsyncMock(spec=nio.AsyncClient)
     event_cache = AsyncMock(spec=ConversationEventCache)
     event_cache.get_latest_edit.return_value = None
 
-    response = await _cached_room_get_event_response(
-        client,
-        event_cache,
-        room_id="!synthetic:example.test",
-        event_source=event_source,
-    )
+    with caplog.at_level(logging.WARNING, logger="nio.events.misc"):
+        response = await _cached_room_get_event_response(
+            client,
+            event_cache,
+            room_id="!synthetic:example.test",
+            event_source=event_source,
+        )
 
     assert isinstance(response, nio.RoomGetEventResponse)
     assert isinstance(response.event, nio.ReactionEvent)
+    _assert_synthetic_secrets_absent(caplog)
 
 
 @pytest.mark.asyncio
