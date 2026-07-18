@@ -117,13 +117,17 @@ def certify_sync_response(
     next_batch: str | None,
     cache_result: SyncCacheWriteResult,
     first_sync: bool,
+    response_after_client_token_reset: bool,
 ) -> SyncCertificationDecision:
     """Return the certifier decision for one sync response."""
     reason = _uncertain_reason(cache_result, next_batch=next_batch)
     if reason is not None:
+        limited_timeline_requires_reset = bool(cache_result.limited_room_ids) and not (
+            response_after_client_token_reset
+        )
         return _uncertain_decision(
             reason=reason,
-            reset_client_token=bool(cache_result.limited_room_ids) or (state is SyncTrustState.PENDING and first_sync),
+            reset_client_token=limited_timeline_requires_reset or (state is SyncTrustState.PENDING and first_sync),
         )
 
     token = normalize_sync_token(next_batch)

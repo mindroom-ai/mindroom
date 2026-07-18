@@ -373,7 +373,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         self,
         bot: AgentBot,
     ) -> None:
-        """A long-running client must discard a partial position and later certify a complete recovery."""
+        """A reset must consume one limited initial sync, then certify the next complete delta."""
         _save_certified_sync_token(bot, "s_before_partial")
         bot._first_sync_done = True
         bot._sync_trust_state = SyncTrustState.CERTIFIED
@@ -393,6 +393,20 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             reason="limited_sync_timeline",
         )
 
+        initial_recovery_response = self._sync_response(
+            {"!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=True))},
+        )
+        initial_recovery_response.next_batch = "s_after_initial_recovery"
+        bot.client.next_batch = initial_recovery_response.next_batch
+
+        await self._run_sync_response_without_startup_side_effects(bot, initial_recovery_response)
+
+        assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
+        assert bot.client.next_batch == "s_after_initial_recovery"
+        assert bot._sync_reset_recovery_pending is False
+        assert _load_sync_token_value(bot.storage_path, bot.agent_name) is None
+        assert bot.event_cache.mark_room_threads_stale.await_count == 2
+
         complete_event = nio.RoomMessageText.from_dict(
             {
                 "content": {"body": "complete recovery", "msgtype": "m.text"},
@@ -411,6 +425,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             },
         )
         complete_response.next_batch = "s_after_complete_recovery"
+        bot.client.next_batch = complete_response.next_batch
 
         await self._run_sync_response_without_startup_side_effects(bot, complete_response)
 
@@ -418,6 +433,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert bot._sync_trust_state is SyncTrustState.CERTIFIED
         assert token_record is not None
         assert token_record.checkpoint == SyncCheckpoint("s_after_complete_recovery")
+        assert bot.client.next_batch == "s_after_complete_recovery"
         bot.event_cache.store_events_batch.assert_awaited_once()
 
     @pytest.mark.asyncio

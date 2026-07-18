@@ -78,6 +78,7 @@ def test_successful_sync_certifies_checkpoint(
         next_batch="s_next",
         cache_result=SyncCacheWriteResult(complete=True),
         first_sync=state is SyncTrustState.PENDING,
+        response_after_client_token_reset=False,
     )
 
     assert decision.state is SyncTrustState.CERTIFIED
@@ -110,6 +111,7 @@ def test_uncertain_sync_fails_closed(
         next_batch="s_next",
         cache_result=cache_result,
         first_sync=False,
+        response_after_client_token_reset=False,
     )
 
     assert decision.state is SyncTrustState.UNCERTAIN
@@ -121,7 +123,7 @@ def test_uncertain_sync_fails_closed(
 
 @pytest.mark.parametrize("state", list(SyncTrustState))
 def test_limited_sync_resets_active_client_token_in_every_trust_state(state: SyncTrustState) -> None:
-    """A partial timeline must restart from a complete sync regardless of prior certification state."""
+    """A newly observed partial timeline must restart from a complete sync in every trust state."""
     decision = certify_sync_response(
         state,
         next_batch="s_partial",
@@ -130,12 +132,33 @@ def test_limited_sync_resets_active_client_token_in_every_trust_state(state: Syn
             limited_room_ids=("!room:localhost",),
         ),
         first_sync=state is SyncTrustState.PENDING,
+        response_after_client_token_reset=False,
     )
 
     assert decision.state is SyncTrustState.UNCERTAIN
     assert decision.checkpoint_to_save is None
     assert decision.clear_saved_token is True
     assert decision.reset_client_token is True
+
+
+def test_limited_reset_recovery_response_does_not_reset_client_token_again() -> None:
+    """A limited initial response after a deliberate reset must advance to incremental recovery."""
+    decision = certify_sync_response(
+        SyncTrustState.UNCERTAIN,
+        next_batch="s_initial_recovery",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            limited_room_ids=("!room:localhost",),
+        ),
+        first_sync=False,
+        response_after_client_token_reset=True,
+    )
+
+    assert decision.state is SyncTrustState.UNCERTAIN
+    assert decision.checkpoint_to_save is None
+    assert decision.clear_saved_token is True
+    assert decision.reset_client_token is False
+    assert decision.reason == "limited_sync_timeline"
 
 
 def test_sync_cache_write_diagnostics_explains_uncertainty() -> None:
@@ -176,6 +199,7 @@ def test_pending_first_sync_uncertainty_resets_client_token() -> None:
         next_batch="s_next",
         cache_result=SyncCacheWriteResult(complete=False),
         first_sync=True,
+        response_after_client_token_reset=False,
     )
 
     assert decision.state is SyncTrustState.UNCERTAIN
@@ -190,6 +214,7 @@ def test_missing_next_batch_fails_closed() -> None:
         next_batch=None,
         cache_result=SyncCacheWriteResult(complete=True),
         first_sync=True,
+        response_after_client_token_reset=False,
     )
 
     assert decision.state is SyncTrustState.UNCERTAIN

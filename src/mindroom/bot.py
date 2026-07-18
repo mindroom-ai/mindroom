@@ -303,6 +303,7 @@ class AgentBot:
     _calls_reconcile_pending: bool
     _room_member_callback_registered: bool
     _room_member_join_hooks_armed: bool
+    _sync_reset_recovery_pending: bool
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
 
@@ -332,6 +333,7 @@ class AgentBot:
         self._sync_shutting_down = False
         self._sync_trust_state = SyncTrustState.COLD
         self._sync_checkpoint: SyncCheckpoint | None = None
+        self._sync_reset_recovery_pending = False
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._room_member_callback_registered = False
         self._room_member_join_hooks_armed = False
@@ -1042,6 +1044,7 @@ class AgentBot:
         startup = start_from_loaded_token(self._loaded_sync_token_for_certification())
         self._sync_trust_state = startup.state
         self._sync_checkpoint = None
+        self._sync_reset_recovery_pending = False
         client = cast("Any", self.client)
         client.next_batch = startup.sync_token
         if startup.sync_token is None and self.client.user_id:
@@ -1085,6 +1088,7 @@ class AgentBot:
         cache_result: SyncCacheWriteResult | None = None,
     ) -> None:
         """Apply a certifier decision to runtime state and token storage."""
+        self._sync_reset_recovery_pending = decision.reset_client_token
         if self._runtime_view.callback_failure_count:
             if decision.reset_client_token and self.client is not None:
                 client = cast("Any", self.client)
@@ -1132,6 +1136,7 @@ class AgentBot:
             next_batch=response.next_batch,
             cache_result=cache_result,
             first_sync=first_sync_response,
+            response_after_client_token_reset=self._sync_reset_recovery_pending,
         )
 
     def seconds_since_last_sync_activity(self) -> float | None:
