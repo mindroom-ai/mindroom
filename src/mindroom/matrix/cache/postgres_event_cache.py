@@ -39,6 +39,7 @@ _POSTGRES_SCHEMA_LOCK_NAME = "mindroom_event_cache_schema"
 _LOCK_WAIT_LOG_THRESHOLD_SECONDS = 0.1
 _MAX_CACHED_ROOM_LOCKS = 256
 _MAX_TRANSIENT_OPERATION_ATTEMPTS = 2
+_PRINCIPAL_PURGE_LOCK_SCOPE = "__mindroom_principal_purge__"
 _T = TypeVar("_T")
 
 logger = get_logger(__name__)
@@ -475,6 +476,7 @@ class _FlushedPendingWrites:
     """Runtime-only writes included in one committed PostgreSQL operation."""
 
     room_purge: bool = False
+    principal_purge: bool = False
     invalidations: tuple[tuple[str, str | None, _PendingInvalidation], ...] = ()
 
 
@@ -497,6 +499,7 @@ class _PostgresEventCacheRuntime:
         self._pending_thread_invalidations: dict[tuple[str, str], _PendingInvalidation] = {}
         self._pending_room_invalidations: dict[str, _PendingInvalidation] = {}
         self._pending_room_purges: set[str] = set()
+        self._pending_principal_purge = False
 
     @property
     def database_url(self) -> str:
@@ -561,6 +564,7 @@ class _PostgresEventCacheRuntime:
             "cache_postgres_pending_thread_invalidations": len(self._pending_thread_invalidations),
             "cache_postgres_pending_room_invalidations": len(self._pending_room_invalidations),
             "cache_postgres_pending_room_purges": len(self._pending_room_purges),
+            "cache_postgres_pending_principal_purge": self._pending_principal_purge,
             "cache_postgres_explicitly_closed": self._explicitly_closed,
         }
         if self._disabled_reason is not None:
@@ -659,6 +663,22 @@ class _PostgresEventCacheRuntime:
     def record_pending_room_purge(self, room_id: str) -> None:
         """Remember a room deletion until a PostgreSQL transaction commits it."""
         self._pending_room_purges.add(room_id)
+
+    def record_pending_principal_purge(self) -> None:
+        """Remember a namespace deletion until PostgreSQL commits it."""
+        self._pending_principal_purge = True
+
+    @property
+    def has_pending_principal_purge(self) -> bool:
+        """Return whether every row in this principal namespace must be deleted."""
+        return self._pending_principal_purge
+
+    def forget_pending_principal_purge(self) -> None:
+        """Forget one committed namespace deletion and covered pending writes."""
+        self._pending_principal_purge = False
+        self._pending_room_purges.clear()
+        self._pending_room_invalidations.clear()
+        self._pending_thread_invalidations.clear()
 
     def has_pending_room_purge(self, room_id: str) -> bool:
         """Return whether a principal-room deletion is still pending."""
@@ -908,6 +928,8 @@ class PostgresEventCache:
     @property
     def cache_generation(self) -> str | None:
         """Return the principal namespace's durable cache generation when available."""
+        if self._runtime.has_pending_principal_purge:
+            return None
         return self._runtime.generation
 
     async def initialize(self) -> None:
@@ -1024,6 +1046,12 @@ class PostgresEventCache:
         db: psycopg.AsyncConnection,
         room_id: str,
     ) -> _FlushedPendingWrites:
+        if self._runtime.has_pending_principal_purge:
+            await postgres_event_cache_events.purge_principal_locked(
+                db,
+                namespace=self._runtime.namespace,
+            )
+            return _FlushedPendingWrites(principal_purge=True)
         if self._runtime.has_pending_room_purge(room_id):
             await postgres_event_cache_events.purge_room_locked(
                 db,
@@ -1064,6 +1092,9 @@ class PostgresEventCache:
         room_id: str,
         flushed_pending: _FlushedPendingWrites,
     ) -> None:
+        if flushed_pending.principal_purge:
+            self._runtime.forget_pending_principal_purge()
+            return
         if flushed_pending.room_purge:
             self._runtime.forget_pending_room_purge(room_id)
             return
@@ -1445,3 +1476,17 @@ class PostgresEventCache:
         """Delete this principal namespace's rows for one departed room."""
         self._runtime.record_pending_room_purge(room_id)
         await self.flush_pending_durable_writes(room_id)
+
+    async def purge_principal(self) -> None:
+        """Delete every row in this principal namespace."""
+        self._runtime.record_pending_principal_purge()
+
+        async def purge_only(_db: psycopg.AsyncConnection) -> None:
+            return None
+
+        await self._write_operation(
+            _PRINCIPAL_PURGE_LOCK_SCOPE,
+            operation="purge_principal",
+            disabled_result=None,
+            writer=purge_only,
+        )

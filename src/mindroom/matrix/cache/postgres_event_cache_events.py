@@ -650,6 +650,29 @@ async def purge_room_locked(
         )
 
 
+async def purge_principal_locked(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+) -> None:
+    """Delete all cache rows owned by one principal namespace."""
+    for table_name in (
+        "mindroom_event_cache_thread_events",
+        "mindroom_event_cache_events",
+        "mindroom_event_cache_event_edits",
+        "mindroom_event_cache_event_threads",
+        "mindroom_event_cache_redacted_events",
+        "mindroom_event_cache_event_mxc_references",
+        "mindroom_event_cache_mxc_text",
+        "mindroom_event_cache_thread_state",
+        "mindroom_event_cache_room_state",
+    ):
+        await db.execute(
+            f"DELETE FROM {table_name} WHERE namespace = %s",  # noqa: S608
+            (namespace,),
+        )
+
+
 async def _mxc_urls_for_events(
     db: AsyncConnection,
     namespace: str,

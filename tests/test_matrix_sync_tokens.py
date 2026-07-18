@@ -228,6 +228,115 @@ async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_leave_cleanup_restart_purges_only_current_sqlite_principal(tmp_path: Path) -> None:
+    """A restart after leave cleanup interruption must discard only the departed principal."""
+    principal_id = "@mindroom_code:localhost"
+    other_principal_id = "@mindroom_other:localhost"
+    room_id = "!room:localhost"
+    event_id = "$stale"
+    event = {
+        "event_id": event_id,
+        "sender": "@user:localhost",
+        "origin_server_ts": 1,
+        "type": "m.room.message",
+        "content": {"body": "stale", "msgtype": "m.text"},
+    }
+    root = SqliteEventCache(tmp_path / "event-cache.db")
+    await root.initialize()
+    principal_cache = root.for_principal(principal_id)
+    other_cache = root.for_principal(other_principal_id)
+    await principal_cache.store_event(event_id, room_id, event)
+    await other_cache.store_event(event_id, room_id, event)
+    bot = _agent_bot(tmp_path)
+    bot.event_cache = principal_cache
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_before_leave",
+        cache_generation=principal_cache.cache_generation,
+    )
+    leave_response = MagicMock(spec=nio.SyncResponse)
+    leave_response.rooms = MagicMock(join={}, leave={room_id: MagicMock()})
+    await bot._apply_own_room_membership_from_sync(leave_response)
+    assert load_sync_token_record(tmp_path, bot.agent_name) is None
+    await root.close()
+
+    reopened_root = SqliteEventCache(tmp_path / "event-cache.db")
+    await reopened_root.initialize()
+    principal_cache = reopened_root.for_principal(principal_id)
+    other_cache = reopened_root.for_principal(other_principal_id)
+    bot.event_cache = principal_cache
+    client = make_matrix_client_mock(user_id=principal_id)
+    client.next_batch = None
+
+    try:
+        with (
+            patch.object(bot, "ensure_user_account", AsyncMock()),
+            patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+            patch.object(bot, "_set_avatar_if_available", AsyncMock()),
+            patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+            patch("mindroom.bot.interactive.init_persistence"),
+        ):
+            await bot.start()
+
+        assert await principal_cache.get_event(room_id, event_id) is None
+        assert await other_cache.get_event(room_id, event_id) == event
+    finally:
+        await reopened_root.close()
+
+
+@pytest.mark.asyncio
+async def test_login_identity_change_rebinds_principal_cache_view(tmp_path: Path) -> None:
+    """Authenticated identity replacement must not retain the old principal's cache view."""
+    old_principal_id = "@mindroom_code:localhost"
+    new_principal_id = "@mindroom_code:new.example"
+    room_id = "!room:localhost"
+    event_id = "$old-principal"
+    event = {
+        "event_id": event_id,
+        "sender": "@user:localhost",
+        "origin_server_ts": 1,
+        "type": "m.room.message",
+        "content": {"body": "old principal", "msgtype": "m.text"},
+    }
+    root = SqliteEventCache(tmp_path / "event-cache.db")
+    await root.initialize()
+    old_cache = root.for_principal(old_principal_id)
+    await old_cache.store_event(event_id, room_id, event)
+    bot = _agent_bot(tmp_path)
+    bot.event_cache = old_cache
+    matrix_id_before_login = bot.matrix_id
+
+    try:
+        bot.agent_user.user_id = new_principal_id
+        bot._rebuild_runtime_components_after_login_if_identity_changed(matrix_id_before_login)
+
+        assert bot.event_cache.principal_id == new_principal_id
+        assert await bot.event_cache.get_event(room_id, event_id) is None
+        assert await old_cache.get_event(room_id, event_id) == event
+    finally:
+        await root.close()
+
+
+@pytest.mark.asyncio
+async def test_authoritative_leave_clears_checkpoint_before_cache_cleanup(tmp_path: Path) -> None:
+    """A crash during leave cleanup must force principal cleanup on the next startup."""
+    bot = _agent_bot(tmp_path)
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_before_leave",
+        cache_generation=bot.event_cache.cache_generation,
+    )
+    response = MagicMock(spec=nio.SyncResponse)
+    response.rooms = MagicMock(join={}, leave={"!left:localhost": MagicMock()})
+
+    await bot._apply_own_room_membership_from_sync(response)
+
+    assert load_sync_token_record(tmp_path, bot.agent_name) is None
+
+
+@pytest.mark.asyncio
 async def test_bot_start_initializes_postgres_principal_before_restoring_checkpoint(
     tmp_path: Path,
     postgres_event_cache_url: str,
@@ -293,7 +402,7 @@ async def test_sqlite_checkpoint_generation_rejects_matrix_principal_rebind(tmp_
     bot.client.next_batch = None
 
     try:
-        bot._restore_saved_sync_token()
+        bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification())
 
         assert bot.client.next_batch is None
         assert load_sync_token_record(tmp_path, bot.agent_name) is None
@@ -400,7 +509,7 @@ def test_restore_saved_sync_token_ignores_invalid_utf8(tmp_path: Path) -> None:
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_bytes(b"\xff\xfe\xfd")
 
-    bot._restore_saved_sync_token()
+    bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification())
 
     assert bot.client.next_batch is None
 
@@ -722,7 +831,7 @@ async def test_prepare_for_sync_shutdown_skips_precallback_uncertified_token(tmp
         cache_generation=bot.event_cache.cache_generation,
     )
     bot._runtime_view.mark_runtime_started()
-    bot._restore_saved_sync_token()
+    bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification())
 
     bot.client.next_batch = "s_after_precallback"
 

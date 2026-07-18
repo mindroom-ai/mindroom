@@ -204,6 +204,68 @@ async def test_failed_room_purge_blocks_reads_until_recovery(
 
 
 @pytest.mark.asyncio
+async def test_principal_purge_removes_only_that_principals_rows(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """Cold-start cleanup must remove one principal without harming another."""
+    root = _shared_cache(event_cache_factory)
+    await root.initialize()
+    alice = root.for_principal("@alice:localhost")
+    bob = root.for_principal("@bob:localhost")
+    room_id = "!room:localhost"
+    event_id = "$event"
+    event = _event(event_id, 1)
+    try:
+        await alice.store_event(event_id, room_id, event)
+        await bob.store_event(event_id, room_id, event)
+
+        await alice.purge_principal()
+
+        assert await alice.get_event(room_id, event_id) is None
+        assert await bob.get_event(room_id, event_id) == event
+    finally:
+        await root.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_principal_purge_blocks_generation_and_reads_until_recovery(
+    event_cache_factory: Callable[[], ConversationEventCache],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed cold-start cleanup must remain fail-closed for the current runtime."""
+    root = _shared_cache(event_cache_factory)
+    await root.initialize()
+    cache = root.for_principal("@alice:localhost")
+    room_id = "!left:localhost"
+    event_id = "$event"
+    event = _event(event_id, 1)
+    await cache.store_event(event_id, room_id, event)
+
+    if isinstance(cache, SqliteEventCache):
+        module = sqlite_event_cache_events
+    else:
+        assert isinstance(cache, PostgresEventCache)
+        module = postgres_event_cache_events
+    original_purge = module.purge_principal_locked
+    failure_reason = "temporary principal purge failure"
+
+    async def fail_purge(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError(failure_reason)
+
+    try:
+        monkeypatch.setattr(module, "purge_principal_locked", fail_purge)
+        with pytest.raises(RuntimeError, match="temporary principal purge failure"):
+            await cache.purge_principal()
+        assert cache.cache_generation is None
+
+        monkeypatch.setattr(module, "purge_principal_locked", original_purge)
+        assert await cache.get_event(room_id, event_id) is None
+        assert cache.cache_generation is not None
+    finally:
+        await root.close()
+
+
+@pytest.mark.asyncio
 async def test_redaction_reference_lifecycle_is_durable_and_non_resurrecting(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:

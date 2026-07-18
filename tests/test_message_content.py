@@ -916,6 +916,37 @@ class TestDownloadMxcText:
         assert client.download.await_count == 2
 
     @pytest.mark.asyncio
+    async def test_download_returns_fresh_text_without_disabled_advisory_cache(self) -> None:
+        """A permanent cache disable must not suppress authenticated fresh content."""
+        principal_id = "@alice:localhost"
+        room_id = "!room:localhost"
+        event_id = "$event"
+        mxc_url = "mxc://server/cache-disabled"
+        cache_key = (principal_id, room_id, event_id, mxc_url)
+        client = AsyncMock()
+        client.user_id = principal_id
+        response = MagicMock(spec=nio.DownloadResponse)
+        response.body = b"fresh plaintext"
+        client.download.return_value = response
+        event_cache = AsyncMock()
+        event_cache.principal_id = principal_id
+        event_cache.durable_writes_available = False
+        event_cache.get_mxc_text.return_value = None
+        event_cache.store_mxc_text.return_value = False
+
+        assert (
+            await _download_mxc_text(
+                client,
+                mxc_url,
+                event_cache=event_cache,
+                room_id=room_id,
+                event_id=event_id,
+            )
+            == "fresh plaintext"
+        )
+        assert cache_key not in mxc_plaintext_cache_module._mxc_cache
+
+    @pytest.mark.asyncio
     async def test_download_does_not_reinsert_process_plaintext_after_concurrent_redaction(self) -> None:
         """A redaction between download and durable validation must win over process caching."""
         principal_id = "@alice:localhost"

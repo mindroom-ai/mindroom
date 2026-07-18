@@ -597,6 +597,7 @@ class AgentBot:
 
         self.agent_user.__dict__.pop("matrix_id", None)
         self.__dict__.pop("matrix_id", None)
+        self.event_cache = self.event_cache.for_principal(self.matrix_id.full_id)
         self._init_runtime_components()
 
     @property
@@ -1044,10 +1045,10 @@ class AgentBot:
         )
         return token_record.checkpoint if token_record.checkpoint is not None else token_record.token
 
-    def _restore_saved_sync_token(self) -> None:
-        """Restore Matrix sync continuity and initialize cache certification state."""
+    def _restore_loaded_sync_token(self, loaded_token: SyncCheckpoint | str | None) -> None:
+        """Apply one already-validated saved token to the client and certifier."""
         assert self.client is not None
-        startup = start_from_loaded_token(self._loaded_sync_token_for_certification())
+        startup = start_from_loaded_token(loaded_token)
         self._sync_trust_state = startup.state
         self._sync_checkpoint = None
         client = cast("Any", self.client)
@@ -1058,6 +1059,25 @@ class AgentBot:
             raise_notice_floor(self.client.user_id)
         if startup.legacy_token:
             self.logger.warning("matrix_sync_token_uncertified_legacy")
+
+    async def _purge_untrusted_principal_cache(self) -> None:
+        """Drop this principal's cache when no certified checkpoint can prove continuity."""
+        if not self.event_cache.durable_writes_available:
+            return
+        try:
+            await self.event_cache.purge_principal()
+        except Exception as exc:
+            self.logger.warning(
+                "matrix_untrusted_principal_cache_purge_deferred",
+                error=str(exc),
+            )
+
+    async def _prepare_cache_and_restore_saved_sync_token(self) -> None:
+        """Restore a trusted checkpoint or clear untrusted principal-owned rows first."""
+        loaded_token = self._loaded_sync_token_for_certification()
+        if not isinstance(loaded_token, SyncCheckpoint):
+            await self._purge_untrusted_principal_cache()
+        self._restore_loaded_sync_token(loaded_token)
 
     async def _initialize_event_cache_for_sync_restore(self) -> None:
         """Load this principal's durable generation before trusting a sync checkpoint."""
@@ -1406,6 +1426,8 @@ class AgentBot:
         """Apply this bot's authoritative joined/left room sections before other sync work."""
         joined_room_ids = set(response.rooms.join)
         left_room_ids = set(response.rooms.leave)
+        if left_room_ids:
+            self._clear_saved_sync_token()
         for room_id in left_room_ids:
             self._room_lifecycle.forget_invited_room(room_id)
         call_manager = self._call_manager
@@ -1437,6 +1459,7 @@ class AgentBot:
     ) -> None:
         """Apply invited-room cleanup before optional call reconciliation."""
         if event.state_key == self.agent_user.user_id and event.membership in {"leave", "ban"}:
+            self._clear_saved_sync_token()
             self._room_lifecycle.forget_invited_room(room.room_id)
             await self._conversation_cache.purge_room(room.room_id)
         call_manager = self._call_manager
@@ -1460,7 +1483,7 @@ class AgentBot:
                 orchestrator.validate_managed_entity_identities()
             self._runtime_view.mark_runtime_started()
             await self._initialize_event_cache_for_sync_restore()
-            self._restore_saved_sync_token()
+            await self._prepare_cache_and_restore_saved_sync_token()
             await self._set_avatar_if_available()
             # Keep durable tracking-state loading off the event loop at startup.
             await asyncio.to_thread(self._turn_store.warm)
@@ -1588,6 +1611,8 @@ class AgentBot:
 
     async def _purge_left_rooms(self, room_ids: Sequence[str]) -> None:
         """Purge principal-owned cache rows only after confirmed room departures."""
+        if room_ids:
+            self._clear_saved_sync_token()
         for room_id in room_ids:
             await self._conversation_cache.purge_room(room_id)
 

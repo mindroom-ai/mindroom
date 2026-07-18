@@ -52,6 +52,9 @@ class ConversationEventCache(Protocol):
     async def initialize(self) -> None:
         """Initialize any backing storage."""
 
+    def for_principal(self, principal_id: str) -> ConversationEventCache:
+        """Return a cache view that can access only ``principal_id`` rows."""
+
     async def close(self) -> None:
         """Close any backing storage."""
 
@@ -153,6 +156,9 @@ class ConversationEventCache(Protocol):
 
     async def purge_room(self, room_id: str) -> None:
         """Delete only this principal's cached ownership for one left or banned room."""
+
+    async def purge_principal(self) -> None:
+        """Delete every cached row owned by this principal."""
 
     def disable(self, reason: str) -> None:
         """Disable the advisory cache for the rest of the runtime."""

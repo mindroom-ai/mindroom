@@ -46,6 +46,7 @@ _REQUIRED_EVENT_CACHE_TABLES = frozenset(_EVENT_CACHE_TABLES)
 _LOCK_WAIT_LOG_THRESHOLD_SECONDS = 0.1
 _MAX_CACHED_ROOM_LOCKS = 256
 _DEFAULT_PRINCIPAL_ID = "__mindroom_default_principal__"
+_PRINCIPAL_PURGE_LOCK_SCOPE = "__mindroom_principal_purge__"
 _T = TypeVar("_T")
 
 logger = get_logger(__name__)
@@ -327,6 +328,7 @@ class _SqliteEventCacheRuntime:
         self._room_locks: OrderedDict[tuple[str, str], _RoomLockEntry] = OrderedDict()
         self._generation: str | None = None
         self._pending_room_purges: set[tuple[str, str]] = set()
+        self._pending_principal_purges: set[str] = set()
 
     @property
     def db_path(self) -> Path:
@@ -367,6 +369,19 @@ class _SqliteEventCacheRuntime:
     def record_pending_room_purge(self, principal_id: str, room_id: str) -> None:
         """Remember a room deletion until a SQLite transaction commits it."""
         self._pending_room_purges.add((principal_id, room_id))
+
+    def record_pending_principal_purge(self, principal_id: str) -> None:
+        """Remember a principal deletion until a SQLite transaction commits it."""
+        self._pending_principal_purges.add(principal_id)
+
+    def has_pending_principal_purge(self, principal_id: str) -> bool:
+        """Return whether every row for one principal must be deleted."""
+        return principal_id in self._pending_principal_purges
+
+    def forget_pending_principal_purge(self, principal_id: str) -> None:
+        """Forget one committed principal deletion and covered room deletions."""
+        self._pending_principal_purges.discard(principal_id)
+        self._pending_room_purges = {key for key in self._pending_room_purges if key[0] != principal_id}
 
     def has_pending_room_purge(self, principal_id: str, room_id: str) -> bool:
         """Return whether one principal-room deletion is still pending."""
@@ -543,7 +558,7 @@ class SqliteEventCache:
     def cache_generation(self) -> str | None:
         """Return the generation that certified sync checkpoints must match when available."""
         generation = self._runtime.generation
-        if generation is None:
+        if generation is None or self._runtime.has_pending_principal_purge(self.principal_id):
             return None
         principal_generation = f"{generation}\0{self.principal_id}".encode()
         return hashlib.sha256(principal_generation).hexdigest()
@@ -556,6 +571,9 @@ class SqliteEventCache:
             "cache_sqlite_disabled": self._runtime.is_disabled,
             "cache_sqlite_pending_room_purges": len(
                 self._runtime.pending_room_purge_ids(self.principal_id),
+            ),
+            "cache_sqlite_pending_principal_purge": self._runtime.has_pending_principal_purge(
+                self.principal_id,
             ),
         }
 
@@ -601,6 +619,17 @@ class SqliteEventCache:
         if self._runtime.is_disabled:
             return disabled_result
         async with self._runtime.acquire_db_operation(self.principal_id, room_id, operation=operation) as db:
+            if self._runtime.has_pending_principal_purge(self.principal_id):
+                try:
+                    await sqlite_event_cache_events.purge_principal_locked(
+                        db,
+                        principal_id=self.principal_id,
+                    )
+                    await db.commit()
+                except BaseException:
+                    await _rollback_sqlite_connection_best_effort(db, operation=operation)
+                    raise
+                self._runtime.forget_pending_principal_purge(self.principal_id)
             if self._runtime.has_pending_room_purge(self.principal_id, room_id):
                 try:
                     await sqlite_event_cache_events.purge_room_locked(
@@ -626,9 +655,15 @@ class SqliteEventCache:
         if self._runtime.is_disabled:
             return disabled_result
         async with self._runtime.acquire_db_operation(self.principal_id, room_id, operation=operation) as db:
+            pending_principal_purge = self._runtime.has_pending_principal_purge(self.principal_id)
             pending_room_purge = self._runtime.has_pending_room_purge(self.principal_id, room_id)
             try:
-                if pending_room_purge:
+                if pending_principal_purge:
+                    await sqlite_event_cache_events.purge_principal_locked(
+                        db,
+                        principal_id=self.principal_id,
+                    )
+                elif pending_room_purge:
                     await sqlite_event_cache_events.purge_room_locked(
                         db,
                         principal_id=self.principal_id,
@@ -639,7 +674,9 @@ class SqliteEventCache:
             except BaseException:
                 await _rollback_sqlite_connection_best_effort(db, operation=operation)
                 raise
-            if pending_room_purge:
+            if pending_principal_purge:
+                self._runtime.forget_pending_principal_purge(self.principal_id)
+            elif pending_room_purge:
                 self._runtime.forget_pending_room_purge(self.principal_id, room_id)
         return result
 
@@ -993,3 +1030,17 @@ class SqliteEventCache:
         """Delete only this principal's cached ownership for one left or banned room."""
         self._runtime.record_pending_room_purge(self.principal_id, room_id)
         await self.flush_pending_durable_writes(room_id)
+
+    async def purge_principal(self) -> None:
+        """Delete every cache row owned by this principal."""
+        self._runtime.record_pending_principal_purge(self.principal_id)
+
+        async def purge_only(_db: aiosqlite.Connection) -> None:
+            return None
+
+        await self._write_operation(
+            _PRINCIPAL_PURGE_LOCK_SCOPE,
+            operation="purge_principal",
+            disabled_result=None,
+            writer=purge_only,
+        )

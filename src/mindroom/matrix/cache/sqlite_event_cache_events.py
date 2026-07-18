@@ -550,6 +550,29 @@ async def purge_room_locked(
         )
 
 
+async def purge_principal_locked(
+    db: aiosqlite.Connection,
+    *,
+    principal_id: str,
+) -> None:
+    """Delete all cache rows owned by one Matrix principal."""
+    for table_name in (
+        "thread_events",
+        "events",
+        "event_edits",
+        "event_threads",
+        "redacted_events",
+        "event_mxc_references",
+        "mxc_text_cache",
+        "thread_cache_state",
+        "room_cache_state",
+    ):
+        await db.execute(
+            f"DELETE FROM {table_name} WHERE principal_id = ?",  # noqa: S608
+            (principal_id,),
+        )
+
+
 async def _dependent_edit_event_ids(
     db: aiosqlite.Connection,
     principal_id: str,

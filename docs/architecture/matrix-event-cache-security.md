@@ -42,6 +42,12 @@ Each principal-bound view is a non-owning handle, so closing one bot cannot clos
 
 If durable leave or ban cleanup fails, the principal-room purge remains pending in the backend runtime, blocks cache certification, and is flushed transactionally before any later read or write in that room.
 
+Every authoritative leave clears the saved checkpoint before durable cleanup starts.
+
+If the process stops before cleanup commits, the next startup has no certified checkpoint and transactionally purges every row for that principal before restoring sync continuity or allowing cache reads.
+
+That cold-start principal purge preserves rows owned by every other principal, and a failed attempt keeps the principal generation unavailable until a later operation commits the purge.
+
 Process-local plaintext for the departed principal and room is removed immediately even when the durable backend is unavailable.
 
 SQLite schema version 11 resets older advisory cache contents inside one rollback-safe transaction and creates a durable database-generation identifier.
