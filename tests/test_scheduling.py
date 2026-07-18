@@ -1616,6 +1616,20 @@ async def test_get_pending_schedule_thread_ids_excludes_new_threads_and_non_pend
 
 
 @pytest.mark.asyncio
+async def test_get_pending_schedule_thread_ids_raises_on_room_state_error() -> None:
+    """The todo scanner must be able to observe and log a failed Matrix state read."""
+    client = AsyncMock()
+    error_response = nio.RoomGetStateError.from_dict(
+        {"error": "Not authorized"},
+        room_id="!test:server",
+    )
+    client.room_get_state = AsyncMock(return_value=error_response)
+
+    with pytest.raises(TypeError, match="Failed to get scheduled task state"):
+        await get_pending_schedule_thread_ids_for_room(client, "!test:server")
+
+
+@pytest.mark.asyncio
 async def test_cancel_all_scheduled_tasks_no_tasks() -> None:
     """Test cancel_all_scheduled_tasks when no tasks exist."""
     # Create mock client

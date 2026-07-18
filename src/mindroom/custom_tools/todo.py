@@ -101,6 +101,10 @@ class TemplateTodo(BaseModel):
             msg = "Each todo must have exactly one of `title` or `sub_template`"
             raise ValueError(msg)
         if self.title is not None:
+            self.title = self.title.strip()
+            if not self.title:
+                msg = "Todo `title` must not be empty"
+                raise ValueError(msg)
             invalid_fields = self.model_fields_set - {"title", "priority", "depends_on", "assigned_agent"}
             if invalid_fields:
                 invalid = ", ".join(f"`{field}`" for field in sorted(invalid_fields))

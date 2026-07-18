@@ -83,6 +83,19 @@ Each item can have a priority, dependency list, status, and assigned agent name.
 State is stored under `mindroom_data/todo/` and survives restarts.
 Built-in templates live with the package, and agents can add workspace-local templates under `todo/templates`.
 
+### Native Auto-Poke
+
+MindRoom scans native todo state in the background and wakes an idle configured agent when that agent has assigned, open, dependency-unblocked work.
+The scanner waits for the quiet period measured from the actionable item's last update, but an older item that becomes actionable when a dependency completes is eligible immediately for handoff.
+A pending schedule for the same room and existing thread suppresses the poke, while schedules that create a new thread do not suppress room-main work.
+Delivered work fingerprints are persisted under `mindroom_data/todo/poke_state.json`, so unchanged work is not poked twice and changed work observes a cooldown.
+Todo titles are rendered as literal text, and only the assigned agent is mentioned for dispatch.
+
+| Environment variable | Default | Behavior |
+| --- | --- | --- |
+| `MINDROOM_TODO_POKE_INTERVAL_SECONDS` | `120` | Sets the scan interval in seconds, and `0` disables the worker. |
+| `MINDROOM_TODO_POKE_QUIET_SECONDS` | `300` | Sets the minimum quiet period for actionable assigned work. |
+
 ### Configuration
 
 This tool has no tool-specific inline configuration fields.
@@ -110,6 +123,7 @@ apply_template("mindroom-dev", {"ISSUE_REF": "ISSUE-123", "REPO": "mindroom"})
 - `update_todo()` can change title, priority, status, dependency list, and assignee.
 - `apply_template(..., dry_run=True)` previews template expansion before writing state.
 - The built-in `mindroom-dev` template includes a nested `parallel-review-loop` template.
+- Auto-poke scheduling, deduplication, and idle checks are built into the orchestrator and require no plugin.
 
 ## [`bitbucket`]
 

@@ -127,6 +127,28 @@ async def test_todo_poke_worker_lifecycle_survives_reload_and_stops(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_todo_poke_worker_restarts_after_task_finishes(tmp_path: Path) -> None:
+    """A finished worker task is replaced on the next runtime-support sync."""
+    config = _config(tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path))
+    orchestrator.config = config
+
+    await orchestrator._sync_todo_poke_worker()
+    first_worker = orchestrator._todo_poke_worker
+    first_task = orchestrator._todo_poke_task
+    assert first_worker is not None
+    assert first_task is not None
+
+    first_worker.stop()
+    await first_task
+    await orchestrator._sync_todo_poke_worker()
+
+    assert orchestrator._todo_poke_worker is not first_worker
+    assert orchestrator._todo_poke_task is not first_task
+    await orchestrator._stop_todo_poke_worker()
+
+
+@pytest.mark.asyncio
 async def test_zero_interval_disables_todo_poke_worker(tmp_path: Path) -> None:
     """A zero runtime interval leaves no worker or task running."""
     config = _config(tmp_path)

@@ -7,7 +7,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from mindroom.file_locks import advisory_file_lock
 
@@ -65,11 +65,24 @@ def read_json(path: Path) -> dict[str, Any]:
 def locked_update_json(
     path: Path,
     mutate: Callable[[dict[str, Any]], _T | NoWriteResult],
+    *,
+    recover_invalid: bool = False,
 ) -> _T:
     """Mutate and atomically replace one locked JSON object."""
     with advisory_file_lock(_lock_path(path), exclusive=True):
         path.parent.mkdir(parents=True, exist_ok=True)
-        data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        try:
+            loaded: object = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except json.JSONDecodeError:
+            if not recover_invalid:
+                raise
+            loaded = {}
+        if not isinstance(loaded, dict):
+            if not recover_invalid:
+                msg = "JSON state root must be an object"
+                raise TypeError(msg)
+            loaded = {}
+        data = cast("dict[str, Any]", loaded)
         result = mutate(data)
         if isinstance(result, NoWriteResult):
             return result.value

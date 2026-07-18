@@ -14,21 +14,38 @@ The implementation uses an orchestrator-owned sleep-first worker and does not de
 - Added `get_pending_schedule_thread_ids_for_room` in `src/mindroom/scheduling.py`, including only pending existing-scope schedules and excluding `new_thread=True`.
 - Wired worker start, config-reload reuse, environment disablement, and shutdown into the orchestrator runtime-support lifecycle.
 - Added router delivery with an explicit assignee mention, `trigger_dispatch=True`, and the internal MindRoom requester identity when available.
+- Hardened template persistence so literal or rendered whitespace-only todo titles are rejected before state is written.
+- Documented native auto-poke behavior and environment controls in the project-management guide, and marked the external workloop plugin as legacy for this workflow.
+- Regenerated the tracked MindRoom docs-skill references for those documentation changes.
 - Updated `tach.toml` for the new orchestrator dependencies and documented both new modules in `CLAUDE.md`.
 
 ## Scanner behavior
 
-- Todo files are scanned in sorted order, and malformed files are warned about and skipped independently.
+- Todo files are scanned in sorted order, malformed files are warned about and skipped independently, and invalid individual items no longer discard valid siblings.
+- Directory traversal, JSON access, advisory locking, revalidation reads, pruning, and persistence run in worker threads rather than blocking the asyncio event loop.
 - Persisted `main` thread sentinels normalize to room-main `None`.
 - Only open, dependency-unblocked items with a nonempty configured direct-agent assignee can produce a poke.
 - The quiet gate uses the newest `updated_at` among that assignee's actionable items in the scope.
+- An older item that becomes actionable after a dependency completes remains immediately eligible, which is the intended handoff behavior.
 - Direct-agent activity and activity in every running configured team containing that agent suppress the poke, with a second idle check immediately before delivery.
-- Pending schedules are queried once per room and suppress only their existing room/thread scope.
+- Poke state is loaded first, so unchanged and cooldown-blocked scopes cause no schedule queries.
+- Pending schedules are queried once per remaining room and suppress only their existing room/thread scope.
 - Runtime unavailability skips the whole tick, while an executed schedule query that errors fails open with a warning.
+- Each scope is re-read and its fingerprint recomputed after schedule I/O, so work completed, reassigned, or otherwise changed during the await is not poked from a stale snapshot.
 - Durable scope keys hash the canonical `(assigned_agent, room_id, normalized_thread_id)` tuple.
 - Fingerprints include every actionable item, including items beyond the five shown in the message, plus thread total and terminal counts.
 - An unchanged fingerprint never repeats, while a changed fingerprint waits for the cooldown.
-- Failed sends do not consume the successful-delivery cap and do not persist poke state.
+- Poke messages contain exactly one intentional assignee mention, while todo titles are rendered as literal code text with mention tokens neutralized.
+- The per-scan cap counts send attempts, including failures, while failed sends remain retryable because they do not persist poke state.
+- Obsolete poke records are pruned when their actionable assignee/room/thread scope no longer exists.
+- Non-object poke-state roots and non-object `scopes` values are warned about, treated as empty, and repaired through locked atomic persistence.
+
+## Round-1 review disposition
+
+The requester-ownership proposal was intentionally not implemented because this deployment uses the single-user trust model: router-triggered automation carries the configured internal MindRoom user, matching the existing trusted automation path.
+Designing multi-user todo ownership and authorization is a separate product and security change outside ISSUE-245.
+
+`PLAN.md` and this report remain intentionally committed as review artifacts for the branch and will be stripped during squash merge, so the artifact-removal finding required no code change.
 
 ## Assigned-agent defaults
 
@@ -40,11 +57,13 @@ Regression coverage now locks plan defaults, template defaults, and explicit tem
 
 ## Validation
 
-- `env -u MINDROOM_OWNER_USER_ID -u MINDROOM_DOCKER_WORKER_IMAGE uv run pytest`: 10,696 passed and 120 skipped.
+- `env -u MINDROOM_OWNER_USER_ID -u MINDROOM_DOCKER_WORKER_IMAGE uv run pytest -n auto --no-cov`: 10,718 passed and 120 skipped.
 - `uv run pre-commit run --all-files`: passed.
 - `uv run tach check --dependencies --interfaces`: passed.
-- Focused todo-poke, orchestrator, todo-tool, and scheduling suites: passed.
+- Focused todo-poke, orchestrator, todo-tool, and scheduling suites: 112 passed.
 - Changed-file `ty` validation: passed without rule overrides.
+
+The first all-files hook pass regenerated three tracked docs-skill reference outputs, and the required second pass was clean.
 
 The first unsanitized pytest run exposed four unrelated failures because the shell exported owner and Docker image values that overrode isolated test fixtures.
 

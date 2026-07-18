@@ -658,3 +658,39 @@ todos:
 
     assert "Unknown agent 'missing'" in result
     assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()
+
+
+@pytest.mark.parametrize(
+    ("template_title", "params"),
+    [
+        ("   ", {}),
+        ("  {{ TITLE }}  ", {"TITLE": "   "}),
+    ],
+    ids=["literal-whitespace", "rendered-whitespace"],
+)
+def test_apply_template_rejects_empty_stripped_titles(
+    tmp_path: Path,
+    template_title: str,
+    params: dict[str, str],
+) -> None:
+    """Literal and rendered template titles must be nonempty before persistence."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    _write_workspace_template(
+        config,
+        "empty-title",
+        f"""name: empty-title
+version: "1"
+description: Invalid empty title.
+todos:
+  - title: "{template_title}"
+""",
+    )
+
+    with (
+        tool_runtime_context(_tool_context(config)),
+        pytest.raises(ValueError, match="Todo `title` must not be empty"),
+    ):
+        tool.apply_template(agent=_agent(), name="empty-title", params=params)
+
+    assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()

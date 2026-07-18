@@ -606,7 +606,11 @@ async def get_pending_schedule_thread_ids_for_room(
     room_id: str,
 ) -> frozenset[str | None]:
     """Return existing-thread scopes suppressed by pending schedules in one room."""
-    tasks = await get_scheduled_tasks_for_room(client, room_id, include_non_pending=False)
+    response = await client.room_get_state(room_id)
+    if not isinstance(response, nio.RoomGetStateResponse):
+        msg = f"Failed to get scheduled task state for room {room_id}: {response}"
+        raise TypeError(msg)
+    tasks = _parse_task_records_from_state(room_id, response, include_non_pending=False)
     return frozenset(
         None if task.workflow.thread_id in {None, "main"} else task.workflow.thread_id
         for task in tasks
