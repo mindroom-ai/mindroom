@@ -41,6 +41,8 @@ Only `m.room.message` and `m.room.encrypted` relations can enter event-to-thread
 
 Poll responses, poll ends, beacons, stickers, state, calls, and RTC events remain room-level even when they carry a relation-shaped payload.
 
+Plaintext message replies and references cannot inherit visible thread membership through one of those non-message events; unresolved dependent membership invalidates the room's thread snapshots fail-closed.
+
 ## Redactions
 
 Redaction envelope events are intentionally omitted from the point cache.
@@ -107,7 +109,7 @@ The harness emits the interaction matrix, client-controllable ephemeral categori
 
 The harness can invite and explicitly join a second test agent when its token is supplied through a second environment variable.
 
-The optional service-cache inspection opens SQLite with `mode=ro`, enables `PRAGMA query_only`, starts one read transaction for a consistent snapshot, and records only IDs, counts, integrity state, hashes, and timings.
+Evidence collection opens the service cache with SQLite `mode=ro`, enables `PRAGMA query_only`, starts one read transaction for a consistent snapshot, and records only IDs, counts, integrity state, hashes, and timings.
 
 Strict thread reads use a separate new disposable SQLite database and refuse an existing path or the service-cache path.
 
@@ -118,6 +120,8 @@ The backend-neutral owning-seam test `test_advisory_stale_fallback_is_labeled_an
 It proves that an advisory read may return labeled degraded `stale_cache` history while the strict dispatch snapshot propagates the refill failure instead of serving stale context.
 
 Every declared interaction expectation is compared with homeserver accounting, the read-only service snapshot, and the initial visible thread projection before evidence is written.
+
+The CLI requires the service-cache path and strict-read mode, and the writer refuses output without complete passing expectation validation.
 
 The evidence writer rejects secret-shaped keys and either access-token value before writing JSON.
 

@@ -209,14 +209,12 @@ def _tiny_wav() -> bytes:
 
 def media_fixtures() -> tuple[MediaFixture, ...]:
     """Return deterministic real image, audio, video, and file fixtures."""
-    fixtures = (
+    return (
         MediaFixture("tiny.txt", "text/plain", b"Matrix cache audit fixture.\n"),
         MediaFixture("tiny.png", "image/png", base64.b64decode(_TINY_PNG_BASE64)),
         MediaFixture("silence.wav", "audio/wav", _tiny_wav()),
         MediaFixture("black.webm", "video/webm", base64.b64decode(_TINY_WEBM_BASE64)),
     )
-    validate_media_fixtures(fixtures)
-    return fixtures
 
 
 def validate_media_fixtures(fixtures: tuple[MediaFixture, ...]) -> None:
@@ -230,23 +228,27 @@ def validate_media_fixtures(fixtures: tuple[MediaFixture, ...]) -> None:
     with tempfile.NamedTemporaryFile(suffix=".webm") as video:
         video.write(by_name["black.webm"].payload)
         video.flush()
-        probe = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=codec_name,width,height",
-                "-of",
-                "csv=p=0",
-                video.name,
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            probe = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=codec_name,width,height",
+                    "-of",
+                    "csv=p=0",
+                    video.name,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError as exc:
+            msg = "ffprobe is required; enter the documented Nix development shell"
+            raise MatrixAuditError(msg) from exc
     if probe.returncode != 0 or not probe.stdout.strip():
         msg = "Generated WebM fixture has no decodable video stream"
         raise MatrixAuditError(msg)
@@ -1572,6 +1574,7 @@ async def run_audit(  # noqa: PLR0915
 ) -> AuditEvidence:
     """Run the disposable interaction matrix and return sanitized evidence."""
     fixtures = media_fixtures()
+    validate_media_fixtures(fixtures)
     records: list[InteractionRecord] = []
     invite_timings: tuple[RequestTiming, ...] = ()
     thread_reads: tuple[ThreadReadRecord, ...] = ()
@@ -1719,6 +1722,9 @@ async def run_audit(  # noqa: PLR0915
 
 def write_evidence(evidence: AuditEvidence, config: AuditConfig) -> None:
     """Write sanitized evidence after a second secret scan."""
+    if evidence.expectation_validation is None or evidence.expectation_validation.status != "passed":
+        msg = "Evidence output requires complete passing cache and strict-read expectation validation"
+        raise MatrixAuditError(msg)
     access_tokens = tuple(token for token in (config.access_token, config.invite_access_token) if token is not None)
     payload = _secret_free_evidence(evidence, access_tokens=access_tokens)
     config.evidence_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1768,8 +1774,8 @@ def _parse_args() -> AuditConfig:
     invite_access_token = None if args.invite_access_token_env is None else os.environ.get(args.invite_access_token_env)
     if args.invite_access_token_env is not None and not invite_access_token:
         parser.error(f"{args.invite_access_token_env} must contain the invited agent token")
-    if args.strict_thread_reads and (args.cache_db is None or args.strict_read_cache_db is None):
-        parser.error("--strict-thread-reads requires both --cache-db and --strict-read-cache-db")
+    if not args.strict_thread_reads or args.cache_db is None or args.strict_read_cache_db is None:
+        parser.error("evidence output requires --strict-thread-reads, --cache-db, and --strict-read-cache-db")
     if args.strict_read_cache_db is not None:
         if args.strict_read_cache_db.exists():
             parser.error("--strict-read-cache-db must name a new disposable database")

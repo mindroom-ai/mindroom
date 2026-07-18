@@ -564,6 +564,88 @@ async def test_joined_timeline_room_level_interaction_matrix(
 
 
 @pytest.mark.asyncio
+async def test_redaction_envelopes_are_omitted_from_every_point_write(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Direct and batched point writes must enforce the redaction-envelope exclusion."""
+    direct_redaction = _event_source(
+        "$direct-redaction-envelope",
+        "m.room.redaction",
+        {"redacts": "$target"},
+        timestamp=49,
+    )
+    batch_redaction = _event_source(
+        "$batch-redaction-envelope",
+        "m.room.redaction",
+        {"redacts": "$target"},
+        timestamp=50,
+    )
+    retained_message = _message_source("$retained-batch-message", "m.text", timestamp=51)
+
+    await event_cache.store_event("$direct-redaction-envelope", _ROOM_ID, direct_redaction)
+    await event_cache.store_events_batch(
+        [
+            ("$batch-redaction-envelope", _ROOM_ID, batch_redaction),
+            ("$retained-batch-message", _ROOM_ID, retained_message),
+        ],
+    )
+
+    assert await event_cache.get_event(_ROOM_ID, "$direct-redaction-envelope") is None
+    assert await event_cache.get_event(_ROOM_ID, "$batch-redaction-envelope") is None
+    assert await event_cache.get_event(_ROOM_ID, "$retained-batch-message") == retained_message
+
+
+@pytest.mark.parametrize("relation_kind", ["reply", "reference"])
+@pytest.mark.asyncio
+async def test_message_relations_through_non_message_ancestors_fail_closed(
+    event_cache: ConversationEventCache,
+    relation_kind: str,
+) -> None:
+    """A message cannot inherit visible thread membership through a non-message relation."""
+    await _seed_thread(event_cache)
+    sticker = _event_source(
+        "$thread-shaped-sticker",
+        "m.sticker",
+        {
+            "body": "sticker",
+            "m.relates_to": _thread_relation(),
+            "url": "mxc://localhost/sticker",
+        },
+        timestamp=52,
+    )
+    relation = (
+        _reply_relation("$thread-shaped-sticker")
+        if relation_kind == "reply"
+        else {"event_id": "$thread-shaped-sticker", "rel_type": "m.reference"}
+    )
+    dependent_message = _message_source(
+        f"${relation_kind}-through-sticker",
+        "m.text",
+        timestamp=53,
+        relation=relation,
+    )
+
+    await _build_sync_harness(event_cache).apply(
+        _sync_response([raw_nio_event(sticker), raw_nio_event(dependent_message)]),
+    )
+
+    assert await event_cache.get_event(_ROOM_ID, "$thread-shaped-sticker") == sticker
+    assert await event_cache.get_event(_ROOM_ID, cast("str", dependent_message["event_id"])) == dependent_message
+    assert await event_cache.get_thread_id_for_event(_ROOM_ID, "$thread-shaped-sticker") is None
+    assert (
+        await event_cache.get_thread_id_for_event(
+            _ROOM_ID,
+            cast("str", dependent_message["event_id"]),
+        )
+        is None
+    )
+    state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    assert state is not None
+    assert state.room_invalidation_reason == "sync_thread_lookup_unavailable"
+    assert thread_cache_rejection_reason(state) == "room_invalidated_after_validation"
+
+
+@pytest.mark.asyncio
 async def test_joined_timeline_thread_relations_indexes_edits_and_visible_history(
     event_cache: ConversationEventCache,
 ) -> None:
@@ -955,8 +1037,19 @@ async def test_sync_categories_outside_joined_timeline_are_deliberately_excluded
             timestamp=102,
             state_key="",
         ),
-        "invite_timeline": _message_source("$invite-timeline", "m.text", timestamp=103),
-        "leave_timeline": _message_source("$leave-timeline", "m.text", timestamp=104),
+        "invite_timeline": _message_source(
+            "$invite-timeline",
+            "m.text",
+            timestamp=103,
+            relation=_thread_relation("$invite-root"),
+        ),
+        "leave_timeline": _edit_source(
+            "$leave-timeline",
+            "$leave-original",
+            body="leave edit",
+            timestamp=104,
+            thread_id="$leave-root",
+        ),
         "typing": _event_source("$typing", "m.typing", {"user_ids": [_SENDER]}, timestamp=105),
         "receipt": _event_source("$receipt", "m.receipt", {}, timestamp=106),
         "presence": _event_source("$presence", "m.presence", {"presence": "online"}, timestamp=107),
@@ -981,12 +1074,22 @@ async def test_sync_categories_outside_joined_timeline_are_deliberately_excluded
     )
 
     assert await event_cache.get_event(_ROOM_ID, "$joined-timeline") == excluded_sources["joined_timeline"]
+    excluded_room_ids = {
+        "invite_timeline": "!invite:localhost",
+        "leave_timeline": leave_room_id,
+    }
     for category, source in excluded_sources.items():
         if category == "joined_timeline":
             continue
         event_id = cast("str", source["event_id"])
-        assert await event_cache.get_event(_ROOM_ID, event_id) is None
-        assert await event_cache.get_thread_id_for_event(_ROOM_ID, event_id) is None
+        room_id = excluded_room_ids.get(category, _ROOM_ID)
+        assert await event_cache.get_event(room_id, event_id) is None
+        assert await event_cache.get_thread_id_for_event(room_id, event_id) is None
+    assert await event_cache.get_thread_events("!invite:localhost", "$invite-root") is None
+    assert await event_cache.get_thread_cache_state("!invite:localhost", "$invite-root") is None
+    assert await event_cache.get_thread_events(leave_room_id, "$leave-root") is None
+    assert await event_cache.get_thread_cache_state(leave_room_id, "$leave-root") is None
+    assert await event_cache.get_latest_edit(leave_room_id, "$leave-original") is None
     assert await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID) == before_events
     assert await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID) == before_state
     assert await event_cache.get_event(leave_room_id, "$preserved-after-leave") == preserved_leave_event

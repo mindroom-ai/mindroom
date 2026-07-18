@@ -253,9 +253,14 @@ class ThreadMutationResolver:
                 continue
             page_event_infos[event_id] = EventInfo.from_event(event_source)
             ordered_event_ids.append(event_id)
+        relation_event_infos = {
+            event_id: event_info
+            for event_id, event_info in page_event_infos.items()
+            if event_type_supports_thread_relations(event_info.event_type)
+        }
         page_resolved_thread_ids = await resolve_thread_ids_for_event_infos(
             room_id,
-            event_infos=page_event_infos,
+            event_infos=relation_event_infos,
             ordered_event_ids=ordered_event_ids,
         )
         return MutationResolutionContext(
@@ -482,11 +487,15 @@ class ThreadMutationResolver:
             )
 
         async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo:
-            return await self._event_info_for_mutation_context(
+            event_info = await self._event_info_for_mutation_context(
                 room_id,
                 event_id,
                 resolution_context=resolution_context,
             )
+            if not event_type_supports_thread_relations(event_info.event_type):
+                msg = f"Related event {event_id} cannot carry conversation thread membership"
+                raise ThreadMembershipLookupError(msg)
+            return event_info
 
         async def prove_thread_root(_room_id: str, thread_root_id: str) -> ThreadRootProof:
             return await self._prove_thread_root_for_mutation_context(

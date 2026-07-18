@@ -104,13 +104,12 @@ def filter_redacted_events(
     *,
     redacted_event_ids: frozenset[str],
 ) -> list[_CachedEventValue]:
-    """Drop events that are tombstoned or edit a tombstoned original."""
-    if not redacted_event_ids:
-        return events
+    """Drop redaction envelopes, tombstoned events, and edits of tombstoned originals."""
     return [
         (event_id, event)
         for event_id, event in events
-        if event_redaction_candidate_ids(event_id, event).isdisjoint(redacted_event_ids)
+        if event.get("type") != "m.room.redaction"
+        and event_redaction_candidate_ids(event_id, event).isdisjoint(redacted_event_ids)
     ]
 
 

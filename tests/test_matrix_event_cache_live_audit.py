@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
 from contextlib import closing
 from dataclasses import replace
@@ -26,6 +27,8 @@ from tests.manual.matrix_event_cache_live_audit import (
     media_fixtures,
     new_transaction_id,
     validate_interaction_expectations,
+    validate_media_fixtures,
+    write_evidence,
 )
 
 if TYPE_CHECKING:
@@ -55,8 +58,8 @@ def _empty_evidence() -> AuditEvidence:
     )
 
 
-def test_media_fixtures_are_small_stable_and_decodable() -> None:
-    """Every embedded fixture should remain tiny, byte-stable, and decodable."""
+def test_media_fixtures_are_small_and_byte_stable() -> None:
+    """Every embedded fixture should remain tiny and byte-stable."""
     fixtures = media_fixtures()
 
     assert {fixture.filename: (fixture.mime_type, len(fixture.payload), fixture.sha256) for fixture in fixtures} == {
@@ -81,6 +84,24 @@ def test_media_fixtures_are_small_stable_and_decodable() -> None:
             "f8529cbbaa1403b3c5a2992e85056df953aa85c1a3e3d6cfbded9444a9f52d45",
         ),
     }
+
+
+@pytest.mark.skipif(shutil.which("ffprobe") is None, reason="ffprobe is not installed")
+def test_media_fixtures_are_decodable() -> None:
+    """The complete fixture set should pass the harness's real decoders."""
+    validate_media_fixtures(media_fixtures())
+
+
+def test_media_validation_reports_missing_ffprobe_cleanly() -> None:
+    """A host outside the dev shell should receive an actionable dependency error."""
+    with (
+        patch(
+            "tests.manual.matrix_event_cache_live_audit.subprocess.run",
+            side_effect=FileNotFoundError,
+        ),
+        pytest.raises(MatrixAuditError, match="ffprobe is required"),
+    ):
+        validate_media_fixtures(media_fixtures())
 
 
 def test_transaction_ids_are_unique_uuids() -> None:
@@ -128,6 +149,29 @@ def test_evidence_rejects_secret_keys_and_values() -> None:
             replace(evidence, media=({"access_token": "redacted"},)),
             access_tokens=(secret,),
         )
+
+
+def test_evidence_writer_refuses_unvalidated_output(tmp_path: Path) -> None:
+    """Durable audit output should never be written without full expectation validation."""
+    evidence_path = tmp_path / "evidence.json"
+    config = AuditConfig(
+        base_url="https://matrix.example",
+        access_token=UUID("10000000-0000-4000-8000-000000000005").hex,
+        invite_access_token=None,
+        evidence_path=evidence_path,
+        cache_db_path=tmp_path / "service.db",
+        strict_read_cache_db_path=tmp_path / "strict.db",
+        invite_user_id=None,
+        trigger_user_id=None,
+        strict_thread_reads=True,
+        settle_seconds=0.0,
+        trigger_wait_seconds=0.0,
+    )
+
+    with pytest.raises(MatrixAuditError, match="requires complete passing"):
+        write_evidence(_empty_evidence(), config)
+
+    assert evidence_path.exists() is False
 
 
 @pytest.mark.asyncio
