@@ -16,7 +16,7 @@ from mindroom.logging_config import get_logger
 from mindroom.timing import milliseconds
 
 from . import sqlite_event_cache_events, sqlite_event_cache_threads
-from .cache_maintenance import CacheMetricsState, CorruptEventCachePayloadError
+from .cache_maintenance import CacheMetricsState, CorruptEventCachePayloadError, cancel_task_once_and_wait
 from .event_batching import group_lookup_events_by_room
 from .event_normalization import normalize_event_source_for_cache
 from .sqlite_agent_message_snapshot import load_sqlite_agent_message_snapshot
@@ -536,6 +536,7 @@ class SqliteEventCache:
         self._runtime = _SqliteEventCacheRuntime(db_path)
         self._metrics_refresh_task: asyncio.Task[None] | None = None
         self._metrics_refresh_enabled = True
+        self._metrics_refresh_lifecycle_lock = asyncio.Lock()
 
     @property
     def db_path(self) -> Path:
@@ -583,17 +584,18 @@ class SqliteEventCache:
 
     async def refresh_runtime_diagnostics(self) -> dict[str, object]:
         """Force an exact metrics refresh without changing cache availability on telemetry failure."""
-        try:
-            await self._cancel_metrics_refresh(disable=False)
-            return await self._collect_runtime_diagnostics()
-        finally:
-            if (
-                self._metrics_refresh_enabled
-                and self._runtime._metrics.dirty
-                and self._runtime.is_initialized
-                and not self._runtime.is_disabled
-            ):
-                self._schedule_metrics_refresh()
+        async with self._metrics_refresh_lifecycle_lock:
+            try:
+                await self._cancel_metrics_refresh(disable=False)
+                return await self._collect_runtime_diagnostics()
+            finally:
+                if (
+                    self._metrics_refresh_enabled
+                    and self._runtime._metrics.dirty
+                    and self._runtime.is_initialized
+                    and not self._runtime.is_disabled
+                ):
+                    self._schedule_metrics_refresh()
 
     async def _collect_runtime_diagnostics(self) -> dict[str, object]:
         """Collect one exact SQLite storage snapshot."""
@@ -651,8 +653,9 @@ class SqliteEventCache:
 
     async def close(self) -> None:
         """Close the SQLite connection when the cache is no longer needed."""
-        await self._cancel_metrics_refresh()
-        await self._runtime.close()
+        async with self._metrics_refresh_lifecycle_lock:
+            await self._cancel_metrics_refresh()
+            await self._runtime.close()
 
     async def _read_operation(
         self,
@@ -726,15 +729,10 @@ class SqliteEventCache:
         try:
             if task is None:
                 return
-            if not task.done() and task.cancelling() == 0:
-                task.cancel()
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                caller = asyncio.current_task()
-                if caller is not None and caller.cancelling():
-                    raise
+            await cancel_task_once_and_wait(task)
         finally:
+            if task is not None and task.done() and self._metrics_refresh_task is task:
+                self._metrics_refresh_task = None
             if not disable:
                 self._metrics_refresh_enabled = refresh_was_enabled
 

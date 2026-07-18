@@ -61,6 +61,20 @@ def _message_event(
     }
 
 
+async def _wait_for_runtime_metrics_idle(
+    event_cache: ConversationEventCache,
+) -> dict[str, object]:
+    async with asyncio.timeout(5):
+        while True:
+            diagnostics = event_cache.runtime_diagnostics()
+            if (
+                diagnostics["cache_metrics_dirty"] is False
+                and diagnostics["cache_metrics_refresh_in_progress"] is False
+            ):
+                return diagnostics
+            await asyncio.sleep(0.01)
+
+
 class TestConversationEventCacheContract:
     """Run the public cache contract against each configured durable backend."""
 
@@ -647,15 +661,7 @@ async def test_cancelled_forced_metrics_refresh_reschedules_exact_recount(
         await forced_refresh
 
     await asyncio.wait_for(automatic_refresh_finished.wait(), timeout=5)
-    async with asyncio.timeout(5):
-        while True:
-            diagnostics = event_cache.runtime_diagnostics()
-            if (
-                diagnostics["cache_metrics_dirty"] is False
-                and diagnostics["cache_metrics_refresh_in_progress"] is False
-            ):
-                break
-            await asyncio.sleep(0.01)
+    diagnostics = await _wait_for_runtime_metrics_idle(event_cache)
     assert diagnostics["cache_metrics_snapshot"] == "runtime"
     assert diagnostics["cache_metrics_dirty"] is False
     assert diagnostics["cache_metrics_refresh_in_progress"] is False
@@ -713,15 +719,7 @@ async def test_cancelled_forced_refresh_during_prior_cleanup_restores_scheduler(
 
     release_first_refresh_cleanup.set()
     await asyncio.wait_for(automatic_refresh_finished.wait(), timeout=5)
-    async with asyncio.timeout(5):
-        while True:
-            diagnostics = event_cache.runtime_diagnostics()
-            if (
-                diagnostics["cache_metrics_dirty"] is False
-                and diagnostics["cache_metrics_refresh_in_progress"] is False
-            ):
-                break
-            await asyncio.sleep(0.01)
+    diagnostics = await _wait_for_runtime_metrics_idle(event_cache)
     assert diagnostics["cache_metrics_snapshot"] == "runtime"
     assert refresh_attempts == 2
     assert await event_cache.get_event(room_id, str(event["event_id"])) == event
@@ -786,6 +784,8 @@ async def test_concurrent_forced_metrics_refresh_does_not_recancel_cleanup(
 
     second = _message_event("$second:localhost", 2)
     await event_cache.store_event(str(second["event_id"]), room_id, second)
+    await _wait_for_runtime_metrics_idle(event_cache)
+    assert refresh_attempts == 4
     assert await event_cache.get_event(room_id, str(second["event_id"])) == second
 
 

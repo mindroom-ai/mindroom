@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import zlib
@@ -31,6 +32,17 @@ _RUNTIME_METRICS_REFRESH_INTERVAL_SECONDS = 60.0
 
 class CorruptEventCachePayloadError(RuntimeError):
     """Raised when one compressed cache payload cannot be reconstructed safely."""
+
+
+async def cancel_task_once_and_wait(task: asyncio.Task[None]) -> None:
+    """Cancel one owned task at most once and wait for its coroutine cleanup to finish."""
+    completed = asyncio.Event()
+    task.add_done_callback(lambda _task: completed.set())
+    if not task.done() and task.cancelling() == 0:
+        task.cancel()
+    await completed.wait()
+    if not task.cancelled():
+        task.result()
 
 
 def decompress_event_payload(event_json_zlib: bytes, *, backend: str) -> dict[str, Any]:
