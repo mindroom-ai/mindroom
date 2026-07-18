@@ -152,6 +152,9 @@ class ConversationEventCache(Protocol):
     def runtime_diagnostics(self) -> dict[str, object]:
         """Return log-safe runtime state for sync certification diagnostics."""
 
+    async def refresh_runtime_diagnostics(self) -> dict[str, object]:
+        """Force an exact storage-metrics refresh and return log-safe runtime diagnostics."""
+
     def pending_durable_write_room_ids(self) -> tuple[str, ...]:
         """Return rooms with runtime-only writes that must persist before certifying a sync token."""
 

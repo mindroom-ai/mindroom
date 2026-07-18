@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import zlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -10,7 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 from .cache_maintenance import (
     NONTERMINAL_STREAM_STATUSES,
     TERMINAL_STREAM_STATUSES,
-    CorruptEventCachePayloadError,
+    decompress_event_payload,
 )
 from .postgres_cursor import fetchall, fetchone, rowcount
 
@@ -59,11 +58,7 @@ type _ArchivedEditRow = tuple[
 
 
 def _decompress_event(event_json_zlib: bytes) -> dict[str, Any]:
-    try:
-        return json.loads(zlib.decompress(event_json_zlib).decode())
-    except (json.JSONDecodeError, UnicodeDecodeError, zlib.error) as exc:
-        msg = "Compacted PostgreSQL event payload is corrupt"
-        raise CorruptEventCachePayloadError(msg) from exc
+    return decompress_event_payload(event_json_zlib, backend="PostgreSQL")
 
 
 def _archived_edit_from_row(row: object) -> _ArchivedPostgresStreamingEdit:
@@ -180,6 +175,29 @@ async def load_archived_thread_events(
         ORDER BY thread_origin_server_ts, thread_order
         """,
         (namespace, room_id, thread_id),
+    )
+    return [(int(row[0]), int(row[1]), _decompress_event(bytes(row[2]))) for row in rows]
+
+
+async def load_recent_archived_room_events(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+    since_ts_ms: int,
+    limit: int,
+) -> list[tuple[int, int, dict[str, Any]]]:
+    """Return recent compacted room-message edits with their stable ordering keys."""
+    rows = await fetchall(
+        db,
+        """
+        SELECT origin_server_ts, event_order, event_json_zlib
+        FROM mindroom_event_cache_compacted_streaming_edits
+        WHERE namespace = %s AND room_id = %s AND origin_server_ts >= %s
+        ORDER BY origin_server_ts DESC, event_order DESC
+        LIMIT %s
+        """,
+        (namespace, room_id, since_ts_ms, limit),
     )
     return [(int(row[0]), int(row[1]), _decompress_event(bytes(row[2]))) for row in rows]
 
@@ -348,6 +366,45 @@ async def compact_superseded_streaming_edits(
     room_id: str | None = None,
 ) -> int:
     """Archive superseded nonterminal edits and remove their active projections."""
+    if room_id is None:
+        return await _compact_startup_candidates_by_locked_room(db, namespace=namespace)
+    return await _compact_locked_room(db, namespace=namespace, room_id=room_id)
+
+
+async def _compact_startup_candidates_by_locked_room(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+) -> int:
+    """Discover candidate rooms, then reselect edits under the runtime room lock."""
+    compacted = 0
+    while discovered := await _compaction_candidates(
+        db,
+        namespace=namespace,
+        room_id=None,
+        limit=_COMPACTION_BATCH_SIZE,
+    ):
+        room_ids = tuple(dict.fromkeys(candidate.room_id for candidate in discovered))
+        for candidate_room_id in room_ids:
+            await db.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
+                (namespace, candidate_room_id),
+            )
+            compacted += await _compact_locked_room(
+                db,
+                namespace=namespace,
+                room_id=candidate_room_id,
+            )
+    return compacted
+
+
+async def _compact_locked_room(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+) -> int:
+    """Compact one room after its transaction-scoped advisory lock is held."""
     compacted = 0
     while candidates := await _compaction_candidates(
         db,

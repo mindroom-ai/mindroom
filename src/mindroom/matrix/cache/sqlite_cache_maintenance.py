@@ -394,6 +394,29 @@ async def run_startup_maintenance(
     )
 
 
+async def refresh_runtime_metrics(
+    db: aiosqlite.Connection,
+    *,
+    startup_report: CacheMaintenanceReport,
+    db_path: Path,
+) -> CacheMaintenanceReport:
+    """Refresh current counts while preserving immutable startup repair outcomes."""
+    report = await _collect_maintenance_report(
+        db,
+        schema_version=startup_report.schema_version,
+        migrated_from_schema_version=startup_report.migrated_from_schema_version,
+        destructive_reset=startup_report.destructive_reset,
+        orphan_edit_indexes_before=startup_report.orphan_edit_indexes_before,
+        orphan_thread_indexes_before=startup_report.orphan_thread_indexes_before,
+        orphan_thread_event_references_before=startup_report.orphan_thread_event_references_before,
+        repaired_edit_indexes=startup_report.repaired_edit_indexes,
+        repaired_thread_indexes=startup_report.repaired_thread_indexes,
+        repaired_thread_event_references=startup_report.repaired_thread_event_references,
+        compacted_nonterminal_streaming_edits=startup_report.compacted_nonterminal_streaming_edits,
+    )
+    return with_sqlite_storage_bytes(report, db_path)
+
+
 def sqlite_storage_bytes(db_path: Path) -> int:
     """Return current SQLite main/WAL bytes without reading cache content."""
     paths = (db_path, db_path.with_name(f"{db_path.name}-wal"))

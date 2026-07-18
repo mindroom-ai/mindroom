@@ -27,6 +27,7 @@ from .postgres_streaming_compaction import (
     load_archived_event,
     load_archived_thread_id,
     load_latest_archived_edit,
+    load_recent_archived_room_events,
 )
 
 if TYPE_CHECKING:
@@ -71,7 +72,7 @@ async def load_recent_room_events(
     rows = await fetchall(
         db,
         """
-        SELECT event_json
+        SELECT origin_server_ts, write_seq, event_json
         FROM mindroom_event_cache_events
         WHERE namespace = %s
             AND room_id = %s
@@ -82,7 +83,18 @@ async def load_recent_room_events(
         """,
         (namespace, room_id, since_ts_ms, event_type, limit),
     )
-    return [json.loads(row[0]) for row in rows]
+    active = [(int(row[0]), int(row[1]), json.loads(row[2])) for row in rows]
+    if event_type != "m.room.message":
+        return [event for _timestamp, _order, event in active]
+    archived = await load_recent_archived_room_events(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        since_ts_ms=since_ts_ms,
+        limit=limit,
+    )
+    ordered = sorted([*active, *archived], key=lambda row: row[:2], reverse=True)
+    return [event for _timestamp, _order, event in ordered[:limit]]
 
 
 async def load_latest_edit(

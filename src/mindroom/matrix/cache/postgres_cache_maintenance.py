@@ -473,3 +473,29 @@ async def run_startup_maintenance(
         repaired_counts=repaired_counts,
         compacted_nonterminal_streaming_edits=compacted,
     )
+
+
+async def refresh_runtime_metrics(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    startup_report: CacheMaintenanceReport,
+) -> CacheMaintenanceReport:
+    """Refresh current counts while preserving immutable startup repair outcomes."""
+    return await _collect_maintenance_report(
+        db,
+        namespace=namespace,
+        schema_version=startup_report.schema_version,
+        migrated_from_schema_version=startup_report.migrated_from_schema_version,
+        orphan_counts_before=(
+            startup_report.orphan_edit_indexes_before,
+            startup_report.orphan_thread_indexes_before,
+            startup_report.orphan_thread_event_references_before,
+        ),
+        repaired_counts=(
+            startup_report.repaired_edit_indexes,
+            startup_report.repaired_thread_indexes,
+            startup_report.repaired_thread_event_references,
+        ),
+        compacted_nonterminal_streaming_edits=startup_report.compacted_nonterminal_streaming_edits,
+    )

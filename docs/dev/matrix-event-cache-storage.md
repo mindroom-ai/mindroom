@@ -16,13 +16,15 @@ Superseded nonterminal MindRoom streaming edits move from the active tables into
 
 The cold archive is part of the event source of truth because Matrix redaction of a newer terminal edit can make an earlier nonterminal edit visible again.
 
-Point lookup, latest-edit selection, thread lookup, thread ordering, snapshot replacement, invalidation, redaction, and late-replay filtering therefore operate across active and cold storage.
+Point lookup, recent-room lookup, latest-edit selection, thread lookup, thread ordering, snapshot replacement, invalidation, redaction, and late-replay filtering therefore operate across active and cold storage.
 
 Compaction never creates a redaction tombstone because compaction is not deletion from Matrix history.
 
 Compaction requires a strictly newer terminal edit from the same room, original event, and sender, which avoids ambiguous equal-timestamp replacement races and cross-sender replacement.
 
 Compaction selects, compresses, bulk-writes, and removes bounded batches inside one caller-owned transaction, so startup memory is bounded and cancellation rolls every batch back together.
+
+PostgreSQL startup compaction acquires the same transaction-scoped room advisory lock as older runtimes and reselects candidates under that lock before archiving them.
 
 ## Startup maintenance
 
@@ -36,7 +38,13 @@ It marks a thread stale before removing a membership row whose active source eve
 
 It compacts eligible streaming edits again so replayed or partially processed writes converge after restart.
 
-The startup log and startup-labeled runtime diagnostics include backend bytes where available, namespace payload bytes for PostgreSQL, row counts for active tables and cold history, tombstone counts, stale marker counts, streaming categories, orphan counts before and after repair, and repair and compaction outcomes.
+The startup log includes backend bytes where available, namespace payload bytes for PostgreSQL, row counts for active tables and cold history, tombstone counts, stale marker counts, streaming categories, orphan counts before and after repair, and repair and compaction outcomes.
+
+Runtime diagnostics preserve the immutable startup outcomes and overlay an exact, bounded-staleness storage snapshot with its age, dirty state, refresh state, and refresh-failure count.
+
+Committed mutations coalesce into a throttled background recount, and operators can force an exact recount through the cache diagnostics API.
+
+Telemetry refresh failure preserves the last good snapshot and never rolls back a cache write, disables the cache, or weakens sync certification.
 
 Diagnostics contain counts and sizes only and never contain event content or connection URLs.
 

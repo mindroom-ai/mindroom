@@ -101,6 +101,7 @@ DEEPSEEK_REASONER  # used by scripts/utilities/rewrite_git_commits_ai.py
 SAAS_MODEL_PRESETS  # used by scripts/sync_config.py
 _.to_config_dict  # used by scripts/sync_config.py
 _.serialize_datetime  # unused method (src/mindroom/matrix/state.py)
+_.refresh_runtime_diagnostics  # event-cache operator protocol hook (src/mindroom/matrix/cache/event_cache.py)
 clear_auth_session  # unused function (src/mindroom/api/auth.py)
 _.validate_unique_tools  # unused method (src/mindroom/config/agent.py)
 _.validate_context_files  # unused method (src/mindroom/config/agent.py)

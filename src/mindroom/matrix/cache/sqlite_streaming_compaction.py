@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import zlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -10,7 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 from .cache_maintenance import (
     NONTERMINAL_STREAM_STATUSES,
     TERMINAL_STREAM_STATUSES,
-    CorruptEventCachePayloadError,
+    decompress_event_payload,
 )
 
 _COMPACTION_BATCH_SIZE = 500
@@ -58,11 +57,7 @@ type _ArchivedEditRow = tuple[
 
 
 def _decompress_event(event_json_zlib: bytes) -> dict[str, Any]:
-    try:
-        return json.loads(zlib.decompress(event_json_zlib).decode())
-    except (json.JSONDecodeError, UnicodeDecodeError, zlib.error) as exc:
-        msg = "Compacted SQLite event payload is corrupt"
-        raise CorruptEventCachePayloadError(msg) from exc
+    return decompress_event_payload(event_json_zlib, backend="SQLite")
 
 
 def _archived_edit_from_row(row: object) -> ArchivedStreamingEdit:
@@ -183,6 +178,29 @@ async def load_archived_thread_events(
         ORDER BY thread_origin_server_ts, thread_order
         """,
         (room_id, thread_id),
+    )
+    rows = await cursor.fetchall()
+    await cursor.close()
+    return [(int(row[0]), int(row[1]), _decompress_event(bytes(row[2]))) for row in rows]
+
+
+async def load_recent_archived_room_events(
+    db: aiosqlite.Connection,
+    *,
+    room_id: str,
+    since_ts_ms: int,
+    limit: int,
+) -> list[tuple[int, int, dict[str, Any]]]:
+    """Return recent compacted room-message edits with their stable ordering keys."""
+    cursor = await db.execute(
+        """
+        SELECT origin_server_ts, event_order, event_json_zlib
+        FROM compacted_streaming_edits
+        WHERE room_id = ? AND origin_server_ts >= ?
+        ORDER BY origin_server_ts DESC, event_order DESC
+        LIMIT ?
+        """,
+        (room_id, since_ts_ms, limit),
     )
     rows = await cursor.fetchall()
     await cursor.close()

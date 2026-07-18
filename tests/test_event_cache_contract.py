@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import zlib
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -13,7 +14,13 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
-from mindroom.matrix.cache import ConversationEventCache, postgres_streaming_compaction, sqlite_streaming_compaction
+from mindroom.matrix.cache import (
+    ConversationEventCache,
+    postgres_event_cache,
+    postgres_streaming_compaction,
+    sqlite_event_cache,
+    sqlite_streaming_compaction,
+)
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from tests.event_cache_test_support import replace_thread_unconditionally
@@ -400,10 +407,146 @@ async def test_streaming_compaction_survives_backend_restart(
 
 
 @pytest.mark.asyncio
-async def test_corrupt_compacted_payload_disables_advisory_cache(
+async def test_recent_room_events_include_compacted_edits(
     event_cache: ConversationEventCache,
 ) -> None:
-    """Corrupt cold bytes produce a cache miss and log-safe disabled state instead of escaping."""
+    """Recent-room lookups merge cold room-message edits with active events in stable order."""
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    sender = "@agent:localhost"
+    pending = _message_event(
+        "$pending:localhost",
+        2,
+        sender=sender,
+        edit_of=original_id,
+        stream_status=STREAM_STATUS_PENDING,
+    )
+    terminal = _message_event(
+        "$terminal:localhost",
+        3,
+        sender=sender,
+        edit_of=original_id,
+        stream_status=STREAM_STATUS_COMPLETED,
+    )
+    await event_cache.store_events_batch(
+        [
+            (str(pending["event_id"]), room_id, pending),
+            (str(terminal["event_id"]), room_id, terminal),
+        ],
+    )
+
+    assert await event_cache.get_recent_room_events(
+        room_id,
+        event_type="m.room.message",
+        since_ts_ms=0,
+    ) == [terminal, pending]
+    assert await event_cache.get_recent_room_events(
+        room_id,
+        event_type="m.room.message",
+        since_ts_ms=3,
+    ) == [terminal]
+    assert await event_cache.get_recent_room_events(
+        room_id,
+        event_type="m.room.message",
+        since_ts_ms=0,
+        limit=1,
+    ) == [terminal]
+
+
+@pytest.mark.asyncio
+async def test_runtime_diagnostics_refresh_current_storage_metrics(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Both backends expose exact on-demand gauges and bounded-staleness metadata."""
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    sender = "@agent:localhost"
+    pending = _message_event(
+        "$pending:localhost",
+        2,
+        sender=sender,
+        edit_of=original_id,
+        stream_status=STREAM_STATUS_PENDING,
+    )
+    terminal = _message_event(
+        "$terminal:localhost",
+        3,
+        sender=sender,
+        edit_of=original_id,
+        stream_status=STREAM_STATUS_COMPLETED,
+    )
+    await event_cache.store_events_batch(
+        [
+            (str(pending["event_id"]), room_id, pending),
+            (str(terminal["event_id"]), room_id, terminal),
+        ],
+    )
+    dirty_diagnostics = event_cache.runtime_diagnostics()
+    assert dirty_diagnostics["cache_metrics_dirty"] is True
+    assert dirty_diagnostics["cache_metrics_refresh_in_progress"] is True
+
+    diagnostics = await event_cache.refresh_runtime_diagnostics()
+    assert diagnostics["cache_metrics_snapshot"] == "runtime"
+    assert diagnostics["cache_metrics_dirty"] is False
+    assert diagnostics["cache_metrics_refresh_in_progress"] is False
+    assert diagnostics["cache_event_rows"] == 1
+    assert diagnostics["cache_edit_index_rows"] == 1
+    assert diagnostics["cache_terminal_streaming_edit_rows"] == 1
+    assert diagnostics["cache_nonterminal_streaming_edit_rows"] == 0
+    assert diagnostics["cache_compacted_streaming_edit_archive_rows"] == 1
+    assert diagnostics["cache_compacted_streaming_edit_archive_bytes"] > 0
+    assert diagnostics["cache_orphan_edit_indexes_current"] == 0
+
+    await event_cache.mark_thread_stale(room_id, original_id, reason="contract_refresh")
+    await event_cache.store_mxc_text(room_id, "mxc://localhost/secret-media", "secret body")
+    await event_cache.redact_event(room_id, str(pending["event_id"]))
+    refreshed = await event_cache.refresh_runtime_diagnostics()
+    assert refreshed["cache_stale_thread_markers"] == 1
+    assert refreshed["cache_mxc_rows"] == 1
+    assert refreshed["cache_tombstone_rows"] == 1
+    assert refreshed["cache_compacted_streaming_edit_archive_rows"] == 0
+    assert "secret-media" not in str(refreshed)
+    assert "secret body" not in str(refreshed)
+
+
+@pytest.mark.asyncio
+async def test_runtime_metrics_refresh_failure_is_advisory(
+    event_cache: ConversationEventCache,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Telemetry failure preserves the last snapshot and cannot disable durable cache writes."""
+    room_id = "!room:localhost"
+    event = _message_event("$event:localhost", 1)
+    await event_cache.store_event(str(event["event_id"]), room_id, event)
+    failure_reason = "secret database URL"
+
+    async def fail_refresh(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError(failure_reason)
+
+    if isinstance(event_cache, SqliteEventCache):
+        monkeypatch.setattr(sqlite_event_cache, "refresh_runtime_metrics", fail_refresh)
+    else:
+        assert isinstance(event_cache, PostgresEventCache)
+        monkeypatch.setattr(postgres_event_cache, "refresh_runtime_metrics", fail_refresh)
+
+    diagnostics = await event_cache.refresh_runtime_diagnostics()
+    assert event_cache.durable_writes_available is True
+    assert diagnostics["cache_metrics_dirty"] is True
+    assert diagnostics["cache_metrics_refresh_failure_count"] == 1
+    assert failure_reason not in str(diagnostics)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "corrupt_payload",
+    [b"corrupt", zlib.compress(b"[]")],
+    ids=["invalid-compressed-bytes", "valid-non-object-json"],
+)
+async def test_corrupt_compacted_payload_disables_advisory_cache(
+    event_cache: ConversationEventCache,
+    corrupt_payload: bytes,
+) -> None:
+    """Invalid cold payloads produce a cache miss and log-safe disabled state instead of escaping."""
     room_id = "!room:localhost"
     original_id = "$original:localhost"
     sender = "@agent:localhost"
@@ -432,7 +575,7 @@ async def test_corrupt_compacted_payload_disables_advisory_cache(
         db = event_cache._runtime.require_db()
         await db.execute(
             "UPDATE compacted_streaming_edits SET event_json_zlib = ? WHERE event_id = ?",
-            (b"corrupt", pending["event_id"]),
+            (corrupt_payload, pending["event_id"]),
         )
         await db.commit()
     else:
@@ -444,7 +587,7 @@ async def test_corrupt_compacted_payload_disables_advisory_cache(
             SET event_json_zlib = %s
             WHERE namespace = %s AND event_id = %s
             """,
-            (b"corrupt", event_cache.namespace, pending["event_id"]),
+            (corrupt_payload, event_cache.namespace, pending["event_id"]),
         )
         await db.commit()
 
