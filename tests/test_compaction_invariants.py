@@ -731,6 +731,7 @@ async def test_generate_compaction_summary_empty_result_raises_typed_error_with_
 def test_retry_policy_shrinks_budget_for_empty_result() -> None:
     """Empty results may be a provider's response to an oversized request."""
     error = _CompactionSummaryEmptyResultError("summary generation returned no result")
+    assert DEFAULT_SUMMARY_RETRY_POLICY.should_shrink(error) is True
     assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) == 8_000
     assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=2, budget=16_000, error=error) is None
 

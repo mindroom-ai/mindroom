@@ -105,7 +105,13 @@ class SummaryRetryPolicy:
         """Return whether a smaller summary input may resolve this provider failure."""
         if isinstance(
             error,
-            TimeoutError | ContextWindowExceededError | ModelSafeguardRefusalError | CompactionSummaryOutputLimitError,
+            (
+                _CompactionSummaryEmptyResultError
+                | TimeoutError
+                | ContextWindowExceededError
+                | ModelSafeguardRefusalError
+                | CompactionSummaryOutputLimitError
+            ),
         ):
             return True
         message = str(error).lower()
