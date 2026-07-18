@@ -10,7 +10,7 @@ Use this reference for the local Matrix stack, the Python backend, Matty smoke t
 
 ## NixOS Environment (CRITICAL)
 
-On NixOS hosts (e.g., Incus containers), enter the repo dev shell before running `uv run` commands.
+On NixOS hosts (e.g., Incus containers), enter the repo Node.js 24 dev shell before running `uv run` commands.
 The shell provides `libstdc++.so.6`, which is needed for numpy, qdrant, and chromadb.
 
 ```bash
@@ -27,7 +27,9 @@ nix-shell -I nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos shell.ni
 ```
 
 Without this shell, imports fail with `AttributeError: module 'mindroom' has no attribute 'bot'`.
-The repo root `shell.nix` adds `stdenv.cc.cc.lib` to `LD_LIBRARY_PATH`, which is what provides `libstdc++.so.6`.
+The repo root `shell.nix` adds `stdenv.cc.cc.lib` to `LD_LIBRARY_PATH` on Linux, which is what provides `libstdc++.so.6`.
+
+The shell includes Chromium and its shared libraries only on Linux so the backend and Node.js tools also work on macOS.
 
 ## Preflight
 
@@ -35,7 +37,9 @@ Run from the repo root.
 
 ```bash
 uv sync --all-extras
-just local-matrix-up
+if ! curl -fsS --max-time 5 http://localhost:8008/_matrix/client/versions >/dev/null; then
+  just local-matrix-up
+fi
 curl -s http://localhost:8008/_matrix/client/versions | head -c 200
 curl -s http://localhost:9292/v1/models | head -c 200
 ```
@@ -172,14 +176,20 @@ The repo's documented local path suggests `gpt-oss-low:20b` because it has been 
 When open registration is enabled on local Synapse, create a throwaway user directly through the Matrix client API.
 
 ```bash
+set +x
 username="smoketest$(date +%H%M%S)"
 password="smoketestpass"
-curl -sS -X POST 'http://localhost:8008/_matrix/client/v3/register' \
+registration_response="$(curl -sS -X POST 'http://localhost:8008/_matrix/client/v3/register' \
   -H 'Content-Type: application/json' \
-  -d "{\"auth\":{\"type\":\"m.login.dummy\"},\"username\":\"$username\",\"password\":\"$password\"}"
+  -d "{\"auth\":{\"type\":\"m.login.dummy\"},\"username\":\"$username\",\"password\":\"$password\"}")"
+read -r user_id access_token < <(
+  REGISTRATION_RESPONSE="$registration_response" python -c \
+    'import json, os; response = json.loads(os.environ["REGISTRATION_RESPONSE"]); print(response["user_id"], response["access_token"])'
+)
+unset registration_response
 ```
 
-The response includes `user_id` and `access_token`.
+The response is captured without printing its `access_token`, and shell tracing must remain disabled while the credential variables exist.
 
 ## Join a Public Room
 
