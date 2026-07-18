@@ -24,6 +24,7 @@ from mindroom.external_triggers.store import (
     ExternalTriggerStoreError,
     ExternalTriggerTarget,
 )
+from mindroom.runtime_state import get_api_server_address
 from mindroom.tool_system.worker_routing import resolve_agent_owned_path
 
 if TYPE_CHECKING:
@@ -38,7 +39,12 @@ _MAX_LABEL_LENGTH = 200
 def _callback_base_url(context: ToolRuntimeContext) -> str:
     configured_url = context.runtime_paths.env_value("MINDROOM_URL")
     base_url = configured_url.strip() if configured_url is not None else ""
-    return (base_url or DEFAULT_MINDROOM_URL).rstrip("/")
+    if base_url:
+        return base_url.rstrip("/")
+    api_address = get_api_server_address()
+    if api_address is not None:
+        return api_address.base_url
+    return DEFAULT_MINDROOM_URL
 
 
 class CallbackManagerTools(Toolkit):
