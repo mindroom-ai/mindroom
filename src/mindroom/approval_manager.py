@@ -1251,7 +1251,8 @@ class _ApprovalManager:
         status: _ResolutionStatus,
         reason: str | None,
     ) -> tuple[_ApprovalStatus, str | None, bool]:
-        if status == "approved" and pending.arguments_preview_truncated and not pending.full_arguments_available:
+        arguments_unreviewable = pending.arguments_preview_truncated and not pending.full_arguments_available
+        if status == "approved" and (not pending.approvable or arguments_unreviewable):
             return "denied", _DEFAULT_TRUNCATED_APPROVAL_REASON, True
         return status, reason, False
 

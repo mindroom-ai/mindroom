@@ -436,6 +436,7 @@ def _sidecar_upload_has_encrypted_metadata(mxc_uri: str, file_info: dict[str, An
     return (
         file_url == mxc_uri
         and isinstance(key, dict)
+        and bool(key)
         and isinstance(iv, str)
         and iv != ""
         and isinstance(sha256, str)
@@ -451,7 +452,7 @@ def sidecar_upload_is_usable(
     room_encrypted: bool,
 ) -> bool:
     """Return whether one uploaded sidecar carries the metadata clients need to fetch it."""
-    if not mxc_uri or file_info is None:
+    if not isinstance(mxc_uri, str) or not mxc_uri or not isinstance(file_info, dict):
         return False
 
     if not _sidecar_upload_has_common_metadata(file_info):

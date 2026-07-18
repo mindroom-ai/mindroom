@@ -996,6 +996,52 @@ async def test_request_approval_honors_transport_stripped_full_arguments(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_request_approval_honors_transport_non_approvable_flag_with_stale_full_arguments(
+    tmp_path: Path,
+) -> None:
+    """An explicit transport veto must win over stale full-argument delivery metadata."""
+    runtime_paths = test_runtime_paths(tmp_path)
+
+    async def send_non_approvable(
+        _room_id: str,
+        _thread_id: str | None,
+        content: dict[str, Any],
+    ) -> SentApprovalEvent:
+        return SentApprovalEvent(
+            event_id="$approval",
+            sent_content={**content, "approvable": False},
+        )
+
+    sender = AsyncMock(side_effect=send_non_approvable)
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="write_file",
+            arguments={"content": "x" * 10_000},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender=sender)
+
+    assert pending.approvable is False
+    assert pending.full_arguments_available is True
+
+    await _resolve_pending_approval(
+        store,
+        pending,
+        status="approved",
+    )
+    decision = await task
+
+    assert decision.status == "denied"
+    assert "too large to show in full" in (decision.reason or "")
+
+
+@pytest.mark.asyncio
 async def test_truncated_approval_action_sends_denial_notice(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
@@ -1454,6 +1500,48 @@ async def test_approval_transport_offloads_oversized_full_arguments_to_sidecar(t
 
     uploaded_bytes = client.upload.await_args.kwargs["data_provider"](None, None).read()
     assert json.loads(uploaded_bytes) == full_arguments
+
+
+@pytest.mark.asyncio
+async def test_approval_transport_offloads_encrypted_full_arguments_to_file_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator, client = _approval_transport_orchestrator(tmp_path)
+    client.rooms["!room:localhost"].encrypted = True
+    mxc_uri = "mxc://localhost/encrypted-full-args"
+    file_info = {
+        "url": mxc_uri,
+        "key": {"alg": "A256CTR", "k": "secret", "key_ops": ["encrypt", "decrypt"], "kty": "oct"},
+        "iv": "iv-value",
+        "hashes": {"sha256": "sha256-value"},
+        "v": "v2",
+        "size": 100_014,
+        "mimetype": "application/json",
+    }
+    upload_sidecar = AsyncMock(return_value=(mxc_uri, file_info))
+    monkeypatch.setattr("mindroom.approval_transport.upload_json_sidecar", upload_sidecar)
+
+    sent = await orchestrator._approval_transport.send_approval_event_now(
+        "!room:localhost",
+        None,
+        {
+            "approval_id": "approval-1",
+            "tool_name": "write_file",
+            "arguments": {"content": "preview"},
+            "arguments_truncated": True,
+            "full_arguments": {"content": "word " * 20_000},
+            "status": "pending",
+        },
+    )
+
+    assert sent is not None
+    sent_content = client.room_send.await_args.kwargs["content"]
+    assert sent_content["full_arguments_file"] == file_info
+    assert "full_arguments" not in sent_content
+    assert "full_arguments_url" not in sent_content
+    assert "full_arguments_info" not in sent_content
+    assert sent.sent_content == sent_content
 
 
 @pytest.mark.asyncio
@@ -2546,6 +2634,9 @@ def test_pending_approval_parses_full_arguments_availability() -> None:
     card = _approval_card(arguments_truncated=True)
     assert PendingApproval.from_card_event(card, room_id="!room:localhost").full_arguments_available is False
 
+    card["content"]["full_arguments"] = {}
+    assert PendingApproval.from_card_event(card, room_id="!room:localhost").full_arguments_available is False
+
     card["content"]["full_arguments"] = {"content": "x" * 10_000}
     assert PendingApproval.from_card_event(card, room_id="!room:localhost").full_arguments_available is True
 
@@ -2553,11 +2644,39 @@ def test_pending_approval_parses_full_arguments_availability() -> None:
 def test_pending_approval_parses_sidecar_full_arguments_availability() -> None:
     url_card = _approval_card(arguments_truncated=True)
     url_card["content"]["full_arguments_url"] = "mxc://localhost/full-args"
+    assert PendingApproval.from_card_event(url_card, room_id="!room:localhost").full_arguments_available is False
+
+    url_card["content"]["full_arguments_info"] = {"size": 10_000, "mimetype": "application/json"}
     assert PendingApproval.from_card_event(url_card, room_id="!room:localhost").full_arguments_available is True
 
     file_card = _approval_card(arguments_truncated=True)
-    file_card["content"]["full_arguments_file"] = {"url": "mxc://localhost/full-args", "v": "v2"}
+    file_card["content"]["full_arguments_file"] = {}
+    assert PendingApproval.from_card_event(file_card, room_id="!room:localhost").full_arguments_available is False
+
+    file_card["content"]["full_arguments_file"] = {
+        "url": "mxc://localhost/full-args",
+        "key": {"alg": "A256CTR", "k": "secret", "key_ops": ["encrypt", "decrypt"], "kty": "oct"},
+        "iv": "iv-value",
+        "hashes": {"sha256": "sha256-value"},
+        "v": "v2",
+        "size": 10_000,
+        "mimetype": "application/json",
+    }
     assert PendingApproval.from_card_event(file_card, room_id="!room:localhost").full_arguments_available is True
+
+
+def test_pending_approval_defaults_missing_approvable_flag_to_true() -> None:
+    card = _approval_card(arguments_truncated=True)
+
+    assert PendingApproval.from_card_event(card, room_id="!room:localhost").approvable is True
+
+
+@pytest.mark.parametrize(("value", "expected"), [(False, False), (True, True), (None, False), ("false", False)])
+def test_pending_approval_parses_explicit_approvable_flag(value: object, expected: bool) -> None:
+    card = _approval_card(arguments_truncated=True)
+    card["content"]["approvable"] = value
+
+    assert PendingApproval.from_card_event(card, room_id="!room:localhost").approvable is expected
 
 
 @pytest.mark.asyncio
