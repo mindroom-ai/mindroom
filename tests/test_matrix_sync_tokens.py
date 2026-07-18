@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -20,6 +21,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.dispatch_handoff import PendingDispatchMetadata
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
+from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.sync_certification import SyncCertificationDecision, SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
@@ -222,6 +224,50 @@ async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
         await bot.start()
 
     assert client.next_batch == "s_saved"
+
+
+@pytest.mark.asyncio
+async def test_bot_start_initializes_postgres_principal_before_restoring_checkpoint(
+    tmp_path: Path,
+    postgres_event_cache_url: str,
+) -> None:
+    """A matching principal namespace generation must preserve restart continuity."""
+    namespace = f"sync_restore_{uuid.uuid4().hex}"
+    principal_id = "@mindroom_code:localhost"
+    seed_root = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
+    seed_view = seed_root.for_principal(principal_id)
+    await seed_view.initialize()
+    generation = seed_view.cache_generation
+    assert generation is not None
+    await seed_root.close()
+
+    bot = _agent_bot(tmp_path)
+    reopened_root = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
+    bot.event_cache = reopened_root.for_principal(principal_id)
+    assert bot.event_cache.cache_generation is None
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_postgres_restart",
+        cache_generation=generation,
+    )
+    client = make_matrix_client_mock(user_id=principal_id)
+    client.next_batch = None
+
+    try:
+        with (
+            patch.object(bot, "ensure_user_account", AsyncMock()),
+            patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+            patch.object(bot, "_set_avatar_if_available", AsyncMock()),
+            patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+            patch("mindroom.bot.interactive.init_persistence"),
+        ):
+            await bot.start()
+
+        assert client.next_batch == "s_postgres_restart"
+        assert bot.event_cache.cache_generation == generation
+    finally:
+        await reopened_root.close()
 
 
 @pytest.mark.asyncio

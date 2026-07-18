@@ -661,6 +661,26 @@ async def test_postgres_cache_generation_is_durable_and_changes_after_namespace_
 
 
 @pytest.mark.asyncio
+async def test_postgres_shared_disable_covers_current_and_future_principal_views() -> None:
+    """A fatal shared-service disable must stop every principal namespace."""
+    root = PostgresEventCache(
+        database_url="postgresql://cache:test@localhost/mindroom",
+        namespace="runtime",
+    )
+    alice = root.for_principal("@alice:localhost")
+
+    root.disable("fatal schema mismatch")
+    bob = root.for_principal("@bob:localhost")
+    await asyncio.gather(alice.initialize(), bob.initialize())
+
+    assert root.durable_writes_available is False
+    assert alice.durable_writes_available is False
+    assert bob.durable_writes_available is False
+    assert alice.is_initialized is False
+    assert bob.is_initialized is False
+
+
+@pytest.mark.asyncio
 async def test_postgres_event_cache_operation_rolls_back_cancelled_callback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

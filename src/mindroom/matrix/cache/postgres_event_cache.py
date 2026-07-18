@@ -816,14 +816,24 @@ class _PostgresRuntimeRegistry:
     def __init__(self, database_url: str) -> None:
         self._database_url = database_url
         self._runtimes: dict[str, _PostgresEventCacheRuntime] = {}
+        self._disabled_reason: str | None = None
 
     def runtime(self, namespace: str) -> _PostgresEventCacheRuntime:
         """Return the one connection runtime assigned to a principal namespace."""
         runtime = self._runtimes.get(namespace)
         if runtime is None:
             runtime = _PostgresEventCacheRuntime(self._database_url, namespace)
+            if self._disabled_reason is not None:
+                runtime.disable(self._disabled_reason)
             self._runtimes[namespace] = runtime
         return runtime
+
+    def disable(self, reason: str) -> None:
+        """Disable every current and future principal runtime in this service."""
+        if self._disabled_reason is None:
+            self._disabled_reason = reason
+        for runtime in self._runtimes.values():
+            runtime.disable(self._disabled_reason)
 
     async def close(self) -> None:
         """Close every principal runtime created by this shared service."""
@@ -927,7 +937,7 @@ class PostgresEventCache:
 
     def disable(self, reason: str) -> None:
         """Disable the advisory cache for the rest of the runtime."""
-        self._runtime.disable(reason)
+        self._registry.disable(reason)
 
     async def close(self) -> None:
         """Close shared storage only from the root cache owner."""

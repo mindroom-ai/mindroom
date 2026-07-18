@@ -1059,6 +1059,16 @@ class AgentBot:
         if startup.legacy_token:
             self.logger.warning("matrix_sync_token_uncertified_legacy")
 
+    async def _initialize_event_cache_for_sync_restore(self) -> None:
+        """Load this principal's durable generation before trusting a sync checkpoint."""
+        try:
+            await self.event_cache.initialize()
+        except Exception as exc:
+            self.logger.warning(
+                "matrix_principal_event_cache_init_failed",
+                error=str(exc),
+            )
+
     def _save_sync_checkpoint(self, checkpoint: SyncCheckpoint | None) -> None:
         """Persist one certified sync checkpoint if present."""
         if checkpoint is None:
@@ -1449,6 +1459,7 @@ class AgentBot:
             if orchestrator is not None:
                 orchestrator.validate_managed_entity_identities()
             self._runtime_view.mark_runtime_started()
+            await self._initialize_event_cache_for_sync_restore()
             self._restore_saved_sync_token()
             await self._set_avatar_if_available()
             # Keep durable tracking-state loading off the event loop at startup.

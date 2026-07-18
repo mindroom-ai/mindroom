@@ -916,6 +916,74 @@ class TestDownloadMxcText:
         assert client.download.await_count == 2
 
     @pytest.mark.asyncio
+    async def test_download_does_not_reinsert_process_plaintext_after_concurrent_redaction(self) -> None:
+        """A redaction between download and durable validation must win over process caching."""
+        principal_id = "@alice:localhost"
+        room_id = "!room:localhost"
+        event_id = "$event"
+        mxc_url = "mxc://server/redacted-during-store"
+        cache_key = (principal_id, room_id, event_id, mxc_url)
+        client = AsyncMock()
+        client.user_id = principal_id
+        response = MagicMock(spec=nio.DownloadResponse)
+        response.body = b"plaintext"
+        client.download.return_value = response
+        event_cache = AsyncMock()
+        event_cache.principal_id = principal_id
+        event_cache.get_mxc_text.return_value = None
+
+        async def store_after_redaction(*_args: object) -> bool:
+            mxc_plaintext_cache_module.purge_principal_room_mxc_plaintext(principal_id, room_id)
+            return True
+
+        event_cache.store_mxc_text.side_effect = store_after_redaction
+
+        assert (
+            await _download_mxc_text(
+                client,
+                mxc_url,
+                event_cache=event_cache,
+                room_id=room_id,
+                event_id=event_id,
+            )
+            == "plaintext"
+        )
+        assert cache_key not in mxc_plaintext_cache_module._mxc_cache
+
+    @pytest.mark.asyncio
+    async def test_durable_hit_revalidates_after_concurrent_redaction(self) -> None:
+        """A durable read racing a tombstone must not repopulate process plaintext."""
+        principal_id = "@alice:localhost"
+        room_id = "!room:localhost"
+        event_id = "$event"
+        mxc_url = "mxc://server/redacted-during-read"
+        cache_key = (principal_id, room_id, event_id, mxc_url)
+        client = AsyncMock()
+        client.user_id = principal_id
+        event_cache = AsyncMock()
+        event_cache.principal_id = principal_id
+
+        async def read_during_redaction(*_args: object) -> str:
+            mxc_plaintext_cache_module.purge_principal_room_mxc_plaintext(principal_id, room_id)
+            return "stale plaintext"
+
+        event_cache.get_mxc_text.side_effect = read_during_redaction
+        event_cache.store_mxc_text.return_value = False
+
+        assert (
+            await _download_mxc_text(
+                client,
+                mxc_url,
+                event_cache=event_cache,
+                room_id=room_id,
+                event_id=event_id,
+            )
+            is None
+        )
+        assert cache_key not in mxc_plaintext_cache_module._mxc_cache
+        client.download.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_active_event_cache_without_event_identity_does_not_suppress_download(self) -> None:
         """An incomplete owner may hydrate for this call but cannot populate either cache."""
         client = AsyncMock()

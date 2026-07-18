@@ -181,6 +181,25 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
                     return None
                 assert cache_key is not None
                 _cache_mxc_text(mxc_url, cached_text, current_time, cache_key=cache_key)
+                try:
+                    ownership_persisted = await event_cache.store_mxc_text(
+                        room_id,
+                        event_id,
+                        mxc_url,
+                        cached_text,
+                    )
+                except Exception:
+                    remove_cached_mxc_plaintext(cache_key)
+                    logger.exception("Failed to revalidate durable MXC plaintext ownership")
+                else:
+                    if not ownership_persisted:
+                        remove_cached_mxc_plaintext(cache_key)
+                        logger.info(
+                            "mxc_plaintext_rejected_without_visible_owner",
+                            room_id=room_id,
+                            event_id=event_id,
+                        )
+                        return None
                 logger.debug("mxc_text_cache_hit", mxc_url=mxc_url, room_id=room_id)
                 return cached_text
 
@@ -260,6 +279,8 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
         except UnicodeDecodeError:
             logger.exception("Downloaded content is not valid UTF-8 text")
             return None
+        if cache_key is not None:
+            _cache_mxc_text(mxc_url, decoded_text, time.time(), cache_key=cache_key)
         if event_cache is not None and room_id is not None and event_id is not None:
             try:
                 ownership_persisted = await event_cache.store_mxc_text(
@@ -269,9 +290,13 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
                     decoded_text,
                 )
             except Exception:
+                assert cache_key is not None
+                remove_cached_mxc_plaintext(cache_key)
                 logger.exception("Failed to persist durable MXC text cache")
             else:
                 if not ownership_persisted:
+                    assert cache_key is not None
+                    remove_cached_mxc_plaintext(cache_key)
                     logger.info(
                         "mxc_plaintext_rejected_without_visible_owner",
                         room_id=room_id,
@@ -279,7 +304,6 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
                     )
                     return None
         if cache_key is not None:
-            _cache_mxc_text(mxc_url, decoded_text, time.time(), cache_key=cache_key)
             logger.debug("mxc_content_cached", mxc_url=mxc_url)
 
     except Exception:
