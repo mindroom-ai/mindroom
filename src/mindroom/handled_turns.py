@@ -75,6 +75,8 @@ class TurnRecord:
 
     source_event_ids: tuple[str, ...]
     discovery_event_ids: tuple[str, ...] = ()
+    redacted_source_event_ids: tuple[str, ...] = ()
+    pending_redaction_cleanup_event_ids: tuple[str, ...] = ()
     anchor_event_id: str | None = None
     response_event_id: str | None = None
     completed: bool = True
@@ -97,6 +99,18 @@ class TurnRecord:
             for event_id in _normalize_source_event_ids(self.discovery_event_ids)
             if event_id not in source_event_id_set
         )
+        indexed_event_id_set = {*source_event_ids, *discovery_event_ids}
+        redacted_source_event_ids = tuple(
+            event_id
+            for event_id in _normalize_source_event_ids(self.redacted_source_event_ids)
+            if event_id in indexed_event_id_set
+        )
+        redacted_source_event_id_set = set(redacted_source_event_ids)
+        pending_redaction_cleanup_event_ids = tuple(
+            event_id
+            for event_id in _normalize_source_event_ids(self.pending_redaction_cleanup_event_ids)
+            if event_id in redacted_source_event_id_set
+        )
         anchor_event_id = _normalize_string(self.anchor_event_id)
         if anchor_event_id is None and source_event_ids:
             anchor_event_id = source_event_ids[-1]
@@ -106,18 +120,28 @@ class TurnRecord:
         )
         object.__setattr__(self, "source_event_ids", source_event_ids)
         object.__setattr__(self, "discovery_event_ids", discovery_event_ids)
+        object.__setattr__(self, "redacted_source_event_ids", redacted_source_event_ids)
+        object.__setattr__(self, "pending_redaction_cleanup_event_ids", pending_redaction_cleanup_event_ids)
         object.__setattr__(self, "anchor_event_id", anchor_event_id)
         object.__setattr__(self, "response_event_id", _normalize_string(self.response_event_id))
         object.__setattr__(self, "visible_echo_event_id", _normalize_string(self.visible_echo_event_id))
         object.__setattr__(
             self,
             "source_event_prompts",
-            _immutable_prompt_map(source_event_ids, self.source_event_prompts),
+            _immutable_prompt_map(
+                source_event_ids,
+                self.source_event_prompts,
+                excluded_event_ids=redacted_source_event_id_set,
+            ),
         )
         object.__setattr__(
             self,
             "source_event_metadata",
-            _immutable_source_event_metadata(source_event_ids, self.source_event_metadata),
+            _immutable_source_event_metadata(
+                source_event_ids,
+                self.source_event_metadata,
+                excluded_event_ids=redacted_source_event_id_set,
+            ),
         )
         object.__setattr__(self, "response_owner", _normalize_string(self.response_owner))
         object.__setattr__(self, "requester_id", _normalize_string(self.requester_id))
@@ -140,6 +164,8 @@ class TurnRecord:
         source_event_ids: Sequence[str],
         *,
         discovery_event_ids: Sequence[str] = (),
+        redacted_source_event_ids: Sequence[str] = (),
+        pending_redaction_cleanup_event_ids: Sequence[str] = (),
         anchor_event_id: str | None = None,
         response_event_id: str | None = None,
         completed: bool = True,
@@ -157,6 +183,8 @@ class TurnRecord:
         return cls(
             source_event_ids=tuple(source_event_ids),
             discovery_event_ids=tuple(discovery_event_ids),
+            redacted_source_event_ids=tuple(redacted_source_event_ids),
+            pending_redaction_cleanup_event_ids=tuple(pending_redaction_cleanup_event_ids),
             anchor_event_id=anchor_event_id,
             response_event_id=response_event_id,
             completed=completed,
@@ -181,6 +209,12 @@ class TurnRecord:
         """Return canonical source IDs followed by non-source discovery aliases."""
         return (*self.source_event_ids, *self.discovery_event_ids)
 
+    @property
+    def replay_source_event_ids(self) -> tuple[str, ...]:
+        """Return source IDs whose content remains eligible for replay or regeneration."""
+        redacted_event_ids = set(self.redacted_source_event_ids)
+        return tuple(event_id for event_id in self.source_event_ids if event_id not in redacted_event_ids)
+
 
 class TurnRecordCodec:
     """Encode the canonical record into its two intentional physical projections."""
@@ -196,6 +230,8 @@ class TurnRecordCodec:
         payload: dict[str, object] = {
             "anchor_event_id": record.anchor_event_id,
             "source_event_ids": list(record.source_event_ids),
+            "redacted_source_event_ids": list(record.redacted_source_event_ids),
+            "pending_redaction_cleanup_event_ids": list(record.pending_redaction_cleanup_event_ids),
             "response_event_id": record.response_event_id,
             "completed": record.completed,
             "timestamp": record.timestamp,
@@ -230,6 +266,8 @@ class TurnRecordCodec:
         record = typing.cast("Mapping[str, object]", raw_record)
         raw_source_event_ids = record.get("source_event_ids")
         raw_discovery_event_ids = record.get("discovery_event_ids", [])
+        raw_redacted_source_event_ids = record.get("redacted_source_event_ids", [])
+        raw_pending_redaction_cleanup_event_ids = record.get("pending_redaction_cleanup_event_ids", [])
         anchor_event_id = record.get("anchor_event_id")
         completed = record.get("completed")
         timestamp = record.get("timestamp")
@@ -237,6 +275,8 @@ class TurnRecordCodec:
         if (
             not isinstance(raw_source_event_ids, list)
             or not isinstance(raw_discovery_event_ids, list)
+            or not isinstance(raw_redacted_source_event_ids, list)
+            or not isinstance(raw_pending_redaction_cleanup_event_ids, list)
             or not isinstance(anchor_event_id, str)
             or not anchor_event_id
             or not isinstance(completed, bool)
@@ -251,6 +291,10 @@ class TurnRecordCodec:
         turn_record = TurnRecord.create(
             source_event_ids,
             discovery_event_ids=_normalize_source_event_ids(raw_discovery_event_ids),
+            redacted_source_event_ids=_normalize_source_event_ids(raw_redacted_source_event_ids),
+            pending_redaction_cleanup_event_ids=_normalize_source_event_ids(
+                raw_pending_redaction_cleanup_event_ids,
+            ),
             anchor_event_id=anchor_event_id,
             response_event_id=response_event_id,
             completed=completed,
@@ -279,6 +323,10 @@ class TurnRecordCodec:
         }
         if record.discovery_event_ids:
             metadata[constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY] = list(record.discovery_event_ids)
+        if record.redacted_source_event_ids:
+            metadata[constants.MATRIX_TURN_REDACTED_SOURCE_EVENT_IDS_METADATA_KEY] = list(
+                record.redacted_source_event_ids,
+            )
         if record.source_event_prompts is not None:
             metadata[constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY] = dict(record.source_event_prompts)
         if record.source_event_metadata is not None:
@@ -304,6 +352,9 @@ class TurnRecordCodec:
             return None
         raw_source_event_ids = metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
         raw_discovery_event_ids = metadata.get(constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY)
+        raw_redacted_source_event_ids = metadata.get(
+            constants.MATRIX_TURN_REDACTED_SOURCE_EVENT_IDS_METADATA_KEY,
+        )
         source_event_ids = (
             _normalize_source_event_ids(raw_source_event_ids)
             if isinstance(raw_source_event_ids, list)
@@ -315,6 +366,11 @@ class TurnRecordCodec:
             discovery_event_ids=(
                 _normalize_source_event_ids(raw_discovery_event_ids)
                 if isinstance(raw_discovery_event_ids, list)
+                else ()
+            ),
+            redacted_source_event_ids=(
+                _normalize_source_event_ids(raw_redacted_source_event_ids)
+                if isinstance(raw_redacted_source_event_ids, list)
                 else ()
             ),
             anchor_event_id=anchor_event_id,
@@ -407,7 +463,7 @@ class HandledTurnLedger:
         self._cleanup_old_events()
 
     def flush(self) -> None:
-        """Block until every scheduled best-effort persist attempt has completed."""
+        """Block until every scheduled persist completes, propagating write failures."""
         with self._state.lock:
             self._wait_for_pending_persists_locked()
 
@@ -422,8 +478,10 @@ class HandledTurnLedger:
         self,
         lookup_event_ids: Sequence[str],
         update: Callable[[Mapping[str, TurnRecord]], TurnRecord],
+        *,
+        wait_for_persist: bool = False,
     ) -> TurnRecord | None:
-        """Atomically validate and update one record against completed identities."""
+        """Atomically update one record, optionally waiting for its exact persist."""
         normalized_lookup_event_ids = _normalize_source_event_ids(lookup_event_ids)
         if not normalized_lookup_event_ids:
             return None
@@ -447,7 +505,9 @@ class HandledTurnLedger:
                 return None
             for event_id in persisted_record.indexed_event_ids:
                 self._responses[event_id] = persisted_record
-            self._schedule_persist_locked(persisted_record)
+            persist_future = self._schedule_persist_locked(persisted_record)
+        if wait_for_persist:
+            persist_future.result()
         logger.debug("handled_turn_recorded", indexed_event_count=len(persisted_record.indexed_event_ids))
         return persisted_record
 
@@ -456,7 +516,9 @@ class HandledTurnLedger:
         with self._state.lock:
             self._ensure_loaded_locked()
             record = self._responses.get(event_id)
-            return record.completed if record is not None else False
+            if record is None:
+                return False
+            return record.completed or event_id in record.redacted_source_event_ids
 
     def get_visible_echo_event_id(self, source_event_id: str) -> str | None:
         """Return the tracked visible echo event ID for one source event."""
@@ -481,6 +543,34 @@ class HandledTurnLedger:
             self._ensure_loaded_locked()
             return self._responses.get(source_event_id)
 
+    def pending_redaction_cleanup_event_ids(self) -> tuple[str, ...]:
+        """Return every durable redaction cleanup intent still awaiting completion."""
+        with self._state.lock:
+            self._ensure_loaded_locked()
+            return _normalize_source_event_ids(
+                tuple(
+                    event_id
+                    for record in self._responses.values()
+                    for event_id in record.pending_redaction_cleanup_event_ids
+                ),
+            )
+
+    def turn_records_for_conversation(
+        self,
+        *,
+        session_id: str,
+    ) -> tuple[TurnRecord, ...]:
+        """Return unique records that can identify persisted scopes for one conversation."""
+        with self._state.lock:
+            self._ensure_loaded_locked()
+            unique_records: dict[tuple[str, ...], TurnRecord] = {}
+            for record in self._responses.values():
+                target = record.conversation_target
+                if target is None or target.session_id != session_id:
+                    continue
+                unique_records[record.indexed_event_ids] = record
+            return tuple(unique_records.values())
+
     def _ensure_loaded_locked(self) -> None:
         """Load persisted records into shared memory once while the state lock is held."""
         if self._state.loaded:
@@ -494,14 +584,26 @@ class HandledTurnLedger:
         """Wait for queued disk merges while the state lock is held."""
         pending = list(self._state.pending_persists)
         self._state.pending_persists.clear()
+        first_error: Exception | None = None
         for future in pending:
-            future.result()
+            try:
+                future.result()
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
-    def _schedule_persist_locked(self, turn_record: TurnRecord) -> None:
+    def _schedule_persist_locked(self, turn_record: TurnRecord) -> Future[None]:
         """Queue one write-behind disk merge for records already applied to memory."""
         future = _persist_executor().submit(self._persist_record, turn_record)
-        self._state.pending_persists = [pending for pending in self._state.pending_persists if not pending.done()]
+        self._state.pending_persists = [
+            pending
+            for pending in self._state.pending_persists
+            if not pending.done() or pending.cancelled() or pending.exception() is not None
+        ]
         self._state.pending_persists.append(future)
+        return future
 
     def _persist_record(self, turn_record: TurnRecord) -> None:
         """Merge already-applied records into the persisted ledger from a worker thread."""
@@ -517,6 +619,7 @@ class HandledTurnLedger:
                 agent=self.agent_name,
                 responses_file=str(self._responses_file),
             )
+            raise
 
     def _write_responses_file_locked(self, responses: dict[str, TurnRecord]) -> None:
         """Atomically write one versioned ledger payload while the file lock is held."""
@@ -633,14 +736,18 @@ def _resolve_turn_record(
     existing_records: Mapping[str, TurnRecord],
 ) -> TurnRecord | None:
     """Resolve one candidate against completed identities and newer same-turn rows."""
-    for event_id in turn_record.source_event_ids:
-        existing_record = existing_records.get(event_id)
-        if (
-            existing_record is not None
-            and existing_record.completed
-            and not same_turn_identity(existing_record, turn_record)
-        ):
+    conflicting_source_event_ids = tuple(
+        event_id
+        for event_id in turn_record.source_event_ids
+        if (existing_record := existing_records.get(event_id)) is not None
+        and existing_record.completed
+        and not same_turn_identity(existing_record, turn_record)
+    )
+    if conflicting_source_event_ids:
+        projected_turn_record = _project_redaction_alias(turn_record, conflicting_source_event_ids)
+        if projected_turn_record is None:
             return None
+        turn_record = projected_turn_record
     same_identity_records = (
         existing_record
         for event_id in turn_record.indexed_event_ids
@@ -667,6 +774,35 @@ def _resolve_turn_record(
     return replace(resolved_record, discovery_event_ids=discovery_event_ids)
 
 
+def _project_redaction_alias(
+    turn_record: TurnRecord,
+    conflicting_source_event_ids: tuple[str, ...],
+) -> TurnRecord | None:
+    """Detach redaction markers from source aliases now owned by another completed turn."""
+    if not turn_record.redacted_source_event_ids:
+        return None
+    conflicting_ids = set(conflicting_source_event_ids)
+    retained_source_event_ids = tuple(
+        event_id for event_id in turn_record.source_event_ids if event_id not in conflicting_ids
+    )
+    if not retained_source_event_ids:
+        retained_source_event_ids = tuple(
+            event_id for event_id in turn_record.redacted_source_event_ids if event_id not in conflicting_ids
+        )
+    if not retained_source_event_ids:
+        return None
+    anchor_event_id = (
+        turn_record.anchor_event_id
+        if turn_record.anchor_event_id in retained_source_event_ids
+        else retained_source_event_ids[-1]
+    )
+    return replace(
+        turn_record,
+        source_event_ids=retained_source_event_ids,
+        anchor_event_id=anchor_event_id,
+    )
+
+
 def _merge_same_identity_records(candidate: TurnRecord, existing: TurnRecord) -> TurnRecord:
     """Keep the newer same-turn record while preserving older echo and discovery facts."""
     if candidate.completed != existing.completed:
@@ -676,6 +812,10 @@ def _merge_same_identity_records(candidate: TurnRecord, existing: TurnRecord) ->
     return replace(
         newer,
         discovery_event_ids=(*newer.discovery_event_ids, *older.discovery_event_ids),
+        redacted_source_event_ids=(
+            *newer.redacted_source_event_ids,
+            *older.redacted_source_event_ids,
+        ),
         visible_echo_event_id=newer.visible_echo_event_id or older.visible_echo_event_id,
     )
 
@@ -693,6 +833,8 @@ def _mapping_or_none(value: object) -> Mapping[str, Any] | None:
 def _immutable_prompt_map(
     source_event_ids: tuple[str, ...],
     source_event_prompts: Mapping[str, str] | None,
+    *,
+    excluded_event_ids: set[str],
 ) -> Mapping[str, str] | None:
     """Freeze prompt entries that belong to the canonical source identity."""
     if not source_event_prompts:
@@ -700,6 +842,7 @@ def _immutable_prompt_map(
     prompt_map = {
         event_id: prompt
         for event_id in source_event_ids
+        if event_id not in excluded_event_ids
         if isinstance((prompt := source_event_prompts.get(event_id)), str)
     }
     return MappingProxyType(prompt_map) if prompt_map else None
@@ -708,12 +851,16 @@ def _immutable_prompt_map(
 def _immutable_source_event_metadata(
     source_event_ids: tuple[str, ...],
     source_event_metadata: Mapping[str, SourceEventMetadata] | None,
+    *,
+    excluded_event_ids: set[str],
 ) -> Mapping[str, SourceEventMetadata] | None:
     """Normalize and freeze source metadata belonging to the canonical identity."""
     if not source_event_metadata:
         return None
     metadata: dict[str, SourceEventMetadata] = {}
     for event_id in source_event_ids:
+        if event_id in excluded_event_ids:
+            continue
         raw_metadata = source_event_metadata.get(event_id)
         normalized = (
             raw_metadata
@@ -750,9 +897,22 @@ def _cleaned_responses(
     """Remove stale turn groups while keeping coalesced groups intact."""
     current_time = time.time()
     max_age_seconds = max_age_days * 24 * 60 * 60
-    fresh_groups = [group for group in _response_groups(responses) if current_time - group.timestamp < max_age_seconds]
+    fresh_groups = [
+        group
+        for group in _response_groups(responses)
+        if any(record.pending_redaction_cleanup_event_ids for record in group.records.values())
+        or current_time - group.timestamp < max_age_seconds
+    ]
     if len(fresh_groups) > max_events:
-        fresh_groups = fresh_groups[-max_events:]
+        pending_groups = [
+            group
+            for group in fresh_groups
+            if any(record.pending_redaction_cleanup_event_ids for record in group.records.values())
+        ]
+        pending_group_ids = {id(group) for group in pending_groups}
+        ordinary_groups = [group for group in fresh_groups if id(group) not in pending_group_ids]
+        kept_ordinary_groups = ordinary_groups[-max_events:] if max_events else []
+        fresh_groups = sorted((*pending_groups, *kept_ordinary_groups), key=lambda group: group.timestamp)
     cleaned_responses: dict[str, TurnRecord] = {}
     for group in fresh_groups:
         cleaned_responses.update(group.records)

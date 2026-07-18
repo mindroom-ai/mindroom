@@ -22,6 +22,10 @@ It should send, edit, redact, and finalize already-generated responses.
 `EditRegenerator` owns the edited-message replay workflow.
 It is still coupled to the current persistence split, but its workflow boundary is real.
 
+`RedactedTurnCleanup` owns durable source-redaction tombstoning and advisory cache sanitization.
+`TurnStore` removes redacted persisted replay before the next response starts in the affected conversation.
+`AgentBot` only delegates the Matrix redaction callback to that collaborator.
+
 ## Current Problems
 
 `TurnController` is the real turn owner now, but it is still too large.
@@ -76,6 +80,13 @@ Run metadata supplies a complete record when the ledger row is absent and otherw
 `TurnStore` immediately writes a recovered or enriched record back to the ledger, so callers never own backfill or repair decisions.
 One runtime process owns each ledger's semantic ordering, while the advisory file lock protects exact durable writes without defining cross-process turn precedence.
 Unversioned pre-user ledger and run-metadata turn schemas are rejected instead of carrying migration scaffolding.
+
+Matrix source redactions are durably tombstoned before the advisory conversation cache is mutated.
+A tombstone becomes a retained cleanup intent once the entity has recorded the affected conversation context, while unrelated redactions remain bounded ledger barriers without storage probes.
+Pending normal and interactive responses durably record their exact target and history scope off the event loop before generation, and every source-backed response checks tombstones again under the lifecycle lock.
+Before a response starts, `TurnStore` removes the matching run and its causal suffix from every history scope recorded for the conversation, clears summary-backed replay state, preserves compaction run tombstones, and sanitizes coalesced prompt metadata used by later edit regeneration.
+Redacted replay may remain in local session storage until that conversation's next response, but no model receives it.
+Semantic memory backends such as Mem0 have a separate lifecycle and are not altered by persisted replay cleanup.
 
 ## Tool Dispatch Contracts
 

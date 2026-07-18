@@ -25,6 +25,7 @@ from mindroom.dispatch_source import (
 )
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.handled_turns import TurnRecord
+from mindroom.matrix.event_info import reply_to_event_id_from_content
 from mindroom.matrix.media import is_audio_message_event
 from mindroom.turn_origin import requester_id_from_trusted_original_sender
 
@@ -191,6 +192,18 @@ class IngressValidator:
             return False
         sender_agent_name = self.managed_entity_name_for_sender(event.sender)
         return sender_agent_name == ROUTER_AGENT_NAME
+
+    def router_relay_original_event_id(self, event: DispatchEvent) -> str | None:
+        """Return the routed human event one trusted router relay explicitly replies to."""
+        if not self.is_trusted_router_relay_event(event):
+            return None
+        content = event.source.get("content") if isinstance(event.source, dict) else None
+        if not isinstance(content, dict):
+            return None
+        relates_to = content.get("m.relates_to")
+        if isinstance(relates_to, dict) and relates_to.get("is_falling_back") is True:
+            return None
+        return reply_to_event_id_from_content(content)
 
     def is_trusted_router_visible_voice_echo_content(self, sender: str, content: object) -> bool:
         """Return whether replay history content is a display-only router voice echo."""

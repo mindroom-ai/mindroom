@@ -102,6 +102,7 @@ from .matrix.room_member_joins import (
 )
 from .matrix.to_device import AuthenticatedToDeviceEvent
 from .media_inputs import MediaInputs
+from .redacted_turn_cleanup import RedactedTurnCleanup, RedactedTurnCleanupDeps
 from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps, prepare_memory_and_model_context
 from .scheduling import (
@@ -288,6 +289,7 @@ class AgentBot:
     _conversation_cache: MatrixConversationCache
     _delivery_gateway: DeliveryGateway
     _response_runner: ResponseRunner
+    _redacted_turn_cleanup: RedactedTurnCleanup
     _turn_store: TurnStore
     _tool_runtime_support: ToolRuntimeSupport
     _post_response_effects_support: PostResponseEffectsSupport
@@ -535,6 +537,12 @@ class AgentBot:
                 matrix_id=runtime_matrix_id,
                 turn_store=self._turn_store,
                 turn_policy=self._turn_policy,
+            ),
+        )
+        self._redacted_turn_cleanup = RedactedTurnCleanup(
+            RedactedTurnCleanupDeps(
+                conversation_cache=self._conversation_cache,
+                turn_store=self._turn_store,
             ),
         )
         self._turn_controller = TurnController(
@@ -1423,8 +1431,7 @@ class AgentBot:
             self._runtime_view.mark_runtime_started()
             self._restore_saved_sync_token()
             await self._set_avatar_if_available()
-            # Both load tracking state under advisory file locks; keep that
-            # off the event loop so per-bot startup never stalls dispatch.
+            # Keep durable tracking-state loading off the event loop at startup.
             await asyncio.to_thread(self._turn_store.warm)
             await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)
             client = self.client
@@ -1441,7 +1448,7 @@ class AgentBot:
                 nio.RoomMessageText,
             )
             client.add_event_callback(
-                _create_task_wrapper(self._on_redaction, owner=self._runtime_view, on_error=self._mark_callback_failed),
+                self._on_redaction,
                 nio.RedactionEvent,
             )
             client.add_event_callback(
@@ -1779,9 +1786,37 @@ class AgentBot:
             if early_reservation_owner is not None:
                 await early_reservation_owner.release()
 
-    async def _on_redaction(self, room: nio.MatrixRoom, event: nio.RedactionEvent) -> None:
-        """Keep cached thread history consistent when Matrix redactions arrive."""
-        await self._conversation_cache.apply_redaction(room.room_id, event)
+    async def _on_redaction(self, room: nio.MatrixRoom, event: nio.Event) -> None:
+        """Persist one redaction before updating advisory cache state."""
+        assert isinstance(event, nio.RedactionEvent)
+        try:
+            await self._redacted_turn_cleanup.handle(room, event)
+        except asyncio.CancelledError:
+            self._rewind_sync_after_redaction_failure()
+            raise
+        except Exception:
+            self._rewind_sync_after_redaction_failure()
+            raise
+
+    def _rewind_sync_after_redaction_failure(self) -> None:
+        """Replay a sync response whose critical redaction callback did not finish."""
+        client = self.client
+        if client is None:
+            return
+        checkpoint = self._sync_checkpoint
+        retry_token = checkpoint.token if checkpoint is not None else None
+        if retry_token is None:
+            try:
+                token_record = load_sync_token_record(self.storage_path, self.agent_name)
+            except OSError as exc:
+                self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
+            else:
+                retry_token = token_record.token if token_record is not None else None
+        cast("Any", client).next_batch = retry_token
+        self.logger.warning(
+            "matrix_redaction_callback_failed_replaying_sync",
+            has_retry_token=retry_token is not None,
+        )
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""

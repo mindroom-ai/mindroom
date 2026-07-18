@@ -15,6 +15,7 @@ interactive selection path.
 from __future__ import annotations
 
 import asyncio
+import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, cast
@@ -68,6 +69,7 @@ if TYPE_CHECKING:
 
     from mindroom.coalescing_batch import CoalescedBatch
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
+    from mindroom.handled_turns import TurnRecord
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.cache import ThreadHistoryResult
     from mindroom.matrix.event_info import EventInfo
@@ -130,6 +132,8 @@ class _RecordingResponseRunner:
         self.requests.append(request)
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
+        if request.prepare_source_turn is not None and request.prepare_source_turn():
+            return None
         if self.deferred_sync_restart_error is not None:
             assert self.response_event_id is not None
             assert request.on_sync_restart_cancelled is not None
@@ -149,6 +153,8 @@ class _RecordingResponseRunner:
         self.team_requests.append(request)
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
+        if request.prepare_source_turn is not None and request.prepare_source_turn():
+            return None
         return self.response_event_id
 
 
@@ -574,6 +580,44 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
     assert metadata is not None
     assert metadata[constants.MATRIX_RESPONSE_OWNER_METADATA_KEY] == "general"
     assert harness.turn_store.is_handled(event.event_id) is True
+
+
+@pytest.mark.asyncio
+async def test_response_waits_for_pending_context_persistence_before_generation(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Session-backed generation must not start before its cleanup context is durable."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _text_event("persist my response context first")
+    real_persist = harness.turn_store._ledger._persist_record
+    persist_started = threading.Event()
+    release_persist = threading.Event()
+
+    def persist_with_barrier(turn_record: TurnRecord) -> None:
+        if event.event_id in turn_record.indexed_event_ids and not turn_record.completed:
+            persist_started.set()
+            if not release_persist.wait(timeout=5):
+                msg = "test did not release pending-context persistence"
+                raise TimeoutError(msg)
+        real_persist(turn_record)
+
+    monkeypatch.setattr(harness.turn_store._ledger, "_persist_record", persist_with_barrier)
+    delivery = asyncio.create_task(harness.deliver(room, event))
+    try:
+        assert await asyncio.to_thread(persist_started.wait, 5)
+        assert harness.runner.requests == []
+    finally:
+        release_persist.set()
+
+    await asyncio.wait_for(delivery, timeout=5)
+
+    assert len(harness.runner.requests) == 1
+    persisted = harness.turn_store.get_turn_record(event.event_id)
+    assert persisted is not None
+    assert persisted.completed is True
 
 
 def _scheduled_fire_event(
@@ -1098,6 +1142,91 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
 
     assert harness.turn_store.is_handled(selection.question_event_id) is True
     assert harness.turn_store.is_handled("$selection:localhost") is True
+
+
+@pytest.mark.asyncio
+async def test_interactive_selection_persistence_failure_prevents_ack_and_generation(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed pending-context write must escape before any visible or persisted response."""
+    harness = _build_harness(config, tmp_path)
+    room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        question_text="Which option should I use?",
+        selection_key="1",
+        selected_label="Option 1",
+        selected_value="Option 1",
+        thread_id="$thread-root:localhost",
+    )
+    real_persist = harness.turn_store._ledger._persist_record
+
+    def fail_pending_persist(turn_record: TurnRecord) -> None:
+        if selection.question_event_id in turn_record.indexed_event_ids and not turn_record.completed:
+            msg = "pending context write failed"
+            raise OSError(msg)
+        real_persist(turn_record)
+
+    monkeypatch.setattr(harness.turn_store._ledger, "_persist_record", fail_pending_persist)
+
+    with pytest.raises(OSError, match="pending context write failed"):
+        await harness.controller.handle_interactive_selection(
+            room,
+            selection=selection,
+            user_id=_SENDER,
+            source_event_id="$selection:localhost",
+        )
+
+    assert harness.gateway.sent == []
+    assert harness.runner.requests == []
+
+
+@pytest.mark.asyncio
+async def test_interactive_selection_redacted_after_ack_is_suppressed_under_lock(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The selection must be pending before ack and recheck aliases at response startup."""
+    harness = _build_harness(config, tmp_path)
+    room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        question_text="Which option should I use?",
+        selection_key="1",
+        selected_label="Option 1",
+        selected_value="Option 1",
+        thread_id="$thread-root:localhost",
+    )
+    selection_event_id = "$selection:localhost"
+
+    async def send_ack_then_redact(request: SendTextRequest) -> str:
+        harness.gateway.sent.append(request)
+        marked = harness.turn_store.mark_source_redacted(selection_event_id)
+        assert marked is not None
+        assert marked.conversation_target is not None
+        assert marked.history_scope is not None
+        return "$ack:localhost"
+
+    monkeypatch.setattr(harness.gateway, "send_text", send_ack_then_redact)
+
+    await harness.controller.handle_interactive_selection(
+        room,
+        selection=selection,
+        user_id=_SENDER,
+        source_event_id=selection_event_id,
+    )
+
+    assert len(harness.runner.requests) == 1
+    record = harness.turn_store.get_turn_record(selection_event_id)
+    assert record is not None
+    assert record.redacted_source_event_ids == (selection_event_id,)
+    assert record.pending_redaction_cleanup_event_ids == ()
+    assert record.response_event_id is None
+    assert harness.turn_store.is_handled(selection_event_id) is True
+    assert harness.turn_store.is_handled(selection.question_event_id) is False
 
 
 @pytest.mark.asyncio

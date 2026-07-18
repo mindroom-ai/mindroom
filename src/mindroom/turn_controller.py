@@ -1309,6 +1309,23 @@ class TurnController:
             thread_id=selection.thread_id,
             reply_to_event_id=selection.question_event_id,
         )
+        selection_handled_turn = self.deps.turn_store.attach_response_context(
+            TurnRecord.create(
+                [selection.question_event_id],
+                discovery_event_ids=((source_event_id,) if source_event_id != selection.question_event_id else ()),
+                requester_id=user_id,
+                correlation_id=selection.question_event_id,
+            ),
+            history_scope=self.deps.turn_store.response_history_scope(ResponseAction(kind="individual")),
+            conversation_target=response_target,
+        )
+        pending_turn = await asyncio.to_thread(
+            self.deps.turn_store.record_pending_turn,
+            selection_handled_turn,
+        )
+        if pending_turn is None or pending_turn.completed or pending_turn.redacted_source_event_ids:
+            return
+        selection_handled_turn = pending_turn
         ack_event_id = await self.deps.delivery_gateway.send_text(
             SendTextRequest(
                 target=ack_target,
@@ -1323,16 +1340,6 @@ class TurnController:
                 source_event_id=selection.question_event_id,
             )
             return
-        selection_handled_turn = self.deps.turn_store.attach_response_context(
-            TurnRecord.create(
-                [selection.question_event_id],
-                discovery_event_ids=((source_event_id,) if source_event_id != selection.question_event_id else ()),
-                requester_id=user_id,
-                correlation_id=selection.question_event_id,
-            ),
-            history_scope=self.deps.turn_store.response_history_scope(ResponseAction(kind="individual")),
-            conversation_target=response_target,
-        )
         # The selection is a synthetic turn with no Matrix message of its own, so
         # the attachment context that ingress normally resolves per message must
         # be rebuilt here from the conversation that asked the question.
@@ -1390,6 +1397,10 @@ class TurnController:
                 attachment_ids=selection_attachment_ids or None,
                 response_envelope=response_envelope,
                 matrix_run_metadata=selection_matrix_run_metadata,
+                prepare_source_turn=lambda: self.deps.turn_store.prepare_response_for_redactions(
+                    target=response_target,
+                    source_event_ids=selection_handled_turn.indexed_event_ids,
+                ),
             ),
         )
         if response_event_id is not None:
@@ -1775,6 +1786,10 @@ class TurnController:
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
+                            prepare_source_turn=lambda: self.deps.turn_store.prepare_response_for_redactions(
+                                target=dispatch.target,
+                                source_event_ids=handled_turn.indexed_event_ids,
+                            ),
                             on_sync_restart_cancelled=register_sync_restart_retry,
                             sync_restart_retry_source_event_id=sync_restart_retry_source_event_id,
                             on_deferred_outcome_handled=record_deferred_outcome,
@@ -1799,6 +1814,10 @@ class TurnController:
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
+                            prepare_source_turn=lambda: self.deps.turn_store.prepare_response_for_redactions(
+                                target=dispatch.target,
+                                source_event_ids=handled_turn.indexed_event_ids,
+                            ),
                             on_sync_restart_cancelled=register_sync_restart_retry,
                             sync_restart_retry_source_event_id=sync_restart_retry_source_event_id,
                             on_deferred_outcome_handled=record_deferred_outcome,

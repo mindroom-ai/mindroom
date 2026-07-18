@@ -14,6 +14,7 @@ from agno.run.team import TeamRunOutput
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.agents import remove_run_by_event_id
 from mindroom.handled_turns import HandledTurnLedger, TurnRecord, TurnRecordCodec, same_turn_identity
+from mindroom.history.storage import invalidate_compacted_replay, read_scope_seen_event_ids
 from mindroom.session_ids import create_session_id
 
 if TYPE_CHECKING:
@@ -73,7 +74,7 @@ class TurnStore:
         )
 
     def warm(self) -> None:
-        """Load the durable ledger from disk; call from a worker thread, not the event loop."""
+        """Load the ledger before asynchronous startup recovery begins."""
         self._ledger.warm()
 
     def record_turn(self, turn_record: TurnRecord) -> None:
@@ -93,6 +94,11 @@ class TurnStore:
                 if existing_record is not None
                 else turn_record
             )
+            redacted_source_event_ids, pending_redaction_cleanup_event_ids = _merged_redaction_markers(
+                turn_record,
+                merged_record,
+                compatible_existing_records,
+            )
             visible_echo_event_id = merged_record.visible_echo_event_id or next(
                 (
                     existing.visible_echo_event_id
@@ -104,6 +110,8 @@ class TurnStore:
             return replace(
                 merged_record,
                 completed=True,
+                redacted_source_event_ids=redacted_source_event_ids,
+                pending_redaction_cleanup_event_ids=pending_redaction_cleanup_event_ids,
                 visible_echo_event_id=visible_echo_event_id,
                 timestamp=0.0,
             )
@@ -138,6 +146,117 @@ class TurnStore:
     def get_turn_record(self, source_event_id: str) -> TurnRecord | None:
         """Return the ledger-backed canonical record for one source event."""
         return self._ledger.get_turn_record(source_event_id)
+
+    def record_pending_turn(self, turn_record: TurnRecord) -> TurnRecord | None:
+        """Persist exact response context before generation reaches session storage."""
+        if not turn_record.source_event_ids:
+            return None
+        pending_record = replace(turn_record, completed=False, timestamp=0.0)
+
+        def merge_pending(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
+            compatible_existing_records = tuple(
+                existing
+                for existing in existing_records.values()
+                if not existing.completed or same_turn_identity(existing, pending_record)
+            )
+            existing_record = max(
+                compatible_existing_records,
+                key=lambda record: (record.completed, record.timestamp),
+                default=None,
+            )
+            merged_record = (
+                _backfill_missing_turn_facts(pending_record, existing_record)
+                if existing_record is not None
+                else pending_record
+            )
+            redacted_source_event_ids, pending_redaction_cleanup_event_ids = _merged_redaction_markers(
+                pending_record,
+                merged_record,
+                compatible_existing_records,
+            )
+            if _has_redaction_cleanup_context(merged_record):
+                pending_event_ids = set(pending_redaction_cleanup_event_ids)
+                pending_event_ids.update(redacted_source_event_ids)
+                pending_redaction_cleanup_event_ids = tuple(
+                    event_id for event_id in merged_record.indexed_event_ids if event_id in pending_event_ids
+                )
+            return replace(
+                merged_record,
+                completed=False,
+                redacted_source_event_ids=redacted_source_event_ids,
+                pending_redaction_cleanup_event_ids=pending_redaction_cleanup_event_ids,
+                timestamp=0.0,
+            )
+
+        return self._ledger.update_handled_turn(
+            pending_record.indexed_event_ids,
+            merge_pending,
+            wait_for_persist=True,
+        )
+
+    def mark_source_redacted(
+        self,
+        source_event_id: str,
+    ) -> TurnRecord | None:
+        """Durably tombstone one source event before later replay cleanup."""
+
+        def redacted_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
+            existing_record = existing_records.get(source_event_id)
+            authority = existing_record or TurnRecord.create([source_event_id], completed=False)
+            pending_redaction_cleanup_event_ids = authority.pending_redaction_cleanup_event_ids
+            if _has_redaction_cleanup_context(authority):
+                pending_redaction_cleanup_event_ids = (
+                    *pending_redaction_cleanup_event_ids,
+                    source_event_id,
+                )
+            return replace(
+                authority,
+                redacted_source_event_ids=(*authority.redacted_source_event_ids, source_event_id),
+                pending_redaction_cleanup_event_ids=pending_redaction_cleanup_event_ids,
+                timestamp=0.0,
+            )
+
+        return self._ledger.update_handled_turn(
+            (source_event_id,),
+            redacted_record,
+            wait_for_persist=True,
+        )
+
+    def any_source_redacted(self, source_event_ids: tuple[str, ...]) -> bool:
+        """Return whether durable state tombstones any source in one pending response."""
+        return any(
+            (record := self._ledger.get_turn_record(source_event_id)) is not None
+            and source_event_id in record.redacted_source_event_ids
+            for source_event_id in source_event_ids
+        )
+
+    def prepare_response_for_redactions(
+        self,
+        *,
+        target: MessageTarget,
+        source_event_ids: tuple[str, ...],
+    ) -> bool:
+        """Finish owed cleanup in this locked conversation, then check current sources."""
+        for redacted_event_id in self._ledger.pending_redaction_cleanup_event_ids():
+            turn_record = self._ledger.get_turn_record(redacted_event_id)
+            if turn_record is None:
+                continue
+            recorded_target = turn_record.conversation_target
+            recorded_requester_user_id = turn_record.requester_id
+            if not _has_redaction_cleanup_context(turn_record):
+                self._clear_pending_redaction_cleanup(redacted_event_id)
+                continue
+            assert recorded_target is not None
+            assert recorded_requester_user_id is not None
+            if recorded_target.session_id != target.session_id:
+                continue
+            self._remove_redacted_event_from_recorded_scopes(
+                target=recorded_target,
+                requester_user_id=recorded_requester_user_id,
+                redacted_event_id=redacted_event_id,
+            )
+            self._clear_pending_redaction_cleanup(redacted_event_id)
+        return self.any_source_redacted(source_event_ids)
 
     def response_history_scope(
         self,
@@ -241,7 +360,122 @@ class TurnStore:
         self._remove_stale_runs_for_turn_record(
             turn_record=turn_record,
             requester_user_id=requester_user_id,
+            reason="edited",
         )
+
+    def _remove_redacted_event_from_recorded_scopes(
+        self,
+        *,
+        target: MessageTarget,
+        requester_user_id: str,
+        redacted_event_id: str,
+    ) -> bool:
+        """Remove causal replay from every self-owned scope in one conversation."""
+        candidate_records = self._ledger.turn_records_for_conversation(session_id=target.session_id)
+        fallback_scope = self.deps.state_writer.history_scope()
+        contexts: dict[tuple[str, str, str], tuple[MessageTarget, HistoryScope, str]] = {
+            (target.session_id, fallback_scope.key, requester_user_id): (
+                target,
+                fallback_scope,
+                requester_user_id,
+            ),
+        }
+        for candidate in candidate_records:
+            if (
+                candidate.response_owner != self.deps.agent_name
+                or candidate.requester_id is None
+                or candidate.conversation_target is None
+                or candidate.history_scope is None
+            ):
+                continue
+            key = (
+                candidate.conversation_target.session_id,
+                candidate.history_scope.key,
+                candidate.requester_id,
+            )
+            contexts[key] = (
+                candidate.conversation_target,
+                candidate.history_scope,
+                candidate.requester_id,
+            )
+
+        removed_any = False
+        for candidate_target, history_scope, candidate_requester_id in contexts.values():
+            removed = self._remove_redacted_event_from_scope(
+                target=candidate_target,
+                history_scope=history_scope,
+                requester_user_id=candidate_requester_id,
+                redacted_event_id=redacted_event_id,
+            )
+            removed_any = removed or removed_any
+        return removed_any
+
+    def _clear_pending_redaction_cleanup(self, redacted_event_id: str) -> None:
+        """Acknowledge one cleanup intent after its conversation has been cleaned."""
+
+        def cleared_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
+            turn_record = existing_records[redacted_event_id]
+            return replace(
+                turn_record,
+                pending_redaction_cleanup_event_ids=tuple(
+                    event_id
+                    for event_id in turn_record.pending_redaction_cleanup_event_ids
+                    if event_id != redacted_event_id
+                ),
+                timestamp=0.0,
+            )
+
+        if self._ledger.get_turn_record(redacted_event_id) is None:
+            return
+        self._ledger.update_handled_turn((redacted_event_id,), cleared_record)
+
+    def _remove_redacted_event_from_scope(
+        self,
+        *,
+        target: MessageTarget,
+        history_scope: HistoryScope,
+        requester_user_id: str,
+        redacted_event_id: str,
+    ) -> bool:
+        """Remove source-backed replay from one source-derived fallback scope."""
+        execution_identity = self.deps.tool_runtime.build_execution_identity(
+            target=target,
+            user_id=requester_user_id,
+        )
+        storage = self.deps.state_writer.create_storage(execution_identity, scope=history_scope)
+        session_type = self.deps.state_writer.session_type_for_scope(history_scope)
+        try:
+            removed_run = remove_run_by_event_id(
+                storage,
+                target.session_id,
+                redacted_event_id,
+                session_type=session_type,
+                include_seen_event_ids=True,
+                remove_following_runs=True,
+            )
+            session = (
+                get_team_session(storage, target.session_id)
+                if session_type is SessionType.TEAM
+                else get_agent_session(storage, target.session_id)
+            )
+            scope_contains_source = session is not None and redacted_event_id in read_scope_seen_event_ids(
+                session,
+                history_scope,
+            )
+            removed_summary_dependents = bool(
+                session is not None and session.summary is not None and scope_contains_source and session.runs,
+            )
+            if removed_summary_dependents:
+                assert session is not None
+                session.runs = []
+            invalidated_summary = False
+            if session is not None and (removed_run or scope_contains_source):
+                invalidated_summary = invalidate_compacted_replay(session, history_scope)
+                if invalidated_summary or removed_summary_dependents:
+                    storage.upsert_session(session)
+            return removed_run or removed_summary_dependents or invalidated_summary
+        finally:
+            storage.close()
 
     def _latest_matching_persisted_turn_record(
         self,
@@ -330,6 +564,7 @@ class TurnStore:
         *,
         turn_record: TurnRecord,
         requester_user_id: str,
+        reason: str,
     ) -> bool:
         """Remove persisted runs using the exact recorded target and history scope."""
         if turn_record.conversation_target is None or turn_record.history_scope is None:
@@ -347,25 +582,54 @@ class TurnStore:
         try:
             session_type = self.deps.state_writer.session_type_for_scope(turn_record.history_scope)
             for source_event_id in turn_record.indexed_event_ids:
-                removed_any = (
-                    remove_run_by_event_id(
-                        storage,
-                        session_id,
-                        source_event_id,
-                        session_type=session_type,
-                    )
-                    or removed_any
+                removed_source = remove_run_by_event_id(
+                    storage,
+                    session_id,
+                    source_event_id,
+                    session_type=session_type,
+                    remove_following_runs=True,
                 )
+                removed_any = removed_source or removed_any
         finally:
             storage.close()
         if removed_any:
             self.deps.state_writer.deps.logger.info(
-                "Removed stale run for edited handled turn",
+                "Removed stale persisted history for handled turn",
+                reason=reason,
                 source_event_ids=list(turn_record.source_event_ids),
                 session_id=session_id,
                 history_scope=turn_record.history_scope.key,
             )
         return removed_any
+
+
+def _merged_redaction_markers(
+    candidate: TurnRecord,
+    merged_record: TurnRecord,
+    compatible_existing_records: tuple[TurnRecord, ...],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Merge tombstones and pending cleanup markers across compatible aliases."""
+    redacted_event_ids = set(candidate.redacted_source_event_ids)
+    pending_cleanup_event_ids = set(candidate.pending_redaction_cleanup_event_ids)
+    for existing in compatible_existing_records:
+        redacted_event_ids.update(existing.redacted_source_event_ids)
+        pending_cleanup_event_ids.update(existing.pending_redaction_cleanup_event_ids)
+    merged_redacted_event_ids = tuple(
+        event_id for event_id in merged_record.indexed_event_ids if event_id in redacted_event_ids
+    )
+    merged_pending_event_ids = tuple(
+        event_id for event_id in merged_record.indexed_event_ids if event_id in pending_cleanup_event_ids
+    )
+    return merged_redacted_event_ids, merged_pending_event_ids
+
+
+def _has_redaction_cleanup_context(turn_record: TurnRecord) -> bool:
+    """Return whether one record identifies the conversation to sanitize."""
+    return (
+        turn_record.requester_id is not None
+        and turn_record.history_scope is not None
+        and turn_record.conversation_target is not None
+    )
 
 
 def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) -> TurnRecord:
@@ -378,6 +642,14 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
     return replace(
         authority,
         discovery_event_ids=(*authority.discovery_event_ids, *recovery.discovery_event_ids),
+        redacted_source_event_ids=(
+            *authority.redacted_source_event_ids,
+            *recovery.redacted_source_event_ids,
+        ),
+        pending_redaction_cleanup_event_ids=(
+            *authority.pending_redaction_cleanup_event_ids,
+            *recovery.pending_redaction_cleanup_event_ids,
+        ),
         response_event_id=authority.response_event_id or recovery.response_event_id,
         visible_echo_event_id=authority.visible_echo_event_id or recovery.visible_echo_event_id,
         source_event_prompts=(
@@ -423,6 +695,10 @@ def _reconcile_ledger_and_recovery(
     recovered_record = replace(
         ledger_record,
         discovery_event_ids=(*ledger_record.discovery_event_ids, *recovery_record.discovery_event_ids),
+        redacted_source_event_ids=(
+            *ledger_record.redacted_source_event_ids,
+            *recovery_record.redacted_source_event_ids,
+        ),
         response_event_id=recovery_record.response_event_id,
         completed=recovery_record.completed,
         source_event_prompts=recovery_record.source_event_prompts or ledger_record.source_event_prompts,
