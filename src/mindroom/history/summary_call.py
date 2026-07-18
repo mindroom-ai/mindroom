@@ -85,6 +85,15 @@ class _CompactionSummaryEmptyResultError(RuntimeError):
     """Raised when the summary model returns a success response with no text."""
 
 
+_TYPED_SHRINKABLE_ERRORS = (
+    _CompactionSummaryEmptyResultError,
+    TimeoutError,
+    ContextWindowExceededError,
+    ModelSafeguardRefusalError,
+    CompactionSummaryOutputLimitError,
+)
+
+
 @dataclass(frozen=True)
 class SummaryRetryPolicy:
     """Explicit retry policy for failed compaction summary calls.
@@ -103,16 +112,7 @@ class SummaryRetryPolicy:
 
     def should_shrink(self, error: Exception) -> bool:
         """Return whether a smaller summary input may resolve this provider failure."""
-        if isinstance(
-            error,
-            (
-                _CompactionSummaryEmptyResultError
-                | TimeoutError
-                | ContextWindowExceededError
-                | ModelSafeguardRefusalError
-                | CompactionSummaryOutputLimitError
-            ),
-        ):
+        if isinstance(error, _TYPED_SHRINKABLE_ERRORS):
             return True
         message = str(error).lower()
         return any(fragment in message for fragment in _RETRYABLE_PROVIDER_ERROR_FRAGMENTS)
@@ -125,16 +125,7 @@ class SummaryRetryPolicy:
         """Return the next input budget, preserving it for same-input retries."""
         if attempt >= self.max_attempts:
             return None
-        typed_shrinkable = isinstance(
-            error,
-            (
-                _CompactionSummaryEmptyResultError
-                | TimeoutError
-                | ContextWindowExceededError
-                | ModelSafeguardRefusalError
-                | CompactionSummaryOutputLimitError
-            ),
-        )
+        typed_shrinkable = isinstance(error, _TYPED_SHRINKABLE_ERRORS)
         if not typed_shrinkable and self.should_retry_same_input(error):
             return budget
         if typed_shrinkable or self.should_shrink(error):

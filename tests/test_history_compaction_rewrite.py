@@ -471,9 +471,11 @@ async def test_rewrite_gives_up_after_one_bounded_retry(
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     working_session = _session("session-1", runs=[_completed_run("run-1")])
     summary_mock = AsyncMock(side_effect=[error, error])
+    retry_sleep = AsyncMock()
 
     with (
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
+        patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
         patch(
             "mindroom.history.compaction.record_compaction_chunk",
             wraps=record_compaction_chunk,
@@ -483,6 +485,10 @@ async def test_rewrite_gives_up_after_one_bounded_retry(
         await _rewrite_single_run(storage=storage, working_session=working_session)
 
     assert summary_mock.await_count == 2
+    if isinstance(error, ModelSafeguardRefusalError):
+        retry_sleep.assert_not_awaited()
+    else:
+        retry_sleep.assert_awaited_once_with(DEFAULT_SUMMARY_RETRY_POLICY.same_input_retry_delay_seconds)
     persist_spy.assert_not_called()
     assert working_session.summary is None
     assert [run.run_id for run in working_session.runs or []] == ["run-1"]
