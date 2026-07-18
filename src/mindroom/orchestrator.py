@@ -64,7 +64,13 @@ from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
-from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_runtime_ready, set_runtime_starting
+from mindroom.runtime_state import (
+    reset_runtime_state,
+    set_api_server_address,
+    set_runtime_failed,
+    set_runtime_ready,
+    set_runtime_starting,
+)
 from mindroom.scheduling_executor import set_scheduling_hook_registry
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.startup_maintenance import StartupMaintenanceController
@@ -1793,6 +1799,7 @@ async def _run_api_server(
         api_main.bind_orchestrator_knowledge_refresh_scheduler(api_main.app, knowledge_refresh_scheduler)
     config = uvicorn.Config(api_main.app, host=host, port=port, log_level=log_level.lower())
     server = _SignalAwareUvicornServer(config, shutdown_requested)
+    set_api_server_address(host, port)
     logger.info("embedded_api_server_started", **api_server.log_context())
     try:
         await server.serve()
