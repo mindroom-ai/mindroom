@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from agno.agent import Agent
 from agno.exceptions import ContextWindowExceededError, ModelProviderError
@@ -26,6 +27,7 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
+from openai import APIConnectionError
 
 from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.agent import AgentConfig
@@ -56,7 +58,13 @@ from mindroom.history.summary_call import (
     configure_summary_model,
     generate_compaction_summary,
 )
-from mindroom.history.types import HistoryPolicy, HistoryScope, HistoryScopeState, ResolvedHistorySettings
+from mindroom.history.types import (
+    COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
+    HistoryPolicy,
+    HistoryScope,
+    HistoryScopeState,
+    ResolvedHistorySettings,
+)
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.token_budget import estimate_compaction_input_tokens
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude
@@ -79,6 +87,14 @@ class _RecordingClaude(Claude):
         if isinstance(messages, list):
             self.seen_messages = list(messages)
         return self.response
+
+
+def _connection_provider_error() -> ModelProviderError:
+    request = httpx.Request("POST", "https://api.example.test/v1/responses")
+    sdk_error = APIConnectionError(request=request)
+    provider_error = ModelProviderError(str(sdk_error))
+    provider_error.__cause__ = sdk_error
+    return provider_error
 
 
 def _make_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
@@ -677,6 +693,7 @@ def test_retry_policy_does_not_retry_default_provider_error_status() -> None:
     error = ModelProviderError("unclassified provider failure")
 
     assert error.status_code == 502
+    assert error.__cause__ is None
     assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) is None
 
 
@@ -939,8 +956,75 @@ async def test_compaction_shrinks_input_after_safeguard_refusal(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_compaction_retries_transient_provider_error_at_same_budget(tmp_path: Path) -> None:
-    """A selected transient status retries the same chunk and persists the result."""
+async def test_minimum_available_budget_can_retry_safeguard_refusal(tmp_path: Path) -> None:
+    """The smallest available plan can rebuild and issue its degradation retry."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session([_completed_run("run-1", marker="RUN1-MARKER", padding=4_000)])
+    write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+    summary_input_budget = COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS + 1
+    attempts: list[str] = []
+
+    async def flaky_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+        attempts.append(summary_input)
+        if len(attempts) == 1:
+            message = "provider-specific refusal wording"
+            raise ModelSafeguardRefusalError(message)
+        return SessionSummary(summary="recovered summary", updated_at=datetime.now(UTC))
+
+    with (
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(side_effect=flaky_summary),
+        ),
+        patch(
+            "mindroom.history.compaction._build_summary_input",
+            wraps=_build_summary_input,
+        ) as build_summary_input_spy,
+    ):
+        outcome = await compact_scope_history(
+            storage=storage,
+            session=session,
+            scope=_SCOPE,
+            state=read_scope_state(session, _SCOPE),
+            history_settings=_HISTORY_SETTINGS,
+            available_history_budget=None,
+            summary_input_budget=summary_input_budget,
+            summary_model=FakeModel(id="summary-model", provider="fake"),
+            summary_model_name="summary-model",
+            replay_window_tokens=64_000,
+            threshold_tokens=None,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+        )
+
+    assert outcome is not None
+    assert outcome.compacted_run_count == 1
+    assert len(attempts) == 2
+    assert [call.kwargs["max_input_tokens"] for call in build_summary_input_spy.call_args_list] == [
+        summary_input_budget,
+        COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
+    ]
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "recovered summary"
+    storage.close()
+
+
+@pytest.mark.parametrize(
+    "first_error",
+    [
+        pytest.param(ModelProviderError("temporary provider failure", status_code=503), id="status-503"),
+        pytest.param(_connection_provider_error(), id="typed-connection-cause"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_compaction_retries_transient_provider_error_at_same_budget(
+    tmp_path: Path,
+    first_error: ModelProviderError,
+) -> None:
+    """A selected typed transient failure retries the same chunk and persists the result."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session([_completed_run("run-1", marker="RUN1-MARKER", padding=4_000)])
@@ -952,8 +1036,7 @@ async def test_compaction_retries_transient_provider_error_at_same_budget(tmp_pa
     async def flaky_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
         attempts.append(summary_input)
         if len(attempts) == 1:
-            message = "temporary provider failure"
-            raise ModelProviderError(message, status_code=503)
+            raise first_error
         return SessionSummary(summary="recovered summary", updated_at=datetime.now(UTC))
 
     with (

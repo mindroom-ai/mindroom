@@ -39,6 +39,7 @@ from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING
 
+import httpx
 from agno.exceptions import ContextWindowExceededError, ModelProviderError
 from agno.models.message import Message
 from agno.session.summary import SessionSummary
@@ -47,6 +48,7 @@ from mindroom.cancellation import request_task_cancel
 from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
 from mindroom.error_handling import ModelSafeguardRefusalError
+from mindroom.history.types import COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 
@@ -61,7 +63,8 @@ _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
 # Deliberately narrower than ``TRANSIENT_PROVIDER_STATUS_CODES`` because
 # ``ModelProviderError`` defaults to status 502, which would silently make
 # unclassified errors eligible for a full-budget retry. Safeguard refusals share
-# that default, so shrink classification must remain first.
+# that default, so shrink classification must remain first. Default-502 errors
+# are retried only when their cause chain proves a typed network failure.
 _TRANSIENT_SUMMARY_STATUS_CODES = frozenset({429, 503, 529})
 
 _RETRYABLE_PROVIDER_ERROR_FRAGMENTS = (
@@ -81,6 +84,22 @@ _RETRYABLE_PROVIDER_ERROR_FRAGMENTS = (
 )
 
 
+def _has_typed_network_cause(error: ModelProviderError) -> bool:
+    """Return whether provider wrappers retain an unambiguous network failure."""
+    from anthropic import APIConnectionError as AnthropicAPIConnectionError  # noqa: PLC0415
+    from openai import APIConnectionError as OpenAIAPIConnectionError  # noqa: PLC0415
+
+    cause: BaseException | None = error.__cause__
+    while cause is not None:
+        if isinstance(
+            cause,
+            ConnectionError | httpx.NetworkError | AnthropicAPIConnectionError | OpenAIAPIConnectionError,
+        ):
+            return True
+        cause = cause.__cause__
+    return False
+
+
 class CompactionSummaryOutputLimitError(RuntimeError):
     """Raised when the summary response reaches the configured output-token cap."""
 
@@ -94,14 +113,14 @@ class SummaryRetryPolicy:
     """Explicit retry policy for failed compaction summary calls.
 
     Each shrinkable failure divides the input budget by ``shrink_divisor``
-    (clamped to ``floor_tokens``), while selected transient statuses retry the
-    same budget. Once ``max_attempts`` is reached or no retry applies, the error
-    propagates.
+    (clamped to ``floor_tokens``), while selected typed transient failures retry
+    the same budget. Once ``max_attempts`` is reached or no retry applies, the
+    error propagates.
     """
 
     max_attempts: int = 2
     shrink_divisor: int = 2
-    floor_tokens: int = 1_000
+    floor_tokens: int = COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS
 
     def should_shrink(self, error: Exception) -> bool:
         """Return whether rebuilding a smaller summary input may resolve the failure."""
@@ -126,8 +145,11 @@ class SummaryRetryPolicy:
             if smaller_budget >= budget:
                 return None
             return smaller_budget
-        if isinstance(error, ModelProviderError) and error.status_code in _TRANSIENT_SUMMARY_STATUS_CODES:
-            return budget
+        if isinstance(error, ModelProviderError):
+            if error.status_code in _TRANSIENT_SUMMARY_STATUS_CODES:
+                return budget
+            if error.status_code == 502 and _has_typed_network_cause(error):
+                return budget
         return None
 
 
