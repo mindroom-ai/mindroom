@@ -16,6 +16,7 @@ logger = get_logger(__name__)
 # the Claude mid-stream SSE error case: the HTTP response was already committed
 # before the provider emitted an error event.
 TRANSIENT_PROVIDER_STATUS_CODES = frozenset({200, 408, 409, 429, 500, 502, 503, 504, 529})
+MODEL_SAFEGUARD_REFUSAL_MESSAGE = "Vertex Claude returned stop_reason=refusal"
 
 
 class AvatarGenerationError(RuntimeError):
@@ -24,6 +25,15 @@ class AvatarGenerationError(RuntimeError):
 
 class AvatarSyncError(RuntimeError):
     """Raised when managed avatar sync cannot complete."""
+
+
+class ModelSafeguardRefusalError(ModelProviderError):
+    """Raised when a provider explicitly stops generation for safeguards."""
+
+
+def is_model_safeguard_refusal(error: Exception | str) -> bool:
+    """Recognize typed refusals and the exact text Agno preserves in errored runs."""
+    return isinstance(error, ModelSafeguardRefusalError) or str(error).strip() == MODEL_SAFEGUARD_REFUSAL_MESSAGE
 
 
 def _extract_provider_from_error(error: Exception) -> str | None:
@@ -109,6 +119,12 @@ def get_user_friendly_error_message(error: Exception, agent_name: str | None = N
         error_type=type(error).__name__,
         error=repr(error),
     )
+
+    if is_model_safeguard_refusal(error):
+        return (
+            f"{agent_prefix}⚠️ This model's safeguards blocked the request. "
+            "Choose a different model (`!model list`) or revise the prompt, then try again."
+        )
 
     # Only distinguish the most important error types
     if any(x in error_str for x in ["401", "auth", "unauthorized", "api key", "api_key", "apikey"]):

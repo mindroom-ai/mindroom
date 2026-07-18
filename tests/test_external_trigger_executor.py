@@ -10,7 +10,7 @@ import pytest
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SOURCE_KIND_KEY
 from mindroom.dispatch_source import (
     EXTERNAL_TRIGGER_SOURCE_KIND,
     is_automation_source_kind,
@@ -209,6 +209,7 @@ async def test_execute_external_trigger_sends_to_fixed_thread_target_with_source
     assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest"
     assert content[SOURCE_KIND_KEY] == EXTERNAL_TRIGGER_SOURCE_KIND
     assert content[ORIGINAL_SENDER_KEY] == "@owner:localhost"
+    assert PER_FIRE_THREAD_ROOT_KEY not in content
     assert content["io.mindroom.external_trigger.id"] == "campground"
     assert content["io.mindroom.external_trigger.kind"] == "campground.availability"
     assert content["io.mindroom.external_trigger.event_id"] == "availability-42"
@@ -369,3 +370,4 @@ async def test_execute_external_trigger_new_thread_sends_room_message_without_th
     content: dict[str, Any] = send_and_track_message.await_args.args[2]
     assert "m.relates_to" not in content
     assert content[SOURCE_KIND_KEY] == EXTERNAL_TRIGGER_SOURCE_KIND
+    assert content[PER_FIRE_THREAD_ROOT_KEY] is True

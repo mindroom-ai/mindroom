@@ -6,10 +6,13 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
-from agno.exceptions import ContextWindowExceededError
+from agno.exceptions import ContextWindowExceededError, ModelProviderError
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.utils.models.claude import format_messages, format_tools_for_model
 from agno.utils.tokens import count_schema_tokens
+from anthropic.lib.streaming import MessageStopEvent, ParsedBetaMessageStopEvent, ParsedMessageStopEvent
+from anthropic.types import Message as AnthropicMessage
+from anthropic.types.beta import BetaMessage
 
 from mindroom.claude_prompt_cache import (
     SERVER_TOOL_USE_BLOCK_TYPE,
@@ -17,11 +20,13 @@ from mindroom.claude_prompt_cache import (
     TOOL_SEARCH_TOOL_TYPE,
     prepare_claude_request_kwargs,
 )
+from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
 from mindroom.logging_config import get_logger
 from mindroom.token_budget import estimate_compaction_input_tokens, stable_serialize
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+    from typing import NoReturn
 
     from agno.models.message import Message
     from agno.models.response import ModelResponse
@@ -38,6 +43,7 @@ _VERTEX_TOOL_SEARCH_HISTORY_BLOCK_TYPES = frozenset(
 # for the native regex search tool on both Claude Haiku 4.5 and Sonnet 4.6.
 # Keep a small margin because count_tokens cannot count that server-tool prefix.
 _VERTEX_TOOL_SEARCH_TOKEN_RESERVE = 256
+_CLAUDE_SAFEGUARD_STOP_REASON = "refusal"
 
 
 def _strip_vertex_claude_tool_strict(
@@ -442,6 +448,56 @@ class MindroomVertexAIClaude(VertexAIClaude):
             compress_tool_results=compress_tool_results,
         ):
             yield response
+
+    def _raise_for_safeguard_refusal(self, provider_response: object) -> None:
+        """Raise when Vertex Claude explicitly ends generation for safeguards."""
+        if isinstance(provider_response, (MessageStopEvent, ParsedMessageStopEvent, ParsedBetaMessageStopEvent)):
+            stop_reason = provider_response.message.stop_reason
+        elif isinstance(provider_response, (AnthropicMessage, BetaMessage)):
+            stop_reason = provider_response.stop_reason
+        else:
+            return
+        if stop_reason != _CLAUDE_SAFEGUARD_STOP_REASON:
+            return
+        logger.warning(
+            "vertex_claude_safeguard_refusal",
+            model_id=self.id,
+            stop_reason=stop_reason,
+        )
+        raise ModelSafeguardRefusalError(
+            message=MODEL_SAFEGUARD_REFUSAL_MESSAGE,
+            model_name=self.name,
+            model_id=self.id,
+        )
+
+    def _parse_provider_response(
+        self,
+        response: AnthropicMessage | BetaMessage,
+        response_format: dict[str, Any] | type[Any] | None = None,
+        **kwargs: object,
+    ) -> ModelResponse:
+        """Preserve Vertex Claude's non-streaming safeguard signal."""
+        self._raise_for_safeguard_refusal(response)
+        return super()._parse_provider_response(response, response_format=response_format, **kwargs)
+
+    def _parse_provider_response_delta(
+        self,
+        response: object,
+        response_format: dict[str, Any] | type[Any] | None = None,
+    ) -> ModelResponse:
+        """Preserve Vertex Claude's final streaming safeguard signal."""
+        self._raise_for_safeguard_refusal(response)
+        return super()._parse_provider_response_delta(cast("Any", response), response_format=response_format)
+
+    def _handle_api_error(self, e: Exception) -> NoReturn:
+        """Keep typed safeguard refusals intact for MindRoom's user error path."""
+        if isinstance(e, ModelSafeguardRefusalError):
+            raise e
+        return super()._handle_api_error(e)
+
+    def _is_retryable_error(self, error: ModelProviderError) -> bool:
+        """Exclude deterministic safeguard refusals from Agno's configured retries."""
+        return not isinstance(error, ModelSafeguardRefusalError) and super()._is_retryable_error(error)
 
     def _prepare_request_kwargs(
         self,

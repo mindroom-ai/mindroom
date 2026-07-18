@@ -16,8 +16,9 @@ It enforces the call-side half of the compaction invariants
 
 4. Retry on provider failure is deterministic.
    ``SummaryRetryPolicy`` decides which error classes warrant a smaller retry
-   (timeouts and the named context-length fragments), the shrink schedule
-   (halving), and the give-up floor — no inline string matching at call sites.
+   (timeouts, typed context-window errors, and named legacy context-length
+   fragments), the shrink schedule (halving), and the give-up floor — no inline
+   string matching at call sites.
    Empty-text success responses also retry with less input because some providers
    surface rejected or oversized requests as an empty successful response.
 
@@ -39,6 +40,7 @@ from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING
 
+from agno.exceptions import ContextWindowExceededError
 from agno.models.message import Message
 from agno.session.summary import SessionSummary
 
@@ -96,7 +98,7 @@ class SummaryRetryPolicy:
 
     def should_shrink(self, error: Exception) -> bool:
         """Return whether a smaller summary input may resolve this provider failure."""
-        if isinstance(error, TimeoutError | CompactionSummaryOutputLimitError):
+        if isinstance(error, TimeoutError | ContextWindowExceededError | CompactionSummaryOutputLimitError):
             return True
         message = str(error).lower()
         return any(fragment in message for fragment in _RETRYABLE_PROVIDER_ERROR_FRAGMENTS)

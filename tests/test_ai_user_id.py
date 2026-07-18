@@ -53,6 +53,7 @@ from mindroom.constants import (
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
+from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import PreparedHistoryState
@@ -1545,6 +1546,43 @@ class TestUserIdPassthrough:
         assert "Inline media unavailable for this model" in str(second_prompt[-1].content)
 
     @pytest.mark.asyncio
+    async def test_ai_response_surfaces_stringified_safeguard_refusal_without_media_retry(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Agno's errored RunOutput text must retain refusal handling and stop fallback."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "Claude"
+        mock_agent.model.id = "claude-sonnet-4-6"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+        mock_agent.arun = AsyncMock(
+            return_value=RunOutput(content=MODEL_SAFEGUARD_REFUSAL_MESSAGE, status=RunStatus.error),
+        )
+        document_file = File(
+            filepath=str(tmp_path / "report.pdf"),
+            filename="report.pdf",
+            mime_type="application/pdf",
+        )
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            response = await ai_response(
+                make_turn_context("general", session_id="session1"),
+                prompt="test",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                media=MediaInputs(files=[document_file]),
+            )
+
+        assert response == (
+            "[general] ⚠️ This model's safeguards blocked the request. "
+            "Choose a different model (`!model list`) or revise the prompt, then try again."
+        )
+        assert mock_agent.arun.await_count == 1
+
+    @pytest.mark.asyncio
     async def test_ai_response_learns_media_unsupported_for_same_model_route(self, tmp_path: Path) -> None:
         """A successful without-media retry teaches the route to omit media on later calls."""
         reset_model_media_capability_cache()
@@ -1865,6 +1903,48 @@ class TestUserIdPassthrough:
         assert not second_prompt[-1].files
         assert "Inline media unavailable for this model" in str(second_prompt[-1].content)
         assert any(isinstance(chunk, RunContentEvent) and chunk.content == "Recovered stream" for chunk in chunks)
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_surfaces_stringified_safeguard_refusal_without_media_retry(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Agno's RunErrorEvent text must retain refusal handling and stop fallback."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "Claude"
+        mock_agent.model.id = "claude-sonnet-4-6"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def refusal_stream() -> AsyncIterator[object]:
+            yield RunErrorEvent(content=MODEL_SAFEGUARD_REFUSAL_MESSAGE)
+
+        mock_agent.arun = MagicMock(return_value=refusal_stream())
+        document_file = File(
+            filepath=str(tmp_path / "report.pdf"),
+            filename="report.pdf",
+            mime_type="application/pdf",
+        )
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    make_turn_context("general", session_id="session1"),
+                    prompt="test",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    media=MediaInputs(files=[document_file]),
+                )
+            ]
+
+        assert chunks == [
+            "[general] ⚠️ This model's safeguards blocked the request. "
+            "Choose a different model (`!model list`) or revise the prompt, then try again.",
+        ]
+        assert mock_agent.arun.call_count == 1
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_rebuilds_request_log_context_for_retry(self, tmp_path: Path) -> None:

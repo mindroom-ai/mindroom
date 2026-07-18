@@ -34,6 +34,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME
+from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE
 from mindroom.execution_preparation import (
     ThreadHistoryRenderLimits,
     _prepare_bound_team_execution_context,
@@ -307,6 +308,42 @@ async def test_team_response_retries_without_inline_media_on_validation_error() 
     assert isinstance(second_prompt, str)
     assert first_prompt[-1].audio == [audio_input]
     assert "Inline media unavailable for this model" in second_prompt
+
+
+@pytest.mark.asyncio
+async def test_team_response_surfaces_stringified_safeguard_refusal_without_media_retry() -> None:
+    """An errored team output must retain refusal handling and stop fallback."""
+    config = _build_test_config()
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    mock_team = _make_test_team()
+    mock_team.arun = AsyncMock(
+        return_value=TeamRunOutput(content=MODEL_SAFEGUARD_REFUSAL_MESSAGE, status=RunStatus.error),
+    )
+    fake_agent = _make_test_agent("GeneralAgent")
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+    ):
+        response = await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
+            orchestrator=orchestrator,
+            execution_identity=None,
+            ctx=make_turn_context(session_id=None),
+            media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+        )
+
+    assert "This model's safeguards blocked the request" in response
+    assert "stop_reason" not in response
+    assert mock_team.arun.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -3876,6 +3913,47 @@ async def test_team_stream_retries_without_inline_media_on_streamed_run_error() 
 
     rendered_output = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
     assert "Recovered stream" in rendered_output
+
+
+@pytest.mark.asyncio
+async def test_team_stream_surfaces_stringified_safeguard_refusal_without_media_retry() -> None:
+    """A team RunErrorEvent must retain refusal handling and stop fallback."""
+    config = _build_test_config()
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    async def refusal_stream() -> AsyncIterator[object]:
+        yield TeamRunErrorEvent(content=MODEL_SAFEGUARD_REFUSAL_MESSAGE)
+
+    mock_team = _make_test_team()
+    mock_team.arun = MagicMock(return_value=refusal_stream())
+    fake_agent = _make_test_agent("GeneralAgent")
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+    ):
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="Analyze this.",
+                turn_recorder=_team_turn_recorder("Analyze this."),
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id=None),
+                media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+            )
+        ]
+
+    rendered_output = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
+    assert "This model's safeguards blocked the request" in rendered_output
+    assert "stop_reason" not in rendered_output
+    assert mock_team.arun.call_count == 1
 
 
 class _DirectTeamAgentBot:

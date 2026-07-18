@@ -266,8 +266,30 @@ def test_redact_sensitive_text_stays_linear_on_long_unbroken_runs() -> None:
     assert time.perf_counter() - start < 5.0
 
 
+def test_redact_sensitive_text_stays_linear_while_finding_value_terminator() -> None:
+    """Assignment lookahead must not repeatedly rescan long whitespace and key-like runs."""
+    value = "password=visible" + " " * 12_000 + "Ab3" * 4_000
+    start = time.perf_counter()
+    assert redact_sensitive_text(value) == f"password={REDACTED}"
+    assert time.perf_counter() - start < 5.0
+
+
+def test_redact_sensitive_text_redacts_secret_assignments_with_long_keys() -> None:
+    """Performance guards must not exempt long secret-bearing keys from redaction."""
+    key = "x" * 256 + "password"
+
+    assert redact_sensitive_text(f"{key}=hunter2") == f"{key}={REDACTED}"
+
+
+def test_redact_sensitive_text_preserves_long_inter_assignment_whitespace() -> None:
+    """Linear lookahead must not consume whitespace that separates assignments."""
+    separator = " " * 256
+
+    assert redact_sensitive_text(f"api_key=hunter2{separator}mode=safe") == f"api_key={REDACTED}{separator}mode=safe"
+
+
 def test_redact_sensitive_text_still_redacts_assignments_at_run_boundaries() -> None:
-    """Bounding the assignment key must not lose ordinary key=value redaction."""
+    """The assignment key guard must not lose ordinary key=value redaction."""
     redacted = redact_sensitive_text('api_key=hunter2 "password": "abc"')
 
     assert "hunter2" not in redacted

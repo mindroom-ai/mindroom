@@ -26,12 +26,14 @@ _API_KEY_MESSAGE_PATTERN = re.compile(
     r"(?::\s*|\s+))(?P<token>[A-Za-z0-9._~+/=-]+)",
     re.IGNORECASE,
 )
-_NEXT_ASSIGNMENT_PATTERN = r"\s+(?:and\s+)?[\"']?[A-Za-z0-9_.-]+[\"']?\s*[:=]"
-# The key must start at a run boundary and stay length-bounded: an open-ended key run makes
-# the scan quadratic on long unbroken [A-Za-z0-9_.-] blobs (base64url, JWTs, hex dumps).
+# Starting only at the first whitespace in a run and making every run possessive prevents the lazy
+# value scan from repeatedly rescanning the same long suffix while looking for the next assignment.
+_NEXT_ASSIGNMENT_PATTERN = r"(?<!\s)\s++(?:and\s++)?[\"']?[A-Za-z0-9_.-]++[\"']?\s*+[:=]"
+# The key must start at a run boundary and be possessive: otherwise failed matches repeatedly
+# backtrack through long [A-Za-z0-9_.-] blobs (base64url, JWTs, hex dumps).
 _SECRET_ASSIGNMENT_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_.-])"
-    r"(?P<prefix>[\"']?(?P<key>[A-Za-z0-9_.-]{1,128})[\"']?\s*[:=]\s*)"
+    r"(?P<prefix>[\"']?(?P<key>[A-Za-z0-9_.-]++)[\"']?\s*[:=]\s*)"
     rf"(?:(?P<quote>[\"'])(?P<quoted_value>.*?)(?P=quote)|(?P<value>.+?))"
     rf"(?=(?:{_NEXT_ASSIGNMENT_PATTERN})|[\r\n,&)\]}}]|$)",
     re.IGNORECASE,
