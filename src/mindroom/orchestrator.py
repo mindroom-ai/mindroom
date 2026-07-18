@@ -8,6 +8,7 @@ import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, NoReturn, cast, overload
 from uuid import uuid4
@@ -19,7 +20,13 @@ from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.approval_transport import ApprovalMatrixTransport
 from mindroom.authorization import is_authorized_sender
 from mindroom.background_tasks import create_background_task
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from mindroom.custom_tools.todo_poke import (
+    TodoPokeDeps,
+    TodoPokeWorker,
+    todo_poke_policy,
+)
+from mindroom.custom_tools.todo_state import state_root as todo_state_root
 from mindroom.embedder_health import check_embedder_health, handle_embedder_config_reload
 from mindroom.entity_resolution import (
     DuplicateManagedEntityIdentityError,
@@ -27,6 +34,7 @@ from mindroom.entity_resolution import (
     configured_bot_user_ids_for_room,
     entity_identity_registry,
     is_configured_room,
+    mindroom_user_id,
 )
 from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.event_loop_stall import EventLoopStallDetector, start_event_loop_stall_detector
@@ -72,6 +80,7 @@ from mindroom.runtime_state import (
     set_runtime_ready,
     set_runtime_starting,
 )
+from mindroom.scheduling import get_pending_schedule_thread_ids_for_room
 from mindroom.scheduling_executor import set_scheduling_hook_registry
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.startup_maintenance import StartupMaintenanceController
@@ -239,6 +248,8 @@ class _MultiAgentOrchestrator:
     _bot_start_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     _memory_auto_flush_worker: MemoryAutoFlushWorker | None = field(default=None, init=False)
     _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
+    _todo_poke_worker: TodoPokeWorker | None = field(default=None, init=False)
+    _todo_poke_task: asyncio.Task | None = field(default=None, init=False)
     config_reload: ConfigReloadLifecycle = field(init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
     _config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
@@ -340,6 +351,100 @@ class _MultiAgentOrchestrator:
         )
         self._memory_auto_flush_worker = worker
         self._memory_auto_flush_task = asyncio.create_task(worker.run(), name="memory_auto_flush_worker")
+
+    async def _stop_todo_poke_worker(self) -> None:
+        """Stop the native todo poke worker if running."""
+        worker = self._todo_poke_worker
+        task = self._todo_poke_task
+        self._todo_poke_worker = None
+        self._todo_poke_task = None
+
+        if worker is not None:
+            worker.stop()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+
+    def _todo_poke_agent_is_idle(self, agent_name: str) -> bool:
+        """Return whether an agent and its running configured teams are idle."""
+        config = self.config
+        if config is None or agent_name not in config.agents:
+            return False
+
+        agent_bot = self.agent_bots.get(agent_name)
+        if agent_bot is None or not agent_bot.running or agent_bot.in_flight_response_count != 0:
+            return False
+
+        for team_name, team_config in config.teams.items():
+            if agent_name not in team_config.agents:
+                continue
+            team_bot = self.agent_bots.get(team_name)
+            if team_bot is not None and team_bot.running and team_bot.in_flight_response_count != 0:
+                return False
+        return True
+
+    def _todo_poke_router(self) -> AgentBot | TeamBot | None:
+        """Return the running router bot when todo poke I/O is ready."""
+        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
+        if router_bot is None or not router_bot.running or router_bot.client is None:
+            return None
+        return router_bot
+
+    async def _todo_poke_schedule_query(self, room_id: str) -> frozenset[str | None] | None:
+        """Return pending schedule scopes, or None while router I/O is unavailable."""
+        router_bot = self._todo_poke_router()
+        if router_bot is None:
+            return None
+        client = router_bot.client
+        if client is None:
+            return None
+        return await get_pending_schedule_thread_ids_for_room(client, room_id)
+
+    async def _send_todo_poke(
+        self,
+        room_id: str,
+        body: str,
+        thread_id: str | None,
+    ) -> str | None:
+        """Send one router-originated todo poke that enters normal dispatch."""
+        router_bot = self._todo_poke_router()
+        config = self.config
+        if router_bot is None or config is None:
+            return None
+
+        original_sender = mindroom_user_id(config, self.runtime_paths)
+        extra_content = {ORIGINAL_SENDER_KEY: original_sender} if original_sender is not None else None
+        return await router_bot._hook_send_message(
+            room_id,
+            body,
+            thread_id,
+            "todo_poke",
+            extra_content,
+            trigger_dispatch=True,
+        )
+
+    async def _sync_todo_poke_worker(self) -> None:
+        """Start or stop the native todo poke worker from runtime env policy."""
+        policy = todo_poke_policy(self.runtime_paths)
+        if self.config is None or policy.interval_seconds == 0:
+            await self._stop_todo_poke_worker()
+            return
+
+        task = self._todo_poke_task
+        if task is not None and not task.done():
+            return
+
+        worker = TodoPokeWorker(
+            policy=policy,
+            deps=TodoPokeDeps(
+                state_root=lambda: todo_state_root(self.runtime_paths),
+                schedule_query=self._todo_poke_schedule_query,
+                idle_check=self._todo_poke_agent_is_idle,
+                sender=self._send_todo_poke,
+                clock=lambda: datetime.now(UTC),
+            ),
+        )
+        self._todo_poke_worker = worker
+        self._todo_poke_task = asyncio.create_task(worker.run(), name="todo_poke_worker")
 
     def _reset_runtime_shutdown_event(self) -> asyncio.Event:
         """Create the shutdown event for the current orchestrator run."""
@@ -619,6 +724,7 @@ class _MultiAgentOrchestrator:
         await self._sync_event_cache_service(config)
         self._configure_approval_store_transport()
         await self._sync_memory_auto_flush_worker()
+        await self._sync_todo_poke_worker()
 
     async def _stop_mcp_manager(self) -> None:
         """Stop the MCP manager and clear the active runtime binding."""
@@ -1821,6 +1927,7 @@ class _MultiAgentOrchestrator:
         await shutdown_approval_runtime()
         await self.config_reload.cancel()
         await self._startup_maintenance.cancel()
+        await self._stop_todo_poke_worker()
         await self._stop_memory_auto_flush_worker()
         await self._knowledge_source_watcher.shutdown()
         await self._knowledge_refresh_scheduler.shutdown()

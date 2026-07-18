@@ -32,6 +32,7 @@ from mindroom.scheduling import (
     clear_deferred_overdue_tasks,
     drain_deferred_overdue_tasks,
     edit_scheduled_task,
+    get_pending_schedule_thread_ids_for_room,
     get_scheduled_tasks_for_room,
     list_scheduled_tasks,
     restore_scheduled_tasks,
@@ -1564,6 +1565,54 @@ async def test_get_scheduled_tasks_for_room_skips_cancelled_without_workflow() -
     tasks = await get_scheduled_tasks_for_room(client=client, room_id="!test:server", include_non_pending=True)
 
     assert tasks == []
+
+
+@pytest.mark.asyncio
+async def test_get_pending_schedule_thread_ids_excludes_new_threads_and_non_pending() -> None:
+    """Only pending schedules targeting an existing scope should suppress todo pokes."""
+    client = AsyncMock()
+
+    def event(
+        task_id: str,
+        workflow: ScheduledWorkflow,
+        *,
+        status: str = "pending",
+    ) -> dict[str, object]:
+        return {
+            "type": _SCHEDULED_TASK_EVENT_TYPE,
+            "state_key": task_id,
+            "content": {
+                "task_id": task_id,
+                "workflow": workflow.model_dump_json(),
+                "status": status,
+            },
+            "event_id": f"$state_{task_id}",
+            "sender": "@system:server",
+            "origin_server_ts": 1234567890,
+        }
+
+    workflow_fields = {
+        "schedule_type": "once",
+        "execute_at": datetime.now(UTC) + timedelta(minutes=5),
+        "message": "Continue work",
+        "description": "Continue work",
+        "room_id": "!test:server",
+    }
+    response = nio.RoomGetStateResponse.from_dict(
+        [
+            event("thread", ScheduledWorkflow(**workflow_fields, thread_id="$thread")),
+            event("main", ScheduledWorkflow(**workflow_fields, thread_id="main")),
+            event("new", ScheduledWorkflow(**workflow_fields, new_thread=True)),
+            event("cancelled", ScheduledWorkflow(**workflow_fields, thread_id="$cancelled"), status="cancelled"),
+        ],
+        room_id="!test:server",
+    )
+    client.room_get_state = AsyncMock(return_value=response)
+
+    thread_ids = await get_pending_schedule_thread_ids_for_room(client, "!test:server")
+
+    assert thread_ids == frozenset({"$thread", None})
+    client.room_get_state.assert_awaited_once_with("!test:server")
 
 
 @pytest.mark.asyncio

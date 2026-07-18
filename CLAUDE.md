@@ -157,6 +157,8 @@ Matrix sync callback
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `api/` | FastAPI REST API (dashboard, credentials, OpenAI-compatible endpoint) |
 | `custom_tools/` | Built-in custom tool implementations (gmail, calendar, scheduler, etc.) |
+| `custom_tools/todo_state.py` | Leaf storage and actionability primitives for native per-thread todo state |
+| `custom_tools/todo_poke.py` | Native scanner and background worker that wakes idle agents with actionable assigned todos |
 | `background_tasks.py` | Background task management for non-blocking operations |
 | `tool_system/events.py` | Tool-event formatting and metadata for Matrix messages |
 | `tool_system/declarations.py` | Leaf tool metadata enums and dataclasses shared by implementations and the runtime catalog |

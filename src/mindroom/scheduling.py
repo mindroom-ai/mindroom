@@ -601,6 +601,19 @@ async def get_scheduled_tasks_for_room(
     return _parse_task_records_from_state(room_id, response, include_non_pending)
 
 
+async def get_pending_schedule_thread_ids_for_room(
+    client: nio.AsyncClient,
+    room_id: str,
+) -> frozenset[str | None]:
+    """Return existing-thread scopes suppressed by pending schedules in one room."""
+    tasks = await get_scheduled_tasks_for_room(client, room_id, include_non_pending=False)
+    return frozenset(
+        None if task.workflow.thread_id in {None, "main"} else task.workflow.thread_id
+        for task in tasks
+        if not task.workflow.new_thread
+    )
+
+
 async def get_scheduled_task(
     client: nio.AsyncClient,
     room_id: str,
