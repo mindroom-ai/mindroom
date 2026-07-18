@@ -83,6 +83,15 @@
     "assertions": 459,
     "strict_read_cache_isolated": true
   },
+  "post_collection_validation": {
+    "validator_commit": "d3e48585c59083874eb99998b8bc2df38ad1d6f6",
+    "status": "passed",
+    "interaction_records": 58,
+    "assertions": 491,
+    "strict_read_cache_isolated": true,
+    "accounting_missing_event_count": 0,
+    "cache_only_event_count": 0
+  },
   "request_count": 76,
   "request_total_ms": 13068.154,
   "homeserver_event_count": 66,

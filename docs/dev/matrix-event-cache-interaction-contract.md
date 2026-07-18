@@ -43,6 +43,10 @@ Poll responses, poll ends, beacons, stickers, state, calls, and RTC events remai
 
 Plaintext message replies and references cannot inherit visible thread membership through one of those non-message events; unresolved dependent membership invalidates the room's thread snapshots fail-closed.
 
+Explicit snapshot writes apply the same event-family filter, and relation walks validate cached index targets before trusting their thread IDs.
+
+Page-local, cached, and homeserver-scan root proof accepts only plaintext or encrypted message children.
+
 ## Redactions
 
 Redaction envelope events are intentionally omitted from the point cache.
@@ -117,13 +121,19 @@ Strict thread reads use a separate new disposable SQLite database and refuse an 
 
 The first strict read refills that isolated cache from the authenticated homeserver, the second proves a zero-fetch cache hit, and a redaction applied through the cache API proves rejection and refill without writing the live service database.
 
+The second read must return the same visible event IDs as the first with zero homeserver time, pages, and scanned events.
+
+The third read must use `thread_invalidated_after_validation`, omit the redacted child, and refill successfully without degradation or error.
+
 The backend-neutral owning-seam test `test_advisory_stale_fallback_is_labeled_and_dispatch_rejects_it` forces the same homeserver failure against SQLite and PostgreSQL.
 
 It proves that an advisory read may return labeled degraded `stale_cache` history while the strict dispatch snapshot propagates the refill failure instead of serving stale context.
 
 Every declared interaction expectation is compared with homeserver accounting, the read-only service snapshot, and the initial visible thread projection before evidence is written.
 
-The CLI requires the service-cache path and strict-read mode, and the writer refuses output without complete passing expectation validation.
+The CLI requires the service-cache path and strict-read mode, and the writer refuses output without complete passing expectation validation or with any homeserver-to-cache accounting gap.
+
+An invited test agent requires both `--invite-user-id` and `--invite-access-token-env`, and the harness verifies that token's identity before the account can join.
 
 The evidence writer rejects secret-shaped keys and either access-token value before writing JSON.
 

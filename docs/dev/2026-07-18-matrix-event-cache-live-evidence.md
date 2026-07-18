@@ -36,6 +36,10 @@ The harness emitted 58 controlled interaction records through 76 authenticated r
 
 The executable validation compared all 58 records across 459 assertions and returned `passed`.
 
+The stricter validator from commit `d3e48585c59083874eb99998b8bc2df38ad1d6f6` replayed the sanitized raw artifact across 491 assertions and also returned `passed`.
+
+That replay additionally required zero accounting gaps, identical first and second visible snapshots, zero second-read homeserver work, the exact third-read rejection reason, and removal of the redacted child.
+
 The matrix covered member, name, topic, avatar, power, join, history, guest, alias, encryption, pin, generic state, and room creation state supplied by `createRoom`.
 
 The matrix covered text, notice, emote, location, explicit thread, relation-less reply, root edit, child edit, reply edit, message reference, reaction, and reaction redaction.
@@ -101,5 +105,7 @@ The hosted service database must remain read-only to the harness.
 Strict thread reads must use `--strict-read-cache-db` with a new path that differs from `--cache-db`.
 
 The harness rejects an existing strict-cache path, rejects the service-cache path, and fails before writing evidence when any declared interaction expectation disagrees with observed state.
+
+The harness also rejects unpaired invite identity/token configuration and any missing or cache-only event accounting.
 
 The exact command and safety procedure are documented in `docs/dev/matrix-event-cache-interaction-contract.md`.
