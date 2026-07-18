@@ -880,7 +880,7 @@ async def test_conversation_cache_startup_prewarm_fetch_preserves_fixed_metadata
 @pytest.mark.asyncio
 async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path: Path) -> None:
     """Thread snapshot ownership should expose joined thread and room cache state."""
-    db = await event_cache_module._initialize_event_cache_db(tmp_path / "event_cache.db")
+    db, _maintenance_report = await event_cache_module._initialize_event_cache_db(tmp_path / "event_cache.db")
 
     try:
         await sqlite_event_cache_threads._replace_thread_locked(
@@ -932,7 +932,7 @@ async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path
 @pytest.mark.asyncio
 async def test_sqlite_stale_markers_are_monotonic(tmp_path: Path) -> None:
     """Older stale markers should not downgrade newer thread or room invalidations."""
-    db = await event_cache_module._initialize_event_cache_db(tmp_path / "event_cache.db")
+    db, _maintenance_report = await event_cache_module._initialize_event_cache_db(tmp_path / "event_cache.db")
 
     try:
         with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=200.0):

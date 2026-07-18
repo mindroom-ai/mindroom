@@ -36,6 +36,10 @@ class ConversationEventCache(Protocol):
     def is_initialized(self) -> bool:
         """Return whether the backing storage is currently initialized."""
 
+    @property
+    def startup_requires_sync_reset(self) -> bool:
+        """Return whether startup discarded cache contents covered by saved sync checkpoints."""
+
     async def initialize(self) -> None:
         """Initialize any backing storage."""
 

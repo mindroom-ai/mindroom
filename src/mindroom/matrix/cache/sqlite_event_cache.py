@@ -18,6 +18,12 @@ from . import sqlite_event_cache_events, sqlite_event_cache_threads
 from .event_batching import group_lookup_events_by_room
 from .event_normalization import normalize_event_source_for_cache
 from .sqlite_agent_message_snapshot import load_sqlite_agent_message_snapshot
+from .sqlite_cache_maintenance import (
+    migrate_version_10_thread_events,
+    run_startup_maintenance,
+    sqlite_storage_bytes,
+    with_sqlite_storage_bytes,
+)
 from .thread_cache_state import replacement_validated_at
 
 if TYPE_CHECKING:
@@ -25,9 +31,11 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from .agent_message_snapshot import AgentMessageSnapshot
+    from .cache_maintenance import CacheMaintenanceReport
     from .event_cache import ThreadCacheState
 
-_EVENT_CACHE_SCHEMA_VERSION = 10
+_EVENT_CACHE_SCHEMA_VERSION = 11
+_MIGRATABLE_EVENT_CACHE_SCHEMA_VERSION = 10
 _EVENT_CACHE_TABLES = (
     "thread_events",
     "events",
@@ -37,6 +45,7 @@ _EVENT_CACHE_TABLES = (
     "mxc_text_cache",
     "thread_cache_state",
     "room_cache_state",
+    "compacted_streaming_edits",
 )
 _REQUIRED_EVENT_CACHE_TABLES = frozenset(_EVENT_CACHE_TABLES)
 _LOCK_WAIT_LOG_THRESHOLD_SECONDS = 0.1
@@ -72,20 +81,35 @@ async def _rollback_sqlite_connection_best_effort(db: aiosqlite.Connection, *, o
         )
 
 
-async def _initialize_event_cache_db(db_path: Path) -> aiosqlite.Connection:
+async def _initialize_event_cache_db(
+    db_path: Path,
+) -> tuple[aiosqlite.Connection, CacheMaintenanceReport]:
     """Open the SQLite database and ensure the event-cache schema exists."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     db = await aiosqlite.connect(db_path)
     try:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA busy_timeout=5000")
-        await _reset_stale_cache_if_needed(db, db_path=db_path)
+        await db.execute("BEGIN IMMEDIATE")
+        migrated_from_schema_version, destructive_reset = await _prepare_event_cache_schema(
+            db,
+            db_path=db_path,
+        )
         await _create_event_cache_schema(db)
+        report = await run_startup_maintenance(
+            db,
+            schema_version=_EVENT_CACHE_SCHEMA_VERSION,
+            migrated_from_schema_version=migrated_from_schema_version,
+            destructive_reset=destructive_reset,
+        )
         await db.commit()
     except BaseException:
+        await _rollback_sqlite_connection_best_effort(db, operation="initialize")
         await _close_sqlite_connection_best_effort(db, operation="initialize")
         raise
-    return db
+    report = with_sqlite_storage_bytes(report, db_path)
+    logger.info("Matrix event cache startup maintenance complete", backend="sqlite", **report.as_runtime_diagnostics())
+    return db, report
 
 
 async def _create_event_cache_schema(db: aiosqlite.Connection) -> None:
@@ -97,7 +121,6 @@ async def _create_event_cache_schema(db: aiosqlite.Connection) -> None:
             thread_id TEXT NOT NULL,
             event_id TEXT NOT NULL,
             origin_server_ts INTEGER NOT NULL,
-            event_json TEXT NOT NULL,
             PRIMARY KEY (room_id, event_id)
         )
         """,
@@ -196,6 +219,30 @@ async def _create_event_cache_schema(db: aiosqlite.Connection) -> None:
         )
         """,
     )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS compacted_streaming_edits (
+            event_id TEXT PRIMARY KEY,
+            room_id TEXT NOT NULL,
+            original_event_id TEXT NOT NULL,
+            sender TEXT NOT NULL,
+            origin_server_ts INTEGER NOT NULL,
+            event_json_zlib BLOB NOT NULL,
+            cached_at REAL NOT NULL,
+            event_order INTEGER NOT NULL,
+            thread_id TEXT,
+            thread_origin_server_ts INTEGER,
+            thread_order INTEGER,
+            indexed_thread_id TEXT
+        )
+        """,
+    )
+    await db.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_compacted_streaming_edits_original
+        ON compacted_streaming_edits(room_id, original_event_id, sender, origin_server_ts)
+        """,
+    )
     await db.execute(f"PRAGMA user_version = {_EVENT_CACHE_SCHEMA_VERSION}")
 
 
@@ -221,32 +268,44 @@ async def _existing_table_names(db: aiosqlite.Connection) -> set[str]:
     return {str(row[0]) for row in rows}
 
 
-async def _reset_stale_cache_if_needed(
+async def _prepare_event_cache_schema(
     db: aiosqlite.Connection,
     *,
     db_path: Path,
-) -> None:
-    """Drop stale cache contents instead of migrating old cache schemas forward."""
+) -> tuple[int | None, bool]:
+    """Migrate version 10 or reset unsupported cache shapes in the active transaction."""
     current_schema_version = await _schema_version(db)
     current_table_names = await _existing_table_names(db)
     if not current_table_names:
-        return
+        return None, False
     if current_schema_version == _EVENT_CACHE_SCHEMA_VERSION and _REQUIRED_EVENT_CACHE_TABLES.issubset(
         current_table_names,
     ):
-        return
+        return None, False
+
+    version_10_tables = _REQUIRED_EVENT_CACHE_TABLES - {"compacted_streaming_edits"}
+    if current_schema_version == _MIGRATABLE_EVENT_CACHE_SCHEMA_VERSION and version_10_tables.issubset(
+        current_table_names,
+    ):
+        logger.info(
+            "Migrating Matrix event cache schema",
+            db_path=str(db_path),
+            from_schema_version=current_schema_version,
+            to_schema_version=_EVENT_CACHE_SCHEMA_VERSION,
+        )
+        await migrate_version_10_thread_events(db)
+        return current_schema_version, False
 
     logger.info(
-        "Resetting stale Matrix event cache instead of migrating it",
+        "Resetting unsupported Matrix event cache schema",
         db_path=str(db_path),
         _schema_version=current_schema_version,
         existing_tables=sorted(current_table_names),
     )
-    await db.executescript(
-        "\n".join(f"DROP TABLE IF EXISTS {table_name};" for table_name in _EVENT_CACHE_TABLES),
-    )
+    for table_name in (*_EVENT_CACHE_TABLES, "thread_events_v10"):
+        await db.execute(f"DROP TABLE IF EXISTS {table_name}")
     await db.execute("PRAGMA user_version = 0")
-    await db.commit()
+    return None, True
 
 
 @dataclass
@@ -263,6 +322,7 @@ class _SqliteEventCacheRuntime:
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
         self._db: aiosqlite.Connection | None = None
+        self._maintenance_report: CacheMaintenanceReport | None = None
         self._disabled_reason: str | None = None
         self._db_lock = asyncio.Lock()
         self._room_locks: OrderedDict[str, _RoomLockEntry] = OrderedDict()
@@ -287,6 +347,11 @@ class _SqliteEventCacheRuntime:
         """Return whether the advisory cache is disabled for this runtime."""
         return self._disabled_reason is not None
 
+    @property
+    def maintenance_report(self) -> CacheMaintenanceReport | None:
+        """Return the last committed startup maintenance report."""
+        return self._maintenance_report
+
     def disable(self, reason: str) -> None:
         """Disable the advisory cache for the rest of the runtime."""
         if self._disabled_reason is not None:
@@ -303,7 +368,7 @@ class _SqliteEventCacheRuntime:
         async with self._db_lock:
             if self._disabled_reason is not None or self._db is not None:
                 return
-            self._db = await _initialize_event_cache_db(self._db_path)
+            self._db, self._maintenance_report = await _initialize_event_cache_db(self._db_path)
 
     async def close(self) -> None:
         """Close the SQLite connection when the cache is no longer needed."""
@@ -405,13 +470,25 @@ class SqliteEventCache:
         """Return whether cache writes can durably persist data."""
         return self._runtime.is_initialized and not self._runtime.is_disabled
 
+    @property
+    def startup_requires_sync_reset(self) -> bool:
+        """Return whether startup destructively reset cache contents."""
+        report = self._runtime.maintenance_report
+        return report is not None and report.startup_requires_sync_reset
+
     def runtime_diagnostics(self) -> dict[str, object]:
         """Return log-safe runtime state for sync certification diagnostics."""
-        return {
+        diagnostics: dict[str, object] = {
             "cache_backend": "sqlite",
             "cache_sqlite_initialized": self._runtime.is_initialized,
             "cache_sqlite_disabled": self._runtime.is_disabled,
+            "cache_storage_bytes": sqlite_storage_bytes(self.db_path),
         }
+        report = self._runtime.maintenance_report
+        if report is not None:
+            diagnostics.update(report.as_runtime_diagnostics())
+            diagnostics["cache_storage_bytes"] = sqlite_storage_bytes(self.db_path)
+        return diagnostics
 
     def pending_durable_write_room_ids(self) -> tuple[str, ...]:
         """Return rooms with runtime-only writes that must persist before certifying a sync token."""

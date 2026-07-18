@@ -19,6 +19,7 @@ from .event_batching import group_lookup_events_by_room
 from .event_cache import EventCacheBackendUnavailableError
 from .event_normalization import normalize_event_source_for_cache
 from .postgres_agent_message_snapshot import load_postgres_agent_message_snapshot
+from .postgres_cache_maintenance import migrate_postgres_schema, run_startup_maintenance
 from .postgres_redaction import redact_postgres_connection_info
 from .thread_cache_state import replacement_validated_at
 
@@ -28,10 +29,11 @@ if TYPE_CHECKING:
     from psycopg import AsyncConnection
 
     from .agent_message_snapshot import AgentMessageSnapshot
+    from .cache_maintenance import CacheMaintenanceReport
     from .event_cache import ThreadCacheState
 
 
-_POSTGRES_EVENT_CACHE_SCHEMA_VERSION = 1
+_POSTGRES_EVENT_CACHE_SCHEMA_VERSION = 2
 _LOCK_WAIT_LOG_THRESHOLD_SECONDS = 0.1
 _MAX_CACHED_ROOM_LOCKS = 256
 _MAX_TRANSIENT_OPERATION_ATTEMPTS = 2
@@ -139,18 +141,37 @@ async def _initialize_postgres_event_cache_db(
     database_url: str,
     *,
     namespace: str,
-) -> psycopg.AsyncConnection:
+) -> tuple[psycopg.AsyncConnection, CacheMaintenanceReport]:
     """Open the PostgreSQL database and ensure the event-cache schema exists."""
     db = await psycopg.AsyncConnection.connect(database_url)
     try:
+        await db.execute("SELECT pg_advisory_xact_lock(hashtext('mindroom_event_cache_schema'))")
         await _create_postgres_event_cache_schema(db)
-        await _validate_postgres_event_cache_schema(db)
+        current_schema_version = await _postgres_schema_version(db)
+        migrated_from_schema_version = await migrate_postgres_schema(
+            db,
+            namespace=namespace,
+            current_schema_version=current_schema_version,
+            target_schema_version=_POSTGRES_EVENT_CACHE_SCHEMA_VERSION,
+        )
+        report = await run_startup_maintenance(
+            db,
+            namespace=namespace,
+            schema_version=_POSTGRES_EVENT_CACHE_SCHEMA_VERSION,
+            migrated_from_schema_version=migrated_from_schema_version,
+        )
         await db.commit()
     except BaseException:
         await _rollback_postgres_connection_best_effort(db, namespace=namespace, operation="initialize")
         await _close_postgres_connection_best_effort(db, namespace=namespace, operation="initialize")
         raise
-    return db
+    logger.info(
+        "Matrix event cache startup maintenance complete",
+        backend="postgres",
+        namespace=namespace,
+        **report.as_runtime_diagnostics(),
+    )
+    return db, report
 
 
 async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
@@ -164,7 +185,7 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
             thread_id TEXT NOT NULL,
             event_id TEXT NOT NULL,
             origin_server_ts BIGINT NOT NULL,
-            event_json TEXT NOT NULL,
+            event_json TEXT,
             write_seq BIGINT NOT NULL DEFAULT nextval('mindroom_event_cache_write_seq'),
             PRIMARY KEY (namespace, room_id, event_id)
         )
@@ -284,6 +305,39 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
     )
     await db.execute(
         """
+        CREATE TABLE IF NOT EXISTS mindroom_event_cache_compacted_streaming_edits (
+            namespace TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            room_id TEXT NOT NULL,
+            original_event_id TEXT NOT NULL,
+            sender TEXT NOT NULL,
+            origin_server_ts BIGINT NOT NULL,
+            event_json_zlib BYTEA NOT NULL,
+            cached_at DOUBLE PRECISION NOT NULL,
+            event_order BIGINT NOT NULL,
+            thread_id TEXT,
+            thread_origin_server_ts BIGINT,
+            thread_order BIGINT,
+            indexed_thread_id TEXT,
+            PRIMARY KEY (namespace, event_id)
+        )
+        """,
+    )
+    await db.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_mindroom_event_cache_compacted_streaming_edits_original
+        ON mindroom_event_cache_compacted_streaming_edits(
+            namespace,
+            room_id,
+            original_event_id,
+            sender,
+            origin_server_ts,
+            event_order
+        )
+        """,
+    )
+    await db.execute(
+        """
         CREATE TABLE IF NOT EXISTS mindroom_event_cache_metadata (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -306,32 +360,6 @@ async def _postgres_schema_version(db: AsyncConnection) -> int | None:
     finally:
         await cursor.close()
     return None if row is None else int(row[0])
-
-
-async def _validate_postgres_event_cache_schema(db: AsyncConnection) -> None:
-    """Store or validate the PostgreSQL cache schema version."""
-    current_schema_version = await _postgres_schema_version(db)
-    if current_schema_version is None:
-        await db.execute(
-            """
-            INSERT INTO mindroom_event_cache_metadata(key, value)
-            VALUES ('schema_version', %s)
-            ON CONFLICT(key) DO NOTHING
-            """,
-            (str(_POSTGRES_EVENT_CACHE_SCHEMA_VERSION),),
-        )
-        current_schema_version = await _postgres_schema_version(db)
-        if current_schema_version is None:
-            msg = "PostgreSQL Matrix event cache schema version was not initialized"
-            raise RuntimeError(msg)
-    if current_schema_version == _POSTGRES_EVENT_CACHE_SCHEMA_VERSION:
-        return
-    msg = (
-        "PostgreSQL Matrix event cache schema version "
-        f"{current_schema_version} is not compatible with expected version "
-        f"{_POSTGRES_EVENT_CACHE_SCHEMA_VERSION}"
-    )
-    raise RuntimeError(msg)
 
 
 @dataclass
@@ -357,6 +385,7 @@ class _PostgresEventCacheRuntime:
         self._database_url = database_url
         self._namespace = namespace
         self._db: psycopg.AsyncConnection | None = None
+        self._maintenance_report: CacheMaintenanceReport | None = None
         self._disabled_reason: str | None = None
         self._unavailable_reason: str | None = None
         self._transient_failure_count = 0
@@ -403,6 +432,11 @@ class _PostgresEventCacheRuntime:
         """Return whether callers should still attempt durable cache writes."""
         return not self.is_disabled and not self._explicitly_closed
 
+    @property
+    def maintenance_report(self) -> CacheMaintenanceReport | None:
+        """Return the last committed startup maintenance report."""
+        return self._maintenance_report
+
     def disable(self, reason: str) -> None:
         """Disable the advisory cache for the rest of the runtime."""
         if self._disabled_reason is not None:
@@ -431,6 +465,8 @@ class _PostgresEventCacheRuntime:
             diagnostics["cache_postgres_disabled_reason"] = self._disabled_reason
         if self._unavailable_reason is not None:
             diagnostics["cache_postgres_unavailable_reason"] = self._unavailable_reason
+        if self._maintenance_report is not None:
+            diagnostics.update(self._maintenance_report.as_runtime_diagnostics())
         return diagnostics
 
     async def initialize(self) -> None:
@@ -444,7 +480,10 @@ class _PostgresEventCacheRuntime:
             had_previous_connection = self._db is not None
             await self._close_db_locked(operation="initialize")
             try:
-                self._db = await _initialize_postgres_event_cache_db(self._database_url, namespace=self._namespace)
+                self._db, self._maintenance_report = await _initialize_postgres_event_cache_db(
+                    self._database_url,
+                    namespace=self._namespace,
+                )
             except Exception as exc:
                 if _is_transient_postgres_failure(exc):
                     self._transient_failure_count += 1
@@ -678,6 +717,12 @@ class PostgresEventCache:
     def durable_writes_available(self) -> bool:
         """Return whether cache writes can durably persist data."""
         return self._runtime.durable_writes_available
+
+    @property
+    def startup_requires_sync_reset(self) -> bool:
+        """Return whether startup discarded cache contents certified by saved sync tokens."""
+        report = self._runtime.maintenance_report
+        return report is not None and report.startup_requires_sync_reset
 
     async def initialize(self) -> None:
         """Open the PostgreSQL database and create the cache schema."""

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from mindroom.logging_config import get_logger
+
 from .event_cache_events import (
     CachedEventRow,
     SerializedCachedEvent,
@@ -18,9 +20,19 @@ from .event_cache_events import (
     serialize_cacheable_events,
 )
 from .postgres_cursor import fetchall, fetchone, rowcount
+from .postgres_streaming_compaction import (
+    archived_dependent_edit_ids,
+    compact_superseded_streaming_edits,
+    delete_archived_events,
+    load_archived_event,
+    load_archived_thread_id,
+    load_latest_archived_edit,
+)
 
 if TYPE_CHECKING:
     from psycopg import AsyncConnection
+
+logger = get_logger(__name__)
 
 
 async def load_event(
@@ -39,7 +51,9 @@ async def load_event(
         """,
         (namespace, event_id),
     )
-    return None if row is None else json.loads(row[0])
+    if row is not None:
+        return json.loads(row[0])
+    return await load_archived_event(db, namespace=namespace, event_id=event_id)
 
 
 async def load_recent_room_events(
@@ -80,43 +94,25 @@ async def load_latest_edit(
     sender: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the latest cached edit event for one original event."""
-    if sender is None:
-        row = await fetchone(
-            db,
-            """
-            SELECT mindroom_event_cache_events.event_json
-            FROM mindroom_event_cache_event_edits
-            JOIN mindroom_event_cache_events
-                ON mindroom_event_cache_events.namespace = mindroom_event_cache_event_edits.namespace
-                AND mindroom_event_cache_events.event_id = mindroom_event_cache_event_edits.edit_event_id
-            WHERE mindroom_event_cache_event_edits.namespace = %s
-                AND mindroom_event_cache_event_edits.room_id = %s
-                AND mindroom_event_cache_event_edits.original_event_id = %s
-            ORDER BY mindroom_event_cache_event_edits.origin_server_ts DESC, mindroom_event_cache_events.write_seq DESC
-            LIMIT 1
-            """,
-            (namespace, room_id, original_event_id),
-        )
-        return None if row is None else json.loads(row[0])
-
-    row = await fetchone(
+    active = await _load_latest_active_edit(
         db,
-        """
-        SELECT mindroom_event_cache_events.event_json
-        FROM mindroom_event_cache_event_edits
-        JOIN mindroom_event_cache_events
-            ON mindroom_event_cache_events.namespace = mindroom_event_cache_event_edits.namespace
-            AND mindroom_event_cache_events.event_id = mindroom_event_cache_event_edits.edit_event_id
-        WHERE mindroom_event_cache_event_edits.namespace = %s
-            AND mindroom_event_cache_event_edits.room_id = %s
-            AND mindroom_event_cache_event_edits.original_event_id = %s
-            AND mindroom_event_cache_events.event_json::jsonb ->> 'sender' = %s
-        ORDER BY mindroom_event_cache_event_edits.origin_server_ts DESC, mindroom_event_cache_events.write_seq DESC
-        LIMIT 1
-        """,
-        (namespace, room_id, original_event_id, sender),
+        namespace=namespace,
+        room_id=room_id,
+        original_event_id=original_event_id,
+        sender=sender,
     )
-    return None if row is None else json.loads(row[0])
+    archived = await load_latest_archived_edit(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        original_event_id=original_event_id,
+        sender=sender,
+    )
+    if active is None:
+        return None if archived is None else archived.event_payload()
+    if archived is None or active[1:3] >= (archived.origin_server_ts, archived.event_order):
+        return active[0]
+    return archived.event_payload()
 
 
 async def load_latest_edit_row(
@@ -128,28 +124,63 @@ async def load_latest_edit_row(
     sender: str,
 ) -> CachedEventRow | None:
     """Return the latest cached edit event plus its lookup-row write time."""
+    active = await _load_latest_active_edit(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        original_event_id=original_event_id,
+        sender=sender,
+    )
+    archived = await load_latest_archived_edit(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        original_event_id=original_event_id,
+        sender=sender,
+    )
+    if active is None:
+        if archived is None:
+            return None
+        return CachedEventRow(event=archived.event_payload(), cached_at=archived.cached_at)
+    if archived is not None and active[1:3] < (archived.origin_server_ts, archived.event_order):
+        return CachedEventRow(event=archived.event_payload(), cached_at=archived.cached_at)
+    return CachedEventRow(event=active[0], cached_at=active[3])
+
+
+async def _load_latest_active_edit(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+    original_event_id: str,
+    sender: str | None,
+) -> tuple[dict[str, Any], int, int, float | None] | None:
+    sender_predicate = "" if sender is None else "AND events.event_json::jsonb ->> 'sender' = %s"
+    parameters = (namespace, room_id, original_event_id, *((sender,) if sender is not None else ()))
     row = await fetchone(
         db,
-        """
-        SELECT mindroom_event_cache_events.event_json, mindroom_event_cache_events.cached_at
-        FROM mindroom_event_cache_event_edits
-        JOIN mindroom_event_cache_events
-            ON mindroom_event_cache_events.namespace = mindroom_event_cache_event_edits.namespace
-            AND mindroom_event_cache_events.event_id = mindroom_event_cache_event_edits.edit_event_id
-        WHERE mindroom_event_cache_event_edits.namespace = %s
-            AND mindroom_event_cache_event_edits.room_id = %s
-            AND mindroom_event_cache_event_edits.original_event_id = %s
-            AND mindroom_event_cache_events.event_json::jsonb ->> 'sender' = %s
-        ORDER BY mindroom_event_cache_event_edits.origin_server_ts DESC, mindroom_event_cache_events.write_seq DESC
+        f"""
+        SELECT events.event_json, edits.origin_server_ts, events.write_seq, events.cached_at
+        FROM mindroom_event_cache_event_edits AS edits
+        JOIN mindroom_event_cache_events AS events
+            ON events.namespace = edits.namespace
+            AND events.event_id = edits.edit_event_id
+        WHERE edits.namespace = %s
+            AND edits.room_id = %s
+            AND edits.original_event_id = %s
+            {sender_predicate}
+        ORDER BY edits.origin_server_ts DESC, events.write_seq DESC
         LIMIT 1
-        """,
-        (namespace, room_id, original_event_id, sender),
+        """,  # noqa: S608
+        parameters,
     )
     if row is None:
         return None
-    return CachedEventRow(
-        event=json.loads(row[0]),
-        cached_at=None if row[1] is None else float(row[1]),
+    return (
+        json.loads(row[0]),
+        int(row[1]),
+        int(row[2]),
+        None if row[3] is None else float(row[3]),
     )
 
 
@@ -212,6 +243,19 @@ async def persist_lookup_events(
         cached_at=cached_at,
         thread_id=thread_id,
     )
+    compacted = await compact_superseded_streaming_edits(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+    )
+    if compacted:
+        logger.info(
+            "Compacted superseded Matrix streaming edits",
+            backend="postgres",
+            namespace=namespace,
+            room_id=room_id,
+            compacted_event_count=compacted,
+        )
 
 
 async def load_thread_id_for_event(
@@ -231,7 +275,14 @@ async def load_thread_id_for_event(
         """,
         (namespace, room_id, event_id),
     )
-    return None if row is None else str(row[0])
+    if row is not None:
+        return str(row[0])
+    return await load_archived_thread_id(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        event_id=event_id,
+    )
 
 
 async def redact_event_locked(
@@ -248,7 +299,13 @@ async def redact_event_locked(
         room_id,
         original_event_id=event_id,
     )
-    removed_event_ids = redaction_removal_event_ids(event_id, dependent_edit_ids)
+    archived_edit_ids = await archived_dependent_edit_ids(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        original_event_id=event_id,
+    )
+    removed_event_ids = redaction_removal_event_ids(event_id, [*dependent_edit_ids, *archived_edit_ids])
     deleted_thread_rows = await _delete_room_thread_events(
         db,
         namespace,
@@ -269,6 +326,12 @@ async def redact_event_locked(
         room_id,
         event_ids=removed_event_ids,
     )
+    deleted_archived_rows = await delete_archived_events(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        event_ids=removed_event_ids,
+    )
     await _record_redacted_events(
         db,
         namespace,
@@ -280,6 +343,7 @@ async def redact_event_locked(
         deleted_event_rows,
         deleted_edit_rows,
         deleted_thread_index_rows,
+        deleted_archived_rows,
     )
 
 
@@ -330,6 +394,12 @@ async def write_lookup_index_rows(
     """Persist point-lookup, edit-index, and thread-index rows for cached events."""
     if not serialized_events:
         return
+    await delete_archived_events(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        event_ids=[event.event_id for event in serialized_events],
+    )
     for event in serialized_events:
         await db.execute(
             """

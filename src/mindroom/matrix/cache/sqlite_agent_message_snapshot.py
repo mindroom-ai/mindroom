@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import zlib
 from typing import TYPE_CHECKING, Any
 
 from . import sqlite_event_cache_events, sqlite_event_cache_threads
@@ -71,26 +72,15 @@ async def _iter_scope_events(
     db: aiosqlite.Connection,
     *,
     room_id: str,
-    thread_id: str | None,
 ) -> aiosqlite.Cursor:
-    if thread_id is None:
-        return await db.execute(
-            """
-            SELECT event_json, cached_at
-            FROM events
-            WHERE room_id = ?
-            ORDER BY origin_server_ts DESC, rowid DESC
-            """,
-            (room_id,),
-        )
     return await db.execute(
         """
-        SELECT event_json, NULL AS cached_at
-        FROM thread_events
-        WHERE room_id = ? AND thread_id = ?
+        SELECT event_json, cached_at
+        FROM events
+        WHERE room_id = ?
         ORDER BY origin_server_ts DESC, rowid DESC
         """,
-        (room_id, thread_id),
+        (room_id,),
     )
 
 
@@ -102,10 +92,18 @@ async def _load_scope_snapshot(
     sender: str,
     runtime_started_at: float | None,
 ) -> AgentMessageSnapshot | None:
+    if thread_id is not None:
+        return await _load_thread_scope_snapshot(
+            db,
+            room_id=room_id,
+            thread_id=thread_id,
+            sender=sender,
+            runtime_started_at=runtime_started_at,
+        )
+
     cursor = await _iter_scope_events(
         db,
         room_id=room_id,
-        thread_id=thread_id,
     )
     try:
         while True:
@@ -136,6 +134,38 @@ async def _load_scope_snapshot(
         await cursor.close()
 
 
+async def _load_thread_scope_snapshot(
+    db: aiosqlite.Connection,
+    *,
+    room_id: str,
+    thread_id: str,
+    sender: str,
+    runtime_started_at: float | None,
+) -> AgentMessageSnapshot | None:
+    events = await sqlite_event_cache_threads.load_thread_events(
+        db,
+        room_id=room_id,
+        thread_id=thread_id,
+    )
+    for event in reversed(events or []):
+        if not event_matches_snapshot_scope(event, thread_id=thread_id, sender=sender):
+            continue
+        result = await _snapshot_from_event(
+            db,
+            room_id=room_id,
+            thread_id=thread_id,
+            sender=sender,
+            event=event,
+            cached_at=None,
+            runtime_started_at=runtime_started_at,
+        )
+        if result.stop_scanning:
+            return None
+        if result.snapshot is not None:
+            return result.snapshot
+    return None
+
+
 async def load_sqlite_agent_message_snapshot(
     db: aiosqlite.Connection,
     *,
@@ -159,7 +189,7 @@ async def load_sqlite_agent_message_snapshot(
             sender=sender,
             runtime_started_at=runtime_started_at,
         )
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, zlib.error) as exc:
         msg = "Cached Matrix event JSON is corrupt"
         raise AgentMessageSnapshotUnavailable(msg) from exc
     except sqlite3.Error as exc:

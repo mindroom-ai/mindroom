@@ -779,6 +779,7 @@ def make_event_cache_mock() -> AsyncMock:
     """Return an async mock shaped like the event cache protocol."""
     event_cache = AsyncMock(spec=SqliteEventCache)
     event_cache.durable_writes_available = True
+    event_cache.startup_requires_sync_reset = False
     event_cache.get_event.return_value = None
     event_cache.get_latest_edit.return_value = None
     event_cache.get_mxc_text.return_value = None

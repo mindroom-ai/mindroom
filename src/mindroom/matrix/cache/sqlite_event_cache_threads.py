@@ -36,6 +36,12 @@ from .sqlite_event_cache_events import (
     filter_cacheable_events,
     write_lookup_index_rows,
 )
+from .sqlite_streaming_compaction import (
+    archived_thread_event_ids,
+    compact_superseded_streaming_edits,
+    delete_archived_events,
+    load_archived_thread_events,
+)
 from .thread_cache_state import (
     ThreadCacheStateRow,
     can_revalidate_after_incremental_update,
@@ -58,18 +64,30 @@ async def load_thread_events(
     """Return cached events for one thread sorted by timestamp."""
     cursor = await db.execute(
         """
-        SELECT event_json
+        SELECT thread_events.origin_server_ts, thread_events.rowid, events.event_json
         FROM thread_events
-        WHERE room_id = ? AND thread_id = ?
-        ORDER BY origin_server_ts ASC, rowid ASC
+        JOIN events
+            ON events.event_id = thread_events.event_id
+            AND events.room_id = thread_events.room_id
+        WHERE thread_events.room_id = ? AND thread_events.thread_id = ?
+        ORDER BY thread_events.origin_server_ts ASC, thread_events.rowid ASC
         """,
         (room_id, thread_id),
     )
-    rows = await cursor.fetchall()
+    active_rows = await cursor.fetchall()
     await cursor.close()
-    if not rows:
+    ordered_events = [(int(row[0]), int(row[1]), json.loads(row[2])) for row in active_rows]
+    ordered_events.extend(
+        await load_archived_thread_events(
+            db,
+            room_id=room_id,
+            thread_id=thread_id,
+        ),
+    )
+    if not ordered_events:
         return None
-    return [json.loads(row[0]) for row in rows]
+    ordered_events.sort(key=lambda item: (item[0], item[1]))
+    return [event for _, _, event in ordered_events]
 
 
 async def load_recent_room_thread_ids(
@@ -82,13 +100,20 @@ async def load_recent_room_thread_ids(
     cursor = await db.execute(
         """
         SELECT thread_id
-        FROM thread_events
-        WHERE room_id = ?
+        FROM (
+            SELECT thread_id, origin_server_ts
+            FROM thread_events
+            WHERE room_id = ?
+            UNION ALL
+            SELECT thread_id, thread_origin_server_ts
+            FROM compacted_streaming_edits
+            WHERE room_id = ? AND thread_id IS NOT NULL
+        )
         GROUP BY thread_id
         ORDER BY MAX(origin_server_ts) DESC, thread_id ASC
         LIMIT ?
         """,
-        (room_id, limit),
+        (room_id, room_id, limit),
     )
     rows = await cursor.fetchall()
     await cursor.close()
@@ -178,22 +203,6 @@ async def _store_thread_events_locked(
     )
     serialized_events = serialize_cacheable_events(cacheable_events)
     if serialized_events:
-        await db.executemany(
-            """
-            INSERT OR REPLACE INTO thread_events(room_id, thread_id, event_id, origin_server_ts, event_json)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    room_id,
-                    thread_id,
-                    event.event_id,
-                    event.origin_server_ts,
-                    event.event_json,
-                )
-                for event in serialized_events
-            ],
-        )
         await write_lookup_index_rows(
             db,
             room_id=room_id,
@@ -201,6 +210,22 @@ async def _store_thread_events_locked(
             cached_at=validated_at,
             thread_id=thread_id,
         )
+        await db.executemany(
+            """
+            INSERT OR REPLACE INTO thread_events(room_id, thread_id, event_id, origin_server_ts)
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                (
+                    room_id,
+                    thread_id,
+                    event.event_id,
+                    event.origin_server_ts,
+                )
+                for event in serialized_events
+            ],
+        )
+        await compact_superseded_streaming_edits(db, room_id=room_id)
     await db.execute(
         """
         INSERT INTO thread_cache_state(
@@ -238,6 +263,7 @@ async def _replace_thread_locked(
         (room_id, thread_id),
     )
     if existing_event_ids:
+        await delete_archived_events(db, room_id=room_id, event_ids=existing_event_ids)
         await delete_cached_events(db, event_ids=existing_event_ids)
         await delete_event_edit_rows(
             db,
@@ -302,6 +328,7 @@ async def invalidate_thread_locked(
         (room_id, thread_id),
     )
     if event_ids:
+        await delete_archived_events(db, room_id=room_id, event_ids=event_ids)
         await delete_cached_events(db, event_ids=event_ids)
         await delete_event_edit_rows(
             db,
@@ -338,6 +365,7 @@ async def invalidate_room_threads_locked(
         (room_id,),
     )
     if event_ids:
+        await delete_archived_events(db, room_id=room_id, event_ids=event_ids)
         await delete_cached_events(db, event_ids=event_ids)
         await delete_event_edit_rows(
             db,
@@ -497,21 +525,9 @@ async def append_existing_thread_event(
             cached_at=time.time(),
             thread_id=thread_id,
         )
+        await compact_superseded_streaming_edits(db, room_id=room_id)
         return False
 
-    await db.execute(
-        """
-        INSERT OR REPLACE INTO thread_events(room_id, thread_id, event_id, origin_server_ts, event_json)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (
-            room_id,
-            thread_id,
-            serialized_event.event_id,
-            serialized_event.origin_server_ts,
-            serialized_event.event_json,
-        ),
-    )
     await write_lookup_index_rows(
         db,
         room_id=room_id,
@@ -519,6 +535,19 @@ async def append_existing_thread_event(
         cached_at=time.time(),
         thread_id=thread_id,
     )
+    await db.execute(
+        """
+        INSERT OR REPLACE INTO thread_events(room_id, thread_id, event_id, origin_server_ts)
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            room_id,
+            thread_id,
+            serialized_event.event_id,
+            serialized_event.origin_server_ts,
+        ),
+    )
+    await compact_superseded_streaming_edits(db, room_id=room_id)
     return True
 
 
@@ -539,7 +568,14 @@ async def _thread_event_ids_for_thread(
     )
     rows = await cursor.fetchall()
     await cursor.close()
-    return [str(row[0]) for row in rows]
+    return [
+        *(str(row[0]) for row in rows),
+        *await archived_thread_event_ids(
+            db,
+            room_id=room_id,
+            thread_id=thread_id,
+        ),
+    ]
 
 
 async def _thread_event_ids_for_room(
@@ -558,4 +594,10 @@ async def _thread_event_ids_for_room(
     )
     rows = await cursor.fetchall()
     await cursor.close()
-    return [str(row[0]) for row in rows]
+    return [
+        *(str(row[0]) for row in rows),
+        *await archived_thread_event_ids(
+            db,
+            room_id=room_id,
+        ),
+    ]

@@ -257,6 +257,21 @@ def test_restore_saved_sync_token_ignores_invalid_utf8(tmp_path: Path) -> None:
     assert bot.client.next_batch is None
 
 
+def test_restore_saved_sync_token_clears_certification_after_cache_reset(tmp_path: Path) -> None:
+    """A destructive cache reset invalidates the saved sync bound that certified discarded rows."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = None
+    bot.event_cache.startup_requires_sync_reset = True
+    save_sync_token(tmp_path, bot.agent_name, "s_before_cache_reset")
+
+    bot._restore_saved_sync_token()
+
+    assert bot.client.next_batch is None
+    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+    assert bot._sync_trust_state is SyncTrustState.COLD
+
+
 @pytest.mark.asyncio
 async def test_unknown_pos_first_sync_clears_client_and_saved_token(tmp_path: Path) -> None:
     """Rejected first-sync saved tokens should be removed before nio retries."""

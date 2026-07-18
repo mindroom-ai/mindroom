@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import zlib
 from typing import TYPE_CHECKING, Any
+
+from mindroom.logging_config import get_logger
 
 from .event_cache_events import (
     CachedEventRow,
@@ -17,9 +20,20 @@ from .event_cache_events import (
     redaction_removal_event_ids,
     serialize_cacheable_events,
 )
+from .sqlite_streaming_compaction import (
+    ArchivedStreamingEdit,
+    archived_dependent_edit_ids,
+    compact_superseded_streaming_edits,
+    delete_archived_events,
+    load_archived_event,
+    load_archived_thread_id,
+    load_latest_archived_edit,
+)
 
 if TYPE_CHECKING:
     import aiosqlite
+
+logger = get_logger(__name__)
 
 
 async def load_event(
@@ -38,7 +52,9 @@ async def load_event(
     )
     row = await cursor.fetchone()
     await cursor.close()
-    return None if row is None else json.loads(row[0])
+    if row is not None:
+        return json.loads(row[0])
+    return await load_archived_event(db, room_id=None, event_id=event_id)
 
 
 async def load_recent_room_events(
@@ -77,38 +93,23 @@ async def load_latest_edit(
     sender: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the latest cached edit event for one original event."""
-    if sender is None:
-        cursor = await db.execute(
-            """
-            SELECT events.event_json
-            FROM event_edits
-            JOIN events ON events.event_id = event_edits.edit_event_id
-            WHERE event_edits.room_id = ? AND event_edits.original_event_id = ?
-            ORDER BY event_edits.origin_server_ts DESC, events.rowid DESC
-            LIMIT 1
-            """,
-            (room_id, original_event_id),
-        )
-        row = await cursor.fetchone()
-        await cursor.close()
-        return None if row is None else json.loads(row[0])
-
-    cursor = await db.execute(
-        """
-        SELECT events.event_json
-        FROM event_edits
-        JOIN events ON events.event_id = event_edits.edit_event_id
-        WHERE event_edits.room_id = ?
-            AND event_edits.original_event_id = ?
-            AND json_extract(events.event_json, '$.sender') = ?
-        ORDER BY event_edits.origin_server_ts DESC, events.rowid DESC
-        LIMIT 1
-        """,
-        (room_id, original_event_id, sender),
+    active = await _load_latest_active_edit(
+        db,
+        room_id=room_id,
+        original_event_id=original_event_id,
+        sender=sender,
     )
-    row = await cursor.fetchone()
-    await cursor.close()
-    return None if row is None else json.loads(row[0])
+    archived = await load_latest_archived_edit(
+        db,
+        room_id=room_id,
+        original_event_id=original_event_id,
+        sender=sender,
+    )
+    if active is None:
+        return None if archived is None else _archived_event_payload(archived)
+    if archived is None or active[1:3] >= (archived.origin_server_ts, archived.event_order):
+        return active[0]
+    return _archived_event_payload(archived)
 
 
 async def load_latest_edit_row(
@@ -119,27 +120,63 @@ async def load_latest_edit_row(
     sender: str,
 ) -> CachedEventRow | None:
     """Return the latest cached edit event plus its lookup-row write time."""
+    active = await _load_latest_active_edit(
+        db,
+        room_id=room_id,
+        original_event_id=original_event_id,
+        sender=sender,
+    )
+    archived = await load_latest_archived_edit(
+        db,
+        room_id=room_id,
+        original_event_id=original_event_id,
+        sender=sender,
+    )
+    if active is None:
+        if archived is None:
+            return None
+        return CachedEventRow(event=_archived_event_payload(archived), cached_at=archived.cached_at)
+    if archived is not None and active[1:3] < (archived.origin_server_ts, archived.event_order):
+        return CachedEventRow(event=_archived_event_payload(archived), cached_at=archived.cached_at)
+    return CachedEventRow(event=active[0], cached_at=active[3])
+
+
+async def _load_latest_active_edit(
+    db: aiosqlite.Connection,
+    *,
+    room_id: str,
+    original_event_id: str,
+    sender: str | None,
+) -> tuple[dict[str, Any], int, int, float | None] | None:
+    sender_predicate = "" if sender is None else "AND json_extract(events.event_json, '$.sender') = ?"
+    parameters = (room_id, original_event_id, *((sender,) if sender is not None else ()))
     cursor = await db.execute(
-        """
-        SELECT events.event_json, events.cached_at
+        f"""
+        SELECT events.event_json, event_edits.origin_server_ts, events.rowid, events.cached_at
         FROM event_edits
         JOIN events ON events.event_id = event_edits.edit_event_id
         WHERE event_edits.room_id = ?
             AND event_edits.original_event_id = ?
-            AND json_extract(events.event_json, '$.sender') = ?
+            {sender_predicate}
         ORDER BY event_edits.origin_server_ts DESC, events.rowid DESC
         LIMIT 1
-        """,
-        (room_id, original_event_id, sender),
+        """,  # noqa: S608
+        parameters,
     )
     row = await cursor.fetchone()
     await cursor.close()
     if row is None:
         return None
-    return CachedEventRow(
-        event=json.loads(row[0]),
-        cached_at=None if row[1] is None else float(row[1]),
+    return (
+        json.loads(row[0]),
+        int(row[1]),
+        int(row[2]),
+        None if row[3] is None else float(row[3]),
     )
+
+
+def _archived_event_payload(event: ArchivedStreamingEdit) -> dict[str, Any]:
+    return json.loads(zlib.decompress(event.event_json_zlib).decode())
 
 
 async def load_mxc_text(
@@ -195,6 +232,14 @@ async def persist_lookup_events(
         cached_at=cached_at,
         thread_id=thread_id,
     )
+    compacted = await compact_superseded_streaming_edits(db, room_id=room_id)
+    if compacted:
+        logger.info(
+            "Compacted superseded Matrix streaming edits",
+            backend="sqlite",
+            room_id=room_id,
+            compacted_event_count=compacted,
+        )
 
 
 async def load_thread_id_for_event(
@@ -214,7 +259,9 @@ async def load_thread_id_for_event(
     )
     row = await cursor.fetchone()
     await cursor.close()
-    return None if row is None else str(row[0])
+    if row is not None:
+        return str(row[0])
+    return await load_archived_thread_id(db, room_id=room_id, event_id=event_id)
 
 
 async def redact_event_locked(
@@ -225,7 +272,12 @@ async def redact_event_locked(
 ) -> bool:
     """Delete one cached event after a redaction within an existing transaction."""
     dependent_edit_ids = await _dependent_edit_event_ids(db, room_id, original_event_id=event_id)
-    removed_event_ids = redaction_removal_event_ids(event_id, dependent_edit_ids)
+    archived_edit_ids = await archived_dependent_edit_ids(
+        db,
+        room_id=room_id,
+        original_event_id=event_id,
+    )
+    removed_event_ids = redaction_removal_event_ids(event_id, [*dependent_edit_ids, *archived_edit_ids])
     deleted_thread_rows = await _delete_room_thread_events(db, room_id, event_ids=removed_event_ids)
     deleted_event_rows = await delete_cached_events(db, event_ids=removed_event_ids)
     deleted_edit_rows = await delete_event_edit_rows(
@@ -239,6 +291,11 @@ async def redact_event_locked(
         room_id,
         event_ids=removed_event_ids,
     )
+    deleted_archived_rows = await delete_archived_events(
+        db,
+        room_id=room_id,
+        event_ids=removed_event_ids,
+    )
     await _record_redacted_events(
         db,
         room_id,
@@ -249,6 +306,7 @@ async def redact_event_locked(
         deleted_event_rows,
         deleted_edit_rows,
         deleted_thread_index_rows,
+        deleted_archived_rows,
     )
 
 
@@ -294,6 +352,11 @@ async def write_lookup_index_rows(
     """Persist point-lookup, edit-index, and thread-index rows for cached events."""
     if not serialized_events:
         return
+    await delete_archived_events(
+        db,
+        room_id=room_id,
+        event_ids=[event.event_id for event in serialized_events],
+    )
     await db.executemany(
         """
         INSERT INTO events(event_id, room_id, origin_server_ts, event_json, cached_at)

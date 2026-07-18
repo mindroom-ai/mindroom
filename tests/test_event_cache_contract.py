@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from mindroom.constants import (
+    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
+    STREAM_STATUS_STREAMING,
+)
 from mindroom.matrix.cache import ConversationEventCache
 from tests.event_cache_test_support import replace_thread_unconditionally
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _message_event(
@@ -18,6 +27,7 @@ def _message_event(
     sender: str = "@user:localhost",
     thread_id: str | None = None,
     edit_of: str | None = None,
+    stream_status: str | None = None,
 ) -> dict[str, Any]:
     content: dict[str, Any] = {
         "body": event_id if body is None else body,
@@ -27,6 +37,8 @@ def _message_event(
         content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
     if edit_of is not None:
         content["m.new_content"] = {"body": content["body"], "msgtype": "m.text"}
+        if stream_status is not None:
+            content["m.new_content"][STREAM_STATUS_KEY] = stream_status
         content["m.relates_to"] = {"rel_type": "m.replace", "event_id": edit_of}
     return {
         "event_id": event_id,
@@ -208,3 +220,337 @@ class TestConversationEventCacheContract:
         assert await event_cache.get_event(room_id, original_id) is None
         assert await event_cache.get_event(room_id, edit_id) is None
         assert await event_cache.redact_event(room_id, original_id) is False
+
+    @pytest.mark.asyncio
+    async def test_streaming_compaction_preserves_redaction_fallback_chain(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """Compacted nonterminal edits remain exact cold history when newer edits are redacted."""
+        room_id = "!room:localhost"
+        thread_id = "$original:localhost"
+        sender = "@agent:localhost"
+        root = _message_event(thread_id, 1, sender=sender)
+        pending = _message_event(
+            "$pending:localhost",
+            2,
+            sender=sender,
+            edit_of=thread_id,
+            stream_status=STREAM_STATUS_PENDING,
+        )
+        first_terminal = _message_event(
+            "$first-terminal:localhost",
+            3,
+            sender=sender,
+            edit_of=thread_id,
+            stream_status=STREAM_STATUS_COMPLETED,
+        )
+        streaming = _message_event(
+            "$streaming:localhost",
+            4,
+            sender=sender,
+            edit_of=thread_id,
+            stream_status=STREAM_STATUS_STREAMING,
+        )
+        final_terminal = _message_event(
+            "$final-terminal:localhost",
+            5,
+            sender=sender,
+            edit_of=thread_id,
+            stream_status=STREAM_STATUS_COMPLETED,
+        )
+        await replace_thread_unconditionally(
+            event_cache,
+            room_id,
+            thread_id,
+            [final_terminal, streaming, first_terminal, pending, root],
+        )
+
+        cached_thread = await event_cache.get_thread_events(room_id, thread_id)
+        assert cached_thread is not None
+        assert [event["event_id"] for event in cached_thread] == [
+            thread_id,
+            "$pending:localhost",
+            "$first-terminal:localhost",
+            "$streaming:localhost",
+            "$final-terminal:localhost",
+        ]
+        assert await event_cache.get_event(room_id, "$pending:localhost") == pending
+        assert await event_cache.get_event(room_id, "$streaming:localhost") == streaming
+        assert await event_cache.get_latest_edit(room_id, thread_id, sender=sender) == final_terminal
+
+        assert await event_cache.redact_event(room_id, "$final-terminal:localhost") is True
+        assert await event_cache.get_latest_edit(room_id, thread_id, sender=sender) == streaming
+        assert await event_cache.redact_event(room_id, "$streaming:localhost") is True
+        assert await event_cache.get_latest_edit(room_id, thread_id, sender=sender) == first_terminal
+        assert await event_cache.redact_event(room_id, "$first-terminal:localhost") is True
+        assert await event_cache.get_latest_edit(room_id, thread_id, sender=sender) == pending
+        assert await event_cache.redact_event(room_id, "$pending:localhost") is True
+        assert await event_cache.get_latest_edit(room_id, thread_id, sender=sender) is None
+
+    @pytest.mark.asyncio
+    async def test_original_redaction_tombstones_compacted_edits(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """Original redaction removes cold edits and blocks every late replay from resurrecting them."""
+        room_id = "!room:localhost"
+        original_id = "$original:localhost"
+        sender = "@agent:localhost"
+        original = _message_event(original_id, 1, sender=sender)
+        pending = _message_event(
+            "$pending:localhost",
+            2,
+            sender=sender,
+            edit_of=original_id,
+            stream_status=STREAM_STATUS_PENDING,
+        )
+        terminal = _message_event(
+            "$terminal:localhost",
+            3,
+            sender=sender,
+            edit_of=original_id,
+            stream_status=STREAM_STATUS_COMPLETED,
+        )
+        await replace_thread_unconditionally(
+            event_cache,
+            room_id,
+            original_id,
+            [terminal, pending, original],
+        )
+
+        assert await event_cache.redact_event(room_id, original_id) is True
+        assert await event_cache.get_event(room_id, pending["event_id"]) is None
+        assert await event_cache.get_event(room_id, terminal["event_id"]) is None
+
+        await event_cache.store_events_batch(
+            [
+                (original_id, room_id, original),
+                (str(pending["event_id"]), room_id, pending),
+                (str(terminal["event_id"]), room_id, terminal),
+            ],
+        )
+
+        assert await event_cache.get_event(room_id, original_id) is None
+        assert await event_cache.get_event(room_id, str(pending["event_id"])) is None
+        assert await event_cache.get_event(room_id, str(terminal["event_id"])) is None
+        assert await event_cache.get_latest_edit(room_id, original_id, sender=sender) is None
+
+
+@pytest.mark.asyncio
+async def test_streaming_compaction_survives_backend_restart(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """Both backends retain compressed edit history and normalized thread ordering across restart."""
+    room_id = "!room:localhost"
+    thread_id = "$original:localhost"
+    sender = "@agent:localhost"
+    root = _message_event(thread_id, 1, sender=sender)
+    pending = _message_event(
+        "$pending:localhost",
+        2,
+        sender=sender,
+        edit_of=thread_id,
+        stream_status=STREAM_STATUS_PENDING,
+    )
+    terminal = _message_event(
+        "$terminal:localhost",
+        3,
+        sender=sender,
+        edit_of=thread_id,
+        stream_status=STREAM_STATUS_COMPLETED,
+    )
+    first_cache = event_cache_factory()
+    await first_cache.initialize()
+    try:
+        await replace_thread_unconditionally(
+            first_cache,
+            room_id,
+            thread_id,
+            [terminal, pending, root],
+        )
+    finally:
+        await first_cache.close()
+
+    restarted_cache = event_cache_factory()
+    await restarted_cache.initialize()
+    try:
+        cached_thread = await restarted_cache.get_thread_events(room_id, thread_id)
+        diagnostics = restarted_cache.runtime_diagnostics()
+
+        assert cached_thread is not None
+        assert [event["event_id"] for event in cached_thread] == [
+            thread_id,
+            "$pending:localhost",
+            "$terminal:localhost",
+        ]
+        assert await restarted_cache.get_event(room_id, "$pending:localhost") == pending
+        assert await restarted_cache.get_latest_edit(room_id, thread_id, sender=sender) == terminal
+        assert diagnostics["cache_compacted_streaming_edit_archive_rows"] == 1
+        assert diagnostics["cache_compacted_streaming_edit_archive_bytes"] > 0
+        assert "database_url" not in str(diagnostics).lower()
+        assert str(pending["content"]["body"]) not in str(diagnostics)
+    finally:
+        await restarted_cache.close()
+
+
+@pytest.mark.asyncio
+async def test_streaming_compaction_guards_sender_and_equal_timestamp(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """Compaction requires a strictly newer terminal edit in the same sender partition."""
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    first_sender = "@agent:localhost"
+    other_sender = "@other:localhost"
+    pending = _message_event(
+        "$pending:localhost",
+        2,
+        sender=first_sender,
+        edit_of=original_id,
+        stream_status=STREAM_STATUS_PENDING,
+    )
+    equal_terminal = _message_event(
+        "$equal-terminal:localhost",
+        2,
+        sender=first_sender,
+        edit_of=original_id,
+        stream_status=STREAM_STATUS_COMPLETED,
+    )
+    other_pending = _message_event(
+        "$other-pending:localhost",
+        1,
+        sender=other_sender,
+        edit_of=original_id,
+        stream_status=STREAM_STATUS_PENDING,
+    )
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        await cache.store_events_batch(
+            [
+                (str(pending["event_id"]), room_id, pending),
+                (str(equal_terminal["event_id"]), room_id, equal_terminal),
+                (str(other_pending["event_id"]), room_id, other_pending),
+            ],
+        )
+    finally:
+        await cache.close()
+
+    equal_timestamp_restart = event_cache_factory()
+    await equal_timestamp_restart.initialize()
+    try:
+        assert equal_timestamp_restart.runtime_diagnostics()["cache_compacted_streaming_edit_archive_rows"] == 0
+        later_terminal = _message_event(
+            "$later-terminal:localhost",
+            3,
+            sender=first_sender,
+            edit_of=original_id,
+            stream_status=STREAM_STATUS_COMPLETED,
+        )
+        await equal_timestamp_restart.store_event(
+            str(later_terminal["event_id"]),
+            room_id,
+            later_terminal,
+        )
+    finally:
+        await equal_timestamp_restart.close()
+
+    partition_restart = event_cache_factory()
+    await partition_restart.initialize()
+    try:
+        diagnostics = partition_restart.runtime_diagnostics()
+        assert diagnostics["cache_compacted_streaming_edit_archive_rows"] == 1
+        assert await partition_restart.get_event(room_id, str(pending["event_id"])) == pending
+        assert (
+            await partition_restart.get_latest_edit(
+                room_id,
+                original_id,
+                sender=other_sender,
+            )
+            == other_pending
+        )
+    finally:
+        await partition_restart.close()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_replacement_removes_compacted_members(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """Authoritative replacement removes both active and cold members of the old snapshot."""
+    room_id = "!room:localhost"
+    thread_id = "$original:localhost"
+    sender = "@agent:localhost"
+    root = _message_event(thread_id, 1, sender=sender)
+    pending = _message_event(
+        "$pending:localhost",
+        2,
+        sender=sender,
+        edit_of=thread_id,
+        stream_status=STREAM_STATUS_PENDING,
+    )
+    terminal = _message_event(
+        "$terminal:localhost",
+        3,
+        sender=sender,
+        edit_of=thread_id,
+        stream_status=STREAM_STATUS_COMPLETED,
+    )
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        await replace_thread_unconditionally(cache, room_id, thread_id, [terminal, pending, root])
+        await replace_thread_unconditionally(cache, room_id, thread_id, [root])
+    finally:
+        await cache.close()
+
+    restarted_cache = event_cache_factory()
+    await restarted_cache.initialize()
+    try:
+        assert await restarted_cache.get_thread_events(room_id, thread_id) == [root]
+        assert await restarted_cache.get_event(room_id, str(pending["event_id"])) is None
+        assert await restarted_cache.get_event(room_id, str(terminal["event_id"])) is None
+        assert restarted_cache.runtime_diagnostics()["cache_compacted_streaming_edit_archive_rows"] == 0
+    finally:
+        await restarted_cache.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_preserves_learned_root_mapping_proven_by_cold_child(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """A root self-mapping remains valid when its only surviving proof is a compacted child."""
+    room_id = "!room:localhost"
+    thread_id = "$unfetched-root:localhost"
+    sender = "@agent:localhost"
+    pending = _message_event(
+        "$pending:localhost",
+        2,
+        sender=sender,
+        edit_of=thread_id,
+        stream_status=STREAM_STATUS_PENDING,
+    )
+    terminal = _message_event(
+        "$terminal:localhost",
+        3,
+        sender=sender,
+        edit_of=thread_id,
+        stream_status=STREAM_STATUS_COMPLETED,
+    )
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        await replace_thread_unconditionally(cache, room_id, thread_id, [terminal, pending])
+        assert await cache.redact_event(room_id, str(terminal["event_id"])) is True
+    finally:
+        await cache.close()
+
+    restarted_cache = event_cache_factory()
+    await restarted_cache.initialize()
+    try:
+        assert await restarted_cache.get_thread_events(room_id, thread_id) == [pending]
+        assert await restarted_cache.get_thread_id_for_event(room_id, thread_id) == thread_id
+        assert restarted_cache.runtime_diagnostics()["cache_orphan_thread_indexes_after"] == 0
+    finally:
+        await restarted_cache.close()

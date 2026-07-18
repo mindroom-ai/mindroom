@@ -301,12 +301,12 @@ async def test_sqlite_event_cache_initialize_closes_db_after_cancellation(
     async def connect(_db_path: Path) -> object:
         return db
 
-    async def reset_stale_cache_if_needed(_db: object, *, db_path: Path) -> None:
+    async def prepare_event_cache_schema(_db: object, *, db_path: Path) -> tuple[int | None, bool]:
         _ = db_path
         raise asyncio.CancelledError(cancel_reason)
 
     monkeypatch.setattr(sqlite_event_cache.aiosqlite, "connect", connect)
-    monkeypatch.setattr(sqlite_event_cache, "_reset_stale_cache_if_needed", reset_stale_cache_if_needed)
+    monkeypatch.setattr(sqlite_event_cache, "_prepare_event_cache_schema", prepare_event_cache_schema)
 
     with pytest.raises(asyncio.CancelledError, match=cancel_reason):
         await sqlite_event_cache._initialize_event_cache_db(tmp_path / "event_cache.db")
@@ -340,6 +340,7 @@ async def test_postgres_event_cache_initialize_attempts_cleanup_without_masking_
         commit=AsyncMock(),
         rollback=AsyncMock(side_effect=RuntimeError("rollback failed")),
         close=AsyncMock(side_effect=RuntimeError("close failed")),
+        execute=AsyncMock(),
     )
 
     async def connect(_database_url: str) -> object:
