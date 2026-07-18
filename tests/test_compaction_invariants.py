@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from agno.agent import Agent
-from agno.exceptions import ContextWindowExceededError
+from agno.exceptions import ContextWindowExceededError, ModelProviderError
 from agno.models.anthropic import Claude
 from agno.models.message import Message
 from agno.models.response import ModelResponse
@@ -37,6 +37,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
+from mindroom.error_handling import ModelSafeguardRefusalError
 from mindroom.history.compaction import compact_scope_history
 from mindroom.history.storage import (
     compacted_run_ids_with,
@@ -643,6 +644,35 @@ def test_retry_policy_propagates_second_typed_context_window_error() -> None:
     assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=2, budget=8_000, error=error) is None
 
 
+def test_retry_policy_shrinks_budget_for_safeguard_refusal() -> None:
+    error = ModelSafeguardRefusalError("provider-specific refusal wording")
+
+    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) == 8_000
+    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=2, budget=8_000, error=error) is None
+
+
+def test_retry_policy_should_shrink_for_refusal_and_empty_result() -> None:
+    policy = DEFAULT_SUMMARY_RETRY_POLICY
+
+    assert policy.should_shrink(ModelSafeguardRefusalError("provider-specific refusal wording")) is True
+    assert policy.should_shrink(_CompactionSummaryEmptyResultError("summary generation returned no result")) is True
+
+
+@pytest.mark.parametrize("status_code", [429, 503, 529])
+def test_retry_policy_retries_selected_transient_provider_errors_at_same_budget(status_code: int) -> None:
+    error = ModelProviderError("temporary provider failure", status_code=status_code)
+
+    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) == 16_000
+    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=2, budget=16_000, error=error) is None
+
+
+@pytest.mark.parametrize("status_code", [400, 401])
+def test_retry_policy_does_not_retry_non_transient_provider_statuses(status_code: int) -> None:
+    error = ModelProviderError("provider failure", status_code=status_code)
+
+    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) is None
+
+
 def test_retry_policy_preserves_context_error_fragment_matches() -> None:
     policy = DEFAULT_SUMMARY_RETRY_POLICY
 
@@ -838,6 +868,59 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
 
     assert outcome is not None
     # Chunk 1 fails empty, is rebuilt smaller, then chunk 2 compacts run-2.
+    assert len(attempts) == 3
+    assert estimate_compaction_input_tokens(attempts[1]) < estimate_compaction_input_tokens(attempts[0])
+    assert attempts[2] != attempts[1]
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "recovered summary"
+    storage.close()
+
+
+@pytest.mark.asyncio
+async def test_compaction_shrinks_input_after_safeguard_refusal(tmp_path: Path) -> None:
+    """A safeguard refusal retries with a smaller input and persists the result."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        [
+            _completed_run("run-1", marker="RUN1-MARKER", padding=16_000),
+            _completed_run("run-2", marker="RUN2-MARKER", padding=16_000),
+        ],
+    )
+    write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+
+    attempts: list[str] = []
+
+    async def flaky_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+        attempts.append(summary_input)
+        if len(attempts) == 1:
+            msg = "provider-specific refusal wording"
+            raise ModelSafeguardRefusalError(msg)
+        return SessionSummary(summary="recovered summary", updated_at=datetime.now(UTC))
+
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(side_effect=flaky_summary),
+    ):
+        outcome = await compact_scope_history(
+            storage=storage,
+            session=session,
+            scope=_SCOPE,
+            state=read_scope_state(session, _SCOPE),
+            history_settings=_HISTORY_SETTINGS,
+            available_history_budget=None,
+            summary_input_budget=10_000,
+            summary_model=FakeModel(id="summary-model", provider="fake"),
+            summary_model_name="summary-model",
+            replay_window_tokens=64_000,
+            threshold_tokens=None,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+        )
+
+    assert outcome is not None
     assert len(attempts) == 3
     assert estimate_compaction_input_tokens(attempts[1]) < estimate_compaction_input_tokens(attempts[0])
     assert attempts[2] != attempts[1]

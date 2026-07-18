@@ -1033,6 +1033,7 @@ depends_on = [
     "mindroom.cancellation",
     "mindroom.claude_prompt_cache",
     "mindroom.constants",
+    "mindroom.error_handling",
     "mindroom.logging_config",
     "mindroom.timing",
 ]

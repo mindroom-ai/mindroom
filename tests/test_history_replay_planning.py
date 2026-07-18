@@ -727,16 +727,17 @@ def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_di
 
 
 @pytest.mark.parametrize(
-    ("active_context_window", "expected_replay_window"),
+    ("active_context_window", "expected_replay_window", "expected_summary_input_budget"),
     [
-        (1_000_000, 200_000),
-        (100_000, 100_000),
+        (1_000_000, 200_000, 200_000),
+        (100_000, 100_000, 71_616),
     ],
 )
 def test_resolve_history_execution_plan_caps_replay_without_changing_model_window(
     tmp_path: Path,
     active_context_window: int,
     expected_replay_window: int,
+    expected_summary_input_budget: int,
 ) -> None:
     config, _runtime_paths_value = _make_config(
         tmp_path,
@@ -755,6 +756,7 @@ def test_resolve_history_execution_plan_caps_replay_without_changing_model_windo
 
     assert execution_plan.compaction_context_window == active_context_window
     assert execution_plan.replay_window_tokens == expected_replay_window
+    assert execution_plan.summary_input_budget_tokens == expected_summary_input_budget
     assert execution_plan.trigger_threshold_tokens == int(expected_replay_window * 0.8)
     hard_replay_budget = execution_plan.hard_replay_budget_tokens
     assert hard_replay_budget is not None

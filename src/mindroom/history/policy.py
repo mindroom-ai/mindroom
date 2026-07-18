@@ -36,6 +36,7 @@ def resolve_history_execution_plan(
     )
     summary_input_budget_tokens, unavailable_reason = _resolve_summary_input_budget(
         compaction_context_window=compaction_context_window,
+        replay_window_tokens=replay_window_tokens,
         reserve_tokens=compaction_config.reserve_tokens,
     )
 
@@ -182,6 +183,7 @@ def describe_compaction_unavailability(plan: ResolvedHistoryExecutionPlan) -> st
 def _resolve_summary_input_budget(
     *,
     compaction_context_window: int | None,
+    replay_window_tokens: int | None,
     reserve_tokens: int,
 ) -> tuple[int | None, CompactionAvailabilityReason | None]:
     if compaction_context_window is None:
@@ -195,6 +197,8 @@ def _resolve_summary_input_budget(
         compaction_context_window,
         reserve_tokens=normalized_reserve_tokens,
     )
+    if replay_window_tokens is not None:
+        summary_input_budget_tokens = min(summary_input_budget_tokens, replay_window_tokens)
     if summary_input_budget_tokens <= 0:
         return summary_input_budget_tokens, "non_positive_summary_input_budget"
     return summary_input_budget_tokens, None

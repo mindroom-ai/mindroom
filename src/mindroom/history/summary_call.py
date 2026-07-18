@@ -16,11 +16,10 @@ It enforces the call-side half of the compaction invariants
 
 4. Retry on provider failure is deterministic.
    ``SummaryRetryPolicy`` decides which error classes warrant a smaller retry
-   (timeouts, typed context-window errors, and named legacy context-length
-   fragments), the shrink schedule (halving), and the give-up floor — no inline
-   string matching at call sites.
-   Empty-text success responses also retry with less input because some providers
-   surface rejected or oversized requests as an empty successful response.
+   (timeouts, typed context-window and safeguard errors, empty results, output
+   limits, and named legacy context-length fragments), the shrink schedule
+   (halving), and the give-up floor — no inline string matching at call sites.
+   Selected typed transient provider errors get one same-budget retry.
 
 5. Output-capped summaries use an explicit retry signal.
    ``generate_compaction_summary`` refuses to return a likely truncated summary,
@@ -40,13 +39,14 @@ from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING
 
-from agno.exceptions import ContextWindowExceededError
+from agno.exceptions import ContextWindowExceededError, ModelProviderError
 from agno.models.message import Message
 from agno.session.summary import SessionSummary
 
 from mindroom.cancellation import request_task_cancel
 from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
+from mindroom.error_handling import ModelSafeguardRefusalError
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 
@@ -57,6 +57,12 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
+
+# Deliberately narrower than ``TRANSIENT_PROVIDER_STATUS_CODES`` because
+# ``ModelProviderError`` defaults to status 502, which would silently make
+# unclassified errors eligible for a full-budget retry. Safeguard refusals share
+# that default, so shrink classification must remain first.
+_TRANSIENT_SUMMARY_STATUS_CODES = frozenset({429, 503, 529})
 
 _RETRYABLE_PROVIDER_ERROR_FRAGMENTS = (
     "timed out",
@@ -87,9 +93,10 @@ class _CompactionSummaryEmptyResultError(RuntimeError):
 class SummaryRetryPolicy:
     """Explicit retry policy for failed compaction summary calls.
 
-    The schedule is deterministic: each shrinkable failure divides the input
-    budget by ``shrink_divisor`` (clamped to ``floor_tokens``); once the budget
-    can no longer shrink, or ``max_attempts`` is reached, the error propagates.
+    Each shrinkable failure divides the input budget by ``shrink_divisor``
+    (clamped to ``floor_tokens``), while selected transient statuses retry the
+    same budget. Once ``max_attempts`` is reached or no retry applies, the error
+    propagates.
     """
 
     max_attempts: int = 2
@@ -97,22 +104,31 @@ class SummaryRetryPolicy:
     floor_tokens: int = 1_000
 
     def should_shrink(self, error: Exception) -> bool:
-        """Return whether a smaller summary input may resolve this provider failure."""
-        if isinstance(error, TimeoutError | ContextWindowExceededError | CompactionSummaryOutputLimitError):
+        """Return whether rebuilding a smaller summary input may resolve the failure."""
+        if isinstance(
+            error,
+            TimeoutError
+            | ContextWindowExceededError
+            | CompactionSummaryOutputLimitError
+            | ModelSafeguardRefusalError
+            | _CompactionSummaryEmptyResultError,
+        ):
             return True
         message = str(error).lower()
         return any(fragment in message for fragment in _RETRYABLE_PROVIDER_ERROR_FRAGMENTS)
 
     def retry_budget(self, *, attempt: int, budget: int, error: Exception) -> int | None:
-        """Return the input budget for the next attempt, or None when the policy gives up."""
+        """Return the next smaller or same input budget, or None when retries end."""
         if attempt >= self.max_attempts:
             return None
-        if not isinstance(error, _CompactionSummaryEmptyResultError) and not self.should_shrink(error):
-            return None
-        smaller_budget = max(self.floor_tokens, budget // self.shrink_divisor)
-        if smaller_budget >= budget:
-            return None
-        return smaller_budget
+        if self.should_shrink(error):
+            smaller_budget = max(self.floor_tokens, budget // self.shrink_divisor)
+            if smaller_budget >= budget:
+                return None
+            return smaller_budget
+        if isinstance(error, ModelProviderError) and error.status_code in _TRANSIENT_SUMMARY_STATUS_CODES:
+            return budget
+        return None
 
 
 DEFAULT_SUMMARY_RETRY_POLICY = SummaryRetryPolicy()
