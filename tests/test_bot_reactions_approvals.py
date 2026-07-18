@@ -944,6 +944,18 @@ class TestAgentBot(AgentBotTestBase):
                         "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply"}},
                     },
                 )
+            if event_id == "$thread-reply":
+                return room_get_event_response(
+                    "$thread-reply",
+                    {
+                        "body": "thread reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {
+                            "event_id": "$thread-root",
+                            "rel_type": "m.thread",
+                        },
+                    },
+                )
             msg = f"unexpected event lookup: {event_id}"
             raise AssertionError(msg)
 
