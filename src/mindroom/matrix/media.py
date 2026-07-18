@@ -30,6 +30,7 @@ _FILE_OR_VIDEO_MESSAGE_EVENT_TYPES = (*_FILE_MESSAGE_EVENT_TYPES, *_VIDEO_MESSAG
 _AUDIO_MESSAGE_EVENT_TYPES = (nio.RoomMessageAudio, nio.RoomEncryptedAudio)
 _MATRIX_MEDIA_DISPATCH_EVENT_TYPES = (*_IMAGE_MESSAGE_EVENT_TYPES, *_FILE_OR_VIDEO_MESSAGE_EVENT_TYPES)
 MATRIX_MEDIA_EVENT_TYPES = (*_MATRIX_MEDIA_DISPATCH_EVENT_TYPES, *_AUDIO_MESSAGE_EVENT_TYPES)
+_MATRIX_MEDIA_MSGTYPES = frozenset({"m.image", "m.audio", "m.video", "m.file"})
 _matrix_media_max_bytes = 64 * 1024 * 1024
 
 
@@ -73,21 +74,31 @@ def is_matrix_media_dispatch_event(event: object) -> TypeGuard[MatrixMediaDispat
     return is_image_message_event(event) or is_file_or_video_message_event(event)
 
 
+def is_encrypted_media_event_source(event_source: Mapping[str, Any]) -> bool:
+    """Return whether one event source contains standard encrypted media."""
+    content = event_source.get("content")
+    return (
+        event_source.get("type") == "m.room.message"
+        and isinstance(content, Mapping)
+        and content.get("msgtype") in _MATRIX_MEDIA_MSGTYPES
+        and "file" in content
+    )
+
+
 def parse_matrix_media_event_source(
     event_source: Mapping[str, Any],
-) -> MatrixMediaEvent | None:
+) -> MatrixMediaEvent | nio.BadEvent | None:
     """Parse one Matrix event source through nio's correct media validation path."""
     normalized_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
-    content = normalized_source.get("content")
     try:
         parsed_event = (
             nio.RoomMessage.parse_decrypted_event(normalized_source)
-            if isinstance(content, Mapping) and "file" in content
+            if is_encrypted_media_event_source(normalized_source)
             else nio.RoomMessage.parse_event(normalized_source)
         )
     except Exception:
         return None
-    return parsed_event if isinstance(parsed_event, MATRIX_MEDIA_EVENT_TYPES) else None
+    return parsed_event if isinstance(parsed_event, (*MATRIX_MEDIA_EVENT_TYPES, nio.BadEvent)) else None
 
 
 def parse_matrix_media_dispatch_event_source(
