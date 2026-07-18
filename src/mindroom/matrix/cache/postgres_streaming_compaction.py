@@ -7,7 +7,11 @@ import zlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
-from .cache_maintenance import NONTERMINAL_STREAM_STATUSES, TERMINAL_STREAM_STATUSES
+from .cache_maintenance import (
+    NONTERMINAL_STREAM_STATUSES,
+    TERMINAL_STREAM_STATUSES,
+    CorruptEventCachePayloadError,
+)
 from .postgres_cursor import fetchall, fetchone, rowcount
 
 _COMPACTION_BATCH_SIZE = 500
@@ -35,7 +39,7 @@ class _ArchivedPostgresStreamingEdit:
 
     def event_payload(self) -> dict[str, Any]:
         """Return the archived JSON payload."""
-        return json.loads(zlib.decompress(self.event_json_zlib).decode())
+        return _decompress_event(self.event_json_zlib)
 
 
 type _ArchivedEditRow = tuple[
@@ -52,6 +56,14 @@ type _ArchivedEditRow = tuple[
     int | None,
     str | None,
 ]
+
+
+def _decompress_event(event_json_zlib: bytes) -> dict[str, Any]:
+    try:
+        return json.loads(zlib.decompress(event_json_zlib).decode())
+    except (json.JSONDecodeError, UnicodeDecodeError, zlib.error) as exc:
+        msg = "Compacted PostgreSQL event payload is corrupt"
+        raise CorruptEventCachePayloadError(msg) from exc
 
 
 def _archived_edit_from_row(row: object) -> _ArchivedPostgresStreamingEdit:
@@ -88,7 +100,7 @@ async def load_archived_event(
         """,
         (namespace, event_id),
     )
-    return None if row is None else json.loads(zlib.decompress(bytes(row[0])).decode())
+    return None if row is None else _decompress_event(bytes(row[0]))
 
 
 async def load_archived_thread_id(
@@ -169,7 +181,7 @@ async def load_archived_thread_events(
         """,
         (namespace, room_id, thread_id),
     )
-    return [(int(row[0]), int(row[1]), json.loads(zlib.decompress(bytes(row[2])).decode())) for row in rows]
+    return [(int(row[0]), int(row[1]), _decompress_event(bytes(row[2]))) for row in rows]
 
 
 async def archived_thread_event_ids(

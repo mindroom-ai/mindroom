@@ -24,6 +24,10 @@ TERMINAL_STREAM_STATUSES = frozenset(
 )
 
 
+class CorruptEventCachePayloadError(RuntimeError):
+    """Raised when one compressed cache payload cannot be reconstructed safely."""
+
+
 @dataclass(frozen=True, slots=True)
 class CacheMaintenanceReport:
     """Log-safe result of one backend startup maintenance transaction."""

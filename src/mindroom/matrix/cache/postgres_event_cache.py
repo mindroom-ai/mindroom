@@ -16,6 +16,7 @@ from mindroom.logging_config import get_logger
 from mindroom.timing import milliseconds
 
 from . import postgres_event_cache_events, postgres_event_cache_threads
+from .cache_maintenance import CorruptEventCachePayloadError
 from .event_batching import group_lookup_events_by_room
 from .event_cache import EventCacheBackendUnavailableError
 from .event_normalization import normalize_event_source_for_cache
@@ -828,12 +829,16 @@ class PostgresEventCache:
         disabled_result: _T,
         reader: Callable[[psycopg.AsyncConnection], Awaitable[_T]],
     ) -> _T:
-        return await self._operation(
-            room_id,
-            operation=operation,
-            disabled_result=disabled_result,
-            callback=reader,
-        )
+        try:
+            return await self._operation(
+                room_id,
+                operation=operation,
+                disabled_result=disabled_result,
+                callback=reader,
+            )
+        except CorruptEventCachePayloadError:
+            self._runtime.disable("corrupt_compacted_event_payload")
+            return disabled_result
 
     async def _write_operation(
         self,

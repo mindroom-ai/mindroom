@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import zlib
 from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
@@ -176,7 +175,7 @@ async def _load_latest_active_edit(
 
 
 def _archived_event_payload(event: ArchivedStreamingEdit) -> dict[str, Any]:
-    return json.loads(zlib.decompress(event.event_json_zlib).decode())
+    return event.event_payload()
 
 
 async def load_mxc_text(

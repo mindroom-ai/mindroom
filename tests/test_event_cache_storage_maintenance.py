@@ -29,6 +29,7 @@ _THREAD_ID = "$root:localhost"
 _CHILD_ID = "$child:localhost"
 _MISSING_ID = "$missing:localhost"
 _ORPHAN_ID = "$orphan:localhost"
+_FUTURE_INVALIDATED_AT = 4_000_000_000.0
 
 
 def _message_event(event_id: str, *, thread_id: str | None = None) -> dict[str, object]:
@@ -122,6 +123,19 @@ async def _prepare_sqlite_version_10(db_path: Path) -> None:
             VALUES (?, ?, ?, ?)
             """,
             (_ORPHAN_ID, _ROOM_ID, _THREAD_ID, 12),
+        )
+        await db.execute(
+            """
+            INSERT INTO thread_cache_state(
+                room_id,
+                thread_id,
+                validated_at,
+                invalidated_at,
+                invalidation_reason
+            )
+            VALUES (?, ?, NULL, ?, 'preexisting_newer_invalidation')
+            """,
+            (_ROOM_ID, _THREAD_ID, _FUTURE_INVALIDATED_AT),
         )
         await db.execute("PRAGMA user_version = 10")
         await db.commit()
@@ -255,7 +269,8 @@ async def test_sqlite_version_10_migrates_without_reset_and_repairs_orphans(tmp_
         assert diagnostics["cache_orphan_thread_indexes_after"] == 0
         assert cached_thread == [_message_event(_CHILD_ID, thread_id=_THREAD_ID)]
         assert stale_state is not None
-        assert stale_state.invalidation_reason == "schema_migration_missing_thread_event_source"
+        assert stale_state.invalidated_at == _FUTURE_INVALIDATED_AT
+        assert stale_state.invalidation_reason == "preexisting_newer_invalidation"
         assert await cache.get_thread_id_for_event(_ROOM_ID, _THREAD_ID) == _THREAD_ID
         assert await cache.get_thread_id_for_event(_ROOM_ID, _ORPHAN_ID) is None
 

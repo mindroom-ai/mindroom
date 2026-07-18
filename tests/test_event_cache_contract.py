@@ -14,10 +14,13 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
 )
 from mindroom.matrix.cache import ConversationEventCache, postgres_streaming_compaction, sqlite_streaming_compaction
+from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
+from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from tests.event_cache_test_support import replace_thread_unconditionally
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
 
 def _message_event(
@@ -394,6 +397,111 @@ async def test_streaming_compaction_survives_backend_restart(
         assert str(pending["content"]["body"]) not in str(diagnostics)
     finally:
         await restarted_cache.close()
+
+
+@pytest.mark.asyncio
+async def test_corrupt_compacted_payload_disables_advisory_cache(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Corrupt cold bytes produce a cache miss and log-safe disabled state instead of escaping."""
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    sender = "@agent:localhost"
+    pending = _message_event(
+        "$pending:localhost",
+        2,
+        sender=sender,
+        edit_of=original_id,
+        stream_status=STREAM_STATUS_PENDING,
+    )
+    terminal = _message_event(
+        "$terminal:localhost",
+        3,
+        sender=sender,
+        edit_of=original_id,
+        stream_status=STREAM_STATUS_COMPLETED,
+    )
+    await event_cache.store_events_batch(
+        [
+            (str(pending["event_id"]), room_id, pending),
+            (str(terminal["event_id"]), room_id, terminal),
+        ],
+    )
+
+    if isinstance(event_cache, SqliteEventCache):
+        db = event_cache._runtime.require_db()
+        await db.execute(
+            "UPDATE compacted_streaming_edits SET event_json_zlib = ? WHERE event_id = ?",
+            (b"corrupt", pending["event_id"]),
+        )
+        await db.commit()
+    else:
+        assert isinstance(event_cache, PostgresEventCache)
+        db = event_cache._runtime.require_db()
+        await db.execute(
+            """
+            UPDATE mindroom_event_cache_compacted_streaming_edits
+            SET event_json_zlib = %s
+            WHERE namespace = %s AND event_id = %s
+            """,
+            (b"corrupt", event_cache.namespace, pending["event_id"]),
+        )
+        await db.commit()
+
+    assert await event_cache.get_event(room_id, str(pending["event_id"])) is None
+    assert event_cache.durable_writes_available is False
+    diagnostics = event_cache.runtime_diagnostics()
+    assert diagnostics["cache_backend"] in {"sqlite", "postgres"}
+    assert "corrupt_compacted_event_payload" in str(diagnostics)
+    assert str(pending["content"]["body"]) not in str(diagnostics)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_compaction_placeholders_follow_status_sets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SQLite compaction binds every configured status without fixed SQL arity."""
+    future_nonterminal_status = "future_nonterminal"
+    monkeypatch.setattr(
+        sqlite_streaming_compaction,
+        "NONTERMINAL_STREAM_STATUSES",
+        sqlite_streaming_compaction.NONTERMINAL_STREAM_STATUSES | {future_nonterminal_status},
+    )
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    sender = "@agent:localhost"
+    pending = _message_event(
+        "$pending:localhost",
+        2,
+        sender=sender,
+        edit_of=original_id,
+        stream_status=future_nonterminal_status,
+    )
+    terminal = _message_event(
+        "$terminal:localhost",
+        3,
+        sender=sender,
+        edit_of=original_id,
+        stream_status=STREAM_STATUS_COMPLETED,
+    )
+    cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await cache.initialize()
+    try:
+        await cache.store_events_batch(
+            [
+                (str(pending["event_id"]), room_id, pending),
+                (str(terminal["event_id"]), room_id, terminal),
+            ],
+        )
+        cursor = await cache._runtime.require_db().execute(
+            "SELECT COUNT(*) FROM compacted_streaming_edits WHERE event_id = ?",
+            (pending["event_id"],),
+        )
+        assert await cursor.fetchone() == (1,)
+        await cursor.close()
+    finally:
+        await cache.close()
 
 
 @pytest.mark.asyncio

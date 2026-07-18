@@ -7,7 +7,11 @@ import zlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
-from .cache_maintenance import NONTERMINAL_STREAM_STATUSES, TERMINAL_STREAM_STATUSES
+from .cache_maintenance import (
+    NONTERMINAL_STREAM_STATUSES,
+    TERMINAL_STREAM_STATUSES,
+    CorruptEventCachePayloadError,
+)
 
 _COMPACTION_BATCH_SIZE = 500
 
@@ -32,6 +36,10 @@ class ArchivedStreamingEdit:
     thread_order: int | None
     indexed_thread_id: str | None
 
+    def event_payload(self) -> dict[str, Any]:
+        """Return the archived JSON payload."""
+        return _decompress_event(self.event_json_zlib)
+
 
 type _ArchivedEditRow = tuple[
     str,
@@ -50,7 +58,11 @@ type _ArchivedEditRow = tuple[
 
 
 def _decompress_event(event_json_zlib: bytes) -> dict[str, Any]:
-    return json.loads(zlib.decompress(event_json_zlib).decode())
+    try:
+        return json.loads(zlib.decompress(event_json_zlib).decode())
+    except (json.JSONDecodeError, UnicodeDecodeError, zlib.error) as exc:
+        msg = "Compacted SQLite event payload is corrupt"
+        raise CorruptEventCachePayloadError(msg) from exc
 
 
 def _archived_edit_from_row(row: object) -> ArchivedStreamingEdit:
@@ -245,6 +257,8 @@ async def _compaction_candidates(
     room_id: str | None,
     limit: int,
 ) -> list[ArchivedStreamingEdit]:
+    nonterminal_placeholders = ",".join("?" for _ in NONTERMINAL_STREAM_STATUSES)
+    terminal_placeholders = ",".join("?" for _ in TERMINAL_STREAM_STATUSES)
     room_predicate = "" if room_id is None else "AND nonterminal_index.room_id = ?"
     parameters: tuple[object, ...] = (
         *sorted(NONTERMINAL_STREAM_STATUSES),
@@ -283,7 +297,7 @@ async def _compaction_candidates(
             AND json_extract(
                 nonterminal_event.event_json,
                 '$.content."m.new_content"."io.mindroom.stream_status"'
-            ) IN (?, ?)
+            ) IN ({nonterminal_placeholders})
             AND EXISTS (
                 SELECT 1
                 FROM event_edits AS terminal_index
@@ -299,7 +313,7 @@ async def _compaction_candidates(
                     AND json_extract(
                         terminal_event.event_json,
                         '$.content."m.new_content"."io.mindroom.stream_status"'
-                    ) IN (?, ?, ?, ?)
+                    ) IN ({terminal_placeholders})
             )
             {room_predicate}
         ORDER BY nonterminal_event.origin_server_ts, nonterminal_event.write_seq

@@ -90,8 +90,18 @@ async def migrate_version_10_thread_events(db: aiosqlite.Connection) -> None:
                 AND events.room_id = thread_events_v10.room_id
         )
         ON CONFLICT(room_id, thread_id) DO UPDATE SET
-            invalidated_at = excluded.invalidated_at,
-            invalidation_reason = excluded.invalidation_reason
+            invalidated_at = CASE
+                WHEN thread_cache_state.invalidated_at IS NULL
+                    OR excluded.invalidated_at >= thread_cache_state.invalidated_at
+                    THEN excluded.invalidated_at
+                ELSE thread_cache_state.invalidated_at
+            END,
+            invalidation_reason = CASE
+                WHEN thread_cache_state.invalidated_at IS NULL
+                    OR excluded.invalidated_at >= thread_cache_state.invalidated_at
+                    THEN excluded.invalidation_reason
+                ELSE thread_cache_state.invalidation_reason
+            END
         """,
         (time.time(),),
     )

@@ -16,6 +16,7 @@ from mindroom.logging_config import get_logger
 from mindroom.timing import milliseconds
 
 from . import sqlite_event_cache_events, sqlite_event_cache_threads
+from .cache_maintenance import CorruptEventCachePayloadError
 from .event_batching import group_lookup_events_by_room
 from .event_normalization import normalize_event_source_for_cache
 from .sqlite_agent_message_snapshot import load_sqlite_agent_message_snapshot
@@ -409,6 +410,11 @@ class _SqliteEventCacheRuntime:
         return self._disabled_reason is not None
 
     @property
+    def disabled_reason(self) -> str | None:
+        """Return the log-safe reason this advisory cache was disabled."""
+        return self._disabled_reason
+
+    @property
     def maintenance_report(self) -> CacheMaintenanceReport | None:
         """Return the last committed startup maintenance report."""
         return self._maintenance_report
@@ -559,6 +565,8 @@ class SqliteEventCache:
             "cache_certification_generation_present": self.certification_generation is not None,
             "cache_storage_bytes": sqlite_storage_bytes(self.db_path),
         }
+        if self._runtime.disabled_reason is not None:
+            diagnostics["cache_sqlite_disabled_reason"] = self._runtime.disabled_reason
         report = self._runtime.maintenance_report
         if report is not None:
             diagnostics.update(report.as_runtime_diagnostics())
@@ -596,7 +604,11 @@ class SqliteEventCache:
         if self._runtime.is_disabled:
             return disabled_result
         async with self._runtime.acquire_db_operation(room_id, operation=operation) as db:
-            return await reader(db)
+            try:
+                return await reader(db)
+            except CorruptEventCachePayloadError:
+                self._runtime.disable("corrupt_compacted_event_payload")
+                return disabled_result
 
     async def _write_operation(
         self,
