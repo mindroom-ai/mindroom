@@ -649,7 +649,7 @@ def test_retry_policy_halves_budget_for_typed_safeguard_refusal() -> None:
     "error",
     [
         ModelRateLimitError(message="rate limited", status_code=429),
-        ModelProviderError(message="service unavailable", status_code=503),
+        ModelProviderError(message="request timed out while provider unavailable", status_code=503),
         ModelRateLimitError(message="overloaded", status_code=529),
     ],
 )

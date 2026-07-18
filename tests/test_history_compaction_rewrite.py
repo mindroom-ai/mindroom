@@ -378,7 +378,7 @@ async def test_rewrite_retries_safeguard_refusal_with_smaller_chunk(tmp_path: Pa
     "error",
     [
         ModelRateLimitError(message="rate limited", status_code=429),
-        ModelProviderError(message="service unavailable", status_code=503),
+        ModelProviderError(message="request timed out while provider unavailable", status_code=503),
         ModelRateLimitError(message="overloaded", status_code=529),
     ],
 )
@@ -389,7 +389,18 @@ async def test_rewrite_retries_transient_provider_error_with_same_input_and_one_
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    working_session = _session("session-1", runs=[_completed_run("run-1")])
+    working_session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 16_000),
+                    Message(role="assistant", content="a" * 16_000),
+                ],
+            ),
+        ],
+    )
     summary_mock = AsyncMock(
         side_effect=[
             error,

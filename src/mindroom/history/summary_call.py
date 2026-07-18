@@ -117,13 +117,23 @@ class SummaryRetryPolicy:
         """Return the next input budget, preserving it for same-input retries."""
         if attempt >= self.max_attempts:
             return None
-        if isinstance(error, _CompactionSummaryEmptyResultError) or self.should_shrink(error):
+        typed_shrinkable = isinstance(
+            error,
+            (
+                _CompactionSummaryEmptyResultError
+                | TimeoutError
+                | ContextWindowExceededError
+                | ModelSafeguardRefusalError
+                | CompactionSummaryOutputLimitError
+            ),
+        )
+        if not typed_shrinkable and self.should_retry_same_input(error):
+            return budget
+        if typed_shrinkable or self.should_shrink(error):
             smaller_budget = max(self.floor_tokens, budget // self.shrink_divisor)
             if smaller_budget >= budget:
                 return None
             return smaller_budget
-        if self.should_retry_same_input(error):
-            return budget
         return None
 
 
