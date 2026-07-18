@@ -792,6 +792,8 @@ def make_event_cache_mock() -> AsyncMock:
     event_cache.get_latest_agent_message_snapshot.return_value = None
     event_cache.pending_durable_write_room_ids.return_value = ()
     event_cache.runtime_diagnostics.return_value = {"cache_backend": "mock"}
+    event_cache.mark_room_departed.return_value = 1
+    event_cache.room_departure_epoch.return_value = 0
     event_cache.flush_pending_durable_writes.return_value = None
     event_cache.append_event.return_value = True
     event_cache.redact_event.return_value = False

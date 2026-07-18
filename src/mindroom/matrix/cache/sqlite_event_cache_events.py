@@ -175,17 +175,15 @@ async def load_mxc_text(
     return None if row is None else str(row[0])
 
 
-async def persist_mxc_text(
+async def _event_owns_mxc_text(
     db: aiosqlite.Connection,
     *,
     principal_id: str,
     room_id: str,
     event_id: str,
     mxc_url: str,
-    text: str,
-    cached_at: float,
 ) -> bool:
-    """Persist plaintext only if its visible event ownership still exists."""
+    """Return whether one visible event currently owns the room-scoped MXC."""
     cursor = await db.execute(
         """
         SELECT 1
@@ -210,7 +208,27 @@ async def persist_mxc_text(
     )
     owns_plaintext = await cursor.fetchone()
     await cursor.close()
-    if owns_plaintext is None:
+    return owns_plaintext is not None
+
+
+async def persist_mxc_text(
+    db: aiosqlite.Connection,
+    *,
+    principal_id: str,
+    room_id: str,
+    event_id: str,
+    mxc_url: str,
+    text: str,
+    cached_at: float,
+) -> bool:
+    """Persist plaintext only if its visible event ownership still exists."""
+    if not await _event_owns_mxc_text(
+        db,
+        principal_id=principal_id,
+        room_id=room_id,
+        event_id=event_id,
+        mxc_url=mxc_url,
+    ):
         return False
     await db.execute(
         """

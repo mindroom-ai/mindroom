@@ -46,6 +46,12 @@ The operation that commits a pending room or principal purge is discarded, so it
 
 Each principal keeps a runtime departed-room fence after purge commit, and every backend read or write rechecks that fence under the room lock until an authoritative rejoin finishes any pending cleanup.
 
+An authoritative multi-room leave batch raises every principal-room fence synchronously before awaiting the first ordered purge.
+
+Reads recheck the fence after the backend callback and PostgreSQL transaction completes, so a result obtained before a leave cannot be returned after that leave is observed.
+
+Each room fence has a monotonic runtime epoch, and queued rejoin work may clear the fence only when no newer departure changed that epoch.
+
 Principal-scoped safety disables affect only that bot's SQLite or PostgreSQL view, while root-owned shared-service disables still stop every current and future principal.
 
 Every authoritative leave invalidates both the in-memory and saved checkpoint before durable cleanup starts.
@@ -62,10 +68,14 @@ That cold-start principal purge preserves rows owned by every other principal, a
 
 Process-local plaintext for the departed principal and room is removed immediately even when the durable backend is unavailable.
 
+SQLite write operations begin with `BEGIN IMMEDIATE`, so tombstone and MXC-ownership authorization reads cannot race a second connection's redaction commit.
+
 SQLite schema version 11 resets older advisory cache contents inside one rollback-safe transaction and creates a durable database-generation identifier.
 Each SQLite principal view derives a stable checkpoint generation from that database generation and the full Matrix principal ID, so a retained agent token cannot cross an account or homeserver rebind.
 
 PostgreSQL schema version 2 migrates under a global transaction-scoped advisory lock, preserves every namespace, expands event and plaintext keys with room scope, and quarantines legacy unscoped plaintext under an unreachable empty room ID.
+
+PostgreSQL room operations hold a shared principal-namespace advisory lock, while initial and resumed principal purges upgrade to the matching exclusive lock before deleting rows.
 
 Each PostgreSQL principal namespace stores a durable random cache-generation identifier that changes when that namespace metadata is recreated.
 

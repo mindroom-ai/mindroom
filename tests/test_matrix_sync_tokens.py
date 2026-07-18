@@ -261,7 +261,7 @@ async def test_leave_cleanup_restart_purges_only_current_sqlite_principal(tmp_pa
     leave_response.rooms = MagicMock(join={}, leave={room_id: MagicMock()})
     interrupted_cleanup = asyncio.CancelledError("process stopped during leave cleanup")
     with (
-        patch.object(bot._conversation_cache, "purge_room", AsyncMock(side_effect=interrupted_cleanup)),
+        patch.object(bot._conversation_cache, "purge_rooms", AsyncMock(side_effect=interrupted_cleanup)),
         pytest.raises(asyncio.CancelledError, match="process stopped"),
     ):
         await bot._apply_own_room_membership_from_sync(leave_response)
@@ -424,7 +424,7 @@ async def test_leave_purges_before_failing_call_reconciliation(
     response.rooms = MagicMock(join={}, leave={"!left:localhost": MagicMock()})
     operation_order: list[str] = []
 
-    async def purge_room(_room_id: str) -> None:
+    async def purge_rooms(_room_ids: object) -> None:
         operation_order.append("purge")
 
     async def fail_call_cleanup(**_kwargs: object) -> None:
@@ -435,7 +435,7 @@ async def test_leave_purges_before_failing_call_reconciliation(
     bot._call_manager.on_sync_room_membership = AsyncMock(side_effect=fail_call_cleanup)
 
     with (
-        patch.object(bot._conversation_cache, "purge_room", side_effect=purge_room),
+        patch.object(bot._conversation_cache, "purge_rooms", side_effect=purge_rooms),
         pytest.raises(type(call_cleanup_failure), match="call cleanup interrupted"),
     ):
         await bot._apply_own_room_membership_from_sync(response)

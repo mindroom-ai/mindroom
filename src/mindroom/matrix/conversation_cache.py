@@ -194,6 +194,9 @@ class ConversationCacheProtocol(Protocol):
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Resolve the cached thread root for one event when known."""
 
+    async def purge_rooms(self, room_ids: Collection[str]) -> None:
+        """Fence and purge one authoritative batch of departed rooms."""
+
     async def get_latest_thread_event_id_if_needed(
         self,
         room_id: str,
@@ -935,19 +938,33 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
     async def purge_room(self, room_id: str) -> None:
         """Purge this bot principal's rows after a confirmed leave or ban."""
-        self._write_cache_ops.mark_room_departed(room_id)
-        task = self._write_cache_ops.queue_room_cache_update(
-            room_id,
-            lambda: self._write_cache_ops.purge_room(room_id),
-            name="matrix_cache_purge_departed_room",
+        await self.purge_rooms((room_id,))
+
+    async def purge_rooms(self, room_ids: Collection[str]) -> None:
+        """Fence an entire authoritative leave batch before awaiting any purge."""
+        departed_room_ids = tuple(dict.fromkeys(room_ids))
+        for room_id in departed_room_ids:
+            self._write_cache_ops.mark_room_departed(room_id)
+        tasks = tuple(
+            self._write_cache_ops.queue_room_cache_update(
+                room_id,
+                lambda room_id=room_id: self._write_cache_ops.purge_room(room_id),
+                name="matrix_cache_purge_departed_room",
+            )
+            for room_id in departed_room_ids
         )
-        await task
+        if tasks:
+            await asyncio.gather(*tasks)
 
     async def mark_room_joined(self, room_id: str) -> None:
         """Allow principal-owned caching again after an authoritative rejoin."""
+        expected_departure_epoch = self._write_cache_ops.room_departure_epoch(room_id)
         task = self._write_cache_ops.queue_room_cache_update(
             room_id,
-            lambda: self._write_cache_ops.mark_room_joined(room_id),
+            lambda: self._write_cache_ops.mark_room_joined(
+                room_id,
+                expected_departure_epoch=expected_departure_epoch,
+            ),
             name="matrix_cache_mark_room_joined",
         )
         await task

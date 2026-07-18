@@ -183,18 +183,26 @@ class ThreadMutationCacheOps:
         finally:
             self.purge_process_plaintext(room_id)
 
-    def mark_room_departed(self, room_id: str) -> None:
-        """Fence durable and process-local reads before ordered cleanup can wait."""
+    def mark_room_departed(self, room_id: str) -> int:
+        """Fence durable/process-local reads and return the new room epoch."""
         event_cache = self.runtime.event_cache
-        if event_cache is not None:
-            event_cache.mark_room_departed(room_id)
+        departure_epoch = 0 if event_cache is None else event_cache.mark_room_departed(room_id)
         self.purge_process_plaintext(room_id)
+        return departure_epoch
 
-    async def mark_room_joined(self, room_id: str) -> None:
+    def room_departure_epoch(self, room_id: str) -> int:
+        """Return the durable cache's current room-fence epoch."""
+        event_cache = self.runtime.event_cache
+        return 0 if event_cache is None else event_cache.room_departure_epoch(room_id)
+
+    async def mark_room_joined(self, room_id: str, *, expected_departure_epoch: int) -> None:
         """Lift one departed-room fence after an authoritative rejoin."""
         event_cache = self.runtime.event_cache
         if event_cache is not None:
-            await event_cache.mark_room_joined(room_id)
+            await event_cache.mark_room_joined(
+                room_id,
+                expected_departure_epoch=expected_departure_epoch,
+            )
 
     def purge_process_plaintext(self, room_id: str) -> None:
         """Evict heavyweight process-local plaintext for this principal and room."""

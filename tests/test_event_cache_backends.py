@@ -365,6 +365,7 @@ async def test_sqlite_event_cache_write_operation_rolls_back_cancelled_writer(
     cache = SqliteEventCache(tmp_path / "event_cache.db")
     cancel_reason = "stop requested"
     db = SimpleNamespace(
+        execute=AsyncMock(),
         commit=AsyncMock(),
         rollback=AsyncMock(side_effect=RuntimeError("rollback failed")),
     )

@@ -19,6 +19,7 @@ from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
 
 def _sidecar_content(mxc_url: str, *, encrypted: bool) -> dict[str, Any]:
@@ -245,6 +246,53 @@ async def test_failed_room_purge_blocks_reads_until_recovery(
         assert await cache.get_event(room_id, event_id) is None
         assert cache.pending_durable_write_room_ids() == ()
     finally:
+        await root.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lookup_kind", ["event", "mxc"])
+async def test_departure_discards_read_that_started_before_fence(
+    event_cache_factory: Callable[[], ConversationEventCache],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    lookup_kind: str,
+) -> None:
+    """An in-flight cache read must not expose its result after a confirmed leave."""
+    root = _shared_cache(event_cache_factory)
+    await root.initialize()
+    cache = root.for_principal("@alice:localhost")
+    room_id = "!left:localhost"
+    event_id = "$event"
+    mxc_url = "mxc://server/plaintext"
+    event = _event(event_id, 1, sidecar_url=mxc_url)
+    read_obtained_result = asyncio.Event()
+    release_read = asyncio.Event()
+    module = sqlite_event_cache_events if isinstance(cache, SqliteEventCache) else postgres_event_cache_events
+    loader_name = "load_event" if lookup_kind == "event" else "load_mxc_text"
+    original_loader = getattr(module, loader_name)
+
+    async def pause_after_read(*args: object, **kwargs: object) -> object:
+        result = await original_loader(*args, **kwargs)
+        read_obtained_result.set()
+        await release_read.wait()
+        return result
+
+    try:
+        await cache.store_event(event_id, room_id, event)
+        assert await cache.store_mxc_text(room_id, event_id, mxc_url, "plaintext")
+        monkeypatch.setattr(module, loader_name, pause_after_read)
+        if lookup_kind == "event":
+            read_task = asyncio.create_task(cache.get_event(room_id, event_id))
+        else:
+            read_task = asyncio.create_task(cache.get_mxc_text(room_id, event_id, mxc_url))
+        await read_obtained_result.wait()
+
+        cache.mark_room_departed(room_id)
+        release_read.set()
+
+        assert await read_task is None
+    finally:
+        release_read.set()
         await root.close()
 
 
@@ -568,5 +616,159 @@ async def test_postgres_principal_purge_excludes_other_runtime_operations(
             await purge_task
         if store_task is not None and not store_task.done():
             await store_task
+        await first.close()
+        await second.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_resumed_principal_purge_upgrades_to_exclusive_namespace_lock(
+    postgres_event_cache_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ordinary operation resuming a failed purge must still exclude every room writer."""
+    namespace = f"resumed_purge_lock_{uuid.uuid4().hex}"
+    first = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
+    second = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
+    first_room_id = "!first:localhost"
+    second_room_id = "!second:localhost"
+    event_id = "$after-purge"
+    event = _event(event_id, 1)
+    purge_deleted = asyncio.Event()
+    release_purge = asyncio.Event()
+    original_purge = postgres_event_cache_events.purge_principal_locked
+    fail_initial_purge = True
+    failure_reason = "temporary purge failure"
+
+    async def control_purge(*args: object, **kwargs: object) -> None:
+        if fail_initial_purge:
+            raise RuntimeError(failure_reason)
+        await original_purge(*args, **kwargs)
+        purge_deleted.set()
+        await release_purge.wait()
+
+    await first.initialize()
+    await second.initialize()
+    monkeypatch.setattr(postgres_event_cache_events, "purge_principal_locked", control_purge)
+    try:
+        with pytest.raises(RuntimeError, match="temporary purge failure"):
+            await first.purge_principal()
+        fail_initial_purge = False
+
+        resumed_purge = asyncio.create_task(first.get_event(first_room_id, "$missing"))
+        await purge_deleted.wait()
+        store_task = asyncio.create_task(second.store_event(event_id, second_room_id, event))
+        await asyncio.sleep(0.05)
+
+        assert not store_task.done()
+
+        release_purge.set()
+        assert await resumed_purge is None
+        await store_task
+        assert await second.get_event(second_room_id, event_id) == event
+    finally:
+        release_purge.set()
+        await first.close()
+        await second.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_write_transaction_serializes_tombstone_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SQLite must lock before read-based event tombstone authorization."""
+    db_path = tmp_path / "event-cache.db"
+    principal_id = "@alice:localhost"
+    first = SqliteEventCache(db_path, principal_id=principal_id)
+    second = SqliteEventCache(db_path, principal_id=principal_id)
+    room_id = "!room:localhost"
+    event_id = "$late-event"
+    event = _event(event_id, 1)
+    event_checked = asyncio.Event()
+    release_event_write = asyncio.Event()
+    original_filter = sqlite_event_cache_events.filter_cacheable_events
+
+    async def pause_after_tombstone_check(*args: object, **kwargs: object) -> object:
+        cacheable = await original_filter(*args, **kwargs)
+        event_checked.set()
+        await release_event_write.wait()
+        return cacheable
+
+    await first.initialize()
+    await second.initialize()
+    try:
+        monkeypatch.setattr(sqlite_event_cache_events, "filter_cacheable_events", pause_after_tombstone_check)
+        late_store = asyncio.create_task(first.store_event(event_id, room_id, event))
+        await event_checked.wait()
+        redact_late_event = asyncio.create_task(second.redact_event(room_id, event_id))
+        await asyncio.sleep(0.05)
+        assert not redact_late_event.done()
+
+        release_event_write.set()
+        await late_store
+        assert await redact_late_event
+        assert await first.get_event(room_id, event_id) is None
+    finally:
+        release_event_write.set()
+        await first.close()
+        await second.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_write_transaction_serializes_mxc_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SQLite must lock before read-based plaintext ownership authorization."""
+    db_path = tmp_path / "event-cache.db"
+    principal_id = "@alice:localhost"
+    first = SqliteEventCache(db_path, principal_id=principal_id)
+    second = SqliteEventCache(db_path, principal_id=principal_id)
+    room_id = "!room:localhost"
+    sidecar_event_id = "$sidecar"
+    mxc_url = "mxc://server/plaintext"
+    ownership_checked = asyncio.Event()
+    release_plaintext_write = asyncio.Event()
+    original_ownership_check = sqlite_event_cache_events._event_owns_mxc_text
+
+    async def pause_after_ownership_check(*args: object, **kwargs: object) -> object:
+        owns_plaintext = await original_ownership_check(*args, **kwargs)
+        ownership_checked.set()
+        await release_plaintext_write.wait()
+        return owns_plaintext
+
+    await first.initialize()
+    await second.initialize()
+    try:
+        await first.store_event(
+            sidecar_event_id,
+            room_id,
+            _event(sidecar_event_id, 2, sidecar_url=mxc_url),
+        )
+        monkeypatch.setattr(sqlite_event_cache_events, "_event_owns_mxc_text", pause_after_ownership_check)
+        plaintext_store = asyncio.create_task(
+            first.store_mxc_text(room_id, sidecar_event_id, mxc_url, "plaintext"),
+        )
+        await ownership_checked.wait()
+        redact_sidecar = asyncio.create_task(second.redact_event(room_id, sidecar_event_id))
+        await asyncio.sleep(0.05)
+        assert not redact_sidecar.done()
+
+        release_plaintext_write.set()
+        assert await plaintext_store
+        assert await redact_sidecar
+        assert await first.get_mxc_text(room_id, sidecar_event_id, mxc_url) is None
+        cursor = await first._runtime.require_db().execute(
+            """
+            SELECT COUNT(*)
+            FROM mxc_text_cache
+            WHERE principal_id = ? AND room_id = ? AND mxc_url = ?
+            """,
+            (principal_id, room_id, mxc_url),
+        )
+        assert await cursor.fetchone() == (0,)
+        await cursor.close()
+    finally:
+        release_plaintext_write.set()
         await first.close()
         await second.close()

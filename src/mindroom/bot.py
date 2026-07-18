@@ -1441,7 +1441,7 @@ class AgentBot:
             self._invalidate_sync_checkpoint_for_cache_scope_cleanup()
         for room_id in left_room_ids:
             self._room_lifecycle.forget_invited_room(room_id)
-            await self._conversation_cache.purge_room(room_id)
+        await self._conversation_cache.purge_rooms(left_room_ids)
         for room_id in joined_room_ids - left_room_ids:
             await self._conversation_cache.mark_room_joined(room_id)
         call_manager = self._call_manager
@@ -1627,8 +1627,7 @@ class AgentBot:
         """Purge principal-owned cache rows only after confirmed room departures."""
         if room_ids:
             self._invalidate_sync_checkpoint_for_cache_scope_cleanup()
-        for room_id in room_ids:
-            await self._conversation_cache.purge_room(room_id)
+        await self._conversation_cache.purge_rooms(room_ids)
 
     async def stop(
         self,

@@ -331,6 +331,7 @@ class _SqliteEventCacheRuntime:
         self._pending_room_purges: set[tuple[str, str]] = set()
         self._pending_principal_purges: set[str] = set()
         self._departed_rooms: set[tuple[str, str]] = set()
+        self._room_departure_epochs: dict[tuple[str, str], int] = {}
 
     @property
     def db_path(self) -> Path:
@@ -388,13 +389,23 @@ class _SqliteEventCacheRuntime:
         """Remember a room deletion until a SQLite transaction commits it."""
         self._pending_room_purges.add((principal_id, room_id))
 
-    def mark_room_departed(self, principal_id: str, room_id: str) -> None:
-        """Fence one departed principal-room against every later cache operation."""
-        self._departed_rooms.add((principal_id, room_id))
+    def mark_room_departed(self, principal_id: str, room_id: str) -> int:
+        """Fence one departed principal-room and return its new epoch."""
+        key = (principal_id, room_id)
+        epoch = self._room_departure_epochs.get(key, 0) + 1
+        self._room_departure_epochs[key] = epoch
+        self._departed_rooms.add(key)
+        return epoch
 
-    def mark_room_joined(self, principal_id: str, room_id: str) -> None:
-        """Remove one principal-room fence after authoritative rejoin cleanup."""
-        self._departed_rooms.discard((principal_id, room_id))
+    def mark_room_joined(self, principal_id: str, room_id: str, *, expected_departure_epoch: int) -> None:
+        """Remove one fence only when no newer departure superseded the join."""
+        key = (principal_id, room_id)
+        if self._room_departure_epochs.get(key, 0) == expected_departure_epoch:
+            self._departed_rooms.discard(key)
+
+    def room_departure_epoch(self, principal_id: str, room_id: str) -> int:
+        """Return the current fence epoch for one principal-room."""
+        return self._room_departure_epochs.get((principal_id, room_id), 0)
 
     def is_room_departed(self, principal_id: str, room_id: str) -> bool:
         """Return whether one principal-room is fenced after leave or ban."""
@@ -699,7 +710,14 @@ class SqliteEventCache:
                     await _rollback_sqlite_connection_best_effort(db, operation=operation)
                     raise
                 self._runtime.forget_pending_room_purge(self.principal_id, room_id)
-            return await reader(db)
+            result = await reader(db)
+            if (
+                self._runtime.is_disabled
+                or self._runtime.is_principal_disabled(self.principal_id)
+                or self._runtime.is_room_departed(self.principal_id, room_id)
+            ):
+                return disabled_result
+            return result
 
     async def _write_operation(
         self,
@@ -724,6 +742,7 @@ class SqliteEventCache:
             pending_principal_purge = self._runtime.has_pending_principal_purge(self.principal_id)
             pending_room_purge = self._runtime.has_pending_room_purge(self.principal_id, room_id)
             try:
+                await db.execute("BEGIN IMMEDIATE")
                 if pending_principal_purge:
                     await sqlite_event_cache_events.purge_principal_locked(
                         db,
@@ -1097,7 +1116,8 @@ class SqliteEventCache:
 
     async def purge_room(self, room_id: str) -> None:
         """Delete only this principal's cached ownership for one left or banned room."""
-        self.mark_room_departed(room_id)
+        if not self._runtime.is_room_departed(self.principal_id, room_id):
+            self.mark_room_departed(room_id)
         self._runtime.record_pending_room_purge(self.principal_id, room_id)
 
         async def purge_only(_db: aiosqlite.Connection) -> None:
@@ -1111,13 +1131,27 @@ class SqliteEventCache:
             allow_departed=True,
         )
 
-    def mark_room_departed(self, room_id: str) -> None:
-        """Synchronously reject access after an authoritative leave or ban."""
-        self._runtime.mark_room_departed(self.principal_id, room_id)
+    def mark_room_departed(self, room_id: str) -> int:
+        """Synchronously reject access and return the new room-fence epoch."""
+        return self._runtime.mark_room_departed(self.principal_id, room_id)
 
-    async def mark_room_joined(self, room_id: str) -> None:
+    def room_departure_epoch(self, room_id: str) -> int:
+        """Return the current room-fence epoch."""
+        return self._runtime.room_departure_epoch(self.principal_id, room_id)
+
+    async def mark_room_joined(
+        self,
+        room_id: str,
+        *,
+        expected_departure_epoch: int | None = None,
+    ) -> None:
         """Remove a departure fence only after any pending purge commits."""
         if not self._runtime.is_room_departed(self.principal_id, room_id):
+            return
+        departure_epoch = (
+            self.room_departure_epoch(room_id) if expected_departure_epoch is None else expected_departure_epoch
+        )
+        if self.room_departure_epoch(room_id) != departure_epoch:
             return
         if not self.durable_writes_available:
             return
@@ -1133,7 +1167,11 @@ class SqliteEventCache:
             allow_departed=True,
         )
         if not self._runtime.has_pending_room_purge(self.principal_id, room_id):
-            self._runtime.mark_room_joined(self.principal_id, room_id)
+            self._runtime.mark_room_joined(
+                self.principal_id,
+                room_id,
+                expected_departure_epoch=departure_epoch,
+            )
 
     async def purge_principal(self) -> None:
         """Delete every cache row owned by this principal."""

@@ -157,10 +157,18 @@ class ConversationEventCache(Protocol):
     async def purge_room(self, room_id: str) -> None:
         """Delete only this principal's cached ownership for one left or banned room."""
 
-    def mark_room_departed(self, room_id: str) -> None:
-        """Synchronously reject cache access as soon as an authoritative departure is observed."""
+    def mark_room_departed(self, room_id: str) -> int:
+        """Synchronously reject access and return the new room-fence epoch."""
 
-    async def mark_room_joined(self, room_id: str) -> None:
+    def room_departure_epoch(self, room_id: str) -> int:
+        """Return the current room-fence epoch for ordering queued membership work."""
+
+    async def mark_room_joined(
+        self,
+        room_id: str,
+        *,
+        expected_departure_epoch: int | None = None,
+    ) -> None:
         """Allow cache access after an authoritative rejoin finishes any pending purge."""
 
     async def purge_principal(self) -> None:
