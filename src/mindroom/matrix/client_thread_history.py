@@ -45,7 +45,6 @@ from nio.responses import RoomThreadsResponse
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
-    EventCacheBackendUnavailableError,
     ThreadCacheState,
     ThreadHistoryResult,
     is_opaque_encrypted_event_source,
@@ -53,6 +52,7 @@ from mindroom.matrix.cache import (
     thread_cache_rejection_reason,
     thread_history_result,
 )
+from mindroom.matrix.cache.thread_cache_invalidation import mark_thread_stale_fail_closed
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     apply_latest_edits_to_messages,
@@ -610,28 +610,13 @@ async def _mark_thread_cache_stale_for_opaque_history(
     thread_id: str,
 ) -> None:
     """Mark one opaque history fetch stale, deleting the snapshot only when the marker fails."""
-    try:
-        await event_cache.mark_thread_stale(
-            room_id,
-            thread_id,
-            reason=_OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON,
-        )
-    except Exception as stale_marker_error:
-        logger.warning(
-            "Failed to mark opaque thread history stale; deleting cached snapshot",
-            room_id=room_id,
-            thread_id=thread_id,
-        )
-        invalidated = await _invalidate_thread_cache_entry(
-            event_cache,
-            room_id=room_id,
-            thread_id=thread_id,
-        )
-        if invalidated or isinstance(stale_marker_error, EventCacheBackendUnavailableError):
-            return
-        event_cache.disable(
-            f"stale_marker_failed:thread:{thread_id}:{room_id}:{_OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON}",
-        )
+    await mark_thread_stale_fail_closed(
+        event_cache,
+        room_id=room_id,
+        thread_id=thread_id,
+        reason=_OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON,
+        logger=logger,
+    )
 
 
 async def _fetch_thread_history_with_events(
