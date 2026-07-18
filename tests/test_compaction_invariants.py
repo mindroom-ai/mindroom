@@ -27,7 +27,8 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
-from openai import APIConnectionError
+from anthropic import APIConnectionError as AnthropicAPIConnectionError
+from openai import APIConnectionError as OpenAIAPIConnectionError
 
 from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.agent import AgentConfig
@@ -89,12 +90,32 @@ class _RecordingClaude(Claude):
         return self.response
 
 
-def _connection_provider_error() -> ModelProviderError:
-    request = httpx.Request("POST", "https://api.example.test/v1/responses")
-    sdk_error = APIConnectionError(request=request)
-    provider_error = ModelProviderError(str(sdk_error))
-    provider_error.__cause__ = sdk_error
+def _provider_request() -> httpx.Request:
+    return httpx.Request("POST", "https://api.example.test/v1/responses")
+
+
+def _provider_error_with_cause(cause: BaseException) -> ModelProviderError:
+    provider_error = ModelProviderError(str(cause))
+    provider_error.__cause__ = cause
     return provider_error
+
+
+def _provider_error_with_context(context: BaseException) -> ModelProviderError:
+    provider_error = ModelProviderError(str(context))
+    provider_error.__context__ = context
+    return provider_error
+
+
+def _connection_provider_error() -> ModelProviderError:
+    sdk_error = OpenAIAPIConnectionError(request=_provider_request())
+    return _provider_error_with_cause(sdk_error)
+
+
+def _nested_connection_provider_error() -> ModelProviderError:
+    request = _provider_request()
+    sdk_error = OpenAIAPIConnectionError(request=request)
+    sdk_error.__cause__ = httpx.ConnectError("connection reset", request=request)
+    return _provider_error_with_cause(sdk_error)
 
 
 def _make_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
@@ -682,11 +703,54 @@ def test_retry_policy_retries_selected_transient_provider_errors_at_same_budget(
     assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=2, budget=16_000, error=error) is None
 
 
-@pytest.mark.parametrize("status_code", [400, 401])
+@pytest.mark.parametrize("status_code", [400, 401, 408, 500, 502, 504])
 def test_retry_policy_does_not_retry_non_transient_provider_statuses(status_code: int) -> None:
     error = ModelProviderError("provider failure", status_code=status_code)
 
     assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) is None
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_budget"),
+    [
+        pytest.param(
+            _provider_error_with_cause(ConnectionError("connection refused")),
+            16_000,
+            id="builtin-connection-error",
+        ),
+        pytest.param(
+            _provider_error_with_cause(httpx.ConnectError("connection reset", request=_provider_request())),
+            16_000,
+            id="httpx-network-error",
+        ),
+        pytest.param(
+            _provider_error_with_cause(AnthropicAPIConnectionError(request=_provider_request())),
+            16_000,
+            id="anthropic-api-connection-error",
+        ),
+        pytest.param(
+            _nested_connection_provider_error(),
+            16_000,
+            id="nested-sdk-httpx-chain",
+        ),
+        pytest.param(
+            _provider_error_with_context(ConnectionError("connection reset")),
+            16_000,
+            id="implicit-connection-context",
+        ),
+        pytest.param(
+            _provider_error_with_cause(ValueError("invalid provider response")),
+            None,
+            id="non-network-cause",
+        ),
+    ],
+)
+def test_retry_policy_classifies_default_status_by_typed_network_chain(
+    error: ModelProviderError,
+    expected_budget: int | None,
+) -> None:
+    assert error.status_code == 502
+    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) == expected_budget
 
 
 def test_retry_policy_does_not_retry_default_provider_error_status() -> None:

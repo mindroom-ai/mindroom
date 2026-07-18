@@ -73,7 +73,12 @@ def _make_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
     return _make_config_with_context_window(tmp_path, context_window=48_000)
 
 
-def _make_config_with_context_window(tmp_path: Path, *, context_window: int | None) -> tuple[Config, RuntimePaths]:
+def _make_config_with_context_window(
+    tmp_path: Path,
+    *,
+    context_window: int | None,
+    compaction: CompactionConfig | None = None,
+) -> tuple[Config, RuntimePaths]:
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -82,7 +87,7 @@ def _make_config_with_context_window(tmp_path: Path, *, context_window: int | No
                     display_name="Test Agent",
                 ),
             },
-            defaults=DefaultsConfig(tools=[]),
+            defaults=DefaultsConfig(tools=[], compaction=compaction),
             models={"default": ModelConfig(provider="openai", id="test-model", context_window=context_window)},
         ),
         runtime_paths,
@@ -360,6 +365,37 @@ async def test_compact_context_requires_positive_summary_input_budget(tmp_path: 
     assert result == (
         "Error: Compaction is unavailable for this scope because the active compaction model leaves no "
         "usable summary input budget after reserve and prompt overhead."
+    )
+
+
+@pytest.mark.asyncio
+async def test_compact_context_requires_summary_input_budget_above_retry_floor(tmp_path: Path) -> None:
+    """Manual compaction should not set the force flag when the summary budget cannot shrink."""
+    config, runtime_paths = _make_config_with_context_window(
+        tmp_path,
+        context_window=48_000,
+        compaction=CompactionConfig(replay_window_tokens=800),
+    )
+    identity = _execution_identity()
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
+    storage.upsert_session(_session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
+
+    tool = CompactContextTools(
+        agent_name="test_agent",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=identity,
+    )
+
+    result = await tool.compact_context(agent=_agent())
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
+    assert state.force_compact_before_next_run is False
+    assert result == (
+        "Error: Compaction is unavailable for this scope because the summary input budget must exceed "
+        "1,000 tokens so a failed summary call can retry with a smaller request."
     )
 
 

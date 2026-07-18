@@ -85,18 +85,18 @@ _RETRYABLE_PROVIDER_ERROR_FRAGMENTS = (
 
 
 def _has_typed_network_cause(error: ModelProviderError) -> bool:
-    """Return whether provider wrappers retain an unambiguous network failure."""
+    """Return whether visible explicit or implicit causes contain a typed network failure."""
     from anthropic import APIConnectionError as AnthropicAPIConnectionError  # noqa: PLC0415
     from openai import APIConnectionError as OpenAIAPIConnectionError  # noqa: PLC0415
 
-    cause: BaseException | None = error.__cause__
+    cause = error.__cause__ or (None if error.__suppress_context__ else error.__context__)
     while cause is not None:
         if isinstance(
             cause,
             ConnectionError | httpx.NetworkError | AnthropicAPIConnectionError | OpenAIAPIConnectionError,
         ):
             return True
-        cause = cause.__cause__
+        cause = cause.__cause__ or (None if cause.__suppress_context__ else cause.__context__)
     return False
 
 
@@ -113,14 +113,13 @@ class SummaryRetryPolicy:
     """Explicit retry policy for failed compaction summary calls.
 
     Each shrinkable failure divides the input budget by ``shrink_divisor``
-    (clamped to ``floor_tokens``), while selected typed transient failures retry
-    the same budget. Once ``max_attempts`` is reached or no retry applies, the
-    error propagates.
+    (clamped to the shared compaction-summary retry floor), while selected typed
+    transient failures retry the same budget. Once ``max_attempts`` is reached
+    or no retry applies, the error propagates.
     """
 
     max_attempts: int = 2
     shrink_divisor: int = 2
-    floor_tokens: int = COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS
 
     def should_shrink(self, error: Exception) -> bool:
         """Return whether rebuilding a smaller summary input may resolve the failure."""
@@ -141,7 +140,7 @@ class SummaryRetryPolicy:
         if attempt >= self.max_attempts:
             return None
         if self.should_shrink(error):
-            smaller_budget = max(self.floor_tokens, budget // self.shrink_divisor)
+            smaller_budget = max(COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS, budget // self.shrink_divisor)
             if smaller_budget >= budget:
                 return None
             return smaller_budget
