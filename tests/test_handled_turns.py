@@ -9,6 +9,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -468,6 +469,82 @@ def test_discovery_alias_persists_without_becoming_a_coalesced_source(temp_dir: 
     assert not question_record.is_coalesced
 
 
+def test_discovery_alias_redaction_and_cleanup_intent_persist(temp_dir: Path) -> None:
+    """Selection aliases must retain both their tombstone and owed cleanup across restart."""
+    tracker = HandledTurnLedger("test_discovery_redaction", base_path=temp_dir)
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$question"],
+            discovery_event_ids=["$selection"],
+            redacted_source_event_ids=["$selection"],
+            pending_redaction_cleanup_event_ids=["$selection"],
+            completed=False,
+        ),
+    )
+
+    reloaded = _reload_ledger("test_discovery_redaction", temp_dir)
+    record = reloaded.get_turn_record("$selection")
+
+    assert record is not None
+    assert record.redacted_source_event_ids == ("$selection",)
+    assert record.pending_redaction_cleanup_event_ids == ("$selection",)
+    assert reloaded.pending_redaction_cleanup_event_ids() == ("$selection",)
+    assert reloaded.has_responded("$selection") is True
+    assert reloaded.has_responded("$question") is False
+
+
+def test_flush_propagates_persistence_failure(temp_dir: Path) -> None:
+    """Durability barriers must fail before callers mutate source cache state."""
+    tracker = HandledTurnLedger("test_persist_failure", base_path=temp_dir)
+
+    with patch.object(tracker, "_write_responses_file_locked", side_effect=OSError("disk full")):
+        tracker.record_handled_turn(TurnRecord.create(["$source"], completed=False))
+        with pytest.raises(OSError, match="disk full"):
+            tracker.flush()
+
+
+def test_flush_waits_for_every_captured_persist_before_raising(temp_dir: Path) -> None:
+    """One failed persist must not drop later captured work from the barrier."""
+    tracker = HandledTurnLedger("test_flush_drains", base_path=temp_dir)
+    first_future = MagicMock()
+    first_future.result.side_effect = OSError("first persist failed")
+    second_future = MagicMock()
+    tracker._state.pending_persists = [first_future, second_future]
+
+    with pytest.raises(OSError, match="first persist failed"):
+        tracker.flush()
+
+    first_future.result.assert_called_once_with()
+    second_future.result.assert_called_once_with()
+
+
+def test_later_record_does_not_prune_unobserved_persistence_failure(temp_dir: Path) -> None:
+    """A later write must not hide an earlier completed persistence failure."""
+    tracker = HandledTurnLedger("test_interleaved_persist_failure", base_path=temp_dir)
+    tracker.warm()
+    real_persist = tracker._persist_record
+    first_failed = threading.Event()
+    second_completed = threading.Event()
+
+    def persist_with_first_failure(turn_record: TurnRecord) -> None:
+        if "$redacted" in turn_record.indexed_event_ids:
+            first_failed.set()
+            message = "redaction persist failed"
+            raise OSError(message)
+        real_persist(turn_record)
+        second_completed.set()
+
+    with patch.object(tracker, "_persist_record", side_effect=persist_with_first_failure):
+        tracker.record_handled_turn(TurnRecord.create(["$redacted"], completed=False))
+        assert first_failed.wait(timeout=5)
+        failure = tracker._state.pending_persists[0].exception(timeout=5)
+        assert isinstance(failure, OSError)
+        tracker.record_handled_turn(TurnRecord.create(["$later"], completed=False))
+        assert second_completed.wait(timeout=5)
+        with pytest.raises(OSError, match="redaction persist failed"):
+            tracker.flush()
+
+
 def test_persistence_round_trip_preserves_response_context(temp_dir: Path) -> None:
     """Reloaded ledgers should preserve response owner, history scope, and target metadata."""
     tracker1 = HandledTurnLedger("test_persist_context", base_path=temp_dir)
@@ -691,6 +768,49 @@ def test_cleanup_by_age_removes_old_records(temp_dir: Path) -> None:
     for index in range(5):
         assert tracker.has_responded(f"new_event{index}")
         assert not tracker.has_responded(f"old_event{index}")
+
+
+def test_cleanup_by_age_retains_pending_redaction_intent(temp_dir: Path) -> None:
+    """Age retention must not discard cleanup work before the next response."""
+    tracker = HandledTurnLedger("test_pending_age_cleanup", base_path=temp_dir)
+    old_timestamp = time.time() - (40 * 24 * 60 * 60)
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$pending"],
+            redacted_source_event_ids=["$pending"],
+            pending_redaction_cleanup_event_ids=["$pending"],
+            timestamp=old_timestamp,
+        ),
+    )
+    tracker.record_handled_turn(TurnRecord.create(["$ordinary"], timestamp=old_timestamp))
+    tracker.flush()
+
+    tracker._cleanup_old_events(max_events=100, max_age_days=30)
+
+    assert tracker.get_turn_record("$pending") is not None
+    assert tracker.pending_redaction_cleanup_event_ids() == ("$pending",)
+    assert tracker.get_turn_record("$ordinary") is None
+
+
+def test_cleanup_by_count_retains_pending_redaction_intent(temp_dir: Path) -> None:
+    """Count retention may exceed its limit rather than lose owed cleanup work."""
+    tracker = HandledTurnLedger("test_pending_count_cleanup", base_path=temp_dir)
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$pending"],
+            redacted_source_event_ids=["$pending"],
+            pending_redaction_cleanup_event_ids=["$pending"],
+            timestamp=time.time() - 2,
+        ),
+    )
+    tracker.record_handled_turn(TurnRecord.create(["$newest"], timestamp=time.time()))
+    tracker.flush()
+
+    tracker._cleanup_old_events(max_events=1, max_age_days=30)
+
+    assert tracker.get_turn_record("$pending") is not None
+    assert tracker.pending_redaction_cleanup_event_ids() == ("$pending",)
+    assert tracker.get_turn_record("$newest") is not None
 
 
 def test_concurrent_access_keeps_json_valid(temp_dir: Path) -> None:

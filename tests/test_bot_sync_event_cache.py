@@ -68,6 +68,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ):
                 await bot.start()
                 assert bot.client is start_client
+                redaction_callback = next(
+                    callback.args[0]
+                    for callback in start_client.add_event_callback.call_args_list
+                    if callback.args[1] is nio.RedactionEvent
+                )
+                assert redaction_callback == bot._on_redaction
 
                 await bot.stop()
 
@@ -1287,6 +1293,48 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             await _close_bound_runtime_support(bot, support)
 
         assert cached_event is None
+
+    @pytest.mark.asyncio
+    async def test_live_redaction_callback_delegates_to_cleanup(self, bot: AgentBot) -> None:
+        """The bot should await durable tombstoning and advisory cache cleanup."""
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_agent:localhost")
+        redaction_event = MagicMock(spec=nio.RedactionEvent)
+
+        with patch.object(
+            bot._redacted_turn_cleanup,
+            "handle",
+            AsyncMock(),
+        ) as handle:
+            await bot._on_redaction(room, redaction_event)
+
+        handle.assert_awaited_once_with(room, redaction_event)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure", [RuntimeError("persist failed"), RuntimeError("cache failed")])
+    async def test_live_redaction_failure_rewinds_to_last_certified_sync(
+        self,
+        bot: AgentBot,
+        failure: RuntimeError,
+    ) -> None:
+        """A critical redaction failure must replay the sync delta on the same client."""
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_agent:localhost")
+        redaction_event = MagicMock(spec=nio.RedactionEvent)
+        _save_certified_sync_token(bot, "s_before_redaction")
+        bot._sync_checkpoint = SyncCheckpoint("s_before_redaction")
+        bot.client.next_batch = "s_after_redaction"
+
+        with (
+            patch.object(
+                bot._redacted_turn_cleanup,
+                "handle",
+                AsyncMock(side_effect=failure),
+            ),
+            pytest.raises(RuntimeError, match=str(failure)),
+        ):
+            await bot._on_redaction(room, redaction_event)
+
+        assert bot.client.next_batch == "s_before_redaction"
+        assert _load_sync_token_value(bot.storage_path, bot.agent_name) == "s_before_redaction"
 
     @pytest.mark.asyncio
     async def test_sync_timeline_redaction_does_not_resurrect_point_lookup_cache(self, bot: AgentBot) -> None:
