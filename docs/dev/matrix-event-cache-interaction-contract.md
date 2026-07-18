@@ -35,7 +35,11 @@ The following treatment is covered against both SQLite and PostgreSQL backends b
 | RTC membership, focus, and notification events | Retained | Not visible | These families remain room-level |
 | Encrypted relation-bearing events | Retained as opaque events | Not visible until decryption supplies message content | Thread, reply, edit, and message-reference relations are indexed and invalidate the known thread |
 
-Poll responses, poll ends, and beacons reuse `m.reference`, but a reference on a non-message event cannot add visible conversation history and therefore remains room-level.
+Relation names such as `m.reference` and `m.thread` are reused by non-message families.
+
+Only `m.room.message` and `m.room.encrypted` relations can enter event-to-thread bookkeeping.
+
+Poll responses, poll ends, beacons, stickers, state, calls, and RTC events remain room-level even when they carry a relation-shaped payload.
 
 ## Redactions
 
@@ -50,6 +54,8 @@ Redacting an original also removes dependent edits and their edit and thread ind
 Redacting only an edit removes that edit and restores the next applicable visible state of the original.
 
 Redacting a reaction removes only the reaction and leaves the visible thread snapshot unchanged.
+
+Redacting a poll response, poll end, beacon, or any other non-message event removes only that point event and leaves every thread snapshot unchanged.
 
 ## Deliberately excluded sync categories
 
@@ -97,7 +103,13 @@ The harness emits the interaction matrix, client-controllable ephemeral categori
 
 The harness can invite and explicitly join a second test agent when its token is supplied through a second environment variable.
 
-The optional cache inspection opens SQLite with `mode=ro`, enables `PRAGMA query_only`, and records only IDs, counts, integrity state, hashes, and timings.
+The optional service-cache inspection opens SQLite with `mode=ro`, enables `PRAGMA query_only`, and records only IDs, counts, integrity state, hashes, and timings.
+
+Strict thread reads use a separate new disposable SQLite database and refuse an existing path or the service-cache path.
+
+The first strict read refills that isolated cache from the authenticated homeserver, the second proves a zero-fetch cache hit, and a redaction applied through the cache API proves rejection and refill without writing the live service database.
+
+Every declared interaction expectation is compared with homeserver accounting, the read-only service snapshot, and the initial visible thread projection before evidence is written.
 
 The evidence writer rejects secret-shaped keys and either access-token value before writing JSON.
 
@@ -108,6 +120,7 @@ uv run python tests/manual/matrix_event_cache_live_audit.py \
   --homeserver "$MATRIX_HOMESERVER" \
   --evidence /tmp/matrix-event-cache-audit.json \
   --cache-db "$MINDROOM_STORAGE_PATH/event_cache.db" \
+  --strict-read-cache-db "/tmp/matrix-event-cache-strict-$(uuidgen).db" \
   --strict-thread-reads
 ```
 
@@ -119,7 +132,11 @@ Do not point hosted evidence at local port 8008.
 
 Do not print tokens, edit the live database, deploy, restart, or use a pre-existing room.
 
-Pair the sanitized harness JSON with the exact structured refresh records emitted by the strict production read helper for the room and thread.
+The sanitized harness JSON contains the exact fetch source, timings, scanned pages, scanned event counts, visible event IDs, cache rejection reason, and executable expectation-validation count for all three isolated strict reads.
+
+Hosted evidence describes the deployed service as a production baseline.
+
+PR-specific classification remains proven by the SQLite and PostgreSQL owning-seam tests unless the PR itself has been deployed through a separately authorized release.
 
 ## Known non-owned lifecycle and encryption gaps
 
@@ -139,7 +156,7 @@ A deterministic reproduction is to cache a thread child plus a relation-less rep
 
 The authoritative refill removes the now-unresolvable reply, reply edit, and reference from point storage even though the homeserver timeline still retains them.
 
-The live evidence below records this three-event accounting gap without adding an overlapping storage workaround.
+This storage-owned reproduction is documented for coordination and is not inferred from any helper process writing the live service cache.
 
 ## Durable evidence
 

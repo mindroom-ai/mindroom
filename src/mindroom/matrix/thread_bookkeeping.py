@@ -35,8 +35,9 @@ Who may mutate thread state, and how:
    and UNKNOWN means the writer must invalidate the whole room's cached threads
    (or, pre-send in tools, refuse the operation) because membership could not be proven.
 
-5. Redactions of reactions are always ROOM_LEVEL: removing an annotation cannot change any cached
-   thread's visible messages.
+5. Redactions are thread-affecting only when the target is a plaintext or encrypted room message.
+   Reactions and all non-message event families are always ROOM_LEVEL because removing them cannot
+   change a cached thread's visible messages.
 
 6. Redactions whose target metadata is gone fall back to the cache's own event->thread index before
    failing closed: the homeserver strips a redacted event's content, so old redaction targets are
@@ -50,7 +51,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Literal, cast
 
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_info import EventInfo, event_type_supports_thread_relations
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     ThreadMembershipLookupError,
@@ -88,21 +89,18 @@ def is_thread_affecting_relation(
 ) -> bool:
     """Return whether one event relation can affect visible thread-scoped cache state.
 
-    ``m.reference`` is reused by room-level event families such as polls and beacons.
-    Only references carried by plaintext or encrypted room messages can add visible
-    conversation history, so other reference-bearing event types stay room-level.
+    Relation names are reused by non-message event families.
+    Only relations carried by plaintext or encrypted room messages can add visible
+    conversation history, so every non-message relation stays room-level.
     """
-    return (
-        event_info.is_thread
-        or event_info.is_edit
-        or event_info.is_reply
-        or (event_info.relation_type == "m.reference" and event_type in {"m.room.encrypted", "m.room.message"})
+    return event_type_supports_thread_relations(event_type) and (
+        event_info.is_thread or event_info.is_edit or event_info.is_reply or event_info.relation_type == "m.reference"
     )
 
 
 def _redaction_can_affect_thread_cache(event_info: EventInfo) -> bool:
     """Return whether redacting one related event can invalidate cached thread messages."""
-    return not event_info.is_reaction
+    return event_type_supports_thread_relations(event_info.event_type) and not event_info.is_reaction
 
 
 class MutationThreadImpactState(Enum):
@@ -204,7 +202,7 @@ async def resolve_redaction_thread_impact_for_client(
             event_id,
             strict=True,
         )
-    if target_event_info is not None and target_event_info.is_reaction:
+    if target_event_info is not None and not _redaction_can_affect_thread_cache(target_event_info):
         return MutationThreadImpact.room_level()
     resolution = await resolve_related_event_thread_membership(
         room_id,

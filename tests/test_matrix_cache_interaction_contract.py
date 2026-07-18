@@ -415,6 +415,46 @@ def _room_level_timeline_sources() -> list[dict[str, Any]]:
             {"value": "timeline"},
             timestamp=47,
         ),
+        _event_source(
+            "$thread-related-sticker",
+            "m.sticker",
+            {"body": "sticker", "m.relates_to": _thread_relation()},
+            timestamp=48,
+        ),
+        _event_source(
+            "$thread-related-poll",
+            "m.poll.response",
+            {
+                "m.poll.response": {"answers": ["a"]},
+                "m.relates_to": _thread_relation(),
+            },
+            timestamp=49,
+        ),
+        _event_source(
+            "$thread-related-beacon",
+            "m.beacon",
+            {"m.relates_to": _thread_relation()},
+            timestamp=50,
+        ),
+        _event_source(
+            "$thread-related-state",
+            "m.room.topic",
+            {"m.relates_to": _thread_relation(), "topic": "topic"},
+            timestamp=51,
+            state_key="thread-related",
+        ),
+        _event_source(
+            "$thread-related-call",
+            "m.call.invite",
+            {"call_id": "call", "m.relates_to": _thread_relation(), "version": 1},
+            timestamp=52,
+        ),
+        _event_source(
+            "$thread-related-rtc",
+            "org.matrix.msc4075.rtc.notification",
+            {"m.relates_to": _thread_relation(), "type": "ring"},
+            timestamp=53,
+        ),
     ]
 
 
@@ -960,6 +1000,73 @@ async def test_reaction_redaction_is_point_only_and_tombstoned(
     assert await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID) == before_state
     await event_cache.store_event("$reaction-to-redact", _ROOM_ID, reaction)
     assert await event_cache.get_event(_ROOM_ID, "$reaction-to-redact") is None
+
+
+@pytest.mark.asyncio
+async def test_non_message_reference_redactions_are_point_only_and_tombstoned(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Poll and beacon redactions cannot invalidate visible thread history."""
+    await _seed_thread(event_cache)
+    harness = _build_sync_harness(event_cache)
+    targets = [
+        _event_source(
+            "$poll-response-to-redact",
+            "m.poll.response",
+            {
+                "m.poll.response": {"answers": ["a"]},
+                "m.relates_to": {"event_id": _THREAD_CHILD_ID, "rel_type": "m.reference"},
+            },
+            timestamp=122,
+        ),
+        _event_source(
+            "$poll-end-to-redact",
+            "m.poll.end",
+            {
+                "m.poll.end": {"m.text": "Closed"},
+                "m.relates_to": {"event_id": _THREAD_CHILD_ID, "rel_type": "m.reference"},
+            },
+            timestamp=123,
+        ),
+        _event_source(
+            "$beacon-to-redact",
+            "m.beacon",
+            {
+                "m.relates_to": {"event_id": _THREAD_CHILD_ID, "rel_type": "m.reference"},
+                "org.matrix.msc3488.location": {"uri": "geo:51.5,-0.1"},
+            },
+            timestamp=124,
+        ),
+    ]
+    await harness.apply(_sync_response([raw_nio_event(target) for target in targets]))
+    before_events = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+    before_state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+
+    await harness.apply(
+        _sync_response(
+            [
+                raw_nio_redaction(
+                    _event_source(
+                        f"$redaction-{target['event_id']}",
+                        "m.room.redaction",
+                        {"reason": "contract"},
+                        timestamp=125 + index,
+                    ),
+                    redacts=cast("str", target["event_id"]),
+                )
+                for index, target in enumerate(targets)
+            ],
+        ),
+    )
+
+    for target in targets:
+        event_id = cast("str", target["event_id"])
+        assert await event_cache.get_event(_ROOM_ID, event_id) is None
+        assert await event_cache.get_thread_id_for_event(_ROOM_ID, event_id) is None
+        await event_cache.store_event(event_id, _ROOM_ID, target)
+        assert await event_cache.get_event(_ROOM_ID, event_id) is None
+    assert await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID) == before_events
+    assert await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID) == before_state
 
 
 @pytest.mark.parametrize(

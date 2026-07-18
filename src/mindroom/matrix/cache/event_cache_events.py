@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_info import EventInfo, event_type_supports_thread_relations
 
 _EDITABLE_EVENT_TYPES = frozenset({"m.room.message", "io.mindroom.tool_approval"})
 
@@ -127,7 +127,7 @@ def cache_rows_were_deleted(*row_counts: int) -> bool:
 def _event_thread_row(room_id: str, event: dict[str, Any]) -> _EventThreadRow | None:
     """Return an event-to-thread row when thread membership is explicit."""
     event_id = event.get("event_id")
-    if not isinstance(event_id, str) or not event_id:
+    if not isinstance(event_id, str) or not event_id or not event_type_supports_thread_relations(event.get("type")):
         return None
     event_info = EventInfo.from_event(event)
     thread_id = event_info.thread_id

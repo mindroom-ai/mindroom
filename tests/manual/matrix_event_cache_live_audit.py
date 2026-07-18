@@ -76,6 +76,7 @@ class AuditConfig:
     invite_access_token: str | None = field(repr=False)
     evidence_path: Path
     cache_db_path: Path | None
+    strict_read_cache_db_path: Path | None
     invite_user_id: str | None
     trigger_user_id: str | None
     strict_thread_reads: bool
@@ -117,7 +118,6 @@ class InteractionRecord:
     expected_visible_thread_history: bool = False
     expected_event_thread_mapping: bool = False
     expected_edit_index: bool = False
-    expected_invalidation: str = "none"
     expected_representation: str = "active"
     expected_room_level: bool = True
 
@@ -138,7 +138,7 @@ class CacheSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class ThreadReadRecord:
-    """One strict production thread-read result."""
+    """One strict thread-read result against the disposable audit cache."""
 
     sequence: int
     mode: str
@@ -149,9 +149,20 @@ class ThreadReadRecord:
     homeserver_scan_pages: int
     homeserver_scanned_event_count: int
     visible_event_count: int
+    visible_event_ids: tuple[str, ...]
     cache_reject_reason: str | None
     degraded: bool
     error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ExpectationValidation:
+    """Executable comparison of declared interaction expectations with observed evidence."""
+
+    status: str
+    interaction_records: int
+    assertions: int
+    strict_read_cache_isolated: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +185,7 @@ class AuditEvidence:
     cache_only_event_ids: tuple[str, ...]
     trigger_event_ids: tuple[str, ...]
     thread_reads: tuple[ThreadReadRecord, ...]
+    expectation_validation: ExpectationValidation | None
     notes: tuple[str, ...]
 
 
@@ -587,7 +599,6 @@ def _record(
     visible: bool = False,
     threaded: bool = False,
     edit: bool = False,
-    invalidation: str = "none",
     representation: str = "active",
     room_level: bool = True,
 ) -> str:
@@ -598,9 +609,8 @@ def _record(
             event_id=event_id,
             expected_point_cache=representation == "active",
             expected_visible_thread_history=visible,
-            expected_event_thread_mapping=threaded,
-            expected_edit_index=edit,
-            expected_invalidation=invalidation,
+            expected_event_thread_mapping=threaded and representation == "active",
+            expected_edit_index=edit and representation == "active",
             expected_representation=representation,
             expected_room_level=room_level,
         ),
@@ -671,6 +681,8 @@ async def _emit_message_matrix(
         event_type="m.room.message",
         event_id=root_id,
         visible=True,
+        threaded=True,
+        room_level=False,
     )
     simple_messages: tuple[tuple[str, str, dict[str, object]], ...] = (
         ("notice", "m.notice", {"body": "notice"}),
@@ -701,7 +713,6 @@ async def _emit_message_matrix(
         event_id=thread_child_id,
         visible=True,
         threaded=True,
-        invalidation="thread",
         room_level=False,
     )
     reply_id = await api.send_event(
@@ -720,7 +731,6 @@ async def _emit_message_matrix(
         event_id=reply_id,
         visible=True,
         threaded=True,
-        invalidation="thread",
         room_level=False,
     )
 
@@ -750,7 +760,6 @@ async def _emit_message_matrix(
             event_id=event_id,
             threaded=True,
             edit=True,
-            invalidation="thread",
             room_level=False,
         )
 
@@ -770,7 +779,6 @@ async def _emit_message_matrix(
         event_id=reference_id,
         visible=True,
         threaded=True,
-        invalidation="thread",
         room_level=False,
     )
 
@@ -1092,12 +1100,12 @@ async def _emit_trigger_sequence(
             event_id=event_id,
             visible=True,
             threaded=True,
-            invalidation="thread",
             room_level=False,
         )
         await asyncio.sleep(wait_seconds)
 
     redaction_id = await api.redact(room_id, trigger_ids[-1], reason="force cache rejection")
+    _expect_tombstone(records, trigger_ids[-1])
     _record(
         records,
         family="thread_read_trigger_redaction",
@@ -1123,7 +1131,6 @@ async def _emit_trigger_sequence(
         event_id=third_id,
         visible=True,
         threaded=True,
-        invalidation="thread",
         room_level=False,
     )
     await asyncio.sleep(wait_seconds)
@@ -1173,7 +1180,6 @@ async def _emit_encrypted_relation_matrix(
             event_type="m.room.encrypted",
             event_id=event_id,
             threaded=True,
-            invalidation="thread",
             room_level=False,
         )
 
@@ -1198,6 +1204,7 @@ def _thread_read_record(
             diagnostics.get("homeserver_scanned_event_count", 0),
         ),
         visible_event_count=len(history),
+        visible_event_ids=tuple(message.event_id for message in history),
         cache_reject_reason=diagnostics.get("cache_reject_reason"),
         degraded=bool(diagnostics.get("thread_read_degraded", False)),
         error=diagnostics.get("thread_read_error"),
@@ -1210,6 +1217,8 @@ def _expect_tombstone(records: list[InteractionRecord], event_id: str) -> None:
             records[index] = replace(
                 record,
                 expected_point_cache=False,
+                expected_event_thread_mapping=False,
+                expected_edit_index=False,
                 expected_representation="tombstone",
             )
             return
@@ -1223,16 +1232,18 @@ async def _strict_thread_read_sequence(
     config: AuditConfig,
     room_id: str,
     root_id: str,
-    thread_child_id: str,
     user_id: str,
     device_id: str | None,
     records: list[InteractionRecord],
 ) -> tuple[ThreadReadRecord, ...]:
-    """Prove a homeserver refill, cache hit, and Matrix-driven rejection/refill."""
-    if config.cache_db_path is None:
-        msg = "--strict-thread-reads requires --cache-db"
+    """Prove refill, cache hit, and rejection/refill in a disposable isolated cache."""
+    if config.strict_read_cache_db_path is None:
+        msg = "--strict-thread-reads requires --strict-read-cache-db"
         raise MatrixAuditError(msg)
-    cache = SqliteEventCache(config.cache_db_path)
+    if config.strict_read_cache_db_path.exists():
+        msg = "--strict-read-cache-db must name a new disposable database"
+        raise MatrixAuditError(msg)
+    cache = SqliteEventCache(config.strict_read_cache_db_path)
     ssl_context = ssl.create_default_context(cafile=certifi.where())
     client = nio.AsyncClient(
         config.base_url,
@@ -1244,6 +1255,24 @@ async def _strict_thread_read_sequence(
     reads: list[ThreadReadRecord] = []
     await cache.initialize()
     try:
+        strict_child_id = await api.send_event(
+            room_id,
+            "m.room.message",
+            {
+                "body": "strict cache rejection child",
+                "m.relates_to": {"event_id": root_id, "rel_type": "m.thread"},
+                "msgtype": "m.text",
+            },
+        )
+        _record(
+            records,
+            family="strict_read_rejection_target",
+            event_type="m.room.message",
+            event_id=strict_child_id,
+            visible=True,
+            threaded=True,
+            room_level=False,
+        )
         for sequence in (1, 2):
             started = time.perf_counter()
             history = await fetch_dispatch_thread_snapshot(
@@ -1265,10 +1294,10 @@ async def _strict_thread_read_sequence(
             raise MatrixAuditError(msg)
         redaction_event_id = await api.redact(
             room_id,
-            thread_child_id,
+            strict_child_id,
             reason="strict read rejection audit",
         )
-        _expect_tombstone(records, thread_child_id)
+        _expect_tombstone(records, strict_child_id)
         _record(
             records,
             family="strict_read_rejection_redaction",
@@ -1276,15 +1305,16 @@ async def _strict_thread_read_sequence(
             event_id=redaction_event_id,
             representation="omitted",
         )
-        deadline = time.monotonic() + config.trigger_wait_seconds
-        while True:
-            cache_state = await cache.get_thread_cache_state(room_id, root_id)
-            if thread_cache_rejection_reason(cache_state) is not None:
-                break
-            if time.monotonic() >= deadline:
-                msg = "Matrix-driven redaction did not invalidate the thread before timeout"
-                raise MatrixAuditError(msg)
-            await asyncio.sleep(0.25)
+        await cache.redact_event(room_id, strict_child_id)
+        await cache.mark_thread_stale(
+            room_id,
+            root_id,
+            reason="live_audit_redaction",
+        )
+        cache_state = await cache.get_thread_cache_state(room_id, root_id)
+        if thread_cache_rejection_reason(cache_state) != "thread_invalidated_after_validation":
+            msg = "Disposable cache redaction did not make the validated snapshot rejectable"
+            raise MatrixAuditError(msg)
         started = time.perf_counter()
         history = await fetch_dispatch_thread_snapshot(
             client,
@@ -1384,6 +1414,114 @@ def read_cache_snapshot(cache_db_path: Path, room_id: str) -> CacheSnapshot:
         orphan_edit_rows=orphan_edit_rows,
         orphan_thread_rows=orphan_thread_rows,
         quick_check="" if quick_check_row is None else str(quick_check_row[0]),
+    )
+
+
+def _interaction_expectation_comparisons(
+    record: InteractionRecord,
+    *,
+    homeserver_ids: set[str],
+    redaction_ids: set[str],
+    active_ids: set[str],
+    tombstoned_ids: set[str],
+    edit_ids: set[str],
+    mapped_ids: set[str],
+    initial_visible_ids: set[str] | None,
+) -> list[tuple[str, object, object]]:
+    """Return every executable comparison declared by one interaction record."""
+    comparisons: list[tuple[str, object, object]] = [
+        ("homeserver_event", record.event_id in homeserver_ids, True),
+        ("point_cache", record.event_id in active_ids, record.expected_point_cache),
+        (
+            "tombstone",
+            record.event_id in tombstoned_ids,
+            record.expected_representation == "tombstone",
+        ),
+        (
+            "event_thread_mapping",
+            record.event_id in mapped_ids,
+            record.expected_event_thread_mapping,
+        ),
+        ("edit_index", record.event_id in edit_ids, record.expected_edit_index),
+    ]
+    if initial_visible_ids is not None:
+        comparisons.append(
+            (
+                "visible_thread_history",
+                record.event_id in initial_visible_ids,
+                record.expected_visible_thread_history,
+            ),
+        )
+    if record.expected_representation == "omitted":
+        comparisons.append(("redaction_envelope", record.event_id in redaction_ids, True))
+    if record.expected_room_level:
+        comparisons.extend(
+            [
+                ("room_level_mapping", record.event_id in mapped_ids, False),
+                ("room_level_edit_index", record.event_id in edit_ids, False),
+            ],
+        )
+    elif record.expected_representation == "active":
+        comparisons.append(("thread_scoped_mapping", record.event_id in mapped_ids, True))
+    return comparisons
+
+
+def validate_interaction_expectations(
+    records: tuple[InteractionRecord, ...],
+    *,
+    homeserver_event_ids: tuple[str, ...],
+    homeserver_redaction_event_ids: tuple[str, ...],
+    cache: CacheSnapshot,
+    thread_reads: tuple[ThreadReadRecord, ...],
+) -> ExpectationValidation:
+    """Compare every declared cache expectation with secret-free observed state."""
+    errors: list[str] = []
+    assertions = 0
+    homeserver_ids = set(homeserver_event_ids)
+    redaction_ids = set(homeserver_redaction_event_ids)
+    active_ids = set(cache.active_event_ids)
+    tombstoned_ids = set(cache.tombstoned_event_ids)
+    edit_ids = set(cache.edit_event_ids)
+    mapped_ids = set(cache.event_thread_ids)
+    initial_visible_ids = set(thread_reads[0].visible_event_ids) if thread_reads else None
+
+    for record in records:
+        comparisons = _interaction_expectation_comparisons(
+            record,
+            homeserver_ids=homeserver_ids,
+            redaction_ids=redaction_ids,
+            active_ids=active_ids,
+            tombstoned_ids=tombstoned_ids,
+            edit_ids=edit_ids,
+            mapped_ids=mapped_ids,
+            initial_visible_ids=initial_visible_ids,
+        )
+        assertions += len(comparisons)
+        errors.extend(
+            f"{record.family}.{field}: expected {expected!r}, observed {actual!r}"
+            for field, actual, expected in comparisons
+            if actual != expected
+        )
+    if cache.quick_check != "ok":
+        errors.append(f"cache.quick_check: expected 'ok', observed {cache.quick_check!r}")
+    assertions += 1
+    if cache.orphan_edit_rows != 0:
+        errors.append(f"cache.orphan_edit_rows: expected 0, observed {cache.orphan_edit_rows}")
+    assertions += 1
+    if cache.orphan_thread_rows != 0:
+        errors.append(f"cache.orphan_thread_rows: expected 0, observed {cache.orphan_thread_rows}")
+    assertions += 1
+    if errors:
+        detail = "; ".join(errors[:20])
+        if len(errors) > 20:
+            detail = f"{detail}; plus {len(errors) - 20} more"
+        msg = f"Interaction expectation validation failed: {detail}"
+        raise MatrixAuditError(msg)
+    return ExpectationValidation(
+        status="passed",
+        interaction_records=len(records),
+        assertions=assertions,
+        strict_read_cache_isolated=bool(thread_reads),
     )
 
 
@@ -1493,7 +1631,6 @@ async def run_audit(  # noqa: PLR0915
                 config=config,
                 room_id=room_id,
                 root_id=root_id,
-                thread_child_id=thread_child_id,
                 user_id=user_id,
                 device_id=device_id,
                 records=records,
@@ -1519,6 +1656,17 @@ async def run_audit(  # noqa: PLR0915
         represented_event_ids = set(cache.active_event_ids) | set(cache.tombstoned_event_ids) | set(redaction_event_ids)
         accounting_missing = tuple(sorted(set(homeserver_event_ids) - represented_event_ids))
         cache_only = tuple(sorted(set(cache.active_event_ids) - set(homeserver_event_ids)))
+    expectation_validation = (
+        validate_interaction_expectations(
+            tuple(records),
+            homeserver_event_ids=homeserver_event_ids,
+            homeserver_redaction_event_ids=redaction_event_ids,
+            cache=cache,
+            thread_reads=thread_reads,
+        )
+        if cache is not None and thread_reads
+        else None
+    )
 
     evidence = AuditEvidence(
         schema_version=1,
@@ -1546,10 +1694,11 @@ async def run_audit(  # noqa: PLR0915
         cache_only_event_ids=cache_only,
         trigger_event_ids=trigger_ids,
         thread_reads=thread_reads,
+        expectation_validation=expectation_validation,
         notes=(
             "Joined complete state, invite/leave timelines, and device-list changes are covered deterministically by unit tests.",
             "Opaque encrypted events are deliberately undecryptable and are sent only after plaintext trigger evidence.",
-            "Thread refill, cache-hit, and rejection modes must be paired with structured service-log evidence.",
+            "Strict refill, cache-hit, and rejection reads use a disposable cache separate from the service database.",
         ),
     )
     access_tokens = tuple(token for token in (config.access_token, config.invite_access_token) if token is not None)
@@ -1580,7 +1729,16 @@ def _parse_args() -> AuditConfig:
         help="Environment variable containing the token; tokens are never accepted as CLI arguments.",
     )
     parser.add_argument("--evidence", type=Path, required=True)
-    parser.add_argument("--cache-db", type=Path)
+    parser.add_argument(
+        "--cache-db",
+        type=Path,
+        help="Existing service cache inspected only through SQLite read-only/query-only mode.",
+    )
+    parser.add_argument(
+        "--strict-read-cache-db",
+        type=Path,
+        help="New disposable SQLite path used only by the isolated strict-read sequence.",
+    )
     parser.add_argument("--invite-user-id")
     parser.add_argument(
         "--invite-access-token-env",
@@ -1599,12 +1757,20 @@ def _parse_args() -> AuditConfig:
     invite_access_token = None if args.invite_access_token_env is None else os.environ.get(args.invite_access_token_env)
     if args.invite_access_token_env is not None and not invite_access_token:
         parser.error(f"{args.invite_access_token_env} must contain the invited agent token")
+    if args.strict_thread_reads and (args.cache_db is None or args.strict_read_cache_db is None):
+        parser.error("--strict-thread-reads requires both --cache-db and --strict-read-cache-db")
+    if args.strict_read_cache_db is not None:
+        if args.strict_read_cache_db.exists():
+            parser.error("--strict-read-cache-db must name a new disposable database")
+        if args.cache_db is not None and args.strict_read_cache_db.resolve() == args.cache_db.resolve():
+            parser.error("--strict-read-cache-db must be separate from the read-only service cache")
     return AuditConfig(
         base_url=args.homeserver,
         access_token=access_token,
         invite_access_token=invite_access_token,
         evidence_path=args.evidence,
         cache_db_path=args.cache_db,
+        strict_read_cache_db_path=args.strict_read_cache_db,
         invite_user_id=args.invite_user_id,
         trigger_user_id=args.trigger_user_id,
         strict_thread_reads=args.strict_thread_reads,

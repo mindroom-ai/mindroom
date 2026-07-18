@@ -10,11 +10,15 @@ import pytest
 
 from tests.manual.matrix_event_cache_live_audit import (
     AuditEvidence,
+    CacheSnapshot,
+    InteractionRecord,
     MatrixApi,
     MatrixAuditError,
+    ThreadReadRecord,
     _secret_free_evidence,
     media_fixtures,
     new_transaction_id,
+    validate_interaction_expectations,
 )
 
 
@@ -36,6 +40,7 @@ def _empty_evidence() -> AuditEvidence:
         cache_only_event_ids=(),
         trigger_event_ids=(),
         thread_reads=(),
+        expectation_validation=None,
         notes=(),
     )
 
@@ -123,3 +128,95 @@ async def test_authenticated_media_round_trip_keeps_token_out_of_evidence() -> N
         "download:tiny.png",
     ]
     assert secret not in repr(api.timings)
+
+
+def _thread_read(
+    sequence: int,
+    *,
+    source: str,
+    visible_event_ids: tuple[str, ...],
+    cache_reject_reason: str | None = None,
+) -> ThreadReadRecord:
+    return ThreadReadRecord(
+        sequence=sequence,
+        mode="cache_hit" if source == "cache" else "full_scan",
+        source=source,
+        elapsed_ms=1.0,
+        cache_read_ms=0.1,
+        homeserver_fetch_ms=0.9 if source == "homeserver" else 0.0,
+        homeserver_scan_pages=1 if source == "homeserver" else 0,
+        homeserver_scanned_event_count=len(visible_event_ids) if source == "homeserver" else 0,
+        visible_event_count=len(visible_event_ids),
+        visible_event_ids=visible_event_ids,
+        cache_reject_reason=cache_reject_reason,
+        degraded=False,
+        error=None,
+    )
+
+
+def test_interaction_expectations_are_executable_and_fail_closed() -> None:
+    """Declared live expectations should be compared against every observed cache surface."""
+    records = (
+        InteractionRecord(
+            family="thread_child",
+            event_type="m.room.message",
+            event_id="$child",
+            expected_visible_thread_history=True,
+            expected_event_thread_mapping=True,
+            expected_room_level=False,
+        ),
+        InteractionRecord(
+            family="redacted_target",
+            event_type="m.reaction",
+            event_id="$target",
+            expected_point_cache=False,
+            expected_representation="tombstone",
+        ),
+        InteractionRecord(
+            family="redaction",
+            event_type="m.room.redaction",
+            event_id="$redaction",
+            expected_point_cache=False,
+            expected_representation="omitted",
+        ),
+    )
+    cache = CacheSnapshot(
+        active_event_ids=("$child",),
+        tombstoned_event_ids=("$target",),
+        edit_event_ids=(),
+        event_thread_ids=("$child",),
+        thread_state_rows=1,
+        orphan_edit_rows=0,
+        orphan_thread_rows=0,
+        quick_check="ok",
+    )
+    reads = (
+        _thread_read(1, source="homeserver", visible_event_ids=("$child",)),
+        _thread_read(2, source="cache", visible_event_ids=("$child",)),
+        _thread_read(
+            3,
+            source="homeserver",
+            visible_event_ids=(),
+            cache_reject_reason="thread_invalidated_after_validation",
+        ),
+    )
+
+    validation = validate_interaction_expectations(
+        records,
+        homeserver_event_ids=("$child", "$target", "$redaction"),
+        homeserver_redaction_event_ids=("$redaction",),
+        cache=cache,
+        thread_reads=reads,
+    )
+
+    assert validation.status == "passed"
+    assert validation.interaction_records == 3
+    assert validation.assertions > 20
+    with pytest.raises(MatrixAuditError, match=r"thread_child\.point_cache"):
+        validate_interaction_expectations(
+            records,
+            homeserver_event_ids=("$child", "$target", "$redaction"),
+            homeserver_redaction_event_ids=("$redaction",),
+            cache=replace(cache, active_event_ids=()),
+            thread_reads=reads,
+        )
