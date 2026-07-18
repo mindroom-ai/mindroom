@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from agno.media import Image
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 from structlog.testing import capture_logs
@@ -452,6 +453,60 @@ def test_build_summary_input_oversized_run_preserves_messages_before_tool_schema
     assert [included_run.run_id for included_run in included_runs] == ["run-big-metadata"]
     assert root_request in summary_input
     assert "tools_schema" not in summary_input
+
+
+def test_build_summary_input_normal_run_omits_only_bulky_metadata() -> None:
+    run = _completed_run(
+        "run-normal-metadata",
+        messages=[
+            Message(role="user", content="Look up the deployment outcome."),
+            Message(
+                role="assistant",
+                content="I will inspect it.",
+                tool_calls=[
+                    {
+                        "id": "call-deployment",
+                        "type": "function",
+                        "function": {"name": "deployment_status", "arguments": '{"deployment_id":"deploy-1"}'},
+                    },
+                ],
+            ),
+            Message(
+                role="tool",
+                content='{"state":"succeeded"}',
+                tool_call_id="call-deployment",
+                images=[Image(url="https://example.test/deployment.png")],
+            ),
+            Message(role="assistant", content="The deployment succeeded."),
+        ],
+    )
+    run.metadata = {
+        "matrix_event_id": "$request",
+        "started_at": "2026-07-17T20:00:00Z",
+        "durable_outcome": {"state": "delivered"},
+        "tools_schema": [{"name": "deployment_status", "description": "x" * 1_000}],
+        "model_params": {"temperature": 0.2},
+    }
+
+    summary_input, included_runs = _build_summary_input(
+        previous_summary=None,
+        compacted_runs=[run],
+        max_input_tokens=10_000,
+        history_settings=_ALL_HISTORY_SETTINGS,
+    )
+
+    assert included_runs == [run]
+    assert "tools_schema" not in summary_input
+    assert "model_params" not in summary_input
+    assert "$request" in summary_input
+    assert "2026-07-17T20:00:00Z" in summary_input
+    assert "durable_outcome" in summary_input
+    assert "Look up the deployment outcome." in summary_input
+    assert "call-deployment" in summary_input
+    assert "deployment_status" in summary_input
+    assert '{"state":"succeeded"}' in summary_input
+    assert "The deployment succeeded." in summary_input
+    assert "https://example.test/deployment.png" in summary_input
 
 
 def test_build_summary_input_skips_when_previous_summary_cannot_be_preserved() -> None:

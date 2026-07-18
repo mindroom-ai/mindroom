@@ -788,7 +788,8 @@ def _messages_for_runs(
 def _serialize_run(run: RunOutput | TeamRunOutput, index: int, history_settings: ResolvedHistorySettings) -> str:
     lines = [_run_open_tag(run, index)]
     if run.metadata:
-        lines.extend(["<run_metadata>", _escape_xml_content(stable_serialize(run.metadata)), "</run_metadata>"])
+        metadata = _metadata_for_excerpt(run.metadata)
+        lines.extend(["<run_metadata>", _escape_xml_content(stable_serialize(metadata)), "</run_metadata>"])
     for message in _compaction_replay_messages(run, history_settings):
         lines.extend(_serialize_message(message))
     lines.append("</run>")
