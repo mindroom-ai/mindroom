@@ -732,7 +732,7 @@ def test_compaction_input_estimate_keeps_known_model_encoding() -> None:
 
 
 @pytest.mark.asyncio
-async def test_claude_compaction_splits_dense_tool_schema_before_the_input_limit(tmp_path: Path) -> None:
+async def test_claude_compaction_splits_dense_preserved_metadata_before_the_input_limit(tmp_path: Path) -> None:
     """Regression for the production request that tiktoken underestimated by 1.63x."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
@@ -740,14 +740,14 @@ async def test_claude_compaction_splits_dense_tool_schema_before_the_input_limit
     for run_index in range(20):
         run = _completed_run(f"run-{run_index}")
         run.metadata = {
-            "tools_schema": [
+            "durable_outcomes": [
                 {
-                    "name": f"tool_{run_index}_{tool_index}",
+                    "name": f"outcome_{run_index}_{outcome_index}",
                     "description": "".join(
-                        f"{run_index * 100_000 + tool_index * 1_000 + value:08x}" for value in range(50)
+                        f"{run_index * 100_000 + outcome_index * 1_000 + value:08x}" for value in range(50)
                     ),
                 }
-                for tool_index in range(20)
+                for outcome_index in range(20)
             ],
         }
         runs.append(run)
