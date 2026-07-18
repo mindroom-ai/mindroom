@@ -64,7 +64,9 @@ Unbound legacy token records also start cold because they cannot prove which dur
 
 PostgreSQL migration takes a transaction-scoped global advisory lock, changes the legacy payload column to nullable, creates cold storage, normalizes only the initializing namespace, repairs only that namespace, and commits the schema version and maintenance result together.
 
-Transactional PostgreSQL cutover triggers make a surviving version-1 runtime rehydrate a replayed cold event before removing its archive row and make its tombstone writes remove matching cold events and replacement children.
+PostgreSQL version-2 normalization is an exclusive maintenance-window cutover for each namespace.
+Stop and drain every runtime that can write that namespace before starting the first version-2 runtime, and do not restart a version-1 runtime after migration.
+Version-1 thread readers require the duplicated payload that version 2 intentionally removes, and version-1 thread mutations cannot preserve version-2 cold-storage invariants.
 
 Other PostgreSQL namespaces retain their legacy payload until their own runtime initializes under schema version 2, so one namespace never deletes another namespace's only pre-migration copy.
 
