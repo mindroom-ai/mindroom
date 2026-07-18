@@ -95,7 +95,11 @@ async def _initialize_event_cache_db(
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA busy_timeout=5000")
         await db.execute("BEGIN IMMEDIATE")
-        migrated_from_schema_version, destructive_reset = await _prepare_event_cache_schema(
+        (
+            migrated_from_schema_version,
+            destructive_reset,
+            normalized_legacy_thread_payload_rows,
+        ) = await _prepare_event_cache_schema(
             db,
             db_path=db_path,
         )
@@ -106,6 +110,7 @@ async def _initialize_event_cache_db(
             schema_version=_EVENT_CACHE_SCHEMA_VERSION,
             migrated_from_schema_version=migrated_from_schema_version,
             destructive_reset=destructive_reset,
+            normalized_legacy_thread_payload_rows=normalized_legacy_thread_payload_rows,
         )
         await db.commit()
     except BaseException:
@@ -334,16 +339,16 @@ async def _prepare_event_cache_schema(
     db: aiosqlite.Connection,
     *,
     db_path: Path,
-) -> tuple[int | None, bool]:
+) -> tuple[int | None, bool, int]:
     """Migrate version 10 or reset unsupported cache shapes in the active transaction."""
     current_schema_version = await _schema_version(db)
     current_table_names = await _existing_table_names(db)
     if not current_table_names:
-        return None, False
+        return None, False, 0
     if current_schema_version == _EVENT_CACHE_SCHEMA_VERSION and _REQUIRED_EVENT_CACHE_TABLES.issubset(
         current_table_names,
     ):
-        return None, False
+        return None, False, 0
 
     version_10_tables = _REQUIRED_EVENT_CACHE_TABLES - {"cache_metadata", "compacted_streaming_edits"}
     if current_schema_version == _MIGRATABLE_EVENT_CACHE_SCHEMA_VERSION and version_10_tables.issubset(
@@ -355,8 +360,8 @@ async def _prepare_event_cache_schema(
             from_schema_version=current_schema_version,
             to_schema_version=_EVENT_CACHE_SCHEMA_VERSION,
         )
-        await migrate_version_10_thread_events(db)
-        return current_schema_version, False
+        normalized_legacy_thread_payload_rows = await migrate_version_10_thread_events(db)
+        return current_schema_version, False, normalized_legacy_thread_payload_rows
 
     logger.info(
         "Resetting unsupported Matrix event cache schema",
@@ -367,7 +372,7 @@ async def _prepare_event_cache_schema(
     for table_name in (*_EVENT_CACHE_TABLES, "thread_events_v10"):
         await db.execute(f"DROP TABLE IF EXISTS {table_name}")
     await db.execute("PRAGMA user_version = 0")
-    return None, True
+    return None, True, 0
 
 
 @dataclass
@@ -560,19 +565,20 @@ class SqliteEventCache:
 
     def runtime_diagnostics(self) -> dict[str, object]:
         """Return log-safe runtime state for sync certification diagnostics."""
+        storage_bytes = sqlite_storage_bytes(self.db_path)
         diagnostics: dict[str, object] = {
             "cache_backend": "sqlite",
             "cache_sqlite_initialized": self._runtime.is_initialized,
             "cache_sqlite_disabled": self._runtime.is_disabled,
             "cache_certification_generation_present": self.certification_generation is not None,
-            "cache_storage_bytes": sqlite_storage_bytes(self.db_path),
+            "cache_storage_bytes_available": storage_bytes is not None,
         }
+        if storage_bytes is not None:
+            diagnostics["cache_storage_bytes"] = storage_bytes
         if self._runtime.disabled_reason is not None:
             diagnostics["cache_sqlite_disabled_reason"] = self._runtime.disabled_reason
         diagnostics.update(self._runtime._metrics.as_runtime_diagnostics())
         diagnostics["cache_metrics_refresh_in_progress"] = self._metrics_refresh_task is not None
-        if self._runtime.maintenance_report is not None:
-            diagnostics["cache_storage_bytes"] = sqlite_storage_bytes(self.db_path)
         return diagnostics
 
     async def refresh_runtime_diagnostics(self) -> dict[str, object]:

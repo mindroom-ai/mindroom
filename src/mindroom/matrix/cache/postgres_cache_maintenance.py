@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .cache_maintenance import NONTERMINAL_STREAM_STATUSES, TERMINAL_STREAM_STATUSES, CacheMaintenanceReport
@@ -15,13 +16,21 @@ if TYPE_CHECKING:
     from psycopg import AsyncConnection
 
 
+@dataclass(frozen=True, slots=True)
+class _PostgresSchemaMigrationResult:
+    """Namespace normalization outcome inside the shared schema transaction."""
+
+    migrated_from_schema_version: int | None
+    normalized_legacy_thread_payload_rows: int
+
+
 async def migrate_postgres_schema(
     db: AsyncConnection,
     *,
     namespace: str,
     current_schema_version: int | None,
     target_schema_version: int,
-) -> int | None:
+) -> _PostgresSchemaMigrationResult:
     """Transactionally normalize one namespace while upgrading the shared schema."""
     if current_schema_version not in {None, 1, target_schema_version}:
         msg = (
@@ -39,7 +48,8 @@ async def migrate_postgres_schema(
             """,
         )
 
-    await db.execute(
+    normalized_legacy_thread_payload_rows = await rowcount(
+        db,
         """
         UPDATE mindroom_event_cache_thread_events
         SET event_json = NULL
@@ -55,7 +65,10 @@ async def migrate_postgres_schema(
         """,
         (str(target_schema_version),),
     )
-    return migrated_from
+    return _PostgresSchemaMigrationResult(
+        migrated_from_schema_version=migrated_from,
+        normalized_legacy_thread_payload_rows=normalized_legacy_thread_payload_rows,
+    )
 
 
 async def _count(
@@ -262,6 +275,7 @@ async def _repair_orphan_derived_rows(
                     AND events.room_id = thread_events.room_id
             )
         ON CONFLICT(namespace, room_id, thread_id) DO UPDATE SET
+            validated_at = NULL,
             invalidated_at = CASE
                 WHEN mindroom_event_cache_thread_state.invalidated_at IS NULL
                     OR excluded.invalidated_at >= mindroom_event_cache_thread_state.invalidated_at
@@ -301,6 +315,7 @@ async def _collect_maintenance_report(
     namespace: str,
     schema_version: int,
     migrated_from_schema_version: int | None,
+    normalized_legacy_thread_payload_rows: int,
     orphan_counts_before: tuple[int, int, int],
     repaired_counts: tuple[int, int, int],
     compacted_nonterminal_streaming_edits: int,
@@ -309,6 +324,7 @@ async def _collect_maintenance_report(
     return CacheMaintenanceReport(
         schema_version=schema_version,
         migrated_from_schema_version=migrated_from_schema_version,
+        normalized_legacy_thread_payload_rows=normalized_legacy_thread_payload_rows,
         storage_bytes=await _count(db, "SELECT pg_database_size(current_database())", ()),
         namespace_payload_bytes=await _count(
             db,
@@ -455,6 +471,7 @@ async def run_startup_maintenance(
     namespace: str,
     schema_version: int,
     migrated_from_schema_version: int | None,
+    normalized_legacy_thread_payload_rows: int,
 ) -> CacheMaintenanceReport:
     """Audit, safely repair, compact, and recount one PostgreSQL namespace."""
     orphan_counts = (
@@ -469,6 +486,7 @@ async def run_startup_maintenance(
         namespace=namespace,
         schema_version=schema_version,
         migrated_from_schema_version=migrated_from_schema_version,
+        normalized_legacy_thread_payload_rows=normalized_legacy_thread_payload_rows,
         orphan_counts_before=orphan_counts,
         repaired_counts=repaired_counts,
         compacted_nonterminal_streaming_edits=compacted,
@@ -487,6 +505,7 @@ async def refresh_runtime_metrics(
         namespace=namespace,
         schema_version=startup_report.schema_version,
         migrated_from_schema_version=startup_report.migrated_from_schema_version,
+        normalized_legacy_thread_payload_rows=startup_report.normalized_legacy_thread_payload_rows,
         orphan_counts_before=(
             startup_report.orphan_edit_indexes_before,
             startup_report.orphan_thread_indexes_before,

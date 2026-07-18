@@ -150,7 +150,7 @@ async def _initialize_postgres_event_cache_db(
         await db.execute("SELECT pg_advisory_xact_lock(hashtext('mindroom_event_cache_schema'))")
         await _create_postgres_event_cache_schema(db)
         current_schema_version = await _postgres_schema_version(db)
-        migrated_from_schema_version = await migrate_postgres_schema(
+        migration_result = await migrate_postgres_schema(
             db,
             namespace=namespace,
             current_schema_version=current_schema_version,
@@ -164,7 +164,8 @@ async def _initialize_postgres_event_cache_db(
             db,
             namespace=namespace,
             schema_version=_POSTGRES_EVENT_CACHE_SCHEMA_VERSION,
-            migrated_from_schema_version=migrated_from_schema_version,
+            migrated_from_schema_version=migration_result.migrated_from_schema_version,
+            normalized_legacy_thread_payload_rows=migration_result.normalized_legacy_thread_payload_rows,
         )
         await db.commit()
     except BaseException:

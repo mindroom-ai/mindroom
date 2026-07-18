@@ -38,9 +38,10 @@ It marks a thread stale before removing a membership row whose active source eve
 
 It compacts eligible streaming edits again so replayed or partially processed writes converge after restart.
 
-The startup log includes backend bytes where available, namespace payload bytes for PostgreSQL, row counts for active tables and cold history, tombstone counts, stale marker counts, streaming categories, orphan counts before and after repair, and repair and compaction outcomes.
+The startup log includes backend bytes where available, namespace payload bytes for PostgreSQL, normalized legacy thread-payload rows, row counts for active tables and cold history, tombstone counts, stale marker counts, streaming categories, orphan counts before and after repair, and repair and compaction outcomes.
 
 Runtime diagnostics preserve the immutable startup outcomes and overlay an exact, bounded-staleness storage snapshot with its age, dirty state, refresh state, and refresh-failure count.
+SQLite diagnostics explicitly report when filesystem metadata makes byte size unavailable.
 
 Committed mutations coalesce into a throttled background recount, and operators can force an exact recount through the cache diagnostics API.
 
@@ -64,17 +65,23 @@ Unbound legacy token records also start cold because they cannot prove which dur
 
 PostgreSQL migration takes a transaction-scoped global advisory lock, changes the legacy payload column to nullable, creates cold storage, normalizes only the initializing namespace, repairs only that namespace, and commits the schema version and maintenance result together.
 
-PostgreSQL version-2 normalization is an exclusive maintenance-window cutover for each namespace.
-Stop and drain every runtime that can write that namespace before starting the first version-2 runtime, and do not restart a version-1 runtime after migration.
+PostgreSQL version-2 binary cutover requires an exclusive database-wide maintenance window because the schema version is global to the physical database.
+Stop and drain every version-1 runtime sharing that database before starting the first version-2 runtime, and do not restart a version-1 runtime after migration.
 Version-1 thread readers require the duplicated payload that version 2 intentionally removes, and version-1 thread mutations cannot preserve version-2 cold-storage invariants.
 
-Other PostgreSQL namespaces retain their legacy payload until their own runtime initializes under schema version 2, so one namespace never deletes another namespace's only pre-migration copy.
+Row normalization remains namespace-scoped after the binary cutover.
+Other PostgreSQL namespaces retain their legacy payload until their own version-2 runtime initializes, and each startup reports how many legacy payload rows it normalized, so one namespace never deletes another namespace's only pre-migration copy.
 
 Cancellation or failure rolls back SQLite and PostgreSQL DDL, payload normalization, repair, compaction, metadata, and stale markers as one unit.
 
 Cancellation of a background or forced metrics recount also rolls back its read transaction before the shared connection can serve another cache operation.
 
 Migration tests use real version-10 and version-1 shapes on disposable storage and never access a production database.
+
+SQLite version-10 migration adds and populates event write order in place instead of rebuilding the 1.31-GiB JSON-bearing `events` table observed by the audit.
+The write-order update still rewrites event pages into the WAL, so operators must budget temporary free space at least comparable to the active events table plus safety margin and must take an offline backup before upgrade.
+Dropping the legacy JSON-bearing `thread_events` table adds free pages to the database but does not shrink the physical file automatically.
+After a successful upgrade and backup verification, an operator who needs immediate filesystem reclamation can stop MindRoom, run SQLite `VACUUM INTO` to a new file on storage with enough free space, verify the new database, atomically replace the old database while it is offline, and then restart.
 
 ## Retention blocker
 

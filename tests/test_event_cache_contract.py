@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import zlib
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -28,7 +29,6 @@ from tests.event_cache_test_support import replace_thread_unconditionally
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
 
 def _message_event(
@@ -535,6 +535,33 @@ async def test_runtime_metrics_refresh_failure_is_advisory(
     assert diagnostics["cache_metrics_dirty"] is True
     assert diagnostics["cache_metrics_refresh_failure_count"] == 1
     assert failure_reason not in str(diagnostics)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_storage_size_failure_is_advisory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Filesystem telemetry failure cannot escape diagnostics or disable cache writes."""
+    cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await cache.initialize()
+    try:
+        failure_reason = "secret filesystem failure"
+
+        def fail_stat(*_args: object, **_kwargs: object) -> None:
+            raise OSError(failure_reason)
+
+        monkeypatch.setattr(Path, "stat", fail_stat)
+        diagnostics = cache.runtime_diagnostics()
+        assert diagnostics["cache_storage_bytes_available"] is False
+        assert diagnostics["cache_storage_bytes"] > 0
+        assert failure_reason not in str(diagnostics)
+
+        event = _message_event("$event:localhost", 1)
+        await cache.store_event(str(event["event_id"]), "!room:localhost", event)
+        assert await cache.get_event("!room:localhost", str(event["event_id"])) == event
+    finally:
+        await cache.close()
 
 
 @pytest.mark.asyncio

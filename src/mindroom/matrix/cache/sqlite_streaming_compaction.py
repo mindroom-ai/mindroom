@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
-class ArchivedStreamingEdit:
+class _ArchivedStreamingEdit:
     """One compressed edit plus the projections needed for exact cache semantics."""
 
     event_id: str
@@ -60,9 +60,9 @@ def _decompress_event(event_json_zlib: bytes) -> dict[str, Any]:
     return decompress_event_payload(event_json_zlib, backend="SQLite")
 
 
-def _archived_edit_from_row(row: object) -> ArchivedStreamingEdit:
+def _archived_edit_from_row(row: object) -> _ArchivedStreamingEdit:
     values = cast("_ArchivedEditRow", row)
-    return ArchivedStreamingEdit(
+    return _ArchivedStreamingEdit(
         event_id=values[0],
         room_id=values[1],
         original_event_id=values[2],
@@ -130,7 +130,7 @@ async def load_latest_archived_edit(
     room_id: str,
     original_event_id: str,
     sender: str | None,
-) -> ArchivedStreamingEdit | None:
+) -> _ArchivedStreamingEdit | None:
     """Return the latest compacted edit in one visible replacement partition."""
     sender_predicate = "" if sender is None else "AND sender = ?"
     parameters = (room_id, original_event_id, *((sender,) if sender is not None else ()))
@@ -274,7 +274,7 @@ async def _compaction_candidates(
     *,
     room_id: str | None,
     limit: int,
-) -> list[ArchivedStreamingEdit]:
+) -> list[_ArchivedStreamingEdit]:
     nonterminal_placeholders = ",".join("?" for _ in NONTERMINAL_STREAM_STATUSES)
     terminal_placeholders = ",".join("?" for _ in TERMINAL_STREAM_STATUSES)
     room_predicate = "" if room_id is None else "AND nonterminal_index.room_id = ?"
@@ -342,7 +342,7 @@ async def _compaction_candidates(
     rows = await cursor.fetchall()
     await cursor.close()
     return [
-        ArchivedStreamingEdit(
+        _ArchivedStreamingEdit(
             event_id=str(row[0]),
             room_id=str(row[1]),
             original_event_id=str(row[2]),
@@ -379,7 +379,7 @@ async def compact_superseded_streaming_edits(
 
 async def _archive_candidate_batch(
     db: aiosqlite.Connection,
-    candidates: list[ArchivedStreamingEdit],
+    candidates: list[_ArchivedStreamingEdit],
 ) -> None:
     """Move one bounded candidate batch into cold storage."""
     if not candidates:

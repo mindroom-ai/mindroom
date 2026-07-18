@@ -35,6 +35,7 @@ _CHILD_ID = "$child:localhost"
 _MISSING_ID = "$missing:localhost"
 _ORPHAN_ID = "$orphan:localhost"
 _FUTURE_INVALIDATED_AT = 4_000_000_000.0
+_FUTURE_VALIDATED_AT = 5_000_000_000.0
 
 
 def _message_event(event_id: str, *, thread_id: str | None = None) -> dict[str, object]:
@@ -167,9 +168,9 @@ async def _prepare_sqlite_version_10(db_path: Path) -> None:
                 invalidated_at,
                 invalidation_reason
             )
-            VALUES (?, ?, NULL, ?, 'preexisting_newer_invalidation')
+            VALUES (?, ?, ?, ?, 'preexisting_newer_invalidation')
             """,
-            (_ROOM_ID, _THREAD_ID, _FUTURE_INVALIDATED_AT),
+            (_ROOM_ID, _THREAD_ID, _FUTURE_VALIDATED_AT, _FUTURE_INVALIDATED_AT),
         )
         await db.execute("PRAGMA user_version = 10")
         await db.commit()
@@ -277,6 +278,26 @@ async def _prepare_postgres_version_1(database_url: str, *, namespace: str, othe
             """,
             (namespace, _ORPHAN_ID, _ROOM_ID, _THREAD_ID, 12),
         )
+        await db.execute(
+            """
+            INSERT INTO mindroom_event_cache_thread_state(
+                namespace,
+                room_id,
+                thread_id,
+                validated_at,
+                invalidated_at,
+                invalidation_reason
+            )
+            VALUES (%s, %s, %s, %s, %s, 'preexisting_newer_invalidation')
+            """,
+            (
+                namespace,
+                _ROOM_ID,
+                _THREAD_ID,
+                _FUTURE_VALIDATED_AT,
+                _FUTURE_INVALIDATED_AT,
+            ),
+        )
         await db.commit()
     finally:
         await db.close()
@@ -287,6 +308,13 @@ async def test_sqlite_version_10_migrates_without_reset_and_repairs_orphans(tmp_
     """The exact version-10 shape migrates transactionally and preserves valid learned roots."""
     db_path = tmp_path / "event_cache.db"
     await _prepare_sqlite_version_10(db_path)
+    before_db = await aiosqlite.connect(db_path)
+    try:
+        cursor = await before_db.execute("SELECT rootpage FROM sqlite_master WHERE name = 'events'")
+        events_rootpage_before = await cursor.fetchone()
+        await cursor.close()
+    finally:
+        await before_db.close()
 
     cache = SqliteEventCache(db_path)
     await cache.initialize()
@@ -301,8 +329,10 @@ async def test_sqlite_version_10_migrates_without_reset_and_repairs_orphans(tmp_
         assert diagnostics["cache_orphan_edit_indexes_after"] == 0
         assert diagnostics["cache_orphan_thread_indexes_before"] == 1
         assert diagnostics["cache_orphan_thread_indexes_after"] == 0
+        assert diagnostics["cache_normalized_legacy_thread_payload_rows"] == 2
         assert cached_thread == [_message_event(_CHILD_ID, thread_id=_THREAD_ID)]
         assert stale_state is not None
+        assert stale_state.validated_at is None
         assert stale_state.invalidated_at == _FUTURE_INVALIDATED_AT
         assert stale_state.invalidation_reason == "preexisting_newer_invalidation"
         assert await cache.get_thread_id_for_event(_ROOM_ID, _THREAD_ID) == _THREAD_ID
@@ -312,8 +342,20 @@ async def test_sqlite_version_10_migrates_without_reset_and_repairs_orphans(tmp_
         columns = [str(row[1]) for row in await cursor.fetchall()]
         await cursor.close()
         assert "event_json" not in columns
+        cursor = await cache._runtime.require_db().execute("SELECT rootpage FROM sqlite_master WHERE name = 'events'")
+        assert await cursor.fetchone() == events_rootpage_before
+        await cursor.close()
     finally:
         await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_startup_repair_unconditionally_stales_orphan_membership(tmp_path: Path) -> None:
+    """A future validation cannot make a repaired incomplete snapshot look fresh."""
+    db_path = tmp_path / "event_cache.db"
+    cache = SqliteEventCache(db_path)
+    await cache.initialize()
+    await cache.close()
 
     db = await aiosqlite.connect(db_path)
     try:
@@ -323,6 +365,13 @@ async def test_sqlite_version_10_migrates_without_reset_and_repairs_orphans(tmp_
             VALUES (?, ?, ?, ?, ?)
             """,
             (_ROOM_ID, "$dangling-thread:localhost", "$dangling:localhost", 20, 100),
+        )
+        await db.execute(
+            """
+            INSERT INTO thread_cache_state(room_id, thread_id, validated_at)
+            VALUES (?, ?, ?)
+            """,
+            (_ROOM_ID, "$dangling-thread:localhost", _FUTURE_VALIDATED_AT),
         )
         await db.commit()
     finally:
@@ -337,6 +386,7 @@ async def test_sqlite_version_10_migrates_without_reset_and_repairs_orphans(tmp_
         assert diagnostics["cache_repaired_thread_event_references"] == 1
         state = await repaired_cache.get_thread_cache_state(_ROOM_ID, "$dangling-thread:localhost")
         assert state is not None
+        assert state.validated_at is None
         assert state.invalidation_reason == "startup_orphan_thread_event_reference"
     finally:
         await repaired_cache.close()
@@ -429,11 +479,14 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
             assert diagnostics["cache_orphan_edit_indexes_after"] == 0
             assert diagnostics["cache_orphan_thread_indexes_before"] == 1
             assert diagnostics["cache_orphan_thread_indexes_after"] == 0
+            assert diagnostics["cache_normalized_legacy_thread_payload_rows"] == 2
             assert diagnostics["cache_storage_bytes"] > 0
             assert diagnostics["cache_namespace_payload_bytes"] > 0
             assert cached_thread == [_message_event(_CHILD_ID, thread_id=_THREAD_ID)]
             assert stale_state is not None
-            assert stale_state.invalidation_reason == "startup_orphan_thread_event_reference"
+            assert stale_state.validated_at is None
+            assert stale_state.invalidated_at == _FUTURE_INVALIDATED_AT
+            assert stale_state.invalidation_reason == "preexisting_newer_invalidation"
             assert await cache.get_thread_id_for_event(_ROOM_ID, _THREAD_ID) == _THREAD_ID
 
             db = cache._runtime.require_db()
@@ -451,12 +504,19 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
             assert rows == sorted(
                 [(namespace, None), (other_namespace, json.dumps(_message_event(_CHILD_ID, thread_id=_THREAD_ID)))],
             )
+            cursor = await db.execute(
+                "SELECT value FROM mindroom_event_cache_metadata WHERE key = 'schema_version'",
+            )
+            assert await cursor.fetchone() == ("2",)
+            await cursor.close()
         finally:
             await cache.close()
 
         other_cache = PostgresEventCache(database_url=database_url, namespace=other_namespace)
         await other_cache.initialize()
         try:
+            other_diagnostics = other_cache.runtime_diagnostics()
+            assert other_diagnostics["cache_normalized_legacy_thread_payload_rows"] == 1
             cursor = await other_cache._runtime.require_db().execute(
                 """
                 SELECT event_json
@@ -469,6 +529,63 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
             await cursor.close()
         finally:
             await other_cache.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_startup_repair_unconditionally_stales_orphan_membership(
+    postgres_event_cache_url: str,
+) -> None:
+    """A future validation cannot make a repaired incomplete snapshot look fresh."""
+    namespace = f"tenant_{uuid.uuid4().hex}"
+    thread_id = "$dangling-thread:localhost"
+    async with _isolated_postgres_database(postgres_event_cache_url) as database_url:
+        cache = PostgresEventCache(database_url=database_url, namespace=namespace)
+        await cache.initialize()
+        await cache.close()
+
+        db = await psycopg.AsyncConnection.connect(database_url)
+        try:
+            await db.execute(
+                """
+                INSERT INTO mindroom_event_cache_thread_events(
+                    namespace,
+                    room_id,
+                    thread_id,
+                    event_id,
+                    origin_server_ts
+                )
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (namespace, _ROOM_ID, thread_id, "$dangling:localhost", 20),
+            )
+            await db.execute(
+                """
+                INSERT INTO mindroom_event_cache_thread_state(
+                    namespace,
+                    room_id,
+                    thread_id,
+                    validated_at
+                )
+                VALUES (%s, %s, %s, %s)
+                """,
+                (namespace, _ROOM_ID, thread_id, _FUTURE_VALIDATED_AT),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        repaired_cache = PostgresEventCache(database_url=database_url, namespace=namespace)
+        await repaired_cache.initialize()
+        try:
+            diagnostics = repaired_cache.runtime_diagnostics()
+            assert diagnostics["cache_orphan_thread_event_references_before"] == 1
+            assert diagnostics["cache_orphan_thread_event_references_after"] == 0
+            state = await repaired_cache.get_thread_cache_state(_ROOM_ID, thread_id)
+            assert state is not None
+            assert state.validated_at is None
+            assert state.invalidation_reason == "startup_orphan_thread_event_reference"
+        finally:
+            await repaired_cache.close()
 
 
 @pytest.mark.asyncio
@@ -489,13 +606,14 @@ async def test_postgres_version_2_maintenance_avoids_exclusive_schema_lock(
                 "LOCK TABLE mindroom_event_cache_thread_events IN ACCESS SHARE MODE",
             )
             await maintainer.execute("SET statement_timeout = '500ms'")
-            migrated_from = await migrate_postgres_schema(
+            migration_result = await migrate_postgres_schema(
                 maintainer,
                 namespace=namespace,
                 current_schema_version=2,
                 target_schema_version=2,
             )
-            assert migrated_from is None
+            assert migration_result.migrated_from_schema_version is None
+            assert migration_result.normalized_legacy_thread_payload_rows == 0
             await maintainer.rollback()
         finally:
             await blocker.rollback()
@@ -508,7 +626,7 @@ async def test_postgres_startup_compaction_rechecks_after_locked_redaction(
     postgres_event_cache_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Startup compaction cannot archive a payload redacted by an overlapping old runtime."""
+    """Startup compaction cannot archive a payload redacted by an overlapping room transaction."""
     namespace = f"tenant_{uuid.uuid4().hex}"
     pending_id = "$pending:localhost"
     original_id = "$original:localhost"

@@ -20,7 +20,6 @@ from .event_cache_events import (
     serialize_cacheable_events,
 )
 from .sqlite_streaming_compaction import (
-    ArchivedStreamingEdit,
     archived_dependent_edit_ids,
     compact_superseded_streaming_edits,
     delete_archived_events,
@@ -116,10 +115,10 @@ async def load_latest_edit(
         sender=sender,
     )
     if active is None:
-        return None if archived is None else _archived_event_payload(archived)
+        return None if archived is None else archived.event_payload()
     if archived is None or active[1:3] >= (archived.origin_server_ts, archived.event_order):
         return active[0]
-    return _archived_event_payload(archived)
+    return archived.event_payload()
 
 
 async def load_latest_edit_row(
@@ -145,9 +144,9 @@ async def load_latest_edit_row(
     if active is None:
         if archived is None:
             return None
-        return CachedEventRow(event=_archived_event_payload(archived), cached_at=archived.cached_at)
+        return CachedEventRow(event=archived.event_payload(), cached_at=archived.cached_at)
     if archived is not None and active[1:3] < (archived.origin_server_ts, archived.event_order):
-        return CachedEventRow(event=_archived_event_payload(archived), cached_at=archived.cached_at)
+        return CachedEventRow(event=archived.event_payload(), cached_at=archived.cached_at)
     return CachedEventRow(event=active[0], cached_at=active[3])
 
 
@@ -183,10 +182,6 @@ async def _load_latest_active_edit(
         int(row[2]),
         None if row[3] is None else float(row[3]),
     )
-
-
-def _archived_event_payload(event: ArchivedStreamingEdit) -> dict[str, Any]:
-    return event.event_payload()
 
 
 async def load_mxc_text(

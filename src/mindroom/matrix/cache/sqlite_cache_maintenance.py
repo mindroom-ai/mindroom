@@ -15,40 +15,14 @@ if TYPE_CHECKING:
     import aiosqlite
 
 
-async def migrate_version_10_thread_events(db: aiosqlite.Connection) -> None:
+async def migrate_version_10_thread_events(db: aiosqlite.Connection) -> int:
     """Normalize a complete version-10 thread snapshot without losing cached events."""
-    await db.execute("ALTER TABLE events RENAME TO events_v10")
-    await db.execute("DROP INDEX IF EXISTS idx_events_room_origin_ts")
-    await db.execute(
-        """
-        CREATE TABLE events (
-            event_id TEXT PRIMARY KEY,
-            room_id TEXT NOT NULL,
-            origin_server_ts INTEGER NOT NULL,
-            event_json TEXT NOT NULL,
-            cached_at REAL NOT NULL,
-            write_seq INTEGER NOT NULL
-        )
-        """,
-    )
-    await db.execute(
-        """
-        CREATE INDEX idx_events_room_origin_ts
-        ON events(room_id, origin_server_ts DESC)
-        """,
-    )
-    await db.execute(
-        """
-        INSERT INTO events(event_id, room_id, origin_server_ts, event_json, cached_at, write_seq)
-        SELECT event_id, room_id, origin_server_ts, event_json, cached_at, rowid
-        FROM events_v10
-        ORDER BY rowid
-        """,
-    )
-    await db.execute("DROP TABLE events_v10")
+    await db.execute("ALTER TABLE events ADD COLUMN write_seq INTEGER NOT NULL DEFAULT 0")
+    await db.execute("UPDATE events SET write_seq = rowid")
 
     await db.execute("ALTER TABLE thread_events RENAME TO thread_events_v10")
     await db.execute("DROP INDEX IF EXISTS idx_thread_events_room_thread_ts")
+    normalized_thread_payload_rows = await _scalar_count(db, "SELECT COUNT(*) FROM thread_events_v10")
     await db.execute(
         """
         CREATE TABLE thread_events (
@@ -90,6 +64,7 @@ async def migrate_version_10_thread_events(db: aiosqlite.Connection) -> None:
                 AND events.room_id = thread_events_v10.room_id
         )
         ON CONFLICT(room_id, thread_id) DO UPDATE SET
+            validated_at = NULL,
             invalidated_at = CASE
                 WHEN thread_cache_state.invalidated_at IS NULL
                     OR excluded.invalidated_at >= thread_cache_state.invalidated_at
@@ -122,6 +97,7 @@ async def migrate_version_10_thread_events(db: aiosqlite.Connection) -> None:
         """,
     )
     await db.execute("DROP TABLE thread_events_v10")
+    return normalized_thread_payload_rows
 
 
 async def _scalar_count(
@@ -236,6 +212,7 @@ async def _repair_orphan_thread_event_references(db: aiosqlite.Connection) -> in
         FROM thread_events
         WHERE {_ORPHAN_THREAD_EVENT_REFERENCE_PREDICATE}
         ON CONFLICT(room_id, thread_id) DO UPDATE SET
+            validated_at = NULL,
             invalidated_at = CASE
                 WHEN thread_cache_state.invalidated_at IS NULL
                     OR excluded.invalidated_at >= thread_cache_state.invalidated_at
@@ -283,6 +260,7 @@ async def _collect_maintenance_report(
     schema_version: int,
     migrated_from_schema_version: int | None,
     destructive_reset: bool,
+    normalized_legacy_thread_payload_rows: int,
     orphan_edit_indexes_before: int,
     orphan_thread_indexes_before: int,
     orphan_thread_event_references_before: int,
@@ -298,6 +276,7 @@ async def _collect_maintenance_report(
         schema_version=schema_version,
         migrated_from_schema_version=migrated_from_schema_version,
         destructive_reset=destructive_reset,
+        normalized_legacy_thread_payload_rows=normalized_legacy_thread_payload_rows,
         event_rows=await _scalar_count(db, "SELECT COUNT(*) FROM events"),
         thread_event_reference_rows=await _scalar_count(db, "SELECT COUNT(*) FROM thread_events"),
         edit_index_rows=await _scalar_count(db, "SELECT COUNT(*) FROM event_edits"),
@@ -372,6 +351,7 @@ async def run_startup_maintenance(
     schema_version: int,
     migrated_from_schema_version: int | None,
     destructive_reset: bool,
+    normalized_legacy_thread_payload_rows: int,
 ) -> CacheMaintenanceReport:
     """Audit, safely repair, compact, and recount one SQLite cache transaction."""
     orphan_edit_indexes_before = await _orphan_edit_index_count(db)
@@ -384,6 +364,7 @@ async def run_startup_maintenance(
         schema_version=schema_version,
         migrated_from_schema_version=migrated_from_schema_version,
         destructive_reset=destructive_reset,
+        normalized_legacy_thread_payload_rows=normalized_legacy_thread_payload_rows,
         orphan_edit_indexes_before=orphan_edit_indexes_before,
         orphan_thread_indexes_before=orphan_thread_indexes_before,
         orphan_thread_event_references_before=orphan_thread_event_references_before,
@@ -406,6 +387,7 @@ async def refresh_runtime_metrics(
         schema_version=startup_report.schema_version,
         migrated_from_schema_version=startup_report.migrated_from_schema_version,
         destructive_reset=startup_report.destructive_reset,
+        normalized_legacy_thread_payload_rows=startup_report.normalized_legacy_thread_payload_rows,
         orphan_edit_indexes_before=startup_report.orphan_edit_indexes_before,
         orphan_thread_indexes_before=startup_report.orphan_thread_indexes_before,
         orphan_thread_event_references_before=startup_report.orphan_thread_event_references_before,
@@ -417,10 +399,13 @@ async def refresh_runtime_metrics(
     return with_sqlite_storage_bytes(report, db_path)
 
 
-def sqlite_storage_bytes(db_path: Path) -> int:
-    """Return current SQLite main/WAL bytes without reading cache content."""
+def sqlite_storage_bytes(db_path: Path) -> int | None:
+    """Return current SQLite main/WAL bytes when filesystem metadata is available."""
     paths = (db_path, db_path.with_name(f"{db_path.name}-wal"))
-    return sum(path.stat().st_size for path in paths if path.exists())
+    try:
+        return sum(path.stat().st_size for path in paths if path.exists())
+    except OSError:
+        return None
 
 
 def with_sqlite_storage_bytes(report: CacheMaintenanceReport, db_path: Path) -> CacheMaintenanceReport:

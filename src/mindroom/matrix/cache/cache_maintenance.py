@@ -53,6 +53,7 @@ class CacheMaintenanceReport:
     schema_version: int
     migrated_from_schema_version: int | None = None
     destructive_reset: bool = False
+    normalized_legacy_thread_payload_rows: int = 0
     storage_bytes: int | None = None
     namespace_payload_bytes: int | None = None
     event_rows: int = 0
@@ -91,6 +92,7 @@ class CacheMaintenanceReport:
             "cache_metrics_snapshot": snapshot,
             "cache_schema_version": self.schema_version,
             "cache_schema_destructive_reset": self.destructive_reset,
+            "cache_normalized_legacy_thread_payload_rows": self.normalized_legacy_thread_payload_rows,
             "cache_event_rows": self.event_rows,
             "cache_thread_event_reference_rows": self.thread_event_reference_rows,
             "cache_edit_index_rows": self.edit_index_rows,
