@@ -398,7 +398,7 @@ async def _build_file_content(
     size_limit: int,
 ) -> tuple[str | None, dict[str, Any] | None, dict[str, Any]]:
     """Upload full original content JSON and build preview ``m.file`` event."""
-    mxc_uri, file_info = await _upload_content_json_sidecar(client, room_id, full_content)
+    mxc_uri, file_info = await upload_json_sidecar(client, room_id, full_content)
 
     available = size_limit - _LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES
     preview = _create_preview(preview_text, available)
@@ -499,15 +499,6 @@ def _build_text_fallback_content(
         preview_limit = max(0, preview_limit // 2)
 
 
-async def _upload_content_json_sidecar(
-    client: nio.AsyncClient,
-    room_id: str,
-    full_content: dict[str, Any],
-) -> tuple[str | None, dict[str, Any] | None]:
-    """Upload full original content JSON for supported-client hydration."""
-    return await upload_json_sidecar(client, room_id, full_content)
-
-
 async def prepare_large_message(
     client: nio.AsyncClient,
     room_id: str,
@@ -546,7 +537,7 @@ async def prepare_large_message(
             room_id=room_id,
             original_size_bytes=current_size,
         )
-        mxc_uri, file_info = await _upload_content_json_sidecar(client, room_id, content)
+        mxc_uri, file_info = await upload_json_sidecar(client, room_id, content)
         if not sidecar_upload_is_usable(mxc_uri, file_info, room_encrypted=room_encrypted):
             logger.warning(
                 "large_message_sidecar_unavailable_using_inline_preview",

@@ -314,7 +314,7 @@ async def test_prepare_large_message_missing_sidecar_file_metadata_falls_back_to
     ) -> tuple[str, dict[str, object] | None]:
         return "mxc://server/missing-metadata", file_info
 
-    monkeypatch.setattr("mindroom.matrix.large_messages._upload_content_json_sidecar", missing_file_metadata)
+    monkeypatch.setattr("mindroom.matrix.large_messages.upload_json_sidecar", missing_file_metadata)
     client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
     content = _large_text_content("missing metadata ")
 
@@ -344,7 +344,7 @@ async def test_prepare_large_message_encrypted_incomplete_file_metadata_falls_ba
     client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
     client.rooms = {"!room:server": room}
     monkeypatch.setattr(
-        "mindroom.matrix.large_messages._upload_content_json_sidecar",
+        "mindroom.matrix.large_messages.upload_json_sidecar",
         incomplete_encrypted_file_metadata,
     )
     content = _large_text_content("encrypted missing metadata ")
@@ -381,7 +381,7 @@ async def test_prepare_large_message_encrypted_valid_sidecar_keeps_file_preview(
     room.encrypted = True
     client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
     client.rooms = {"!room:server": room}
-    monkeypatch.setattr("mindroom.matrix.large_messages._upload_content_json_sidecar", encrypted_file_metadata)
+    monkeypatch.setattr("mindroom.matrix.large_messages.upload_json_sidecar", encrypted_file_metadata)
     content = _large_text_content("encrypted sidecar ")
 
     result = await prepare_large_message(client, "!room:server", content)
@@ -413,7 +413,7 @@ async def test_prepare_streaming_edit_encrypted_incomplete_file_metadata_omits_s
     client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
     client.rooms = {"!room:server": room}
     monkeypatch.setattr(
-        "mindroom.matrix.large_messages._upload_content_json_sidecar",
+        "mindroom.matrix.large_messages.upload_json_sidecar",
         incomplete_encrypted_file_metadata,
     )
     text = "streaming encrypted fallback " + ("z" * 60000)

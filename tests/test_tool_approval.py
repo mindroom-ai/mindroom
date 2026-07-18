@@ -910,12 +910,10 @@ async def test_request_approval_truncated_preview_with_full_arguments_can_be_app
 
 
 @pytest.mark.asyncio
-async def test_request_approval_survives_full_arguments_build_failure(
+async def test_request_approval_propagates_full_arguments_build_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failed full-arguments build must degrade to a non-approvable card, not raise."""
-
     def raise_unexpected(_arguments: dict[str, Any]) -> dict[str, Any] | None:
         msg = "unexpected redaction failure"
         raise ValueError(msg)
@@ -925,32 +923,19 @@ async def test_request_approval_survives_full_arguments_build_failure(
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
     editor = AsyncMock(return_value=True)
     store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
-    task = asyncio.create_task(
-        store.request_approval(
+
+    with pytest.raises(ValueError, match="unexpected redaction failure"):
+        await store.request_approval(
             tool_name="write_file",
             arguments={"content": "x" * 10_000},
             room_id="!room:localhost",
             requester_id="@user:localhost",
             approver_user_id="@user:localhost",
             timeout_seconds=30,
-        ),
-    )
-    pending = await _wait_for_pending(store, sender=sender)
+        )
 
-    card_content = sender.await_args.args[2]
-    assert card_content["arguments_truncated"] is True
-    assert card_content["approvable"] is False
-    assert "full_arguments" not in card_content
-
-    await _resolve_pending_approval(
-        store,
-        pending,
-        status="approved",
-    )
-    decision = await task
-
-    assert decision.status == "denied"
-    assert "too large to show in full" in (decision.reason or "")
+    sender.assert_not_awaited()
+    editor.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2626,8 +2611,13 @@ def test_full_event_arguments_budgets_utf8_bytes_not_characters() -> None:
     assert _build_full_event_arguments({"content": "汉" * 8_000}) == {"content": "汉" * 8_000}
 
 
-def test_full_event_arguments_rejects_sanitizer_truncated_collections() -> None:
-    assert _build_full_event_arguments({"items": list(range(60_000))}) is None
+def test_full_event_arguments_accepts_structurally_complex_payload_below_byte_cap() -> None:
+    nested: object = "value"
+    for _ in range(20):
+        nested = {"nested": nested}
+    arguments = {"items": list(range(60_000)), "nested": nested}
+
+    assert _build_full_event_arguments(arguments) == arguments
 
 
 def test_pending_approval_parses_full_arguments_availability() -> None:

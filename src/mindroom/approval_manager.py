@@ -12,7 +12,7 @@ from concurrent.futures import Future, InvalidStateError
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 from mindroom.approval_events import (
@@ -60,13 +60,7 @@ _DEFAULT_TRUNCATED_APPROVAL_REASON = (
 )
 _STARTUP_DISCARD_REASON = "Bot restarted before approval — original request was cancelled."
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
-# Absolute completeness cap for full arguments. Payloads under this cap are embedded on the
-# card when they fit and offloaded to an uploaded JSON sidecar by the transport when they do
-# not; payloads over it can never be shown completely, so their cards are not approvable.
 _MAX_FULL_ARGUMENTS_JSON_BYTES = 2_000_000
-_MAX_FULL_ARGUMENT_STRING_CHARS = 2_000_000
-_MAX_FULL_ARGUMENT_COLLECTION_ITEMS = 50_000
-_MAX_FULL_ARGUMENT_DEPTH = 12
 _MAX_REMEMBERED_TERMINAL_CARD_IDS = 4096
 _SANITIZER_TRUNCATION_MARKER = "... [truncated]"
 _MANAGER: _ApprovalManager | None = None
@@ -186,37 +180,12 @@ def _full_arguments_json_bytes(value: object) -> int:
 
 def _build_full_event_arguments(arguments: dict[str, Any]) -> dict[str, Any] | None:
     """Return the complete redacted arguments when they can be delivered to a human, else None."""
-    # Cost pre-filter, not the authoritative bound: skip redaction work for payloads that are
-    # already over budget. The byte check on the sanitized result below is what gates shipping.
-    if len(_compact_preview_text(arguments).encode("utf-8")) > _MAX_FULL_ARGUMENTS_JSON_BYTES:
+    if _full_arguments_json_bytes(arguments) > _MAX_FULL_ARGUMENTS_JSON_BYTES:
         return None
-    sanitized = redact_sensitive_data(
-        arguments,
-        max_string_length=_MAX_FULL_ARGUMENT_STRING_CHARS,
-        max_collection_items=_MAX_FULL_ARGUMENT_COLLECTION_ITEMS,
-        max_depth=_MAX_FULL_ARGUMENT_DEPTH,
-    )
-    if not isinstance(sanitized, dict):
-        return None
-    if _contains_sanitizer_truncation(arguments, sanitized):
-        return None
+    sanitized = cast("dict[str, Any]", redact_sensitive_data(arguments))
     if _full_arguments_json_bytes(sanitized) > _MAX_FULL_ARGUMENTS_JSON_BYTES:
         return None
     return sanitized
-
-
-async def _full_event_arguments_off_loop(arguments: dict[str, Any], *, tool_name: str) -> dict[str, Any] | None:
-    """Build complete card arguments off-loop; a failed build degrades to None, never raises.
-
-    Off-loop because redacting a card-sized payload can take whole seconds on adversarial
-    strings, and contained because full arguments are an enhancement — their failure must
-    yield a non-approvable card, not take down the approval flow.
-    """
-    try:
-        return await asyncio.to_thread(_build_full_event_arguments, arguments)
-    except Exception:
-        logger.warning("Failed to build full approval arguments", tool_name=tool_name, exc_info=True)
-        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,7 +305,7 @@ class _ApprovalManager:
         expires_at = requested_at + timedelta(seconds=max(timeout_seconds, 0.0))
         event_arguments, arguments_truncated = _build_event_arguments_preview(arguments)
         full_arguments = (
-            await _full_event_arguments_off_loop(arguments, tool_name=tool_name) if arguments_truncated else None
+            await asyncio.to_thread(_build_full_event_arguments, arguments) if arguments_truncated else None
         )
         content = self._pending_event_content(
             approval_id=approval_id,
