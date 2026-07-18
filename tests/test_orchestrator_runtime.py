@@ -54,7 +54,13 @@ from mindroom.orchestrator import (
     main,
 )
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
-from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
+from mindroom.runtime_state import (
+    get_api_server_address,
+    get_runtime_state,
+    reset_runtime_state,
+    set_api_server_address,
+    set_runtime_ready,
+)
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.tool_approval import _shutdown_approval_store
@@ -147,6 +153,35 @@ class TestAgentBot(AgentBotTestBase):
         )
 
     @pytest.mark.asyncio
+    async def test_embedded_uvicorn_publishes_actual_bound_port_after_startup(self) -> None:
+        """Port-zero binds publish the listener's real port only after startup succeeds."""
+
+        async def app(scope: object, receive: object, send: object) -> None:
+            del scope
+            del receive
+            del send
+
+        server = _SignalAwareUvicornServer(
+            uvicorn.Config(app, host="0.0.0.0", port=0, lifespan="off"),  # noqa: S104
+            asyncio.Event(),
+        )
+        server.config.load()
+        server.lifespan = server.config.lifespan_class(server.config)
+        reset_runtime_state()
+        assert get_api_server_address() is None
+        try:
+            await server.startup()
+            address = get_api_server_address()
+            assert address is not None
+            listeners = server.servers[0].sockets
+            assert listeners is not None
+            bound_port = cast("tuple[str, int]", listeners[0].getsockname())[1]
+            assert address.base_url == f"http://127.0.0.1:{bound_port}"
+        finally:
+            await server.shutdown()
+            reset_runtime_state()
+
+    @pytest.mark.asyncio
     async def test_run_api_server_fails_fast_when_serve_returns_unexpectedly(self, tmp_path: Path) -> None:
         """server.serve() returning outside shutdown should be a fatal API lifecycle failure."""
 
@@ -158,7 +193,7 @@ class TestAgentBot(AgentBotTestBase):
                 pass
 
             async def serve(self) -> None:
-                return None
+                set_api_server_address("127.0.0.1", 8765)
 
         with (
             patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
@@ -178,6 +213,7 @@ class TestAgentBot(AgentBotTestBase):
 
         mock_error.assert_called_once()
         assert mock_error.call_args.args == ("fatal_embedded_api_server_exit",)
+        assert get_api_server_address() is None
 
     @pytest.mark.asyncio
     async def test_run_api_server_allows_expected_shutdown_after_serve_returns(self, tmp_path: Path) -> None:
@@ -191,7 +227,7 @@ class TestAgentBot(AgentBotTestBase):
                 pass
 
             async def serve(self) -> None:
-                return None
+                set_api_server_address("127.0.0.1", 8765)
 
         shutdown_requested = asyncio.Event()
         shutdown_requested.set()
@@ -212,6 +248,7 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         mock_error.assert_not_called()
+        assert get_api_server_address() is None
 
     @pytest.mark.asyncio
     async def test_run_api_server_converts_uvicorn_system_exit_to_runtime_error(self, tmp_path: Path) -> None:

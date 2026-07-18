@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from threading import Lock
 
-_LOOPBACK_BIND_HOSTS = ("0.0.0.0", "::")  # noqa: S104
+_IPV4_WILDCARD_BIND_HOST = "0.0.0.0"  # noqa: S104
+_IPV6_WILDCARD_BIND_HOST = "::"
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,7 +19,14 @@ class _ApiServerAddress:
     @property
     def base_url(self) -> str:
         """Return the local-client base URL for this bind address."""
-        host = "127.0.0.1" if self.host in _LOOPBACK_BIND_HOSTS else self.host
+        if self.host == _IPV4_WILDCARD_BIND_HOST:
+            host = "127.0.0.1"
+        elif self.host == _IPV6_WILDCARD_BIND_HOST:
+            host = "::1"
+        else:
+            host = self.host
+        if ":" in host:
+            host = f"[{host}]"
         return f"http://{host}:{self.port}"
 
 
@@ -55,6 +63,12 @@ def get_api_server_address() -> _ApiServerAddress | None:
     """Return the embedded API server bind address, if one was started."""
     with _lock:
         return _state.api_server_address
+
+
+def clear_api_server_address() -> None:
+    """Clear the embedded API server address after it stops."""
+    with _lock:
+        _state.api_server_address = None
 
 
 def set_runtime_starting(detail: str = "MindRoom startup in progress") -> None:

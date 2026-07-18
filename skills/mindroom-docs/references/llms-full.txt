@@ -15059,7 +15059,9 @@ Unused callbacks do not expire automatically, so delete abandoned records with `
 
 ## Network Access
 
-Generated scripts call `http://127.0.0.1:8765` by default.
+Generated scripts use the embedded API server's bound address, including a non-default `--api-port`.
+
+When no embedded API server is running, they fall back to `http://127.0.0.1:8765`.
 
 Set `MINDROOM_URL` when the background process needs another address to reach the MindRoom API.
 
