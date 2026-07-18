@@ -112,6 +112,65 @@ async def test_prepare_history_for_run_authored_compaction_still_plans_safe_repl
 
 
 @pytest.mark.asyncio
+async def test_small_replay_window_cannot_select_required_compaction_without_progress(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, replay_window_tokens=1),
+        context_window=1_000_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+        ],
+    )
+    storage.upsert_session(session)
+
+    execution_plan = resolve_history_execution_plan(
+        config=config,
+        compaction_config=config.resolve_entity("test_agent").compaction_config,
+        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        active_model_name="default",
+        active_context_window=1_000_000,
+        static_prompt_tokens=10,
+    )
+
+    assert execution_plan.summary_input_budget_tokens == 1
+    assert execution_plan.destructive_compaction_available is False
+    assert execution_plan.unavailable_reason == "non_positive_summary_input_budget"
+
+    with patch("mindroom.history.runtime._run_scope_compaction_with_lifecycle", new=AsyncMock()) as compact_mock:
+        prepared_attempts = [
+            await prepare_history_for_run_for_test(
+                agent=_agent(db=storage),
+                agent_name="test_agent",
+                full_prompt="Current prompt",
+                session_id="session-1",
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=None,
+                storage=storage,
+                session=session,
+            )
+            for _attempt in range(2)
+        ]
+
+    assert [
+        (prepared.compaction_decision.mode, prepared.compaction_decision.reason) for prepared in prepared_attempts
+    ] == [
+        ("none", "compaction_unavailable"),
+        ("none", "compaction_unavailable"),
+    ]
+    compact_mock.assert_not_awaited()
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
+
+
+@pytest.mark.asyncio
 async def test_prepare_history_for_run_without_authored_compaction_and_no_window_skips_warning(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path, context_window=None)
     config.defaults.compaction = None
@@ -680,6 +739,38 @@ def test_resolve_history_execution_plan_marks_non_positive_summary_budget_unavai
     assert execution_plan.summary_input_budget_tokens == 0
     assert execution_plan.destructive_compaction_available is False
     assert execution_plan.unavailable_reason == "non_positive_summary_input_budget"
+
+
+@pytest.mark.parametrize(
+    ("replay_window_tokens", "expected_available"),
+    [
+        (999, False),
+        (1_000, True),
+    ],
+)
+def test_resolve_history_execution_plan_enforces_minimum_summary_input_budget(
+    tmp_path: Path,
+    replay_window_tokens: int,
+    expected_available: bool,
+) -> None:
+    config, _runtime_paths_value = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, replay_window_tokens=replay_window_tokens),
+        context_window=1_000_000,
+    )
+
+    execution_plan = resolve_history_execution_plan(
+        config=config,
+        compaction_config=config.resolve_entity("test_agent").compaction_config,
+        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        active_model_name="default",
+        active_context_window=1_000_000,
+        static_prompt_tokens=10,
+    )
+
+    assert execution_plan.summary_input_budget_tokens == replay_window_tokens
+    assert execution_plan.destructive_compaction_available is expected_available
+    assert (execution_plan.unavailable_reason is None) is expected_available
 
 
 @pytest.mark.parametrize(

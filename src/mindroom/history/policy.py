@@ -12,6 +12,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import CompactionConfig
 
+_MINIMUM_SUMMARY_INPUT_BUDGET_TOKENS = 1_000
+
 
 def resolve_history_execution_plan(
     *,
@@ -186,6 +188,12 @@ def _resolve_summary_input_budget(
     replay_window_tokens: int | None,
     reserve_tokens: int,
 ) -> tuple[int | None, CompactionAvailabilityReason | None]:
+    """Resolve a summary budget large enough for the request envelope and one degradation retry.
+
+    The 1,000-token floor matches ``SummaryRetryPolicy.floor_tokens``. Below it,
+    fixed summary markup can consume the budget and the retry policy has no
+    smaller viable request to build.
+    """
     if compaction_context_window is None:
         return None, "no_context_window"
 
@@ -200,6 +208,8 @@ def _resolve_summary_input_budget(
     if replay_window_tokens is not None:
         summary_input_budget_tokens = min(summary_input_budget_tokens, replay_window_tokens)
     if summary_input_budget_tokens <= 0:
+        return summary_input_budget_tokens, "non_positive_summary_input_budget"
+    if summary_input_budget_tokens < _MINIMUM_SUMMARY_INPUT_BUDGET_TOKENS:
         return summary_input_budget_tokens, "non_positive_summary_input_budget"
     return summary_input_budget_tokens, None
 

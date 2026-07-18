@@ -38,7 +38,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.error_handling import ModelSafeguardRefusalError
-from mindroom.history.compaction import compact_scope_history
+from mindroom.history.compaction import _build_summary_input, compact_scope_history
 from mindroom.history.storage import (
     compacted_run_ids_with,
     prune_reintroduced_runs,
@@ -673,6 +673,13 @@ def test_retry_policy_does_not_retry_non_transient_provider_statuses(status_code
     assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) is None
 
 
+def test_retry_policy_does_not_retry_default_provider_error_status() -> None:
+    error = ModelProviderError("unclassified provider failure")
+
+    assert error.status_code == 502
+    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) is None
+
+
 def test_retry_policy_preserves_context_error_fragment_matches() -> None:
     policy = DEFAULT_SUMMARY_RETRY_POLICY
 
@@ -924,6 +931,61 @@ async def test_compaction_shrinks_input_after_safeguard_refusal(tmp_path: Path) 
     assert len(attempts) == 3
     assert estimate_compaction_input_tokens(attempts[1]) < estimate_compaction_input_tokens(attempts[0])
     assert attempts[2] != attempts[1]
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "recovered summary"
+    storage.close()
+
+
+@pytest.mark.asyncio
+async def test_compaction_retries_transient_provider_error_at_same_budget(tmp_path: Path) -> None:
+    """A selected transient status retries the same chunk and persists the result."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session([_completed_run("run-1", marker="RUN1-MARKER", padding=4_000)])
+    write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+
+    attempts: list[str] = []
+
+    async def flaky_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+        attempts.append(summary_input)
+        if len(attempts) == 1:
+            message = "temporary provider failure"
+            raise ModelProviderError(message, status_code=503)
+        return SessionSummary(summary="recovered summary", updated_at=datetime.now(UTC))
+
+    with (
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(side_effect=flaky_summary),
+        ),
+        patch(
+            "mindroom.history.compaction._build_summary_input",
+            wraps=_build_summary_input,
+        ) as build_summary_input_spy,
+    ):
+        outcome = await compact_scope_history(
+            storage=storage,
+            session=session,
+            scope=_SCOPE,
+            state=read_scope_state(session, _SCOPE),
+            history_settings=_HISTORY_SETTINGS,
+            available_history_budget=None,
+            summary_input_budget=10_000,
+            summary_model=FakeModel(id="summary-model", provider="fake"),
+            summary_model_name="summary-model",
+            replay_window_tokens=64_000,
+            threshold_tokens=None,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+        )
+
+    assert outcome is not None
+    assert outcome.compacted_run_count == 1
+    assert len(attempts) == 2
+    assert attempts[1] == attempts[0]
+    assert [call.kwargs["max_input_tokens"] for call in build_summary_input_spy.call_args_list] == [10_000, 10_000]
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
     assert persisted.summary is not None
