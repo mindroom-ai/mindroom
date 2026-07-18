@@ -197,7 +197,10 @@ class _SignalAwareUvicornServer(uvicorn.Server):
             return
         listeners = self.servers[0].sockets
         assert listeners is not None
-        bound_address = cast("tuple[str, int]", listeners[0].getsockname())
+        bound_address = cast(
+            "tuple[str, int] | tuple[str, int, int, int]",
+            listeners[0].getsockname(),
+        )
         bound_host = bound_address[0]
         bound_port = bound_address[1]
         set_api_server_address(bound_host, bound_port)

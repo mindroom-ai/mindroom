@@ -175,7 +175,11 @@ class TestAgentBot(AgentBotTestBase):
             assert address is not None
             listeners = server.servers[0].sockets
             assert listeners is not None
-            bound_port = cast("tuple[str, int]", listeners[0].getsockname())[1]
+            bound_address = cast(
+                "tuple[str, int] | tuple[str, int, int, int]",
+                listeners[0].getsockname(),
+            )
+            bound_port = bound_address[1]
             assert address.base_url == f"http://127.0.0.1:{bound_port}"
         finally:
             await server.shutdown()
