@@ -62,6 +62,10 @@ _deferred_overdue_tasks: deque[_DeferredOverdueTaskStart] = deque()
 _deferred_overdue_task_ids: set[str] = set()
 
 
+class _ScheduledTaskStateReadError(RuntimeError):
+    """Matrix room state could not be read for schedule suppression."""
+
+
 class _AgentValidationResult(NamedTuple):
     """Result of agent mention validation."""
 
@@ -609,7 +613,7 @@ async def get_pending_schedule_thread_ids_for_room(
     response = await client.room_get_state(room_id)
     if not isinstance(response, nio.RoomGetStateResponse):
         msg = f"Failed to get scheduled task state for room {room_id}: {response}"
-        raise TypeError(msg)
+        raise _ScheduledTaskStateReadError(msg)
     tasks = _parse_task_records_from_state(room_id, response, include_non_pending=False)
     return frozenset(
         None if task.workflow.thread_id in {None, "main"} else task.workflow.thread_id

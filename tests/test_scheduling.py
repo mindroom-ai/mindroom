@@ -1625,7 +1625,7 @@ async def test_get_pending_schedule_thread_ids_raises_on_room_state_error() -> N
     )
     client.room_get_state = AsyncMock(return_value=error_response)
 
-    with pytest.raises(TypeError, match="Failed to get scheduled task state"):
+    with pytest.raises(RuntimeError, match="Failed to get scheduled task state"):
         await get_pending_schedule_thread_ids_for_room(client, "!test:server")
 
 

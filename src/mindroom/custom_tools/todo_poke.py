@@ -1,4 +1,7 @@
-"""Native scanner that wakes idle agents with actionable assigned todos."""
+"""Native scanner that wakes idle agents with actionable assigned todos.
+
+Ad-hoc team activity outside configured team bots is not visible to idle checks and can result in one extra serialized turn.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import math
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -42,6 +46,7 @@ type _TodoPokeSender = Callable[[str, str, str | None], Awaitable[str | None]]
 
 _PRIORITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 _VALID_STATUSES = {"open", *TERMINAL_STATUSES}
+_SAFE_ASSIGNEE_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
 _POKE_STATE_FILENAME = "poke_state.json"
 _VISIBLE_ITEM_LIMIT = 5
 
@@ -61,9 +66,9 @@ class TodoPokeDeps:
     """Runtime collaborators injected into the todo poke scanner."""
 
     state_root: Callable[[], Path]
-    schedule_query: _TodoScheduleQuery | None
+    schedule_query: _TodoScheduleQuery
     idle_check: Callable[[str], bool]
-    sender: _TodoPokeSender | None
+    sender: _TodoPokeSender
     clock: Callable[[], datetime]
 
 
@@ -207,10 +212,15 @@ def _parse_thread_snapshot(data: object, source_path: Path) -> _TodoThreadSnapsh
 
     parsed_items: list[_TodoItemSnapshot] = []
     item_ids: set[str] = set()
+    skipped_item_ids: set[str] = set()
     for index, raw_item in enumerate(raw_items):
         try:
             item = _parse_item(raw_item)
         except (KeyError, TypeError, ValueError) as exc:
+            if isinstance(raw_item, dict):
+                skipped_item_id = cast("dict[str, Any]", raw_item).get("id")
+                if isinstance(skipped_item_id, str) and skipped_item_id:
+                    skipped_item_ids.add(skipped_item_id)
             logger.warning(
                 "todo_poke_item_skipped",
                 path=str(source_path),
@@ -219,6 +229,7 @@ def _parse_thread_snapshot(data: object, source_path: Path) -> _TodoThreadSnapsh
             )
             continue
         if item.item_id in item_ids:
+            skipped_item_ids.add(item.item_id)
             logger.warning(
                 "todo_poke_item_skipped",
                 path=str(source_path),
@@ -238,7 +249,11 @@ def _parse_thread_snapshot(data: object, source_path: Path) -> _TodoThreadSnapsh
         for item in items
     }
     actionable_item_ids = frozenset(
-        item.item_id for item in items if is_actionable(items_by_id[item.item_id], items_by_id)
+        item.item_id
+        for item in items
+        if not skipped_item_ids.intersection(item.depends_on)
+        and all(dependency_id in items_by_id for dependency_id in item.depends_on)
+        and is_actionable(items_by_id[item.item_id], items_by_id)
     )
     return _TodoThreadSnapshot(
         source_path=source_path,
@@ -295,6 +310,14 @@ def _poke_scopes(snapshots: list[_TodoThreadSnapshot]) -> list[_TodoPokeScope]:
         items_by_agent: dict[str, list[_TodoItemSnapshot]] = {}
         for item in snapshot.items:
             if item.item_id not in snapshot.actionable_item_ids or not item.assigned_agent:
+                continue
+            if _SAFE_ASSIGNEE_PATTERN.fullmatch(item.assigned_agent) is None:
+                logger.warning(
+                    "todo_poke_assignee_skipped",
+                    path=str(snapshot.source_path),
+                    item_id=item.item_id,
+                    assigned_agent=item.assigned_agent,
+                )
                 continue
             items_by_agent.setdefault(item.assigned_agent, []).append(item)
 
@@ -481,15 +504,14 @@ def _dedup_allows_poke(
 async def _deliver_pokes(
     scopes: list[_TodoPokeScope],
     pending_by_room: Mapping[str, frozenset[str | None]],
-    poke_state: dict[str, Any],
     todo_root: Path,
     policy: TodoPokePolicy,
     deps: TodoPokeDeps,
     now_timestamp: float,
+    failed_scope_keys: set[str],
 ) -> int:
     delivered = 0
     attempts = 0
-    sender = cast("_TodoPokeSender", deps.sender)
     for scope in scopes:
         if attempts >= policy.max_pokes_per_scan:
             break
@@ -513,57 +535,62 @@ async def _deliver_pokes(
             continue
 
         attempts += 1
-        event_id = await sender(
+        refreshed_scope_key = _scope_key(refreshed_scope)
+        event_id = await deps.sender(
             refreshed_scope.room_id,
             _format_poke_message(refreshed_scope),
             refreshed_scope.thread_id,
         )
         if event_id is None:
+            failed_scope_keys.add(refreshed_scope_key)
             continue
 
+        failed_scope_keys.discard(refreshed_scope_key)
         await asyncio.to_thread(_persist_poke, todo_root, refreshed_scope, now_timestamp)
-        poke_state.setdefault("scopes", {})[_scope_key(refreshed_scope)] = {
-            "last_poked_at": now_timestamp,
-            "last_fingerprint": refreshed_scope.fingerprint,
-        }
         delivered += 1
     return delivered
 
 
-async def scan_todo_pokes(policy: TodoPokePolicy, deps: TodoPokeDeps) -> int:
+async def scan_todo_pokes(
+    policy: TodoPokePolicy,
+    deps: TodoPokeDeps,
+    *,
+    failed_scope_keys: set[str] | None = None,
+) -> int:
     """Scan native todo state once and return the number of delivered pokes."""
-    schedule_query = deps.schedule_query
-    if schedule_query is None or deps.sender is None:
-        return 0
-
+    remembered_failures = failed_scope_keys if failed_scope_keys is not None else set()
     now = deps.clock().astimezone(UTC)
     todo_root = deps.state_root()
     snapshots = await asyncio.to_thread(_read_thread_snapshots, todo_root)
     all_scopes = _poke_scopes(snapshots)
     poke_state = await asyncio.to_thread(_read_poke_state, todo_root)
     active_scope_keys = frozenset(_scope_key(scope) for scope in all_scopes)
+    remembered_failures.intersection_update(active_scope_keys)
     await asyncio.to_thread(_prune_poke_state, todo_root, active_scope_keys)
 
-    scopes = [
-        scope
-        for scope in _idle_quiet_scopes(all_scopes, policy, deps, now)
-        if _dedup_allows_poke(scope, poke_state, policy, now.timestamp())
-    ]
+    scopes = sorted(
+        (
+            scope
+            for scope in _idle_quiet_scopes(all_scopes, policy, deps, now)
+            if _dedup_allows_poke(scope, poke_state, policy, now.timestamp())
+        ),
+        key=lambda scope: _scope_key(scope) in remembered_failures,
+    )
     if not scopes:
         return 0
 
-    pending_by_room = await _pending_schedules_by_room(scopes, schedule_query)
+    pending_by_room = await _pending_schedules_by_room(scopes, deps.schedule_query)
     if pending_by_room is None:
         return 0
 
     return await _deliver_pokes(
         scopes,
         pending_by_room,
-        poke_state,
         todo_root,
         policy,
         deps,
         now.timestamp(),
+        remembered_failures,
     )
 
 
@@ -574,6 +601,7 @@ class TodoPokeWorker:
     policy: TodoPokePolicy
     deps: TodoPokeDeps
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    _failed_scope_keys: set[str] = field(default_factory=set, init=False)
 
     def stop(self) -> None:
         """Request graceful shutdown of the worker loop."""
@@ -592,6 +620,10 @@ class TodoPokeWorker:
             if self._stop_event.is_set():
                 return
             try:
-                await scan_todo_pokes(self.policy, self.deps)
+                await scan_todo_pokes(
+                    self.policy,
+                    self.deps,
+                    failed_scope_keys=self._failed_scope_keys,
+                )
             except Exception:
                 logger.exception("todo_poke_scan_failed")

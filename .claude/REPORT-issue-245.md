@@ -22,6 +22,7 @@ The implementation uses an orchestrator-owned sleep-first worker and does not de
 ## Scanner behavior
 
 - Todo files are scanned in sorted order, malformed files are warned about and skipped independently, and invalid individual items no longer discard valid siblings.
+- Dependents of skipped, duplicate, or missing dependency identities remain blocked instead of becoming prematurely actionable.
 - Directory traversal, JSON access, advisory locking, revalidation reads, pruning, and persistence run in worker threads rather than blocking the asyncio event loop.
 - Persisted `main` thread sentinels normalize to room-main `None`.
 - Only open, dependency-unblocked items with a nonempty configured direct-agent assignee can produce a poke.
@@ -36,7 +37,9 @@ The implementation uses an orchestrator-owned sleep-first worker and does not de
 - Fingerprints include every actionable item, including items beyond the five shown in the message, plus thread total and terminal counts.
 - An unchanged fingerprint never repeats, while a changed fingerprint waits for the cooldown.
 - Poke messages contain exactly one intentional assignee mention, while todo titles are rendered as literal code text with mention tokens neutralized.
+- Persisted assignees must match the same alphanumeric-and-underscore identifier shape as configured entities before they can reach idle checks or mention formatting.
 - The per-scan cap counts send attempts, including failures, while failed sends remain retryable because they do not persist poke state.
+- The worker remembers failed scope keys in memory and orders them behind fresh scopes on later scans, preventing deterministic failures from starving healthy work.
 - Obsolete poke records are pruned when their actionable assignee/room/thread scope no longer exists.
 - Non-object poke-state roots and non-object `scopes` values are warned about, treated as empty, and repaired through locked atomic persistence.
 
@@ -46,6 +49,14 @@ The requester-ownership proposal was intentionally not implemented because this 
 Designing multi-user todo ownership and authorization is a separate product and security change outside ISSUE-245.
 
 `PLAN.md` and this report remain intentionally committed as review artifacts for the branch and will be stripped during squash merge, so the artifact-removal finding required no code change.
+
+## Round-2 review disposition
+
+Requester ownership remains intentionally scoped to the documented single-user trust model, so the repeated multi-tenant authority proposal was not implemented.
+Router and assignee membership checks were not added because todo state is created through the native tool in rooms where those configured entities operate, and the bounded misconfiguration case does not justify membership-query machinery.
+Schedule reads deliberately remain fail-open because fail-closed behavior can silently disable anti-stall indefinitely, while dedup bounds the redundant-poke risk.
+Ad-hoc team activity is a known idle-check limitation because only configured direct and team bots expose the required in-flight counts; a new execution-wide activity registry is outside this issue.
+The committed plan and report remain intentional review artifacts that safe squash merge removes.
 
 ## Assigned-agent defaults
 
@@ -57,13 +68,15 @@ Regression coverage now locks plan defaults, template defaults, and explicit tem
 
 ## Validation
 
-- `env -u MINDROOM_OWNER_USER_ID -u MINDROOM_DOCKER_WORKER_IMAGE uv run pytest -n auto --no-cov`: 10,718 passed and 120 skipped.
+- `env -u MINDROOM_OWNER_USER_ID -u MINDROOM_DOCKER_WORKER_IMAGE uv run pytest -n auto --no-cov`: 10,722 passed and 120 skipped.
 - `uv run pre-commit run --all-files`: passed.
 - `uv run tach check --dependencies --interfaces`: passed.
-- Focused todo-poke, orchestrator, todo-tool, and scheduling suites: 112 passed.
+- Focused round-2 todo-poke, orchestrator, and scheduling suites: 92 passed.
 - Changed-file `ty` validation: passed without rule overrides.
 
 The first all-files hook pass regenerated three tracked docs-skill reference outputs, and the required second pass was clean.
+
+One round-2 full-suite run hit an unrelated stochastic callback test because its random token contained the literal substring `jq`; the isolated test and the complete rerun both passed.
 
 The first unsanitized pytest run exposed four unrelated failures because the shell exported owner and Docker image values that overrode isolated test fixtures.
 

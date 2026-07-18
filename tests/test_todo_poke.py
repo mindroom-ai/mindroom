@@ -157,6 +157,80 @@ async def test_scan_skips_malformed_unassigned_and_unconfigured_items(tmp_path: 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_kind", ["duplicate-id", "naive-updated-at"])
+async def test_scan_skips_duplicate_or_timezone_naive_items(
+    tmp_path: Path,
+    invalid_kind: str,
+) -> None:
+    """A duplicate identity or naive timestamp invalidates only the affected item."""
+    todo_root = tmp_path / "todo"
+    valid_item = _item("ready", title="Valid item")
+    if invalid_kind == "duplicate-id":
+        invalid_item = _item("ready", title="Duplicate item")
+    else:
+        invalid_item = _item("invalid", title="Naive item")
+        invalid_item["updated_at"] = "2026-07-18T11:50:00"
+    _write_thread(todo_root, "scope", items=[valid_item, invalid_item])
+    deps, _queried_rooms, sent = _deps(todo_root)
+
+    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 1
+    assert "`ready` [medium] `Valid item`" in sent[0][1]
+    assert "Duplicate item" not in sent[0][1]
+    assert "Naive item" not in sent[0][1]
+
+
+@pytest.mark.asyncio
+async def test_dependency_on_skipped_malformed_item_stays_blocked(tmp_path: Path) -> None:
+    """A dependent must not become actionable when its malformed dependency is skipped."""
+    todo_root = tmp_path / "todo"
+    malformed_dependency = _item("dependency")
+    malformed_dependency["updated_at"] = "2026-07-18T11:50:00"
+    _write_thread(
+        todo_root,
+        "scope",
+        items=[
+            malformed_dependency,
+            _item("dependent", depends_on=["dependency"]),
+            _item("healthy"),
+        ],
+    )
+    deps, _queried_rooms, sent = _deps(todo_root)
+
+    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 1
+    assert "`healthy`" in sent[0][1]
+    assert "dependent" not in sent[0][1]
+
+
+@pytest.mark.asyncio
+async def test_scan_rejects_unsafe_assignee_identifiers_before_idle_check(tmp_path: Path) -> None:
+    """Persisted assignees that could alter the mention line never reach runtime callbacks."""
+    todo_root = tmp_path / "todo"
+    _write_thread(
+        todo_root,
+        "scope",
+        items=[
+            _item("unsafe", assigned_agent="code @reviewer"),
+            _item("safe", assigned_agent="code"),
+        ],
+    )
+    idle_checks: list[str] = []
+
+    def idle_check(agent_name: str) -> bool:
+        idle_checks.append(agent_name)
+        return True
+
+    deps, _queried_rooms, sent = _deps(
+        todo_root,
+        idle_check=idle_check,
+    )
+
+    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 1
+    assert idle_checks == ["code", "code"]
+    assert "@code Todo work is ready" in sent[0][1]
+    assert "unsafe" not in sent[0][1]
+
+
+@pytest.mark.asyncio
 async def test_poke_titles_cannot_inject_agent_team_or_matrix_mentions(tmp_path: Path) -> None:
     """Only the intentional assignee mention may enter dispatch mention parsing."""
     runtime_paths = test_runtime_paths(tmp_path)
@@ -386,6 +460,40 @@ async def test_delivery_cap_counts_attempts_and_failed_send_stays_retryable(tmp_
 
 
 @pytest.mark.asyncio
+async def test_failed_scopes_move_behind_fresh_scopes_on_later_scans(tmp_path: Path) -> None:
+    """Permanently failing sorted scopes must not starve healthy work behind the cap."""
+    todo_root = tmp_path / "todo"
+    for index in range(4):
+        _write_thread(
+            todo_root,
+            f"scope-{index}",
+            room_id=f"!room-{index}:localhost",
+            items=[_item(f"task-{index}")],
+        )
+    remembered_failures: set[str] = set()
+    first_deps, _first_queries, first_sends = _deps(
+        todo_root,
+        send_results=[None, None, None],
+    )
+    policy = TodoPokePolicy(quiet_seconds=0, max_pokes_per_scan=3)
+
+    assert await scan_todo_pokes(policy, first_deps, failed_scope_keys=remembered_failures) == 0
+    assert [room_id for room_id, _body, _thread_id in first_sends] == [
+        "!room-0:localhost",
+        "!room-1:localhost",
+        "!room-2:localhost",
+    ]
+
+    second_deps, _second_queries, second_sends = _deps(todo_root)
+    assert await scan_todo_pokes(policy, second_deps, failed_scope_keys=remembered_failures) == 3
+    assert [room_id for room_id, _body, _thread_id in second_sends] == [
+        "!room-3:localhost",
+        "!room-0:localhost",
+        "!room-1:localhost",
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("bad_state", [[], {"scopes": []}], ids=["root-list", "scopes-list"])
 async def test_corrupt_poke_state_is_treated_as_empty(tmp_path: Path, bad_state: object) -> None:
     """Invalid poke-state container types must not disable scans or repeated persistence."""
@@ -451,34 +559,6 @@ async def test_scan_offloads_all_blocking_storage_phases(
     ]
 
 
-@pytest.mark.asyncio
-async def test_missing_sender_or_querier_skips_whole_tick(tmp_path: Path) -> None:
-    """Startup scans must do no partial work before both I/O collaborators exist."""
-    todo_root = tmp_path / "todo"
-    _write_thread(todo_root, "scope")
-    deps, queried_rooms, sent = _deps(todo_root)
-
-    no_sender = TodoPokeDeps(
-        state_root=deps.state_root,
-        schedule_query=deps.schedule_query,
-        idle_check=deps.idle_check,
-        sender=None,
-        clock=deps.clock,
-    )
-    no_querier = TodoPokeDeps(
-        state_root=deps.state_root,
-        schedule_query=None,
-        idle_check=deps.idle_check,
-        sender=deps.sender,
-        clock=deps.clock,
-    )
-
-    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), no_sender) == 0
-    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), no_querier) == 0
-    assert queried_rooms == []
-    assert sent == []
-
-
 def test_policy_reads_interval_and_quiet_runtime_env(tmp_path: Path) -> None:
     """Runtime-scoped env values override timing, including zero disabling interval."""
     runtime_paths = replace(
@@ -523,7 +603,7 @@ async def test_worker_sleeps_first_continues_after_failure_and_stops(
 
     worker: TodoPokeWorker | None = None
 
-    async def scan_side_effect(*_args: object) -> None:
+    async def scan_side_effect(*_args: object, **_kwargs: object) -> None:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
@@ -545,3 +625,5 @@ async def test_worker_sleeps_first_continues_after_failure_and_stops(
     await asyncio.wait_for(task, timeout=1)
 
     assert scan.await_count == 2
+    assert scan.await_args_list[0].kwargs["failed_scope_keys"] is worker._failed_scope_keys
+    assert scan.await_args_list[1].kwargs["failed_scope_keys"] is worker._failed_scope_keys

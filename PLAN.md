@@ -15,15 +15,15 @@
 ### 3. Scan algorithm (per tick)
 
 1. Enumerate `storage_root/todo/threads/*/todos.json` in sorted order; skip malformed files with a structured warning and continue.
-2. Parse into frozen snapshots; normalize persisted `"main"` thread sentinel to `None`.
-3. Group actionable items (native rule: status `open` + all deps terminal) by nonempty `assigned_agent`; ignore unassigned or no-longer-configured agents.
+2. Parse into frozen snapshots; normalize persisted `"main"` thread sentinel to `None`; isolate invalid or duplicate items while keeping their dependents blocked.
+3. Group actionable items (native rule: status `open` + all deps terminal) by nonempty, safe-identifier `assigned_agent`; ignore unassigned, malformed, or no-longer-configured agents.
 4. **Quiet gate**: skip scope unless `now - max(updated_at of that agent's actionable items) >= quiet_seconds` (data already in todos.json; restores "don't barge in right after activity" without activity ledgers).
    Intentionally use the actionable item's timestamp, so an older item that becomes unblocked by a newly completed dependency is immediately eligible for handoff.
 5. **Idle check**: agent's direct bot exists, is running, `in_flight_response_count == 0` (`response_runner.py:448-458`, exposed at `bot.py:712-720`) AND every running configured team bot containing the member (`config/agent.py:382-426`) also has zero in-flight. Recheck idle immediately before send.
 6. **Schedule suppression**: query pending schedules for the room once per room via the injected querier; if the todo scope has a pending schedule (after `new_thread` exclusion) → skip. **Failure posture**: sender/querier not yet available (startup) → skip the whole tick; query executed but errored → log warning and treat as no pending schedules (fail-open — a persistent read failure must not silently disable anti-stall forever; worst case is one redundant poke bounded by dedup).
 7. **Dedup + cooldown** in `storage_root/todo/poke_state.json` (same lock/atomic-replace discipline): key = canonical tuple of `(assigned_agent, room_id, normalized_thread_id)` (nested mapping or hashed tuple — no string concatenation of raw IDs); store `last_poked_at` + `last_fingerprint`. Fingerprint = canonical serialization of ALL actionable items for that agent in scope (id/title/priority/depends_on/assigned_agent/updated_at) + thread total/terminal counts. Unchanged fingerprint → never re-poke; changed fingerprint → only after cooldown.
 8. **Send**: native todo poke message ("Todo work is ready" style, list up to 5 items with priorities) from the router into the stored room/thread with exactly one explicit assignee mention, literal non-mention todo titles, `trigger_dispatch=True`, and `extra_content={ORIGINAL_SENDER_KEY: mindroom_user_id(config, runtime_paths)}` when non-None (parity with `hooks/context.py:83-113`, `811-830`). Router sender returns `None` on failure (`bot.py:2045-2076`): persist fingerprint/timestamp ONLY on a non-None event ID so failed sends stay retryable.
-9. Stop after `max_pokes_per_scan` delivery attempts; deterministic iteration order.
+9. Stop after `max_pokes_per_scan` delivery attempts; deterministic iteration order, with worker-memory failed scope keys ordered behind fresh scopes on later scans so repeated failures cannot starve healthy work.
 
 ### 4. Scope item 2 (`assigned_agent` defaults)
 
@@ -37,7 +37,7 @@ Already on main since `7be4d90af` (#1337): `plan` and `apply_template` set `_def
 
 ### 6. Tests
 
-Unit: malformed file and invalid-item skip-and-continue; unassigned/unconfigured skip; quiet gate and immediate newly-unblocked handoff; direct-busy and team-busy skip; pre-send idle and state recheck races; schedule suppression incl. `new_thread` exclusion and both failure postures; fingerprint dedup (hidden 6th item change re-arms; unchanged never re-pokes or queries schedules); cooldown ordering; three-send-attempt cap (failed send counts against the cap but does not persist state); poke-state recovery and pruning; once-per-room schedule query; orchestrator lifecycle (start/reload/restart/stop); env override incl. `0` disables and invalid values; scheduling helper parsing. Regression tests for scope item 2 as above.
+Unit: malformed file and invalid-item skip-and-continue; duplicate IDs and timezone-naive timestamps; dependencies on skipped items remain blocked; unassigned, unsafe, or unconfigured assignee skip; quiet gate and immediate newly-unblocked handoff; direct-busy and team-busy skip; pre-send idle and state recheck races; schedule suppression incl. `new_thread` exclusion and both failure postures; fingerprint dedup (hidden 6th item change re-arms; unchanged never re-pokes or queries schedules); cooldown ordering; three-send-attempt cap with failed-scope fairness and no failed-send persistence; poke-state recovery and pruning; once-per-room schedule query; orchestrator lifecycle (start/reload/restart/stop); env override incl. `0` disables and invalid values; scheduling helper parsing. Regression tests for scope item 2 as above.
 
 Gates: `uv run pytest`, `uv run pre-commit run --all-files`, `uv run tach check --dependencies --interfaces`.
 
