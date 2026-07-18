@@ -100,6 +100,42 @@ async def test_todo_poke_router_query_and_send_wiring(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_todo_poke_adapters_skip_when_runtime_is_unavailable(tmp_path: Path) -> None:
+    """Unavailable idle, schedule, and sender adapters conservatively skip the tick."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path))
+    orchestrator.config = _config(tmp_path)
+
+    assert orchestrator._todo_poke_agent_is_idle("code") is False
+    assert await orchestrator._todo_poke_schedule_query("!room:localhost") is None
+    assert (
+        await orchestrator._send_todo_poke(
+            "!room:localhost",
+            "@code Todo work is ready.",
+            "$thread",
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_todo_poke_schedule_adapter_preserves_read_errors(tmp_path: Path) -> None:
+    """Read errors reach the scanner's tested fail-open boundary unchanged."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path))
+    orchestrator.config = _config(tmp_path)
+    router_bot = SimpleNamespace(running=True, client=object())
+    orchestrator.agent_bots = cast("dict[str, Any]", {"router": router_bot})
+
+    with (
+        patch(
+            "mindroom.orchestrator.get_pending_schedule_thread_ids_for_room",
+            new=AsyncMock(side_effect=RuntimeError("state unavailable")),
+        ),
+        pytest.raises(RuntimeError, match="state unavailable"),
+    ):
+        await orchestrator._todo_poke_schedule_query("!room:localhost")
+
+
+@pytest.mark.asyncio
 async def test_todo_poke_worker_lifecycle_survives_reload_and_stops(tmp_path: Path) -> None:
     """Runtime support starts one worker, reuses it on reload, and stops it promptly."""
     config = _config(tmp_path)

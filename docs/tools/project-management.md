@@ -91,8 +91,10 @@ Built-in templates live with the package, and agents can add workspace-local tem
 
 MindRoom scans native todo state in the background and wakes an idle configured agent when that agent has assigned, open, dependency-unblocked work.
 The scanner waits for the quiet period measured from the actionable item's last update, but an older item that becomes actionable when a dependency completes is eligible immediately for handoff.
+Future item timestamps beyond one quiet window are treated as already quiet so clock skew cannot disable a scope indefinitely.
 A pending schedule for the same room and existing thread suppresses the poke, while schedules that create a new thread do not suppress room-main work.
-Delivered work fingerprints are persisted under `mindroom_data/todo/poke_state.json`, so changed work observes a cooldown and unchanged work receives at most three one-hour anti-stall retries.
+Work fingerprints are persisted under `mindroom_data/todo/poke_state.json`, so changed work observes a cooldown and unchanged work receives at most three one-hour anti-stall retries.
+Failed sends are persisted and receive at most three retries for the same fingerprint before a successful send or changed work resets the failure counter.
 Each scan sends at most one poke to a given agent even when that agent has actionable work in multiple scopes.
 Todo titles are rendered as literal text, and only the assigned agent is mentioned for dispatch.
 
