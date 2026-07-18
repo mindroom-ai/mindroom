@@ -254,6 +254,7 @@ async def _run_cleanup(
     bot_user_ids: set[str] | None = None,
     now_ms: int = NOW_MS,
     startup_cutoff_ms: int | None = None,
+    terminal_interrupted_only: bool = False,
 ) -> tuple[int, list[InterruptedThread]]:
     client.user_id = BOT_USER_ID
     assert joined_rooms == [ROOM_ID]
@@ -266,6 +267,7 @@ async def _run_cleanup(
             config=config,
             runtime_paths=runtime_paths_for(config),
             startup_cutoff_ms=startup_cutoff_ms,
+            terminal_interrupted_only=terminal_interrupted_only,
         )
 
 
@@ -1995,7 +1997,76 @@ async def test_targeted_recovery_scans_only_handoff_rooms_without_a_clock_cutoff
     cleanup_room.assert_awaited_once()
     assert cleanup_room.await_args.kwargs["room_id"] == ROOM_ID
     assert cleanup_room.await_args.kwargs["startup_cutoff_ms"] is None
+    assert cleanup_room.await_args.kwargs["terminal_interrupted_only"] is True
     assert scanned_room_ids == {ROOM_ID}
+
+
+@pytest.mark.asyncio
+async def test_targeted_recovery_does_not_clobber_live_replacement_stream(tmp_path: Path) -> None:
+    """Replacement handoff recovery must ignore active output from the new bot generation."""
+    config = _make_config(tmp_path)
+    config.defaults.auto_resume_after_restart = True
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread-root",
+            body="Question",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+        ),
+        _make_message_event(
+            event_id="$live-placeholder",
+            body="Working ⋯",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={STREAM_STATUS_KEY: "pending"},
+        ),
+    )
+
+    cleaned, interrupted = await _run_cleanup(
+        client,
+        config,
+        joined_rooms=[ROOM_ID],
+        terminal_interrupted_only=True,
+    )
+
+    assert cleaned == 0
+    assert interrupted == []
+    client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failed_targeted_room_scan_remains_unscanned_for_retry(tmp_path: Path) -> None:
+    """A transient room-history failure must leave the claimed handoff retryable."""
+    config = _make_config(tmp_path)
+    client = make_matrix_client_mock(user_id=BOT_USER_ID)
+    actors = {BOT_USER_ID: StaleStreamCleanupActor(client, MagicMock())}
+
+    with (
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.get_joined_rooms",
+            new=AsyncMock(return_value=[ROOM_ID]),
+        ),
+        patch(
+            "mindroom.matrix.stale_stream_cleanup._cleanup_stale_streaming_room",
+            new=AsyncMock(side_effect=RuntimeError("temporary history failure")),
+        ),
+    ):
+        scanned_room_ids: set[str] = set()
+        result = await recover_stale_streaming_messages(
+            actors,
+            resume_client=client,
+            resume_conversation_cache=None,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            startup_cutoff_ms=None,
+            scanned_room_ids=scanned_room_ids,
+            target_room_ids={ROOM_ID},
+        )
+
+    assert result == StaleStreamRecoveryResult(room_count=1, cleaned_count=0, resumed_count=0)
+    assert scanned_room_ids == set()
 
 
 @pytest.mark.asyncio

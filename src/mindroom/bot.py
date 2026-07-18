@@ -714,15 +714,15 @@ class AgentBot:
         """Return the number of active response lifecycles."""
         return self._response_runner.in_flight_response_count
 
-    @property
-    def pending_sync_restart_retry_room_ids(self) -> frozenset[str]:
-        """Return rooms with interrupted turns awaiting same-bot retry."""
-        return self._restart_retry_queue.pending_room_ids
-
     @in_flight_response_count.setter
     def in_flight_response_count(self, value: int) -> None:
         """Update the number of active response lifecycles."""
         self._response_runner.in_flight_response_count = value
+
+    @property
+    def pending_sync_restart_retry_room_ids(self) -> frozenset[str]:
+        """Return rooms with interrupted turns awaiting same-bot retry."""
+        return self._restart_retry_queue.pending_room_ids
 
     @property
     def agent_name(self) -> str:

@@ -5,7 +5,8 @@ responses are cancelled and their placeholder becomes a terminal
 "[Response interrupted by service restart]" note. The turn controller
 registers a retry here, and the bot flushes the queue once its sync loop
 reports a healthy sync response again. Each source event is retried at
-most once; a retry that is itself interrupted is not requeued.
+most once; a retry that is itself interrupted is not requeued. Pending
+room ids also let the orchestrator hand retries to a replacement bot.
 """
 
 from __future__ import annotations

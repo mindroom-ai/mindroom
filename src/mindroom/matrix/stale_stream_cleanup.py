@@ -150,15 +150,22 @@ class _CleanupScanPolicy:
 
     startup_cutoff_ms: int | None
     collect_terminal_interrupted_for_resume: bool
+    terminal_interrupted_only: bool
     max_extra_old_pages: int
 
 
-def _cleanup_scan_policy(config: Config, *, startup_cutoff_ms: int | None) -> _CleanupScanPolicy:
+def _cleanup_scan_policy(
+    config: Config,
+    *,
+    startup_cutoff_ms: int | None,
+    terminal_interrupted_only: bool = False,
+) -> _CleanupScanPolicy:
     """Return history scan policy for one stale-stream cleanup run."""
     collect_terminal_interrupted_for_resume = config.defaults.auto_resume_after_restart
     return _CleanupScanPolicy(
         startup_cutoff_ms=startup_cutoff_ms,
         collect_terminal_interrupted_for_resume=collect_terminal_interrupted_for_resume,
+        terminal_interrupted_only=terminal_interrupted_only,
         max_extra_old_pages=(_MAX_EXTRA_INTERRUPTED_HISTORY_PAGES if collect_terminal_interrupted_for_resume else 0),
     )
 
@@ -228,8 +235,10 @@ async def recover_stale_streaming_messages(
                     config=config,
                     runtime_paths=runtime_paths,
                     startup_cutoff_ms=startup_cutoff_ms,
+                    terminal_interrupted_only=target_room_ids is not None,
                 )
             except Exception:
+                scanned_room_ids.discard(room_id)
                 logger.warning("Failed stale stream recovery for room", room_id=room_id, exc_info=True)
                 return 0, []
 
@@ -475,12 +484,17 @@ async def _cleanup_stale_streaming_room(
     config: Config,
     runtime_paths: RuntimePaths,
     startup_cutoff_ms: int | None = None,
+    terminal_interrupted_only: bool = False,
 ) -> tuple[int, list[_InterruptedThread]]:
     """Scan one room once and let each bot account repair its own messages."""
     if not actors:
         return 0, []
     current_time_ms = int(time.time() * 1000)
-    scan_policy = _cleanup_scan_policy(config, startup_cutoff_ms=startup_cutoff_ms)
+    scan_policy = _cleanup_scan_policy(
+        config,
+        startup_cutoff_ms=startup_cutoff_ms,
+        terminal_interrupted_only=terminal_interrupted_only,
+    )
     scanned_state = await _scan_room_message_states(
         scan_client,
         room_id=room_id,
@@ -555,6 +569,8 @@ async def _process_stale_room_candidate(
         now_ms=current_time_ms,
         scan_policy=scan_policy,
     ):
+        return False, None
+    if scan_policy.terminal_interrupted_only and not _has_resumable_interrupted_note(state):
         return False, None
     if _is_cleanup_candidate(state):
         return await _cleanup_candidate_message(
