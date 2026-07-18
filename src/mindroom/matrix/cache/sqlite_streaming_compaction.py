@@ -269,6 +269,37 @@ async def delete_archived_events(
     return 0 if cursor.rowcount is None else int(cursor.rowcount)
 
 
+async def restore_archived_event_projections(
+    db: aiosqlite.Connection,
+    *,
+    room_id: str,
+    event_ids: list[str],
+) -> None:
+    """Restore cold thread projections before replay moves an event back to active storage."""
+    if not event_ids:
+        return
+    await db.executemany(
+        """
+        INSERT INTO thread_events(room_id, thread_id, event_id, origin_server_ts, write_seq)
+        SELECT room_id, thread_id, event_id, thread_origin_server_ts, thread_order
+        FROM compacted_streaming_edits
+        WHERE room_id = ? AND event_id = ? AND thread_id IS NOT NULL
+        ON CONFLICT(room_id, event_id) DO NOTHING
+        """,
+        [(room_id, event_id) for event_id in event_ids],
+    )
+    await db.executemany(
+        """
+        INSERT INTO event_threads(room_id, event_id, thread_id)
+        SELECT room_id, event_id, indexed_thread_id
+        FROM compacted_streaming_edits
+        WHERE room_id = ? AND event_id = ? AND indexed_thread_id IS NOT NULL
+        ON CONFLICT(room_id, event_id) DO NOTHING
+        """,
+        [(room_id, event_id) for event_id in event_ids],
+    )
+
+
 async def _compaction_candidates(
     db: aiosqlite.Connection,
     *,

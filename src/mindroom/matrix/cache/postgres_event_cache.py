@@ -1013,7 +1013,8 @@ class PostgresEventCache:
         try:
             if task is None:
                 return
-            task.cancel()
+            if not task.done() and task.cancelling() == 0:
+                task.cancel()
             try:
                 await asyncio.shield(task)
             except asyncio.CancelledError:

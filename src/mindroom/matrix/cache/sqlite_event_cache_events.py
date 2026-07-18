@@ -27,6 +27,7 @@ from .sqlite_streaming_compaction import (
     load_archived_thread_id,
     load_latest_archived_edit,
     load_recent_archived_room_events,
+    restore_archived_event_projections,
 )
 
 if TYPE_CHECKING:
@@ -357,10 +358,16 @@ async def write_lookup_index_rows(
     """Persist point-lookup, edit-index, and thread-index rows for cached events."""
     if not serialized_events:
         return
+    event_ids = [event.event_id for event in serialized_events]
+    await restore_archived_event_projections(
+        db,
+        room_id=room_id,
+        event_ids=event_ids,
+    )
     await delete_archived_events(
         db,
         room_id=room_id,
-        event_ids=[event.event_id for event in serialized_events],
+        event_ids=event_ids,
     )
     write_sequences = await allocate_write_sequences(db, len(serialized_events))
     await db.executemany(

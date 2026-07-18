@@ -728,6 +728,68 @@ async def test_cancelled_forced_refresh_during_prior_cleanup_restores_scheduler(
 
 
 @pytest.mark.asyncio
+async def test_concurrent_forced_metrics_refresh_does_not_recancel_cleanup(
+    event_cache: ConversationEventCache,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent forced recounts share one cancellation without interrupting cleanup."""
+    monkeypatch.setattr(cache_maintenance, "_RUNTIME_METRICS_REFRESH_INTERVAL_SECONDS", 0.0)
+    if isinstance(event_cache, SqliteEventCache):
+        metrics_module = sqlite_event_cache
+    else:
+        assert isinstance(event_cache, PostgresEventCache)
+        metrics_module = postgres_event_cache
+    real_refresh = metrics_module.refresh_runtime_metrics
+    first_refresh_started = asyncio.Event()
+    first_refresh_cleanup_started = asyncio.Event()
+    release_first_refresh_cleanup = asyncio.Event()
+    first_refresh_cleanup_interrupted = asyncio.Event()
+    never_finish_first_refresh = asyncio.Event()
+    refresh_attempts = 0
+
+    async def delay_first_refresh_cleanup(*args: object, **kwargs: object) -> object:
+        nonlocal refresh_attempts
+        refresh_attempts += 1
+        if refresh_attempts == 1:
+            first_refresh_started.set()
+            try:
+                await never_finish_first_refresh.wait()
+            except asyncio.CancelledError:
+                first_refresh_cleanup_started.set()
+                try:
+                    await release_first_refresh_cleanup.wait()
+                except asyncio.CancelledError:
+                    first_refresh_cleanup_interrupted.set()
+                    raise
+                raise
+        return await real_refresh(*args, **kwargs)
+
+    monkeypatch.setattr(metrics_module, "refresh_runtime_metrics", delay_first_refresh_cleanup)
+    room_id = "!room:localhost"
+    first = _message_event("$first:localhost", 1)
+    await event_cache.store_event(str(first["event_id"]), room_id, first)
+    await asyncio.wait_for(first_refresh_started.wait(), timeout=5)
+
+    first_forced_refresh = asyncio.create_task(event_cache.refresh_runtime_diagnostics())
+    await asyncio.wait_for(first_refresh_cleanup_started.wait(), timeout=5)
+    second_forced_refresh = asyncio.create_task(event_cache.refresh_runtime_diagnostics())
+    await asyncio.sleep(0)
+    assert first_refresh_cleanup_interrupted.is_set() is False
+
+    release_first_refresh_cleanup.set()
+    await asyncio.wait_for(
+        asyncio.gather(first_forced_refresh, second_forced_refresh),
+        timeout=5,
+    )
+    assert first_refresh_cleanup_interrupted.is_set() is False
+    assert refresh_attempts == 3
+
+    second = _message_event("$second:localhost", 2)
+    await event_cache.store_event(str(second["event_id"]), room_id, second)
+    assert await event_cache.get_event(room_id, str(second["event_id"])) == second
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "corrupt_payload",
     [b"corrupt", zlib.compress(b"[]")],
@@ -988,6 +1050,53 @@ async def test_append_recognizes_archive_only_thread_snapshot(
         assert await cache.get_thread_events(room_id, thread_id) == [pending, appended]
     finally:
         await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_replaying_compacted_thread_member_preserves_cold_projections(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """Replaying a cold edit preserves its snapshot membership and learned thread mapping."""
+    room_id = "!room:localhost"
+    thread_id = "$root:localhost"
+    sender = "@agent:localhost"
+    pending = _message_event(
+        "$pending:localhost",
+        2,
+        sender=sender,
+        edit_of=thread_id,
+        stream_status=STREAM_STATUS_PENDING,
+    )
+    terminal = _message_event(
+        "$terminal:localhost",
+        3,
+        sender=sender,
+        edit_of=thread_id,
+        stream_status=STREAM_STATUS_COMPLETED,
+    )
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        await replace_thread_unconditionally(cache, room_id, thread_id, [pending, terminal])
+        assert await cache.get_thread_events(room_id, thread_id) == [pending, terminal]
+        assert await cache.get_thread_id_for_event(room_id, str(pending["event_id"])) == thread_id
+
+        await cache.store_event(str(pending["event_id"]), room_id, pending)
+        assert await cache.get_thread_events(room_id, thread_id) == [pending, terminal]
+        assert await cache.get_thread_id_for_event(room_id, str(pending["event_id"])) == thread_id
+
+        await cache.store_events_batch([(str(pending["event_id"]), room_id, pending)])
+    finally:
+        await cache.close()
+
+    restarted_cache = event_cache_factory()
+    await restarted_cache.initialize()
+    try:
+        assert await restarted_cache.get_thread_events(room_id, thread_id) == [pending, terminal]
+        assert await restarted_cache.get_thread_id_for_event(room_id, str(pending["event_id"])) == thread_id
+        assert restarted_cache.runtime_diagnostics()["cache_compacted_streaming_edit_archive_rows"] == 1
+    finally:
+        await restarted_cache.close()
 
 
 @pytest.mark.asyncio

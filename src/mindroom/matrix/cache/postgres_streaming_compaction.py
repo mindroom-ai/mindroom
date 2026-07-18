@@ -268,6 +268,51 @@ async def delete_archived_events(
     )
 
 
+async def restore_archived_event_projections(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+    event_ids: list[str],
+) -> None:
+    """Restore cold thread projections before replay moves an event back to active storage."""
+    if not event_ids:
+        return
+    await db.execute(
+        """
+        INSERT INTO mindroom_event_cache_thread_events(
+            namespace,
+            room_id,
+            thread_id,
+            event_id,
+            origin_server_ts,
+            write_seq
+        )
+        SELECT namespace, room_id, thread_id, event_id, thread_origin_server_ts, thread_order
+        FROM mindroom_event_cache_compacted_streaming_edits
+        WHERE namespace = %s
+            AND room_id = %s
+            AND event_id = ANY(%s)
+            AND thread_id IS NOT NULL
+        ON CONFLICT(namespace, room_id, event_id) DO NOTHING
+        """,
+        (namespace, room_id, event_ids),
+    )
+    await db.execute(
+        """
+        INSERT INTO mindroom_event_cache_event_threads(namespace, room_id, event_id, thread_id)
+        SELECT namespace, room_id, event_id, indexed_thread_id
+        FROM mindroom_event_cache_compacted_streaming_edits
+        WHERE namespace = %s
+            AND room_id = %s
+            AND event_id = ANY(%s)
+            AND indexed_thread_id IS NOT NULL
+        ON CONFLICT(namespace, room_id, event_id) DO NOTHING
+        """,
+        (namespace, room_id, event_ids),
+    )
+
+
 async def _compaction_candidates(
     db: AsyncConnection,
     *,
