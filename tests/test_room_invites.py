@@ -1014,6 +1014,7 @@ async def test_agent_manages_rooms_on_config_update(monkeypatch: pytest.MonkeyPa
         runtime_paths=runtime_paths_for(config),
         rooms=["!room1:localhost"],
     )
+    install_runtime_cache_support(bot)
 
     # Mock the client
     mock_client = AsyncMock()

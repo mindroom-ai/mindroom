@@ -24,6 +24,8 @@ Plaintext persistence succeeds only while the owning event and its reference are
 
 Process-local plaintext entries include principal, room, event, and MXC identity, and durable-cache use revalidates ownership before every hit.
 
+Hydration without that complete identity may return freshly downloaded content to the current call, but it cannot read or populate the process cache.
+
 Redaction runs in the same database transaction as event, dependent-edit, thread-index, edit-index, and reference removal.
 
 Candidate plaintext is deleted only when no surviving reference in the same principal and room remains.
@@ -36,8 +38,16 @@ An authoritative sync leave, a live own-user leave or ban, and a successful proa
 
 Another principal that remains joined keeps its events, references, plaintext, tombstones, and freshness state.
 
+Each principal-bound view is a non-owning handle, so closing one bot cannot close the runtime-wide cache service used by another bot.
+
+If durable leave or ban cleanup fails, the principal-room purge remains pending in the backend runtime, blocks cache certification, and is flushed transactionally before any later read or write in that room.
+
+Process-local plaintext for the departed principal and room is removed immediately even when the durable backend is unavailable.
+
 SQLite schema version 11 resets older advisory cache contents inside one rollback-safe transaction and creates a durable cache-generation identifier.
 
 PostgreSQL schema version 2 migrates under a global transaction-scoped advisory lock, preserves every namespace, expands event and plaintext keys with room scope, and quarantines legacy unscoped plaintext under an unreachable empty room ID.
+
+Each PostgreSQL principal namespace stores a durable random cache-generation identifier that changes when that namespace metadata is recreated.
 
 Certified sync-token records use version 2 and include the cache generation, so an old schema or a reset cache cannot skip the history required to rebuild ownership rows.

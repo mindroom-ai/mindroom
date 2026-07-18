@@ -1031,10 +1031,9 @@ class AgentBot:
             return None
         if token_record is None:
             return None
-        if (
-            token_record.checkpoint is not None
-            and token_record.checkpoint.cache_generation is not None
-            and token_record.checkpoint.cache_generation != self.event_cache.cache_generation
+        current_cache_generation = self.event_cache.cache_generation
+        if token_record.checkpoint is not None and (
+            current_cache_generation is None or token_record.checkpoint.cache_generation != current_cache_generation
         ):
             self.logger.warning("matrix_sync_token_cache_generation_mismatch")
             self._clear_saved_sync_token()
@@ -1064,12 +1063,17 @@ class AgentBot:
         """Persist one certified sync checkpoint if present."""
         if checkpoint is None:
             return
+        cache_generation = self.event_cache.cache_generation
+        if cache_generation is None:
+            self.logger.warning("matrix_sync_checkpoint_skipped_without_cache_generation")
+            self._clear_saved_sync_token()
+            return
         try:
             save_sync_token(
                 self.storage_path,
                 self.agent_name,
                 checkpoint.token,
-                cache_generation=self.event_cache.cache_generation,
+                cache_generation=cache_generation,
             )
         except (OSError, ValueError) as exc:
             self.logger.warning("matrix_sync_token_save_failed", error=str(exc))

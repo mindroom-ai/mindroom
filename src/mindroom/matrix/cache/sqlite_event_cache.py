@@ -325,6 +325,7 @@ class _SqliteEventCacheRuntime:
         self._db_lock = asyncio.Lock()
         self._room_locks: OrderedDict[tuple[str, str], _RoomLockEntry] = OrderedDict()
         self._generation: str | None = None
+        self._pending_room_purges: set[tuple[str, str]] = set()
 
     @property
     def db_path(self) -> Path:
@@ -347,11 +348,8 @@ class _SqliteEventCacheRuntime:
         return self._disabled_reason is not None
 
     @property
-    def generation(self) -> str:
-        """Return the durable cache generation created with the active schema."""
-        if self._generation is None:
-            msg = "SqliteEventCache must be initialized before reading its generation"
-            raise RuntimeError(msg)
+    def generation(self) -> str | None:
+        """Return the durable cache generation when the database is initialized."""
         return self._generation
 
     def disable(self, reason: str) -> None:
@@ -364,6 +362,22 @@ class _SqliteEventCacheRuntime:
             db_path=str(self._db_path),
             reason=reason,
         )
+
+    def record_pending_room_purge(self, principal_id: str, room_id: str) -> None:
+        """Remember a room deletion until a SQLite transaction commits it."""
+        self._pending_room_purges.add((principal_id, room_id))
+
+    def has_pending_room_purge(self, principal_id: str, room_id: str) -> bool:
+        """Return whether one principal-room deletion is still pending."""
+        return (principal_id, room_id) in self._pending_room_purges
+
+    def forget_pending_room_purge(self, principal_id: str, room_id: str) -> None:
+        """Forget one committed principal-room deletion."""
+        self._pending_room_purges.discard((principal_id, room_id))
+
+    def pending_room_purge_ids(self, principal_id: str) -> tuple[str, ...]:
+        """Return rooms with runtime-only deletions for one principal."""
+        return tuple(sorted(room_id for owner, room_id in self._pending_room_purges if owner == principal_id))
 
     async def initialize(self) -> None:
         """Open the SQLite database and create the cache schema."""
@@ -488,6 +502,7 @@ class SqliteEventCache:
         principal_id: str = _DEFAULT_PRINCIPAL_ID,
         _runtime: _SqliteEventCacheRuntime | None = None,
     ) -> None:
+        self._owns_runtime = _runtime is None
         self._runtime = _SqliteEventCacheRuntime(db_path) if _runtime is None else _runtime
         self._principal_id = principal_id
 
@@ -524,8 +539,8 @@ class SqliteEventCache:
         return self._runtime.is_initialized and not self._runtime.is_disabled
 
     @property
-    def cache_generation(self) -> str:
-        """Return the generation that certified sync checkpoints must match."""
+    def cache_generation(self) -> str | None:
+        """Return the generation that certified sync checkpoints must match when available."""
         return self._runtime.generation
 
     def runtime_diagnostics(self) -> dict[str, object]:
@@ -534,15 +549,28 @@ class SqliteEventCache:
             "cache_backend": "sqlite",
             "cache_sqlite_initialized": self._runtime.is_initialized,
             "cache_sqlite_disabled": self._runtime.is_disabled,
+            "cache_sqlite_pending_room_purges": len(
+                self._runtime.pending_room_purge_ids(self.principal_id),
+            ),
         }
 
     def pending_durable_write_room_ids(self) -> tuple[str, ...]:
         """Return rooms with runtime-only writes that must persist before certifying a sync token."""
-        return ()
+        return self._runtime.pending_room_purge_ids(self.principal_id)
 
     async def flush_pending_durable_writes(self, room_id: str) -> None:
         """Persist runtime-only writes for one room before certifying a sync token."""
-        _ = room_id
+        if self._runtime.has_pending_room_purge(self.principal_id, room_id):
+
+            async def flush_only(_db: aiosqlite.Connection) -> None:
+                return None
+
+            await self._write_operation(
+                room_id,
+                operation="flush_pending_durable_writes",
+                disabled_result=None,
+                writer=flush_only,
+            )
 
     async def initialize(self) -> None:
         """Open the SQLite database and create the cache schema."""
@@ -553,8 +581,9 @@ class SqliteEventCache:
         self._runtime.disable(reason)
 
     async def close(self) -> None:
-        """Close the SQLite connection when the cache is no longer needed."""
-        await self._runtime.close()
+        """Close shared storage only from the root cache owner."""
+        if self._owns_runtime:
+            await self._runtime.close()
 
     async def _read_operation(
         self,
@@ -567,6 +596,18 @@ class SqliteEventCache:
         if self._runtime.is_disabled:
             return disabled_result
         async with self._runtime.acquire_db_operation(self.principal_id, room_id, operation=operation) as db:
+            if self._runtime.has_pending_room_purge(self.principal_id, room_id):
+                try:
+                    await sqlite_event_cache_events.purge_room_locked(
+                        db,
+                        principal_id=self.principal_id,
+                        room_id=room_id,
+                    )
+                    await db.commit()
+                except BaseException:
+                    await _rollback_sqlite_connection_best_effort(db, operation=operation)
+                    raise
+                self._runtime.forget_pending_room_purge(self.principal_id, room_id)
             return await reader(db)
 
     async def _write_operation(
@@ -580,12 +621,21 @@ class SqliteEventCache:
         if self._runtime.is_disabled:
             return disabled_result
         async with self._runtime.acquire_db_operation(self.principal_id, room_id, operation=operation) as db:
+            pending_room_purge = self._runtime.has_pending_room_purge(self.principal_id, room_id)
             try:
+                if pending_room_purge:
+                    await sqlite_event_cache_events.purge_room_locked(
+                        db,
+                        principal_id=self.principal_id,
+                        room_id=room_id,
+                    )
                 result = await writer(db)
                 await db.commit()
             except BaseException:
                 await _rollback_sqlite_connection_best_effort(db, operation=operation)
                 raise
+            if pending_room_purge:
+                self._runtime.forget_pending_room_purge(self.principal_id, room_id)
         return result
 
     async def get_thread_events(self, room_id: str, thread_id: str) -> list[dict[str, Any]] | None:
@@ -936,13 +986,5 @@ class SqliteEventCache:
 
     async def purge_room(self, room_id: str) -> None:
         """Delete only this principal's cached ownership for one left or banned room."""
-        await self._write_operation(
-            room_id,
-            operation="purge_room",
-            disabled_result=None,
-            writer=lambda db: sqlite_event_cache_events.purge_room_locked(
-                db,
-                principal_id=self.principal_id,
-                room_id=room_id,
-            ),
-        )
+        self._runtime.record_pending_room_purge(self.principal_id, room_id)
+        await self.flush_pending_durable_writes(room_id)

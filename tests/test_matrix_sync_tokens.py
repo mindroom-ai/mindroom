@@ -202,7 +202,12 @@ def test_clear_sync_token_is_idempotent(tmp_path: Path) -> None:
 async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
     """Startup should hydrate the nio client from the previously saved token."""
     bot = _agent_bot(tmp_path)
-    save_sync_token(tmp_path, bot.agent_name, "s_saved")
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_saved",
+        cache_generation=bot.event_cache.cache_generation,
+    )
 
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     client.next_batch = None
@@ -228,6 +233,33 @@ async def test_bot_start_rejects_checkpoint_from_reset_cache_generation(tmp_path
         bot.agent_name,
         "s_stale",
         cache_generation="stale-cache-generation",
+    )
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.next_batch = None
+
+    with (
+        patch.object(bot, "ensure_user_account", AsyncMock()),
+        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch.object(bot, "_set_avatar_if_available", AsyncMock()),
+        patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+        patch("mindroom.bot.interactive.init_persistence"),
+    ):
+        await bot.start()
+
+    assert client.next_batch is None
+    assert load_sync_token_record(tmp_path, bot.agent_name) is None
+
+
+@pytest.mark.asyncio
+async def test_bot_start_rejects_checkpoint_when_cache_generation_is_unavailable(tmp_path: Path) -> None:
+    """An unavailable cache generation cannot certify a previously saved checkpoint."""
+    bot = _agent_bot(tmp_path)
+    bot.event_cache.cache_generation = None
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_stale",
+        cache_generation="old-cache-generation",
     )
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     client.next_batch = None
@@ -606,7 +638,12 @@ async def test_prepare_for_sync_shutdown_skips_precallback_uncertified_token(tmp
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot._coalescing_gate.drain_all = AsyncMock(return_value=CoalescingDrainResult(completed=True))
-    save_sync_token(tmp_path, bot.agent_name, "s_before_precallback")
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_before_precallback",
+        cache_generation=bot.event_cache.cache_generation,
+    )
     bot._runtime_view.mark_runtime_started()
     bot._restore_saved_sync_token()
 

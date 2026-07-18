@@ -169,10 +169,16 @@ class ThreadMutationCacheOps:
         """Delete this bot principal's cache rows after an authoritative departure."""
         try:
             await self.runtime.event_cache.purge_room(room_id)
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to purge principal-owned Matrix event cache room; deletion remains pending",
+                room_id=room_id,
+                error=str(exc),
+            )
         finally:
-            self._purge_process_plaintext(room_id)
+            self.purge_process_plaintext(room_id)
 
-    def _purge_process_plaintext(self, room_id: str) -> None:
+    def purge_process_plaintext(self, room_id: str) -> None:
         """Evict heavyweight process-local plaintext for this principal and room."""
         purge_principal_room_mxc_plaintext(self.runtime.event_cache.principal_id, room_id)
 
@@ -189,7 +195,7 @@ class ThreadMutationCacheOps:
         try:
             redacted = bool(await self.runtime.event_cache.redact_event(room_id, redacted_event_id))
         except Exception as exc:
-            self._purge_process_plaintext(room_id)
+            self.purge_process_plaintext(room_id)
             self.logger.warning(
                 failure_message,
                 room_id=room_id,
@@ -200,7 +206,7 @@ class ThreadMutationCacheOps:
             if raise_on_failure:
                 raise
             return False
-        self._purge_process_plaintext(room_id)
+        self.purge_process_plaintext(room_id)
         return redacted
 
     async def invalidate_after_redaction(

@@ -145,7 +145,7 @@ def _cache_mxc_text(
     text: str,
     timestamp: float,
     *,
-    cache_key: MxcPlaintextCacheKey | None = None,
+    cache_key: MxcPlaintextCacheKey,
 ) -> None:
     cache_mxc_plaintext(mxc_url, text, timestamp, cache_key=cache_key)
 
@@ -175,8 +175,10 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
     current_time = time.time()
     client_user_id = client.user_id if isinstance(client.user_id, str) and client.user_id else None
     principal_id = event_cache.principal_id if event_cache is not None else client_user_id
-    cache_key: MxcPlaintextCacheKey = (
-        (principal_id, room_id or "", event_id or "", mxc_url) if principal_id is not None else mxc_url
+    cache_key: MxcPlaintextCacheKey | None = (
+        (principal_id, room_id, event_id, mxc_url)
+        if principal_id is not None and room_id is not None and event_id is not None
+        else None
     )
 
     if event_cache is not None and room_id is not None and event_id is not None:
@@ -195,12 +197,14 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
                         limit_bytes=MXC_TEXT_MAX_BYTES,
                     )
                     return None
+                assert cache_key is not None
                 _cache_mxc_text(mxc_url, cached_text, current_time, cache_key=cache_key)
                 logger.debug("mxc_text_cache_hit", mxc_url=mxc_url, room_id=room_id)
                 return cached_text
 
-    cached_entry = get_cached_mxc_plaintext(cache_key)
+    cached_entry = get_cached_mxc_plaintext(cache_key) if cache_key is not None else None
     if cached_entry is not None:
+        assert cache_key is not None
         content, timestamp = cached_entry
         if current_time - timestamp < MXC_CACHE_TTL_SECONDS and not _mxc_text_exceeds_limit(content):
             if event_cache is None:
@@ -274,9 +278,7 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
         except UnicodeDecodeError:
             logger.exception("Downloaded content is not valid UTF-8 text")
             return None
-        if event_cache is not None:
-            if room_id is None or event_id is None:
-                return None
+        if event_cache is not None and room_id is not None and event_id is not None:
             try:
                 ownership_persisted = await event_cache.store_mxc_text(
                     room_id,
@@ -286,16 +288,17 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
                 )
             except Exception:
                 logger.exception("Failed to persist durable MXC text cache")
-                return None
-            if not ownership_persisted:
-                logger.info(
-                    "mxc_plaintext_rejected_without_visible_owner",
-                    room_id=room_id,
-                    event_id=event_id,
-                )
-                return None
-        _cache_mxc_text(mxc_url, decoded_text, time.time(), cache_key=cache_key)
-        logger.debug("mxc_content_cached", mxc_url=mxc_url)
+            else:
+                if not ownership_persisted:
+                    logger.info(
+                        "mxc_plaintext_rejected_without_visible_owner",
+                        room_id=room_id,
+                        event_id=event_id,
+                    )
+                    return None
+        if cache_key is not None:
+            _cache_mxc_text(mxc_url, decoded_text, time.time(), cache_key=cache_key)
+            logger.debug("mxc_content_cached", mxc_url=mxc_url)
 
     except Exception:
         logger.exception("Error downloading MXC content")

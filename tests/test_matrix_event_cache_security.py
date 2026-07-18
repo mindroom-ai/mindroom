@@ -6,7 +6,14 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
-from mindroom.matrix.cache import ConversationEventCache, SharedConversationEventCache
+from mindroom.matrix.cache import (
+    ConversationEventCache,
+    SharedConversationEventCache,
+    postgres_event_cache_events,
+    sqlite_event_cache_events,
+)
+from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
+from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -131,6 +138,67 @@ async def test_principal_isolation_survives_asymmetric_decryption_and_leave(
         assert await alice.get_mxc_text(room_id, event_id, mxc_url) is None
         assert await bob.get_event(room_id, event_id) == bob_event
         assert await bob.get_mxc_text(room_id, event_id, mxc_url) == "bob plaintext"
+    finally:
+        await root.close()
+
+
+@pytest.mark.asyncio
+async def test_closing_principal_view_does_not_close_shared_runtime(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """A bot stopping must not close cache storage still used by another bot."""
+    root = _shared_cache(event_cache_factory)
+    await root.initialize()
+    alice = root.for_principal("@alice:localhost")
+    bob = root.for_principal("@bob:localhost")
+    room_id = "!room:localhost"
+    try:
+        await alice.store_event("$alice", room_id, _event("$alice", 1))
+        await bob.store_event("$bob", room_id, _event("$bob", 2))
+
+        await alice.close()
+
+        assert await bob.get_event(room_id, "$bob") == _event("$bob", 2)
+        await bob.store_event("$bob-after-close", room_id, _event("$bob-after-close", 3))
+        assert await bob.get_event(room_id, "$bob-after-close") == _event("$bob-after-close", 3)
+    finally:
+        await root.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_room_purge_blocks_reads_until_recovery(
+    event_cache_factory: Callable[[], ConversationEventCache],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient leave cleanup failure must remain pending and flush before later reads."""
+    root = _shared_cache(event_cache_factory)
+    await root.initialize()
+    cache = root.for_principal("@alice:localhost")
+    room_id = "!left:localhost"
+    event_id = "$event"
+    event = _event(event_id, 1)
+    await cache.store_event(event_id, room_id, event)
+
+    if isinstance(cache, SqliteEventCache):
+        module = sqlite_event_cache_events
+    else:
+        assert isinstance(cache, PostgresEventCache)
+        module = postgres_event_cache_events
+    original_purge = module.purge_room_locked
+    failure_reason = "temporary purge failure"
+
+    async def fail_purge(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError(failure_reason)
+
+    try:
+        monkeypatch.setattr(module, "purge_room_locked", fail_purge)
+        with pytest.raises(RuntimeError, match="temporary purge failure"):
+            await cache.purge_room(room_id)
+        assert cache.pending_durable_write_room_ids() == (room_id,)
+
+        monkeypatch.setattr(module, "purge_room_locked", original_purge)
+        assert await cache.get_event(room_id, event_id) is None
+        assert cache.pending_durable_write_room_ids() == ()
     finally:
         await root.close()
 

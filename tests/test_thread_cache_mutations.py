@@ -24,6 +24,7 @@ from mindroom.matrix.cache.thread_writes import (
     _collect_sync_timeline_cache_updates,
 )
 from mindroom.matrix.conversation_cache import MatrixConversationCache
+from mindroom.matrix.mxc_plaintext_cache import cache_mxc_plaintext, get_cached_mxc_plaintext
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
@@ -80,6 +81,31 @@ def test_thread_writes_does_not_keep_message_impact_wrapper() -> None:
 
 class TestThreadMutationHelpers:
     """Direct mutation-helper coverage for outbound/live/sync message and redaction paths."""
+
+    @pytest.mark.asyncio
+    async def test_room_purge_evicts_process_plaintext_when_durable_backend_fails(self) -> None:
+        """A leave must drop this principal's RAM plaintext even during a cache outage."""
+        cache_ops, logger, event_cache = _thread_mutation_cache_ops()
+        room_id = "!left:localhost"
+        cache_key = (
+            "@alice:localhost",
+            room_id,
+            "$event",
+            "mxc://server/plaintext",
+        )
+        event_cache.principal_id = "@alice:localhost"
+        event_cache.purge_room = AsyncMock(side_effect=EventCacheBackendUnavailableError("offline"))
+        cache_mxc_plaintext(
+            "mxc://server/plaintext",
+            "secret",
+            time.time(),
+            cache_key=cache_key,
+        )
+
+        await cache_ops.purge_room(room_id)
+
+        assert get_cached_mxc_plaintext(cache_key) is None
+        logger.warning.assert_called_once()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

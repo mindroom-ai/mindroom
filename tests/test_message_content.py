@@ -757,13 +757,29 @@ class TestDownloadMxcText:
     async def test_successful_download(self) -> None:
         """Test successful text download."""
         client = AsyncMock()
+        client.user_id = "@alice:localhost"
         response = MagicMock(spec=nio.DownloadResponse)
         response.body = b"Downloaded text content"
         client.download.return_value = response
 
-        result = await _download_mxc_text(client, "mxc://server/media123")
+        result = await _download_mxc_text(
+            client,
+            "mxc://server/media123",
+            room_id="!room:localhost",
+            event_id="$event",
+        )
         assert result == "Downloaded text content"
         client.download.assert_called_once_with(mxc="mxc://server/media123")
+        assert (
+            await _download_mxc_text(
+                client,
+                "mxc://server/media123",
+                room_id="!room:localhost",
+                event_id="$event",
+            )
+            == "Downloaded text content"
+        )
+        client.download.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_process_cache_scopes_same_mxc_url_by_matrix_principal(self) -> None:
@@ -780,10 +796,141 @@ class TestDownloadMxcText:
         bob_response.body = b"bob plaintext"
         bob.download.return_value = bob_response
 
-        assert await _download_mxc_text(alice, mxc_url) == "alice plaintext"
-        assert await _download_mxc_text(bob, mxc_url) == "bob plaintext"
+        assert (
+            await _download_mxc_text(
+                alice,
+                mxc_url,
+                room_id="!room:localhost",
+                event_id="$event",
+            )
+            == "alice plaintext"
+        )
+        assert (
+            await _download_mxc_text(
+                bob,
+                mxc_url,
+                room_id="!room:localhost",
+                event_id="$event",
+            )
+            == "bob plaintext"
+        )
         assert alice.download.await_count == 1
         assert bob.download.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_process_cache_scopes_same_principal_and_mxc_by_room(self) -> None:
+        """One principal must never reuse plaintext from another room."""
+        client = AsyncMock()
+        client.user_id = "@alice:localhost"
+        room_a_response = MagicMock(spec=nio.DownloadResponse)
+        room_a_response.body = b"room A plaintext"
+        room_b_response = MagicMock(spec=nio.DownloadResponse)
+        room_b_response.body = b"room B plaintext"
+        client.download.side_effect = [room_a_response, room_b_response]
+        mxc_url = "mxc://server/shared"
+
+        assert (
+            await _download_mxc_text(
+                client,
+                mxc_url,
+                room_id="!a:localhost",
+                event_id="$same",
+            )
+            == "room A plaintext"
+        )
+        assert (
+            await _download_mxc_text(
+                client,
+                mxc_url,
+                room_id="!b:localhost",
+                event_id="$same",
+            )
+            == "room B plaintext"
+        )
+        assert (
+            await _download_mxc_text(
+                client,
+                mxc_url,
+                room_id="!a:localhost",
+                event_id="$same",
+            )
+            == "room A plaintext"
+        )
+        assert client.download.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_process_cache_bypasses_reuse_without_complete_ownership(self) -> None:
+        """Hydration without room and event identity may return text but must not cache it."""
+        client = AsyncMock()
+        client.user_id = "@alice:localhost"
+        first_response = MagicMock(spec=nio.DownloadResponse)
+        first_response.body = b"first"
+        second_response = MagicMock(spec=nio.DownloadResponse)
+        second_response.body = b"second"
+        client.download.side_effect = [first_response, second_response]
+
+        assert await _download_mxc_text(client, "mxc://server/incomplete") == "first"
+        assert await _download_mxc_text(client, "mxc://server/incomplete") == "second"
+        assert client.download.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_download_returns_text_without_caching_when_durable_store_fails(self) -> None:
+        """A cache outage must not suppress freshly downloaded visible content."""
+        client = AsyncMock()
+        client.user_id = "@alice:localhost"
+        first_response = MagicMock(spec=nio.DownloadResponse)
+        first_response.body = b"first"
+        second_response = MagicMock(spec=nio.DownloadResponse)
+        second_response.body = b"second"
+        client.download.side_effect = [first_response, second_response]
+        event_cache = AsyncMock()
+        event_cache.principal_id = "@alice:localhost"
+        event_cache.get_mxc_text.return_value = None
+        event_cache.store_mxc_text.side_effect = RuntimeError("cache unavailable")
+        kwargs = {
+            "event_cache": event_cache,
+            "room_id": "!room:localhost",
+            "event_id": "$event",
+        }
+
+        assert await _download_mxc_text(client, "mxc://server/outage", **kwargs) == "first"
+        assert await _download_mxc_text(client, "mxc://server/outage", **kwargs) == "second"
+        assert client.download.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_active_event_cache_without_event_identity_does_not_suppress_download(self) -> None:
+        """An incomplete owner may hydrate for this call but cannot populate either cache."""
+        client = AsyncMock()
+        client.user_id = "@alice:localhost"
+        first_response = MagicMock(spec=nio.DownloadResponse)
+        first_response.body = b"first"
+        second_response = MagicMock(spec=nio.DownloadResponse)
+        second_response.body = b"second"
+        client.download.side_effect = [first_response, second_response]
+        event_cache = AsyncMock()
+        event_cache.principal_id = "@alice:localhost"
+
+        assert (
+            await _download_mxc_text(
+                client,
+                "mxc://server/incomplete-owner",
+                event_cache=event_cache,
+                room_id="!room:localhost",
+            )
+            == "first"
+        )
+        assert (
+            await _download_mxc_text(
+                client,
+                "mxc://server/incomplete-owner",
+                event_cache=event_cache,
+                room_id="!room:localhost",
+            )
+            == "second"
+        )
+        event_cache.get_mxc_text.assert_not_awaited()
+        event_cache.store_mxc_text.assert_not_awaited()
+        assert client.download.await_count == 2
 
     def test_process_cache_purge_removes_only_principal_room_plaintext(self) -> None:
         """Redaction and leave cleanup must not evict another joined principal's plaintext."""
@@ -876,24 +1023,47 @@ class TestDownloadMxcText:
         assert result is None
         assert "mxc://server/decrypted-oversized" not in mxc_plaintext_cache_module._mxc_cache
 
-    @pytest.mark.asyncio
-    async def test_mxc_cache_uses_lru_eviction(self) -> None:
+    def test_mxc_cache_uses_lru_eviction(self) -> None:
         """A cache hit should refresh recency so the oldest untouched entry is evicted first."""
-        client = AsyncMock()
         now = time.time()
+        keys = [
+            ("@alice:localhost", "!room:localhost", f"$event-{index}", f"mxc://server/{index}")
+            for index in range(mxc_plaintext_cache_module._mxc_cache_max_entries)
+        ]
         for index in range(mxc_plaintext_cache_module._mxc_cache_max_entries):
-            message_content_module._cache_mxc_text(f"mxc://server/{index}", str(index), now)
+            message_content_module._cache_mxc_text(
+                f"mxc://server/{index}",
+                str(index),
+                now,
+                cache_key=keys[index],
+            )
 
-        assert await _download_mxc_text(client, "mxc://server/0") == "0"
-        client.download.assert_not_called()
+        overflow_key = (
+            "@alice:localhost",
+            "!room:localhost",
+            "$event-overflow",
+            "mxc://server/overflow",
+        )
+        mxc_plaintext_cache_module.touch_cached_mxc_plaintext(keys[0])
+        message_content_module._cache_mxc_text(
+            "mxc://server/overflow",
+            "overflow",
+            now,
+            cache_key=overflow_key,
+        )
+        assert keys[0] in mxc_plaintext_cache_module._mxc_cache
+        assert keys[1] not in mxc_plaintext_cache_module._mxc_cache
 
-        overflow_response = MagicMock(spec=nio.DownloadResponse)
-        overflow_response.body = b"overflow"
-        client.download.return_value = overflow_response
-
-        assert await _download_mxc_text(client, "mxc://server/overflow") == "overflow"
-        assert "mxc://server/0" in mxc_plaintext_cache_module._mxc_cache
-        assert "mxc://server/1" not in mxc_plaintext_cache_module._mxc_cache
+    def test_mxc_cache_touch_tolerates_concurrent_eviction(self) -> None:
+        """An entry removed while ownership is validated must not make hydration fail."""
+        mxc_plaintext_cache_module.touch_cached_mxc_plaintext(
+            (
+                "@alice:localhost",
+                "!room:localhost",
+                "$missing",
+                "mxc://server/missing",
+            ),
+        )
 
     @pytest.mark.asyncio
     async def test_mxc_cache_prunes_by_total_bytes(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -907,11 +1077,30 @@ class TestDownloadMxcText:
         second_response.body = b"abcdef"
         client.download.side_effect = [first_response, second_response]
 
-        assert await _download_mxc_text(client, "mxc://server/first") == "123456"
-        assert await _download_mxc_text(client, "mxc://server/second") == "abcdef"
+        client.user_id = "@alice:localhost"
+        assert (
+            await _download_mxc_text(
+                client,
+                "mxc://server/first",
+                room_id="!room:localhost",
+                event_id="$first",
+            )
+            == "123456"
+        )
+        assert (
+            await _download_mxc_text(
+                client,
+                "mxc://server/second",
+                room_id="!room:localhost",
+                event_id="$second",
+            )
+            == "abcdef"
+        )
 
-        assert "mxc://server/first" not in mxc_plaintext_cache_module._mxc_cache
-        assert "mxc://server/second" in mxc_plaintext_cache_module._mxc_cache
+        first_key = ("@alice:localhost", "!room:localhost", "$first", "mxc://server/first")
+        second_key = ("@alice:localhost", "!room:localhost", "$second", "mxc://server/second")
+        assert first_key not in mxc_plaintext_cache_module._mxc_cache
+        assert second_key in mxc_plaintext_cache_module._mxc_cache
 
 
 class TestCanonicalContentResolution:

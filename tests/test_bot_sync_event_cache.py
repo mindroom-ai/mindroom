@@ -437,6 +437,24 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         event_cache.purge_room.assert_awaited_once_with(room_id)
 
     @pytest.mark.asyncio
+    async def test_sync_leave_queues_purge_while_cache_runtime_is_unavailable(self, bot: AgentBot) -> None:
+        """An outage cannot discard authoritative principal-room leave cleanup."""
+        room_id = "!left-during-outage:localhost"
+        event_cache = _runtime_event_cache()
+        event_cache.durable_writes_available = False
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+        response = self._sync_response({})
+        response.rooms.leave = {room_id: MagicMock()}
+
+        result = await bot._conversation_cache.cache_sync_timeline_for_certification(response)
+
+        assert result.complete is False
+        assert result.runtime_available is False
+        assert result.task_count == 1
+        event_cache.purge_room.assert_awaited_once_with(room_id)
+
+    @pytest.mark.asyncio
     async def test_empty_sync_does_not_certify_while_pending_cache_writes_remain(self, bot: AgentBot) -> None:
         """A sync token is not cache-certified while runtime-only writes remain in memory."""
         event_cache = _runtime_event_cache()

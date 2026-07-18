@@ -9,6 +9,7 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar
+from uuid import uuid4
 
 import psycopg
 
@@ -154,7 +155,7 @@ async def _initialize_postgres_event_cache_db(
     database_url: str,
     *,
     namespace: str,
-) -> psycopg.AsyncConnection:
+) -> tuple[psycopg.AsyncConnection, str]:
     """Open the PostgreSQL database and ensure the event-cache schema exists."""
     db = await psycopg.AsyncConnection.connect(database_url)
     try:
@@ -177,12 +178,13 @@ async def _initialize_postgres_event_cache_db(
             _require_compatible_postgres_schema_version(current_schema_version)
         await _create_postgres_event_cache_schema(db)
         await _validate_postgres_event_cache_schema(db)
+        cache_generation = await _postgres_cache_generation(db, namespace=namespace)
         await db.commit()
     except BaseException:
         await _rollback_postgres_connection_best_effort(db, namespace=namespace, operation="initialize")
         await _close_postgres_connection_best_effort(db, namespace=namespace, operation="initialize")
         raise
-    return db
+    return db, cache_generation
 
 
 async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
@@ -397,6 +399,35 @@ async def _postgres_schema_version(db: AsyncConnection) -> int | None:
     return None if row is None else int(row[0])
 
 
+async def _postgres_cache_generation(db: AsyncConnection, *, namespace: str) -> str:
+    """Return a durable random incarnation for one principal namespace."""
+    generation_key = f"cache_generation:{namespace}"
+    await db.execute(
+        """
+        INSERT INTO mindroom_event_cache_metadata(key, value)
+        VALUES (%s, %s)
+        ON CONFLICT(key) DO NOTHING
+        """,
+        (generation_key, str(uuid4())),
+    )
+    cursor = await db.execute(
+        """
+        SELECT value
+        FROM mindroom_event_cache_metadata
+        WHERE key = %s
+        """,
+        (generation_key,),
+    )
+    try:
+        row = await cursor.fetchone()
+    finally:
+        await cursor.close()
+    if row is None:
+        msg = "PostgreSQL Matrix event cache generation metadata was not initialized"
+        raise RuntimeError(msg)
+    return str(row[0])
+
+
 async def _validate_postgres_event_cache_schema(db: AsyncConnection) -> None:
     """Store or validate the PostgreSQL cache schema version."""
     current_schema_version = await _postgres_schema_version(db)
@@ -439,6 +470,14 @@ class _PendingInvalidation:
     reason: str
 
 
+@dataclass(frozen=True)
+class _FlushedPendingWrites:
+    """Runtime-only writes included in one committed PostgreSQL operation."""
+
+    room_purge: bool = False
+    invalidations: tuple[tuple[str, str | None, _PendingInvalidation], ...] = ()
+
+
 class _PostgresEventCacheRuntime:
     """Own runtime-only lifecycle, locking, and disable state for one cache instance."""
 
@@ -446,6 +485,7 @@ class _PostgresEventCacheRuntime:
         self._database_url = database_url
         self._namespace = namespace
         self._db: psycopg.AsyncConnection | None = None
+        self._generation: str | None = None
         self._disabled_reason: str | None = None
         self._unavailable_reason: str | None = None
         self._transient_failure_count = 0
@@ -456,6 +496,7 @@ class _PostgresEventCacheRuntime:
         self._room_locks: OrderedDict[str, _RoomLockEntry] = OrderedDict()
         self._pending_thread_invalidations: dict[tuple[str, str], _PendingInvalidation] = {}
         self._pending_room_invalidations: dict[str, _PendingInvalidation] = {}
+        self._pending_room_purges: set[str] = set()
 
     @property
     def database_url(self) -> str:
@@ -492,6 +533,11 @@ class _PostgresEventCacheRuntime:
         """Return whether callers should still attempt durable cache writes."""
         return not self.is_disabled and not self._explicitly_closed
 
+    @property
+    def generation(self) -> str | None:
+        """Return the durable cache generation when the database was initialized."""
+        return self._generation
+
     def disable(self, reason: str) -> None:
         """Disable the advisory cache for the rest of the runtime."""
         if self._disabled_reason is not None:
@@ -514,6 +560,7 @@ class _PostgresEventCacheRuntime:
             "cache_postgres_reconnect_count": self._reconnect_count,
             "cache_postgres_pending_thread_invalidations": len(self._pending_thread_invalidations),
             "cache_postgres_pending_room_invalidations": len(self._pending_room_invalidations),
+            "cache_postgres_pending_room_purges": len(self._pending_room_purges),
             "cache_postgres_explicitly_closed": self._explicitly_closed,
         }
         if self._disabled_reason is not None:
@@ -533,7 +580,10 @@ class _PostgresEventCacheRuntime:
             had_previous_connection = self._db is not None
             await self._close_db_locked(operation="initialize")
             try:
-                self._db = await _initialize_postgres_event_cache_db(self._database_url, namespace=self._namespace)
+                self._db, self._generation = await _initialize_postgres_event_cache_db(
+                    self._database_url,
+                    namespace=self._namespace,
+                )
             except Exception as exc:
                 if _is_transient_postgres_failure(exc):
                     self._transient_failure_count += 1
@@ -552,6 +602,7 @@ class _PostgresEventCacheRuntime:
             self._explicitly_closed = True
             self._reconnect_after_transient = False
             await self._close_db_locked(operation="close")
+            self._generation = None
             self._room_locks.clear()
 
     async def handle_transient_failure(self, exc: BaseException, *, operation: str) -> None:
@@ -605,6 +656,22 @@ class _PostgresEventCacheRuntime:
             reason=reason,
         )
 
+    def record_pending_room_purge(self, room_id: str) -> None:
+        """Remember a room deletion until a PostgreSQL transaction commits it."""
+        self._pending_room_purges.add(room_id)
+
+    def has_pending_room_purge(self, room_id: str) -> bool:
+        """Return whether a principal-room deletion is still pending."""
+        return room_id in self._pending_room_purges
+
+    def forget_pending_room_purge(self, room_id: str) -> None:
+        """Forget one committed room deletion and obsolete invalidations."""
+        self._pending_room_purges.discard(room_id)
+        self._pending_room_invalidations.pop(room_id, None)
+        self._pending_thread_invalidations = {
+            key: pending for key, pending in self._pending_thread_invalidations.items() if key[0] != room_id
+        }
+
     def pending_room_invalidation(self, room_id: str) -> _PendingInvalidation | None:
         """Return one pending room invalidation, if any."""
         return self._pending_room_invalidations.get(room_id)
@@ -619,7 +686,8 @@ class _PostgresEventCacheRuntime:
 
     def pending_invalidation_room_ids(self) -> tuple[str, ...]:
         """Return rooms with runtime-only invalidation markers pending durable persistence."""
-        room_ids = set(self._pending_room_invalidations)
+        room_ids = set(self._pending_room_purges)
+        room_ids.update(self._pending_room_invalidations)
         room_ids.update(room_id for room_id, _thread_id in self._pending_thread_invalidations)
         return tuple(sorted(room_ids))
 
@@ -784,6 +852,7 @@ class PostgresEventCache:
     ) -> None:
         self._principal_id = principal_id
         self._base_namespace = namespace if _base_namespace is None else _base_namespace
+        self._owns_registry = _registry is None
         self._registry = _PostgresRuntimeRegistry(database_url) if _registry is None else _registry
         self._runtime = self._registry.runtime(_principal_namespace(self._base_namespace, principal_id))
 
@@ -827,9 +896,9 @@ class PostgresEventCache:
         return self._runtime.durable_writes_available
 
     @property
-    def cache_generation(self) -> str:
-        """Return the principal namespace's current schema generation."""
-        return f"postgres-v{_POSTGRES_EVENT_CACHE_SCHEMA_VERSION}:{self.namespace}"
+    def cache_generation(self) -> str | None:
+        """Return the principal namespace's durable cache generation when available."""
+        return self._runtime.generation
 
     async def initialize(self) -> None:
         """Open the PostgreSQL database and create the cache schema."""
@@ -861,8 +930,9 @@ class PostgresEventCache:
         self._runtime.disable(reason)
 
     async def close(self) -> None:
-        """Close the PostgreSQL connection when the cache is no longer needed."""
-        await self._registry.close()
+        """Close shared storage only from the root cache owner."""
+        if self._owns_registry:
+            await self._registry.close()
 
     async def _read_operation(
         self,
@@ -907,11 +977,11 @@ class PostgresEventCache:
             return disabled_result
         transient_error: BaseException | None = None
         for attempt in range(_MAX_TRANSIENT_OPERATION_ATTEMPTS):
-            flushed_pending: tuple[tuple[str, str | None, _PendingInvalidation], ...] = ()
+            flushed_pending = _FlushedPendingWrites()
             try:
                 async with self._runtime.acquire_db_operation(room_id, operation=operation) as db:
                     try:
-                        flushed_pending = await self._flush_pending_invalidations(db, room_id)
+                        flushed_pending = await self._flush_pending_writes(db, room_id)
                         result = await callback(db)
                         await db.commit()
                     except BaseException:
@@ -935,15 +1005,23 @@ class PostgresEventCache:
                     continue
                 raise _cache_backend_unavailable(operation, exc) from exc
             else:
-                self._forget_flushed_pending_invalidations(room_id, flushed_pending)
+                self._forget_flushed_pending_writes(room_id, flushed_pending)
                 return result
         raise _cache_backend_unavailable(operation, transient_error or RuntimeError("operation did not run"))
 
-    async def _flush_pending_invalidations(
+    async def _flush_pending_writes(
         self,
         db: psycopg.AsyncConnection,
         room_id: str,
-    ) -> tuple[tuple[str, str | None, _PendingInvalidation], ...]:
+    ) -> _FlushedPendingWrites:
+        if self._runtime.has_pending_room_purge(room_id):
+            await postgres_event_cache_events.purge_room_locked(
+                db,
+                namespace=self._runtime.namespace,
+                room_id=room_id,
+            )
+            return _FlushedPendingWrites(room_purge=True)
+
         flushed: list[tuple[str, str | None, _PendingInvalidation]] = []
         room_pending = self._runtime.pending_room_invalidation(room_id)
         thread_pending = self._runtime.pending_thread_invalidations(room_id)
@@ -969,14 +1047,17 @@ class PostgresEventCache:
                 reason=pending_invalidation.reason,
             )
             flushed.append(("thread", thread_id, pending_invalidation))
-        return tuple(flushed)
+        return _FlushedPendingWrites(invalidations=tuple(flushed))
 
-    def _forget_flushed_pending_invalidations(
+    def _forget_flushed_pending_writes(
         self,
         room_id: str,
-        flushed_pending: tuple[tuple[str, str | None, _PendingInvalidation], ...],
+        flushed_pending: _FlushedPendingWrites,
     ) -> None:
-        for kind, thread_id, pending in flushed_pending:
+        if flushed_pending.room_purge:
+            self._runtime.forget_pending_room_purge(room_id)
+            return
+        for kind, thread_id, pending in flushed_pending.invalidations:
             if kind == "room":
                 self._runtime.forget_pending_room_invalidation(room_id, pending)
                 continue
@@ -1352,13 +1433,5 @@ class PostgresEventCache:
 
     async def purge_room(self, room_id: str) -> None:
         """Delete this principal namespace's rows for one departed room."""
-        await self._write_operation(
-            room_id,
-            operation="purge_room",
-            disabled_result=None,
-            writer=lambda db: postgres_event_cache_events.purge_room_locked(
-                db,
-                namespace=self._runtime.namespace,
-                room_id=room_id,
-            ),
-        )
+        self._runtime.record_pending_room_purge(room_id)
+        await self.flush_pending_durable_writes(room_id)

@@ -38,8 +38,8 @@ class ConversationEventCache(Protocol):
         """Return the Matrix user ID that owns every row visible through this view."""
 
     @property
-    def cache_generation(self) -> str:
-        """Return the durable generation used to certify restart checkpoints."""
+    def cache_generation(self) -> str | None:
+        """Return the durable generation used to certify restart checkpoints when available."""
 
     @property
     def durable_writes_available(self) -> bool:

@@ -9,7 +9,7 @@ from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-type MxcPlaintextCacheKey = str | tuple[str, str, str, str]
+type MxcPlaintextCacheKey = tuple[str, str, str, str]
 
 MXC_CACHE_TTL_SECONDS = 3600.0
 MXC_TEXT_MAX_BYTES = 2 * 1024 * 1024
@@ -29,7 +29,7 @@ def cache_mxc_plaintext(
     text: str,
     timestamp: float,
     *,
-    cache_key: MxcPlaintextCacheKey | None = None,
+    cache_key: MxcPlaintextCacheKey,
 ) -> None:
     """Cache bounded plaintext under its complete ownership key."""
     global _mxc_cache_total_bytes
@@ -45,13 +45,12 @@ def cache_mxc_plaintext(
         return
     if not _mxc_cache:
         _mxc_cache_total_bytes = 0
-    key = mxc_url if cache_key is None else cache_key
-    if key in _mxc_cache:
-        previous_text, _ = _mxc_cache[key]
+    if cache_key in _mxc_cache:
+        previous_text, _ = _mxc_cache[cache_key]
         _mxc_cache_total_bytes -= _text_size_bytes(previous_text)
-    _mxc_cache[key] = (text, timestamp)
+    _mxc_cache[cache_key] = (text, timestamp)
     _mxc_cache_total_bytes += size_bytes
-    _mxc_cache.move_to_end(key)
+    _mxc_cache.move_to_end(cache_key)
     _clean_expired_cache()
 
 
@@ -62,7 +61,10 @@ def get_cached_mxc_plaintext(cache_key: MxcPlaintextCacheKey) -> tuple[str, floa
 
 def touch_cached_mxc_plaintext(cache_key: MxcPlaintextCacheKey) -> None:
     """Mark one existing plaintext entry as most recently used."""
-    _mxc_cache.move_to_end(cache_key)
+    try:
+        _mxc_cache.move_to_end(cache_key)
+    except KeyError:
+        return
 
 
 def remove_cached_mxc_plaintext(cache_key: MxcPlaintextCacheKey) -> None:
@@ -79,7 +81,7 @@ def remove_cached_mxc_plaintext(cache_key: MxcPlaintextCacheKey) -> None:
 
 def purge_principal_room_mxc_plaintext(principal_id: str, room_id: str) -> None:
     """Evict process-local plaintext owned by one principal and room."""
-    owned_keys = [key for key in _mxc_cache if isinstance(key, tuple) and key[0] == principal_id and key[1] == room_id]
+    owned_keys = [key for key in _mxc_cache if key[0] == principal_id and key[1] == room_id]
     for key in owned_keys:
         remove_cached_mxc_plaintext(key)
 

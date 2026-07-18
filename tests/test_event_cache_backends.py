@@ -386,6 +386,7 @@ async def test_sqlite_event_cache_write_operation_rolls_back_cancelled_writer(
         SimpleNamespace(
             is_disabled=False,
             acquire_db_operation=acquire_db_operation,
+            has_pending_room_purge=Mock(return_value=False),
         ),
     )
 
@@ -623,6 +624,43 @@ async def test_postgres_v1_migration_rolls_back_on_cancellation(
 
 
 @pytest.mark.asyncio
+async def test_postgres_cache_generation_is_durable_and_changes_after_namespace_reset(
+    postgres_event_cache_url: str,
+) -> None:
+    """A recreated PostgreSQL cache namespace cannot reuse an old checkpoint generation."""
+    namespace = f"generation_{uuid.uuid4().hex}"
+    cache = PostgresEventCache(
+        database_url=postgres_event_cache_url,
+        namespace=namespace,
+    )
+    await cache.initialize()
+    first_generation = cache.cache_generation
+    assert first_generation is not None
+
+    await cache.close()
+    await cache.initialize()
+    assert cache.cache_generation == first_generation
+    await cache.close()
+
+    db = await psycopg.AsyncConnection.connect(postgres_event_cache_url)
+    try:
+        await db.execute(
+            "DELETE FROM mindroom_event_cache_metadata WHERE key = %s",
+            (f"cache_generation:{namespace}",),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    await cache.initialize()
+    try:
+        assert cache.cache_generation is not None
+        assert cache.cache_generation != first_generation
+    finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
 async def test_postgres_event_cache_operation_rolls_back_cancelled_callback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -646,7 +684,7 @@ async def test_postgres_event_cache_operation_rolls_back_cancelled_callback(
             acquire_db_operation=acquire_db_operation,
         ),
     )
-    monkeypatch.setattr(cache, "_flush_pending_invalidations", AsyncMock(return_value=()))
+    monkeypatch.setattr(cache, "_flush_pending_writes", AsyncMock(return_value=SimpleNamespace()))
 
     async def cancelled_callback(_db: object) -> None:
         raise asyncio.CancelledError(cancel_reason)
