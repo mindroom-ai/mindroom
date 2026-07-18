@@ -23,7 +23,6 @@ from mindroom.matrix.cache import (
 from mindroom.matrix.cache.postgres_cache_maintenance import migrate_postgres_schema
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from tests.event_cache_test_support import replace_thread_unconditionally
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator

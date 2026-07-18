@@ -360,6 +360,8 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
         )
         """,
     )
+
+
 async def _initialize_namespace_certification_generation(
     db: AsyncConnection,
     *,
