@@ -57,6 +57,7 @@ from mindroom.matrix.client_visible_messages import (
     record_latest_thread_edit,
 )
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.media import parse_matrix_media_event_source
 from mindroom.matrix.message_content import extract_and_resolve_message, resolve_event_source_content
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
@@ -232,9 +233,15 @@ def _snapshot_message_dict(
 
 def _parse_room_message_event(event_source: dict[str, Any]) -> nio.Event | None:
     """Parse one event dict into a room-message event when possible."""
-    try:
-        parsed_event = nio.Event.parse_event(event_source)
-    except Exception:
+    content = event_source.get("content")
+    if isinstance(content, Mapping) and "file" in content:
+        parsed_event = parse_matrix_media_event_source(event_source)
+    else:
+        try:
+            parsed_event = nio.Event.parse_event(event_source)
+        except Exception:
+            return None
+    if parsed_event is None:
         return None
     return parsed_event if _is_room_message_event(parsed_event) else None
 

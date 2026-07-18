@@ -73,10 +73,10 @@ def is_matrix_media_dispatch_event(event: object) -> TypeGuard[MatrixMediaDispat
     return is_image_message_event(event) or is_file_or_video_message_event(event)
 
 
-def parse_matrix_media_dispatch_event_source(
+def parse_matrix_media_event_source(
     event_source: Mapping[str, Any],
-) -> MatrixMediaDispatchEvent | None:
-    """Parse one Matrix event source into image/file/video media when possible."""
+) -> MatrixMediaEvent | None:
+    """Parse one Matrix event source through nio's correct media validation path."""
     normalized_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
     content = normalized_source.get("content")
     try:
@@ -87,6 +87,14 @@ def parse_matrix_media_dispatch_event_source(
         )
     except Exception:
         return None
+    return parsed_event if isinstance(parsed_event, MATRIX_MEDIA_EVENT_TYPES) else None
+
+
+def parse_matrix_media_dispatch_event_source(
+    event_source: Mapping[str, Any],
+) -> MatrixMediaDispatchEvent | None:
+    """Parse one Matrix event source into image/file/video media when possible."""
+    parsed_event = parse_matrix_media_event_source(event_source)
     return parsed_event if is_matrix_media_dispatch_event(parsed_event) else None
 
 
