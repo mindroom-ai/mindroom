@@ -81,10 +81,22 @@ if TYPE_CHECKING:
 MutationWriteContext = Literal["outbound", "live", "sync"]
 
 
-def is_thread_affecting_relation(event_info: EventInfo) -> bool:
-    """Return whether one room message relation can affect thread-scoped cache state."""
+def is_thread_affecting_relation(
+    event_info: EventInfo,
+    *,
+    event_type: str | None,
+) -> bool:
+    """Return whether one event relation can affect visible thread-scoped cache state.
+
+    ``m.reference`` is reused by room-level event families such as polls and beacons.
+    Only references carried by plaintext or encrypted room messages can add visible
+    conversation history, so other reference-bearing event types stay room-level.
+    """
     return (
-        event_info.is_thread or event_info.is_edit or event_info.is_reply or event_info.relation_type == "m.reference"
+        event_info.is_thread
+        or event_info.is_edit
+        or event_info.is_reply
+        or (event_info.relation_type == "m.reference" and event_type in {"m.room.encrypted", "m.room.message"})
     )
 
 

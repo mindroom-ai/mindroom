@@ -26,7 +26,23 @@ class EventCacheBackendUnavailableError(RuntimeError):
 
 @runtime_checkable
 class ConversationEventCache(Protocol):
-    """Storage-agnostic cache API for Matrix event and thread lookups."""
+    """Storage-agnostic durable cache for joined-room conversation timelines.
+
+    Sync ingestion admits only joined-room ``timeline.events`` and deliberately
+    excludes complete room state, invite and leave timelines, ephemeral typing
+    and receipts, presence, account data, to-device events, and device-list
+    changes.
+
+    Point lookup is broader than visible conversation history, so any admitted
+    timeline event with an event ID can be retained while thread projection
+    renders only supported ``m.room.message`` content.
+
+    Redaction envelopes are not stored as point events, while their durable
+    effect removes or tombstones the target and repairs dependent indexes.
+
+    Membership loss is a separate lifecycle concern and does not currently
+    purge retained joined-room history.
+    """
 
     @property
     def durable_writes_available(self) -> bool:

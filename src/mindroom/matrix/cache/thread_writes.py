@@ -77,7 +77,11 @@ def _collect_sync_timeline_cache_updates(
         return
 
     event_info = EventInfo.from_event(event_source)
-    if is_thread_affecting_relation(event_info):
+    event_type = event_source.get("type")
+    if is_thread_affecting_relation(
+        event_info,
+        event_type=event_type if isinstance(event_type, str) else None,
+    ):
         cache_update = _threaded_sync_event_cache_update(room_id, event)
         if cache_update is None:
             return
@@ -108,7 +112,11 @@ def _threaded_sync_event_cache_update(
 ) -> tuple[str, dict[str, object]] | None:
     event_source = event.source if isinstance(event.source, dict) else {}
     event_info = EventInfo.from_event(event_source)
-    if not is_thread_affecting_relation(event_info):
+    event_type = event_source.get("type")
+    if not is_thread_affecting_relation(
+        event_info,
+        event_type=event_type if isinstance(event_type, str) else None,
+    ):
         return None
     event_id = event.event_id
     if not isinstance(event_id, str) or not event_id:
@@ -388,7 +396,10 @@ class ThreadOutboundWritePolicy:
                     emit_timing=emit_timing,
                 )
                 return
-            if not is_thread_affecting_relation(event_info):
+            if not is_thread_affecting_relation(
+                event_info,
+                event_type=event_type,
+            ):
                 return
             thread_id = event_info.thread_id or event_info.thread_id_from_edit
             if thread_id is not None:
