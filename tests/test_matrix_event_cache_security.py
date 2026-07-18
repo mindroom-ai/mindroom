@@ -177,6 +177,37 @@ async def test_closing_principal_view_does_not_close_shared_runtime(
 
 
 @pytest.mark.asyncio
+async def test_disabling_principal_view_does_not_disable_other_principals(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """A principal-scoped safety failure must not take down another bot's cache view."""
+    root = _shared_cache(event_cache_factory)
+    await root.initialize()
+    alice = root.for_principal("@alice:localhost")
+    bob = root.for_principal("@bob:localhost")
+    room_id = "!room:localhost"
+    alice_event = _event("$alice", 1)
+    bob_event = _event("$bob", 2)
+    try:
+        await alice.store_event("$alice", room_id, alice_event)
+        await bob.store_event("$bob", room_id, bob_event)
+
+        alice.disable("principal checkpoint failure")
+
+        assert alice.durable_writes_available is False
+        assert await alice.get_event(room_id, "$alice") is None
+        assert bob.durable_writes_available is True
+        assert await bob.get_event(room_id, "$bob") == bob_event
+
+        root.disable("shared schema failure")
+
+        assert bob.durable_writes_available is False
+        assert await bob.get_event(room_id, "$bob") is None
+    finally:
+        await root.close()
+
+
+@pytest.mark.asyncio
 async def test_failed_room_purge_blocks_reads_until_recovery(
     event_cache_factory: Callable[[], ConversationEventCache],
     monkeypatch: pytest.MonkeyPatch,

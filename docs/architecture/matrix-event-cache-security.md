@@ -46,6 +46,8 @@ The operation that commits a pending room or principal purge is discarded, so it
 
 Each principal keeps a runtime departed-room fence after purge commit, and every backend read or write rechecks that fence under the room lock until an authoritative rejoin finishes any pending cleanup.
 
+Principal-scoped safety disables affect only that bot's SQLite or PostgreSQL view, while root-owned shared-service disables still stop every current and future principal.
+
 Every authoritative leave invalidates both the in-memory and saved checkpoint before durable cleanup starts.
 
 If saved-checkpoint deletion fails, the runtime disables cache reads and writes, leaves durable rows consistent with the older checkpoint, and poisons further certification so restart can replay the leave.

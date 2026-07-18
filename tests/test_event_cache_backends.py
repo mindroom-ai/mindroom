@@ -387,6 +387,7 @@ async def test_sqlite_event_cache_write_operation_rolls_back_cancelled_writer(
         SimpleNamespace(
             is_disabled=False,
             acquire_db_operation=acquire_db_operation,
+            is_principal_disabled=Mock(return_value=False),
             is_room_departed=Mock(return_value=False),
             has_pending_principal_purge=Mock(return_value=False),
             has_pending_room_purge=Mock(return_value=False),

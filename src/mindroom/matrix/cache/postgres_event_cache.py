@@ -974,7 +974,10 @@ class PostgresEventCache:
 
     def disable(self, reason: str) -> None:
         """Disable the advisory cache for the rest of the runtime."""
-        self._registry.disable(reason)
+        if self._owns_registry:
+            self._registry.disable(reason)
+        else:
+            self._runtime.disable(reason)
 
     async def close(self) -> None:
         """Close shared storage only from the root cache owner."""
@@ -1073,7 +1076,7 @@ class PostgresEventCache:
         allow_departed: bool,
     ) -> tuple[_T, _FlushedPendingWrites]:
         """Commit one callback unless the transaction first removed its security scope."""
-        if not allow_departed and self._runtime.is_room_departed(room_id):
+        if self._runtime.is_disabled or (not allow_departed and self._runtime.is_room_departed(room_id)):
             await db.commit()
             return disabled_result, _FlushedPendingWrites()
         flushed_pending = await self._flush_pending_writes(db, room_id)

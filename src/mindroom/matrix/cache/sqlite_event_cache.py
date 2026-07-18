@@ -324,6 +324,7 @@ class _SqliteEventCacheRuntime:
         self._db_path = db_path
         self._db: aiosqlite.Connection | None = None
         self._disabled_reason: str | None = None
+        self._disabled_principal_reasons: dict[str, str] = {}
         self._db_lock = asyncio.Lock()
         self._room_locks: OrderedDict[tuple[str, str], _RoomLockEntry] = OrderedDict()
         self._generation: str | None = None
@@ -366,6 +367,22 @@ class _SqliteEventCacheRuntime:
             db_path=str(self._db_path),
             reason=reason,
         )
+
+    def disable_principal(self, principal_id: str, reason: str) -> None:
+        """Disable one principal view without affecting other Matrix accounts."""
+        if principal_id in self._disabled_principal_reasons:
+            return
+        self._disabled_principal_reasons[principal_id] = reason
+        logger.warning(
+            "Disabling principal Matrix event cache view",
+            db_path=str(self._db_path),
+            principal_id=principal_id,
+            reason=reason,
+        )
+
+    def is_principal_disabled(self, principal_id: str) -> bool:
+        """Return whether one principal view is disabled for this runtime."""
+        return principal_id in self._disabled_principal_reasons
 
     def record_pending_room_purge(self, principal_id: str, room_id: str) -> None:
         """Remember a room deletion until a SQLite transaction commits it."""
@@ -569,13 +586,21 @@ class SqliteEventCache:
     @property
     def durable_writes_available(self) -> bool:
         """Return whether cache writes can durably persist data."""
-        return self._runtime.is_initialized and not self._runtime.is_disabled
+        return (
+            self._runtime.is_initialized
+            and not self._runtime.is_disabled
+            and not self._runtime.is_principal_disabled(self.principal_id)
+        )
 
     @property
     def cache_generation(self) -> str | None:
         """Return the generation that certified sync checkpoints must match when available."""
         generation = self._runtime.generation
-        if generation is None or self._runtime.has_pending_principal_purge(self.principal_id):
+        if (
+            generation is None
+            or self._runtime.is_principal_disabled(self.principal_id)
+            or self._runtime.has_pending_principal_purge(self.principal_id)
+        ):
             return None
         principal_generation = f"{generation}\0{self.principal_id}".encode()
         return hashlib.sha256(principal_generation).hexdigest()
@@ -586,6 +611,7 @@ class SqliteEventCache:
             "cache_backend": "sqlite",
             "cache_sqlite_initialized": self._runtime.is_initialized,
             "cache_sqlite_disabled": self._runtime.is_disabled,
+            "cache_sqlite_principal_disabled": self._runtime.is_principal_disabled(self.principal_id),
             "cache_sqlite_pending_room_purges": len(
                 self._runtime.pending_room_purge_ids(self.principal_id),
             ),
@@ -620,7 +646,10 @@ class SqliteEventCache:
 
     def disable(self, reason: str) -> None:
         """Disable the advisory cache for the rest of the runtime."""
-        self._runtime.disable(reason)
+        if self._owns_runtime:
+            self._runtime.disable(reason)
+        else:
+            self._runtime.disable_principal(self.principal_id, reason)
 
     async def close(self) -> None:
         """Close shared storage only from the root cache owner."""
@@ -635,10 +664,17 @@ class SqliteEventCache:
         disabled_result: _T,
         reader: Callable[[aiosqlite.Connection], Awaitable[_T]],
     ) -> _T:
-        if self._runtime.is_disabled or self._runtime.is_room_departed(self.principal_id, room_id):
+        if (
+            self._runtime.is_disabled
+            or self._runtime.is_principal_disabled(self.principal_id)
+            or self._runtime.is_room_departed(self.principal_id, room_id)
+        ):
             return disabled_result
         async with self._runtime.acquire_db_operation(self.principal_id, room_id, operation=operation) as db:
-            if self._runtime.is_room_departed(self.principal_id, room_id):
+            if self._runtime.is_principal_disabled(self.principal_id) or self._runtime.is_room_departed(
+                self.principal_id,
+                room_id,
+            ):
                 return disabled_result
             if self._runtime.has_pending_principal_purge(self.principal_id):
                 try:
@@ -674,12 +710,16 @@ class SqliteEventCache:
         writer: Callable[[aiosqlite.Connection], Awaitable[_T]],
         allow_departed: bool = False,
     ) -> _T:
-        if self._runtime.is_disabled or (
-            not allow_departed and self._runtime.is_room_departed(self.principal_id, room_id)
+        if (
+            self._runtime.is_disabled
+            or self._runtime.is_principal_disabled(self.principal_id)
+            or (not allow_departed and self._runtime.is_room_departed(self.principal_id, room_id))
         ):
             return disabled_result
         async with self._runtime.acquire_db_operation(self.principal_id, room_id, operation=operation) as db:
-            if not allow_departed and self._runtime.is_room_departed(self.principal_id, room_id):
+            if self._runtime.is_principal_disabled(self.principal_id) or (
+                not allow_departed and self._runtime.is_room_departed(self.principal_id, room_id)
+            ):
                 return disabled_result
             pending_principal_purge = self._runtime.has_pending_principal_purge(self.principal_id)
             pending_room_purge = self._runtime.has_pending_room_purge(self.principal_id, room_id)
