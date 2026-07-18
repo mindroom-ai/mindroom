@@ -24,6 +24,7 @@ from tests.manual.matrix_event_cache_live_audit import (
     _begin_readonly_snapshot,
     _secret_free_evidence,
     _strict_thread_read_sequence,
+    _wait_for_cache_edit_index,
     media_fixtures,
     new_transaction_id,
     validate_interaction_expectations,
@@ -131,6 +132,30 @@ def test_readonly_snapshot_is_consistent_across_concurrent_writes(tmp_path: Path
             writer.commit()
 
             assert reader.execute("SELECT event_id FROM evidence").fetchall() == [("$before",)]
+
+
+@pytest.mark.asyncio
+async def test_edit_redaction_wait_uses_readonly_service_observation(tmp_path: Path) -> None:
+    """The harness should observe the dependent edit before asking Matrix to redact its original."""
+    database_path = tmp_path / "service.db"
+    with closing(sqlite3.connect(database_path)) as db:
+        db.execute("CREATE TABLE event_edits (room_id TEXT, edit_event_id TEXT)")
+        db.execute("INSERT INTO event_edits VALUES ('!audit:example', '$edit')")
+        db.commit()
+
+    await _wait_for_cache_edit_index(
+        database_path,
+        room_id="!audit:example",
+        edit_event_id="$edit",
+        timeout_seconds=0.0,
+    )
+    with pytest.raises(MatrixAuditError, match="did not observe edit"):
+        await _wait_for_cache_edit_index(
+            database_path,
+            room_id="!audit:example",
+            edit_event_id="$missing",
+            timeout_seconds=0.0,
+        )
 
 
 def test_evidence_rejects_secret_keys_and_values() -> None:

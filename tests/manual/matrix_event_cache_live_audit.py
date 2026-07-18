@@ -62,6 +62,7 @@ _SECRET_KEY_FRAGMENTS = frozenset(
         "refresh_token",
     },
 )
+_CACHE_OBSERVATION_TIMEOUT_SECONDS = 30.0
 
 
 class MatrixAuditError(RuntimeError):
@@ -978,6 +979,8 @@ async def _emit_redaction_matrix(
     api: MatrixApi,
     room_id: str,
     records: list[InteractionRecord],
+    *,
+    cache_db_path: Path,
 ) -> None:
     message_id = await api.send_event(
         room_id,
@@ -1030,6 +1033,11 @@ async def _emit_redaction_matrix(
         edit=True,
         representation="tombstone",
     )
+    await _wait_for_cache_edit_index(
+        cache_db_path,
+        room_id=room_id,
+        edit_event_id=edit_id,
+    )
     original_redaction_id = await api.redact(room_id, original_id, reason="original audit")
     _record(
         records,
@@ -1067,6 +1075,11 @@ async def _emit_redaction_matrix(
         event_id=edit_only_id,
         edit=True,
         representation="tombstone",
+    )
+    await _wait_for_cache_edit_index(
+        cache_db_path,
+        room_id=room_id,
+        edit_event_id=edit_only_id,
     )
     edit_redaction_id = await api.redact(room_id, edit_only_id, reason="edit-only audit")
     _record(
@@ -1352,6 +1365,45 @@ def _begin_readonly_snapshot(db: sqlite3.Connection) -> None:
     db.execute("BEGIN")
 
 
+def _cache_contains_edit_index(
+    cache_db_path: Path,
+    *,
+    room_id: str,
+    edit_event_id: str,
+) -> bool:
+    """Return whether one edit reached the service cache through a read-only snapshot."""
+    database_uri = f"file:{quote(str(cache_db_path.resolve()))}?mode=ro"
+    with closing(sqlite3.connect(database_uri, uri=True)) as db:
+        _begin_readonly_snapshot(db)
+        return (
+            db.execute(
+                "SELECT 1 FROM event_edits WHERE room_id = ? AND edit_event_id = ?",
+                (room_id, edit_event_id),
+            ).fetchone()
+            is not None
+        )
+
+
+async def _wait_for_cache_edit_index(
+    cache_db_path: Path,
+    *,
+    room_id: str,
+    edit_event_id: str,
+    timeout_seconds: float = _CACHE_OBSERVATION_TIMEOUT_SECONDS,
+) -> None:
+    """Wait until the service observes an edit before emitting its dependent redaction."""
+    deadline = time.monotonic() + timeout_seconds
+    while not _cache_contains_edit_index(
+        cache_db_path,
+        room_id=room_id,
+        edit_event_id=edit_event_id,
+    ):
+        if time.monotonic() >= deadline:
+            msg = f"Service cache did not observe edit {edit_event_id} before redaction"
+            raise MatrixAuditError(msg)
+        await asyncio.sleep(0.25)
+
+
 def read_cache_snapshot(cache_db_path: Path, room_id: str) -> CacheSnapshot:
     """Read cache evidence through one SQLite read-only/query-only snapshot."""
     database_uri = f"file:{quote(str(cache_db_path.resolve()))}?mode=ro"
@@ -1573,6 +1625,9 @@ async def run_audit(  # noqa: PLR0915
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> AuditEvidence:
     """Run the disposable interaction matrix and return sanitized evidence."""
+    if config.cache_db_path is None or not config.strict_thread_reads:
+        msg = "Audit evidence requires a service cache and strict thread reads"
+        raise MatrixAuditError(msg)
     fixtures = media_fixtures()
     validate_media_fixtures(fixtures)
     records: list[InteractionRecord] = []
@@ -1611,7 +1666,12 @@ async def run_audit(  # noqa: PLR0915
             records,
         )
         await _emit_poll_beacon_call_matrix(api, room_id, user_id, records)
-        await _emit_redaction_matrix(api, room_id, records)
+        await _emit_redaction_matrix(
+            api,
+            room_id,
+            records,
+            cache_db_path=config.cache_db_path,
+        )
 
         trigger_ids: tuple[str, ...] = ()
         if config.trigger_user_id is not None:

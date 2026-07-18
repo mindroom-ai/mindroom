@@ -107,6 +107,8 @@ The harness generates and decodes a real PNG, WAV, and WebM fixture before uploa
 
 The harness emits the interaction matrix, client-controllable ephemeral categories, redaction cases, and opaque encrypted relations through authenticated Matrix client APIs.
 
+Before redacting an original with a dependent edit, the harness waits through read-only service-cache observations until that edit index is present, so the redaction case cannot race sync ingestion.
+
 The harness can invite and explicitly join a second test agent when its token is supplied through a second environment variable.
 
 Evidence collection opens the service cache with SQLite `mode=ro`, enables `PRAGMA query_only`, starts one read transaction for a consistent snapshot, and records only IDs, counts, integrity state, hashes, and timings.
