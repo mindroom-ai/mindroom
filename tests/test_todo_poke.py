@@ -289,11 +289,12 @@ async def test_poke_titles_cannot_inject_agent_team_or_matrix_mentions(tmp_path:
         ("inside``ticks", "```inside``ticks```"),
         ("`leading", "`` `leading ``"),
         ("trailing`", "`` trailing` ``"),
+        ("multi\n\nline\t title", "`multi line title`"),
     ],
-    ids=["plain", "fence-growth", "double-fence-growth", "leading-edge", "trailing-edge"],
+    ids=["plain", "fence-growth", "double-fence-growth", "leading-edge", "trailing-edge", "multiline"],
 )
 def test_literal_code_text_uses_safe_fences_and_edge_padding(text: str, expected: str) -> None:
-    """Literal todo text must grow its fence and pad ambiguous backtick edges."""
+    """Literal todo text must normalize whitespace, grow its fence, and pad ambiguous backtick edges."""
     assert todo_poke_module._literal_code_text(text) == expected
 
 
@@ -485,6 +486,61 @@ async def test_fingerprint_includes_hidden_items_and_cooldown_precedes_repoke(tm
     assert await scan_todo_pokes(policy, deps) == 1
     assert queried_rooms == ["!room:localhost", "!room:localhost"]
     assert len(sent) == 2
+
+
+@pytest.mark.asyncio
+async def test_delivery_outcome_time_owns_cooldown_and_backstop_windows(tmp_path: Path) -> None:
+    """Slow schedule and send I/O must not make cooldown or backstop windows expire early."""
+    todo_root = tmp_path / "todo"
+    source_path = _write_thread(todo_root, "scope")
+    current_time = [_NOW]
+    base_deps, queried_rooms, sent = _deps(todo_root, clock=lambda: current_time[0])
+
+    async def delayed_schedule_query(room_id: str) -> frozenset[str | None] | None:
+        current_time[0] += timedelta(minutes=10)
+        return await base_deps.schedule_query(room_id)
+
+    async def delayed_sender(room_id: str, body: str, thread_id: str | None) -> str | None:
+        current_time[0] += timedelta(minutes=20)
+        return await base_deps.sender(room_id, body, thread_id)
+
+    deps = replace(
+        base_deps,
+        schedule_query=delayed_schedule_query,
+        sender=delayed_sender,
+    )
+    policy = TodoPokePolicy(quiet_seconds=0, cooldown_seconds=300)
+
+    assert await scan_todo_pokes(policy, deps) == 1
+    first_delivery_time = current_time[0]
+    poke_state_path = todo_root / "poke_state.json"
+    poke_state = json.loads(poke_state_path.read_text(encoding="utf-8"))
+    record = next(iter(poke_state["scopes"].values()))
+    assert record["last_poked_at"] == first_delivery_time.timestamp()
+
+    thread_state = json.loads(source_path.read_text(encoding="utf-8"))
+    thread_state["items"][0]["title"] = "Changed work"
+    source_path.write_text(json.dumps(thread_state), encoding="utf-8")
+
+    current_time[0] = first_delivery_time + timedelta(seconds=299)
+    assert await scan_todo_pokes(policy, deps) == 0
+    assert len(sent) == 1
+
+    current_time[0] = first_delivery_time + timedelta(seconds=300)
+    assert await scan_todo_pokes(policy, deps) == 1
+    second_delivery_time = current_time[0]
+    poke_state = json.loads(poke_state_path.read_text(encoding="utf-8"))
+    record = next(iter(poke_state["scopes"].values()))
+    assert record["last_poked_at"] == second_delivery_time.timestamp()
+
+    current_time[0] = second_delivery_time + timedelta(seconds=3599)
+    assert await scan_todo_pokes(policy, deps) == 0
+    assert len(sent) == 2
+
+    current_time[0] = second_delivery_time + timedelta(hours=1)
+    assert await scan_todo_pokes(policy, deps) == 1
+    assert queried_rooms == ["!room:localhost"] * 3
+    assert len(sent) == 3
 
 
 @pytest.mark.asyncio
@@ -942,6 +998,59 @@ async def test_parse_invalid_source_still_prunes_poke_record(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_worker_warning_memory_suppresses_repeated_persistent_state_warnings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One worker warns once per persistent path and error across rereads and scan ticks."""
+    todo_root = tmp_path / "todo"
+    malformed_path = todo_root / "threads" / "a-malformed" / "todos.json"
+    malformed_path.parent.mkdir(parents=True)
+    malformed_path.write_text("{bad json", encoding="utf-8")
+    invalid_item = _item("invalid")
+    invalid_item["title"] = " "
+    _write_thread(
+        todo_root,
+        "b-partial",
+        items=[
+            invalid_item,
+            _item("unsafe", assigned_agent="code agent"),
+            _item("ready"),
+        ],
+    )
+    deps, _queried_rooms, _sent = _deps(todo_root)
+    seen_warning_keys: set[tuple[str, str]] = set()
+    warnings: list[str] = []
+
+    def capture_warning(event: str, **_context: object) -> None:
+        warnings.append(event)
+
+    monkeypatch.setattr(todo_poke_module.logger, "warning", capture_warning)
+
+    assert (
+        await scan_todo_pokes(
+            TodoPokePolicy(quiet_seconds=0),
+            deps,
+            seen_warning_keys=seen_warning_keys,
+        )
+        == 1
+    )
+    assert (
+        await scan_todo_pokes(
+            TodoPokePolicy(quiet_seconds=0),
+            deps,
+            seen_warning_keys=seen_warning_keys,
+        )
+        == 0
+    )
+
+    assert warnings.count("todo_poke_item_skipped") == 1
+    assert warnings.count("todo_poke_state_file_skipped") == 1
+    assert warnings.count("todo_poke_assignee_skipped") == 1
+    assert len(seen_warning_keys) == 3
+
+
+@pytest.mark.asyncio
 async def test_scan_offloads_all_blocking_storage_phases(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1055,3 +1164,5 @@ async def test_worker_sleeps_first_continues_after_failure_and_stops(
     assert scan.await_args_list[1].kwargs["failed_scope_keys"] is worker._failed_scope_keys
     assert scan.await_args_list[0].kwargs["pending_poke_records"] is worker._pending_poke_records
     assert scan.await_args_list[1].kwargs["pending_poke_records"] is worker._pending_poke_records
+    assert scan.await_args_list[0].kwargs["seen_warning_keys"] is worker._seen_warning_keys
+    assert scan.await_args_list[1].kwargs["seen_warning_keys"] is worker._seen_warning_keys

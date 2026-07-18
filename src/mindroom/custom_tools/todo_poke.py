@@ -44,6 +44,7 @@ __all__ = [
 
 type _TodoScheduleQuery = Callable[[str], Awaitable[frozenset[str | None] | None]]
 type _TodoPokeSender = Callable[[str, str, str | None], Awaitable[str | None]]
+type _StateWarningKey = tuple[str, str]
 
 _VALID_STATUSES = {"open", *TERMINAL_STATUSES}
 # Keep synchronized with config.main._AGENT_NAME_PATTERN without importing the config graph here.
@@ -220,7 +221,25 @@ def _parse_item(raw_item: object) -> _TodoItemSnapshot:
     )
 
 
-def _parse_thread_snapshot(data: object, source_path: Path) -> _TodoThreadSnapshot:
+def _warn_state_once(
+    event: str,
+    source_path: Path,
+    error: str,
+    seen_warning_keys: set[_StateWarningKey],
+    **context: object,
+) -> None:
+    warning_key = (str(source_path), error)
+    if warning_key in seen_warning_keys:
+        return
+    seen_warning_keys.add(warning_key)
+    logger.warning(event, path=str(source_path), error=error, **context)
+
+
+def _parse_thread_snapshot(
+    data: object,
+    source_path: Path,
+    seen_warning_keys: set[_StateWarningKey],
+) -> _TodoThreadSnapshot:
     if not isinstance(data, dict):
         msg = "todo state must be an object"
         raise TypeError(msg)
@@ -245,20 +264,22 @@ def _parse_thread_snapshot(data: object, source_path: Path) -> _TodoThreadSnapsh
                 skipped_item_id = cast("dict[str, Any]", raw_item).get("id")
                 if isinstance(skipped_item_id, str) and skipped_item_id:
                     skipped_item_ids.add(skipped_item_id)
-            logger.warning(
+            _warn_state_once(
                 "todo_poke_item_skipped",
-                path=str(source_path),
+                source_path,
+                str(exc),
+                seen_warning_keys,
                 item_index=index,
-                error=str(exc),
             )
             continue
         if item.item_id in item_ids:
             skipped_item_ids.add(item.item_id)
-            logger.warning(
+            _warn_state_once(
                 "todo_poke_item_skipped",
-                path=str(source_path),
+                source_path,
+                f"duplicate todo item id: {item.item_id}",
+                seen_warning_keys,
                 item_index=index,
-                error=f"duplicate todo item id: {item.item_id}",
             )
             continue
         parsed_items.append(item)
@@ -289,22 +310,28 @@ def _parse_thread_snapshot(data: object, source_path: Path) -> _TodoThreadSnapsh
     )
 
 
-def _read_thread_snapshot(path: Path) -> _TodoThreadSnapshot | None:
+def _read_thread_snapshot(
+    path: Path,
+    seen_warning_keys: set[_StateWarningKey],
+) -> _TodoThreadSnapshot | None:
     try:
-        return _parse_thread_snapshot(read_json(path), path)
+        return _parse_thread_snapshot(read_json(path), path, seen_warning_keys)
     except (KeyError, TypeError, ValueError) as exc:
-        logger.warning("todo_poke_state_file_skipped", path=str(path), error=str(exc))
+        _warn_state_once("todo_poke_state_file_skipped", path, str(exc), seen_warning_keys)
         return None
 
 
-def _read_thread_snapshots(todo_root: Path) -> _TodoSnapshotBatch:
+def _read_thread_snapshots(
+    todo_root: Path,
+    seen_warning_keys: set[_StateWarningKey],
+) -> _TodoSnapshotBatch:
     snapshots: list[_TodoThreadSnapshot] = []
     had_io_failure = False
     for path in sorted((todo_root / "threads").glob("*/todos.json")):
         try:
-            snapshot = _read_thread_snapshot(path)
+            snapshot = _read_thread_snapshot(path, seen_warning_keys)
         except OSError as exc:
-            logger.warning("todo_poke_state_file_skipped", path=str(path), error=str(exc))
+            _warn_state_once("todo_poke_state_file_skipped", path, str(exc), seen_warning_keys)
             had_io_failure = True
             continue
         if snapshot is not None:
@@ -336,7 +363,10 @@ def _fingerprint(
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def _poke_scopes(snapshots: list[_TodoThreadSnapshot]) -> list[_TodoPokeScope]:
+def _poke_scopes(
+    snapshots: list[_TodoThreadSnapshot],
+    seen_warning_keys: set[_StateWarningKey],
+) -> list[_TodoPokeScope]:
     scopes: list[_TodoPokeScope] = []
     for snapshot in snapshots:
         items_by_agent: dict[str, list[_TodoItemSnapshot]] = {}
@@ -344,9 +374,11 @@ def _poke_scopes(snapshots: list[_TodoThreadSnapshot]) -> list[_TodoPokeScope]:
             if item.item_id not in snapshot.actionable_item_ids or not item.assigned_agent:
                 continue
             if _SAFE_ASSIGNEE_PATTERN.fullmatch(item.assigned_agent) is None:
-                logger.warning(
+                _warn_state_once(
                     "todo_poke_assignee_skipped",
-                    path=str(snapshot.source_path),
+                    snapshot.source_path,
+                    f"invalid assigned_agent: {item.assigned_agent}",
+                    seen_warning_keys,
                     item_id=item.item_id,
                     assigned_agent=item.assigned_agent,
                 )
@@ -500,7 +532,7 @@ async def _try_persist_poke(
 
 
 def _literal_code_text(text: str) -> str:
-    safe_text = text.replace("@", "@\u200b")
+    safe_text = " ".join(text.split()).replace("@", "@\u200b")
     fence = "`"
     while fence in safe_text:
         fence += "`"
@@ -662,25 +694,58 @@ async def _repair_pending_poke_records(
             pending_poke_records.pop(scope_key, None)
 
 
-async def _refreshed_scope_for_delivery(scope: _TodoPokeScope) -> _TodoPokeScope | None:
+async def _refreshed_scope_for_delivery(
+    scope: _TodoPokeScope,
+    seen_warning_keys: set[_StateWarningKey],
+) -> _TodoPokeScope | None:
     try:
-        refreshed_snapshot = await asyncio.to_thread(_read_thread_snapshot, scope.source_path)
+        refreshed_snapshot = await asyncio.to_thread(
+            _read_thread_snapshot,
+            scope.source_path,
+            seen_warning_keys,
+        )
     except OSError as exc:
-        logger.warning(
+        _warn_state_once(
             "todo_poke_state_file_skipped",
-            path=str(scope.source_path),
-            error=str(exc),
+            scope.source_path,
+            str(exc),
+            seen_warning_keys,
         )
         return None
     if refreshed_snapshot is None:
         return None
     refreshed_scope = next(
-        (candidate for candidate in _poke_scopes([refreshed_snapshot]) if _scope_key(candidate) == _scope_key(scope)),
+        (
+            candidate
+            for candidate in _poke_scopes([refreshed_snapshot], seen_warning_keys)
+            if _scope_key(candidate) == _scope_key(scope)
+        ),
         None,
     )
     if refreshed_scope is None or refreshed_scope.fingerprint != scope.fingerprint:
         return None
     return refreshed_scope
+
+
+def _delivery_still_eligible(
+    scope: _TodoPokeScope,
+    poke_state: Mapping[str, Any],
+    policy: TodoPokePolicy,
+    deps: TodoPokeDeps,
+    pending_poke_records: Mapping[str, _PokeRecord],
+) -> bool:
+    now = deps.clock().astimezone(UTC)
+    return (
+        _quiet_period_elapsed(scope, now, policy.quiet_seconds)
+        and _dedup_allows_poke(
+            scope,
+            poke_state,
+            pending_poke_records,
+            policy,
+            now.timestamp(),
+        )
+        and deps.idle_check(scope.assigned_agent)
+    )
 
 
 async def _deliver_pokes(
@@ -690,9 +755,9 @@ async def _deliver_pokes(
     todo_root: Path,
     policy: TodoPokePolicy,
     deps: TodoPokeDeps,
-    now_timestamp: float,
     failed_scope_keys: set[str],
     pending_poke_records: dict[str, _PokeRecord],
+    seen_warning_keys: set[_StateWarningKey],
 ) -> int:
     delivered = 0
     attempts = 0
@@ -705,10 +770,16 @@ async def _deliver_pokes(
         if scope.thread_id in pending_by_room[scope.room_id]:
             continue
 
-        refreshed_scope = await _refreshed_scope_for_delivery(scope)
+        refreshed_scope = await _refreshed_scope_for_delivery(scope, seen_warning_keys)
         if refreshed_scope is None:
             continue
-        if not deps.idle_check(refreshed_scope.assigned_agent):
+        if not _delivery_still_eligible(
+            refreshed_scope,
+            poke_state,
+            policy,
+            deps,
+            pending_poke_records,
+        ):
             continue
 
         attempts += 1
@@ -722,9 +793,10 @@ async def _deliver_pokes(
             _format_poke_message(refreshed_scope),
             refreshed_scope.thread_id,
         )
+        outcome_timestamp = deps.clock().astimezone(UTC).timestamp()
         if event_id is None:
             failed_scope_keys.add(refreshed_scope_key)
-            record = _record_after_send_failure(refreshed_scope, previous, now_timestamp)
+            record = _record_after_send_failure(refreshed_scope, previous, outcome_timestamp)
             pending_poke_records[refreshed_scope_key] = record
             if await _try_persist_poke(todo_root, refreshed_scope, record):
                 pending_poke_records.pop(refreshed_scope_key, None)
@@ -732,7 +804,7 @@ async def _deliver_pokes(
 
         poked_agents.add(refreshed_scope.assigned_agent)
         failed_scope_keys.discard(refreshed_scope_key)
-        record = _record_after_delivery(refreshed_scope, previous, now_timestamp)
+        record = _record_after_delivery(refreshed_scope, previous, outcome_timestamp)
         pending_poke_records[refreshed_scope_key] = record
         if await _try_persist_poke(todo_root, refreshed_scope, record):
             pending_poke_records.pop(refreshed_scope_key, None)
@@ -746,14 +818,15 @@ async def scan_todo_pokes(
     *,
     failed_scope_keys: set[str] | None = None,
     pending_poke_records: dict[str, _PokeRecord] | None = None,
+    seen_warning_keys: set[_StateWarningKey] | None = None,
 ) -> int:
     """Scan native todo state once and return the number of delivered pokes."""
     remembered_failures = failed_scope_keys if failed_scope_keys is not None else set()
     remembered_pokes = pending_poke_records if pending_poke_records is not None else {}
-    now = deps.clock().astimezone(UTC)
+    remembered_warnings = seen_warning_keys if seen_warning_keys is not None else set()
     todo_root = deps.state_root()
-    snapshot_batch = await asyncio.to_thread(_read_thread_snapshots, todo_root)
-    all_scopes = _poke_scopes(list(snapshot_batch.snapshots))
+    snapshot_batch = await asyncio.to_thread(_read_thread_snapshots, todo_root, remembered_warnings)
+    all_scopes = _poke_scopes(list(snapshot_batch.snapshots), remembered_warnings)
     active_scope_keys = frozenset(_scope_key(scope) for scope in all_scopes)
     scopes_by_key = {_scope_key(scope): scope for scope in all_scopes}
     if not snapshot_batch.had_io_failure:
@@ -772,16 +845,17 @@ async def scan_todo_pokes(
         )
         return 0
 
+    eligibility_now = deps.clock().astimezone(UTC)
     scopes = sorted(
         (
             scope
-            for scope in _idle_quiet_scopes(all_scopes, policy, deps, now)
+            for scope in _idle_quiet_scopes(all_scopes, policy, deps, eligibility_now)
             if _dedup_allows_poke(
                 scope,
                 poke_state,
                 remembered_pokes,
                 policy,
-                now.timestamp(),
+                eligibility_now.timestamp(),
             )
         ),
         key=lambda scope: _scope_key(scope) in remembered_failures,
@@ -800,9 +874,9 @@ async def scan_todo_pokes(
         todo_root,
         policy,
         deps,
-        now.timestamp(),
         remembered_failures,
         remembered_pokes,
+        remembered_warnings,
     )
 
 
@@ -815,6 +889,7 @@ class TodoPokeWorker:
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _failed_scope_keys: set[str] = field(default_factory=set, init=False)
     _pending_poke_records: dict[str, _PokeRecord] = field(default_factory=dict, init=False)
+    _seen_warning_keys: set[_StateWarningKey] = field(default_factory=set, init=False)
 
     def stop(self) -> None:
         """Request graceful shutdown of the worker loop."""
@@ -838,6 +913,7 @@ class TodoPokeWorker:
                     self.deps,
                     failed_scope_keys=self._failed_scope_keys,
                     pending_poke_records=self._pending_poke_records,
+                    seen_warning_keys=self._seen_warning_keys,
                 )
             except Exception:
                 logger.exception("todo_poke_scan_failed")
