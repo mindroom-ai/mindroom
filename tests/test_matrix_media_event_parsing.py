@@ -184,6 +184,17 @@ def test_text_message_with_file_extension_is_not_dropped_from_history() -> None:
     assert parsed_event.body == "harmless text with extension metadata"
 
 
+def test_custom_message_with_encrypted_file_is_not_dropped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A custom message type should keep its normal nio representation."""
+    with caplog.at_level(logging.WARNING, logger="nio.events.misc"):
+        parsed_event = _parse_room_message_event(_encrypted_media_source("io.synthetic.custom"))
+
+    assert isinstance(parsed_event, nio.RoomMessageUnknown)
+    _assert_synthetic_secrets_absent(caplog)
+
+
 @pytest.mark.asyncio
 async def test_text_message_with_file_extension_uses_cached_response() -> None:
     """A non-media extension field should not bypass cached point reconstruction."""
