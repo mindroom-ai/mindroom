@@ -767,7 +767,7 @@ def test_validate_authored_overrides_rejects_bad_types_and_password_fields() -> 
 
 
 def test_searxng_include_tools_override_filters_registered_functions(tmp_path: Path) -> None:
-    """Universal Agno toolkit filters should reach toolkit constructors."""
+    """Universal Agno toolkit filters should retain selected functions."""
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
@@ -785,6 +785,39 @@ def test_searxng_include_tools_override_filters_registered_functions(tmp_path: P
     )
 
     assert set(tool.functions) == {"search_web", "news_search", "image_search"}
+
+
+def test_custom_toolkit_exclude_tools_override_filters_async_functions(tmp_path: Path) -> None:
+    """Universal filters should work when a Toolkit subclass omits filter constructor kwargs."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    tool = get_tool_by_name(
+        "scheduler",
+        runtime_paths,
+        tool_config_overrides={"exclude_tools": ["cancel_schedule"]},
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert set(tool.async_functions) == {
+        "schedule",
+        "edit_schedule",
+        "list_schedules",
+    }
+
+
+@pytest.mark.parametrize("tool_name", ["composio", "memory"])
+def test_non_toolkit_registration_rejects_universal_filters(tool_name: str) -> None:
+    """Universal filters should not validate for non-Toolkit catalog entries."""
+    with pytest.raises(ToolConfigOverrideError, match="unknown authored override field"):
+        _validate_authored_overrides(
+            tool_name,
+            {"include_tools": ["GITHUB_CREATE_ISSUE"]},
+            config_path_prefix="agents.code.tools[0]",
+        )
 
 
 def test_config_load_rejects_unknown_tool_override_key(tmp_path: Path) -> None:
@@ -886,6 +919,22 @@ def test_deserialize_tool_validation_snapshot_rejects_non_boolean_room_context()
                     "agent_override_fields": [],
                     "authored_override_validator": "default",
                     "requires_room_context": "yes",
+                    "runtime_loadable": True,
+                },
+            },
+        )
+
+
+def test_deserialize_tool_validation_snapshot_rejects_non_boolean_toolkit_filter_support() -> None:
+    """Validation snapshot payloads should type-check toolkit-filter support strictly."""
+    with pytest.raises(TypeError, match="supports_toolkit_filters to a boolean"):
+        deserialize_tool_validation_snapshot(
+            {
+                "todo": {
+                    "config_fields": [],
+                    "agent_override_fields": [],
+                    "authored_override_validator": "default",
+                    "supports_toolkit_filters": "yes",
                     "runtime_loadable": True,
                 },
             },

@@ -47,6 +47,7 @@ def register_tool_with_metadata(
     helper_text: str | None = None,
     function_names: tuple[str, ...] = (),
     managed_init_args: tuple[ToolManagedInitArg, ...] = (),
+    supports_toolkit_filters: bool = True,
 ) -> Callable[[Callable[[], type]], Callable[[], type]]:
     """Register a tool factory and its declarative metadata."""
 
@@ -72,6 +73,7 @@ def register_tool_with_metadata(
             helper_text=helper_text,
             function_names=function_names,
             managed_init_args=managed_init_args,
+            supports_toolkit_filters=supports_toolkit_filters,
             factory=factory,
         )
 

@@ -508,6 +508,63 @@ async def _write_llm_request_log_if_enabled(
     )
 
 
+async def _write_llm_request_log_best_effort(
+    *,
+    model: Model,
+    agent_name: str,
+    kwargs: dict[str, object],
+    debug_config: DebugConfig,
+    default_log_dir: Path,
+    request_context: dict[str, _JSONValue],
+    wire_tools_capture: _WireToolsCapture,
+) -> _RequestLogRef | None:
+    """Persist an optional request record without changing model-call behavior."""
+    try:
+        return await _write_llm_request_log_if_enabled(
+            model=model,
+            agent_name=agent_name,
+            kwargs=kwargs,
+            debug_config=debug_config,
+            default_log_dir=default_log_dir,
+            request_context=request_context,
+            wire_tools_capture=wire_tools_capture,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to persist LLM request log",
+            agent_name=agent_name,
+            model_id=model.id,
+        )
+        return None
+
+
+async def _write_llm_response_log_best_effort(
+    *,
+    model: Model,
+    agent_name: str,
+    configured_provider: str | None,
+    request_log_ref: _RequestLogRef | None,
+    usage: MessageMetrics | None,
+    request_context: dict[str, _JSONValue],
+) -> None:
+    """Emit usage and optional response records without affecting the model call."""
+    try:
+        await _write_llm_response_log(
+            model=model,
+            agent_name=agent_name,
+            configured_provider=configured_provider,
+            request_log_ref=request_log_ref,
+            usage=usage,
+            request_context=request_context,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to emit LLM response telemetry",
+            agent_name=agent_name,
+            model_id=model.id,
+        )
+
+
 async def _invoke_with_llm_request_logging(
     *,
     model: Model,
@@ -522,12 +579,11 @@ async def _invoke_with_llm_request_logging(
 ) -> ModelResponse:
     """Invoke one model and persist the request after wire tools are known."""
     wire_tools_capture = _WireToolsCapture(enabled=debug_config.log_llm_requests)
-    response: ModelResponse | None = None
     try:
         with _model_request_scope(model, wire_tools_capture):
             response = await original_ainvoke(*args, **kwargs)
     finally:
-        request_log_ref = await _write_llm_request_log_if_enabled(
+        request_log_ref = await _write_llm_request_log_best_effort(
             model=model,
             agent_name=agent_name,
             kwargs=kwargs,
@@ -536,10 +592,7 @@ async def _invoke_with_llm_request_logging(
             request_context=request_context,
             wire_tools_capture=wire_tools_capture,
         )
-    if response is None:
-        msg = "Model invocation completed without a response."
-        raise RuntimeError(msg)
-    await _write_llm_response_log(
+    await _write_llm_response_log_best_effort(
         model=model,
         agent_name=agent_name,
         configured_provider=configured_provider,
@@ -574,7 +627,7 @@ def _stream_with_llm_request_logging(
             nonlocal request_log_ref, request_logged
             if request_logged:
                 return
-            request_log_ref = await _write_llm_request_log_if_enabled(
+            request_log_ref = await _write_llm_request_log_best_effort(
                 model=model,
                 agent_name=agent_name,
                 kwargs=kwargs,
@@ -600,7 +653,7 @@ def _stream_with_llm_request_logging(
                 yield chunk
         finally:
             await _write_request_once()
-            await _write_llm_response_log(
+            await _write_llm_response_log_best_effort(
                 model=model,
                 agent_name=agent_name,
                 configured_provider=configured_provider,

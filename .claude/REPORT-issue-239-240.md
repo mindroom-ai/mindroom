@@ -20,24 +20,29 @@
 - `tests/test_llm_request_logging.py` verifies deferred tools are excluded before load and included after load, and separately verifies Claude's native wire array.
 - `.claude/REPORT-issue-239-240.md` records this implementation and its verification evidence.
 
+## Review remediation
+
+- Optional request and response log failures are isolated at the observability boundary, so they cannot replace model responses, mask provider errors, terminate streams, or suppress later usage telemetry.
+- Universal Toolkit filters are applied after construction, which supports Toolkit subclasses that do not expose Agno's base filter kwargs.
+- Toolkit-filter capability is explicit in runtime validation snapshots.
+- Metadata-only helpers and the Composio non-Toolkit integration reject universal filter fields during config validation.
+- OpenAI native wire-tool capture, log-write failures, provider-error preservation, stream resilience, custom Toolkit constructors, `exclude_tools`, and validation-snapshot transport have focused regressions.
+- Configuration docs now describe Toolkit function filters and final provider-prepared request logging.
+- Bundled `mindroom-docs` references were regenerated from the updated docs.
+
 ## Test evidence
 
 - `uv sync --all-extras` completed successfully before validation.
-- `uv run pytest tests/test_tools_metadata.py tests/test_dynamic_toolkits.py -q` passed for ISSUE-239.
-- `uv run pytest tests/test_llm_request_logging.py tests/test_issue_154_logging_integration.py -q` passed with 20 tests.
-- `uv run pytest tests/test_extra_kwargs.py tests/test_codex_model.py tests/test_dynamic_toolkits.py tests/test_import_graph.py -q` passed with 160 tests.
-- `uv run ruff check` and `uv run ruff format --check` passed on every changed Python file.
-- `uv run ty check` passed on every changed Python file.
+- Focused logging and tool-metadata regressions passed with 57 tests.
+- Provider, dynamic-tool, worker-snapshot, sandbox-proxy, and import-graph suites passed.
+- `uv run ruff check`, `uv run ruff format --check`, and `uv run ty check` passed on every changed Python file.
 - `uv run tach check --dependencies --interfaces` passed without a boundary update.
-- `env -u MINDROOM_OWNER_USER_ID -u MINDROOM_DOCKER_WORKER_IMAGE uv run pytest` passed with 10,563 tests and 120 skips.
-- Repository-wide pre-commit passed every hook except `ty`.
-- Repository-wide `ty` failed only because the Linux environment cannot import the macOS-only `AppKit`, `ApplicationServices`, and `Quartz` modules referenced by untouched desktop files.
+- `env -u MINDROOM_OWNER_USER_ID -u MINDROOM_DOCKER_WORKER_IMAGE uv run pytest -n 0 --no-cov -q` passed repository-wide.
+- `uv run pre-commit run --all-files` passed every hook.
 
 ## Deviations
 
-- The repository has a `ty` pre-commit hook rather than a mypy hook, so changed-file type checking used `ty`.
-- The first full-suite run inherited live `MINDROOM_OWNER_USER_ID` and `MINDROOM_DOCKER_WORKER_IMAGE` values, which overrode four test fixtures.
-- Those four tests passed when the two ambient variables were removed, and the complete clean-environment rerun passed.
 - The requested exclude-until-load assertion covers the homegrown deferred-tool flow.
-- A second regression test covers native Claude behavior, where an exact wire log correctly includes deferred definitions marked with `defer_loading`.
+- Separate regressions cover native Claude and OpenAI behavior, where exact wire logs correctly include deferred definitions marked with `defer_loading`.
+- A live Matrix test was not run because the changed invariants are local constructor filtering and injected filesystem-write failures, both exercised directly at their owning seams.
 - No functional behavior outside the two requested fixes was changed.

@@ -161,8 +161,10 @@ def _agent_override_field(
 
 
 def _tool_config_fields(metadata: ToolMetadata | ToolValidationInfo) -> tuple[ConfigField, ...]:
-    """Return declared fields plus the filters supported by every Agno toolkit."""
+    """Return declared fields plus universal Agno Toolkit filters."""
     fields = tuple(metadata.config_fields or ())
+    if not metadata.supports_toolkit_filters:
+        return fields
     declared_names = {field.name for field in fields}
     return fields + tuple(field for field in _TOOLKIT_FILTER_CONFIG_FIELDS if field.name not in declared_names)
 
@@ -484,6 +486,55 @@ def _build_tool_config_init_kwargs(
     return init_kwargs
 
 
+def _pop_implicit_toolkit_filters(
+    metadata: ToolMetadata,
+    init_kwargs: dict[str, object],
+) -> tuple[list[str] | None, list[str] | None]:
+    """Remove universal filters that the concrete constructor did not declare."""
+    declared_names = {field.name for field in metadata.config_fields or ()}
+    include_tools = (
+        None
+        if "include_tools" in declared_names
+        else _normalize_string_array_override(init_kwargs.pop("include_tools", None))
+    )
+    exclude_tools = (
+        None
+        if "exclude_tools" in declared_names
+        else _normalize_string_array_override(init_kwargs.pop("exclude_tools", None))
+    )
+    return include_tools, exclude_tools
+
+
+def _apply_implicit_toolkit_filters(
+    toolkit: Toolkit,
+    *,
+    include_tools: list[str] | None,
+    exclude_tools: list[str] | None,
+) -> None:
+    """Apply Agno-equivalent filters after constructing a Toolkit subclass."""
+    if include_tools is None and exclude_tools is None:
+        return
+
+    available_tools = {*toolkit.functions, *toolkit.async_functions}
+    missing_includes = sorted(set(include_tools or ()) - available_tools)
+    if missing_includes:
+        msg = f"Included tool(s) not present in the toolkit: {', '.join(missing_includes)}"
+        raise ValueError(msg)
+    missing_excludes = sorted(set(exclude_tools or ()) - available_tools)
+    if missing_excludes:
+        msg = f"Excluded tool(s) not present in the toolkit: {', '.join(missing_excludes)}"
+        raise ValueError(msg)
+
+    toolkit.include_tools = include_tools
+    toolkit.exclude_tools = exclude_tools
+    included_names = set(include_tools) if include_tools is not None else None
+    excluded_names = set(exclude_tools or ())
+    for registered_functions in (toolkit.functions, toolkit.async_functions):
+        for function_name in tuple(registered_functions):
+            if (included_names is not None and function_name not in included_names) or function_name in excluded_names:
+                del registered_functions[function_name]
+
+
 def _build_managed_tool_init_kwargs(
     metadata: ToolMetadata,
     *,
@@ -606,8 +657,14 @@ def _build_tool_instance(
             worker_tools_override=worker_tools_override,
         ),
     )
+    include_tools, exclude_tools = _pop_implicit_toolkit_filters(metadata, init_kwargs)
 
     toolkit = cast("Any", tool_class)(**init_kwargs)
+    _apply_implicit_toolkit_filters(
+        toolkit,
+        include_tools=include_tools,
+        exclude_tools=exclude_tools,
+    )
     output_file_policy = (
         ToolOutputFilePolicy.from_runtime(
             tool_output_workspace_root,
@@ -993,6 +1050,7 @@ def _tool_validation_snapshot_from_state(
             config_fields=tuple(metadata.config_fields or ()),
             agent_override_fields=tuple(metadata.agent_override_fields or ()),
             authored_override_validator=metadata.authored_override_validator,
+            supports_toolkit_filters=metadata.supports_toolkit_filters,
             requires_room_context=metadata.requires_room_context,
             runtime_loadable=tool_name in tool_registry,
             unavailable_due_to_plugin_load_error=tool_name in unavailable_plugin_tool_names,
@@ -1136,6 +1194,7 @@ def serialize_tool_validation_snapshot(
             "config_fields": [asdict(field) for field in info.config_fields],
             "agent_override_fields": [asdict(field) for field in info.agent_override_fields],
             "authored_override_validator": info.authored_override_validator.value,
+            "supports_toolkit_filters": info.supports_toolkit_filters,
             "requires_room_context": info.requires_room_context,
             "runtime_loadable": info.runtime_loadable,
             "unavailable_due_to_plugin_load_error": info.unavailable_due_to_plugin_load_error,
@@ -1203,6 +1262,10 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
         if not isinstance(raw_requires_room_context, bool):
             msg = f"Tool validation snapshot entry for '{tool_name}' must set requires_room_context to a boolean."
             raise TypeError(msg)
+        raw_supports_toolkit_filters = raw_info_mapping.get("supports_toolkit_filters", False)
+        if not isinstance(raw_supports_toolkit_filters, bool):
+            msg = f"Tool validation snapshot entry for '{tool_name}' must set supports_toolkit_filters to a boolean."
+            raise TypeError(msg)
         snapshot[tool_name] = ToolValidationInfo(
             name=tool_name,
             config_fields=_deserialize_tool_validation_fields(
@@ -1214,6 +1277,7 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
                 field_name=f"{tool_name}.agent_override_fields",
             ),
             authored_override_validator=authored_override_validator,
+            supports_toolkit_filters=raw_supports_toolkit_filters,
             requires_room_context=raw_requires_room_context,
             runtime_loadable=raw_runtime_loadable,
             unavailable_due_to_plugin_load_error=raw_unavailable_due_to_plugin_load_error,
@@ -1244,6 +1308,7 @@ def export_tools_metadata(tool_metadata: dict[str, ToolMetadata] | None = None) 
         tool_dict["default_execution_target"] = metadata.default_execution_target.value
         tool_dict.pop("authored_override_validator", None)
         tool_dict.pop("managed_init_args", None)
+        tool_dict.pop("supports_toolkit_filters", None)
         tool_dict.pop("factory", None)
         tools.append(tool_dict)
 

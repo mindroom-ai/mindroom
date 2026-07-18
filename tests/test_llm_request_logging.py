@@ -24,6 +24,7 @@ from mindroom.llm_request_logging import (
     record_llm_request_tools,
     stream_with_llm_request_log_context,
 )
+from mindroom.openai_tool_search import request_params_with_deferred_tool_search
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -92,6 +93,18 @@ class _DeferredWireModel(_FakeModel):
     async def ainvoke_stream(self, *_args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
         self._record_wire_tools(kwargs)
         yield ModelResponse(content="ok")
+
+
+@dataclass
+class _OpenAIDeferredWireModel(_FakeModel):
+    """Fake OpenAI adapter that runs MindRoom's real wire-tool preparation."""
+
+    async def ainvoke(self, *_args: object, **kwargs: object) -> ModelResponse:
+        request_params_with_deferred_tool_search(
+            {"tools": kwargs.get("tools")},
+            frozenset({"deferred_search"}),
+        )
+        return ModelResponse(content="ok")
 
 
 def _read_log_entries(log_dir: Path) -> list[dict[str, Any]]:
@@ -301,6 +314,36 @@ async def test_llm_request_logging_records_claude_native_wire_tools(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_llm_request_logging_records_openai_native_wire_tools(tmp_path: Path) -> None:
+    """OpenAI logs should match the final server-side-search tools array."""
+    model = _OpenAIDeferredWireModel()
+    install_llm_request_logging(
+        model,
+        agent_name="openai",
+        debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+        default_log_dir=tmp_path / "unused",
+    )
+    tools = [
+        {"type": "function", "name": "always_available"},
+        {"type": "function", "name": "deferred_search"},
+    ]
+
+    await model.ainvoke(
+        messages=[Message(role="user", content="search")],
+        assistant_message=Message(role="assistant"),
+        tools=tools,
+    )
+
+    entry = _read_log_entries(tmp_path)[0]
+    assert entry["tools"] == [
+        {"type": "tool_search"},
+        {"type": "function", "name": "always_available"},
+        {"type": "function", "name": "deferred_search", "defer_loading": True},
+    ]
+    assert entry["tool_count"] == 3
+
+
+@pytest.mark.asyncio
 async def test_llm_request_logging_redacts_sensitive_values_before_jsonl_write(tmp_path: Path) -> None:
     """Durable request logs should preserve structure while masking credentials."""
     model = _FakeModel()
@@ -448,6 +491,154 @@ async def test_llm_request_logging_disabled_still_emits_usage_telemetry(tmp_path
             "correlation_id": "corr-1",
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_llm_request_log_failure_does_not_fail_invoke_or_drop_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Optional request persistence must not change response or usage behavior."""
+    log_error = OSError("disk full")
+
+    async def fail_request_log(**_kwargs: object) -> None:
+        raise log_error
+
+    monkeypatch.setattr(
+        "mindroom.llm_request_logging._write_llm_request_log_if_enabled",
+        fail_request_log,
+    )
+    model = _FakeModel(response_usage=MessageMetrics(input_tokens=12, output_tokens=3))
+    install_llm_request_logging(
+        model,
+        agent_name="default",
+        debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+        default_log_dir=tmp_path / "unused",
+    )
+
+    with capture_logs() as logs:
+        response = await model.ainvoke(
+            messages=[Message(role="user", content="hello")],
+            assistant_message=Message(role="assistant"),
+            tools=[],
+        )
+
+    assert response.content == "ok"
+    assert [entry["event"] for entry in logs] == [
+        "Failed to persist LLM request log",
+        "LLM usage",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_llm_request_log_failure_does_not_mask_provider_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request-log failure in finally must preserve the provider exception."""
+    provider_error = RuntimeError("provider failed")
+    log_error = OSError("disk full")
+
+    @dataclass
+    class _FailingModel(_FakeModel):
+        async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+            raise provider_error
+
+    async def fail_request_log(**_kwargs: object) -> None:
+        raise log_error
+
+    monkeypatch.setattr(
+        "mindroom.llm_request_logging._write_llm_request_log_if_enabled",
+        fail_request_log,
+    )
+    model = _FailingModel()
+    install_llm_request_logging(
+        model,
+        agent_name="default",
+        debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+        default_log_dir=tmp_path / "unused",
+    )
+
+    with capture_logs(), pytest.raises(RuntimeError, match="provider failed"):
+        await model.ainvoke(
+            messages=[Message(role="user", content="hello")],
+            assistant_message=Message(role="assistant"),
+            tools=[],
+        )
+
+
+@pytest.mark.asyncio
+async def test_llm_request_log_failure_does_not_terminate_stream(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Streaming must remain usable when optional request persistence fails."""
+    log_error = OSError("disk full")
+
+    async def fail_request_log(**_kwargs: object) -> None:
+        raise log_error
+
+    monkeypatch.setattr(
+        "mindroom.llm_request_logging._write_llm_request_log_if_enabled",
+        fail_request_log,
+    )
+    model = _FakeModel(response_usage=MessageMetrics(input_tokens=12, output_tokens=3))
+    install_llm_request_logging(
+        model,
+        agent_name="default",
+        debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+        default_log_dir=tmp_path / "unused",
+    )
+
+    with capture_logs() as logs:
+        chunks = [
+            chunk
+            async for chunk in model.ainvoke_stream(
+                messages=[Message(role="user", content="hello")],
+                assistant_message=Message(role="assistant"),
+                tools=[],
+            )
+        ]
+
+    assert [chunk.content for chunk in chunks] == ["ok", "!"]
+    assert [entry["event"] for entry in logs] == [
+        "Failed to persist LLM request log",
+        "LLM usage",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_llm_response_log_failure_does_not_fail_invoke(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Optional response telemetry must not replace a successful response."""
+    log_error = OSError("disk full")
+
+    async def fail_response_log(**_kwargs: object) -> None:
+        raise log_error
+
+    monkeypatch.setattr(
+        "mindroom.llm_request_logging._write_llm_response_log",
+        fail_response_log,
+    )
+    model = _FakeModel(response_usage=MessageMetrics(input_tokens=12, output_tokens=3))
+    install_llm_request_logging(
+        model,
+        agent_name="default",
+        debug_config=DebugConfig(),
+        default_log_dir=tmp_path,
+    )
+
+    with capture_logs() as logs:
+        response = await model.ainvoke(
+            messages=[Message(role="user", content="hello")],
+            assistant_message=Message(role="assistant"),
+            tools=[],
+        )
+
+    assert response.content == "ok"
+    assert [entry["event"] for entry in logs] == ["Failed to emit LLM response telemetry"]
 
 
 @pytest.mark.asyncio
