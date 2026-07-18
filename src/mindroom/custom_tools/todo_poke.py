@@ -49,6 +49,7 @@ _VALID_STATUSES = {"open", *TERMINAL_STATUSES}
 _SAFE_ASSIGNEE_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
 _POKE_STATE_FILENAME = "poke_state.json"
 _VISIBLE_ITEM_LIMIT = 5
+_UNCHANGED_REPOKE_SECONDS = 60 * 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,7 +110,13 @@ class _PokeRecord:
     last_fingerprint: str
 
 
-def _env_seconds(runtime_paths: RuntimePaths, name: str, default: float) -> float:
+def _env_seconds(
+    runtime_paths: RuntimePaths,
+    name: str,
+    default: float,
+    *,
+    minimum_enabled_seconds: float = 0,
+) -> float:
     raw_value = runtime_paths.env_value(name)
     if raw_value is None:
         return default
@@ -118,7 +125,7 @@ def _env_seconds(runtime_paths: RuntimePaths, name: str, default: float) -> floa
     except ValueError:
         logger.warning("todo_poke_env_value_invalid", env_name=name, value=raw_value, default=default)
         return default
-    if value < 0 or not math.isfinite(value):
+    if value < 0 or not math.isfinite(value) or 0 < value < minimum_enabled_seconds:
         logger.warning("todo_poke_env_value_invalid", env_name=name, value=raw_value, default=default)
         return default
     return value
@@ -132,6 +139,7 @@ def todo_poke_policy(runtime_paths: RuntimePaths) -> TodoPokePolicy:
             runtime_paths,
             "MINDROOM_TODO_POKE_INTERVAL_SECONDS",
             defaults.interval_seconds,
+            minimum_enabled_seconds=1,
         ),
         cooldown_seconds=defaults.cooldown_seconds,
         quiet_seconds=_env_seconds(
@@ -248,6 +256,7 @@ def _parse_thread_snapshot(data: object, source_path: Path) -> _TodoThreadSnapsh
         }
         for item in items
     }
+    # Scanner snapshots keep dependents blocked when their persisted dependency was skipped or is missing.
     actionable_item_ids = frozenset(
         item.item_id
         for item in items
@@ -375,7 +384,7 @@ def _read_poke_state(todo_root: Path) -> dict[str, Any]:
     path = todo_root / _POKE_STATE_FILENAME
     try:
         state = _validated_poke_state(read_json(path))
-    except (OSError, json.JSONDecodeError, TypeError) as exc:
+    except (OSError, TypeError, ValueError) as exc:
         logger.warning("todo_poke_dedup_state_reset", path=str(path), error=str(exc))
         return {}
     else:
@@ -497,7 +506,7 @@ def _dedup_allows_poke(
     if previous is None:
         return True
     if previous.last_fingerprint == scope.fingerprint:
-        return False
+        return now_timestamp - previous.last_poked_at >= _UNCHANGED_REPOKE_SECONDS
     return now_timestamp - previous.last_poked_at >= policy.cooldown_seconds
 
 
@@ -512,9 +521,12 @@ async def _deliver_pokes(
 ) -> int:
     delivered = 0
     attempts = 0
+    poked_agents: set[str] = set()
     for scope in scopes:
         if attempts >= policy.max_pokes_per_scan:
             break
+        if scope.assigned_agent in poked_agents:
+            continue
         if scope.thread_id in pending_by_room[scope.room_id]:
             continue
 
@@ -545,6 +557,7 @@ async def _deliver_pokes(
             failed_scope_keys.add(refreshed_scope_key)
             continue
 
+        poked_agents.add(refreshed_scope.assigned_agent)
         failed_scope_keys.discard(refreshed_scope_key)
         await asyncio.to_thread(_persist_poke, todo_root, refreshed_scope, now_timestamp)
         delivered += 1

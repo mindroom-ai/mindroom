@@ -35,13 +35,15 @@ The implementation uses an orchestrator-owned sleep-first worker and does not de
 - Each scope is re-read and its fingerprint recomputed after schedule I/O, so work completed, reassigned, or otherwise changed during the await is not poked from a stale snapshot.
 - Durable scope keys hash the canonical `(assigned_agent, room_id, normalized_thread_id)` tuple.
 - Fingerprints include every actionable item, including items beyond the five shown in the message, plus thread total and terminal counts.
-- An unchanged fingerprint never repeats, while a changed fingerprint waits for the cooldown.
+- An unchanged fingerprint retries only after a one-hour anti-stall backstop, while a changed fingerprint waits for the normal cooldown.
 - Poke messages contain exactly one intentional assignee mention, while todo titles are rendered as literal code text with mention tokens neutralized.
 - Persisted assignees must match the same alphanumeric-and-underscore identifier shape as configured entities before they can reach idle checks or mention formatting.
 - The per-scan cap counts send attempts, including failures, while failed sends remain retryable because they do not persist poke state.
+- A successful delivery suppresses further scopes for the same agent during that scan, so one tick cannot enqueue multiple new turns for one idle agent.
 - The worker remembers failed scope keys in memory and orders them behind fresh scopes on later scans, preventing deterministic failures from starving healthy work.
 - Obsolete poke records are pruned when their actionable assignee/room/thread scope no longer exists.
-- Non-object poke-state roots and non-object `scopes` values are warned about, treated as empty, and repaired through locked atomic persistence.
+- Non-object, malformed JSON, and non-UTF-8 poke state is warned about, treated as empty, and repaired through locked atomic persistence.
+- Enabled scan intervals below one second are rejected in favor of the default, while `0` still disables the worker and subsecond quiet periods remain valid.
 
 ## Round-1 review disposition
 
@@ -58,6 +60,15 @@ Schedule reads deliberately remain fail-open because fail-closed behavior can si
 Ad-hoc team activity is a known idle-check limitation because only configured direct and team bots expose the required in-flight counts; a new execution-wide activity registry is outside this issue.
 The committed plan and report remain intentional review artifacts that safe squash merge removes.
 
+## Round-3 review disposition
+
+Locked state recovery now handles non-UTF-8 bytes, each scan delivers at most one successful poke per assigned agent, and unchanged fingerprints become eligible again after a one-hour anti-stall backstop.
+The scanner's stricter dependency rule is now documented at its ownership boundary, and enabled subsecond scan intervals fall back to the default.
+
+Corrupt-state warnings remain intentionally unsuppressed because persistent state corruption should stay visible until a successful atomic repair, and adding warning rate-limit state is unnecessary for this bounded recovery path.
+File-lock timeouts remain intentionally out of scope because todo state uses the repository's shared advisory-lock discipline, and introducing a scanner-only timeout contract would add inconsistent lock machinery without evidence of a deadlock.
+The repeated round-three findings about requester identity, room membership, fail-open schedule reads, ad-hoc team activity, and review artifacts remain covered by the round-one and round-two dispositions above.
+
 ## Assigned-agent defaults
 
 The `plan` and `apply_template` default-assignee behavior was already present on main from `7be4d90af`.
@@ -68,10 +79,12 @@ Regression coverage now locks plan defaults, template defaults, and explicit tem
 
 ## Validation
 
-- `env -u MINDROOM_OWNER_USER_ID -u MINDROOM_DOCKER_WORKER_IMAGE uv run pytest -n auto --no-cov`: 10,722 passed and 120 skipped.
+- `env -u MINDROOM_OWNER_USER_ID -u MINDROOM_DOCKER_WORKER_IMAGE uv run pytest -n auto --no-cov`: 10,726 passed and 120 skipped.
 - `uv run pre-commit run --all-files`: passed.
 - `uv run tach check --dependencies --interfaces`: passed.
 - Focused round-2 todo-poke, orchestrator, and scheduling suites: 92 passed.
+- Focused round-3 todo-poke scanner suite: 38 passed.
+- Focused round-3 todo state, scanner, and orchestrator suites: 67 passed.
 - Changed-file `ty` validation: passed without rule overrides.
 
 The first all-files hook pass regenerated three tracked docs-skill reference outputs, and the required second pass was clean.

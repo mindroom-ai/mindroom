@@ -397,8 +397,28 @@ async def test_scan_normalizes_main_and_queries_each_room_once(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_scan_delivers_at_most_one_scope_per_agent(tmp_path: Path) -> None:
+    """One scan must not enqueue multiple turns for the same otherwise-idle agent."""
+    todo_root = tmp_path / "todo"
+    _write_thread(todo_root, "a", room_id="!a:localhost")
+    _write_thread(todo_root, "b", room_id="!b:localhost")
+    deps, queried_rooms, sent = _deps(todo_root)
+    policy = TodoPokePolicy(quiet_seconds=0)
+
+    assert await scan_todo_pokes(policy, deps) == 1
+    assert [room_id for room_id, _body, _thread_id in sent] == ["!a:localhost"]
+
+    assert await scan_todo_pokes(policy, deps) == 1
+    assert [room_id for room_id, _body, _thread_id in sent] == [
+        "!a:localhost",
+        "!b:localhost",
+    ]
+    assert queried_rooms == ["!a:localhost", "!b:localhost", "!b:localhost"]
+
+
+@pytest.mark.asyncio
 async def test_fingerprint_includes_hidden_items_and_cooldown_precedes_repoke(tmp_path: Path) -> None:
-    """An unchanged scope never repeats, while a hidden change re-arms only after cooldown."""
+    """An unchanged scope stays suppressed normally, while hidden changes observe cooldown."""
     todo_root = tmp_path / "todo"
     path = _write_thread(todo_root, "scope", items=[_item(f"task-{index}") for index in range(6)])
     current_time = [_NOW]
@@ -427,6 +447,26 @@ async def test_fingerprint_includes_hidden_items_and_cooldown_precedes_repoke(tm
 
 
 @pytest.mark.asyncio
+async def test_unchanged_fingerprint_rearms_after_backstop(tmp_path: Path) -> None:
+    """An unchanged scope eventually retries in case its delivered agent turn failed."""
+    todo_root = tmp_path / "todo"
+    _write_thread(todo_root, "scope")
+    current_time = [_NOW]
+    deps, queried_rooms, sent = _deps(todo_root, clock=lambda: current_time[0])
+    policy = TodoPokePolicy(quiet_seconds=0)
+
+    assert await scan_todo_pokes(policy, deps) == 1
+    current_time[0] = _NOW + timedelta(seconds=3599)
+    assert await scan_todo_pokes(policy, deps) == 0
+    assert queried_rooms == ["!room:localhost"]
+
+    current_time[0] = _NOW + timedelta(hours=1)
+    assert await scan_todo_pokes(policy, deps) == 1
+    assert queried_rooms == ["!room:localhost", "!room:localhost"]
+    assert len(sent) == 2
+
+
+@pytest.mark.asyncio
 async def test_delivery_cap_counts_attempts_and_failed_send_stays_retryable(tmp_path: Path) -> None:
     """Failed sends consume the attempt cap but do not persist their fingerprint."""
     todo_root = tmp_path / "todo"
@@ -435,7 +475,7 @@ async def test_delivery_cap_counts_attempts_and_failed_send_stays_retryable(tmp_
             todo_root,
             f"scope-{index}",
             room_id=f"!room-{index}:localhost",
-            items=[_item(f"task-{index}")],
+            items=[_item(f"task-{index}", assigned_agent=f"agent_{index}")],
         )
     deps, _queried_rooms, sent = _deps(
         todo_root,
@@ -468,7 +508,7 @@ async def test_failed_scopes_move_behind_fresh_scopes_on_later_scans(tmp_path: P
             todo_root,
             f"scope-{index}",
             room_id=f"!room-{index}:localhost",
-            items=[_item(f"task-{index}")],
+            items=[_item(f"task-{index}", assigned_agent=f"agent_{index}")],
         )
     remembered_failures: set[str] = set()
     first_deps, _first_queries, first_sends = _deps(
@@ -512,11 +552,37 @@ async def test_corrupt_poke_state_is_treated_as_empty(tmp_path: Path, bad_state:
 
 
 @pytest.mark.asyncio
+async def test_non_utf8_poke_state_is_treated_as_empty(tmp_path: Path) -> None:
+    """Byte-corrupt poke state must be recovered by both the read and update boundaries."""
+    todo_root = tmp_path / "todo"
+    _write_thread(todo_root, "scope")
+    todo_root.mkdir(parents=True, exist_ok=True)
+    (todo_root / "poke_state.json").write_bytes(b"\xff\xfe")
+    deps, queried_rooms, sent = _deps(todo_root)
+
+    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 1
+    assert queried_rooms == ["!room:localhost"]
+    assert len(sent) == 1
+    repaired = json.loads((todo_root / "poke_state.json").read_text(encoding="utf-8"))
+    assert len(repaired["scopes"]) == 1
+
+
+@pytest.mark.asyncio
 async def test_scan_prunes_poke_records_without_current_actionable_scope(tmp_path: Path) -> None:
     """Completed or removed todo scopes must not accumulate durable dedup records."""
     todo_root = tmp_path / "todo"
-    completed_path = _write_thread(todo_root, "a", room_id="!a:localhost")
-    _write_thread(todo_root, "b", room_id="!b:localhost")
+    completed_path = _write_thread(
+        todo_root,
+        "a",
+        room_id="!a:localhost",
+        items=[_item("a", assigned_agent="agent_a")],
+    )
+    _write_thread(
+        todo_root,
+        "b",
+        room_id="!b:localhost",
+        items=[_item("b", assigned_agent="agent_b")],
+    )
     deps, queried_rooms, _sent = _deps(todo_root)
     policy = TodoPokePolicy(quiet_seconds=0)
 
@@ -575,6 +641,22 @@ def test_policy_reads_interval_and_quiet_runtime_env(tmp_path: Path) -> None:
     assert policy.quiet_seconds == 12.5
     assert policy.cooldown_seconds == 300
     assert policy.max_pokes_per_scan == 3
+
+
+def test_policy_rejects_subsecond_enabled_interval(tmp_path: Path) -> None:
+    """An enabled interval below one second falls back while subsecond quiet remains valid."""
+    runtime_paths = replace(
+        test_runtime_paths(tmp_path),
+        process_env={
+            "MINDROOM_TODO_POKE_INTERVAL_SECONDS": "0.5",
+            "MINDROOM_TODO_POKE_QUIET_SECONDS": "0.5",
+        },
+    )
+
+    policy = todo_poke_policy(runtime_paths)
+
+    assert policy.interval_seconds == 120
+    assert policy.quiet_seconds == 0.5
 
 
 @pytest.mark.parametrize(

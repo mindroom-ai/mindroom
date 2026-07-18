@@ -73,7 +73,7 @@ def locked_update_json(
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             loaded: object = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        except json.JSONDecodeError:
+        except ValueError:
             if not recover_invalid:
                 raise
             loaded = {}
