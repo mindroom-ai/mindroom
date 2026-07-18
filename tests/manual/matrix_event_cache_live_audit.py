@@ -25,7 +25,7 @@ import tempfile
 import time
 import wave
 import zlib
-from contextlib import closing
+from contextlib import AsyncExitStack, closing
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1750,25 +1750,32 @@ async def run_audit(  # noqa: PLR0915
     records: list[InteractionRecord] = []
     invite_timings: tuple[RequestTiming, ...] = ()
     thread_reads: tuple[ThreadReadRecord, ...] = ()
-    async with MatrixApi(
-        base_url=config.base_url,
-        access_token=config.access_token,
-        transport=transport,
-    ) as api:
-        user_id, device_id = await api.whoami()
-        room_id = await api.create_private_room(invite_user_id=config.invite_user_id)
-        if config.invite_access_token is not None:
-            async with MatrixApi(
+    async with AsyncExitStack() as stack:
+        api = await stack.enter_async_context(
+            MatrixApi(
                 base_url=config.base_url,
-                access_token=config.invite_access_token,
+                access_token=config.access_token,
                 transport=transport,
-            ) as invite_api:
-                invite_user_id, _ = await invite_api.whoami()
-                if invite_user_id != config.invite_user_id:
-                    msg = "Invite access token does not belong to --invite-user-id"
-                    raise MatrixAuditError(msg)
-                await invite_api.join(room_id)
-                invite_timings = tuple(invite_api.timings)
+            ),
+        )
+        user_id, device_id = await api.whoami()
+        invite_api: MatrixApi | None = None
+        if config.invite_access_token is not None:
+            invite_api = await stack.enter_async_context(
+                MatrixApi(
+                    base_url=config.base_url,
+                    access_token=config.invite_access_token,
+                    transport=transport,
+                ),
+            )
+            invite_user_id, _ = await invite_api.whoami()
+            if invite_user_id != config.invite_user_id:
+                msg = "Invite access token does not belong to --invite-user-id"
+                raise MatrixAuditError(msg)
+        room_id = await api.create_private_room(invite_user_id=config.invite_user_id)
+        if invite_api is not None:
+            await invite_api.join(room_id)
+            invite_timings = tuple(invite_api.timings)
         media_urls = {fixture.filename: await api.upload(fixture) for fixture in fixtures}
         for fixture in fixtures:
             downloaded = await api.download(media_urls[fixture.filename], filename=fixture.filename)

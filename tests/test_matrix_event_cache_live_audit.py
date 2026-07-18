@@ -248,6 +248,47 @@ async def test_audit_refuses_an_unverified_invited_account(tmp_path: Path) -> No
         await run_audit(config)
 
 
+@pytest.mark.asyncio
+async def test_audit_verifies_invite_token_before_room_creation(tmp_path: Path) -> None:
+    """A mismatched token must fail before createRoom can expose the private room."""
+    owner_token = UUID("10000000-0000-4000-8000-000000000008").hex
+    invite_token = UUID("10000000-0000-4000-8000-000000000009").hex
+    requested_paths: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        assert request.url.path.endswith("/account/whoami")
+        if request.headers["Authorization"] == f"Bearer {owner_token}":
+            return httpx.Response(200, json={"device_id": "OWNER", "user_id": "@owner:example"})
+        if request.headers["Authorization"] == f"Bearer {invite_token}":
+            return httpx.Response(200, json={"device_id": "OTHER", "user_id": "@other:example"})
+        msg = "Unexpected access token"
+        raise AssertionError(msg)
+
+    config = AuditConfig(
+        base_url="https://matrix.example",
+        access_token=owner_token,
+        invite_access_token=invite_token,
+        evidence_path=tmp_path / "evidence.json",
+        cache_db_path=tmp_path / "service.db",
+        strict_read_cache_db_path=tmp_path / "strict.db",
+        invite_user_id="@invited:example",
+        trigger_user_id=None,
+        strict_thread_reads=True,
+        settle_seconds=0.0,
+        trigger_wait_seconds=0.0,
+    )
+
+    with (
+        patch("tests.manual.matrix_event_cache_live_audit.validate_media_fixtures"),
+        pytest.raises(MatrixAuditError, match="does not belong"),
+    ):
+        await run_audit(config, transport=httpx.MockTransport(handler))
+
+    assert len(requested_paths) == 2
+    assert all("/createRoom" not in path for path in requested_paths)
+
+
 def test_cli_requires_invited_user_and_token_environment_together(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
