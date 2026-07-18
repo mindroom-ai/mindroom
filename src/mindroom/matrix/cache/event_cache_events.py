@@ -83,6 +83,21 @@ def serialize_cacheable_events(cacheable_events: list[_CachedEventValue]) -> lis
     return [serialize_cached_event(event_id, event) for event_id, event in cacheable_events]
 
 
+def preferred_cached_events_by_id(events: list[SerializedCachedEvent]) -> list[SerializedCachedEvent]:
+    """Collapse duplicate IDs while preventing a later opaque payload from replacing clear data."""
+    preferred_events: dict[str, SerializedCachedEvent] = {}
+    for event in events:
+        previous = preferred_events.get(event.event_id)
+        event_type = event.event.get("type")
+        if (
+            previous is None
+            or previous.event.get("type") == "m.room.encrypted"
+            or (event_type is not None and event_type != "m.room.encrypted")
+        ):
+            preferred_events[event.event_id] = event
+    return list(preferred_events.values())
+
+
 def event_redaction_candidate_ids(event_id: str, event: dict[str, Any]) -> frozenset[str]:
     """Return IDs whose tombstones would prevent caching one event."""
     candidate_ids = {event_id}

@@ -14,6 +14,7 @@ from .event_cache_events import (
     event_redaction_candidate_ids,
     event_thread_rows,
     filter_redacted_events,
+    preferred_cached_events_by_id,
     redaction_removal_event_ids,
     serialize_cacheable_events,
 )
@@ -292,15 +293,30 @@ async def write_lookup_index_rows(
     thread_id: str | None = None,
 ) -> None:
     """Persist point-lookup, edit-index, and thread-index rows for cached events."""
-    if not serialized_events:
-        return
-    accepted_events_by_id: dict[str, SerializedCachedEvent] = {}
-    prior_child_roots: set[tuple[str, str]] = set()
-    for event in serialized_events:
-        cursor = await db.execute(
+    candidates = preferred_cached_events_by_id(serialized_events)
+    accepted_event_ids: set[str] = set()
+    if candidates:
+        candidate_rows_json = json.dumps(
+            [
+                {
+                    "event_id": event.event_id,
+                    "origin_server_ts": event.origin_server_ts,
+                    "event_json": event.event_json,
+                }
+                for event in candidates
+            ],
+        )
+        async with db.execute(
             """
             INSERT INTO events(event_id, room_id, origin_server_ts, event_json, cached_at)
-            VALUES (?, ?, ?, ?, ?)
+            SELECT
+                json_extract(input.value, '$.event_id'),
+                ?,
+                json_extract(input.value, '$.origin_server_ts'),
+                json_extract(input.value, '$.event_json'),
+                ?
+            FROM json_each(?) AS input
+            WHERE TRUE
             ON CONFLICT(event_id) DO UPDATE SET
                 room_id = excluded.room_id,
                 origin_server_ts = excluded.origin_server_ts,
@@ -310,42 +326,36 @@ async def write_lookup_index_rows(
                 OR json_extract(excluded.event_json, '$.type') <> 'm.room.encrypted'
             RETURNING event_id
             """,
-            (
-                event.event_id,
-                room_id,
-                event.origin_server_ts,
-                event.event_json,
-                cached_at,
-            ),
-        )
-        accepted_row = await cursor.fetchone()
-        await cursor.close()
-        if accepted_row is not None:
-            accepted_events_by_id[event.event_id] = event
-            cursor = await db.execute(
-                """
-                SELECT room_id, thread_id
-                FROM event_threads
-                WHERE event_id = ? AND event_id <> thread_id
-                """,
-                (event.event_id,),
-            )
-            prior_thread_row = await cursor.fetchone()
-            await cursor.close()
-            if prior_thread_row is not None:
-                prior_child_roots.add((str(prior_thread_row[0]), str(prior_thread_row[1])))
-    accepted_events = list(accepted_events_by_id.values())
+            (room_id, cached_at, candidate_rows_json),
+        ) as cursor:
+            accepted_event_ids.update(str(row[0]) for row in await cursor.fetchall())
+    accepted_events = [event for event in candidates if event.event_id in accepted_event_ids]
     if not accepted_events:
         return
 
-    await db.executemany(
-        "DELETE FROM event_edits WHERE edit_event_id = ?",
-        [(event.event_id,) for event in accepted_events],
+    accepted_event_ids_json = json.dumps([event.event_id for event in accepted_events])
+    async with db.execute(
+        """
+        SELECT room_id, thread_id
+        FROM event_threads
+        WHERE event_id IN (SELECT value FROM json_each(?))
+            AND event_id <> thread_id
+        """,
+        (accepted_event_ids_json,),
+    ) as cursor:
+        prior_child_roots = {(str(row[0]), str(row[1])) for row in await cursor.fetchall()}
+
+    await db.execute(
+        """
+        DELETE FROM event_edits
+        WHERE edit_event_id IN (SELECT value FROM json_each(?))
+        """,
+        (accepted_event_ids_json,),
     )
-    await db.executemany(
+    await db.execute(
         """
         DELETE FROM event_threads
-        WHERE event_id = ?
+        WHERE event_id IN (SELECT value FROM json_each(?))
             AND (
                 event_id <> thread_id
                 OR NOT EXISTS (
@@ -357,7 +367,7 @@ async def write_lookup_index_rows(
                 )
             )
         """,
-        [(event.event_id,) for event in accepted_events],
+        (accepted_event_ids_json,),
     )
     edit_rows = event_edit_rows(room_id, accepted_events)
     if edit_rows:

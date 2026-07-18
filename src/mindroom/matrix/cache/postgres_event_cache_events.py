@@ -14,6 +14,7 @@ from .event_cache_events import (
     event_redaction_candidate_ids,
     event_thread_rows,
     filter_redacted_events,
+    preferred_cached_events_by_id,
     redaction_removal_event_ids,
     serialize_cacheable_events,
 )
@@ -328,105 +329,119 @@ async def write_lookup_index_rows(
     thread_id: str | None = None,
 ) -> None:
     """Persist point-lookup, edit-index, and thread-index rows for cached events."""
-    if not serialized_events:
+    candidates = preferred_cached_events_by_id(serialized_events)
+    if not candidates:
         return
-    accepted_events_by_id: dict[str, SerializedCachedEvent] = {}
-    prior_child_roots: set[tuple[str, str]] = set()
-    for event in serialized_events:
-        accepted_row = await fetchone(
-            db,
-            """
-            INSERT INTO mindroom_event_cache_events(namespace, event_id, room_id, origin_server_ts, event_json, cached_at)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT(namespace, event_id) DO UPDATE SET
-                room_id = excluded.room_id,
-                origin_server_ts = excluded.origin_server_ts,
-                event_json = excluded.event_json,
-                cached_at = excluded.cached_at,
-                write_seq = nextval('mindroom_event_cache_write_seq')
-            WHERE mindroom_event_cache_events.event_json::jsonb ->> 'type' = 'm.room.encrypted'
-                OR excluded.event_json::jsonb ->> 'type' <> 'm.room.encrypted'
-            RETURNING event_id
-            """,
-            (
-                namespace,
-                event.event_id,
-                room_id,
-                event.origin_server_ts,
-                event.event_json,
-                cached_at,
-            ),
-        )
-        if accepted_row is not None:
-            accepted_events_by_id[event.event_id] = event
-            prior_thread_row = await fetchone(
-                db,
-                """
-                SELECT room_id, thread_id
-                FROM mindroom_event_cache_event_threads
-                WHERE namespace = %s AND event_id = %s AND event_id <> thread_id
-                """,
-                (namespace, event.event_id),
-            )
-            if prior_thread_row is not None:
-                prior_child_roots.add((str(prior_thread_row[0]), str(prior_thread_row[1])))
-    accepted_events = list(accepted_events_by_id.values())
+    accepted_rows = await fetchall(
+        db,
+        """
+        INSERT INTO mindroom_event_cache_events(namespace, event_id, room_id, origin_server_ts, event_json, cached_at)
+        SELECT %s, input.event_id, %s, input.origin_server_ts, input.event_json, %s
+        FROM unnest(%s::text[], %s::bigint[], %s::text[])
+            AS input(event_id, origin_server_ts, event_json)
+        ON CONFLICT(namespace, event_id) DO UPDATE SET
+            room_id = excluded.room_id,
+            origin_server_ts = excluded.origin_server_ts,
+            event_json = excluded.event_json,
+            cached_at = excluded.cached_at,
+            write_seq = nextval('mindroom_event_cache_write_seq')
+        WHERE mindroom_event_cache_events.event_json::jsonb ->> 'type' = 'm.room.encrypted'
+            OR excluded.event_json::jsonb ->> 'type' <> 'm.room.encrypted'
+        RETURNING event_id
+        """,
+        (
+            namespace,
+            room_id,
+            cached_at,
+            [event.event_id for event in candidates],
+            [event.origin_server_ts for event in candidates],
+            [event.event_json for event in candidates],
+        ),
+    )
+    accepted_event_ids = {str(row[0]) for row in accepted_rows}
+    accepted_events = [event for event in candidates if event.event_id in accepted_event_ids]
     if not accepted_events:
         return
 
-    for event in accepted_events:
-        await db.execute(
-            """
-            DELETE FROM mindroom_event_cache_event_edits
-            WHERE namespace = %s AND edit_event_id = %s
-            """,
-            (namespace, event.event_id),
-        )
-        await db.execute(
-            """
-            DELETE FROM mindroom_event_cache_event_threads
-            WHERE namespace = %s AND event_id = %s
-                AND (
-                    event_id <> thread_id
-                    OR NOT EXISTS (
-                        SELECT 1
-                        FROM mindroom_event_cache_event_threads AS child
-                        WHERE child.namespace = mindroom_event_cache_event_threads.namespace
-                            AND child.room_id = mindroom_event_cache_event_threads.room_id
-                            AND child.thread_id = mindroom_event_cache_event_threads.thread_id
-                            AND child.event_id <> mindroom_event_cache_event_threads.event_id
-                    )
+    accepted_event_id_list = [event.event_id for event in accepted_events]
+    prior_thread_rows = await fetchall(
+        db,
+        """
+        SELECT room_id, thread_id
+        FROM mindroom_event_cache_event_threads
+        WHERE namespace = %s
+            AND event_id = ANY(%s)
+            AND event_id <> thread_id
+        """,
+        (namespace, accepted_event_id_list),
+    )
+    prior_child_roots = {(str(row[0]), str(row[1])) for row in prior_thread_rows}
+    await db.execute(
+        """
+        DELETE FROM mindroom_event_cache_event_edits
+        WHERE namespace = %s AND edit_event_id = ANY(%s)
+        """,
+        (namespace, accepted_event_id_list),
+    )
+    await db.execute(
+        """
+        DELETE FROM mindroom_event_cache_event_threads
+        WHERE namespace = %s AND event_id = ANY(%s)
+            AND (
+                event_id <> thread_id
+                OR NOT EXISTS (
+                    SELECT 1
+                    FROM mindroom_event_cache_event_threads AS child
+                    WHERE child.namespace = mindroom_event_cache_event_threads.namespace
+                        AND child.room_id = mindroom_event_cache_event_threads.room_id
+                        AND child.thread_id = mindroom_event_cache_event_threads.thread_id
+                        AND child.event_id <> mindroom_event_cache_event_threads.event_id
                 )
-            """,
-            (namespace, event.event_id),
-        )
+            )
+        """,
+        (namespace, accepted_event_id_list),
+    )
 
     edit_rows = event_edit_rows(room_id, accepted_events)
-    for row in edit_rows:
+    if edit_rows:
         await db.execute(
             """
             INSERT INTO mindroom_event_cache_event_edits(namespace, edit_event_id, room_id, original_event_id, origin_server_ts)
-            VALUES (%s, %s, %s, %s, %s)
+            SELECT %s, input.edit_event_id, input.room_id, input.original_event_id, input.origin_server_ts
+            FROM unnest(%s::text[], %s::text[], %s::text[], %s::bigint[])
+                AS input(edit_event_id, room_id, original_event_id, origin_server_ts)
             ON CONFLICT(namespace, edit_event_id) DO UPDATE SET
                 room_id = excluded.room_id,
                 original_event_id = excluded.original_event_id,
                 origin_server_ts = excluded.origin_server_ts
             """,
-            (namespace, row.edit_event_id, row.room_id, row.original_event_id, row.origin_server_ts),
+            (
+                namespace,
+                [row.edit_event_id for row in edit_rows],
+                [row.room_id for row in edit_rows],
+                [row.original_event_id for row in edit_rows],
+                [row.origin_server_ts for row in edit_rows],
+            ),
         )
 
     thread_rows = event_thread_rows(room_id, accepted_events, thread_id=thread_id)
     if thread_rows:
-        for row in thread_rows:
-            await db.execute(
-                """
-                INSERT INTO mindroom_event_cache_event_threads(namespace, room_id, event_id, thread_id)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
-                    thread_id = excluded.thread_id
-                """,
-                (namespace, row.room_id, row.event_id, row.thread_id),
-            )
+        await db.execute(
+            """
+            INSERT INTO mindroom_event_cache_event_threads(namespace, room_id, event_id, thread_id)
+            SELECT %s, input.room_id, input.event_id, input.thread_id
+            FROM unnest(%s::text[], %s::text[], %s::text[])
+                AS input(room_id, event_id, thread_id)
+            ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
+                thread_id = excluded.thread_id
+            """,
+            (
+                namespace,
+                [row.room_id for row in thread_rows],
+                [row.event_id for row in thread_rows],
+                [row.thread_id for row in thread_rows],
+            ),
+        )
     await _delete_orphaned_prior_thread_roots(
         db,
         namespace=namespace,
@@ -441,22 +456,32 @@ async def _delete_orphaned_prior_thread_roots(
     prior_child_roots: set[tuple[str, str]],
 ) -> None:
     """Remove learned root self-mappings after their final child mapping moves away."""
-    for prior_room_id, prior_thread_id in prior_child_roots:
-        await db.execute(
-            """
-            DELETE FROM mindroom_event_cache_event_threads
-            WHERE namespace = %s AND room_id = %s AND event_id = %s AND thread_id = %s
-                AND NOT EXISTS (
-                    SELECT 1
-                    FROM mindroom_event_cache_event_threads AS child
-                    WHERE child.namespace = mindroom_event_cache_event_threads.namespace
-                        AND child.room_id = mindroom_event_cache_event_threads.room_id
-                        AND child.thread_id = mindroom_event_cache_event_threads.thread_id
-                        AND child.event_id <> mindroom_event_cache_event_threads.event_id
-                )
-            """,
-            (namespace, prior_room_id, prior_thread_id, prior_thread_id),
-        )
+    if not prior_child_roots:
+        return
+    prior_root_rows = list(prior_child_roots)
+    await db.execute(
+        """
+        DELETE FROM mindroom_event_cache_event_threads AS root
+        USING unnest(%s::text[], %s::text[]) AS prior(room_id, thread_id)
+        WHERE root.namespace = %s
+            AND root.room_id = prior.room_id
+            AND root.event_id = prior.thread_id
+            AND root.thread_id = prior.thread_id
+            AND NOT EXISTS (
+                SELECT 1
+                FROM mindroom_event_cache_event_threads AS child
+                WHERE child.namespace = root.namespace
+                    AND child.room_id = root.room_id
+                    AND child.thread_id = root.thread_id
+                    AND child.event_id <> root.event_id
+            )
+        """,
+        (
+            [row[0] for row in prior_root_rows],
+            [row[1] for row in prior_root_rows],
+            namespace,
+        ),
+    )
 
 
 async def _dependent_edit_event_ids(

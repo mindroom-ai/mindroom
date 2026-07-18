@@ -25,11 +25,13 @@ from mindroom.matrix.cache import (
     ConversationEventCache,
     ThreadCacheState,
     event_normalization,
+    postgres_event_cache_events,
     sqlite_event_cache_events,
     sqlite_event_cache_threads,
     thread_cache_rejection_reason,
 )
 from mindroom.matrix.cache.event_batching import group_lookup_events_by_room
+from mindroom.matrix.cache.event_cache_events import serialize_cacheable_events
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
@@ -1545,49 +1547,215 @@ async def test_event_upsert_prefers_decrypted_payload_across_cache_clients(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("payload_order", [("opaque", "clear"), ("clear", "opaque")])
+@pytest.mark.parametrize(
+    ("payload_order", "expected_payload"),
+    [
+        (("opaque-a", "clear-a", "opaque-b"), "clear-a"),
+        (("clear-a", "clear-b"), "clear-b"),
+        (("opaque-a", "opaque-b"), "opaque-b"),
+        (("clear-a", "missing-type"), "clear-a"),
+        (("clear-a", "null-type"), "clear-a"),
+    ],
+)
 async def test_event_batch_derives_indexes_only_from_final_accepted_payload(
     event_cache: ConversationEventCache,
-    payload_order: tuple[str, str],
+    payload_order: tuple[str, ...],
+    expected_payload: str,
 ) -> None:
-    """Duplicate IDs in one batch must keep clear payloads and leave no ciphertext-derived indexes."""
+    """Duplicate IDs must choose the last acceptable payload and derive indexes from only that row."""
     room_id = "!room:localhost"
     event_id = "$event:localhost"
-    opaque_event = {
-        "event_id": event_id,
-        "sender": "@user:localhost",
-        "origin_server_ts": 1000,
-        "type": "m.room.encrypted",
-        "content": {
-            "algorithm": "m.megolm.v1.aes-sha2",
-            "ciphertext": "opaque ciphertext",
-            "device_id": "DEVICE",
-            "sender_key": "sender-key",
-            "session_id": "session",
-            "m.relates_to": {
-                "rel_type": "m.thread",
-                "event_id": "$opaque-root:localhost",
+
+    def event_source(payload: str) -> dict[str, object]:
+        root_id = f"${payload}-root:localhost"
+        if payload in {"missing-type", "null-type"}:
+            source: dict[str, object] = {
+                "event_id": event_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": 3000,
+                "content": {
+                    "body": payload,
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": root_id},
+                },
+            }
+            if payload == "null-type":
+                source["type"] = None
+            return source
+        if payload.startswith("opaque"):
+            return {
+                "event_id": event_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": 1000,
+                "type": "m.room.encrypted",
+                "content": {
+                    "algorithm": "m.megolm.v1.aes-sha2",
+                    "ciphertext": payload,
+                    "device_id": "DEVICE",
+                    "sender_key": "sender-key",
+                    "session_id": "session",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": root_id},
+                },
+            }
+        return {
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "body": payload,
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": root_id},
             },
-        },
-    }
-    clear_event = {
-        "event_id": event_id,
-        "sender": "@user:localhost",
-        "origin_server_ts": 2000,
-        "type": "m.room.message",
-        "content": {"body": "clear", "msgtype": "m.text"},
-    }
-    payloads = {"opaque": opaque_event, "clear": clear_event}
+        }
 
     await event_cache.store_events_batch(
-        [(event_id, room_id, payloads[payload]) for payload in payload_order],
+        [(event_id, room_id, event_source(payload)) for payload in payload_order],
     )
 
     cached_event = await event_cache.get_event(room_id, event_id)
     assert cached_event is not None
+    expected_type = "m.room.encrypted" if expected_payload.startswith("opaque") else "m.room.message"
+    expected_value_key = "ciphertext" if expected_payload.startswith("opaque") else "body"
+    expected_root_id = f"${expected_payload}-root:localhost"
+    assert cached_event["type"] == expected_type
+    assert cached_event["content"][expected_value_key] == expected_payload
+    assert await event_cache.get_thread_id_for_event(room_id, event_id) == expected_root_id
+    assert await event_cache.get_thread_id_for_event(room_id, expected_root_id) == expected_root_id
+    for rejected_payload in set(payload_order) - {expected_payload}:
+        rejected_root_id = f"${rejected_payload}-root:localhost"
+        assert await event_cache.get_thread_id_for_event(room_id, rejected_root_id) is None
+
+
+@pytest.mark.asyncio
+async def test_rejected_opaque_batch_preserves_existing_clear_payload_and_indexes(
+    event_cache: ConversationEventCache,
+) -> None:
+    """An all-opaque duplicate batch must not disturb an existing clear payload or its indexes."""
+    room_id = "!room:localhost"
+    event_id = "$event:localhost"
+    clear_root_id = "$clear-root:localhost"
+    clear_event = {
+        "event_id": event_id,
+        "sender": "@user:localhost",
+        "origin_server_ts": 1000,
+        "type": "m.room.message",
+        "content": {
+            "body": "clear",
+            "msgtype": "m.text",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": clear_root_id},
+        },
+    }
+    opaque_events = [
+        {
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 2000 + index,
+            "type": "m.room.encrypted",
+            "content": {
+                "algorithm": "m.megolm.v1.aes-sha2",
+                "ciphertext": f"opaque-{index}",
+                "device_id": "DEVICE",
+                "sender_key": "sender-key",
+                "session_id": "session",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": f"$opaque-{index}-root:localhost",
+                },
+            },
+        }
+        for index in range(2)
+    ]
+
+    await event_cache.store_event(event_id, room_id, clear_event)
+    await event_cache.store_events_batch([(event_id, room_id, event) for event in opaque_events])
+
+    cached_event = await event_cache.get_event(room_id, event_id)
+    assert cached_event is not None
     assert cached_event["type"] == "m.room.message"
-    assert await event_cache.get_thread_id_for_event(room_id, event_id) is None
-    assert await event_cache.get_thread_id_for_event(room_id, "$opaque-root:localhost") is None
+    assert cached_event["content"]["body"] == "clear"
+    assert await event_cache.get_thread_id_for_event(room_id, event_id) == clear_root_id
+    assert await event_cache.get_thread_id_for_event(room_id, clear_root_id) == clear_root_id
+    for index in range(2):
+        assert await event_cache.get_thread_id_for_event(room_id, f"$opaque-{index}-root:localhost") is None
+
+
+@pytest.mark.asyncio
+async def test_sqlite_lookup_index_batch_uses_constant_statement_count(tmp_path: Path) -> None:
+    """SQLite point payload and index writes should stay set-based as a sync batch grows."""
+    cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await cache.initialize()
+    db = cache._runtime.db
+    assert db is not None
+    statements: list[str] = []
+    await db.set_trace_callback(statements.append)
+    events = [
+        (
+            f"$event-{index}:localhost",
+            "!room:localhost",
+            {
+                "event_id": f"$event-{index}:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": index,
+                "type": "m.room.message",
+                "content": {"body": f"event {index}", "msgtype": "m.text"},
+            },
+        )
+        for index in range(50)
+    ]
+    try:
+        await cache.store_events_batch(events)
+    finally:
+        await db.set_trace_callback(None)
+        await cache.close()
+
+    lookup_index_statements = [
+        statement
+        for statement in statements
+        if (
+            "INSERT INTO events" in statement
+            or "FROM event_threads" in statement
+            or "DELETE FROM event_edits" in statement
+            or "DELETE FROM event_threads" in statement
+        )
+    ]
+    assert len(lookup_index_statements) == 4
+
+
+@pytest.mark.asyncio
+async def test_postgres_lookup_index_batch_uses_constant_statement_count() -> None:
+    """PostgreSQL point payload and index writes should not issue one query per sync event."""
+    room_id = "!room:localhost"
+    events = [
+        (
+            f"$event-{index}:localhost",
+            {
+                "event_id": f"$event-{index}:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": index,
+                "type": "m.room.message",
+                "content": {"body": f"event {index}", "msgtype": "m.text"},
+            },
+        )
+        for index in range(50)
+    ]
+    serialized_events = serialize_cacheable_events(events)
+    accepted_cursor = AsyncMock()
+    accepted_cursor.fetchall.return_value = [(event.event_id,) for event in serialized_events]
+    prior_roots_cursor = AsyncMock()
+    prior_roots_cursor.fetchall.return_value = []
+    db = AsyncMock()
+    db.execute.side_effect = [accepted_cursor, prior_roots_cursor, None, None]
+
+    await postgres_event_cache_events.write_lookup_index_rows(
+        db,
+        namespace="test",
+        room_id=room_id,
+        serialized_events=serialized_events,
+        cached_at=1.0,
+    )
+
+    assert db.execute.await_count == 4
 
 
 @pytest.mark.asyncio
