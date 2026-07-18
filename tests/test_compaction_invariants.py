@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from agno.agent import Agent
-from agno.exceptions import ContextWindowExceededError
+from agno.exceptions import ContextWindowExceededError, ModelProviderError, ModelRateLimitError
 from agno.models.anthropic import Claude
 from agno.models.message import Message
 from agno.models.response import ModelResponse
@@ -37,6 +37,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
+from mindroom.error_handling import ModelSafeguardRefusalError
 from mindroom.history.compaction import compact_scope_history
 from mindroom.history.storage import (
     compacted_run_ids_with,
@@ -635,6 +636,26 @@ def test_retry_policy_halves_budget_for_typed_context_window_error() -> None:
     error = ContextWindowExceededError(message="provider-specific wording does not matter")
 
     assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) == 8_000
+
+
+def test_retry_policy_halves_budget_for_typed_safeguard_refusal() -> None:
+    error = ModelSafeguardRefusalError(message="provider-specific wording does not matter")
+
+    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) == 8_000
+    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=2, budget=8_000, error=error) is None
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ModelRateLimitError(message="rate limited", status_code=429),
+        ModelProviderError(message="service unavailable", status_code=503),
+        ModelRateLimitError(message="overloaded", status_code=529),
+    ],
+)
+def test_retry_policy_retries_transient_provider_error_without_shrinking(error: ModelProviderError) -> None:
+    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) == 16_000
+    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=2, budget=16_000, error=error) is None
 
 
 def test_retry_policy_propagates_second_typed_context_window_error() -> None:
