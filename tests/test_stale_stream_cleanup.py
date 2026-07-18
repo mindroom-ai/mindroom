@@ -1888,7 +1888,7 @@ async def test_recent_mid_tool_shutdown_marker_resumes_only_without_newer_human_
     *,
     newer_human_activity: bool,
 ) -> None:
-    """A replaced mid-tool turn should be collected immediately while freshness still gates its relay."""
+    """A clock-skewed mid-tool marker should be collected while human activity still gates its relay."""
     config = _make_config(tmp_path)
     config.defaults.auto_resume_after_restart = True
     client = _make_client()
@@ -1897,7 +1897,7 @@ async def test_recent_mid_tool_shutdown_marker_resumes_only_without_newer_human_
         "Checking disk usage",
         cancel_source="sync_restart",
     )
-    target_timestamp_ms = NOW_MS - 1_000
+    target_timestamp_ms = NOW_MS + 60_000
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
             event_id="$thread-root",
@@ -1925,7 +1925,7 @@ async def test_recent_mid_tool_shutdown_marker_resumes_only_without_newer_human_
         client,
         config,
         joined_rooms=[ROOM_ID],
-        startup_cutoff_ms=NOW_MS,
+        startup_cutoff_ms=None,
     )
 
     assert cleaned == 0
@@ -1960,6 +1960,42 @@ async def test_recent_mid_tool_shutdown_marker_resumes_only_without_newer_human_
 
     assert resumed_count == (0 if newer_human_activity else 1)
     assert send_resume.await_count == resumed_count
+
+
+@pytest.mark.asyncio
+async def test_targeted_recovery_scans_only_handoff_rooms_without_a_clock_cutoff(tmp_path: Path) -> None:
+    """Replacement recovery must exclude unrelated rooms and preserve the Matrix clock domain."""
+    config = _make_config(tmp_path)
+    client = make_matrix_client_mock(user_id=BOT_USER_ID)
+    actors = {BOT_USER_ID: StaleStreamCleanupActor(client, MagicMock())}
+
+    with (
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.get_joined_rooms",
+            new=AsyncMock(return_value=[ROOM_ID, "!unrelated:example.org"]),
+        ),
+        patch(
+            "mindroom.matrix.stale_stream_cleanup._cleanup_stale_streaming_room",
+            new=AsyncMock(return_value=(0, [])),
+        ) as cleanup_room,
+    ):
+        scanned_room_ids: set[str] = set()
+        result = await recover_stale_streaming_messages(
+            actors,
+            resume_client=None,
+            resume_conversation_cache=None,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            startup_cutoff_ms=None,
+            scanned_room_ids=scanned_room_ids,
+            target_room_ids={ROOM_ID},
+        )
+
+    assert result == StaleStreamRecoveryResult(room_count=1, cleaned_count=0, resumed_count=0)
+    cleanup_room.assert_awaited_once()
+    assert cleanup_room.await_args.kwargs["room_id"] == ROOM_ID
+    assert cleanup_room.await_args.kwargs["startup_cutoff_ms"] is None
+    assert scanned_room_ids == {ROOM_ID}
 
 
 @pytest.mark.asyncio

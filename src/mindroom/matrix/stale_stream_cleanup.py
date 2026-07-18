@@ -192,7 +192,7 @@ async def recover_stale_streaming_messages(
     resume_conversation_cache: ConversationCacheProtocol | None,
     config: Config,
     runtime_paths: RuntimePaths,
-    startup_cutoff_ms: int,
+    startup_cutoff_ms: int | None,
     scanned_room_ids: set[str],
     target_room_ids: set[str] | None = None,
     room_concurrency: int = _RECOVERY_ROOM_CONCURRENCY,
@@ -1743,8 +1743,9 @@ def _should_skip_for_startup_cleanup_window(
     timestamp_ms = state.latest_timestamp
     if _is_at_or_after_startup_cutoff(timestamp_ms, startup_cutoff_ms=scan_policy.startup_cutoff_ms):
         return True
-    # A terminal interruption cannot still be receiving chunks, and the cutoff
-    # already proves it belongs to the previous bot generation.
+    # A terminal interruption cannot still be receiving chunks. Targeted
+    # replacement recovery passes no cutoff because local and Matrix clocks
+    # are not comparable.
     if _is_recent_timestamp(timestamp_ms, now_ms=now_ms) and not (
         scan_policy.collect_terminal_interrupted_for_resume and _has_resumable_interrupted_note(state)
     ):

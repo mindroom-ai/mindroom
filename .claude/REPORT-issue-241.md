@@ -17,17 +17,17 @@ This timing matters because no startup scan could have collected an event that d
 
 The dying openclaw bot wrote the edit during the 13:21 graceful entity replacement, not startup cleanup in a new process.
 `src/mindroom/streaming.py:285-301` maps a `sync_restart` cancellation to `RESTART_INTERRUPTED_RESPONSE_NOTE` and `STREAM_STATUS_ERROR`.
-`src/mindroom/streaming.py:645-696` applies that terminal update from `StreamingResponse.finalize()`.
-`src/mindroom/streaming.py:1835-1889` catches the response cancellation, drains pending delivery, calls `finalize(cancel_source=cancel_source)`, and re-raises a delivery error.
+`src/mindroom/streaming.py:645-762` applies that terminal update from `StreamingResponse.finalize()`.
+`src/mindroom/streaming.py:1784-1826` catches the response cancellation, drains pending delivery, calls `finalize(cancel_source=cancel_source)`, and re-raises a delivery error.
 The cached latest edit `$ob8K_y16WxhKIagooG19NdKr5xm3y84JtYb6ubDchTo` has timestamp 13:21:34, contains `**[Response interrupted by service restart]**`, and has `io.mindroom.stream_status: error`.
 Startup cleanup reads and classifies Matrix events in `src/mindroom/matrix/stale_stream_cleanup.py`; it does not write this terminal interrupted edit.
 
 ## Q2: What predicate controls resume eligibility?
 
 `src/mindroom/matrix/stale_stream_cleanup.py:156-163` enables collection when `defaults.auto_resume_after_restart` is true.
-`src/mindroom/matrix/stale_stream_cleanup.py:1692-1700` classifies the restart note as resume-eligible when the rendered body contains `RESTART_INTERRUPTED_RESPONSE_NOTE` and `stream_status` is absent, `error`, or `interrupted`.
-`src/mindroom/matrix/stale_stream_cleanup.py:1703-1723` additionally requires a thread identifier and rejects an event that already has an auto-resume relay.
-`src/mindroom/matrix/stale_stream_cleanup.py:534-586` applies the startup cutoff and age policy before collecting the candidate.
+`src/mindroom/matrix/stale_stream_cleanup.py:1693-1701` classifies the restart note as resume-eligible when the rendered body contains `RESTART_INTERRUPTED_RESPONSE_NOTE` and `stream_status` is absent, `error`, or `interrupted`.
+`src/mindroom/matrix/stale_stream_cleanup.py:607-610` and `1704-1723` require a thread identifier and reject an event that already has an auto-resume relay.
+`src/mindroom/matrix/stale_stream_cleanup.py:535-587` and `1736-1755` apply the startup cutoff and age policy before collecting the candidate.
 
 The affected event does not fail this predicate.
 Its latest state contains the restart note, `stream_status: error`, and the expected thread relation.
@@ -44,23 +44,23 @@ The three terminal states have the same relevant classification fields.
 | `$dAw5iTGPvSZAFGxe4Jd6piivYXojd0sA9D1BxW9C-EA` | `$ob8K…` | `error` | restart-interrupted note |
 
 The first two targets existed before the 09:52 startup scan and were collected.
-`src/mindroom/matrix/stale_stream_cleanup.py:375-414` then correctly skipped both because newer human activity existed.
+`src/mindroom/matrix/stale_stream_cleanup.py:376-415` then correctly skipped both because newer human activity existed.
 The affected target was created at 13:16:56 and could not appear in the earlier scan.
 The only 09:53 access to its eventual thread identifier was an unrelated thread-prewarm cache read; no placeholder for the later turn existed then.
 
 ## Q4: Does mid-tool cancellation use a different terminal path?
 
 Mid-tool and mid-text streaming use the same terminal finalization path.
-Tool progress and text chunks are consumed by the same response stream in `src/mindroom/streaming.py:1703-1833`.
-Any `CancelledError` enters the common handler in `src/mindroom/streaming.py:1835-1889` and calls `StreamingResponse.finalize()` with the classified cancellation source.
+Tool progress and text chunks are consumed by the same response stream in `src/mindroom/streaming.py:1295-1410`.
+Any `CancelledError` enters the common handler in `src/mindroom/streaming.py:1784-1826` and calls `StreamingResponse.finalize()` with the classified cancellation source.
 There is no tool-specific branch that changes the terminal Matrix status or omits the restart note.
 
 ## Root cause
 
 The actual interruption was a forced hot-config replacement, not a process restart.
-`src/mindroom/bot.py:325` constructs a separate `SyncRestartRetryQueue` for every bot instance.
-`src/mindroom/turn_controller.py:1600-1635` registers an in-memory retry closure after the interrupted response finalizes.
-`src/mindroom/bot.py:1214-1232` only flushes that queue after the same bot receives a later healthy sync response.
+`src/mindroom/bot.py:327` constructs a separate `SyncRestartRetryQueue` for every bot instance.
+`src/mindroom/turn_controller.py:1643-1659` registers an in-memory retry closure after the interrupted response finalizes.
+`src/mindroom/bot.py:1238-1245` only flushes that queue after the same bot receives a later healthy sync response.
 The config lifecycle replaces the interrupted bot instance, so the old queue and its callback become unreachable before they can flush.
 `src/mindroom/sync_restart_retry.py` is intentionally an in-process sync-watchdog mechanism and provides no cross-instance handoff.
 

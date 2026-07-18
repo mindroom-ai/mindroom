@@ -635,6 +635,47 @@ async def test_handle_mcp_catalog_change_sets_up_rooms_before_trigger_runtime_re
 
 
 @pytest.mark.asyncio
+async def test_mcp_catalog_replacement_recovers_interrupted_rooms(tmp_path: Path) -> None:
+    """The direct MCP restart path must use the same interrupted-room handoff."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    config = _config(tmp_path)
+    config.defaults.auto_resume_after_restart = True
+    orchestrator.config = config
+    orchestrator.running = True
+    old_code_bot = MagicMock(spec=AgentBot)
+    old_code_bot.pending_sync_restart_retry_room_ids = frozenset()
+    old_team_bot = MagicMock(spec=AgentBot)
+    old_team_bot.pending_sync_restart_retry_room_ids = frozenset()
+    new_code_bot = MagicMock(spec=AgentBot)
+    new_code_bot.agent_name = "code"
+    new_code_bot.running = True
+    new_code_bot.client = MagicMock()
+    new_code_bot.agent_user = MagicMock(user_id="@code:example.org")
+    orchestrator.agent_bots = {
+        "code": old_code_bot,
+        "dev_team": old_team_bot,
+    }
+
+    async def stop_interrupted_bot(*_args: object, **_kwargs: object) -> None:
+        old_code_bot.pending_sync_restart_retry_room_ids = frozenset({"!interrupted:example.org"})
+
+    async def install_replacement(*_args: object, **_kwargs: object) -> EntityStartResults:
+        orchestrator.agent_bots["code"] = new_code_bot
+        return EntityStartResults()
+
+    with (
+        patch("mindroom.orchestrator.stop_entities", new=AsyncMock(side_effect=stop_interrupted_bot)),
+        patch.object(orchestrator, "_create_and_start_entities", new=AsyncMock(side_effect=install_replacement)),
+        patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()) as mock_recover,
+    ):
+        await orchestrator._handle_mcp_catalog_change("demo")
+
+    mock_recover.assert_awaited_once()
+    assert mock_recover.await_args.args[:3] == ([new_code_bot], config, None)
+    assert mock_recover.await_args.kwargs["target_room_ids"] == {"!interrupted:example.org"}
+
+
+@pytest.mark.asyncio
 async def test_router_restart_unbinds_external_trigger_runtime_before_stop_and_stays_unbound_on_failure(
     tmp_path: Path,
 ) -> None:
@@ -756,15 +797,25 @@ async def test_external_trigger_target_restart_unbinds_runtime_before_stop(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_entity_replacement_recovers_rooms_from_the_old_bots_retry_queue(tmp_path: Path) -> None:
-    """A replacement bot should recover terminal markers that its old generation queued for retry."""
+@pytest.mark.parametrize("already_stopped", [False, True])
+async def test_entity_replacement_recovers_rooms_from_every_old_bot(
+    tmp_path: Path,
+    *,
+    already_stopped: bool,
+) -> None:
+    """Replacement recovery must include bots stopped early for an MCP change."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
     config = _config_with_code_agent(tmp_path)
     orchestrator.config = config
     old_bot = MagicMock(spec=AgentBot)
-    old_bot.pending_sync_restart_retry_room_ids = frozenset()
+    old_bot.pending_sync_restart_retry_room_ids = (
+        frozenset({"!interrupted:example.org"}) if already_stopped else frozenset()
+    )
     new_bot = MagicMock(spec=AgentBot)
     new_bot.agent_name = "code"
+    new_bot.running = True
+    new_bot.client = MagicMock()
+    new_bot.agent_user = MagicMock(user_id="@code:example.org")
     orchestrator.agent_bots = {"code": old_bot}
     plan = ConfigUpdatePlan(
         new_config=config,
@@ -782,6 +833,10 @@ async def test_entity_replacement_recovers_rooms_from_the_old_bots_retry_queue(t
     async def stop_mid_tool_turn(*_args: object, **_kwargs: object) -> None:
         old_bot.pending_sync_restart_retry_room_ids = frozenset({"!interrupted:example.org"})
 
+    async def start_replacement(*_args: object, **_kwargs: object) -> EntityStartResults:
+        orchestrator.agent_bots["code"] = new_bot
+        return EntityStartResults(started_bots=[new_bot])
+
     with (
         patch(
             "mindroom.orchestrator.stop_entities",
@@ -790,20 +845,52 @@ async def test_entity_replacement_recovers_rooms_from_the_old_bots_retry_queue(t
         patch.object(
             orchestrator,
             "_create_and_start_entities",
-            new=AsyncMock(return_value=EntityStartResults(started_bots=[new_bot])),
+            new=AsyncMock(side_effect=start_replacement),
         ),
         patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()) as mock_recover,
     ):
-        await orchestrator._restart_changed_entities(plan)
+        await orchestrator._restart_changed_entities(
+            plan,
+            already_stopped_entities={"code"} if already_stopped else set(),
+        )
+        await orchestrator._recover_pending_replacement_rooms(config)
 
-    mock_stop_entities.assert_awaited_once()
-    assert mock_stop_entities.await_args.kwargs["restart_entities"] == {"code"}
+    if already_stopped:
+        mock_stop_entities.assert_not_awaited()
+    else:
+        mock_stop_entities.assert_awaited_once()
+        assert mock_stop_entities.await_args.kwargs["restart_entities"] == {"code"}
     mock_recover.assert_awaited_once()
     assert mock_recover.await_args.args[0] == [new_bot]
     assert mock_recover.await_args.args[1] is config
-    assert isinstance(mock_recover.await_args.args[2], int)
+    assert mock_recover.await_args.args[2] is None
     assert mock_recover.await_args.args[3] == set()
     assert mock_recover.await_args.kwargs["target_room_ids"] == {"!interrupted:example.org"}
+    assert orchestrator._pending_replacement_recovery_room_ids == {}
+
+
+@pytest.mark.asyncio
+async def test_delayed_replacement_start_retries_pending_room_recovery(tmp_path: Path) -> None:
+    """A transient replacement startup failure must not discard its interrupted-room handoff."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    config = _config_with_code_agent(tmp_path)
+    orchestrator.config = config
+    replacement_bot = MagicMock(spec=AgentBot)
+    replacement_bot.running = False
+    replacement_bot.try_start = AsyncMock(return_value=True)
+    orchestrator.agent_bots = {"code": replacement_bot}
+    orchestrator._pending_replacement_recovery_room_ids = {
+        "code": {"!interrupted:example.org"},
+    }
+
+    with (
+        patch.object(orchestrator, "_start_sync_task"),
+        patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()) as mock_recover,
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
+    ):
+        await orchestrator._run_bot_start_retry("code")
+
+    mock_recover.assert_awaited_once_with(config)
 
 
 @pytest.mark.asyncio
