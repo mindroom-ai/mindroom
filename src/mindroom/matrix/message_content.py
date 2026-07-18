@@ -191,6 +191,7 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
                 except Exception:
                     remove_cached_mxc_plaintext(cache_key)
                     logger.exception("Failed to revalidate durable MXC plaintext ownership")
+                    return None
                 else:
                     if not ownership_persisted:
                         remove_cached_mxc_plaintext(cache_key)

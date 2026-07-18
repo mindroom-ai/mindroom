@@ -44,7 +44,8 @@ If durable leave or ban cleanup fails, the principal-room purge remains pending 
 
 Process-local plaintext for the departed principal and room is removed immediately even when the durable backend is unavailable.
 
-SQLite schema version 11 resets older advisory cache contents inside one rollback-safe transaction and creates a durable cache-generation identifier.
+SQLite schema version 11 resets older advisory cache contents inside one rollback-safe transaction and creates a durable database-generation identifier.
+Each SQLite principal view derives a stable checkpoint generation from that database generation and the full Matrix principal ID, so a retained agent token cannot cross an account or homeserver rebind.
 
 PostgreSQL schema version 2 migrates under a global transaction-scoped advisory lock, preserves every namespace, expands event and plaintext keys with room scope, and quarantines legacy unscoped plaintext under an unreachable empty room ID.
 

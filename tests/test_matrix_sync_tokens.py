@@ -22,6 +22,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.dispatch_handoff import PendingDispatchMetadata
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
+from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.sync_certification import SyncCertificationDecision, SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
@@ -268,6 +269,36 @@ async def test_bot_start_initializes_postgres_principal_before_restoring_checkpo
         assert bot.event_cache.cache_generation == generation
     finally:
         await reopened_root.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_checkpoint_generation_rejects_matrix_principal_rebind(tmp_path: Path) -> None:
+    """A retained agent token must not cross a Matrix account or homeserver change."""
+    root = SqliteEventCache(tmp_path / "event-cache.db")
+    await root.initialize()
+    old_principal = root.for_principal("@mindroom_code:old.example")
+    new_principal = root.for_principal("@mindroom_code:new.example")
+    old_generation = old_principal.cache_generation
+    assert old_generation is not None
+    assert new_principal.cache_generation != old_generation
+    save_sync_token(
+        tmp_path,
+        "code",
+        "s_old_principal",
+        cache_generation=old_generation,
+    )
+    bot = _agent_bot(tmp_path)
+    bot.event_cache = new_principal
+    bot.client = make_matrix_client_mock(user_id=new_principal.principal_id)
+    bot.client.next_batch = None
+
+    try:
+        bot._restore_saved_sync_token()
+
+        assert bot.client.next_batch is None
+        assert load_sync_token_record(tmp_path, bot.agent_name) is None
+    finally:
+        await root.close()
 
 
 @pytest.mark.asyncio

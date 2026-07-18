@@ -984,6 +984,34 @@ class TestDownloadMxcText:
         client.download.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_durable_hit_fails_closed_when_ownership_revalidation_errors(self) -> None:
+        """A backend outage during final ownership validation must not release stale plaintext."""
+        principal_id = "@alice:localhost"
+        room_id = "!room:localhost"
+        event_id = "$event"
+        mxc_url = "mxc://server/revalidation-outage"
+        cache_key = (principal_id, room_id, event_id, mxc_url)
+        client = AsyncMock()
+        client.user_id = principal_id
+        event_cache = AsyncMock()
+        event_cache.principal_id = principal_id
+        event_cache.get_mxc_text.return_value = "possibly redacted plaintext"
+        event_cache.store_mxc_text.side_effect = RuntimeError("cache unavailable")
+
+        assert (
+            await _download_mxc_text(
+                client,
+                mxc_url,
+                event_cache=event_cache,
+                room_id=room_id,
+                event_id=event_id,
+            )
+            is None
+        )
+        assert cache_key not in mxc_plaintext_cache_module._mxc_cache
+        client.download.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_active_event_cache_without_event_identity_does_not_suppress_download(self) -> None:
         """An incomplete owner may hydrate for this call but cannot populate either cache."""
         client = AsyncMock()

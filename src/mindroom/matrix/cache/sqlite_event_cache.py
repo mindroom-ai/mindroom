@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 import uuid
 from collections import OrderedDict
@@ -541,7 +542,11 @@ class SqliteEventCache:
     @property
     def cache_generation(self) -> str | None:
         """Return the generation that certified sync checkpoints must match when available."""
-        return self._runtime.generation
+        generation = self._runtime.generation
+        if generation is None:
+            return None
+        principal_generation = f"{generation}\0{self.principal_id}".encode()
+        return hashlib.sha256(principal_generation).hexdigest()
 
     def runtime_diagnostics(self) -> dict[str, object]:
         """Return log-safe runtime state for sync certification diagnostics."""
