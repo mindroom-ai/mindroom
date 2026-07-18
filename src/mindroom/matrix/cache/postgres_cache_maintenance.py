@@ -30,13 +30,14 @@ async def migrate_postgres_schema(
         )
         raise RuntimeError(msg)
 
-    await db.execute(
-        """
-        ALTER TABLE mindroom_event_cache_thread_events
-        ALTER COLUMN event_json DROP NOT NULL
-        """,
-    )
     migrated_from = 1 if current_schema_version == 1 else None
+    if migrated_from is not None:
+        await db.execute(
+            """
+            ALTER TABLE mindroom_event_cache_thread_events
+            ALTER COLUMN event_json DROP NOT NULL
+            """,
+        )
 
     await db.execute(
         """

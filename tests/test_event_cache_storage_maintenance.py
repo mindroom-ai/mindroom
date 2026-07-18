@@ -15,6 +15,7 @@ from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
 from mindroom.matrix.cache import postgres_event_cache, sqlite_event_cache
+from mindroom.matrix.cache.postgres_cache_maintenance import migrate_postgres_schema
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 
@@ -419,6 +420,38 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
             await cursor.close()
         finally:
             await other_cache.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_version_2_maintenance_avoids_exclusive_schema_lock(
+    postgres_event_cache_url: str,
+) -> None:
+    """Routine namespace maintenance must run beside readers without repeating migration DDL."""
+    namespace = f"tenant_{uuid.uuid4().hex}"
+    async with _isolated_postgres_database(postgres_event_cache_url) as database_url:
+        cache = PostgresEventCache(database_url=database_url, namespace=namespace)
+        await cache.initialize()
+        await cache.close()
+
+        blocker = await psycopg.AsyncConnection.connect(database_url)
+        maintainer = await psycopg.AsyncConnection.connect(database_url)
+        try:
+            await blocker.execute(
+                "LOCK TABLE mindroom_event_cache_thread_events IN ACCESS SHARE MODE",
+            )
+            await maintainer.execute("SET statement_timeout = '500ms'")
+            migrated_from = await migrate_postgres_schema(
+                maintainer,
+                namespace=namespace,
+                current_schema_version=2,
+                target_schema_version=2,
+            )
+            assert migrated_from is None
+            await maintainer.rollback()
+        finally:
+            await blocker.rollback()
+            await blocker.close()
+            await maintainer.close()
 
 
 @pytest.mark.asyncio
