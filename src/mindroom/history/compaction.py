@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from functools import partial
 from html import escape
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
@@ -17,6 +18,7 @@ from agno.session.summary import SessionSummary
 from agno.utils.message import filter_tool_calls
 from pydantic import BaseModel
 
+from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS, prompt_roles_for_history_storage
 from mindroom.history.storage import (
     compacted_run_ids_with,
@@ -39,12 +41,7 @@ from mindroom.history.types import (
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
-from mindroom.token_budget import (
-    compaction_token_estimator,
-    estimate_compaction_input_tokens,
-    estimate_text_tokens,
-    stable_serialize,
-)
+from mindroom.token_budget import estimate_compaction_input_tokens, estimate_text_tokens, stable_serialize
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
 
 if TYPE_CHECKING:
@@ -348,16 +345,10 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
     before_persist_callback: Callable[[Sequence[RunOutput | TeamRunOutput]], Awaitable[None]] | None = None,
 ) -> _CompactionRewriteResult | None:
     final_summary_text = _current_summary_text(working_session) or ""
-    estimator = compaction_token_estimator(model_id=summary_model.id)
-    token_estimator = estimator.estimate
-    logger.info(
-        "Compaction token estimator selected",
-        session_id=session_id,
-        scope=scope.key,
-        provider=summary_model.provider,
-        model=summary_model.id,
-        token_estimator_method=estimator.method,
-        token_estimate_confidence=estimator.confidence,
+    token_estimator = partial(
+        estimate_compaction_input_tokens,
+        model_id=summary_model.id,
+        conservative_fallback=as_anthropic_claude(summary_model) is not None,
     )
     total_compacted_run_count = 0
     all_compacted_run_ids: list[str] = []
@@ -576,16 +567,6 @@ async def _generate_compaction_summary_with_retry(
                 # feasibility gate. If no run fits the smaller budget, fall through
                 # to raise instead of resending the original input.
                 if rebuilt_runs:
-                    logger.info(
-                        "Compaction summary chunk retry scheduled",
-                        session_id=session_id,
-                        scope=scope.key,
-                        attempt=attempt,
-                        next_attempt=attempt + 1,
-                        previous_input_budget=budget,
-                        next_input_budget=retry_budget,
-                        error_type=type(exc).__name__,
-                    )
                     summary_input = rebuilt_input
                     included_runs = rebuilt_runs
                     budget = retry_budget

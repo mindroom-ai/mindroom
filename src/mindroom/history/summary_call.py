@@ -10,11 +10,8 @@ It enforces the call-side half of the compaction invariants
    at or above max_tokens is a 400 from Anthropic), SDK retries disabled, and
    one SDK timeout coordinated with the outer chunk budget
    (``MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS``) instead of two uncoordinated
-   constants in two modules. Gemini, OpenAI Chat, and Cerebras summary calls use
-   one candidate so provider usage describes the same response Agno retains.
-   Summary output uses the loaded model's configured output cap as the truncation
-   guard. Gemini's guard includes its separately reported thinking tokens because
-   they consume the same output budget. Unknown providers pass through untouched
+   constants in two modules. Claude summary output uses the loaded model's own
+   max_tokens as the truncation guard. Unknown providers pass through untouched
    and rely on the outer chunk timeout alone.
 
 4. Retry on provider failure is deterministic.
@@ -38,11 +35,10 @@ plugs in behind it without another cross-cutting diff.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING
 
 from agno.exceptions import ContextWindowExceededError
 from agno.models.message import Message
@@ -52,23 +48,15 @@ from mindroom.cancellation import request_task_cancel
 from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
 from mindroom.logging_config import get_logger
-from mindroom.model_instance_checks import isinstance_of_loaded
 from mindroom.timing import timed
-from mindroom.token_budget import configured_model_max_output_tokens
 
 if TYPE_CHECKING:
     from agno.models.base import Model
-    from agno.models.cerebras import Cerebras
-    from agno.models.google import Gemini
-    from agno.models.openai import OpenAIChat
     from agno.models.response import ModelResponse
 
 logger = get_logger(__name__)
 
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
-_CEREBRAS_CLASS = ("agno.models.cerebras.cerebras", "Cerebras")
-_GOOGLE_GEMINI_CLASS = ("agno.models.google.gemini", "Gemini")
-_OPENAI_CHAT_CLASS = ("agno.models.openai.chat", "OpenAIChat")
 
 _RETRYABLE_PROVIDER_ERROR_FRAGMENTS = (
     "timed out",
@@ -95,25 +83,16 @@ class _CompactionSummaryEmptyResultError(RuntimeError):
     """Raised when the summary model returns a success response with no text."""
 
 
-@runtime_checkable
-class _ConfigWithCandidateCount(Protocol):
-    """Typed surface for Gemini SDK request config objects."""
-
-    candidate_count: int | None
-
-
 @dataclass(frozen=True)
 class SummaryRetryPolicy:
     """Explicit retry policy for failed compaction summary calls.
 
     The schedule is deterministic: each shrinkable failure divides the input
-    budget by ``shrink_divisor`` (clamped to ``floor_tokens``). Ordinary errors
-    stop at ``max_attempts``; empty successes stop at
-    ``empty_result_max_attempts``.
+    budget by ``shrink_divisor`` (clamped to ``floor_tokens``); once the budget
+    can no longer shrink, or ``max_attempts`` is reached, the error propagates.
     """
 
     max_attempts: int = 2
-    empty_result_max_attempts: int = 3
     shrink_divisor: int = 2
     floor_tokens: int = 1_000
 
@@ -126,11 +105,9 @@ class SummaryRetryPolicy:
 
     def retry_budget(self, *, attempt: int, budget: int, error: Exception) -> int | None:
         """Return the input budget for the next attempt, or None when the policy gives up."""
-        is_empty_result = isinstance(error, _CompactionSummaryEmptyResultError)
-        max_attempts = self.empty_result_max_attempts if is_empty_result else self.max_attempts
-        if attempt >= max_attempts:
+        if attempt >= self.max_attempts:
             return None
-        if not is_empty_result and not self.should_shrink(error):
+        if not isinstance(error, _CompactionSummaryEmptyResultError) and not self.should_shrink(error):
             return None
         smaller_budget = max(self.floor_tokens, budget // self.shrink_divisor)
         if smaller_budget >= budget:
@@ -141,86 +118,6 @@ class SummaryRetryPolicy:
 DEFAULT_SUMMARY_RETRY_POLICY = SummaryRetryPolicy()
 
 
-def _multiple_candidates_requested(value: object) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value > 1
-
-
-def _force_single_gemini_candidate(model: Gemini) -> None:
-    effective_config = model.get_request_params().get("config")
-    if isinstance(effective_config, Mapping):
-        candidate_count = effective_config.get("candidate_count")
-    elif isinstance(effective_config, _ConfigWithCandidateCount):
-        candidate_count = effective_config.candidate_count
-    else:
-        return
-    if not _multiple_candidates_requested(candidate_count):
-        return
-
-    request_params = dict(model.request_params or {})
-    if "config" not in request_params:
-        generative_model_kwargs = dict(model.generative_model_kwargs or {})
-        generative_model_kwargs["candidate_count"] = 1
-        model.generative_model_kwargs = generative_model_kwargs
-        return
-
-    request_config = request_params["config"]
-    if isinstance(request_config, Mapping):
-        adjusted_config = dict(request_config)
-        adjusted_config["candidate_count"] = 1
-        request_params["config"] = adjusted_config
-        model.request_params = request_params
-    elif isinstance(request_config, _ConfigWithCandidateCount):
-        request_config.candidate_count = 1
-
-
-def _force_single_openai_chat_choice(model: OpenAIChat) -> None:
-    effective_request = model.get_request_params()
-    request_params = dict(model.request_params or {})
-    changed = False
-    if _multiple_candidates_requested(effective_request.get("n")):
-        request_params["n"] = 1
-        changed = True
-
-    extra_body = effective_request.get("extra_body")
-    if isinstance(extra_body, Mapping) and _multiple_candidates_requested(extra_body.get("n")):
-        adjusted_extra_body = dict(extra_body)
-        adjusted_extra_body["n"] = 1
-        request_params["extra_body"] = adjusted_extra_body
-        changed = True
-
-    if changed:
-        model.request_params = request_params
-
-
-def _force_single_cerebras_choice(model: Cerebras) -> None:
-    effective_request = model.get_request_params()
-    request_params = dict(model.request_params or {})
-    if _multiple_candidates_requested(effective_request.get("n")):
-        request_params["n"] = 1
-        model.request_params = request_params
-
-    extra_body = effective_request.get("extra_body")
-    if not isinstance(extra_body, Mapping) or not _multiple_candidates_requested(extra_body.get("n")):
-        return
-    adjusted_extra_body = dict(extra_body)
-    adjusted_extra_body["n"] = 1
-    if "extra_body" in request_params:
-        request_params["extra_body"] = adjusted_extra_body
-        model.request_params = request_params
-    else:
-        model.extra_body = adjusted_extra_body
-
-
-def _force_single_summary_candidate(model: Model) -> None:
-    """Keep provider usage and Agno's retained first response on the same scope."""
-    if isinstance_of_loaded(model, _GOOGLE_GEMINI_CLASS):
-        _force_single_gemini_candidate(cast("Gemini", model))
-    elif isinstance_of_loaded(model, _OPENAI_CHAT_CLASS):
-        _force_single_openai_chat_choice(cast("OpenAIChat", model))
-    elif isinstance_of_loaded(model, _CEREBRAS_CLASS):
-        _force_single_cerebras_choice(cast("Cerebras", model))
-
-
 def configure_summary_model(model: Model, *, timeout_seconds: float | None = None) -> Model:
     """Apply all compaction-specific provider tuning to one loaded model (invariant 3).
 
@@ -229,13 +126,12 @@ def configure_summary_model(model: Model, *, timeout_seconds: float | None = Non
     Mutating the instance is safe: ``get_model_instance`` builds a fresh model per
     call and compaction loads its own instance per run.
     """
-    _force_single_summary_candidate(model)
     claude_model = as_anthropic_claude(model)
     if claude_model is None:
         logger.debug(
-            "Compaction Claude-specific model tuning skipped",
+            "Compaction summary model tuning skipped",
             model_type=type(model).__name__,
-            reason="model_is_not_claude",
+            reason="provider_specific_tuning_only_defined_for_claude",
         )
         return model
     resolved_timeout = MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
@@ -327,7 +223,7 @@ async def generate_compaction_summary(
     """Issue one compaction summary call with tuned provider config and one timeout."""
     resolved_timeout = MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     configured_model = configure_summary_model(model, timeout_seconds=resolved_timeout)
-    summary_output_limit = configured_model_max_output_tokens(configured_model)
+    summary_output_limit = _summary_output_token_limit(configured_model)
 
     async def _request_summary() -> ModelResponse:
         try:
@@ -379,11 +275,7 @@ async def generate_compaction_summary(
             f"has_reasoning={bool(response.reasoning_content or response.redacted_reasoning_content)})"
         )
         raise _CompactionSummaryEmptyResultError(msg)
-    if _summary_response_likely_truncated(
-        response,
-        output_token_limit=summary_output_limit,
-        include_reasoning_tokens=isinstance_of_loaded(configured_model, _GOOGLE_GEMINI_CLASS),
-    ):
+    if _summary_response_likely_truncated(response, output_token_limit=summary_output_limit):
         msg = "compaction summary hit configured output token limit; refusing to persist incomplete summary"
         raise CompactionSummaryOutputLimitError(msg)
     return SessionSummary(summary=normalized_text, updated_at=datetime.now(UTC))
@@ -400,19 +292,16 @@ def _normalize_compaction_summary_text(raw_text: str) -> str:
     return normalized
 
 
-def _summary_response_likely_truncated(
-    response: ModelResponse,
-    *,
-    output_token_limit: int | None,
-    include_reasoning_tokens: bool = False,
-) -> bool:
+def _summary_output_token_limit(model: Model) -> int | None:
+    claude_model = as_anthropic_claude(model)
+    return claude_model.max_tokens if claude_model is not None else None
+
+
+def _summary_response_likely_truncated(response: ModelResponse, *, output_token_limit: int | None) -> bool:
     if output_token_limit is None:
         return False
     output_tokens = _response_output_tokens(response)
-    if output_tokens is None:
-        return False
-    reasoning_tokens = _response_reasoning_tokens(response) if include_reasoning_tokens else 0
-    return output_tokens + (reasoning_tokens or 0) >= output_token_limit
+    return output_tokens is not None and output_tokens >= output_token_limit
 
 
 def _response_output_tokens(response: ModelResponse) -> int | None:
@@ -421,11 +310,3 @@ def _response_output_tokens(response: ModelResponse) -> int | None:
     if response.response_usage is None:
         return None
     return response.response_usage.output_tokens
-
-
-def _response_reasoning_tokens(response: ModelResponse) -> int | None:
-    if response.reasoning_tokens is not None:
-        return response.reasoning_tokens
-    if response.response_usage is None:
-        return None
-    return response.response_usage.reasoning_tokens

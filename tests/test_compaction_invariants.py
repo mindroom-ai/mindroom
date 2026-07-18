@@ -14,27 +14,20 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from agno.agent import Agent
 from agno.exceptions import ContextWindowExceededError
 from agno.models.anthropic import Claude
-from agno.models.cerebras import Cerebras
-from agno.models.google import Gemini
-from agno.models.message import Message, MessageMetrics
-from agno.models.ollama import Ollama
-from agno.models.openai import OpenAIChat, OpenAIResponses
+from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
-from google.genai.types import GenerateContentConfig
 
 from mindroom.agent_storage import create_session_storage, get_agent_session
-from mindroom.codex_model import CodexResponses
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
@@ -64,16 +57,9 @@ from mindroom.history.summary_call import (
 )
 from mindroom.history.types import HistoryPolicy, HistoryScope, HistoryScopeState, ResolvedHistorySettings
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
-from mindroom.token_budget import (
-    compaction_token_estimator,
-    compute_compaction_input_budget,
-    configured_model_max_output_tokens,
-)
+from mindroom.token_budget import estimate_compaction_input_tokens
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 from tests.conftest import FakeModel, bind_runtime_paths, prepare_history_for_run_for_test
-
-if TYPE_CHECKING:
-    from agno.models.base import Model
 
 _SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
 _HISTORY_SETTINGS = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
@@ -480,112 +466,6 @@ def test_configure_summary_model_preserves_authored_output_cap() -> None:
     assert model.timeout == 30.0
 
 
-@pytest.mark.parametrize(
-    "model",
-    [
-        Gemini(
-            id="gemini-3.5-flash",
-            max_output_tokens=1024,
-            generation_config={"candidate_count": 2},
-        ),
-        Gemini(
-            id="gemini-3.5-flash",
-            max_output_tokens=1024,
-            generative_model_kwargs={"candidate_count": 2},
-        ),
-        Gemini(
-            id="gemini-3.5-flash",
-            request_params={
-                "config": {
-                    "candidate_count": 2,
-                    "max_output_tokens": 1024,
-                },
-            },
-        ),
-        Gemini(
-            id="gemini-3.5-flash",
-            request_params={
-                "config": GenerateContentConfig(
-                    candidate_count=2,
-                    max_output_tokens=1024,
-                ),
-            },
-        ),
-    ],
-)
-def test_configure_summary_model_forces_single_gemini_candidate(model: Gemini) -> None:
-    configure_summary_model(model)
-
-    request_config = model.get_request_params()["config"]
-    if isinstance(request_config, dict):
-        assert request_config["candidate_count"] == 1
-    else:
-        assert isinstance(request_config, GenerateContentConfig)
-        assert request_config.candidate_count == 1
-
-
-@pytest.mark.parametrize(
-    "model",
-    [
-        OpenAIChat(
-            id="gpt-5.6",
-            max_completion_tokens=1024,
-            request_params={"n": 2},
-        ),
-        OpenAIChat(
-            id="gpt-5.6",
-            max_completion_tokens=1024,
-            extra_body={"n": 2},
-        ),
-        OpenAIChat(
-            id="gpt-5.6",
-            max_completion_tokens=1024,
-            request_params={"n": 2, "extra_body": {"n": 3}},
-        ),
-    ],
-)
-def test_configure_summary_model_forces_single_openai_chat_choice(model: OpenAIChat) -> None:
-    configure_summary_model(model)
-
-    request_params = model.get_request_params()
-    if "n" in request_params:
-        assert request_params["n"] == 1
-    extra_body = request_params.get("extra_body")
-    if isinstance(extra_body, dict):
-        assert extra_body.get("n") == 1
-
-
-@pytest.mark.parametrize(
-    "model",
-    [
-        Cerebras(
-            id="llama-4-scout-17b-16e-instruct",
-            max_completion_tokens=1024,
-            request_params={"n": 2},
-        ),
-        Cerebras(
-            id="llama-4-scout-17b-16e-instruct",
-            max_completion_tokens=1024,
-            extra_body={"n": 2},
-        ),
-        Cerebras(
-            id="llama-4-scout-17b-16e-instruct",
-            max_completion_tokens=1024,
-            request_params={"n": 2, "extra_body": {"n": 3}},
-        ),
-    ],
-)
-def test_configure_summary_model_forces_single_cerebras_choice(model: Cerebras) -> None:
-    configure_summary_model(model)
-
-    request_params = model.get_request_params()
-    if "n" in request_params:
-        assert request_params["n"] == 1
-    extra_body = request_params.get("extra_body")
-    if isinstance(extra_body, dict):
-        assert extra_body.get("n") == 1
-
-
 def test_configure_summary_model_leaves_unknown_providers_untouched() -> None:
     model = FakeModel(id="test-model", provider="fake")
 
@@ -654,80 +534,6 @@ async def test_generate_compaction_summary_uses_configured_output_cap() -> None:
             summary_input="conversation payload",
             summary_prompt="Summarize the conversation.",
         )
-
-
-@pytest.mark.parametrize(
-    "model",
-    [
-        OpenAIResponses(id="gpt-5.6", max_output_tokens=1_024),
-        OpenAIChat(id="gpt-5.6", max_completion_tokens=1_024),
-    ],
-)
-@pytest.mark.asyncio
-async def test_generate_compaction_summary_rejects_provider_output_cap_truncation(model: Model) -> None:
-    with (
-        patch.object(
-            model,
-            "aresponse",
-            new=AsyncMock(
-                return_value=ModelResponse(
-                    content="durable summary ended at its output cap.",
-                    output_tokens=1_024,
-                ),
-            ),
-        ),
-        pytest.raises(CompactionSummaryOutputLimitError, match="output token limit"),
-    ):
-        await generate_compaction_summary(
-            model=model,
-            summary_input="conversation payload",
-            summary_prompt="Summarize the conversation.",
-        )
-
-
-@pytest.mark.asyncio
-async def test_generate_compaction_summary_counts_gemini_thinking_toward_output_cap() -> None:
-    model = Gemini(id="gemini-3.5-flash", provider="Custom Google", max_output_tokens=1_024)
-    with (
-        patch.object(
-            model,
-            "aresponse",
-            new=AsyncMock(
-                return_value=ModelResponse(
-                    content="durable summary was truncated after extensive thinking.",
-                    response_usage=MessageMetrics(output_tokens=24, reasoning_tokens=1_000),
-                ),
-            ),
-        ),
-        pytest.raises(CompactionSummaryOutputLimitError, match="output token limit"),
-    ):
-        await generate_compaction_summary(
-            model=model,
-            summary_input="conversation payload",
-            summary_prompt="Summarize the conversation.",
-        )
-
-
-@pytest.mark.asyncio
-async def test_generate_compaction_summary_does_not_double_count_openai_reasoning_tokens() -> None:
-    model = OpenAIResponses(id="gpt-5.6", max_output_tokens=1_024)
-    with patch.object(
-        model,
-        "aresponse",
-        new=AsyncMock(
-            return_value=ModelResponse(
-                content="durable summary ended cleanly.",
-                response_usage=MessageMetrics(output_tokens=1_023, reasoning_tokens=1_000),
-            ),
-        ),
-    ):
-        summary = await generate_compaction_summary(
-            model=model,
-            summary_input="conversation payload",
-            summary_prompt="Summarize the conversation.",
-        )
-
-    assert summary.summary == "durable summary ended cleanly."
 
 
 @pytest.mark.asyncio
@@ -858,7 +664,7 @@ def test_retry_policy_gives_up_on_non_retryable_errors() -> None:
 
 
 def test_retry_policy_gives_up_after_max_attempts() -> None:
-    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=2, budget=8_000, error=TimeoutError()) is None
+    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=2, budget=16_000, error=TimeoutError()) is None
 
 
 def test_retry_policy_clamps_to_floor_and_stops_there() -> None:
@@ -900,220 +706,92 @@ async def test_generate_compaction_summary_empty_result_raises_typed_error_with_
         )
 
 
-@pytest.mark.asyncio
-async def test_generate_compaction_summary_accepts_short_non_empty_result() -> None:
-    summary = await generate_compaction_summary(
-        model=_RecordingClaude(
-            id="claude-sonnet-5",
-            response=ModelResponse(content="ok"),
-        ),
-        summary_input="conversation payload",
-        summary_prompt="Summarize the conversation.",
-    )
-
-    assert summary.summary == "ok"
-
-
 def test_retry_policy_shrinks_budget_for_empty_result() -> None:
     """Empty results may be a provider's response to an oversized request."""
     error = _CompactionSummaryEmptyResultError("summary generation returned no result")
     assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) == 8_000
-    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=2, budget=8_000, error=error) == 4_000
-    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=3, budget=4_000, error=error) is None
+    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=2, budget=16_000, error=error) is None
 
 
-def test_compaction_input_estimate_uses_tiktoken_for_known_model() -> None:
-    estimator = compaction_token_estimator(model_id="gpt-4o")
-
-    assert estimator.method == "tiktoken:o200k_base"
-    assert estimator.confidence == "high"
-    assert estimator.estimate("structured: true") == 3
-    assert estimator.estimate("☃☃") == 4
+def test_compaction_input_estimate_uses_tiktoken() -> None:
+    assert estimate_compaction_input_tokens("structured: true") == 3
+    assert estimate_compaction_input_tokens("☃☃") == 4
 
 
 def test_compaction_input_estimate_uses_conservative_claude_fallback() -> None:
-    estimator = compaction_token_estimator(model_id="claude-sonnet-5")
-
-    assert estimator.method == "utf8_bytes_conservative"
-    assert estimator.confidence == "low"
-    assert estimator.estimate("structured: true") == len(b"structured: true")
-    assert estimator.estimate("☃☃") == 6
-
-
-def test_compaction_input_estimate_uses_conservative_unknown_fallback() -> None:
-    estimator = compaction_token_estimator()
-
-    assert estimator.method == "utf8_bytes_conservative"
-    assert estimator.confidence == "low"
-    assert estimator.estimate("structured: true") == len(b"structured: true")
+    assert estimate_compaction_input_tokens(
+        "structured: true",
+        model_id="claude-sonnet-5",
+        conservative_fallback=True,
+    ) == len(b"structured: true")
+    assert estimate_compaction_input_tokens("☃☃", model_id="claude-sonnet-5", conservative_fallback=True) == 6
 
 
-def test_compaction_budget_reserves_loaded_model_output_cap() -> None:
-    model = _RecordingClaude(id="claude-sonnet-5", max_tokens=64_000)
+def test_compaction_input_estimate_keeps_known_model_encoding() -> None:
+    assert estimate_compaction_input_tokens("structured: true", model_id="gpt-4o", conservative_fallback=True) == 3
 
-    assert configured_model_max_output_tokens(model) == 64_000
+
+@pytest.mark.asyncio
+async def test_claude_compaction_splits_dense_tool_schema_before_the_input_limit(tmp_path: Path) -> None:
+    """Regression for the production request that tiktoken underestimated by 1.63x."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    runs = []
+    for run_index in range(20):
+        run = _completed_run(f"run-{run_index}")
+        run.metadata = {
+            "tools_schema": [
+                {
+                    "name": f"tool_{run_index}_{tool_index}",
+                    "description": "".join(
+                        f"{run_index * 100_000 + tool_index * 1_000 + value:08x}" for value in range(50)
+                    ),
+                }
+                for tool_index in range(20)
+            ],
+        }
+        runs.append(run)
+    session = _session(runs)
+    write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+    summary_inputs: list[str] = []
+
+    async def record_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+        summary_inputs.append(summary_input)
+        return SessionSummary(summary=f"summary chunk {len(summary_inputs)}", updated_at=datetime.now(UTC))
+
+    summary_input_limit = 167_232
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(side_effect=record_summary),
+    ):
+        outcome = await compact_scope_history(
+            storage=storage,
+            session=session,
+            scope=_SCOPE,
+            state=read_scope_state(session, _SCOPE),
+            history_settings=_HISTORY_SETTINGS,
+            available_history_budget=None,
+            summary_input_budget=summary_input_limit,
+            summary_model=_RecordingClaude(id="claude-sonnet-5"),
+            summary_model_name="summary-model",
+            replay_window_tokens=200_000,
+            threshold_tokens=None,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+        )
+
+    assert outcome is not None
+    assert outcome.compacted_run_count == 20
+    assert len(summary_inputs) == 2
+    assert all(len(summary_input.encode("utf-8")) <= summary_input_limit for summary_input in summary_inputs)
     assert (
-        compute_compaction_input_budget(
-            100_000,
-            reserve_tokens=16_384,
-            model_max_output_tokens=configured_model_max_output_tokens(model),
+        estimate_compaction_input_tokens(
+            summary_inputs[0],
+            model_id="claude-sonnet-5",
         )
-        == 24_000
+        < summary_input_limit
     )
-
-
-@pytest.mark.parametrize(
-    "model",
-    [
-        OpenAIResponses(id="gpt-5.6", max_output_tokens=64_000),
-        OpenAIChat(id="gpt-5.6", max_completion_tokens=64_000),
-        Gemini(id="gemini-3.5-flash", max_output_tokens=64_000),
-        Ollama(id="llama3.1", options={"num_predict": 64_000}),
-    ],
-)
-def test_loaded_model_output_cap_supports_provider_parameter_names(model: Model) -> None:
-    assert configured_model_max_output_tokens(model) == 64_000
-
-
-@pytest.mark.parametrize(
-    ("model", "expected"),
-    [
-        (Claude(id="claude-sonnet-5", max_tokens=8_192, request_params={"max_tokens": 64_000}), 64_000),
-        (Claude(id="claude-sonnet-5", max_tokens=64_000, request_params={"max_tokens": 1_024}), 1_024),
-        (OpenAIResponses(id="gpt-5.6", request_params={"max_output_tokens": 64_000}), 64_000),
-        (OpenAIChat(id="gpt-5.6", request_params={"max_completion_tokens": 64_000}), 64_000),
-        (OpenAIResponses(id="gpt-5.6", extra_body={"max_output_tokens": 64_000}), 64_000),
-        (
-            OpenAIResponses(
-                id="gpt-5.6",
-                max_output_tokens=64_000,
-                extra_body={"max_output_tokens": 1_024},
-            ),
-            1_024,
-        ),
-        (
-            OpenAIResponses(
-                id="gpt-5.6",
-                max_output_tokens=1_024,
-                extra_body={"max_output_tokens": 64_000},
-            ),
-            64_000,
-        ),
-        (OpenAIResponses(id="gpt-5.6", max_output_tokens=64_000, extra_body={"max_output_tokens": None}), None),
-        (OpenAIChat(id="gpt-5.6", extra_body={"max_completion_tokens": 64_000}), 64_000),
-        (
-            OpenAIChat(
-                id="gpt-5.6",
-                max_completion_tokens=64_000,
-                extra_body={"max_completion_tokens": 1_024},
-            ),
-            1_024,
-        ),
-        (Gemini(id="gemini-3.5-flash", request_params={"config": {"max_output_tokens": 64_000}}), 64_000),
-        (
-            Gemini(
-                id="gemini-3.5-flash",
-                max_output_tokens=64_000,
-                request_params={"config": {"max_output_tokens": 1_024}},
-            ),
-            1_024,
-        ),
-        (
-            Gemini(
-                id="gemini-3.5-flash",
-                max_output_tokens=64_000,
-                request_params={"config": GenerateContentConfig(max_output_tokens=1_024)},
-            ),
-            1_024,
-        ),
-        (
-            Ollama(
-                id="llama3.1",
-                options={"num_predict": 1_024},
-                request_params={"options": {"num_predict": 64_000}},
-            ),
-            64_000,
-        ),
-    ],
-)
-def test_loaded_model_output_cap_honors_request_parameter_overrides(model: Model, expected: int) -> None:
-    assert configured_model_max_output_tokens(model) == expected
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model",
-    [
-        Gemini(
-            id="gemini-3.5-flash",
-            max_output_tokens=64_000,
-            request_params={"config": {"max_output_tokens": 1_024}},
-        ),
-        OpenAIResponses(
-            id="gpt-5.6",
-            max_output_tokens=64_000,
-            extra_body={"max_output_tokens": 1_024},
-        ),
-        OpenAIChat(
-            id="gpt-5.6",
-            max_completion_tokens=64_000,
-            extra_body={"max_completion_tokens": 1_024},
-        ),
-    ],
-)
-async def test_generate_compaction_summary_uses_effective_request_output_cap(model: Model) -> None:
-    with (
-        patch.object(
-            model,
-            "aresponse",
-            new=AsyncMock(
-                return_value=ModelResponse(
-                    content="durable summary ended at its output cap.",
-                    output_tokens=1_024,
-                ),
-            ),
-        ),
-        pytest.raises(CompactionSummaryOutputLimitError, match="output token limit"),
-    ):
-        await generate_compaction_summary(
-            model=model,
-            summary_input="conversation payload",
-            summary_prompt="Summarize the conversation.",
-        )
-
-
-def test_codex_stripped_output_cap_does_not_reduce_compaction_input_budget() -> None:
-    model = CodexResponses(id="gpt-5.6", max_output_tokens=40_000)
-
-    assert "max_output_tokens" not in model.get_request_params()
-    assert configured_model_max_output_tokens(model) is None
-    assert compute_compaction_input_budget(
-        100_000,
-        reserve_tokens=16_384,
-        model_max_output_tokens=configured_model_max_output_tokens(model),
-    ) == compute_compaction_input_budget(100_000, reserve_tokens=16_384)
-
-
-@pytest.mark.asyncio
-async def test_generate_compaction_summary_allows_codex_response_without_wire_cap() -> None:
-    model = CodexResponses(id="gpt-5.6", max_output_tokens=40)
-    with patch.object(
-        model,
-        "aresponse",
-        new=AsyncMock(
-            return_value=ModelResponse(
-                content="durable summary ended cleanly.",
-                output_tokens=40,
-            ),
-        ),
-    ):
-        summary = await generate_compaction_summary(
-            model=model,
-            summary_input="conversation payload",
-            summary_prompt="Summarize the conversation.",
-        )
-
-    assert summary.summary == "durable summary ended cleanly."
+    storage.close()
 
 
 @pytest.mark.asyncio
@@ -1134,7 +812,7 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
 
     async def flaky_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
         attempts.append(summary_input)
-        if len(attempts) <= 2:
+        if len(attempts) == 1:
             msg = "summary generation returned no result (output_tokens=0, has_reasoning=False)"
             raise _CompactionSummaryEmptyResultError(msg)
         return SessionSummary(summary="recovered summary", updated_at=datetime.now(UTC))
@@ -1159,12 +837,10 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
         )
 
     assert outcome is not None
-    # Chunk 1 fails twice, succeeds on a bounded third attempt, then chunk 2 compacts run-2.
-    assert len(attempts) == 4
-    estimator = compaction_token_estimator(model_id="summary-model")
-    assert estimator.estimate(attempts[1]) < estimator.estimate(attempts[0])
-    assert estimator.estimate(attempts[2]) < estimator.estimate(attempts[1])
-    assert attempts[3] != attempts[2]
+    # Chunk 1 fails empty, is rebuilt smaller, then chunk 2 compacts run-2.
+    assert len(attempts) == 3
+    assert estimate_compaction_input_tokens(attempts[1]) < estimate_compaction_input_tokens(attempts[0])
+    assert attempts[2] != attempts[1]
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
     assert persisted.summary is not None

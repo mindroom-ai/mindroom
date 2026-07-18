@@ -111,7 +111,6 @@ You can tune team-scoped compaction behavior with these settings:
 - Use `model` to choose the summary model.
 - Set `enabled: false` to disable automatic pre-reply compaction for a team.
 
-For summary generation only, MindRoom first clamps `reserve_tokens` to at most half the summary model's context window, then computes input capacity using the larger of that normalized reserve and the loaded model's positive output cap.
 When the active team model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
 When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
 If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass.

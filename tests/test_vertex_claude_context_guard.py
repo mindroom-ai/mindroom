@@ -23,9 +23,8 @@ from mindroom.claude_prompt_cache import (
 )
 from mindroom.claude_stream_retry import install_claude_stream_retry_hook
 from mindroom.error_handling import ModelSafeguardRefusalError
-from mindroom.token_budget import stable_serialize
+from mindroom.token_budget import estimate_compaction_input_tokens, stable_serialize
 from mindroom.vertex_claude_compat import (
-    _EXACT_COUNT_THRESHOLD_RATIO,
     _VERTEX_TOOL_SEARCH_TOKEN_RESERVE,
     MindroomVertexAIClaude,
     _request_for_vertex_token_count,
@@ -535,14 +534,15 @@ async def test_fit_request_messages_counts_exactly_at_half_budget() -> None:
 
 
 @pytest.mark.asyncio
-async def test_conservative_fallback_crossing_half_budget_delegates_to_exact_count() -> None:
-    """The byte fallback may deliberately cause an earlier Vertex count call."""
+async def test_conservative_claude_estimate_triggers_exact_count_before_the_request_limit() -> None:
+    """Dense unknown-tokenizer payloads reach Vertex's exact-count gate early."""
     model = _model()
     messages = [Message(role="user", content="hello")]
     request_kwargs = {
         "model": model.id,
         "messages": [{"role": "user", "content": "hello"}],
     }
+    serialized_request = stable_serialize(request_kwargs)
     counter = AsyncMock(return_value=20)
 
     with (
@@ -563,10 +563,11 @@ async def test_conservative_fallback_crossing_half_budget_delegates_to_exact_cou
             compress_tool_results=False,
         )
 
-    assert estimated_tokens == len(stable_serialize(request_kwargs).encode("utf-8"))
     assert model.context_window is not None
     assert model.max_tokens is not None
-    exact_count_threshold = (model.context_window - model.max_tokens) * _EXACT_COUNT_THRESHOLD_RATIO
+    exact_count_threshold = (model.context_window - model.max_tokens) / 2
+    assert estimate_compaction_input_tokens(serialized_request, model_id=model.id) < exact_count_threshold
+    assert estimated_tokens == len(serialized_request.encode("utf-8"))
     assert estimated_tokens >= exact_count_threshold
     assert fitted is messages
     counter.assert_awaited_once()

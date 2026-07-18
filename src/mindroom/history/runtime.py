@@ -29,7 +29,6 @@ from mindroom.history.compaction import (
 from mindroom.history.policy import (
     classify_compaction_decision,
     describe_compaction_unavailability,
-    normalize_compaction_budget_tokens,
     resolve_history_execution_plan,
 )
 from mindroom.history.prompt_tokens import estimate_agent_static_tokens, estimate_team_static_tokens
@@ -59,11 +58,7 @@ from mindroom.history.types import (
 from mindroom.logging_config import get_logger
 from mindroom.team_scope import ad_hoc_team_has_private_member, ad_hoc_team_scope_id
 from mindroom.timing import timed
-from mindroom.token_budget import (
-    compute_compaction_input_budget,
-    configured_model_max_output_tokens,
-    estimate_text_tokens,
-)
+from mindroom.token_budget import estimate_text_tokens
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -529,20 +524,6 @@ async def _run_scope_compaction(
         runtime_paths,
         execution_plan.compaction_model_name,
     )
-    model_max_output_tokens = configured_model_max_output_tokens(summary_model)
-    summary_input_budget = _effective_summary_input_budget(
-        execution_plan,
-        model_max_output_tokens=model_max_output_tokens,
-    )
-    logger.info(
-        "Compaction summary input budget resolved",
-        summary_model=execution_plan.compaction_model_name,
-        context_window=execution_plan.compaction_context_window,
-        configured_reserve_tokens=execution_plan.reserve_tokens,
-        model_max_output_tokens=model_max_output_tokens,
-        planned_input_budget=execution_plan.summary_input_budget_tokens,
-        effective_input_budget=summary_input_budget,
-    )
     return await compact_scope_history(
         storage=storage,
         session=session,
@@ -550,7 +531,7 @@ async def _run_scope_compaction(
         state=state,
         history_settings=resolved_inputs.history_settings,
         available_history_budget=history_budget,
-        summary_input_budget=summary_input_budget,
+        summary_input_budget=execution_plan.summary_input_budget_tokens,
         summary_model=summary_model,
         summary_model_name=execution_plan.compaction_model_name,
         replay_window_tokens=execution_plan.replay_window_tokens,
@@ -559,32 +540,6 @@ async def _run_scope_compaction(
         lifecycle_notice_event_id=lifecycle_notice_event_id,
         progress_callback=progress_callback,
     )
-
-
-def _effective_summary_input_budget(
-    execution_plan: ResolvedHistoryExecutionPlan,
-    *,
-    model_max_output_tokens: int | None,
-) -> int:
-    """Apply the loaded model output cap without bypassing resolved reserve policy."""
-    assert execution_plan.summary_input_budget_tokens is not None
-    if model_max_output_tokens is None:
-        return execution_plan.summary_input_budget_tokens
-
-    assert execution_plan.compaction_context_window is not None
-    normalized_reserve_tokens = normalize_compaction_budget_tokens(
-        execution_plan.reserve_tokens,
-        execution_plan.compaction_context_window,
-    )
-    effective_budget = compute_compaction_input_budget(
-        execution_plan.compaction_context_window,
-        reserve_tokens=normalized_reserve_tokens,
-        model_max_output_tokens=model_max_output_tokens,
-    )
-    if effective_budget <= 0:
-        msg = "Compaction model leaves no usable summary input budget after its configured output cap."
-        raise ValueError(msg)
-    return effective_budget
 
 
 def finalize_history_preparation(

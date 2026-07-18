@@ -1007,6 +1007,7 @@ depends_on = ["mindroom.attachment_media"]
 [[modules]]
 path = "mindroom.history.compaction"
 depends_on = [
+    "mindroom.claude_prompt_cache",
     "mindroom.constants",
     "mindroom.history.storage",
     "mindroom.history.summary_call",
@@ -1033,9 +1034,7 @@ depends_on = [
     "mindroom.claude_prompt_cache",
     "mindroom.constants",
     "mindroom.logging_config",
-    "mindroom.model_instance_checks",
     "mindroom.timing",
-    "mindroom.token_budget",
 ]
 
 [[modules]]
