@@ -11,6 +11,8 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     ORIGINAL_SENDER_KEY,
+    PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
+    PER_FIRE_THREAD_ROOT_KEY,
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
     STREAM_STATUS_KEY,
@@ -312,7 +314,7 @@ async def test_prepare_large_message_missing_sidecar_file_metadata_falls_back_to
     ) -> tuple[str, dict[str, object] | None]:
         return "mxc://server/missing-metadata", file_info
 
-    monkeypatch.setattr("mindroom.matrix.large_messages._upload_content_json_sidecar", missing_file_metadata)
+    monkeypatch.setattr("mindroom.matrix.large_messages.upload_json_sidecar", missing_file_metadata)
     client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
     content = _large_text_content("missing metadata ")
 
@@ -342,7 +344,7 @@ async def test_prepare_large_message_encrypted_incomplete_file_metadata_falls_ba
     client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
     client.rooms = {"!room:server": room}
     monkeypatch.setattr(
-        "mindroom.matrix.large_messages._upload_content_json_sidecar",
+        "mindroom.matrix.large_messages.upload_json_sidecar",
         incomplete_encrypted_file_metadata,
     )
     content = _large_text_content("encrypted missing metadata ")
@@ -379,7 +381,7 @@ async def test_prepare_large_message_encrypted_valid_sidecar_keeps_file_preview(
     room.encrypted = True
     client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
     client.rooms = {"!room:server": room}
-    monkeypatch.setattr("mindroom.matrix.large_messages._upload_content_json_sidecar", encrypted_file_metadata)
+    monkeypatch.setattr("mindroom.matrix.large_messages.upload_json_sidecar", encrypted_file_metadata)
     content = _large_text_content("encrypted sidecar ")
 
     result = await prepare_large_message(client, "!room:server", content)
@@ -411,7 +413,7 @@ async def test_prepare_streaming_edit_encrypted_incomplete_file_metadata_omits_s
     client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
     client.rooms = {"!room:server": room}
     monkeypatch.setattr(
-        "mindroom.matrix.large_messages._upload_content_json_sidecar",
+        "mindroom.matrix.large_messages.upload_json_sidecar",
         incomplete_encrypted_file_metadata,
     )
     text = "streaming encrypted fallback " + ("z" * 60000)
@@ -823,11 +825,15 @@ async def test_prepare_large_message_trusted_metadata_round_trips_through_sideca
         ATTACHMENT_IDS_KEY: ["att-sidecar"],
         HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2,
         ORIGINAL_SENDER_KEY: "@user:localhost",
+        PER_FIRE_THREAD_ROOT_KEY: True,
+        PER_FIRE_THREAD_ROOT_EVENT_ID_KEY: "$fire-root:localhost",
         VOICE_RAW_AUDIO_FALLBACK_KEY: True,
     }
 
     preview = await prepare_large_message(client, "!room:server", content)
     assert client.uploaded_data is not None
+    assert preview[PER_FIRE_THREAD_ROOT_KEY] is True
+    assert preview[PER_FIRE_THREAD_ROOT_EVENT_ID_KEY] == "$fire-root:localhost"
     event = nio.RoomMessageText.from_dict(
         {
             "content": preview,
@@ -849,6 +855,8 @@ async def test_prepare_large_message_trusted_metadata_round_trips_through_sideca
     assert resolved["content"][ATTACHMENT_IDS_KEY] == ["att-sidecar"]
     assert resolved["content"][HOOK_MESSAGE_RECEIVED_DEPTH_KEY] == 2
     assert resolved["content"][ORIGINAL_SENDER_KEY] == "@user:localhost"
+    assert resolved["content"][PER_FIRE_THREAD_ROOT_KEY] is True
+    assert resolved["content"][PER_FIRE_THREAD_ROOT_EVENT_ID_KEY] == "$fire-root:localhost"
     assert resolved["content"][VOICE_RAW_AUDIO_FALLBACK_KEY] is True
 
 

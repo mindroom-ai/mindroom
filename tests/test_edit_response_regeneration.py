@@ -28,8 +28,10 @@ from mindroom.commands import config_confirmation
 from mindroom.config.main import Config
 from mindroom.constants import (
     MATRIX_CONVERSATION_TARGET_METADATA_KEY,
+    MATRIX_EVENT_ID_METADATA_KEY,
     MATRIX_HISTORY_SCOPE_METADATA_KEY,
     MATRIX_RESPONSE_OWNER_METADATA_KEY,
+    MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
     MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY,
@@ -852,6 +854,35 @@ def test_remove_run_by_event_id_matches_discovery_aliases() -> None:
     assert session.runs == []
 
 
+def test_remove_run_by_event_id_optionally_matches_consumed_history() -> None:
+    """Redaction cleanup may remove later runs whose replay consumed the source."""
+    session = TeamSession(
+        session_id="session-1",
+        team_id="test_team",
+        runs=[
+            TeamRunOutput(
+                session_id="session-1",
+                metadata={
+                    MATRIX_EVENT_ID_METADATA_KEY: "$later:example.com",
+                    MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$source:example.com", "$later:example.com"],
+                },
+            ),
+        ],
+    )
+    storage = _FakeTeamStorage(session)
+
+    removed = remove_run_by_event_id(
+        storage,
+        "session-1",
+        "$source:example.com",
+        session_type=SessionType.TEAM,
+        include_seen_event_ids=True,
+    )
+
+    assert removed is True
+    assert session.runs == []
+
+
 @pytest.mark.asyncio
 async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path: Path) -> None:
     """Team edit regeneration should delete stale runs from the shared team session."""
@@ -1007,6 +1038,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
             stored_target.session_id,
             "$original:example.com",
             session_type=SessionType.TEAM,
+            remove_following_runs=True,
         ),
     ]
     mock_team_response.assert_awaited_once()
@@ -1460,12 +1492,14 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
                     "!test:example.com",
                     "$first:example.com",
                     session_type=SessionType.AGENT,
+                    remove_following_runs=True,
                 ),
                 call(
                     mock_create_storage.return_value,
                     "!test:example.com",
                     "$primary:example.com",
                     session_type=SessionType.AGENT,
+                    remove_following_runs=True,
                 ),
             ],
         )
@@ -1975,12 +2009,14 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
                     "!test:example.com",
                     "$first:example.com",
                     session_type=SessionType.AGENT,
+                    remove_following_runs=True,
                 ),
                 call(
                     storage,
                     "!test:example.com",
                     "$primary:example.com",
                     session_type=SessionType.AGENT,
+                    remove_following_runs=True,
                 ),
             ],
         )

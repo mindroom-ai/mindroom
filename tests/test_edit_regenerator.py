@@ -81,6 +81,7 @@ def _message_context(*, thread_id: str | None = THREAD_ID) -> MessageContext:
 def _turn_record(
     *,
     source_event_ids: tuple[str, ...] = (ORIGINAL_EVENT_ID,),
+    redacted_source_event_ids: tuple[str, ...] = (),
     anchor_event_id: str | None = None,
     response_event_id: str | None = RESPONSE_EVENT_ID,
     source_event_prompts: dict[str, str] | None = None,
@@ -92,6 +93,7 @@ def _turn_record(
     return TurnRecord(
         anchor_event_id=anchor,
         source_event_ids=source_event_ids,
+        redacted_source_event_ids=redacted_source_event_ids,
         response_event_id=response_event_id,
         source_event_prompts=source_event_prompts,
         source_event_metadata=source_event_metadata,
@@ -155,6 +157,7 @@ def _harness(tmp_path: Path, *, turn_record: TurnRecord | None) -> _Harness:
     turn_store = MagicMock(spec=TurnStore)
     turn_store.load_turn.return_value = turn_record
     turn_store.build_run_metadata.return_value = dict(RUN_METADATA)
+    turn_store.prepare_response_for_redactions.return_value = False
 
     ingress_hook_runner = MagicMock(spec=IngressHookRunner)
     ingress_hook_runner.emit_message_received_hooks.return_value = False
@@ -286,6 +289,96 @@ async def test_coalesced_edit_rebuilds_combined_prompt(tmp_path: Path) -> None:
         first_event_id: "edited first message",
         second_event_id: "second message",
     }
+
+
+@pytest.mark.asyncio
+async def test_coalesced_sibling_edit_excludes_redacted_source_prompt(tmp_path: Path) -> None:
+    """Editing a sibling must rebuild without the tombstoned member's durable text."""
+    first_event_id = "$m1:example.org"
+    second_event_id = "$m2:example.org"
+    record = _turn_record(
+        source_event_ids=(first_event_id, second_event_id),
+        redacted_source_event_ids=(first_event_id,),
+        source_event_prompts={first_event_id: "REDACTED_SECRET", second_event_id: "second message"},
+    )
+    harness = _harness(tmp_path, turn_record=record)
+    event, event_info = _edit_event(original_event_id=second_event_id, new_body="edited second message")
+
+    await _handle_edit(harness, event, event_info)
+
+    request = harness.generate_response.await_args.args[0]
+    assert request.prompt == coalesced_prompt(["edited second message"])
+    assert "REDACTED_SECRET" not in request.prompt
+    assert request.prepare_source_turn is not None
+    assert request.prepare_source_turn() is False
+    harness.turn_store.prepare_response_for_redactions.assert_called_once_with(
+        target=record.conversation_target,
+        source_event_ids=(second_event_id,),
+    )
+    handled_turn = harness.turn_store.build_run_metadata.call_args.args[0]
+    assert handled_turn.redacted_source_event_ids == (first_event_id,)
+    assert handled_turn.source_event_prompts == {second_event_id: "edited second message"}
+
+
+@pytest.mark.asyncio
+async def test_coalesced_edit_rechecks_every_snapshotted_source_under_lock(tmp_path: Path) -> None:
+    """A sibling redacted after prompt assembly must suppress the stale coalesced prompt."""
+    first_event_id = "$m1:example.org"
+    second_event_id = "$m2:example.org"
+    record = _turn_record(
+        source_event_ids=(first_event_id, second_event_id),
+        source_event_prompts={first_event_id: "first message", second_event_id: "second message"},
+    )
+    harness = _harness(tmp_path, turn_record=record)
+    harness.turn_store.prepare_response_for_redactions.return_value = True
+    event, event_info = _edit_event(original_event_id=second_event_id, new_body="edited second message")
+
+    await _handle_edit(harness, event, event_info)
+
+    request = harness.generate_response.await_args.args[0]
+    assert request.prepare_source_turn is not None
+    assert request.prepare_source_turn() is True
+    harness.turn_store.prepare_response_for_redactions.assert_called_once_with(
+        target=record.conversation_target,
+        source_event_ids=(first_event_id, second_event_id),
+    )
+
+
+@pytest.mark.asyncio
+async def test_edit_of_redacted_coalesced_source_is_ignored(tmp_path: Path) -> None:
+    """A later edit cannot reintroduce a source already tombstoned by redaction."""
+    first_event_id = "$m1:example.org"
+    second_event_id = "$m2:example.org"
+    record = _turn_record(
+        source_event_ids=(first_event_id, second_event_id),
+        redacted_source_event_ids=(first_event_id,),
+        source_event_prompts={first_event_id: "REDACTED_SECRET", second_event_id: "second message"},
+    )
+    harness = _harness(tmp_path, turn_record=record)
+    event, event_info = _edit_event(original_event_id=first_event_id, new_body="restore secret")
+
+    await _handle_edit(harness, event, event_info)
+
+    _assert_no_regeneration(harness)
+
+
+@pytest.mark.asyncio
+async def test_edit_request_rechecks_redaction_after_acquiring_response_lock(tmp_path: Path) -> None:
+    """A redaction that wins the lifecycle lock race must suppress stale regeneration."""
+    record = _turn_record()
+    harness = _harness(tmp_path, turn_record=record)
+    harness.turn_store.prepare_response_for_redactions.return_value = True
+    event, event_info = _edit_event()
+
+    await _handle_edit(harness, event, event_info)
+
+    request = harness.generate_response.await_args.args[0]
+    assert request.prepare_source_turn is not None
+    assert request.prepare_source_turn() is True
+    harness.turn_store.prepare_response_for_redactions.assert_called_once_with(
+        target=record.conversation_target,
+        source_event_ids=(ORIGINAL_EVENT_ID,),
+    )
 
 
 @pytest.mark.asyncio

@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from agno.agent import Agent
+from agno.exceptions import ContextWindowExceededError
 from agno.models.anthropic import Claude
 from agno.models.message import Message
 from agno.models.response import ModelResponse
@@ -616,7 +617,7 @@ def test_build_summary_request_messages_is_the_single_request_seam() -> None:
 # --- Invariant 4: deterministic budget shrink on provider failure --------------
 
 
-def test_retry_policy_shrinks_on_timeout_and_context_length_errors() -> None:
+def test_retry_policy_shrinks_on_timeout_and_output_limit() -> None:
     policy = DEFAULT_SUMMARY_RETRY_POLICY
 
     assert policy.retry_budget(attempt=1, budget=16_000, error=TimeoutError()) == 8_000
@@ -628,6 +629,23 @@ def test_retry_policy_shrinks_on_timeout_and_context_length_errors() -> None:
         )
         == 8_000
     )
+
+
+def test_retry_policy_halves_budget_for_typed_context_window_error() -> None:
+    error = ContextWindowExceededError(message="provider-specific wording does not matter")
+
+    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) == 8_000
+
+
+def test_retry_policy_propagates_second_typed_context_window_error() -> None:
+    error = ContextWindowExceededError(message="provider-specific wording does not matter")
+
+    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=2, budget=8_000, error=error) is None
+
+
+def test_retry_policy_preserves_context_error_fragment_matches() -> None:
+    policy = DEFAULT_SUMMARY_RETRY_POLICY
+
     assert policy.retry_budget(attempt=1, budget=16_000, error=RuntimeError("context_length_exceeded")) == 8_000
     assert policy.retry_budget(attempt=1, budget=16_000, error=RuntimeError("request too large")) == 8_000
     assert (
@@ -698,6 +716,82 @@ def test_retry_policy_shrinks_budget_for_empty_result() -> None:
 def test_compaction_input_estimate_uses_tiktoken() -> None:
     assert estimate_compaction_input_tokens("structured: true") == 3
     assert estimate_compaction_input_tokens("☃☃") == 4
+
+
+def test_compaction_input_estimate_uses_conservative_claude_fallback() -> None:
+    assert estimate_compaction_input_tokens(
+        "structured: true",
+        model_id="claude-sonnet-5",
+        conservative_fallback=True,
+    ) == len(b"structured: true")
+    assert estimate_compaction_input_tokens("☃☃", model_id="claude-sonnet-5", conservative_fallback=True) == 6
+
+
+def test_compaction_input_estimate_keeps_known_model_encoding() -> None:
+    assert estimate_compaction_input_tokens("structured: true", model_id="gpt-4o", conservative_fallback=True) == 3
+
+
+@pytest.mark.asyncio
+async def test_claude_compaction_splits_dense_tool_schema_before_the_input_limit(tmp_path: Path) -> None:
+    """Regression for the production request that tiktoken underestimated by 1.63x."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    runs = []
+    for run_index in range(20):
+        run = _completed_run(f"run-{run_index}")
+        run.metadata = {
+            "tools_schema": [
+                {
+                    "name": f"tool_{run_index}_{tool_index}",
+                    "description": "".join(
+                        f"{run_index * 100_000 + tool_index * 1_000 + value:08x}" for value in range(50)
+                    ),
+                }
+                for tool_index in range(20)
+            ],
+        }
+        runs.append(run)
+    session = _session(runs)
+    write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+    summary_inputs: list[str] = []
+
+    async def record_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+        summary_inputs.append(summary_input)
+        return SessionSummary(summary=f"summary chunk {len(summary_inputs)}", updated_at=datetime.now(UTC))
+
+    summary_input_limit = 167_232
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(side_effect=record_summary),
+    ):
+        outcome = await compact_scope_history(
+            storage=storage,
+            session=session,
+            scope=_SCOPE,
+            state=read_scope_state(session, _SCOPE),
+            history_settings=_HISTORY_SETTINGS,
+            available_history_budget=None,
+            summary_input_budget=summary_input_limit,
+            summary_model=_RecordingClaude(id="claude-sonnet-5"),
+            summary_model_name="summary-model",
+            replay_window_tokens=200_000,
+            threshold_tokens=None,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+        )
+
+    assert outcome is not None
+    assert outcome.compacted_run_count == 20
+    assert len(summary_inputs) == 2
+    assert all(len(summary_input.encode("utf-8")) <= summary_input_limit for summary_input in summary_inputs)
+    assert (
+        estimate_compaction_input_tokens(
+            summary_inputs[0],
+            model_id="claude-sonnet-5",
+        )
+        < summary_input_limit
+    )
+    storage.close()
 
 
 @pytest.mark.asyncio

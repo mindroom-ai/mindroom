@@ -24,6 +24,8 @@ from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
+    PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
+    PER_FIRE_THREAD_ROOT_KEY,
     ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
     STREAM_STATUS_COMPLETED,
@@ -57,6 +59,7 @@ from mindroom.dispatch_source import (
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
     ScheduledHistoryBudget,
+    content_owns_per_fire_thread_root,
     scheduled_history_limit_from_content,
     source_kind_allows_internal_relay_detection,
 )
@@ -1306,6 +1309,23 @@ class TurnController:
             thread_id=selection.thread_id,
             reply_to_event_id=selection.question_event_id,
         )
+        selection_handled_turn = self.deps.turn_store.attach_response_context(
+            TurnRecord.create(
+                [selection.question_event_id],
+                discovery_event_ids=((source_event_id,) if source_event_id != selection.question_event_id else ()),
+                requester_id=user_id,
+                correlation_id=selection.question_event_id,
+            ),
+            history_scope=self.deps.turn_store.response_history_scope(ResponseAction(kind="individual")),
+            conversation_target=response_target,
+        )
+        pending_turn = await asyncio.to_thread(
+            self.deps.turn_store.record_pending_turn,
+            selection_handled_turn,
+        )
+        if pending_turn is None or pending_turn.completed or pending_turn.redacted_source_event_ids:
+            return
+        selection_handled_turn = pending_turn
         ack_event_id = await self.deps.delivery_gateway.send_text(
             SendTextRequest(
                 target=ack_target,
@@ -1320,16 +1340,6 @@ class TurnController:
                 source_event_id=selection.question_event_id,
             )
             return
-        selection_handled_turn = self.deps.turn_store.attach_response_context(
-            TurnRecord.create(
-                [selection.question_event_id],
-                discovery_event_ids=((source_event_id,) if source_event_id != selection.question_event_id else ()),
-                requester_id=user_id,
-                correlation_id=selection.question_event_id,
-            ),
-            history_scope=self.deps.turn_store.response_history_scope(ResponseAction(kind="individual")),
-            conversation_target=response_target,
-        )
         # The selection is a synthetic turn with no Matrix message of its own, so
         # the attachment context that ingress normally resolves per message must
         # be rebuilt here from the conversation that asked the question.
@@ -1387,6 +1397,10 @@ class TurnController:
                 attachment_ids=selection_attachment_ids or None,
                 response_envelope=response_envelope,
                 matrix_run_metadata=selection_matrix_run_metadata,
+                prepare_source_turn=lambda: self.deps.turn_store.prepare_response_for_redactions(
+                    target=response_target,
+                    source_event_ids=selection_handled_turn.indexed_event_ids,
+                ),
             ),
         )
         if response_event_id is not None:
@@ -1397,12 +1411,16 @@ class TurnController:
     def _router_handoff_extra_content(
         self,
         *,
+        event: DispatchEvent,
         extra_content: dict[str, Any] | None,
         suggested_entity: str | None,
         requester_user_id: str,
+        thread_event_id: str | None,
     ) -> dict[str, Any]:
         """Return router relay metadata normalized through the handoff origin policy."""
         routed_extra_content = dict(extra_content) if extra_content is not None else {}
+        routed_extra_content.pop(PER_FIRE_THREAD_ROOT_EVENT_ID_KEY, None)
+        routed_extra_content.pop(PER_FIRE_THREAD_ROOT_KEY, None)
         inherited_original_sender = routed_extra_content.get(ORIGINAL_SENDER_KEY)
         inherited_original_sender = inherited_original_sender if isinstance(inherited_original_sender, str) else None
         handoff_original_sender = original_sender_for_router_handoff(
@@ -1420,6 +1438,15 @@ class TurnController:
         if handoff_original_sender is not None:
             routed_extra_content[SOURCE_KIND_KEY] = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
             routed_extra_content[ORIGINAL_SENDER_KEY] = handoff_original_sender
+        event_content = event.source.get("content") if isinstance(event.source, dict) else None
+        if (
+            self.deps.ingress.sender_is_trusted_for_ingress_metadata(event.sender)
+            and isinstance(event_content, dict)
+            and content_owns_per_fire_thread_root(event_content)
+        ):
+            routed_extra_content[PER_FIRE_THREAD_ROOT_KEY] = True
+            if thread_event_id is not None:
+                routed_extra_content[PER_FIRE_THREAD_ROOT_EVENT_ID_KEY] = thread_event_id
         return routed_extra_content
 
     async def _execute_router_relay(
@@ -1496,9 +1523,11 @@ class TurnController:
         )
         thread_event_id = resolved_target.resolved_thread_id
         routed_extra_content = self._router_handoff_extra_content(
+            event=event,
             extra_content=extra_content,
             suggested_entity=suggested_entity,
             requester_user_id=requester_user_id,
+            thread_event_id=thread_event_id,
         )
         routed_media_events = list(media_events or [])
         if not routed_media_events and is_matrix_media_dispatch_event(event):
@@ -1757,6 +1786,10 @@ class TurnController:
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
+                            prepare_source_turn=lambda: self.deps.turn_store.prepare_response_for_redactions(
+                                target=dispatch.target,
+                                source_event_ids=handled_turn.indexed_event_ids,
+                            ),
                             on_sync_restart_cancelled=register_sync_restart_retry,
                             sync_restart_retry_source_event_id=sync_restart_retry_source_event_id,
                             on_deferred_outcome_handled=record_deferred_outcome,
@@ -1781,6 +1814,10 @@ class TurnController:
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
+                            prepare_source_turn=lambda: self.deps.turn_store.prepare_response_for_redactions(
+                                target=dispatch.target,
+                                source_event_ids=handled_turn.indexed_event_ids,
+                            ),
                             on_sync_restart_cancelled=register_sync_restart_retry,
                             sync_restart_retry_source_event_id=sync_restart_retry_source_event_id,
                             on_deferred_outcome_handled=record_deferred_outcome,

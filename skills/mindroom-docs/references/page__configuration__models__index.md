@@ -266,7 +266,9 @@ It still uses the active runtime window for the final replay-fit step, but destr
 If you set `compaction.model`, that summary model must also define its own `context_window` for the durable summary-generation pass.
 Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place.
 Otherwise MindRoom leaves the session unchanged and relies on replay fitting for that reply.
-The budget uses a chars/4 approximation and reserves headroom for the current prompt and output.
+Replay planning uses a chars/4 approximation and reserves headroom for the current prompt and output.
+Summary-input chunk sizing uses the model's tiktoken encoding when recognized.
+Direct Anthropic, Vertex AI Claude, and Bedrock Claude summary models without a recognized encoding use one token per UTF-8 byte as a conservative upper bound.
 MindRoom does not mutate configured `num_history_runs` to fit the window.
 Instead, it computes the replay plan that actually fits the current call and uses compaction to keep future replay healthy.
 If needed, that replay plan can reduce raw replay, fall back to summary-only replay, or disable persisted replay entirely for the run.

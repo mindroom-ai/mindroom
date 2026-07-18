@@ -18,6 +18,7 @@ from agno.session.summary import SessionSummary
 from agno.utils.message import filter_tool_calls
 from pydantic import BaseModel
 
+from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS, prompt_roles_for_history_storage
 from mindroom.history.storage import (
     compacted_run_ids_with,
@@ -344,7 +345,11 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
     before_persist_callback: Callable[[Sequence[RunOutput | TeamRunOutput]], Awaitable[None]] | None = None,
 ) -> _CompactionRewriteResult | None:
     final_summary_text = _current_summary_text(working_session) or ""
-    token_estimator = partial(estimate_compaction_input_tokens, model_id=summary_model.id)
+    token_estimator = partial(
+        estimate_compaction_input_tokens,
+        model_id=summary_model.id,
+        conservative_fallback=as_anthropic_claude(summary_model) is not None,
+    )
     total_compacted_run_count = 0
     all_compacted_run_ids: list[str] = []
     all_compacted_run_id_set: set[str] = set()

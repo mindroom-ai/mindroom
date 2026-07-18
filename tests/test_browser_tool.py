@@ -311,6 +311,21 @@ async def test_browser_discovery_actions_return_action_table(action: str) -> Non
     assert any(entry["action"] == "act" for entry in payload["actionTable"])
 
 
+@pytest.mark.asyncio
+async def test_browser_discovery_distinguishes_host_and_desktop_semantics() -> None:
+    """Discovery must not direct desktop agents toward rejected host-only arguments."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+
+    payload = json.loads(await tool.browser(action="help", target="desktop"))
+    descriptions = {entry["action"]: entry["description"] for entry in payload["actionTable"]}
+
+    assert "Host target only" in descriptions["focus"]
+    assert "desktop closes its current extension tab" in descriptions["close"]
+    assert "current desktop extension tab" in descriptions["navigate"]
+    assert "active desktop file chooser" in descriptions["upload"]
+    assert "desktop removes its transient scratch file" in descriptions["screenshot"]
+
+
 def test_browser_function_schema_documents_actions_and_act_request() -> None:
     """Tool schema should make browser actions and act request kinds discoverable."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
@@ -326,6 +341,8 @@ def test_browser_function_schema_documents_actions_and_act_request() -> None:
     assert "request.kind" in request_description
     assert "click" in request_description
     assert "evaluate" in request_description
+    for field_name in ("compact", "frame", "interactive", "labels", "limit", "mode", "refs", "snapshotFormat"):
+        assert "Host-target" in properties[field_name]["description"]
 
 
 def test_browser_schema_description_requires_registered_browser_function() -> None:
@@ -350,7 +367,9 @@ def test_browser_metadata_documents_default_output_dir() -> None:
     output_dir_field = next(field for field in TOOL_METADATA["browser"].config_fields if field.name == "output_dir")
 
     assert output_dir_field.description is not None
+    assert "host target" in output_dir_field.description
     assert "storage path's browser/ directory" in output_dir_field.description
+    assert "desktop-browser" in output_dir_field.description
 
 
 def test_browser_private_network_metadata_defaults_to_false() -> None:
@@ -528,10 +547,10 @@ async def test_desktop_target_routes_snapshot_and_control_over_matrix(monkeypatc
                 result={"action": "snapshot", "provider": "playwright_mcp_extension", "result": "plain-tree"},
             ),
             DesktopResponse(
-                request_id="snapshot",
+                request_id="navigate",
                 session_id="session",
                 ok=True,
-                result={"action": "snapshot", "provider": "playwright_mcp_extension", "result": "tree"},
+                result={"action": "navigate", "provider": "playwright_mcp_extension", "result": "navigated"},
             ),
             DesktopResponse(
                 request_id="click",
@@ -555,32 +574,115 @@ async def test_desktop_target_routes_snapshot_and_control_over_matrix(monkeypatc
     )
 
     plain_snapshot = await tool.browser(action="snapshot", maxChars=1000)
-    snapshot = await tool.browser(action="snapshot", targetId="2", maxChars=5000)
+    navigate = await tool.browser(action="navigate", targetUrl="https://example.com")
     click = await tool.browser(action="act", request={"kind": "click", "ref": "e3"})
 
     assert isinstance(plain_snapshot, str)
-    assert isinstance(snapshot, str)
-    assert json.loads(snapshot)["provider"] == "playwright_mcp_extension"
+    assert isinstance(navigate, str)
+    assert json.loads(navigate)["provider"] == "playwright_mcp_extension"
     assert isinstance(click, str)
     observe_command = request.await_args_list[0].args[1]
-    snapshot_command = request.await_args_list[1].args[1]
+    navigate_command = request.await_args_list[1].args[1]
     click_command = request.await_args_list[2].args[1]
     assert observe_command.action == "browser_observe"
     assert observe_command.parameters == {
         "browser_action": "snapshot",
         "browser_parameters": {"maxChars": 1000},
     }
-    assert snapshot_command.action == "browser_control"
-    assert snapshot_command.parameters == {
-        "browser_action": "snapshot",
-        "browser_parameters": {"targetId": "2", "maxChars": 5000},
+    assert navigate_command.action == "browser_control"
+    assert navigate_command.parameters == {
+        "browser_action": "navigate",
+        "browser_parameters": {"targetUrl": "https://example.com"},
     }
     assert click_command.action == "browser_control"
     assert click_command.parameters == {
         "browser_action": "act",
         "browser_parameters": {"request": {"kind": "click", "ref": "e3"}},
     }
-    assert (observe_command.sequence, snapshot_command.sequence, click_command.sequence) == (0, 1, 2)
+    assert (observe_command.sequence, navigate_command.sequence, click_command.sequence) == (0, 1, 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "arguments", "expected"),
+    [
+        ("snapshot", {"targetId": "1"}, "does not support targetId"),
+        (
+            "act",
+            {"request": {"kind": "click", "ref": "e1", "targetId": "1"}},
+            "does not support request.targetId",
+        ),
+        ("snapshot", {"snapshotFormat": "aria"}, "does not support: snapshotFormat"),
+        ("status", {"profile": "chrome"}, "does not support: profile"),
+        ("upload", {"paths": ["invoice.pdf"], "inputRef": "e1"}, "does not support: inputRef"),
+        ("upload", {"paths": ["invoice.pdf"], "ref": "e1"}, "does not support ref or element"),
+        ("upload", {"paths": ["invoice.pdf"], "element": "File input"}, "does not support ref or element"),
+        ("dialog", {"timeoutMs": 1000}, "does not support: timeoutMs"),
+        ("focus", {}, "does not support focus"),
+    ],
+)
+async def test_desktop_target_rejects_unsupported_host_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    arguments: dict[str, object],
+    expected: str,
+) -> None:
+    """Desktop routing fails closed instead of pretending host-only arguments were honored."""
+    context = SimpleNamespace(requester_id="@alice:example.org", agent_name="computer", client=object())
+    request = AsyncMock()
+    monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.desktop_response_router",
+        lambda _client: SimpleNamespace(request=request),
+    )
+    tool = BrowserTools(
+        TEST_RUNTIME_PATHS,
+        default_target="desktop",
+        device_user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        device_ed25519="fingerprint",
+    )
+
+    with pytest.raises(ValueError, match=expected):
+        await tool.browser(action=action, **arguments)
+
+    request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arguments", [{"interactive": False}, {"compact": False}, {"labels": False}])
+async def test_desktop_target_accepts_false_noop_host_hints(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict[str, bool],
+) -> None:
+    """Explicit false values for host-only hints preserve the desktop default behavior."""
+    context = SimpleNamespace(requester_id="@alice:example.org", agent_name="computer", client=object())
+    response = DesktopResponse(
+        request_id="snapshot",
+        session_id="session",
+        ok=True,
+        result={"action": "snapshot", "provider": "playwright_mcp_extension"},
+    )
+    request = AsyncMock(return_value=response)
+    monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.desktop_response_router",
+        lambda _client: SimpleNamespace(request=request),
+    )
+    tool = BrowserTools(
+        TEST_RUNTIME_PATHS,
+        default_target="desktop",
+        device_user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        device_ed25519="fingerprint",
+    )
+
+    result = await tool.browser(action="snapshot", **arguments)
+
+    assert json.loads(result) == {"action": "snapshot", "provider": "playwright_mcp_extension"}
+    command = request.await_args.args[1]
+    assert command.action == "browser_observe"
+    assert command.parameters == {"browser_action": "snapshot", "browser_parameters": {}}
 
 
 @pytest.mark.asyncio

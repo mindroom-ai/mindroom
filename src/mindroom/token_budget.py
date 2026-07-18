@@ -24,19 +24,27 @@ def estimate_text_tokens(value: str | list[str] | None) -> int:
 
 
 @lru_cache(maxsize=16)
-def _compaction_encoding(model_id: str | None) -> tiktoken.Encoding:
+def _compaction_encoding(model_id: str | None) -> tiktoken.Encoding | None:
     if model_id:
         try:
             return tiktoken.encoding_for_model(model_id)
         except KeyError:
             pass
-    return tiktoken.get_encoding("o200k_base")
+    return None
 
 
-def estimate_compaction_input_tokens(value: str, *, model_id: str | None = None) -> int:
-    """Estimate serialized compaction history with the closest tiktoken encoding."""
+def estimate_compaction_input_tokens(
+    value: str,
+    *,
+    model_id: str | None = None,
+    conservative_fallback: bool = False,
+) -> int:
+    """Estimate serialized compaction history with an optional conservative fallback."""
     encoding = _compaction_encoding(model_id)
-    return len(encoding.encode(value, disallowed_special=()))
+    if encoding is None and conservative_fallback:
+        return len(value.encode("utf-8"))
+    resolved_encoding = encoding or tiktoken.get_encoding("o200k_base")
+    return len(resolved_encoding.encode(value, disallowed_special=()))
 
 
 def compute_compaction_input_budget(

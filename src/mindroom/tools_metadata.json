@@ -9792,7 +9792,7 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "Optional directory for browser screenshots, PDFs, and downloads. Defaults to the active storage path's browser/ directory.",
+          "description": "Optional host target directory for browser screenshots, PDFs, and downloads. Defaults to the active storage path's browser/ directory. The desktop target instead uses its local storage path's desktop-browser/ directory.",
           "label": "Output Directory",
           "name": "output_dir",
           "options": null,

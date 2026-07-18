@@ -9,6 +9,7 @@ orchestrator/bot boot, so shrinking ``response_runner.py`` has a safety net.
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -263,6 +264,143 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
     # Each turn's payload preparation consumed the history refreshed under its own lock.
     assert prepare_history_by_turn[1] is refreshed[0]
     assert prepare_history_by_turn[2] is refreshed[1]
+
+
+@pytest.mark.asyncio
+async def test_begin_locked_turn_suppresses_source_redacted_before_response_registration(tmp_path: Path) -> None:
+    """A durable tombstone observed under the lock must prevent every persistence side effect."""
+    bot = _bot(tmp_path)
+    target = _target(thread_id="$thread", reply_to_event_id="$event")
+    envelope = _envelope(target, source_event_id="$event")
+    delivery_gateway = MagicMock(spec=DeliveryGateway)
+    delivery_gateway.send_text = AsyncMock(return_value="$placeholder")
+    request_preparer = MagicMock(spec=ResponsePayloadPreparer)
+    request_preparer.prepare = AsyncMock()
+    runner = ResponseRunner(
+        replace(
+            unwrap_extracted_collaborator(bot._response_runner).deps,
+            delivery_gateway=delivery_gateway,
+            request_preparer=request_preparer,
+        ),
+    )
+    response_thread_id = threading.get_ident()
+    preparation_thread_ids: list[int] = []
+
+    def prepare_source_turn() -> bool:
+        preparation_thread_ids.append(threading.get_ident())
+        return True
+
+    request = ResponseRequest(
+        thread_history=[],
+        prompt="REDACTED_SECRET",
+        user_id="@user:localhost",
+        response_envelope=envelope,
+        payload_preparation=_preparation(target, envelope),
+        prepare_source_turn=prepare_source_turn,
+    )
+
+    prepared_request = await runner._begin_locked_turn(
+        request,
+        resolved_target=target,
+        history_scope=runner.deps.state_writer.history_scope(),
+        execution_identity=runner.deps.tool_runtime.build_execution_identity(
+            target=target,
+            user_id=request.user_id,
+        ),
+        placeholder_message="Thinking...",
+    )
+
+    assert prepared_request is None
+    assert len(preparation_thread_ids) == 1
+    assert preparation_thread_ids[0] != response_thread_id
+    delivery_gateway.send_text.assert_not_awaited()
+    request_preparer.prepare.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path: Path) -> None:
+    """Cancellation must not release the lifecycle lock while cleanup still mutates storage."""
+    bot = _bot(tmp_path)
+    target = _target(thread_id="$thread", reply_to_event_id="$event")
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    preparation_started = threading.Event()
+    allow_preparation_finish = threading.Event()
+
+    def prepare_source_turn() -> bool:
+        preparation_started.set()
+        allow_preparation_finish.wait(timeout=2)
+        return False
+
+    request = ResponseRequest(
+        thread_history=[],
+        prompt="prompt",
+        user_id="@user:localhost",
+        response_envelope=_envelope(target, source_event_id="$event"),
+        prepare_source_turn=prepare_source_turn,
+    )
+    preparation_task = asyncio.create_task(
+        runner._begin_locked_turn(
+            request,
+            resolved_target=target,
+            history_scope=runner.deps.state_writer.history_scope(),
+            execution_identity=runner.deps.tool_runtime.build_execution_identity(
+                target=target,
+                user_id=request.user_id,
+            ),
+        ),
+    )
+    await asyncio.wait_for(asyncio.to_thread(preparation_started.wait, 1), timeout=2)
+
+    preparation_task.cancel()
+    await asyncio.sleep(0)
+
+    assert preparation_task.done() is False
+    allow_preparation_finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await preparation_task
+
+
+@pytest.mark.asyncio
+async def test_begin_locked_turn_settles_external_placeholder_when_source_is_redacted(tmp_path: Path) -> None:
+    """Suppression must not leave an interactive acknowledgement stuck on Processing."""
+    bot = _bot(tmp_path)
+    target = _target(thread_id="$thread", reply_to_event_id="$event")
+    envelope = _envelope(target, source_event_id="$event")
+    delivery_gateway = MagicMock(spec=DeliveryGateway)
+    delivery_gateway.deliver_cancelled_visible_note = AsyncMock(
+        return_value=FinalDeliveryOutcome(terminal_status="cancelled", event_id="$ack"),
+    )
+    runner = ResponseRunner(
+        replace(
+            unwrap_extracted_collaborator(bot._response_runner).deps,
+            delivery_gateway=delivery_gateway,
+        ),
+    )
+    request = ResponseRequest(
+        thread_history=[],
+        prompt="REDACTED_SECRET",
+        user_id="@user:localhost",
+        response_envelope=envelope,
+        existing_event_id="$ack",
+        existing_event_is_placeholder=True,
+        prepare_source_turn=lambda: True,
+    )
+
+    prepared_request = await runner._begin_locked_turn(
+        request,
+        resolved_target=target,
+        history_scope=runner.deps.state_writer.history_scope(),
+        execution_identity=runner.deps.tool_runtime.build_execution_identity(
+            target=target,
+            user_id=request.user_id,
+        ),
+    )
+
+    assert prepared_request is None
+    delivery_gateway.deliver_cancelled_visible_note.assert_awaited_once()
+    cancellation_request = delivery_gateway.deliver_cancelled_visible_note.await_args.args[0]
+    assert cancellation_request.event_id == "$ack"
+    assert cancellation_request.existing_event_is_placeholder is True
 
 
 @pytest.mark.asyncio

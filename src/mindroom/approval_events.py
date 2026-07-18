@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.large_messages import sidecar_upload_is_usable
 from mindroom.matrix.visible_body import visible_content_from_content
 
 PendingApprovalStatus = Literal["pending", "approved", "denied", "expired"]
@@ -27,6 +28,8 @@ class PendingApproval:
     arguments_preview_truncated: bool
     timeout_seconds: int
     created_at_ms: int
+    approvable: bool = True
+    full_arguments_available: bool = False
     thread_id: str | None = None
     agent_name: str | None = None
     workflow_id: str | None = None
@@ -83,6 +86,8 @@ class PendingApproval:
             arguments_preview_truncated=bool(content.get("arguments_truncated")),
             timeout_seconds=timeout_seconds,
             created_at_ms=created_at_ms,
+            approvable=_approvable(content),
+            full_arguments_available=_full_arguments_available(content),
             thread_id=thread_id,
             agent_name=agent_name,
             workflow_id=workflow_id,
@@ -102,6 +107,26 @@ class PendingApproval:
         if status in {"pending", "approved", "denied", "expired"}:
             return cast("PendingApprovalStatus", status)
         return "pending"
+
+
+def _approvable(content: dict[str, Any]) -> bool:
+    """Return the explicit approval gate, defaulting absent cards to approvable."""
+    value = content.get("approvable", True)
+    return value if isinstance(value, bool) else False
+
+
+def _full_arguments_available(content: dict[str, Any]) -> bool:
+    """Return whether one card delivers the complete arguments inline or via a sidecar."""
+    full_arguments = content.get("full_arguments")
+    if isinstance(full_arguments, dict) and bool(full_arguments):
+        return True
+    encrypted_file = content.get("full_arguments_file")
+    encrypted_url = encrypted_file.get("url") if isinstance(encrypted_file, dict) else None
+    if sidecar_upload_is_usable(encrypted_url, encrypted_file, room_encrypted=True):
+        return True
+    url = content.get("full_arguments_url")
+    file_info = content.get("full_arguments_info")
+    return sidecar_upload_is_usable(url, file_info, room_encrypted=False)
 
 
 def is_original_approval_card(event: dict[str, Any]) -> bool:

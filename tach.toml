@@ -1007,6 +1007,7 @@ depends_on = ["mindroom.attachment_media"]
 [[modules]]
 path = "mindroom.history.compaction"
 depends_on = [
+    "mindroom.claude_prompt_cache",
     "mindroom.constants",
     "mindroom.history.storage",
     "mindroom.history.summary_call",
@@ -2493,6 +2494,7 @@ depends_on = [
     "mindroom.matrix_rtc.call_manager",
     "mindroom.memory",
     "mindroom.post_response_effects",
+    "mindroom.redacted_turn_cleanup",
     "mindroom.response_payload_preparation",
     "mindroom.response_runner",
     "mindroom.scheduling",
@@ -2507,6 +2509,11 @@ depends_on = [
     "mindroom.turn_policy",
     "mindroom.turn_store",
 ]
+
+[[modules]]
+path = "mindroom.redacted_turn_cleanup"
+depends_on = []
+visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.cli"
@@ -3061,6 +3068,7 @@ depends_on = [
     "mindroom.agents",
     "mindroom.constants",
     "mindroom.handled_turns",
+    "mindroom.history.storage",
     "mindroom.thread_utils",
 ]
 

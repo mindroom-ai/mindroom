@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SOURCE_KIND_KEY
 from mindroom.dispatch_source import EXTERNAL_TRIGGER_SOURCE_KIND
 from mindroom.hooks.sender import send_and_track_message
 from mindroom.matrix.client_room_admin import get_room_members
@@ -101,10 +101,13 @@ def _external_trigger_content_metadata(
     payload: ExternalTriggerPayload,
 ) -> dict[str, Any]:
     """Return Matrix content metadata for one external trigger dispatch."""
-    return {
+    metadata: dict[str, Any] = {
         SOURCE_KIND_KEY: EXTERNAL_TRIGGER_SOURCE_KIND,
         ORIGINAL_SENDER_KEY: snapshot.owner_user_id,
         _EXTERNAL_TRIGGER_ID_KEY: snapshot.trigger_id,
         _EXTERNAL_TRIGGER_KIND_KEY: payload.kind,
         _EXTERNAL_TRIGGER_EVENT_ID_KEY: payload.event_id,
     }
+    if snapshot.target.new_thread:
+        metadata[PER_FIRE_THREAD_ROOT_KEY] = True
+    return metadata

@@ -479,11 +479,44 @@ def test_mac_launches_only_the_exact_allowlisted_bundle_id(monkeypatch: pytest.M
     assert launched.activation_options == [0]
 
 
+def test_mac_launch_rejects_invalid_bundle_id_before_request() -> None:
+    """Invalid allowlist entries fail definitively before any launch side effect."""
+    backend, _, workspace = _fake_mac_backend()
+    backend._allowed_app_ids = frozenset({"invalid_app"})
+    workspace.applications = []
+
+    with pytest.raises(AccessibilityError, match="invalid bundle identifier") as exc_info:
+        backend.launch_app("invalid_app")
+
+    assert type(exc_info.value) is AccessibilityError
+
+
 def test_mac_launch_timeout_has_unknown_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
     """An accepted launch request that never appears cannot be presented as safe to repeat."""
     backend, _, workspace = _fake_mac_backend()
     workspace.applications = []
     monkeypatch.setattr("mindroom.desktop.accessibility._request_application_activation", lambda _app_id: None)
+    monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(AccessibilityActionOutcomeUnknownError, match="outcome is unknown"):
+        backend.launch_app("com.example.Editor")
+
+
+@pytest.mark.parametrize("already_running", [False, True])
+def test_mac_launch_activation_timeout_has_unknown_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    already_running: bool,
+) -> None:
+    """A failed foreground wait stays unknown after either launch or direct activation was requested."""
+    backend, _, workspace = _fake_mac_backend()
+    application = FakeRunningApplication(active=False)
+    workspace.applications = [application] if already_running else []
+
+    def request_activation(_app_id: str) -> None:
+        if not already_running:
+            workspace.applications.append(application)
+
+    monkeypatch.setattr("mindroom.desktop.accessibility._request_application_activation", request_activation)
     monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", lambda _seconds: None)
 
     with pytest.raises(AccessibilityActionOutcomeUnknownError, match="outcome is unknown"):

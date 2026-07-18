@@ -15,6 +15,7 @@ interactive selection path.
 from __future__ import annotations
 
 import asyncio
+import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, cast
@@ -68,6 +69,7 @@ if TYPE_CHECKING:
 
     from mindroom.coalescing_batch import CoalescedBatch
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
+    from mindroom.handled_turns import TurnRecord
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.cache import ThreadHistoryResult
     from mindroom.matrix.event_info import EventInfo
@@ -130,6 +132,8 @@ class _RecordingResponseRunner:
         self.requests.append(request)
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
+        if request.prepare_source_turn is not None and request.prepare_source_turn():
+            return None
         if self.deferred_sync_restart_error is not None:
             assert self.response_event_id is not None
             assert request.on_sync_restart_cancelled is not None
@@ -149,6 +153,8 @@ class _RecordingResponseRunner:
         self.team_requests.append(request)
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
+        if request.prepare_source_turn is not None and request.prepare_source_turn():
+            return None
         return self.response_event_id
 
 
@@ -576,22 +582,64 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
     assert harness.turn_store.is_handled(event.event_id) is True
 
 
+@pytest.mark.asyncio
+async def test_response_waits_for_pending_context_persistence_before_generation(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Session-backed generation must not start before its cleanup context is durable."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _text_event("persist my response context first")
+    real_persist = harness.turn_store._ledger._persist_record
+    persist_started = threading.Event()
+    release_persist = threading.Event()
+
+    def persist_with_barrier(turn_record: TurnRecord) -> None:
+        if event.event_id in turn_record.indexed_event_ids and not turn_record.completed:
+            persist_started.set()
+            if not release_persist.wait(timeout=5):
+                msg = "test did not release pending-context persistence"
+                raise TimeoutError(msg)
+        real_persist(turn_record)
+
+    monkeypatch.setattr(harness.turn_store._ledger, "_persist_record", persist_with_barrier)
+    delivery = asyncio.create_task(harness.deliver(room, event))
+    try:
+        assert await asyncio.to_thread(persist_started.wait, 5)
+        assert harness.runner.requests == []
+    finally:
+        release_persist.set()
+
+    await asyncio.wait_for(delivery, timeout=5)
+
+    assert len(harness.runner.requests) == 1
+    persisted = harness.turn_store.get_turn_record(event.event_id)
+    assert persisted is not None
+    assert persisted.completed is True
+
+
 def _scheduled_fire_event(
     config: Config,
     *,
     extra_content: dict[str, Any],
     event_id: str = "$scheduled:localhost",
+    new_thread: bool = False,
 ) -> nio.RoomMessageText:
     """Build a self-authored scheduled-fire event as the scheduling executor sends it."""
+    content: dict[str, Any] = {
+        "body": "Poll the queue" if new_thread else "⏰ [Automated Task]\nPoll the queue",
+        "msgtype": "m.text",
+        constants.SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
+        constants.ORIGINAL_SENDER_KEY: _SENDER,
+        **extra_content,
+    }
+    if new_thread:
+        content[constants.PER_FIRE_THREAD_ROOT_KEY] = True
     return nio.RoomMessageText.from_dict(
         {
-            "content": {
-                "body": "⏰ [Automated Task]\nPoll the queue",
-                "msgtype": "m.text",
-                constants.SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
-                constants.ORIGINAL_SENDER_KEY: _SENDER,
-                **extra_content,
-            },
+            "content": content,
             "event_id": event_id,
             "sender": _entity_user_id(config, "general"),
             "origin_server_ts": 1_000_000,
@@ -665,6 +713,66 @@ async def test_scheduled_router_handoff_history_limit_reaches_response_request(
 
 
 @pytest.mark.asyncio
+async def test_scheduled_new_thread_survives_router_handoff_in_room_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A router relay preserves the scheduled fire's per-fire thread and session."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General", thread_mode="room"),
+                "research": AgentConfig(display_name="Research"),
+            },
+        ),
+        test_runtime_paths(tmp_path / "runtime"),
+    )
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    scheduled_event = _scheduled_fire_event(config, extra_content={}, new_thread=True)
+    router_harness = _build_harness(config, tmp_path / "router", agent_name=ROUTER_AGENT_NAME)
+
+    async def _route_to_general(*_args: object, **_kwargs: object) -> str:
+        return "general"
+
+    monkeypatch.setattr("mindroom.turn_controller.suggest_responder_for_message", _route_to_general)
+
+    await router_harness.deliver(room, scheduled_event)
+
+    assert len(router_harness.gateway.sent) == 1
+    handoff = router_harness.gateway.sent[0]
+    assert handoff.target.resolved_thread_id == scheduled_event.event_id
+    assert handoff.extra_content is not None
+    assert handoff.extra_content[constants.SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+    assert handoff.extra_content[constants.PER_FIRE_THREAD_ROOT_KEY] is True
+    assert handoff.extra_content[constants.PER_FIRE_THREAD_ROOT_EVENT_ID_KEY] == scheduled_event.event_id
+
+    relay_content = {
+        "body": handoff.response_text,
+        "msgtype": "m.text",
+        **handoff.extra_content,
+        "m.relates_to": {"rel_type": "m.thread", "event_id": scheduled_event.event_id},
+    }
+    relay_event = nio.RoomMessageText.from_dict(
+        {
+            "content": relay_content,
+            "event_id": "$scheduled-router-handoff:localhost",
+            "sender": _entity_user_id(config, ROUTER_AGENT_NAME),
+            "origin_server_ts": 1_000_001,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+    agent_harness = _build_harness(config, tmp_path / "agent")
+
+    await agent_harness.deliver(room, relay_event)
+
+    assert len(agent_harness.runner.requests) == 1
+    target = agent_harness.runner.requests[0].response_envelope.target
+    assert target.resolved_thread_id == scheduled_event.event_id
+    assert target.session_id == f"{_ROOM_ID}:{scheduled_event.event_id}"
+
+
+@pytest.mark.asyncio
 async def test_scheduled_fire_without_annotation_keeps_full_history(config: Config, tmp_path: Path) -> None:
     """A scheduled fire without the annotation must not cap history for that turn."""
     harness = _build_harness(config, tmp_path)
@@ -713,7 +821,7 @@ async def test_scheduled_fire_response_starts_per_fire_thread_session(tmp_path: 
     config = _single_agent_config(tmp_path, thread_mode)
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")
-    event = _scheduled_fire_event(config, extra_content={})
+    event = _scheduled_fire_event(config, extra_content={}, new_thread=True)
 
     await harness.deliver(room, event)
 
@@ -736,6 +844,7 @@ async def test_external_trigger_fire_response_starts_per_fire_thread_session(tmp
                 "msgtype": "m.text",
                 constants.SOURCE_KIND_KEY: EXTERNAL_TRIGGER_SOURCE_KIND,
                 constants.ORIGINAL_SENDER_KEY: _SENDER,
+                constants.PER_FIRE_THREAD_ROOT_KEY: True,
             },
             "event_id": "$trigger:localhost",
             "sender": _entity_user_id(config, "general"),
@@ -760,8 +869,14 @@ async def test_consecutive_scheduled_fires_resolve_distinct_sessions(tmp_path: P
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")
 
-    await harness.deliver(room, _scheduled_fire_event(config, extra_content={}, event_id="$fire-one:localhost"))
-    await harness.deliver(room, _scheduled_fire_event(config, extra_content={}, event_id="$fire-two:localhost"))
+    await harness.deliver(
+        room,
+        _scheduled_fire_event(config, extra_content={}, event_id="$fire-one:localhost", new_thread=True),
+    )
+    await harness.deliver(
+        room,
+        _scheduled_fire_event(config, extra_content={}, event_id="$fire-two:localhost", new_thread=True),
+    )
 
     assert len(harness.runner.requests) == 2
     first_target = harness.runner.requests[0].response_envelope.target
@@ -771,6 +886,35 @@ async def test_consecutive_scheduled_fires_resolve_distinct_sessions(tmp_path: P
     assert first_target.session_id == f"{_ROOM_ID}:$fire-one:localhost"
     assert second_target.session_id == f"{_ROOM_ID}:$fire-two:localhost"
     assert first_target.session_id != second_target.session_id
+
+
+@pytest.mark.asyncio
+async def test_concurrent_scheduled_fires_use_distinct_coalescing_threads(tmp_path: Path) -> None:
+    """Concurrent per-fire deliveries receive distinct keys before entering the gate."""
+    config = _single_agent_config(tmp_path, "room")
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    first_event = _scheduled_fire_event(
+        config,
+        extra_content={},
+        event_id="$fire-one:localhost",
+        new_thread=True,
+    )
+    second_event = _scheduled_fire_event(
+        config,
+        extra_content={},
+        event_id="$fire-two:localhost",
+        new_thread=True,
+    )
+
+    first_thread_id, second_thread_id = await asyncio.gather(
+        harness.controller.deps.resolver.coalescing_thread_id(room, first_event),
+        harness.controller.deps.resolver.coalescing_thread_id(room, second_event),
+    )
+
+    assert first_thread_id == first_event.event_id
+    assert second_thread_id == second_event.event_id
+    assert first_thread_id != second_thread_id
 
 
 @pytest.mark.asyncio
@@ -820,6 +964,21 @@ async def test_room_mode_plain_user_message_keeps_room_session(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_room_mode_schedule_without_new_thread_keeps_room_session(tmp_path: Path) -> None:
+    """A relation-free room-scope schedule keeps the shared room session."""
+    config = _single_agent_config(tmp_path, "room")
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+
+    await harness.deliver(room, _scheduled_fire_event(config, extra_content={}))
+
+    assert len(harness.runner.requests) == 1
+    target = harness.runner.requests[0].response_envelope.target
+    assert target.resolved_thread_id is None
+    assert target.session_id == _ROOM_ID
+
+
+@pytest.mark.asyncio
 async def test_user_message_cannot_spoof_scheduled_thread_promotion(tmp_path: Path) -> None:
     """A scheduled marker on an untrusted user message must not force a per-fire thread."""
     config = _single_agent_config(tmp_path, "room")
@@ -831,6 +990,8 @@ async def test_user_message_cannot_spoof_scheduled_thread_promotion(tmp_path: Pa
                 "body": "pretend to be a scheduled fire",
                 "msgtype": "m.text",
                 constants.SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
+                constants.PER_FIRE_THREAD_ROOT_KEY: True,
+                constants.PER_FIRE_THREAD_ROOT_EVENT_ID_KEY: "$spoofed-root:localhost",
             },
             "event_id": _EVENT_ID,
             "sender": _SENDER,
@@ -981,6 +1142,91 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
 
     assert harness.turn_store.is_handled(selection.question_event_id) is True
     assert harness.turn_store.is_handled("$selection:localhost") is True
+
+
+@pytest.mark.asyncio
+async def test_interactive_selection_persistence_failure_prevents_ack_and_generation(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed pending-context write must escape before any visible or persisted response."""
+    harness = _build_harness(config, tmp_path)
+    room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        question_text="Which option should I use?",
+        selection_key="1",
+        selected_label="Option 1",
+        selected_value="Option 1",
+        thread_id="$thread-root:localhost",
+    )
+    real_persist = harness.turn_store._ledger._persist_record
+
+    def fail_pending_persist(turn_record: TurnRecord) -> None:
+        if selection.question_event_id in turn_record.indexed_event_ids and not turn_record.completed:
+            msg = "pending context write failed"
+            raise OSError(msg)
+        real_persist(turn_record)
+
+    monkeypatch.setattr(harness.turn_store._ledger, "_persist_record", fail_pending_persist)
+
+    with pytest.raises(OSError, match="pending context write failed"):
+        await harness.controller.handle_interactive_selection(
+            room,
+            selection=selection,
+            user_id=_SENDER,
+            source_event_id="$selection:localhost",
+        )
+
+    assert harness.gateway.sent == []
+    assert harness.runner.requests == []
+
+
+@pytest.mark.asyncio
+async def test_interactive_selection_redacted_after_ack_is_suppressed_under_lock(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The selection must be pending before ack and recheck aliases at response startup."""
+    harness = _build_harness(config, tmp_path)
+    room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        question_text="Which option should I use?",
+        selection_key="1",
+        selected_label="Option 1",
+        selected_value="Option 1",
+        thread_id="$thread-root:localhost",
+    )
+    selection_event_id = "$selection:localhost"
+
+    async def send_ack_then_redact(request: SendTextRequest) -> str:
+        harness.gateway.sent.append(request)
+        marked = harness.turn_store.mark_source_redacted(selection_event_id)
+        assert marked is not None
+        assert marked.conversation_target is not None
+        assert marked.history_scope is not None
+        return "$ack:localhost"
+
+    monkeypatch.setattr(harness.gateway, "send_text", send_ack_then_redact)
+
+    await harness.controller.handle_interactive_selection(
+        room,
+        selection=selection,
+        user_id=_SENDER,
+        source_event_id=selection_event_id,
+    )
+
+    assert len(harness.runner.requests) == 1
+    record = harness.turn_store.get_turn_record(selection_event_id)
+    assert record is not None
+    assert record.redacted_source_event_ids == (selection_event_id,)
+    assert record.pending_redaction_cleanup_event_ids == ()
+    assert record.response_event_id is None
+    assert harness.turn_store.is_handled(selection_event_id) is True
+    assert harness.turn_store.is_handled(selection.question_event_id) is False
 
 
 @pytest.mark.asyncio

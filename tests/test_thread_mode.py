@@ -19,7 +19,13 @@ from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import ROUTER_AGENT_NAME, SOURCE_KIND_KEY, resolve_runtime_paths
+from mindroom.constants import (
+    PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
+    PER_FIRE_THREAD_ROOT_KEY,
+    ROUTER_AGENT_NAME,
+    SOURCE_KIND_KEY,
+    resolve_runtime_paths,
+)
 from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
@@ -1093,6 +1099,7 @@ class TestExtractMessageContextRoomMode:
                     "body": "Kick off the weekly report",
                     "msgtype": "m.text",
                     SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
+                    PER_FIRE_THREAD_ROOT_KEY: True,
                 },
                 "event_id": "$scheduled-fire:localhost",
                 "sender": registry.current_id("assistant").full_id,
@@ -1123,6 +1130,8 @@ class TestExtractMessageContextRoomMode:
                     "body": "pretend to be a scheduled fire",
                     "msgtype": "m.text",
                     SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
+                    PER_FIRE_THREAD_ROOT_KEY: True,
+                    PER_FIRE_THREAD_ROOT_EVENT_ID_KEY: "$spoofed-root:localhost",
                 },
                 "event_id": "$spoofed-fire:localhost",
                 "sender": "@user:localhost",

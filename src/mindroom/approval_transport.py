@@ -13,6 +13,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import normalize_nio_event_for_cache
 from mindroom.matrix.client_delivery import can_send_to_encrypted_room
+from mindroom.matrix.large_messages import content_fits_normal_event, sidecar_upload_is_usable, upload_json_sidecar
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content, build_thread_relation
 from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
 from mindroom.tool_approval import (
@@ -64,6 +65,40 @@ def _approval_startup_lookback_hours(config: Config) -> int:
 def _approval_relation_agent_name(content: dict[str, Any], *, fallback: str) -> str:
     agent_name = content.get("agent_name")
     return agent_name if isinstance(agent_name, str) and agent_name else fallback
+
+
+async def _offload_oversized_full_arguments(
+    client: nio.AsyncClient,
+    room_id: str,
+    send_content: dict[str, Any],
+) -> dict[str, Any]:
+    """Move full arguments that would overflow the card event into an uploaded JSON sidecar.
+
+    A failed upload strips the payload and marks the card non-approvable so the manager's
+    fail-closed resolution still holds: nothing approvable ships without complete arguments.
+    """
+    full_arguments = send_content.get("full_arguments")
+    if not isinstance(full_arguments, dict) or content_fits_normal_event(send_content):
+        return send_content
+
+    offloaded = {key: value for key, value in send_content.items() if key != "full_arguments"}
+    room_encrypted = room_id in client.rooms and client.rooms[room_id].encrypted
+    mxc_uri, file_info = await upload_json_sidecar(client, room_id, full_arguments)
+    if not sidecar_upload_is_usable(mxc_uri, file_info, room_encrypted=room_encrypted):
+        logger.warning(
+            "approval_full_arguments_sidecar_unavailable",
+            room_id=room_id,
+            has_mxc_uri=bool(mxc_uri),
+            has_file_info=bool(file_info),
+        )
+        offloaded["approvable"] = False
+        return offloaded
+    if room_encrypted:
+        offloaded["full_arguments_file"] = file_info
+    else:
+        offloaded["full_arguments_url"] = mxc_uri
+        offloaded["full_arguments_info"] = file_info
+    return offloaded
 
 
 @dataclass
@@ -185,6 +220,7 @@ class ApprovalMatrixTransport:
                 thread_id,
                 _approval_relation_agent_name(send_content, fallback=bot.agent_name),
             )
+        send_content = await _offload_oversized_full_arguments(bot.client, room_id, send_content)
         response = await bot.client.room_send(
             room_id=room_id,
             message_type="io.mindroom.tool_approval",
@@ -201,7 +237,7 @@ class ApprovalMatrixTransport:
                     agent_name=bot.agent_name,
                 )
             self.track_cache_write(bot, room_id, str(response.event_id))
-            return SentApprovalEvent(event_id=str(response.event_id))
+            return SentApprovalEvent(event_id=str(response.event_id), sent_content=send_content)
         logger.warning(
             "Failed to send approval Matrix event",
             room_id=room_id,

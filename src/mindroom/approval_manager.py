@@ -12,7 +12,7 @@ from concurrent.futures import Future, InvalidStateError
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 from mindroom.approval_events import (
@@ -23,6 +23,7 @@ from mindroom.approval_events import (
     terminal_edit_matches_card_sender,
 )
 from mindroom.logging_config import get_logger
+from mindroom.redaction import redact_sensitive_data
 from mindroom.tool_system.tool_calls import sanitize_failure_text, sanitize_failure_value
 
 if TYPE_CHECKING:
@@ -52,11 +53,14 @@ _DEFAULT_SEND_FAILURE_REASON = "Tool approval request could not be delivered to 
 DEFAULT_SHUTDOWN_REASON = "MindRoom shut down before approval completed."
 _DEFAULT_TIMEOUT_REASON = "Tool approval request timed out."
 _DEFAULT_TRUNCATED_APPROVAL_REASON = (
-    "Cannot approve: the displayed arguments are truncated. "
-    "Ask the agent to retry with a smaller payload, or approve via the script-based approval rule."
+    "Cannot approve: the tool arguments are too large to show in full, so a human cannot review "
+    "exactly what would run. Retry with a smaller payload — for example save large content to a "
+    "workspace file via `mindroom_output_path` or send it as a file attachment with a short message "
+    "body — or auto-approve this tool via a script-based approval rule."
 )
 _STARTUP_DISCARD_REASON = "Bot restarted before approval — original request was cancelled."
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
+_MAX_FULL_ARGUMENTS_JSON_BYTES = 2_000_000
 _MAX_REMEMBERED_TERMINAL_CARD_IDS = 4096
 _SANITIZER_TRUNCATION_MARKER = "... [truncated]"
 _MANAGER: _ApprovalManager | None = None
@@ -170,6 +174,20 @@ def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str,
     return preview, True
 
 
+def _full_arguments_json_bytes(value: object) -> int:
+    return len(json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+
+
+def _build_full_event_arguments(arguments: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the complete redacted arguments when they can be delivered to a human, else None."""
+    if _full_arguments_json_bytes(arguments) > _MAX_FULL_ARGUMENTS_JSON_BYTES:
+        return None
+    sanitized = cast("dict[str, Any]", redact_sensitive_data(arguments))
+    if _full_arguments_json_bytes(sanitized) > _MAX_FULL_ARGUMENTS_JSON_BYTES:
+        return None
+    return sanitized
+
+
 @dataclass(frozen=True, slots=True)
 class ApprovalDecision:
     """One resolved approval outcome."""
@@ -185,6 +203,9 @@ class SentApprovalEvent:
     """One delivered approval event."""
 
     event_id: str
+    # Content the transport actually sent when it diverges from the requested content,
+    # e.g. after offloading full arguments to an uploaded sidecar.
+    sent_content: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,11 +304,15 @@ class _ApprovalManager:
         requested_at = _utcnow()
         expires_at = requested_at + timedelta(seconds=max(timeout_seconds, 0.0))
         event_arguments, arguments_truncated = _build_event_arguments_preview(arguments)
+        full_arguments = (
+            await asyncio.to_thread(_build_full_event_arguments, arguments) if arguments_truncated else None
+        )
         content = self._pending_event_content(
             approval_id=approval_id,
             tool_name=tool_name,
             arguments=event_arguments,
             arguments_truncated=arguments_truncated,
+            full_arguments=full_arguments,
             agent_name=agent_name,
             workflow_id=workflow_id,
             participant_id=participant_id,
@@ -572,7 +597,7 @@ class _ApprovalManager:
     ) -> _LiveApprovalWaiter:
         card_event = self._card_event_from_content(
             event_id=sent_event.event_id,
-            content=content,
+            content=sent_event.sent_content if sent_event.sent_content is not None else content,
             requested_at=requested_at,
         )
         waiter = _LiveApprovalWaiter(
@@ -1082,6 +1107,7 @@ class _ApprovalManager:
         status: PendingApprovalStatus,
         workflow_id: str | None = None,
         participant_id: str | None = None,
+        full_arguments: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         content: dict[str, Any] = {
             "msgtype": "io.mindroom.tool_approval",
@@ -1109,6 +1135,10 @@ class _ApprovalManager:
             content["participant_id"] = participant_id
         if arguments_truncated:
             content["arguments_truncated"] = True
+            if full_arguments is not None:
+                content["full_arguments"] = full_arguments
+            else:
+                content["approvable"] = False
         if requester_id is not None:
             content["requester_id"] = requester_id
         return content
@@ -1190,7 +1220,8 @@ class _ApprovalManager:
         status: _ResolutionStatus,
         reason: str | None,
     ) -> tuple[_ApprovalStatus, str | None, bool]:
-        if status == "approved" and pending.arguments_preview_truncated:
+        arguments_unreviewable = pending.arguments_preview_truncated and not pending.full_arguments_available
+        if status == "approved" and (not pending.approvable or arguments_unreviewable):
             return "denied", _DEFAULT_TRUNCATED_APPROVAL_REASON, True
         return status, reason, False
 

@@ -540,6 +540,7 @@ class TestAgentBot(AgentBotTestBase):
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             )
+            await drain_coalescing(bot)
 
         mock_refresh_thread_history.assert_awaited_once()
         mock_build_payload.assert_awaited_once()
@@ -1034,6 +1035,92 @@ class TestAgentBot(AgentBotTestBase):
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is event
         assert pending_event.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+
+    @staticmethod
+    def _router_relay_event(
+        *,
+        sender: str = "@mindroom_router:localhost",
+        reply_to: str | None = "$user_msg:localhost",
+        is_falling_back: bool = False,
+    ) -> nio.RoomMessageText:
+        content: dict[str, Any] = {
+            "msgtype": "m.text",
+            "body": "@mindroom_calculator:localhost could you help with this?",
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        }
+        if reply_to is not None:
+            content["m.relates_to"] = {
+                "rel_type": "m.thread",
+                "event_id": "$thread_root:localhost",
+                "is_falling_back": is_falling_back,
+                "m.in_reply_to": {"event_id": reply_to},
+            }
+        return nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$relay:localhost",
+                "sender": sender,
+                "origin_server_ts": 1234567890,
+                "content": content,
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_router_relay_dispatch_indexes_routed_original_event(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Routed turns must stay discoverable by the human event the router relayed."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.canonical_alias = None
+        event = self._router_relay_event()
+
+        with (
+            patch.object(
+                bot._inbound_turn_normalizer,
+                "resolve_text_event",
+                new=AsyncMock(return_value=event),
+            ),
+            patch.object(
+                bot._turn_controller,
+                "_prepare_dispatch",
+                new=AsyncMock(return_value=None),
+            ) as mock_prepare,
+        ):
+            await bot._turn_controller._dispatch_text_message(
+                room,
+                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+            )
+
+        handled_turn = mock_prepare.await_args.kwargs["handled_turn"]
+        assert handled_turn.source_event_ids == ("$relay:localhost",)
+        assert "$user_msg:localhost" in handled_turn.discovery_event_ids
+
+    @pytest.mark.asyncio
+    async def test_router_relay_original_event_requires_explicit_router_reply(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Fallback replies and non-router relays must not alias the routed turn."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        validator = bot._ingress_validator
+
+        explicit_relay = self._router_relay_event()
+        fallback_relay = self._router_relay_event(reply_to="$latest:localhost", is_falling_back=True)
+        replyless_relay = self._router_relay_event(reply_to=None)
+        non_router_relay = self._router_relay_event(sender="@mindroom_general:localhost")
+
+        assert validator.router_relay_original_event_id(explicit_relay) == "$user_msg:localhost"
+        assert validator.router_relay_original_event_id(fallback_relay) is None
+        assert validator.router_relay_original_event_id(replyless_relay) is None
+        assert validator.router_relay_original_event_id(non_router_relay) is None
 
     @pytest.mark.asyncio
     async def test_external_trigger_to_private_agent_uses_trigger_owner_as_requester(

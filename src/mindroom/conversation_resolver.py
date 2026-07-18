@@ -16,8 +16,9 @@ from mindroom.dispatch_source import (
     IMAGE_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
     VOICE_SOURCE_KIND,
+    content_owns_per_fire_thread_root,
+    per_fire_thread_root_event_id_from_content,
     source_kind_from_content,
-    source_kind_owns_per_fire_thread_root,
 )
 from mindroom.dispatch_thread_context import (
     DispatchThreadContext,
@@ -327,12 +328,30 @@ class ConversationResolver:
     def _is_trusted_automation_fire(self, event_source: dict[str, Any]) -> bool:
         """Return whether one event is a per-fire automation delivery from a managed entity."""
         content = event_source.get("content")
-        if not isinstance(content, dict) or not source_kind_owns_per_fire_thread_root(
-            source_kind_from_content(content),
-        ):
+        if not isinstance(content, dict) or not content_owns_per_fire_thread_root(content):
             return False
         sender = event_source.get("sender")
         return isinstance(sender, str) and self._sender_is_managed_entity(sender)
+
+    def _trusted_automation_fire_root_event_id(
+        self,
+        event_source: dict[str, Any],
+        event_info: EventInfo,
+        *,
+        fallback_root_event_id: str | None,
+    ) -> str | None:
+        """Return the explicit root for one trusted per-fire automation delivery."""
+        if not self._is_trusted_automation_fire(event_source):
+            return None
+        content = event_source.get("content")
+        relayed_root_event_id = (
+            per_fire_thread_root_event_id_from_content(content) if isinstance(content, dict) else None
+        )
+        if relayed_root_event_id is not None:
+            return relayed_root_event_id
+        if event_info.thread_id is not None:
+            return event_info.thread_id
+        return fallback_root_event_id if event_info.can_be_thread_root else None
 
     def build_message_target(
         self,
@@ -356,11 +375,14 @@ class ConversationResolver:
             event_info = EventInfo.from_event(event_source)
             if event_info.can_be_thread_root and reply_to_event_id is not None:
                 thread_start_root_event_id = reply_to_event_id
-                # A scheduled or external-trigger fire that is its own root owns a
-                # per-fire thread and session even in room mode; otherwise every
-                # recurring fire in a room-mode room shares one room-level session
-                # and its history accumulates across fires.
-                automation_fire_root = self._is_trusted_automation_fire(event_source)
+            automation_root_event_id = self._trusted_automation_fire_root_event_id(
+                event_source,
+                event_info,
+                fallback_root_event_id=thread_start_root_event_id,
+            )
+            if automation_root_event_id is not None:
+                thread_start_root_event_id = automation_root_event_id
+                automation_fire_root = True
         return MessageTarget.resolve(
             room_id=room_id,
             thread_id=thread_id,
@@ -475,6 +497,7 @@ class ConversationResolver:
     ) -> str | None:
         """Return the coalescing thread scope for one inbound event."""
         config = self.deps.runtime.config
+        event_info = EventInfo.from_event(event.source)
         if (
             config.get_entity_thread_mode(
                 self.deps.agent_name,
@@ -483,11 +506,15 @@ class ConversationResolver:
             )
             == "room"
         ):
-            return None
+            return self._trusted_automation_fire_root_event_id(
+                event.source,
+                event_info,
+                fallback_root_event_id=event.event_id,
+            )
         try:
             resolution = await resolve_event_thread_membership(
                 room.room_id,
-                EventInfo.from_event(event.source),
+                event_info,
                 event_id=event.event_id,
                 access=self.thread_membership_access(
                     mode=ThreadReadMode.DISPATCH_SNAPSHOT,
