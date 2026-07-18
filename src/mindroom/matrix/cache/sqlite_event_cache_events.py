@@ -294,28 +294,72 @@ async def write_lookup_index_rows(
     """Persist point-lookup, edit-index, and thread-index rows for cached events."""
     if not serialized_events:
         return
-    await db.executemany(
-        """
-        INSERT INTO events(event_id, room_id, origin_server_ts, event_json, cached_at)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(event_id) DO UPDATE SET
-            room_id = excluded.room_id,
-            origin_server_ts = excluded.origin_server_ts,
-            event_json = excluded.event_json,
-            cached_at = excluded.cached_at
-        """,
-        [
+    accepted_events_by_id: dict[str, SerializedCachedEvent] = {}
+    prior_child_roots: set[tuple[str, str]] = set()
+    for event in serialized_events:
+        cursor = await db.execute(
+            """
+            INSERT INTO events(event_id, room_id, origin_server_ts, event_json, cached_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(event_id) DO UPDATE SET
+                room_id = excluded.room_id,
+                origin_server_ts = excluded.origin_server_ts,
+                event_json = excluded.event_json,
+                cached_at = excluded.cached_at
+            WHERE json_extract(events.event_json, '$.type') = 'm.room.encrypted'
+                OR json_extract(excluded.event_json, '$.type') <> 'm.room.encrypted'
+            RETURNING event_id
+            """,
             (
                 event.event_id,
                 room_id,
                 event.origin_server_ts,
                 event.event_json,
                 cached_at,
+            ),
+        )
+        accepted_row = await cursor.fetchone()
+        await cursor.close()
+        if accepted_row is not None:
+            accepted_events_by_id[event.event_id] = event
+            cursor = await db.execute(
+                """
+                SELECT room_id, thread_id
+                FROM event_threads
+                WHERE event_id = ? AND event_id <> thread_id
+                """,
+                (event.event_id,),
             )
-            for event in serialized_events
-        ],
+            prior_thread_row = await cursor.fetchone()
+            await cursor.close()
+            if prior_thread_row is not None:
+                prior_child_roots.add((str(prior_thread_row[0]), str(prior_thread_row[1])))
+    accepted_events = list(accepted_events_by_id.values())
+    if not accepted_events:
+        return
+
+    await db.executemany(
+        "DELETE FROM event_edits WHERE edit_event_id = ?",
+        [(event.event_id,) for event in accepted_events],
     )
-    edit_rows = event_edit_rows(room_id, serialized_events)
+    await db.executemany(
+        """
+        DELETE FROM event_threads
+        WHERE event_id = ?
+            AND (
+                event_id <> thread_id
+                OR NOT EXISTS (
+                    SELECT 1
+                    FROM event_threads AS child
+                    WHERE child.room_id = event_threads.room_id
+                        AND child.thread_id = event_threads.thread_id
+                        AND child.event_id <> event_threads.event_id
+                )
+            )
+        """,
+        [(event.event_id,) for event in accepted_events],
+    )
+    edit_rows = event_edit_rows(room_id, accepted_events)
     if edit_rows:
         await db.executemany(
             """
@@ -324,7 +368,7 @@ async def write_lookup_index_rows(
             """,
             [(row.edit_event_id, row.room_id, row.original_event_id, row.origin_server_ts) for row in edit_rows],
         )
-    thread_rows = event_thread_rows(room_id, serialized_events, thread_id=thread_id)
+    thread_rows = event_thread_rows(room_id, accepted_events, thread_id=thread_id)
     if thread_rows:
         await db.executemany(
             """
@@ -332,6 +376,21 @@ async def write_lookup_index_rows(
             VALUES (?, ?, ?)
             """,
             [(row.room_id, row.event_id, row.thread_id) for row in thread_rows],
+        )
+    if prior_child_roots:
+        await db.executemany(
+            """
+            DELETE FROM event_threads
+            WHERE room_id = ? AND event_id = ? AND thread_id = ?
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM event_threads AS child
+                    WHERE child.room_id = event_threads.room_id
+                        AND child.thread_id = event_threads.thread_id
+                        AND child.event_id <> event_threads.event_id
+                )
+            """,
+            [(prior_room_id, prior_thread_id, prior_thread_id) for prior_room_id, prior_thread_id in prior_child_roots],
         )
 
 

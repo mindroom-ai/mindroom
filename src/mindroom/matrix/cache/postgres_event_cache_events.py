@@ -330,8 +330,11 @@ async def write_lookup_index_rows(
     """Persist point-lookup, edit-index, and thread-index rows for cached events."""
     if not serialized_events:
         return
+    accepted_events_by_id: dict[str, SerializedCachedEvent] = {}
+    prior_child_roots: set[tuple[str, str]] = set()
     for event in serialized_events:
-        await db.execute(
+        accepted_row = await fetchone(
+            db,
             """
             INSERT INTO mindroom_event_cache_events(namespace, event_id, room_id, origin_server_ts, event_json, cached_at)
             VALUES (%s, %s, %s, %s, %s, %s)
@@ -341,6 +344,9 @@ async def write_lookup_index_rows(
                 event_json = excluded.event_json,
                 cached_at = excluded.cached_at,
                 write_seq = nextval('mindroom_event_cache_write_seq')
+            WHERE mindroom_event_cache_events.event_json::jsonb ->> 'type' = 'm.room.encrypted'
+                OR excluded.event_json::jsonb ->> 'type' <> 'm.room.encrypted'
+            RETURNING event_id
             """,
             (
                 namespace,
@@ -351,8 +357,51 @@ async def write_lookup_index_rows(
                 cached_at,
             ),
         )
+        if accepted_row is not None:
+            accepted_events_by_id[event.event_id] = event
+            prior_thread_row = await fetchone(
+                db,
+                """
+                SELECT room_id, thread_id
+                FROM mindroom_event_cache_event_threads
+                WHERE namespace = %s AND event_id = %s AND event_id <> thread_id
+                """,
+                (namespace, event.event_id),
+            )
+            if prior_thread_row is not None:
+                prior_child_roots.add((str(prior_thread_row[0]), str(prior_thread_row[1])))
+    accepted_events = list(accepted_events_by_id.values())
+    if not accepted_events:
+        return
 
-    edit_rows = event_edit_rows(room_id, serialized_events)
+    for event in accepted_events:
+        await db.execute(
+            """
+            DELETE FROM mindroom_event_cache_event_edits
+            WHERE namespace = %s AND edit_event_id = %s
+            """,
+            (namespace, event.event_id),
+        )
+        await db.execute(
+            """
+            DELETE FROM mindroom_event_cache_event_threads
+            WHERE namespace = %s AND event_id = %s
+                AND (
+                    event_id <> thread_id
+                    OR NOT EXISTS (
+                        SELECT 1
+                        FROM mindroom_event_cache_event_threads AS child
+                        WHERE child.namespace = mindroom_event_cache_event_threads.namespace
+                            AND child.room_id = mindroom_event_cache_event_threads.room_id
+                            AND child.thread_id = mindroom_event_cache_event_threads.thread_id
+                            AND child.event_id <> mindroom_event_cache_event_threads.event_id
+                    )
+                )
+            """,
+            (namespace, event.event_id),
+        )
+
+    edit_rows = event_edit_rows(room_id, accepted_events)
     for row in edit_rows:
         await db.execute(
             """
@@ -366,7 +415,7 @@ async def write_lookup_index_rows(
             (namespace, row.edit_event_id, row.room_id, row.original_event_id, row.origin_server_ts),
         )
 
-    thread_rows = event_thread_rows(room_id, serialized_events, thread_id=thread_id)
+    thread_rows = event_thread_rows(room_id, accepted_events, thread_id=thread_id)
     if thread_rows:
         for row in thread_rows:
             await db.execute(
@@ -378,6 +427,36 @@ async def write_lookup_index_rows(
                 """,
                 (namespace, row.room_id, row.event_id, row.thread_id),
             )
+    await _delete_orphaned_prior_thread_roots(
+        db,
+        namespace=namespace,
+        prior_child_roots=prior_child_roots,
+    )
+
+
+async def _delete_orphaned_prior_thread_roots(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    prior_child_roots: set[tuple[str, str]],
+) -> None:
+    """Remove learned root self-mappings after their final child mapping moves away."""
+    for prior_room_id, prior_thread_id in prior_child_roots:
+        await db.execute(
+            """
+            DELETE FROM mindroom_event_cache_event_threads
+            WHERE namespace = %s AND room_id = %s AND event_id = %s AND thread_id = %s
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM mindroom_event_cache_event_threads AS child
+                    WHERE child.namespace = mindroom_event_cache_event_threads.namespace
+                        AND child.room_id = mindroom_event_cache_event_threads.room_id
+                        AND child.thread_id = mindroom_event_cache_event_threads.thread_id
+                        AND child.event_id <> mindroom_event_cache_event_threads.event_id
+                )
+            """,
+            (namespace, prior_room_id, prior_thread_id, prior_thread_id),
+        )
 
 
 async def _dependent_edit_event_ids(
