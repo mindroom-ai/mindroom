@@ -180,7 +180,7 @@ def _validate_text_authored_override_value(
     """Validate one authored override for a text-like config field."""
     if field.type == "string[]":
         try:
-            return _normalize_string_array_override(value)
+            return _normalize_string_array_override(value, preserve_empty_list=True)
         except TypeError as exc:
             msg = f"{full_path}: {exc}."
             raise ToolConfigOverrideError(msg) from exc
@@ -495,12 +495,18 @@ def _pop_implicit_toolkit_filters(
     include_tools = (
         None
         if "include_tools" in declared_names
-        else _normalize_string_array_override(init_kwargs.pop("include_tools", None))
+        else _normalize_string_array_override(
+            init_kwargs.pop("include_tools", None),
+            preserve_empty_list=True,
+        )
     )
     exclude_tools = (
         None
         if "exclude_tools" in declared_names
-        else _normalize_string_array_override(init_kwargs.pop("exclude_tools", None))
+        else _normalize_string_array_override(
+            init_kwargs.pop("exclude_tools", None),
+            preserve_empty_list=True,
+        )
     )
     return include_tools, exclude_tools
 
@@ -1316,7 +1322,11 @@ def export_tools_metadata(tool_metadata: dict[str, ToolMetadata] | None = None) 
     return tools
 
 
-def _normalize_string_array_override(value: object) -> list[str] | None:
+def _normalize_string_array_override(
+    value: object,
+    *,
+    preserve_empty_list: bool = False,
+) -> list[str] | None:
     """Normalize a string-array authored override from a list or legacy text value."""
     if value is None:
         return None
@@ -1334,7 +1344,9 @@ def _normalize_string_array_override(value: object) -> list[str] | None:
         stripped = entry.strip()
         if stripped:
             normalized.append(stripped)
-    return normalized or None
+    if normalized or preserve_empty_list:
+        return normalized
+    return None
 
 
 def _normalize_agent_override_field_value(field: ConfigField, value: object) -> object | None:

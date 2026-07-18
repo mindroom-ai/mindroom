@@ -787,6 +787,43 @@ def test_searxng_include_tools_override_filters_registered_functions(tmp_path: P
     assert set(tool.functions) == {"search_web", "news_search", "image_search"}
 
 
+def test_searxng_empty_include_tools_override_filters_all_functions(tmp_path: Path) -> None:
+    """An explicit empty universal allowlist should expose no toolkit functions."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    tool = get_tool_by_name(
+        "searxng",
+        runtime_paths,
+        credential_overrides={"host": "https://search.example.com"},
+        tool_config_overrides={"include_tools": []},
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert not tool.functions
+
+
+def test_file_empty_exclude_patterns_override_reaches_constructor(tmp_path: Path) -> None:
+    """Declared string-array fields should preserve an explicit empty list."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    tool = get_tool_by_name(
+        "file",
+        runtime_paths,
+        tool_config_overrides={"exclude_patterns": []},
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert tool.exclude_patterns == []
+
+
 def test_custom_toolkit_exclude_tools_override_filters_async_functions(tmp_path: Path) -> None:
     """Universal filters should work when a Toolkit subclass omits filter constructor kwargs."""
     runtime_paths = resolve_runtime_paths(
