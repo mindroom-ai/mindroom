@@ -432,6 +432,13 @@ async def write_lookup_index_rows(
         )
 
     thread_rows = event_thread_rows(room_id, serialized_events, thread_id=thread_id)
+    await db.executemany(
+        """
+        DELETE FROM event_threads
+        WHERE principal_id = ? AND room_id = ? AND event_id = ?
+        """,
+        [(principal_id, room_id, event_id) for event_id in event_ids],
+    )
     if thread_rows:
         await db.executemany(
             """

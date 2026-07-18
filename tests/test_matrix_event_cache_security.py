@@ -204,6 +204,76 @@ async def test_failed_room_purge_blocks_reads_until_recovery(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("purge_scope", ["room", "principal"])
+async def test_recovered_purge_discards_the_operation_that_flushes_it(
+    event_cache_factory: Callable[[], ConversationEventCache],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    purge_scope: str,
+) -> None:
+    """A late write must not recreate rows in the transaction that commits a pending purge."""
+    root = _shared_cache(event_cache_factory)
+    await root.initialize()
+    cache = root.for_principal("@alice:localhost")
+    room_id = "!left:localhost"
+    old_event = _event("$old", 1)
+    late_event = _event("$late", 2)
+    await cache.store_event("$old", room_id, old_event)
+
+    if isinstance(cache, SqliteEventCache):
+        module = sqlite_event_cache_events
+    else:
+        assert isinstance(cache, PostgresEventCache)
+        module = postgres_event_cache_events
+    purge_name = f"purge_{purge_scope}_locked"
+    original_purge = getattr(module, purge_name)
+    failure_reason = "temporary purge failure"
+
+    async def fail_purge(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError(failure_reason)
+
+    try:
+        monkeypatch.setattr(module, purge_name, fail_purge)
+        purge = (lambda: cache.purge_room(room_id)) if purge_scope == "room" else cache.purge_principal
+        with pytest.raises(RuntimeError, match=failure_reason):
+            await purge()
+
+        monkeypatch.setattr(module, purge_name, original_purge)
+        await cache.store_event("$late", room_id, late_event)
+
+        assert await cache.get_event(room_id, "$old") is None
+        assert await cache.get_event(room_id, "$late") is None
+    finally:
+        await root.close()
+
+
+@pytest.mark.asyncio
+async def test_restoring_event_without_thread_relation_removes_stale_mapping(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """Replacing an event must rebuild rather than accumulate its thread lookup index."""
+    root = _shared_cache(event_cache_factory)
+    await root.initialize()
+    cache = root.for_principal("@alice:localhost")
+    room_id = "!room:localhost"
+    event_id = "$event"
+    threaded_event = _event(event_id, 1)
+    threaded_event["content"]["m.relates_to"] = {
+        "rel_type": "m.thread",
+        "event_id": "$thread-root",
+    }
+    try:
+        await cache.store_event(event_id, room_id, threaded_event)
+        assert await cache.get_thread_id_for_event(room_id, event_id) == "$thread-root"
+
+        await cache.store_event(event_id, room_id, _event(event_id, 2))
+
+        assert await cache.get_thread_id_for_event(room_id, event_id) is None
+    finally:
+        await root.close()
+
+
+@pytest.mark.asyncio
 async def test_principal_purge_removes_only_that_principals_rows(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:

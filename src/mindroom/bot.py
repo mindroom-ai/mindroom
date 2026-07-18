@@ -1108,19 +1108,30 @@ class AgentBot:
         except (OSError, ValueError) as exc:
             self.logger.warning("matrix_sync_token_save_failed", error=str(exc))
 
-    def _clear_saved_sync_token(self) -> None:
+    def _clear_saved_sync_token(self) -> bool:
         """Clear the saved sync token file."""
         try:
             clear_sync_token(self.storage_path, self.agent_name)
         except OSError as exc:
             self.logger.warning("matrix_sync_token_clear_failed", error=str(exc))
+            return False
+        return True
+
+    def _invalidate_sync_checkpoint_for_cache_scope_cleanup(self) -> bool:
+        """Prevent an older checkpoint from certifying rows removed by membership cleanup."""
+        self._sync_trust_state = SyncTrustState.UNCERTAIN
+        self._sync_checkpoint = None
+        if self._clear_saved_sync_token():
+            return True
+        self._runtime_view.mark_callback_failed()
+        self.event_cache.disable("sync_checkpoint_clear_failed")
+        self.logger.warning("matrix_cache_scope_cleanup_deferred_until_checkpoint_replay")
+        return False
 
     def _mark_callback_failed(self) -> None:
         """Mark sync certification unsafe after a Matrix callback failure."""
         self._runtime_view.mark_callback_failed()
-        self._sync_trust_state = SyncTrustState.UNCERTAIN
-        self._sync_checkpoint = None
-        self._clear_saved_sync_token()
+        self._invalidate_sync_checkpoint_for_cache_scope_cleanup()
 
     def _apply_sync_certification_decision(
         self,
@@ -1427,9 +1438,10 @@ class AgentBot:
         joined_room_ids = set(response.rooms.join)
         left_room_ids = set(response.rooms.leave)
         if left_room_ids:
-            self._clear_saved_sync_token()
+            self._invalidate_sync_checkpoint_for_cache_scope_cleanup()
         for room_id in left_room_ids:
             self._room_lifecycle.forget_invited_room(room_id)
+            await self._conversation_cache.purge_room(room_id)
         call_manager = self._call_manager
         if call_manager is not None:
             await call_manager.on_sync_room_membership(
@@ -1459,7 +1471,7 @@ class AgentBot:
     ) -> None:
         """Apply invited-room cleanup before optional call reconciliation."""
         if event.state_key == self.agent_user.user_id and event.membership in {"leave", "ban"}:
-            self._clear_saved_sync_token()
+            self._invalidate_sync_checkpoint_for_cache_scope_cleanup()
             self._room_lifecycle.forget_invited_room(room.room_id)
             await self._conversation_cache.purge_room(room.room_id)
         call_manager = self._call_manager
@@ -1612,7 +1624,7 @@ class AgentBot:
     async def _purge_left_rooms(self, room_ids: Sequence[str]) -> None:
         """Purge principal-owned cache rows only after confirmed room departures."""
         if room_ids:
-            self._clear_saved_sync_token()
+            self._invalidate_sync_checkpoint_for_cache_scope_cleanup()
         for room_id in room_ids:
             await self._conversation_cache.purge_room(room_id)
 

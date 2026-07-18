@@ -451,6 +451,13 @@ async def write_lookup_index_rows(
         )
 
     thread_rows = event_thread_rows(room_id, serialized_events, thread_id=thread_id)
+    await db.execute(
+        """
+        DELETE FROM mindroom_event_cache_event_threads
+        WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
+        """,
+        (namespace, room_id, event_ids),
+    )
     if thread_rows:
         for row in thread_rows:
             await db.execute(

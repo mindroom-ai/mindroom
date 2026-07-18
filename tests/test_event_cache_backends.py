@@ -21,6 +21,7 @@ from mindroom.matrix.cache import postgres_event_cache_threads, sqlite_event_cac
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import (
     PostgresEventCache,
+    _FlushedPendingWrites,
     _initialize_postgres_event_cache_db,
     _is_transient_postgres_failure,
     _PostgresEventCacheRuntime,
@@ -705,7 +706,7 @@ async def test_postgres_event_cache_operation_rolls_back_cancelled_callback(
             acquire_db_operation=acquire_db_operation,
         ),
     )
-    monkeypatch.setattr(cache, "_flush_pending_writes", AsyncMock(return_value=SimpleNamespace()))
+    monkeypatch.setattr(cache, "_flush_pending_writes", AsyncMock(return_value=_FlushedPendingWrites()))
 
     async def cancelled_callback(_db: object) -> None:
         raise asyncio.CancelledError(cancel_reason)

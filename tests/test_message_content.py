@@ -96,6 +96,27 @@ class TestResolvedMessageExtraction:
         assert sidecar_mxc_url(content) == "mxc://server/encrypted-sidecar"
         assert event_mxc_urls({"content": content}) == frozenset({"mxc://server/encrypted-sidecar"})
 
+    @pytest.mark.parametrize("malformed_url", ["mxc://", "mxc://server"])
+    def test_sidecar_url_validation_rejects_incomplete_mxc_uris(self, malformed_url: str) -> None:
+        """Incomplete content URIs must not enter hydration or ownership indexes."""
+        metadata = {
+            "version": 2,
+            "encoding": "matrix_event_content_json",
+        }
+        direct_content = {
+            "io.mindroom.long_text": metadata,
+            "url": malformed_url,
+        }
+        encrypted_content = {
+            "io.mindroom.long_text": metadata,
+            "file": {"url": malformed_url},
+        }
+
+        assert sidecar_mxc_url(direct_content) is None
+        assert sidecar_mxc_url(encrypted_content) is None
+        assert event_mxc_urls({"content": direct_content}) == frozenset()
+        assert event_mxc_urls({"content": encrypted_content}) == frozenset()
+
     @pytest.mark.asyncio
     async def test_extract_and_resolve_message_hydrates_v2_sidecar_content(self) -> None:
         """Regular v2 sidecars should return the canonical content and body."""
@@ -1120,17 +1141,25 @@ class TestDownloadMxcText:
         response.body = b"123456"
         client.download.return_value = response
         event_cache = AsyncMock()
+        event_cache.principal_id = "@alice:localhost"
         event_cache.get_mxc_text.return_value = None
+        cache_key = (
+            "@alice:localhost",
+            "!room:server",
+            "$oversized",
+            "mxc://server/oversized",
+        )
 
         result = await _download_mxc_text(
             client,
             "mxc://server/oversized",
             event_cache=event_cache,
             room_id="!room:server",
+            event_id="$oversized",
         )
 
         assert result is None
-        assert "mxc://server/oversized" not in mxc_plaintext_cache_module._mxc_cache
+        assert cache_key not in mxc_plaintext_cache_module._mxc_cache
         event_cache.store_mxc_text.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1161,12 +1190,28 @@ class TestDownloadMxcText:
         response.body = b"small"
         client.download.return_value = response
         file_info = {"key": {"k": "key"}, "hashes": {"sha256": "hash"}, "iv": "iv"}
+        event_cache = AsyncMock()
+        event_cache.principal_id = "@alice:localhost"
+        event_cache.get_mxc_text.return_value = None
+        cache_key = (
+            "@alice:localhost",
+            "!room:server",
+            "$decrypted-oversized",
+            "mxc://server/decrypted-oversized",
+        )
 
         with patch("mindroom.matrix.message_content.crypto.attachments.decrypt_attachment", return_value=b"123456"):
-            result = await _download_mxc_text(client, "mxc://server/decrypted-oversized", file_info)
+            result = await _download_mxc_text(
+                client,
+                "mxc://server/decrypted-oversized",
+                file_info,
+                event_cache=event_cache,
+                room_id="!room:server",
+                event_id="$decrypted-oversized",
+            )
 
         assert result is None
-        assert "mxc://server/decrypted-oversized" not in mxc_plaintext_cache_module._mxc_cache
+        assert cache_key not in mxc_plaintext_cache_module._mxc_cache
 
     def test_mxc_cache_uses_lru_eviction(self) -> None:
         """A cache hit should refresh recency so the oldest untouched entry is evicted first."""

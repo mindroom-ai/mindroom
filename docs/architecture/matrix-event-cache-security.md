@@ -42,7 +42,13 @@ Each principal-bound view is a non-owning handle, so closing one bot cannot clos
 
 If durable leave or ban cleanup fails, the principal-room purge remains pending in the backend runtime, blocks cache certification, and is flushed transactionally before any later read or write in that room.
 
-Every authoritative leave clears the saved checkpoint before durable cleanup starts.
+The operation that commits a pending room or principal purge is discarded, so its queued callback cannot recreate deleted rows in the same transaction.
+
+Every authoritative leave invalidates both the in-memory and saved checkpoint before durable cleanup starts.
+
+If saved-checkpoint deletion fails, the runtime disables cache reads and writes, leaves durable rows consistent with the older checkpoint, and poisons further certification so restart can replay the leave.
+
+Sync-response leave cleanup commits before unrelated call reconciliation can suspend or fail.
 
 If the process stops before cleanup commits, the next startup has no certified checkpoint and transactionally purges every row for that principal before restoring sync continuity or allowing cache reads.
 

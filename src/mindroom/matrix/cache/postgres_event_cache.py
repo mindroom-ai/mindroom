@@ -1013,9 +1013,12 @@ class PostgresEventCache:
             try:
                 async with self._runtime.acquire_db_operation(room_id, operation=operation) as db:
                     try:
-                        flushed_pending = await self._flush_pending_writes(db, room_id)
-                        result = await callback(db)
-                        await db.commit()
+                        result, flushed_pending = await self._run_operation_transaction(
+                            db,
+                            room_id=room_id,
+                            disabled_result=disabled_result,
+                            callback=callback,
+                        )
                     except BaseException:
                         await _rollback_postgres_connection_best_effort(
                             db,
@@ -1040,6 +1043,23 @@ class PostgresEventCache:
                 self._forget_flushed_pending_writes(room_id, flushed_pending)
                 return result
         raise _cache_backend_unavailable(operation, transient_error or RuntimeError("operation did not run"))
+
+    async def _run_operation_transaction(
+        self,
+        db: psycopg.AsyncConnection,
+        *,
+        room_id: str,
+        disabled_result: _T,
+        callback: Callable[[psycopg.AsyncConnection], Awaitable[_T]],
+    ) -> tuple[_T, _FlushedPendingWrites]:
+        """Commit one callback unless the transaction first removed its security scope."""
+        flushed_pending = await self._flush_pending_writes(db, room_id)
+        if flushed_pending.room_purge or flushed_pending.principal_purge:
+            result = disabled_result
+        else:
+            result = await callback(db)
+        await db.commit()
+        return result, flushed_pending
 
     async def _flush_pending_writes(
         self,

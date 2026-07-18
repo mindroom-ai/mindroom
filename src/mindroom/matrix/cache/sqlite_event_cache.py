@@ -669,7 +669,10 @@ class SqliteEventCache:
                         principal_id=self.principal_id,
                         room_id=room_id,
                     )
-                result = await writer(db)
+                if pending_principal_purge or pending_room_purge:
+                    result = disabled_result
+                else:
+                    result = await writer(db)
                 await db.commit()
             except BaseException:
                 await _rollback_sqlite_connection_best_effort(db, operation=operation)
