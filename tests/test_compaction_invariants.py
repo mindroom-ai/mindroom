@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from agno.agent import Agent
+from agno.exceptions import ContextWindowExceededError
 from agno.models.anthropic import Claude
 from agno.models.cerebras import Cerebras
 from agno.models.google import Gemini
@@ -810,7 +811,7 @@ def test_build_summary_request_messages_is_the_single_request_seam() -> None:
 # --- Invariant 4: deterministic budget shrink on provider failure --------------
 
 
-def test_retry_policy_shrinks_on_timeout_and_context_length_errors() -> None:
+def test_retry_policy_shrinks_on_timeout_and_output_limit() -> None:
     policy = DEFAULT_SUMMARY_RETRY_POLICY
 
     assert policy.retry_budget(attempt=1, budget=16_000, error=TimeoutError()) == 8_000
@@ -822,6 +823,23 @@ def test_retry_policy_shrinks_on_timeout_and_context_length_errors() -> None:
         )
         == 8_000
     )
+
+
+def test_retry_policy_halves_budget_for_typed_context_window_error() -> None:
+    error = ContextWindowExceededError(message="provider-specific wording does not matter")
+
+    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) == 8_000
+
+
+def test_retry_policy_propagates_second_typed_context_window_error() -> None:
+    error = ContextWindowExceededError(message="provider-specific wording does not matter")
+
+    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=2, budget=8_000, error=error) is None
+
+
+def test_retry_policy_preserves_context_error_fragment_matches() -> None:
+    policy = DEFAULT_SUMMARY_RETRY_POLICY
+
     assert policy.retry_budget(attempt=1, budget=16_000, error=RuntimeError("context_length_exceeded")) == 8_000
     assert policy.retry_budget(attempt=1, budget=16_000, error=RuntimeError("request too large")) == 8_000
     assert (
