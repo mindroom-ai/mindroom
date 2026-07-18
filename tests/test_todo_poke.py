@@ -6,13 +6,14 @@ import asyncio
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock
 
 import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
+from mindroom.custom_tools import todo_poke as todo_poke_module
 from mindroom.custom_tools.todo_poke import (
     TodoPokeDeps,
     TodoPokePolicy,
@@ -27,6 +28,7 @@ from tests.conftest import bind_runtime_paths, test_runtime_paths
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+    from typing import Any
 
 _NOW = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
 
@@ -157,19 +159,25 @@ async def test_scan_skips_malformed_unassigned_and_unconfigured_items(tmp_path: 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("invalid_kind", ["duplicate-id", "naive-updated-at"])
-async def test_scan_skips_duplicate_or_timezone_naive_items(
+@pytest.mark.parametrize(
+    "invalid_kind",
+    ["duplicate-id", "naive-updated-at", "overflow-updated-at"],
+)
+async def test_scan_skips_duplicate_or_invalid_timestamp_items(
     tmp_path: Path,
     invalid_kind: str,
 ) -> None:
-    """A duplicate identity or naive timestamp invalidates only the affected item."""
+    """A duplicate identity or invalid timestamp invalidates only the affected item."""
     todo_root = tmp_path / "todo"
     valid_item = _item("ready", title="Valid item")
     if invalid_kind == "duplicate-id":
         invalid_item = _item("ready", title="Duplicate item")
-    else:
+    elif invalid_kind == "naive-updated-at":
         invalid_item = _item("invalid", title="Naive item")
         invalid_item["updated_at"] = "2026-07-18T11:50:00"
+    else:
+        invalid_item = _item("invalid", title="Overflow item")
+        invalid_item["updated_at"] = "9999-12-31T23:00:00-05:00"
     _write_thread(todo_root, "scope", items=[valid_item, invalid_item])
     deps, _queried_rooms, sent = _deps(todo_root)
 
@@ -177,6 +185,7 @@ async def test_scan_skips_duplicate_or_timezone_naive_items(
     assert "`ready` [medium] `Valid item`" in sent[0][1]
     assert "Duplicate item" not in sent[0][1]
     assert "Naive item" not in sent[0][1]
+    assert "Overflow item" not in sent[0][1]
 
 
 @pytest.mark.asyncio
@@ -270,6 +279,22 @@ async def test_poke_titles_cannot_inject_agent_team_or_matrix_mentions(tmp_path:
     assert "`Ask @\u200breviewer`" in body
     assert "`Ask @\u200bdev`" in body
     assert "`Ask @\u200boutside:localhost`" in body
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("plain", "`plain`"),
+        ("inside`tick", "``inside`tick``"),
+        ("inside``ticks", "```inside``ticks```"),
+        ("`leading", "`` `leading ``"),
+        ("trailing`", "`` trailing` ``"),
+    ],
+    ids=["plain", "fence-growth", "double-fence-growth", "leading-edge", "trailing-edge"],
+)
+def test_literal_code_text_uses_safe_fences_and_edge_padding(text: str, expected: str) -> None:
+    """Literal todo text must grow its fence and pad ambiguous backtick edges."""
+    assert todo_poke_module._literal_code_text(text) == expected
 
 
 @pytest.mark.asyncio
@@ -447,10 +472,10 @@ async def test_fingerprint_includes_hidden_items_and_cooldown_precedes_repoke(tm
 
 
 @pytest.mark.asyncio
-async def test_unchanged_fingerprint_rearms_after_backstop(tmp_path: Path) -> None:
-    """An unchanged scope eventually retries in case its delivered agent turn failed."""
+async def test_unchanged_fingerprint_retries_are_bounded_and_reset_after_change(tmp_path: Path) -> None:
+    """Unchanged work gets three backstop retries, while changed work resets the counter."""
     todo_root = tmp_path / "todo"
-    _write_thread(todo_root, "scope")
+    path = _write_thread(todo_root, "scope")
     current_time = [_NOW]
     deps, queried_rooms, sent = _deps(todo_root, clock=lambda: current_time[0])
     policy = TodoPokePolicy(quiet_seconds=0)
@@ -460,10 +485,103 @@ async def test_unchanged_fingerprint_rearms_after_backstop(tmp_path: Path) -> No
     assert await scan_todo_pokes(policy, deps) == 0
     assert queried_rooms == ["!room:localhost"]
 
-    current_time[0] = _NOW + timedelta(hours=1)
+    for retry_count in range(1, 4):
+        current_time[0] = _NOW + timedelta(hours=retry_count)
+        assert await scan_todo_pokes(policy, deps) == 1
+        poke_state = json.loads((todo_root / "poke_state.json").read_text(encoding="utf-8"))
+        record = next(iter(poke_state["scopes"].values()))
+        assert record["unchanged_repoke_count"] == retry_count
+
+    current_time[0] = _NOW + timedelta(hours=4)
+    assert await scan_todo_pokes(policy, deps) == 0
+
+    thread_state = json.loads(path.read_text(encoding="utf-8"))
+    thread_state["items"][0]["title"] = "Changed work"
+    thread_state["items"][0]["updated_at"] = current_time[0].isoformat()
+    path.write_text(json.dumps(thread_state), encoding="utf-8")
     assert await scan_todo_pokes(policy, deps) == 1
-    assert queried_rooms == ["!room:localhost", "!room:localhost"]
+
+    poke_state = json.loads((todo_root / "poke_state.json").read_text(encoding="utf-8"))
+    record = next(iter(poke_state["scopes"].values()))
+    assert record["unchanged_repoke_count"] == 0
+    assert len(queried_rooms) == 5
+    assert len(sent) == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_timestamp",
+    [
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(float("inf"), id="infinity"),
+        pytest.param(True, id="bool"),
+    ],
+)
+async def test_invalid_persisted_poke_timestamp_does_not_wedge_scope(
+    tmp_path: Path,
+    bad_timestamp: float | bool,
+) -> None:
+    """Non-finite and boolean dedup timestamps must be treated as absent records."""
+    todo_root = tmp_path / "todo"
+    _write_thread(todo_root, "scope")
+    deps, _queried_rooms, sent = _deps(todo_root)
+    policy = TodoPokePolicy(quiet_seconds=0)
+
+    assert await scan_todo_pokes(policy, deps) == 1
+    poke_state_path = todo_root / "poke_state.json"
+    poke_state = json.loads(poke_state_path.read_text(encoding="utf-8"))
+    record = next(iter(poke_state["scopes"].values()))
+    record["last_poked_at"] = bad_timestamp
+    poke_state_path.write_text(json.dumps(poke_state), encoding="utf-8")
+
+    assert await scan_todo_pokes(policy, deps) == 1
     assert len(sent) == 2
+
+
+@pytest.mark.asyncio
+async def test_persist_failure_remembers_delivery_and_does_not_starve_later_scopes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delivered poke stays memory-deduped while later scopes and persistence continue."""
+    todo_root = tmp_path / "todo"
+    _write_thread(
+        todo_root,
+        "a",
+        room_id="!a:localhost",
+        items=[_item("a", assigned_agent="agent_a")],
+    )
+    _write_thread(
+        todo_root,
+        "b",
+        room_id="!b:localhost",
+        items=[_item("b", assigned_agent="agent_b")],
+    )
+    deps, _queried_rooms, sent = _deps(todo_root)
+    real_persist = cast("Callable[..., None]", todo_poke_module._persist_poke)
+    persist_attempts = 0
+
+    def fail_first_persist(*args: object) -> None:
+        nonlocal persist_attempts
+        persist_attempts += 1
+        if persist_attempts == 1:
+            msg = "disk full"
+            raise OSError(msg)
+        real_persist(*args)
+
+    monkeypatch.setattr(todo_poke_module, "_persist_poke", fail_first_persist)
+    remembered_pokes = {}
+    policy = TodoPokePolicy(quiet_seconds=0)
+
+    assert await scan_todo_pokes(policy, deps, pending_poke_records=remembered_pokes) == 2
+    assert len(sent) == 2
+    assert len(remembered_pokes) == 1
+
+    assert await scan_todo_pokes(policy, deps, pending_poke_records=remembered_pokes) == 0
+    assert len(sent) == 2
+    assert remembered_pokes == {}
+    poke_state = json.loads((todo_root / "poke_state.json").read_text(encoding="utf-8"))
+    assert len(poke_state["scopes"]) == 2
 
 
 @pytest.mark.asyncio
@@ -598,6 +716,54 @@ async def test_scan_prunes_poke_records_without_current_actionable_scope(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_transient_source_read_failure_preserves_poke_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A temporary source I/O failure must not prune dedup state and cause a duplicate poke."""
+    todo_root = tmp_path / "todo"
+    source_path = _write_thread(todo_root, "scope")
+    deps, _queried_rooms, sent = _deps(todo_root)
+    policy = TodoPokePolicy(quiet_seconds=0)
+
+    assert await scan_todo_pokes(policy, deps) == 1
+    real_read_json = todo_poke_module.read_json
+    fail_source_read = True
+
+    def read_with_transient_failure(path: Path) -> dict[str, Any]:
+        if fail_source_read and path == source_path:
+            msg = "temporary read failure"
+            raise OSError(msg)
+        return real_read_json(path)
+
+    monkeypatch.setattr(todo_poke_module, "read_json", read_with_transient_failure)
+
+    assert await scan_todo_pokes(policy, deps) == 0
+    poke_state = json.loads((todo_root / "poke_state.json").read_text(encoding="utf-8"))
+    assert len(poke_state["scopes"]) == 1
+
+    fail_source_read = False
+    assert await scan_todo_pokes(policy, deps) == 0
+    assert len(sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_parse_invalid_source_still_prunes_poke_record(tmp_path: Path) -> None:
+    """A parse-invalid source is observable state loss, so its obsolete record may be pruned."""
+    todo_root = tmp_path / "todo"
+    source_path = _write_thread(todo_root, "scope")
+    deps, _queried_rooms, _sent = _deps(todo_root)
+    policy = TodoPokePolicy(quiet_seconds=0)
+
+    assert await scan_todo_pokes(policy, deps) == 1
+    source_path.write_text("{bad json", encoding="utf-8")
+
+    assert await scan_todo_pokes(policy, deps) == 0
+    poke_state = json.loads((todo_root / "poke_state.json").read_text(encoding="utf-8"))
+    assert poke_state["scopes"] == {}
+
+
+@pytest.mark.asyncio
 async def test_scan_offloads_all_blocking_storage_phases(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -618,8 +784,8 @@ async def test_scan_offloads_all_blocking_storage_phases(
     assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 1
     assert offloaded == [
         "_read_thread_snapshots",
-        "_read_poke_state",
         "_prune_poke_state",
+        "_read_poke_state",
         "_read_thread_snapshot",
         "_persist_poke",
     ]
@@ -709,3 +875,5 @@ async def test_worker_sleeps_first_continues_after_failure_and_stops(
     assert scan.await_count == 2
     assert scan.await_args_list[0].kwargs["failed_scope_keys"] is worker._failed_scope_keys
     assert scan.await_args_list[1].kwargs["failed_scope_keys"] is worker._failed_scope_keys
+    assert scan.await_args_list[0].kwargs["pending_poke_records"] is worker._pending_poke_records
+    assert scan.await_args_list[1].kwargs["pending_poke_records"] is worker._pending_poke_records

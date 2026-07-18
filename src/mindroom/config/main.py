@@ -96,6 +96,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.catalog import ToolValidationInfo
     from mindroom.tool_system.worker_routing import WorkerScope
 
+# Keep synchronized with todo_poke._SAFE_ASSIGNEE_PATTERN without importing runtime tools into config.
 _AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 _RESERVED_ENTITY_NAMES = frozenset({ROUTER_AGENT_NAME, "user"})
 _DEFER_PROHIBITED_CONTROL_TOOLS = frozenset({"delegate", "dynamic_tools", "external_trigger_manager", "self_config"})

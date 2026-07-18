@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from mindroom import yaml_io
 from mindroom.custom_tools.todo_state import (
+    PRIORITY_ORDER,
     TERMINAL_STATUSES,
     NoWriteResult,
     is_actionable,
@@ -38,14 +39,13 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 
-_VALID_PRIORITIES = {"low", "medium", "high", "critical"}
+_VALID_PRIORITIES = frozenset(PRIORITY_ORDER)
 _PRIORITY_EMOJI: dict[str, str] = {
     "critical": "red",
     "high": "orange",
     "medium": "yellow",
     "low": "green",
 }
-_PRIORITY_ORDER: dict[str, int] = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 _TEMPLATE_RECURSION_LIMIT = 3
 _WORKSPACE_TEMPLATE_RELATIVE_DIR = Path("todo/templates")
 _JINJA_ENV = SandboxedEnvironment(autoescape=False, undefined=StrictUndefined)
@@ -735,7 +735,7 @@ class TodoTools(Toolkit):
         actionable = [item for item in items if is_actionable(item, items_by_id)]
         blocked = [item for item in items if item["status"] == "open" and is_blocked(item, items_by_id)]
         done = [item for item in items if item["status"] in TERMINAL_STATUSES]
-        actionable.sort(key=lambda item: _PRIORITY_ORDER.get(item.get("priority", "medium"), 9))
+        actionable.sort(key=lambda item: PRIORITY_ORDER.get(item.get("priority", "medium"), 9))
 
         result_lines = [f"Work plan: {len(done)}/{len(items)} complete.\n"]
         if actionable:

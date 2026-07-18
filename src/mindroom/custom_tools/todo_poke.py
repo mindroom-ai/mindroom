@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.custom_tools.todo_state import (
+    PRIORITY_ORDER,
     TERMINAL_STATUSES,
     NoWriteResult,
     is_actionable,
@@ -44,12 +45,13 @@ __all__ = [
 type _TodoScheduleQuery = Callable[[str], Awaitable[frozenset[str | None] | None]]
 type _TodoPokeSender = Callable[[str, str, str | None], Awaitable[str | None]]
 
-_PRIORITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 _VALID_STATUSES = {"open", *TERMINAL_STATUSES}
+# Keep synchronized with config.main._AGENT_NAME_PATTERN without importing the config graph here.
 _SAFE_ASSIGNEE_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
 _POKE_STATE_FILENAME = "poke_state.json"
 _VISIBLE_ITEM_LIMIT = 5
 _UNCHANGED_REPOKE_SECONDS = 60 * 60
+_MAX_UNCHANGED_REPOKES = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +96,12 @@ class _TodoThreadSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class _TodoSnapshotBatch:
+    snapshots: tuple[_TodoThreadSnapshot, ...]
+    had_io_failure: bool
+
+
+@dataclass(frozen=True, slots=True)
 class _TodoPokeScope:
     source_path: Path
     assigned_agent: str
@@ -108,6 +116,7 @@ class _TodoPokeScope:
 class _PokeRecord:
     last_poked_at: float
     last_fingerprint: str
+    unchanged_repoke_count: int
 
 
 def _env_seconds(
@@ -160,11 +169,15 @@ def _require_string(data: Mapping[str, Any], key: str, *, allow_empty: bool = Fa
 
 
 def _parse_updated_at(value: str) -> datetime:
-    updated_at = datetime.fromisoformat(value)
-    if updated_at.tzinfo is None:
-        msg = "updated_at must include a timezone"
-        raise ValueError(msg)
-    return updated_at.astimezone(UTC)
+    try:
+        updated_at = datetime.fromisoformat(value)
+        if updated_at.tzinfo is None:
+            msg = "updated_at must include a timezone"
+            raise ValueError(msg)
+        return updated_at.astimezone(UTC)
+    except OverflowError as exc:
+        msg = "updated_at is outside the supported datetime range"
+        raise ValueError(msg) from exc
 
 
 def _parse_item(raw_item: object) -> _TodoItemSnapshot:
@@ -184,7 +197,7 @@ def _parse_item(raw_item: object) -> _TodoItemSnapshot:
         raise ValueError(msg)
 
     priority = _require_string(item_data, "priority")
-    if priority not in _PRIORITY_ORDER:
+    if priority not in PRIORITY_ORDER:
         msg = f"invalid todo priority: {priority}"
         raise ValueError(msg)
 
@@ -276,17 +289,24 @@ def _parse_thread_snapshot(data: object, source_path: Path) -> _TodoThreadSnapsh
 def _read_thread_snapshot(path: Path) -> _TodoThreadSnapshot | None:
     try:
         return _parse_thread_snapshot(read_json(path), path)
-    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError) as exc:
         logger.warning("todo_poke_state_file_skipped", path=str(path), error=str(exc))
         return None
 
 
-def _read_thread_snapshots(todo_root: Path) -> list[_TodoThreadSnapshot]:
-    return [
-        snapshot
-        for path in sorted((todo_root / "threads").glob("*/todos.json"))
-        if (snapshot := _read_thread_snapshot(path)) is not None
-    ]
+def _read_thread_snapshots(todo_root: Path) -> _TodoSnapshotBatch:
+    snapshots: list[_TodoThreadSnapshot] = []
+    had_io_failure = False
+    for path in sorted((todo_root / "threads").glob("*/todos.json")):
+        try:
+            snapshot = _read_thread_snapshot(path)
+        except OSError as exc:
+            logger.warning("todo_poke_state_file_skipped", path=str(path), error=str(exc))
+            had_io_failure = True
+            continue
+        if snapshot is not None:
+            snapshots.append(snapshot)
+    return _TodoSnapshotBatch(tuple(snapshots), had_io_failure)
 
 
 def _fingerprint(
@@ -363,9 +383,22 @@ def _poke_record(state: Mapping[str, Any], scope: _TodoPokeScope) -> _PokeRecord
         return None
     last_poked_at = raw_record.get("last_poked_at")
     last_fingerprint = raw_record.get("last_fingerprint")
-    if not isinstance(last_poked_at, int | float) or not isinstance(last_fingerprint, str):
+    unchanged_repoke_count = raw_record.get("unchanged_repoke_count")
+    if (
+        isinstance(last_poked_at, bool)
+        or not isinstance(last_poked_at, int | float)
+        or not math.isfinite(last_poked_at)
+        or not isinstance(last_fingerprint, str)
+        or isinstance(unchanged_repoke_count, bool)
+        or not isinstance(unchanged_repoke_count, int)
+        or not 0 <= unchanged_repoke_count <= _MAX_UNCHANGED_REPOKES
+    ):
         return None
-    return _PokeRecord(last_poked_at=float(last_poked_at), last_fingerprint=last_fingerprint)
+    return _PokeRecord(
+        last_poked_at=float(last_poked_at),
+        last_fingerprint=last_fingerprint,
+        unchanged_repoke_count=unchanged_repoke_count,
+    )
 
 
 def _validated_poke_state(raw_state: object) -> dict[str, Any]:
@@ -411,7 +444,7 @@ def _prune_poke_state(todo_root: Path, active_scope_keys: frozenset[str]) -> Non
     locked_update_json(path, update, recover_invalid=True)
 
 
-def _persist_poke(todo_root: Path, scope: _TodoPokeScope, now_timestamp: float) -> None:
+def _persist_poke(todo_root: Path, scope: _TodoPokeScope, record: _PokeRecord) -> None:
     path = todo_root / _POKE_STATE_FILENAME
 
     def update(data: dict[str, Any]) -> None:
@@ -423,11 +456,32 @@ def _persist_poke(todo_root: Path, scope: _TodoPokeScope, now_timestamp: float) 
             "assigned_agent": scope.assigned_agent,
             "room_id": scope.room_id,
             "thread_id": scope.thread_id,
-            "last_poked_at": now_timestamp,
-            "last_fingerprint": scope.fingerprint,
+            "last_poked_at": record.last_poked_at,
+            "last_fingerprint": record.last_fingerprint,
+            "unchanged_repoke_count": record.unchanged_repoke_count,
         }
 
     locked_update_json(path, update, recover_invalid=True)
+
+
+async def _try_persist_poke(
+    todo_root: Path,
+    scope: _TodoPokeScope,
+    record: _PokeRecord,
+) -> bool:
+    try:
+        await asyncio.to_thread(_persist_poke, todo_root, scope, record)
+    except (OSError, TypeError, ValueError) as exc:
+        logger.warning(
+            "todo_poke_persistence_failed",
+            assigned_agent=scope.assigned_agent,
+            room_id=scope.room_id,
+            thread_id=scope.thread_id,
+            error=str(exc),
+            exc_info=True,
+        )
+        return False
+    return True
 
 
 def _literal_code_text(text: str) -> str:
@@ -444,7 +498,7 @@ def _format_poke_message(scope: _TodoPokeScope) -> str:
     lines = [f"@{scope.assigned_agent} Todo work is ready. Continue with these actionable items:"]
     ordered_items = sorted(
         scope.actionable_items,
-        key=lambda item: (_PRIORITY_ORDER.get(item.priority, 9), item.item_id),
+        key=lambda item: (PRIORITY_ORDER.get(item.priority, 9), item.item_id),
     )
     lines.extend(
         f"- {_literal_code_text(item.item_id)} [{item.priority}] {_literal_code_text(item.title)}"
@@ -499,25 +553,80 @@ async def _pending_schedules_by_room(
 def _dedup_allows_poke(
     scope: _TodoPokeScope,
     poke_state: Mapping[str, Any],
+    pending_poke_records: Mapping[str, _PokeRecord],
     policy: TodoPokePolicy,
     now_timestamp: float,
 ) -> bool:
-    previous = _poke_record(poke_state, scope)
+    previous = pending_poke_records.get(_scope_key(scope)) or _poke_record(poke_state, scope)
     if previous is None:
         return True
     if previous.last_fingerprint == scope.fingerprint:
-        return now_timestamp - previous.last_poked_at >= _UNCHANGED_REPOKE_SECONDS
+        return (
+            previous.unchanged_repoke_count < _MAX_UNCHANGED_REPOKES
+            and now_timestamp - previous.last_poked_at >= _UNCHANGED_REPOKE_SECONDS
+        )
     return now_timestamp - previous.last_poked_at >= policy.cooldown_seconds
+
+
+def _record_after_delivery(
+    scope: _TodoPokeScope,
+    previous: _PokeRecord | None,
+    now_timestamp: float,
+) -> _PokeRecord:
+    unchanged_repoke_count = (
+        previous.unchanged_repoke_count + 1
+        if previous is not None and previous.last_fingerprint == scope.fingerprint
+        else 0
+    )
+    return _PokeRecord(
+        last_poked_at=now_timestamp,
+        last_fingerprint=scope.fingerprint,
+        unchanged_repoke_count=unchanged_repoke_count,
+    )
+
+
+async def _repair_pending_poke_records(
+    todo_root: Path,
+    scopes_by_key: Mapping[str, _TodoPokeScope],
+    pending_poke_records: dict[str, _PokeRecord],
+) -> None:
+    for scope_key in sorted(pending_poke_records.keys() & scopes_by_key.keys()):
+        record = pending_poke_records[scope_key]
+        if await _try_persist_poke(todo_root, scopes_by_key[scope_key], record):
+            pending_poke_records.pop(scope_key, None)
+
+
+async def _refreshed_scope_for_delivery(scope: _TodoPokeScope) -> _TodoPokeScope | None:
+    try:
+        refreshed_snapshot = await asyncio.to_thread(_read_thread_snapshot, scope.source_path)
+    except OSError as exc:
+        logger.warning(
+            "todo_poke_state_file_skipped",
+            path=str(scope.source_path),
+            error=str(exc),
+        )
+        return None
+    if refreshed_snapshot is None:
+        return None
+    refreshed_scope = next(
+        (candidate for candidate in _poke_scopes([refreshed_snapshot]) if _scope_key(candidate) == _scope_key(scope)),
+        None,
+    )
+    if refreshed_scope is None or refreshed_scope.fingerprint != scope.fingerprint:
+        return None
+    return refreshed_scope
 
 
 async def _deliver_pokes(
     scopes: list[_TodoPokeScope],
     pending_by_room: Mapping[str, frozenset[str | None]],
+    poke_state: Mapping[str, Any],
     todo_root: Path,
     policy: TodoPokePolicy,
     deps: TodoPokeDeps,
     now_timestamp: float,
     failed_scope_keys: set[str],
+    pending_poke_records: dict[str, _PokeRecord],
 ) -> int:
     delivered = 0
     attempts = 0
@@ -530,18 +639,8 @@ async def _deliver_pokes(
         if scope.thread_id in pending_by_room[scope.room_id]:
             continue
 
-        refreshed_snapshot = await asyncio.to_thread(_read_thread_snapshot, scope.source_path)
-        if refreshed_snapshot is None:
-            continue
-        refreshed_scope = next(
-            (
-                candidate
-                for candidate in _poke_scopes([refreshed_snapshot])
-                if _scope_key(candidate) == _scope_key(scope)
-            ),
-            None,
-        )
-        if refreshed_scope is None or refreshed_scope.fingerprint != scope.fingerprint:
+        refreshed_scope = await _refreshed_scope_for_delivery(scope)
+        if refreshed_scope is None:
             continue
         if not deps.idle_check(refreshed_scope.assigned_agent):
             continue
@@ -559,7 +658,14 @@ async def _deliver_pokes(
 
         poked_agents.add(refreshed_scope.assigned_agent)
         failed_scope_keys.discard(refreshed_scope_key)
-        await asyncio.to_thread(_persist_poke, todo_root, refreshed_scope, now_timestamp)
+        previous = pending_poke_records.get(refreshed_scope_key) or _poke_record(
+            poke_state,
+            refreshed_scope,
+        )
+        record = _record_after_delivery(refreshed_scope, previous, now_timestamp)
+        pending_poke_records[refreshed_scope_key] = record
+        if await _try_persist_poke(todo_root, refreshed_scope, record):
+            pending_poke_records.pop(refreshed_scope_key, None)
         delivered += 1
     return delivered
 
@@ -569,23 +675,36 @@ async def scan_todo_pokes(
     deps: TodoPokeDeps,
     *,
     failed_scope_keys: set[str] | None = None,
+    pending_poke_records: dict[str, _PokeRecord] | None = None,
 ) -> int:
     """Scan native todo state once and return the number of delivered pokes."""
     remembered_failures = failed_scope_keys if failed_scope_keys is not None else set()
+    remembered_pokes = pending_poke_records if pending_poke_records is not None else {}
     now = deps.clock().astimezone(UTC)
     todo_root = deps.state_root()
-    snapshots = await asyncio.to_thread(_read_thread_snapshots, todo_root)
-    all_scopes = _poke_scopes(snapshots)
-    poke_state = await asyncio.to_thread(_read_poke_state, todo_root)
+    snapshot_batch = await asyncio.to_thread(_read_thread_snapshots, todo_root)
+    all_scopes = _poke_scopes(list(snapshot_batch.snapshots))
     active_scope_keys = frozenset(_scope_key(scope) for scope in all_scopes)
-    remembered_failures.intersection_update(active_scope_keys)
-    await asyncio.to_thread(_prune_poke_state, todo_root, active_scope_keys)
+    scopes_by_key = {_scope_key(scope): scope for scope in all_scopes}
+    if not snapshot_batch.had_io_failure:
+        remembered_failures.intersection_update(active_scope_keys)
+        for stale_scope_key in remembered_pokes.keys() - active_scope_keys:
+            del remembered_pokes[stale_scope_key]
+        await asyncio.to_thread(_prune_poke_state, todo_root, active_scope_keys)
+    await _repair_pending_poke_records(todo_root, scopes_by_key, remembered_pokes)
+    poke_state = await asyncio.to_thread(_read_poke_state, todo_root)
 
     scopes = sorted(
         (
             scope
             for scope in _idle_quiet_scopes(all_scopes, policy, deps, now)
-            if _dedup_allows_poke(scope, poke_state, policy, now.timestamp())
+            if _dedup_allows_poke(
+                scope,
+                poke_state,
+                remembered_pokes,
+                policy,
+                now.timestamp(),
+            )
         ),
         key=lambda scope: _scope_key(scope) in remembered_failures,
     )
@@ -599,11 +718,13 @@ async def scan_todo_pokes(
     return await _deliver_pokes(
         scopes,
         pending_by_room,
+        poke_state,
         todo_root,
         policy,
         deps,
         now.timestamp(),
         remembered_failures,
+        remembered_pokes,
     )
 
 
@@ -615,6 +736,7 @@ class TodoPokeWorker:
     deps: TodoPokeDeps
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _failed_scope_keys: set[str] = field(default_factory=set, init=False)
+    _pending_poke_records: dict[str, _PokeRecord] = field(default_factory=dict, init=False)
 
     def stop(self) -> None:
         """Request graceful shutdown of the worker loop."""
@@ -637,6 +759,7 @@ class TodoPokeWorker:
                     self.policy,
                     self.deps,
                     failed_scope_keys=self._failed_scope_keys,
+                    pending_poke_records=self._pending_poke_records,
                 )
             except Exception:
                 logger.exception("todo_poke_scan_failed")

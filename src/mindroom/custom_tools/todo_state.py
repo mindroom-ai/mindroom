@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 _T = TypeVar("_T")
 
 TERMINAL_STATUSES = frozenset({"done", "cancelled"})
+PRIORITY_ORDER: dict[str, int] = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 
 @dataclass(frozen=True, slots=True)

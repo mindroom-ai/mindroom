@@ -21,7 +21,7 @@ The implementation uses an orchestrator-owned sleep-first worker and does not de
 
 ## Scanner behavior
 
-- Todo files are scanned in sorted order, malformed files are warned about and skipped independently, and invalid individual items no longer discard valid siblings.
+- Todo files are scanned in sorted order, malformed files are warned about and skipped independently, and invalid individual items—including timezone-overflowing timestamps—no longer discard valid siblings.
 - Dependents of skipped, duplicate, or missing dependency identities remain blocked instead of becoming prematurely actionable.
 - Directory traversal, JSON access, advisory locking, revalidation reads, pruning, and persistence run in worker threads rather than blocking the asyncio event loop.
 - Persisted `main` thread sentinels normalize to room-main `None`.
@@ -29,20 +29,21 @@ The implementation uses an orchestrator-owned sleep-first worker and does not de
 - The quiet gate uses the newest `updated_at` among that assignee's actionable items in the scope.
 - An older item that becomes actionable after a dependency completes remains immediately eligible, which is the intended handoff behavior.
 - Direct-agent activity and activity in every running configured team containing that agent suppress the poke, with a second idle check immediately before delivery.
-- Poke state is loaded first, so unchanged and cooldown-blocked scopes cause no schedule queries.
+- Poke state is consulted before schedule queries, so dedup-blocked scopes cause no Matrix schedule reads.
 - Pending schedules are queried once per remaining room and suppress only their existing room/thread scope.
 - Runtime unavailability skips the whole tick, while an executed schedule query that errors fails open with a warning.
 - Each scope is re-read and its fingerprint recomputed after schedule I/O, so work completed, reassigned, or otherwise changed during the await is not poked from a stale snapshot.
 - Durable scope keys hash the canonical `(assigned_agent, room_id, normalized_thread_id)` tuple.
 - Fingerprints include every actionable item, including items beyond the five shown in the message, plus thread total and terminal counts.
-- An unchanged fingerprint retries only after a one-hour anti-stall backstop, while a changed fingerprint waits for the normal cooldown.
+- An unchanged fingerprint receives at most three one-hour anti-stall retries, while a changed fingerprint waits for the normal cooldown and resets that retry count.
 - Poke messages contain exactly one intentional assignee mention, while todo titles are rendered as literal code text with mention tokens neutralized.
 - Persisted assignees must match the same alphanumeric-and-underscore identifier shape as configured entities before they can reach idle checks or mention formatting.
 - The per-scan cap counts send attempts, including failures, while failed sends remain retryable because they do not persist poke state.
 - A successful delivery suppresses further scopes for the same agent during that scan, so one tick cannot enqueue multiple new turns for one idle agent.
+- Successful deliveries enter worker memory before durable persistence, so a per-scope write failure neither repeats immediately nor prevents later scopes, and later ticks retry the write.
 - The worker remembers failed scope keys in memory and orders them behind fresh scopes on later scans, preventing deterministic failures from starving healthy work.
-- Obsolete poke records are pruned when their actionable assignee/room/thread scope no longer exists.
-- Non-object, malformed JSON, and non-UTF-8 poke state is warned about, treated as empty, and repaired through locked atomic persistence.
+- Obsolete poke records are pruned when their actionable assignee/room/thread scope no longer exists, but a transient todo-file I/O failure conservatively defers pruning for that tick.
+- Non-object, malformed JSON, non-UTF-8, non-finite timestamp, and boolean-timestamp poke state is warned about or treated as an absent record and repaired through locked atomic persistence.
 - Enabled scan intervals below one second are rejected in favor of the default, while `0` still disables the worker and subsecond quiet periods remain valid.
 
 ## Round-1 review disposition
@@ -62,12 +63,21 @@ The committed plan and report remain intentional review artifacts that safe squa
 
 ## Round-3 review disposition
 
-Locked state recovery now handles non-UTF-8 bytes, each scan delivers at most one successful poke per assigned agent, and unchanged fingerprints become eligible again after a one-hour anti-stall backstop.
+Locked state recovery now handles non-UTF-8 bytes, each scan delivers at most one successful poke per assigned agent, and unchanged fingerprints become eligible for up to three one-hour anti-stall retries.
 The scanner's stricter dependency rule is now documented at its ownership boundary, and enabled subsecond scan intervals fall back to the default.
 
 Corrupt-state warnings remain intentionally unsuppressed because persistent state corruption should stay visible until a successful atomic repair, and adding warning rate-limit state is unnecessary for this bounded recovery path.
 File-lock timeouts remain intentionally out of scope because todo state uses the repository's shared advisory-lock discipline, and introducing a scanner-only timeout contract would add inconsistent lock machinery without evidence of a deadlock.
 The repeated round-three findings about requester identity, room membership, fail-open schedule reads, ad-hoc team activity, and review artifacts remain covered by the round-one and round-two dispositions above.
+
+## Round-4 review disposition
+
+Timestamp overflow is normalized into per-item malformed-state isolation, dedup records reject non-finite and boolean timestamps, and unchanged retries now stop after three attempts until the fingerprint changes.
+Successful deliveries are remembered before persistence and repaired on later ticks, while transient source I/O prevents pruning durable records that might still be active.
+The schedule helper now documents its `RuntimeError` read-failure contract, todo priority ordering has one leaf-module source of truth, the duplicated safe-name regexes cross-reference each other, and literal backtick fence behavior has parameterized coverage.
+
+The standing requester-identity, room-membership, fail-open schedule-read, ad-hoc team-registry, and review-artifact proposals remain dropped for the reasons documented above.
+Shutdown cancellation machinery also remains dropped because this worker intentionally matches the established `MemoryAutoFlushWorker` stop-event lifecycle.
 
 ## Assigned-agent defaults
 
@@ -79,12 +89,14 @@ Regression coverage now locks plan defaults, template defaults, and explicit tem
 
 ## Validation
 
-- `env -u MINDROOM_OWNER_USER_ID -u MINDROOM_DOCKER_WORKER_IMAGE uv run pytest -n auto --no-cov`: 10,726 passed and 120 skipped.
+- `env -u MINDROOM_OWNER_USER_ID -u MINDROOM_DOCKER_WORKER_IMAGE -u MINDROOM_CONFIG_PATH -u MINDROOM_STORAGE_PATH uv run pytest -n auto --no-cov`: 10,738 passed and 120 skipped.
 - `uv run pre-commit run --all-files`: passed.
 - `uv run tach check --dependencies --interfaces`: passed.
 - Focused round-2 todo-poke, orchestrator, and scheduling suites: 92 passed.
 - Focused round-3 todo-poke scanner suite: 38 passed.
 - Focused round-3 todo state, scanner, and orchestrator suites: 67 passed.
+- Focused round-4 todo-poke and scheduling suites: 103 passed.
+- Focused round-4 todo state, scanner, orchestrator, and scheduling suites: 132 passed.
 - Changed-file `ty` validation: passed without rule overrides.
 
 The first all-files hook pass regenerated three tracked docs-skill reference outputs, and the required second pass was clean.

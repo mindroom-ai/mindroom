@@ -609,7 +609,12 @@ async def get_pending_schedule_thread_ids_for_room(
     client: nio.AsyncClient,
     room_id: str,
 ) -> frozenset[str | None]:
-    """Return existing-thread scopes suppressed by pending schedules in one room."""
+    """Return existing-thread scopes suppressed by pending schedules in one room.
+
+    Raises:
+        RuntimeError: If Matrix room state cannot be read.
+
+    """
     response = await client.room_get_state(room_id)
     if not isinstance(response, nio.RoomGetStateResponse):
         msg = f"Failed to get scheduled task state for room {room_id}: {response}"
