@@ -183,6 +183,12 @@ class ThreadMutationCacheOps:
         finally:
             self.purge_process_plaintext(room_id)
 
+    async def mark_room_joined(self, room_id: str) -> None:
+        """Lift one departed-room fence after an authoritative rejoin."""
+        event_cache = self.runtime.event_cache
+        if event_cache is not None:
+            await event_cache.mark_room_joined(room_id)
+
     def purge_process_plaintext(self, room_id: str) -> None:
         """Evict heavyweight process-local plaintext for this principal and room."""
         event_cache = self.runtime.event_cache

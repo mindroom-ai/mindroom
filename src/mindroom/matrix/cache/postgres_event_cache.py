@@ -500,6 +500,7 @@ class _PostgresEventCacheRuntime:
         self._pending_room_invalidations: dict[str, _PendingInvalidation] = {}
         self._pending_room_purges: set[str] = set()
         self._pending_principal_purge = False
+        self._departed_rooms: set[str] = set()
 
     @property
     def database_url(self) -> str:
@@ -565,6 +566,7 @@ class _PostgresEventCacheRuntime:
             "cache_postgres_pending_room_invalidations": len(self._pending_room_invalidations),
             "cache_postgres_pending_room_purges": len(self._pending_room_purges),
             "cache_postgres_pending_principal_purge": self._pending_principal_purge,
+            "cache_postgres_departed_room_count": len(self._departed_rooms),
             "cache_postgres_explicitly_closed": self._explicitly_closed,
         }
         if self._disabled_reason is not None:
@@ -663,6 +665,18 @@ class _PostgresEventCacheRuntime:
     def record_pending_room_purge(self, room_id: str) -> None:
         """Remember a room deletion until a PostgreSQL transaction commits it."""
         self._pending_room_purges.add(room_id)
+
+    def mark_room_departed(self, room_id: str) -> None:
+        """Fence one departed room against every later cache operation."""
+        self._departed_rooms.add(room_id)
+
+    def mark_room_joined(self, room_id: str) -> None:
+        """Remove one room fence after authoritative rejoin cleanup."""
+        self._departed_rooms.discard(room_id)
+
+    def is_room_departed(self, room_id: str) -> bool:
+        """Return whether this principal namespace is fenced from one room."""
+        return room_id in self._departed_rooms
 
     def record_pending_principal_purge(self) -> None:
         """Remember a namespace deletion until PostgreSQL commits it."""
@@ -955,6 +969,7 @@ class PostgresEventCache:
             operation="flush_pending_durable_writes",
             disabled_result=None,
             writer=flush_only,
+            allow_departed=True,
         )
 
     def disable(self, reason: str) -> None:
@@ -988,12 +1003,14 @@ class PostgresEventCache:
         operation: str,
         disabled_result: _T,
         writer: Callable[[psycopg.AsyncConnection], Awaitable[_T]],
+        allow_departed: bool = False,
     ) -> _T:
         return await self._operation(
             room_id,
             operation=operation,
             disabled_result=disabled_result,
             callback=writer,
+            allow_departed=allow_departed,
         )
 
     async def _operation(
@@ -1003,9 +1020,10 @@ class PostgresEventCache:
         operation: str,
         disabled_result: _T,
         callback: Callable[[psycopg.AsyncConnection], Awaitable[_T]],
+        allow_departed: bool = False,
     ) -> _T:
         """Run one cache operation, flushing pending stale markers first even for reads."""
-        if self._runtime.is_disabled:
+        if self._runtime.is_disabled or (not allow_departed and self._runtime.is_room_departed(room_id)):
             return disabled_result
         transient_error: BaseException | None = None
         for attempt in range(_MAX_TRANSIENT_OPERATION_ATTEMPTS):
@@ -1018,6 +1036,7 @@ class PostgresEventCache:
                             room_id=room_id,
                             disabled_result=disabled_result,
                             callback=callback,
+                            allow_departed=allow_departed,
                         )
                     except BaseException:
                         await _rollback_postgres_connection_best_effort(
@@ -1051,8 +1070,12 @@ class PostgresEventCache:
         room_id: str,
         disabled_result: _T,
         callback: Callable[[psycopg.AsyncConnection], Awaitable[_T]],
+        allow_departed: bool,
     ) -> tuple[_T, _FlushedPendingWrites]:
         """Commit one callback unless the transaction first removed its security scope."""
+        if not allow_departed and self._runtime.is_room_departed(room_id):
+            await db.commit()
+            return disabled_result, _FlushedPendingWrites()
         flushed_pending = await self._flush_pending_writes(db, room_id)
         if flushed_pending.room_purge or flushed_pending.principal_purge:
             result = disabled_result
@@ -1494,8 +1517,39 @@ class PostgresEventCache:
 
     async def purge_room(self, room_id: str) -> None:
         """Delete this principal namespace's rows for one departed room."""
+        self._runtime.mark_room_departed(room_id)
         self._runtime.record_pending_room_purge(room_id)
-        await self.flush_pending_durable_writes(room_id)
+
+        async def purge_only(_db: psycopg.AsyncConnection) -> None:
+            return None
+
+        await self._write_operation(
+            room_id,
+            operation="purge_room",
+            disabled_result=None,
+            writer=purge_only,
+            allow_departed=True,
+        )
+
+    async def mark_room_joined(self, room_id: str) -> None:
+        """Remove a departure fence only after any pending purge commits."""
+        if not self._runtime.is_room_departed(room_id):
+            return
+        if not self.durable_writes_available:
+            return
+
+        async def join_only(_db: psycopg.AsyncConnection) -> None:
+            return None
+
+        await self._write_operation(
+            room_id,
+            operation="mark_room_joined",
+            disabled_result=None,
+            writer=join_only,
+            allow_departed=True,
+        )
+        if not self._runtime.has_pending_room_purge(room_id):
+            self._runtime.mark_room_joined(room_id)
 
     async def purge_principal(self) -> None:
         """Delete every row in this principal namespace."""

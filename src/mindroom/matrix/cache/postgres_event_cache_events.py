@@ -450,6 +450,16 @@ async def write_lookup_index_rows(
             (namespace, row.edit_event_id, row.room_id, row.original_event_id, row.origin_server_ts),
         )
 
+    previous_thread_rows = await fetchall(
+        db,
+        """
+        SELECT DISTINCT thread_id
+        FROM mindroom_event_cache_event_threads
+        WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
+        """,
+        (namespace, room_id, event_ids),
+    )
+    previous_thread_ids = {str(row[0]) for row in previous_thread_rows}
     thread_rows = event_thread_rows(room_id, serialized_events, thread_id=thread_id)
     await db.execute(
         """
@@ -469,6 +479,35 @@ async def write_lookup_index_rows(
                 """,
                 (namespace, row.room_id, row.event_id, row.thread_id),
             )
+    current_self_root_ids = {row.thread_id for row in thread_rows if row.event_id == row.thread_id}
+    for root_id in previous_thread_ids | {row.thread_id for row in thread_rows}:
+        surviving_child = await fetchone(
+            db,
+            """
+            SELECT 1
+            FROM mindroom_event_cache_event_threads
+            WHERE namespace = %s AND room_id = %s AND thread_id = %s AND event_id <> %s
+            LIMIT 1
+            """,
+            (namespace, room_id, root_id, root_id),
+        )
+        if surviving_child is not None or root_id in current_self_root_ids:
+            await db.execute(
+                """
+                INSERT INTO mindroom_event_cache_event_threads(namespace, room_id, event_id, thread_id)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT(namespace, room_id, event_id) DO NOTHING
+                """,
+                (namespace, room_id, root_id, root_id),
+            )
+            continue
+        await db.execute(
+            """
+            DELETE FROM mindroom_event_cache_event_threads
+            WHERE namespace = %s AND room_id = %s AND event_id = %s AND thread_id = %s
+            """,
+            (namespace, room_id, root_id, root_id),
+        )
 
 
 async def _dependent_edit_event_ids(

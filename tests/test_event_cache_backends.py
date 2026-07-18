@@ -387,6 +387,7 @@ async def test_sqlite_event_cache_write_operation_rolls_back_cancelled_writer(
         SimpleNamespace(
             is_disabled=False,
             acquire_db_operation=acquire_db_operation,
+            is_room_departed=Mock(return_value=False),
             has_pending_principal_purge=Mock(return_value=False),
             has_pending_room_purge=Mock(return_value=False),
         ),
@@ -704,6 +705,7 @@ async def test_postgres_event_cache_operation_rolls_back_cancelled_callback(
             is_disabled=False,
             namespace="tenant-a",
             acquire_db_operation=acquire_db_operation,
+            is_room_departed=Mock(return_value=False),
         ),
     )
     monkeypatch.setattr(cache, "_flush_pending_writes", AsyncMock(return_value=_FlushedPendingWrites()))

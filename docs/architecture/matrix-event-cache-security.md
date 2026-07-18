@@ -44,11 +44,15 @@ If durable leave or ban cleanup fails, the principal-room purge remains pending 
 
 The operation that commits a pending room or principal purge is discarded, so its queued callback cannot recreate deleted rows in the same transaction.
 
+Each principal keeps a runtime departed-room fence after purge commit, and every backend read or write rechecks that fence under the room lock until an authoritative rejoin finishes any pending cleanup.
+
 Every authoritative leave invalidates both the in-memory and saved checkpoint before durable cleanup starts.
 
 If saved-checkpoint deletion fails, the runtime disables cache reads and writes, leaves durable rows consistent with the older checkpoint, and poisons further certification so restart can replay the leave.
 
 Sync-response leave cleanup commits before unrelated call reconciliation can suspend or fail.
+
+Thread lookup indexes are rebuilt on event replacement, while root self-mappings survive only when a current batch or a surviving child still proves them.
 
 If the process stops before cleanup commits, the next startup has no certified checkpoint and transactionally purges every row for that principal before restoring sync continuity or allowing cache reads.
 

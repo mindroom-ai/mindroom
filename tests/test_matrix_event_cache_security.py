@@ -136,7 +136,18 @@ async def test_principal_isolation_survives_asymmetric_decryption_and_leave(
         await alice.purge_room(room_id)
         assert await alice.get_event(room_id, event_id) is None
         assert await alice.get_mxc_text(room_id, event_id, mxc_url) is None
+        await alice.store_event("$late", room_id, _event("$late", 3, sidecar_url=mxc_url))
+        assert await alice.store_mxc_text(room_id, "$late", mxc_url, "late plaintext") is False
+        assert await alice.get_event(room_id, "$late") is None
+        assert await alice.get_mxc_text(room_id, "$late", mxc_url) is None
         assert await bob.get_event(room_id, event_id) == bob_event
+        assert await bob.get_mxc_text(room_id, event_id, mxc_url) == "bob plaintext"
+
+        await alice.mark_room_joined(room_id)
+        rejoined_event = _event("$rejoined", 4, sidecar_url=mxc_url)
+        await alice.store_event("$rejoined", room_id, rejoined_event)
+        assert await alice.store_mxc_text(room_id, "$rejoined", mxc_url, "rejoined plaintext")
+        assert await alice.get_event(room_id, "$rejoined") == rejoined_event
         assert await bob.get_mxc_text(room_id, event_id, mxc_url) == "bob plaintext"
     finally:
         await root.close()
@@ -197,6 +208,7 @@ async def test_failed_room_purge_blocks_reads_until_recovery(
         assert cache.pending_durable_write_room_ids() == (room_id,)
 
         monkeypatch.setattr(module, "purge_room_locked", original_purge)
+        await cache.flush_pending_durable_writes(room_id)
         assert await cache.get_event(room_id, event_id) is None
         assert cache.pending_durable_write_room_ids() == ()
     finally:
@@ -265,10 +277,39 @@ async def test_restoring_event_without_thread_relation_removes_stale_mapping(
     try:
         await cache.store_event(event_id, room_id, threaded_event)
         assert await cache.get_thread_id_for_event(room_id, event_id) == "$thread-root"
+        assert await cache.get_thread_id_for_event(room_id, "$thread-root") == "$thread-root"
 
         await cache.store_event(event_id, room_id, _event(event_id, 2))
 
         assert await cache.get_thread_id_for_event(room_id, event_id) is None
+        assert await cache.get_thread_id_for_event(room_id, "$thread-root") is None
+    finally:
+        await root.close()
+
+
+@pytest.mark.asyncio
+async def test_storing_thread_root_preserves_child_proven_self_mapping(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """A relation-less root event must not erase the self-mapping proven by a surviving child."""
+    root = _shared_cache(event_cache_factory)
+    await root.initialize()
+    cache = root.for_principal("@alice:localhost")
+    room_id = "!room:localhost"
+    root_event_id = "$thread-root"
+    child_event = _event("$child", 1)
+    child_event["content"]["m.relates_to"] = {
+        "rel_type": "m.thread",
+        "event_id": root_event_id,
+    }
+    try:
+        await cache.store_event("$child", room_id, child_event)
+        assert await cache.get_thread_id_for_event(room_id, root_event_id) == root_event_id
+
+        await cache.store_event(root_event_id, room_id, _event(root_event_id, 2))
+
+        assert await cache.get_thread_id_for_event(room_id, "$child") == root_event_id
+        assert await cache.get_thread_id_for_event(room_id, root_event_id) == root_event_id
     finally:
         await root.close()
 

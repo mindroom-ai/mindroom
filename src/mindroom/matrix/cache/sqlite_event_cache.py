@@ -329,6 +329,7 @@ class _SqliteEventCacheRuntime:
         self._generation: str | None = None
         self._pending_room_purges: set[tuple[str, str]] = set()
         self._pending_principal_purges: set[str] = set()
+        self._departed_rooms: set[tuple[str, str]] = set()
 
     @property
     def db_path(self) -> Path:
@@ -370,6 +371,18 @@ class _SqliteEventCacheRuntime:
         """Remember a room deletion until a SQLite transaction commits it."""
         self._pending_room_purges.add((principal_id, room_id))
 
+    def mark_room_departed(self, principal_id: str, room_id: str) -> None:
+        """Fence one departed principal-room against every later cache operation."""
+        self._departed_rooms.add((principal_id, room_id))
+
+    def mark_room_joined(self, principal_id: str, room_id: str) -> None:
+        """Remove one principal-room fence after authoritative rejoin cleanup."""
+        self._departed_rooms.discard((principal_id, room_id))
+
+    def is_room_departed(self, principal_id: str, room_id: str) -> bool:
+        """Return whether one principal-room is fenced after leave or ban."""
+        return (principal_id, room_id) in self._departed_rooms
+
     def record_pending_principal_purge(self, principal_id: str) -> None:
         """Remember a principal deletion until a SQLite transaction commits it."""
         self._pending_principal_purges.add(principal_id)
@@ -394,6 +407,10 @@ class _SqliteEventCacheRuntime:
     def pending_room_purge_ids(self, principal_id: str) -> tuple[str, ...]:
         """Return rooms with runtime-only deletions for one principal."""
         return tuple(sorted(room_id for owner, room_id in self._pending_room_purges if owner == principal_id))
+
+    def departed_room_ids(self, principal_id: str) -> tuple[str, ...]:
+        """Return runtime-fenced rooms for one principal."""
+        return tuple(sorted(room_id for owner, room_id in self._departed_rooms if owner == principal_id))
 
     async def initialize(self) -> None:
         """Open the SQLite database and create the cache schema."""
@@ -575,6 +592,7 @@ class SqliteEventCache:
             "cache_sqlite_pending_principal_purge": self._runtime.has_pending_principal_purge(
                 self.principal_id,
             ),
+            "cache_sqlite_departed_room_count": len(self._runtime.departed_room_ids(self.principal_id)),
         }
 
     def pending_durable_write_room_ids(self) -> tuple[str, ...]:
@@ -593,6 +611,7 @@ class SqliteEventCache:
                 operation="flush_pending_durable_writes",
                 disabled_result=None,
                 writer=flush_only,
+                allow_departed=True,
             )
 
     async def initialize(self) -> None:
@@ -616,9 +635,11 @@ class SqliteEventCache:
         disabled_result: _T,
         reader: Callable[[aiosqlite.Connection], Awaitable[_T]],
     ) -> _T:
-        if self._runtime.is_disabled:
+        if self._runtime.is_disabled or self._runtime.is_room_departed(self.principal_id, room_id):
             return disabled_result
         async with self._runtime.acquire_db_operation(self.principal_id, room_id, operation=operation) as db:
+            if self._runtime.is_room_departed(self.principal_id, room_id):
+                return disabled_result
             if self._runtime.has_pending_principal_purge(self.principal_id):
                 try:
                     await sqlite_event_cache_events.purge_principal_locked(
@@ -651,10 +672,15 @@ class SqliteEventCache:
         operation: str,
         disabled_result: _T,
         writer: Callable[[aiosqlite.Connection], Awaitable[_T]],
+        allow_departed: bool = False,
     ) -> _T:
-        if self._runtime.is_disabled:
+        if self._runtime.is_disabled or (
+            not allow_departed and self._runtime.is_room_departed(self.principal_id, room_id)
+        ):
             return disabled_result
         async with self._runtime.acquire_db_operation(self.principal_id, room_id, operation=operation) as db:
+            if not allow_departed and self._runtime.is_room_departed(self.principal_id, room_id):
+                return disabled_result
             pending_principal_purge = self._runtime.has_pending_principal_purge(self.principal_id)
             pending_room_purge = self._runtime.has_pending_room_purge(self.principal_id, room_id)
             try:
@@ -1031,8 +1057,39 @@ class SqliteEventCache:
 
     async def purge_room(self, room_id: str) -> None:
         """Delete only this principal's cached ownership for one left or banned room."""
+        self._runtime.mark_room_departed(self.principal_id, room_id)
         self._runtime.record_pending_room_purge(self.principal_id, room_id)
-        await self.flush_pending_durable_writes(room_id)
+
+        async def purge_only(_db: aiosqlite.Connection) -> None:
+            return None
+
+        await self._write_operation(
+            room_id,
+            operation="purge_room",
+            disabled_result=None,
+            writer=purge_only,
+            allow_departed=True,
+        )
+
+    async def mark_room_joined(self, room_id: str) -> None:
+        """Remove a departure fence only after any pending purge commits."""
+        if not self._runtime.is_room_departed(self.principal_id, room_id):
+            return
+        if not self.durable_writes_available:
+            return
+
+        async def join_only(_db: aiosqlite.Connection) -> None:
+            return None
+
+        await self._write_operation(
+            room_id,
+            operation="mark_room_joined",
+            disabled_result=None,
+            writer=join_only,
+            allow_departed=True,
+        )
+        if not self._runtime.has_pending_room_purge(self.principal_id, room_id):
+            self._runtime.mark_room_joined(self.principal_id, room_id)
 
     async def purge_principal(self) -> None:
         """Delete every cache row owned by this principal."""

@@ -350,6 +350,55 @@ async def test_authoritative_leave_clears_checkpoint_before_cache_cleanup(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_leave_fence_rejects_delayed_write_before_new_checkpoint(tmp_path: Path) -> None:
+    """Certification after leave must not preserve a delayed callback's recreated rows."""
+    principal_id = "@mindroom_code:localhost"
+    room_id = "!left:localhost"
+    event_id = "$event"
+    event = {
+        "event_id": event_id,
+        "sender": "@user:localhost",
+        "origin_server_ts": 1,
+        "type": "m.room.message",
+        "content": {"body": "stale", "msgtype": "m.text"},
+    }
+    root = SqliteEventCache(tmp_path / "event-cache.db")
+    await root.initialize()
+    cache = root.for_principal(principal_id)
+    await cache.store_event(event_id, room_id, event)
+    bot = _agent_bot(tmp_path)
+    bot.event_cache = cache
+    bot._sync_trust_state = SyncTrustState.CERTIFIED
+    bot._sync_checkpoint = SyncCheckpoint("s_before_leave")
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_before_leave",
+        cache_generation=cache.cache_generation,
+    )
+    response = MagicMock(spec=nio.SyncResponse)
+    response.rooms = MagicMock(join={}, leave={room_id: MagicMock()})
+    try:
+        await bot._apply_own_room_membership_from_sync(response)
+        await cache.store_event("$late", room_id, {**event, "event_id": "$late"})
+        bot._save_sync_checkpoint(SyncCheckpoint("s_after_leave"))
+
+        assert await cache.get_event(room_id, "$late") is None
+        assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_after_leave"
+    finally:
+        await root.close()
+
+    reopened_root = SqliteEventCache(tmp_path / "event-cache.db")
+    await reopened_root.initialize()
+    try:
+        reopened_cache = reopened_root.for_principal(principal_id)
+        assert await reopened_cache.get_event(room_id, event_id) is None
+        assert await reopened_cache.get_event(room_id, "$late") is None
+    finally:
+        await reopened_root.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "call_cleanup_failure",
     [

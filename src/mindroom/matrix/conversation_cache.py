@@ -942,6 +942,15 @@ class MatrixConversationCache(ConversationCacheProtocol):
         )
         await task
 
+    async def mark_room_joined(self, room_id: str) -> None:
+        """Allow principal-owned caching again after an authoritative rejoin."""
+        task = self._write_cache_ops.queue_room_cache_update(
+            room_id,
+            lambda: self._write_cache_ops.mark_room_joined(room_id),
+            name="matrix_cache_mark_room_joined",
+        )
+        await task
+
     def cache_sync_timeline(
         self,
         response: nio.SyncResponse,

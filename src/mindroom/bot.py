@@ -1442,6 +1442,8 @@ class AgentBot:
         for room_id in left_room_ids:
             self._room_lifecycle.forget_invited_room(room_id)
             await self._conversation_cache.purge_room(room_id)
+        for room_id in joined_room_ids - left_room_ids:
+            await self._conversation_cache.mark_room_joined(room_id)
         call_manager = self._call_manager
         if call_manager is not None:
             await call_manager.on_sync_room_membership(

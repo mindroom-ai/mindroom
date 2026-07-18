@@ -15,6 +15,7 @@ from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_WARMUP_SUFFIX_KEY, RuntimePaths
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.cache.event_cache_events import event_mxc_urls
+from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.client_visible_messages import (
     extract_visible_edit_body,
     message_preview,
@@ -966,6 +967,69 @@ class TestDownloadMxcText:
             == "fresh plaintext"
         )
         assert cache_key not in mxc_plaintext_cache_module._mxc_cache
+
+    @pytest.mark.asyncio
+    async def test_departed_room_fence_rejects_late_sidecar_until_rejoin(self, tmp_path: Path) -> None:
+        """Late hydration cannot repopulate plaintext after leave, while a real rejoin can."""
+        principal_id = "@alice:localhost"
+        room_id = "!left:localhost"
+        event_id = "$sidecar"
+        mxc_url = "mxc://server/departed"
+        event = {
+            "event_id": event_id,
+            "sender": principal_id,
+            "origin_server_ts": 1,
+            "type": "m.room.message",
+            "content": {
+                "body": "preview",
+                "msgtype": "m.file",
+                "url": mxc_url,
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+            },
+        }
+        root = SqliteEventCache(tmp_path / "event-cache.db")
+        await root.initialize()
+        cache = root.for_principal(principal_id)
+        await cache.store_event(event_id, room_id, event)
+        await cache.purge_room(room_id)
+        client = AsyncMock()
+        response = MagicMock(spec=nio.DownloadResponse)
+        response.body = b"departed plaintext"
+        client.download.return_value = response
+        cache_key = (principal_id, room_id, event_id, mxc_url)
+        try:
+            assert (
+                await _download_mxc_text(
+                    client,
+                    mxc_url,
+                    event_cache=cache,
+                    room_id=room_id,
+                    event_id=event_id,
+                )
+                is None
+            )
+            assert cache_key not in mxc_plaintext_cache_module._mxc_cache
+            assert await cache.get_mxc_text(room_id, event_id, mxc_url) is None
+
+            await cache.mark_room_joined(room_id)
+            await cache.store_event(event_id, room_id, event)
+
+            assert (
+                await _download_mxc_text(
+                    client,
+                    mxc_url,
+                    event_cache=cache,
+                    room_id=room_id,
+                    event_id=event_id,
+                )
+                == "departed plaintext"
+            )
+            assert cache_key in mxc_plaintext_cache_module._mxc_cache
+        finally:
+            await root.close()
 
     @pytest.mark.asyncio
     async def test_download_does_not_reinsert_process_plaintext_after_concurrent_redaction(self) -> None:
