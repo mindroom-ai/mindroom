@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import uuid
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -346,6 +348,45 @@ async def test_storing_thread_root_preserves_child_proven_self_mapping(
 
 
 @pytest.mark.asyncio
+async def test_redacting_last_thread_child_removes_orphan_root_mapping(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """The synthetic root self-index must exist exactly while a visible child proves it."""
+    root = _shared_cache(event_cache_factory)
+    await root.initialize()
+    cache = root.for_principal("@alice:localhost")
+    room_id = "!room:localhost"
+    root_event_id = "$thread-root"
+    first_child = _event("$first-child", 1)
+    first_child["content"]["m.relates_to"] = {
+        "rel_type": "m.thread",
+        "event_id": root_event_id,
+    }
+    second_child = _event("$second-child", 2)
+    second_child["content"]["m.relates_to"] = {
+        "rel_type": "m.thread",
+        "event_id": root_event_id,
+    }
+    try:
+        await cache.store_events_batch(
+            [
+                ("$first-child", room_id, first_child),
+                ("$second-child", room_id, second_child),
+            ],
+        )
+
+        assert await cache.redact_event(room_id, "$first-child")
+        assert await cache.get_thread_id_for_event(room_id, "$first-child") is None
+        assert await cache.get_thread_id_for_event(room_id, root_event_id) == root_event_id
+
+        assert await cache.redact_event(room_id, "$second-child")
+        assert await cache.get_thread_id_for_event(room_id, "$second-child") is None
+        assert await cache.get_thread_id_for_event(room_id, root_event_id) is None
+    finally:
+        await root.close()
+
+
+@pytest.mark.asyncio
 async def test_principal_purge_removes_only_that_principals_rows(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
@@ -482,3 +523,50 @@ async def test_redaction_reference_lifecycle_is_durable_and_non_resurrecting(
         assert await reopened.store_mxc_text(room_id, "$edit", dependent_mxc, "late plaintext") is False
     finally:
         await reopened_root.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_principal_purge_excludes_other_runtime_operations(
+    postgres_event_cache_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A namespace purge transaction must exclude room operations from another runtime."""
+    namespace = f"purge_lock_{uuid.uuid4().hex}"
+    first = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
+    second = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
+    room_id = "!room:localhost"
+    event_id = "$after-purge"
+    event = _event(event_id, 1)
+    purge_deleted = asyncio.Event()
+    release_purge = asyncio.Event()
+    original_purge = postgres_event_cache_events.purge_principal_locked
+
+    async def pause_after_delete(*args: object, **kwargs: object) -> None:
+        await original_purge(*args, **kwargs)
+        purge_deleted.set()
+        await release_purge.wait()
+
+    await first.initialize()
+    await second.initialize()
+    monkeypatch.setattr(postgres_event_cache_events, "purge_principal_locked", pause_after_delete)
+    purge_task = asyncio.create_task(first.purge_principal())
+    store_task: asyncio.Task[None] | None = None
+    try:
+        await purge_deleted.wait()
+        store_task = asyncio.create_task(second.store_event(event_id, room_id, event))
+        await asyncio.sleep(0.05)
+
+        assert not store_task.done()
+
+        release_purge.set()
+        await purge_task
+        await store_task
+        assert await second.get_event(room_id, event_id) == event
+    finally:
+        release_purge.set()
+        if not purge_task.done():
+            await purge_task
+        if store_task is not None and not store_task.done():
+            await store_task
+        await first.close()
+        await second.close()

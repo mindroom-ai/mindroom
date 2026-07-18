@@ -935,6 +935,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
     async def purge_room(self, room_id: str) -> None:
         """Purge this bot principal's rows after a confirmed leave or ban."""
+        self._write_cache_ops.mark_room_departed(room_id)
         task = self._write_cache_ops.queue_room_cache_update(
             room_id,
             lambda: self._write_cache_ops.purge_room(room_id),

@@ -157,6 +157,9 @@ class ConversationEventCache(Protocol):
     async def purge_room(self, room_id: str) -> None:
         """Delete only this principal's cached ownership for one left or banned room."""
 
+    def mark_room_departed(self, room_id: str) -> None:
+        """Synchronously reject cache access as soon as an authoritative departure is observed."""
+
     async def mark_room_joined(self, room_id: str) -> None:
         """Allow cache access after an authoritative rejoin finishes any pending purge."""
 

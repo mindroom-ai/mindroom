@@ -40,6 +40,7 @@ _LOCK_WAIT_LOG_THRESHOLD_SECONDS = 0.1
 _MAX_CACHED_ROOM_LOCKS = 256
 _MAX_TRANSIENT_OPERATION_ATTEMPTS = 2
 _PRINCIPAL_PURGE_LOCK_SCOPE = "__mindroom_principal_purge__"
+_PRINCIPAL_NAMESPACE_LOCK_SCOPE = "__mindroom_principal_namespace__"
 _T = TypeVar("_T")
 
 logger = get_logger(__name__)
@@ -815,10 +816,20 @@ class _PostgresEventCacheRuntime:
         async with self._db_lock, self.acquire_room_lock(room_id, operation=operation):
             db = self.require_db()
             try:
-                await db.execute(
-                    "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
-                    (self._namespace, room_id),
-                )
+                if room_id == _PRINCIPAL_PURGE_LOCK_SCOPE:
+                    await db.execute(
+                        "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
+                        (self._namespace, _PRINCIPAL_NAMESPACE_LOCK_SCOPE),
+                    )
+                else:
+                    await db.execute(
+                        "SELECT pg_advisory_xact_lock_shared(hashtext(%s), hashtext(%s))",
+                        (self._namespace, _PRINCIPAL_NAMESPACE_LOCK_SCOPE),
+                    )
+                    await db.execute(
+                        "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
+                        (self._namespace, room_id),
+                    )
             except BaseException:
                 await _rollback_postgres_connection_best_effort(db, namespace=self._namespace, operation=operation)
                 raise
@@ -1520,7 +1531,7 @@ class PostgresEventCache:
 
     async def purge_room(self, room_id: str) -> None:
         """Delete this principal namespace's rows for one departed room."""
-        self._runtime.mark_room_departed(room_id)
+        self.mark_room_departed(room_id)
         self._runtime.record_pending_room_purge(room_id)
 
         async def purge_only(_db: psycopg.AsyncConnection) -> None:
@@ -1533,6 +1544,10 @@ class PostgresEventCache:
             writer=purge_only,
             allow_departed=True,
         )
+
+    def mark_room_departed(self, room_id: str) -> None:
+        """Synchronously reject access after an authoritative leave or ban."""
+        self._runtime.mark_room_departed(room_id)
 
     async def mark_room_joined(self, room_id: str) -> None:
         """Remove a departure fence only after any pending purge commits."""

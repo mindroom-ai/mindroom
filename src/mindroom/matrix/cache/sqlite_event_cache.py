@@ -1097,7 +1097,7 @@ class SqliteEventCache:
 
     async def purge_room(self, room_id: str) -> None:
         """Delete only this principal's cached ownership for one left or banned room."""
-        self._runtime.mark_room_departed(self.principal_id, room_id)
+        self.mark_room_departed(room_id)
         self._runtime.record_pending_room_purge(self.principal_id, room_id)
 
         async def purge_only(_db: aiosqlite.Connection) -> None:
@@ -1110,6 +1110,10 @@ class SqliteEventCache:
             writer=purge_only,
             allow_departed=True,
         )
+
+    def mark_room_departed(self, room_id: str) -> None:
+        """Synchronously reject access after an authoritative leave or ban."""
+        self._runtime.mark_room_departed(self.principal_id, room_id)
 
     async def mark_room_joined(self, room_id: str) -> None:
         """Remove a departure fence only after any pending purge commits."""

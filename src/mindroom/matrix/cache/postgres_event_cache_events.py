@@ -369,6 +369,65 @@ async def filter_cacheable_events(
     return filter_redacted_events(room_events, redacted_event_ids=redacted_event_ids)
 
 
+async def _thread_ids_for_events(
+    db: AsyncConnection,
+    namespace: str,
+    room_id: str,
+    *,
+    event_ids: list[str],
+) -> set[str]:
+    """Return thread IDs currently mapped from one event set."""
+    rows = await fetchall(
+        db,
+        """
+        SELECT DISTINCT thread_id
+        FROM mindroom_event_cache_event_threads
+        WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
+        """,
+        (namespace, room_id, event_ids),
+    )
+    return {str(row[0]) for row in rows}
+
+
+async def _reconcile_thread_root_self_rows(
+    db: AsyncConnection,
+    namespace: str,
+    room_id: str,
+    *,
+    candidate_root_ids: set[str],
+    current_self_root_ids: set[str],
+) -> None:
+    """Keep root self-mappings exactly while a current row still proves them."""
+    for root_id in candidate_root_ids:
+        surviving_child = await fetchone(
+            db,
+            """
+            SELECT 1
+            FROM mindroom_event_cache_event_threads
+            WHERE namespace = %s AND room_id = %s AND thread_id = %s AND event_id <> %s
+            LIMIT 1
+            """,
+            (namespace, room_id, root_id, root_id),
+        )
+        if surviving_child is not None or root_id in current_self_root_ids:
+            await db.execute(
+                """
+                INSERT INTO mindroom_event_cache_event_threads(namespace, room_id, event_id, thread_id)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT(namespace, room_id, event_id) DO NOTHING
+                """,
+                (namespace, room_id, root_id, root_id),
+            )
+            continue
+        await db.execute(
+            """
+            DELETE FROM mindroom_event_cache_event_threads
+            WHERE namespace = %s AND room_id = %s AND event_id = %s AND thread_id = %s
+            """,
+            (namespace, room_id, root_id, root_id),
+        )
+
+
 async def write_lookup_index_rows(
     db: AsyncConnection,
     *,
@@ -450,16 +509,12 @@ async def write_lookup_index_rows(
             (namespace, row.edit_event_id, row.room_id, row.original_event_id, row.origin_server_ts),
         )
 
-    previous_thread_rows = await fetchall(
+    previous_thread_ids = await _thread_ids_for_events(
         db,
-        """
-        SELECT DISTINCT thread_id
-        FROM mindroom_event_cache_event_threads
-        WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
-        """,
-        (namespace, room_id, event_ids),
+        namespace,
+        room_id,
+        event_ids=event_ids,
     )
-    previous_thread_ids = {str(row[0]) for row in previous_thread_rows}
     thread_rows = event_thread_rows(room_id, serialized_events, thread_id=thread_id)
     await db.execute(
         """
@@ -479,35 +534,13 @@ async def write_lookup_index_rows(
                 """,
                 (namespace, row.room_id, row.event_id, row.thread_id),
             )
-    current_self_root_ids = {row.thread_id for row in thread_rows if row.event_id == row.thread_id}
-    for root_id in previous_thread_ids | {row.thread_id for row in thread_rows}:
-        surviving_child = await fetchone(
-            db,
-            """
-            SELECT 1
-            FROM mindroom_event_cache_event_threads
-            WHERE namespace = %s AND room_id = %s AND thread_id = %s AND event_id <> %s
-            LIMIT 1
-            """,
-            (namespace, room_id, root_id, root_id),
-        )
-        if surviving_child is not None or root_id in current_self_root_ids:
-            await db.execute(
-                """
-                INSERT INTO mindroom_event_cache_event_threads(namespace, room_id, event_id, thread_id)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT(namespace, room_id, event_id) DO NOTHING
-                """,
-                (namespace, room_id, root_id, root_id),
-            )
-            continue
-        await db.execute(
-            """
-            DELETE FROM mindroom_event_cache_event_threads
-            WHERE namespace = %s AND room_id = %s AND event_id = %s AND thread_id = %s
-            """,
-            (namespace, room_id, root_id, root_id),
-        )
+    await _reconcile_thread_root_self_rows(
+        db,
+        namespace,
+        room_id,
+        candidate_root_ids=previous_thread_ids | {row.thread_id for row in thread_rows},
+        current_self_root_ids={row.thread_id for row in thread_rows if row.event_id == row.thread_id},
+    )
 
 
 async def _dependent_edit_event_ids(
@@ -570,7 +603,13 @@ async def delete_event_thread_rows(
     """Delete durable event-to-thread rows for the provided event IDs."""
     if not event_ids:
         return 0
-    return await rowcount(
+    affected_thread_ids = await _thread_ids_for_events(
+        db,
+        namespace,
+        room_id,
+        event_ids=event_ids,
+    )
+    deleted_rows = await rowcount(
         db,
         """
         DELETE FROM mindroom_event_cache_event_threads
@@ -578,6 +617,14 @@ async def delete_event_thread_rows(
         """,
         (namespace, room_id, event_ids),
     )
+    await _reconcile_thread_root_self_rows(
+        db,
+        namespace,
+        room_id,
+        candidate_root_ids=affected_thread_ids,
+        current_self_root_ids=set(),
+    )
+    return deleted_rows
 
 
 async def delete_event_edit_rows(

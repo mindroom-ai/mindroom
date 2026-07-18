@@ -108,6 +108,66 @@ class TestThreadMutationHelpers:
         logger.warning.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_departure_fences_reads_before_ordered_purge_can_start(self, tmp_path: Path) -> None:
+        """A queued predecessor must not extend plaintext visibility after a confirmed leave."""
+        root = SqliteEventCache(tmp_path / "event_cache.db")
+        await root.initialize()
+        cache = root.for_principal("@alice:localhost")
+        coordinator = _runtime_write_coordinator()
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(event_cache=cache, coordinator=coordinator),
+        )
+        room_id = "!left:localhost"
+        event_id = "$event"
+        mxc_url = "mxc://server/plaintext"
+        event = {
+            "event_id": event_id,
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1,
+            "type": "m.room.message",
+            "content": {
+                "body": "preview",
+                "msgtype": "m.file",
+                "url": mxc_url,
+                "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+            },
+        }
+        cache_key = (cache.principal_id, room_id, event_id, mxc_url)
+        predecessor_started = asyncio.Event()
+        release_predecessor = asyncio.Event()
+
+        async def block_predecessor() -> None:
+            predecessor_started.set()
+            await release_predecessor.wait()
+
+        try:
+            await cache.store_event(event_id, room_id, event)
+            assert await cache.store_mxc_text(room_id, event_id, mxc_url, "durable plaintext")
+            cache_mxc_plaintext(mxc_url, "process plaintext", time.time(), cache_key=cache_key)
+            predecessor = coordinator.queue_room_update(
+                room_id,
+                block_predecessor,
+                name="matrix_cache_test_departure_predecessor",
+            )
+            await predecessor_started.wait()
+
+            purge = asyncio.create_task(access.purge_room(room_id))
+            await asyncio.sleep(0)
+
+            assert not purge.done()
+            assert await cache.get_event(room_id, event_id) is None
+            assert await cache.get_mxc_text(room_id, event_id, mxc_url) is None
+            assert get_cached_mxc_plaintext(cache_key) is None
+
+            release_predecessor.set()
+            await predecessor
+            await purge
+        finally:
+            release_predecessor.set()
+            await root.close()
+
+    @pytest.mark.asyncio
     async def test_unbound_cache_runtime_falls_back_without_attribute_errors(self) -> None:
         """Early cache-only operations must remain harmless before runtime support is bound."""
         cache_ops, _logger, _event_cache = _thread_mutation_cache_ops()

@@ -351,6 +351,70 @@ async def filter_cacheable_events(
     return filter_redacted_events(room_events, redacted_event_ids=redacted_event_ids)
 
 
+async def _thread_ids_for_events(
+    db: aiosqlite.Connection,
+    principal_id: str,
+    room_id: str,
+    *,
+    event_ids: list[str],
+) -> set[str]:
+    """Return thread IDs currently mapped from one event set."""
+    thread_ids: set[str] = set()
+    for event_id in event_ids:
+        cursor = await db.execute(
+            """
+            SELECT thread_id
+            FROM event_threads
+            WHERE principal_id = ? AND room_id = ? AND event_id = ?
+            """,
+            (principal_id, room_id, event_id),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is not None:
+            thread_ids.add(str(row[0]))
+    return thread_ids
+
+
+async def _reconcile_thread_root_self_rows(
+    db: aiosqlite.Connection,
+    principal_id: str,
+    room_id: str,
+    *,
+    candidate_root_ids: set[str],
+    current_self_root_ids: set[str],
+) -> None:
+    """Keep root self-mappings exactly while a current row still proves them."""
+    for root_id in candidate_root_ids:
+        cursor = await db.execute(
+            """
+            SELECT 1
+            FROM event_threads
+            WHERE principal_id = ? AND room_id = ? AND thread_id = ? AND event_id <> ?
+            LIMIT 1
+            """,
+            (principal_id, room_id, root_id, root_id),
+        )
+        has_surviving_child = await cursor.fetchone() is not None
+        await cursor.close()
+        if has_surviving_child or root_id in current_self_root_ids:
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO event_threads(principal_id, room_id, event_id, thread_id)
+                VALUES (?, ?, ?, ?)
+                """,
+                (principal_id, room_id, root_id, root_id),
+            )
+            continue
+        await db.execute(
+            """
+            DELETE FROM event_threads
+            WHERE principal_id = ? AND room_id = ? AND event_id = ? AND thread_id = ?
+            """,
+            (principal_id, room_id, root_id, root_id),
+        )
+
+
 async def write_lookup_index_rows(
     db: aiosqlite.Connection,
     *,
@@ -431,21 +495,12 @@ async def write_lookup_index_rows(
             ],
         )
 
-    previous_thread_ids: set[str] = set()
-    for event_id in event_ids:
-        cursor = await db.execute(
-            """
-            SELECT thread_id
-            FROM event_threads
-            WHERE principal_id = ? AND room_id = ? AND event_id = ?
-            """,
-            (principal_id, room_id, event_id),
-        )
-        row = await cursor.fetchone()
-        await cursor.close()
-        if row is not None:
-            previous_thread_ids.add(str(row[0]))
-
+    previous_thread_ids = await _thread_ids_for_events(
+        db,
+        principal_id,
+        room_id,
+        event_ids=event_ids,
+    )
     thread_rows = event_thread_rows(room_id, serialized_events, thread_id=thread_id)
     await db.executemany(
         """
@@ -464,35 +519,13 @@ async def write_lookup_index_rows(
             """,
             [(principal_id, row.room_id, row.event_id, row.thread_id) for row in thread_rows],
         )
-    current_self_root_ids = {row.thread_id for row in thread_rows if row.event_id == row.thread_id}
-    for root_id in previous_thread_ids | {row.thread_id for row in thread_rows}:
-        cursor = await db.execute(
-            """
-            SELECT 1
-            FROM event_threads
-            WHERE principal_id = ? AND room_id = ? AND thread_id = ? AND event_id <> ?
-            LIMIT 1
-            """,
-            (principal_id, room_id, root_id, root_id),
-        )
-        has_surviving_child = await cursor.fetchone() is not None
-        await cursor.close()
-        if has_surviving_child or root_id in current_self_root_ids:
-            await db.execute(
-                """
-                INSERT OR IGNORE INTO event_threads(principal_id, room_id, event_id, thread_id)
-                VALUES (?, ?, ?, ?)
-                """,
-                (principal_id, room_id, root_id, root_id),
-            )
-            continue
-        await db.execute(
-            """
-            DELETE FROM event_threads
-            WHERE principal_id = ? AND room_id = ? AND event_id = ? AND thread_id = ?
-            """,
-            (principal_id, room_id, root_id, root_id),
-        )
+    await _reconcile_thread_root_self_rows(
+        db,
+        principal_id,
+        room_id,
+        candidate_root_ids=previous_thread_ids | {row.thread_id for row in thread_rows},
+        current_self_root_ids={row.thread_id for row in thread_rows if row.event_id == row.thread_id},
+    )
 
 
 async def delete_cached_events(
@@ -536,7 +569,13 @@ async def delete_event_thread_rows(
     event_ids: list[str],
 ) -> int:
     """Delete event-to-thread rows within one owner and room."""
-    return await _delete_scoped_event_rows(
+    affected_thread_ids = await _thread_ids_for_events(
+        db,
+        principal_id,
+        room_id,
+        event_ids=event_ids,
+    )
+    deleted_rows = await _delete_scoped_event_rows(
         db,
         "event_threads",
         "event_id",
@@ -544,6 +583,14 @@ async def delete_event_thread_rows(
         room_id,
         event_ids,
     )
+    await _reconcile_thread_root_self_rows(
+        db,
+        principal_id,
+        room_id,
+        candidate_root_ids=affected_thread_ids,
+        current_self_root_ids=set(),
+    )
+    return deleted_rows
 
 
 async def delete_event_edit_rows(
