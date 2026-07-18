@@ -5,7 +5,8 @@ responses are cancelled and their placeholder becomes a terminal
 "[Response interrupted by service restart]" note. The turn controller
 registers a retry here, and the bot flushes the queue once its sync loop
 reports a healthy sync response again. Each source event is retried at
-most once; a retry that is itself interrupted is not requeued.
+most once; a retry that is itself interrupted is not requeued. Pending
+room ids also let the orchestrator hand retries to a replacement bot.
 """
 
 from __future__ import annotations
@@ -31,6 +32,14 @@ logger = get_logger(__name__)
 _MAX_ATTEMPTED_KEYS = 512
 _INTERRUPTED_REPLAY_STATE_KEY = "mindroom_replay_state"
 _INTERRUPTED_REPLAY_STATE = "interrupted"
+
+
+@dataclass(frozen=True)
+class _PendingRetry:
+    """One retry callback plus the Matrix room containing its terminal marker."""
+
+    room_id: str
+    callback: Callable[[], Awaitable[None]]
 
 
 def _run_matches_scope(run: RunOutput | TeamRunOutput, scope: HistoryScope) -> bool:
@@ -88,7 +97,7 @@ def interrupted_source_needs_retry(
 class SyncRestartRetryQueue:
     """Hold one-shot retry callbacks keyed by source event id."""
 
-    _pending: dict[str, Callable[[], Awaitable[None]]] = field(default_factory=dict)
+    _pending: dict[str, _PendingRetry] = field(default_factory=dict)
     _attempted: dict[str, None] = field(default_factory=dict)
 
     @property
@@ -96,11 +105,16 @@ class SyncRestartRetryQueue:
         """Return whether any retry is waiting for sync recovery."""
         return bool(self._pending)
 
-    def register(self, key: str, retry: Callable[[], Awaitable[None]]) -> bool:
+    @property
+    def pending_room_ids(self) -> frozenset[str]:
+        """Return rooms whose interrupted turns still await a retry."""
+        return frozenset(pending.room_id for pending in self._pending.values())
+
+    def register(self, key: str, retry: Callable[[], Awaitable[None]], *, room_id: str) -> bool:
         """Queue one retry for a source event; refuse anything already seen."""
         if key in self._attempted or key in self._pending:
             return False
-        self._pending[key] = retry
+        self._pending[key] = _PendingRetry(room_id=room_id, callback=retry)
         logger.info("sync_restart_retry_queued", source_event_id=key, pending_count=len(self._pending))
         return True
 
@@ -114,7 +128,7 @@ class SyncRestartRetryQueue:
         """Run every queued retry exactly once in FIFO order, isolating individual failures."""
         while self._pending:
             key = next(iter(self._pending))
-            retry = self._pending.pop(key)
+            retry = self._pending.pop(key).callback
             self._mark_attempted(key)
             logger.info("sync_restart_retry_started", source_event_id=key)
             try:

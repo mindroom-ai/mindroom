@@ -150,15 +150,22 @@ class _CleanupScanPolicy:
 
     startup_cutoff_ms: int | None
     collect_terminal_interrupted_for_resume: bool
+    terminal_interrupted_only: bool
     max_extra_old_pages: int
 
 
-def _cleanup_scan_policy(config: Config, *, startup_cutoff_ms: int | None) -> _CleanupScanPolicy:
+def _cleanup_scan_policy(
+    config: Config,
+    *,
+    startup_cutoff_ms: int | None,
+    terminal_interrupted_only: bool = False,
+) -> _CleanupScanPolicy:
     """Return history scan policy for one stale-stream cleanup run."""
     collect_terminal_interrupted_for_resume = config.defaults.auto_resume_after_restart
     return _CleanupScanPolicy(
         startup_cutoff_ms=startup_cutoff_ms,
         collect_terminal_interrupted_for_resume=collect_terminal_interrupted_for_resume,
+        terminal_interrupted_only=terminal_interrupted_only,
         max_extra_old_pages=(_MAX_EXTRA_INTERRUPTED_HISTORY_PAGES if collect_terminal_interrupted_for_resume else 0),
     )
 
@@ -192,15 +199,16 @@ async def recover_stale_streaming_messages(
     resume_conversation_cache: ConversationCacheProtocol | None,
     config: Config,
     runtime_paths: RuntimePaths,
-    startup_cutoff_ms: int,
+    startup_cutoff_ms: int | None,
     scanned_room_ids: set[str],
+    target_room_ids: set[str] | None = None,
     room_concurrency: int = _RECOVERY_ROOM_CONCURRENCY,
 ) -> _StaleStreamRecoveryResult:
     """Recover stale streams through one concurrent Matrix-history path."""
     room_actors = {
         room_id: joined_actors
         for room_id, joined_actors in (await _joined_room_actors(actors)).items()
-        if room_id not in scanned_room_ids
+        if room_id not in scanned_room_ids and (target_room_ids is None or room_id in target_room_ids)
     }
     scanned_room_ids.update(room_actors)
     if not room_actors:
@@ -227,8 +235,10 @@ async def recover_stale_streaming_messages(
                     config=config,
                     runtime_paths=runtime_paths,
                     startup_cutoff_ms=startup_cutoff_ms,
+                    terminal_interrupted_only=target_room_ids is not None,
                 )
             except Exception:
+                scanned_room_ids.discard(room_id)
                 logger.warning("Failed stale stream recovery for room", room_id=room_id, exc_info=True)
                 return 0, []
 
@@ -474,12 +484,17 @@ async def _cleanup_stale_streaming_room(
     config: Config,
     runtime_paths: RuntimePaths,
     startup_cutoff_ms: int | None = None,
+    terminal_interrupted_only: bool = False,
 ) -> tuple[int, list[_InterruptedThread]]:
     """Scan one room once and let each bot account repair its own messages."""
     if not actors:
         return 0, []
     current_time_ms = int(time.time() * 1000)
-    scan_policy = _cleanup_scan_policy(config, startup_cutoff_ms=startup_cutoff_ms)
+    scan_policy = _cleanup_scan_policy(
+        config,
+        startup_cutoff_ms=startup_cutoff_ms,
+        terminal_interrupted_only=terminal_interrupted_only,
+    )
     scanned_state = await _scan_room_message_states(
         scan_client,
         room_id=room_id,
@@ -554,6 +569,8 @@ async def _process_stale_room_candidate(
         now_ms=current_time_ms,
         scan_policy=scan_policy,
     ):
+        return False, None
+    if scan_policy.terminal_interrupted_only and not _has_resumable_interrupted_note(state):
         return False, None
     if _is_cleanup_candidate(state):
         return await _cleanup_candidate_message(
@@ -1742,7 +1759,12 @@ def _should_skip_for_startup_cleanup_window(
     timestamp_ms = state.latest_timestamp
     if _is_at_or_after_startup_cutoff(timestamp_ms, startup_cutoff_ms=scan_policy.startup_cutoff_ms):
         return True
-    if _is_recent_timestamp(timestamp_ms, now_ms=now_ms):
+    # A terminal interruption cannot still be receiving chunks. Targeted
+    # replacement recovery passes no cutoff because local and Matrix clocks
+    # are not comparable.
+    if _is_recent_timestamp(timestamp_ms, now_ms=now_ms) and not (
+        scan_policy.collect_terminal_interrupted_for_resume and _has_resumable_interrupted_note(state)
+    ):
         return True
     if _is_older_than_cleanup_window(timestamp_ms, now_ms=now_ms):
         return not (scan_policy.collect_terminal_interrupted_for_resume and _has_resumable_interrupted_note(state))

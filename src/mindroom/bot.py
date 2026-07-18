@@ -720,6 +720,11 @@ class AgentBot:
         self._response_runner.in_flight_response_count = value
 
     @property
+    def pending_sync_restart_retry_room_ids(self) -> frozenset[str]:
+        """Return rooms with interrupted turns awaiting same-bot retry."""
+        return self._restart_retry_queue.pending_room_ids
+
+    @property
     def agent_name(self) -> str:
         """Get the agent name from username."""
         return self.agent_user.agent_name

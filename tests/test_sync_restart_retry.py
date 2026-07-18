@@ -225,16 +225,18 @@ async def test_queue_runs_each_retry_exactly_once() -> None:
     async def retry() -> None:
         runs.append("ran")
 
-    assert queue.register("$event", retry) is True
-    assert queue.register("$event", retry) is False
+    assert queue.register("$event", retry, room_id="!room:localhost") is True
+    assert queue.register("$event", retry, room_id="!room:localhost") is False
     assert queue.has_pending
+    assert queue.pending_room_ids == {"!room:localhost"}
 
     await queue.flush()
     assert runs == ["ran"]
     assert not queue.has_pending
+    assert not queue.pending_room_ids
 
     # Already-attempted keys never requeue, so a second stall cannot loop.
-    assert queue.register("$event", retry) is False
+    assert queue.register("$event", retry, room_id="!room:localhost") is False
     await queue.flush()
     assert runs == ["ran"]
 
@@ -252,8 +254,8 @@ async def test_queue_isolates_individual_retry_failures() -> None:
     async def succeeding() -> None:
         runs.append("ok")
 
-    queue.register("$a", failing)
-    queue.register("$b", succeeding)
+    queue.register("$a", failing, room_id="!a:localhost")
+    queue.register("$b", succeeding, room_id="!b:localhost")
     await queue.flush()
     assert runs == ["ok"]
 
@@ -271,7 +273,7 @@ async def test_queue_flushes_in_registration_order() -> None:
         return retry
 
     for key in ("$first", "$second", "$third"):
-        queue.register(key, make_retry(key))
+        queue.register(key, make_retry(key), room_id="!room:localhost")
 
     await queue.flush()
     assert runs == ["$first", "$second", "$third"]
@@ -290,8 +292,8 @@ async def test_cancelled_flush_logs_in_flight_key_and_keeps_rest_pending() -> No
     async def later() -> None:
         pass
 
-    queue.register("$in_flight", hanging)
-    queue.register("$later", later)
+    queue.register("$in_flight", hanging, room_id="!in-flight:localhost")
+    queue.register("$later", later, room_id="!later:localhost")
     flush_task = asyncio.create_task(queue.flush())
     await started.wait()
 
@@ -303,7 +305,7 @@ async def test_cancelled_flush_logs_in_flight_key_and_keeps_rest_pending() -> No
         "$in_flight",
     ]
     # The interrupted key was already promoted to attempted and never requeues.
-    assert queue.register("$in_flight", hanging) is False
+    assert queue.register("$in_flight", hanging, room_id="!in-flight:localhost") is False
     # The untouched retry survives for the next healthy sync response.
     assert queue.has_pending
 
@@ -321,7 +323,7 @@ async def test_watchdog_cancelled_response_is_redispatched_once_and_answers() ->
         attempts += 1
 
         def register_retry() -> None:
-            queue.register("$source", execute_action)
+            queue.register("$source", execute_action, room_id="!room:localhost")
 
         if attempts == 1:
             # First attempt: cancelled mid-generation by stall recovery.
@@ -352,7 +354,7 @@ async def test_user_stopped_response_is_not_retried() -> None:
     runner = ResponseRunner(deps=MagicMock())
 
     def register_retry() -> None:
-        queue.register("$source", MagicMock())
+        queue.register("$source", MagicMock(), room_id="!room:localhost")
 
     _notify(
         runner,
