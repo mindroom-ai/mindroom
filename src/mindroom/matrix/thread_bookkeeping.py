@@ -61,6 +61,7 @@ from mindroom.matrix.thread_membership import (
     ThreadResolution,
     ThreadResolutionState,
     ThreadRootProof,
+    conversation_relation_thread_membership_access,
     page_event_info_counts_as_thread_child_proof,
     resolve_event_thread_membership,
     resolve_related_event_thread_membership,
@@ -487,15 +488,11 @@ class ThreadMutationResolver:
             )
 
         async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo:
-            event_info = await self._event_info_for_mutation_context(
+            return await self._event_info_for_mutation_context(
                 room_id,
                 event_id,
                 resolution_context=resolution_context,
             )
-            if not event_type_supports_thread_relations(event_info.event_type):
-                msg = f"Related event {event_id} cannot carry conversation thread membership"
-                raise ThreadMembershipLookupError(msg)
-            return event_info
 
         async def prove_thread_root(_room_id: str, thread_root_id: str) -> ThreadRootProof:
             return await self._prove_thread_root_for_mutation_context(
@@ -504,10 +501,12 @@ class ThreadMutationResolver:
                 resolution_context=resolution_context,
             )
 
-        return ThreadMembershipAccess(
-            lookup_thread_id=lookup_thread_id,
-            fetch_event_info=fetch_event_info,
-            prove_thread_root=prove_thread_root,
+        return conversation_relation_thread_membership_access(
+            ThreadMembershipAccess(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                prove_thread_root=prove_thread_root,
+            ),
         )
 
 
@@ -518,9 +517,11 @@ def _event_source_counts_as_thread_child_proof(
 ) -> bool:
     """Return whether one cached event proves a root has real thread children."""
     event_id = event_source.get("event_id")
-    if event_id == thread_root_id:
+    if not isinstance(event_id, str):
         return False
     event_info = EventInfo.from_event(event_source)
-    if event_info.is_edit and event_info.original_event_id == thread_root_id:
-        return False
-    return isinstance(event_info.thread_id, str) and event_info.thread_id == thread_root_id
+    return page_event_info_counts_as_thread_child_proof(
+        thread_root_id,
+        event_id=event_id,
+        event_info=event_info,
+    )

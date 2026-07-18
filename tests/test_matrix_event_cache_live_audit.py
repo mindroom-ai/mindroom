@@ -17,16 +17,19 @@ from tests.manual.matrix_event_cache_live_audit import (
     AuditConfig,
     AuditEvidence,
     CacheSnapshot,
+    ExpectationValidation,
     InteractionRecord,
     MatrixApi,
     MatrixAuditError,
     ThreadReadRecord,
     _begin_readonly_snapshot,
+    _parse_args,
     _secret_free_evidence,
     _strict_thread_read_sequence,
     _wait_for_cache_edit_index,
     media_fixtures,
     new_transaction_id,
+    run_audit,
     validate_interaction_expectations,
     validate_media_fixtures,
     write_evidence,
@@ -198,6 +201,85 @@ def test_evidence_writer_refuses_unvalidated_output(tmp_path: Path) -> None:
 
     assert evidence_path.exists() is False
 
+    validated = replace(
+        _empty_evidence(),
+        accounting_missing_event_ids=("$missing",),
+        expectation_validation=ExpectationValidation(
+            status="passed",
+            interaction_records=1,
+            assertions=1,
+            strict_read_cache_isolated=True,
+        ),
+    )
+    with pytest.raises(MatrixAuditError, match="complete homeserver-to-cache accounting"):
+        write_evidence(validated, config)
+
+    with pytest.raises(MatrixAuditError, match="complete homeserver-to-cache accounting"):
+        write_evidence(
+            replace(
+                validated,
+                accounting_missing_event_ids=(),
+                cache_only_event_ids=("$cache-only",),
+            ),
+            config,
+        )
+
+    assert evidence_path.exists() is False
+
+
+@pytest.mark.asyncio
+async def test_audit_refuses_an_unverified_invited_account(tmp_path: Path) -> None:
+    """An invited audit identity must be authenticated before room creation."""
+    config = AuditConfig(
+        base_url="https://matrix.example",
+        access_token=UUID("10000000-0000-4000-8000-000000000006").hex,
+        invite_access_token=None,
+        evidence_path=tmp_path / "evidence.json",
+        cache_db_path=tmp_path / "service.db",
+        strict_read_cache_db_path=tmp_path / "strict.db",
+        invite_user_id="@unverified:example",
+        trigger_user_id=None,
+        strict_thread_reads=True,
+        settle_seconds=0.0,
+        trigger_wait_seconds=0.0,
+    )
+
+    with pytest.raises(MatrixAuditError, match="requires both its user ID and access token"):
+        await run_audit(config)
+
+
+def test_cli_requires_invited_user_and_token_environment_together(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The command line cannot invite an identity that the harness cannot authenticate."""
+    monkeypatch.setenv(
+        "MATRIX_ACCESS_TOKEN",
+        UUID("10000000-0000-4000-8000-000000000007").hex,
+    )
+    with (
+        patch(
+            "sys.argv",
+            [
+                "matrix_event_cache_live_audit.py",
+                "--evidence",
+                str(tmp_path / "evidence.json"),
+                "--cache-db",
+                str(tmp_path / "service.db"),
+                "--strict-read-cache-db",
+                str(tmp_path / "strict.db"),
+                "--strict-thread-reads",
+                "--invite-user-id",
+                "@unverified:example",
+            ],
+        ),
+        pytest.raises(SystemExit, match="2"),
+    ):
+        _parse_args()
+
+    assert "must be provided together" in capsys.readouterr().err
+
 
 @pytest.mark.asyncio
 async def test_authenticated_media_round_trip_keeps_token_out_of_evidence() -> None:
@@ -347,10 +429,18 @@ def test_interaction_expectations_are_executable_and_fail_closed() -> None:
             expected_point_cache=False,
             expected_representation="omitted",
         ),
+        InteractionRecord(
+            family="strict_read_rejection_target",
+            event_type="m.room.message",
+            event_id="$strict-child",
+            expected_point_cache=False,
+            expected_representation="tombstone",
+            expected_visible_thread_history=True,
+        ),
     )
     cache = CacheSnapshot(
         active_event_ids=("$child",),
-        tombstoned_event_ids=("$target",),
+        tombstoned_event_ids=("$strict-child", "$target"),
         edit_event_ids=(),
         event_thread_ids=("$child",),
         thread_state_rows=1,
@@ -359,32 +449,118 @@ def test_interaction_expectations_are_executable_and_fail_closed() -> None:
         quick_check="ok",
     )
     reads = (
-        _thread_read(1, source="homeserver", visible_event_ids=("$child",)),
-        _thread_read(2, source="cache", visible_event_ids=("$child",)),
+        _thread_read(
+            1,
+            source="homeserver",
+            visible_event_ids=("$child", "$strict-child"),
+            cache_reject_reason="no_cache_state",
+        ),
+        _thread_read(2, source="cache", visible_event_ids=("$child", "$strict-child")),
         _thread_read(
             3,
             source="homeserver",
-            visible_event_ids=(),
+            visible_event_ids=("$child",),
             cache_reject_reason="thread_invalidated_after_validation",
         ),
     )
 
     validation = validate_interaction_expectations(
         records,
-        homeserver_event_ids=("$child", "$target", "$redaction"),
+        homeserver_event_ids=("$child", "$target", "$redaction", "$strict-child"),
         homeserver_redaction_event_ids=("$redaction",),
         cache=cache,
+        accounting_missing_event_ids=(),
+        cache_only_event_ids=(),
         thread_reads=reads,
     )
 
     assert validation.status == "passed"
-    assert validation.interaction_records == 3
+    assert validation.interaction_records == 4
     assert validation.assertions > 20
     with pytest.raises(MatrixAuditError, match=r"thread_child\.point_cache"):
         validate_interaction_expectations(
             records,
-            homeserver_event_ids=("$child", "$target", "$redaction"),
+            homeserver_event_ids=("$child", "$target", "$redaction", "$strict-child"),
             homeserver_redaction_event_ids=("$redaction",),
             cache=replace(cache, active_event_ids=()),
+            accounting_missing_event_ids=(),
+            cache_only_event_ids=(),
             thread_reads=reads,
+        )
+
+    with pytest.raises(MatrixAuditError, match=r"accounting\.missing_event_ids"):
+        validate_interaction_expectations(
+            records,
+            homeserver_event_ids=("$child", "$target", "$redaction", "$strict-child"),
+            homeserver_redaction_event_ids=("$redaction",),
+            cache=cache,
+            accounting_missing_event_ids=("$unrepresented",),
+            cache_only_event_ids=(),
+            thread_reads=reads,
+        )
+
+    with pytest.raises(MatrixAuditError, match=r"accounting\.cache_only_event_ids"):
+        validate_interaction_expectations(
+            records,
+            homeserver_event_ids=("$child", "$target", "$redaction", "$strict-child"),
+            homeserver_redaction_event_ids=("$redaction",),
+            cache=cache,
+            accounting_missing_event_ids=(),
+            cache_only_event_ids=("$cache-only",),
+            thread_reads=reads,
+        )
+
+    corrupt_second_read = replace(
+        reads[1],
+        visible_event_ids=("$child",),
+    )
+    with pytest.raises(MatrixAuditError, match=r"strict_reads\.second\.visible_event_ids"):
+        validate_interaction_expectations(
+            records,
+            homeserver_event_ids=("$child", "$target", "$redaction", "$strict-child"),
+            homeserver_redaction_event_ids=("$redaction",),
+            cache=cache,
+            accounting_missing_event_ids=(),
+            cache_only_event_ids=(),
+            thread_reads=(reads[0], corrupt_second_read, reads[2]),
+        )
+
+    with pytest.raises(MatrixAuditError, match=r"strict_reads\.second\.homeserver_fetch_ms"):
+        validate_interaction_expectations(
+            records,
+            homeserver_event_ids=("$child", "$target", "$redaction", "$strict-child"),
+            homeserver_redaction_event_ids=("$redaction",),
+            cache=cache,
+            accounting_missing_event_ids=(),
+            cache_only_event_ids=(),
+            thread_reads=(reads[0], replace(reads[1], homeserver_fetch_ms=1.0), reads[2]),
+        )
+
+    with pytest.raises(MatrixAuditError, match=r"strict_reads\.third\.cache_reject_reason"):
+        validate_interaction_expectations(
+            records,
+            homeserver_event_ids=("$child", "$target", "$redaction", "$strict-child"),
+            homeserver_redaction_event_ids=("$redaction",),
+            cache=cache,
+            accounting_missing_event_ids=(),
+            cache_only_event_ids=(),
+            thread_reads=(reads[0], reads[1], replace(reads[2], cache_reject_reason="other")),
+        )
+
+    with pytest.raises(MatrixAuditError, match=r"strict_reads\.third\.redacted_event_absent"):
+        validate_interaction_expectations(
+            records,
+            homeserver_event_ids=("$child", "$target", "$redaction", "$strict-child"),
+            homeserver_redaction_event_ids=("$redaction",),
+            cache=cache,
+            accounting_missing_event_ids=(),
+            cache_only_event_ids=(),
+            thread_reads=(
+                reads[0],
+                reads[1],
+                replace(
+                    reads[2],
+                    visible_event_ids=("$child", "$strict-child"),
+                ),
+            ),
         )

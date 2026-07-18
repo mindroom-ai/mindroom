@@ -180,7 +180,11 @@ def event_thread_rows(
 ) -> list[_EventThreadRow]:
     """Return root-complete event-to-thread rows derived from serialized events."""
     rows = (
-        [_EventThreadRow(room_id=room_id, event_id=event.event_id, thread_id=thread_id) for event in events]
+        [
+            _EventThreadRow(room_id=room_id, event_id=event.event_id, thread_id=thread_id)
+            for event in events
+            if event_type_supports_thread_relations(event.event.get("type"))
+        ]
         if thread_id is not None
         else [row for event in events if (row := _event_thread_row(room_id, event.event)) is not None]
     )

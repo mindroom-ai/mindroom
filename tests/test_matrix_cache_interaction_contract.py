@@ -646,6 +646,176 @@ async def test_message_relations_through_non_message_ancestors_fail_closed(
 
 
 @pytest.mark.asyncio
+async def test_explicit_thread_snapshot_does_not_index_non_message_events(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Authoritative snapshot writes must preserve the non-message index boundary."""
+    root = _message_source("$snapshot-root", "m.text", timestamp=54)
+    child = _message_source(
+        "$snapshot-child",
+        "m.text",
+        timestamp=55,
+        relation={"event_id": "$snapshot-root", "rel_type": "m.thread"},
+    )
+    sticker = _event_source(
+        "$snapshot-sticker",
+        "m.sticker",
+        {
+            "body": "sticker",
+            "m.relates_to": {"event_id": "$snapshot-root", "rel_type": "m.thread"},
+            "url": "mxc://localhost/sticker",
+        },
+        timestamp=56,
+    )
+
+    await replace_thread_unconditionally(
+        event_cache,
+        _ROOM_ID,
+        "$snapshot-root",
+        [root, child, sticker],
+    )
+
+    assert await event_cache.get_thread_id_for_event(_ROOM_ID, "$snapshot-root") == "$snapshot-root"
+    assert await event_cache.get_thread_id_for_event(_ROOM_ID, "$snapshot-child") == "$snapshot-root"
+    assert await event_cache.get_thread_id_for_event(_ROOM_ID, "$snapshot-sticker") is None
+
+
+@pytest.mark.asyncio
+async def test_page_local_non_message_child_cannot_prove_thread_root(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A relation-shaped sticker cannot make a same-page relation-free message a thread root."""
+    root = _message_source("$page-root", "m.text", timestamp=57)
+    sticker = _event_source(
+        "$page-sticker",
+        "m.sticker",
+        {
+            "body": "sticker",
+            "m.relates_to": {"event_id": "$page-root", "rel_type": "m.thread"},
+            "url": "mxc://localhost/sticker",
+        },
+        timestamp=58,
+    )
+    reply = _message_source(
+        "$page-root-reply",
+        "m.text",
+        timestamp=59,
+        relation=_reply_relation("$page-root"),
+    )
+
+    await _build_sync_harness(event_cache).apply(
+        _sync_response([raw_nio_event(root), raw_nio_event(sticker), raw_nio_event(reply)]),
+    )
+
+    for event_id in ("$page-root", "$page-sticker", "$page-root-reply"):
+        assert await event_cache.get_thread_id_for_event(_ROOM_ID, event_id) is None
+
+
+@pytest.mark.asyncio
+async def test_cached_non_message_child_cannot_prove_thread_root(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A cached sticker cannot provide thread-root proof when its stale root index is unavailable."""
+    root = _message_source("$cached-proof-root", "m.text", timestamp=60)
+    sticker = _event_source(
+        "$cached-proof-sticker",
+        "m.sticker",
+        {
+            "body": "sticker",
+            "m.relates_to": {"event_id": "$cached-proof-root", "rel_type": "m.thread"},
+            "url": "mxc://localhost/sticker",
+        },
+        timestamp=61,
+    )
+    await replace_thread_unconditionally(
+        event_cache,
+        _ROOM_ID,
+        "$cached-proof-root",
+        [root, sticker],
+    )
+    real_lookup = event_cache.get_thread_id_for_event
+
+    async def lookup_without_root_index(room_id: str, event_id: str) -> str | None:
+        if event_id == "$cached-proof-root":
+            return None
+        return await real_lookup(room_id, event_id)
+
+    with patch.object(
+        event_cache,
+        "get_thread_id_for_event",
+        side_effect=lookup_without_root_index,
+    ):
+        await _build_sync_harness(event_cache).apply(
+            _sync_response(
+                [
+                    raw_nio_event(
+                        _message_source(
+                            "$cached-proof-reply",
+                            "m.text",
+                            timestamp=62,
+                            relation=_reply_relation("$cached-proof-root"),
+                        ),
+                    ),
+                ],
+            ),
+        )
+
+    assert await event_cache.get_thread_id_for_event(_ROOM_ID, "$cached-proof-reply") is None
+
+
+@pytest.mark.parametrize("relation_kind", ["reply", "reference"])
+@pytest.mark.asyncio
+async def test_persisted_non_message_index_is_not_trusted_by_relation_walks(
+    event_cache: ConversationEventCache,
+    relation_kind: str,
+) -> None:
+    """Legacy index rows cannot let message relations inherit from non-message events."""
+    await _seed_thread(event_cache)
+    sticker = _event_source(
+        "$legacy-index-sticker",
+        "m.sticker",
+        {
+            "body": "sticker",
+            "m.relates_to": _thread_relation(),
+            "url": "mxc://localhost/sticker",
+        },
+        timestamp=63,
+    )
+    await event_cache.store_event("$legacy-index-sticker", _ROOM_ID, sticker)
+    relation = (
+        _reply_relation("$legacy-index-sticker")
+        if relation_kind == "reply"
+        else {"event_id": "$legacy-index-sticker", "rel_type": "m.reference"}
+    )
+    dependent = _message_source(
+        f"$legacy-{relation_kind}-dependent",
+        "m.text",
+        timestamp=64,
+        relation=relation,
+    )
+    real_lookup = event_cache.get_thread_id_for_event
+
+    async def lookup_with_legacy_row(room_id: str, event_id: str) -> str | None:
+        if event_id == "$legacy-index-sticker":
+            return _THREAD_ID
+        return await real_lookup(room_id, event_id)
+
+    with patch.object(
+        event_cache,
+        "get_thread_id_for_event",
+        side_effect=lookup_with_legacy_row,
+    ):
+        await _build_sync_harness(event_cache).apply(
+            _sync_response([raw_nio_event(dependent)]),
+        )
+
+    assert await event_cache.get_thread_id_for_event(_ROOM_ID, cast("str", dependent["event_id"])) is None
+    state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    assert state is not None
+    assert state.room_invalidation_reason == "sync_thread_lookup_unavailable"
+
+
+@pytest.mark.asyncio
 async def test_joined_timeline_thread_relations_indexes_edits_and_visible_history(
     event_cache: ConversationEventCache,
 ) -> None:

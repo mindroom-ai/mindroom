@@ -1231,6 +1231,77 @@ def _thread_read_record(
     )
 
 
+def _strict_thread_read_comparisons(
+    reads: tuple[ThreadReadRecord, ...],
+    *,
+    redacted_event_id: str,
+) -> list[tuple[str, object, object]]:
+    """Return executable refill, cache-hit, and rejection comparisons."""
+    comparisons: list[tuple[str, object, object]] = [
+        ("count", len(reads), 3),
+        ("sequences", tuple(read.sequence for read in reads), (1, 2, 3)),
+    ]
+    if len(reads) != 3:
+        return comparisons
+    first, second, third = reads
+    expected_after_redaction = tuple(event_id for event_id in first.visible_event_ids if event_id != redacted_event_id)
+    comparisons.extend(
+        [
+            ("first.mode", first.mode, "full_scan"),
+            ("first.source", first.source, "homeserver"),
+            ("first.cache_reject_reason", first.cache_reject_reason, "no_cache_state"),
+            ("first.homeserver_fetch", first.homeserver_fetch_ms > 0, True),
+            ("first.homeserver_pages", first.homeserver_scan_pages > 0, True),
+            ("first.homeserver_events", first.homeserver_scanned_event_count > 0, True),
+            ("first.degraded", first.degraded, False),
+            ("first.error", first.error, None),
+            ("second.mode", second.mode, "cache_hit"),
+            ("second.source", second.source, "cache"),
+            ("second.visible_event_ids", second.visible_event_ids, first.visible_event_ids),
+            ("second.homeserver_fetch_ms", second.homeserver_fetch_ms, 0.0),
+            ("second.homeserver_scan_pages", second.homeserver_scan_pages, 0),
+            ("second.homeserver_scanned_event_count", second.homeserver_scanned_event_count, 0),
+            ("second.cache_reject_reason", second.cache_reject_reason, None),
+            ("second.degraded", second.degraded, False),
+            ("second.error", second.error, None),
+            ("third.mode", third.mode, "full_scan"),
+            ("third.source", third.source, "homeserver"),
+            (
+                "third.cache_reject_reason",
+                third.cache_reject_reason,
+                "thread_invalidated_after_validation",
+            ),
+            ("third.visible_event_ids", third.visible_event_ids, expected_after_redaction),
+            ("third.redacted_event_absent", redacted_event_id not in third.visible_event_ids, True),
+            ("third.homeserver_fetch", third.homeserver_fetch_ms > 0, True),
+            ("third.homeserver_pages", third.homeserver_scan_pages > 0, True),
+            ("third.homeserver_events", third.homeserver_scanned_event_count > 0, True),
+            ("third.degraded", third.degraded, False),
+            ("third.error", third.error, None),
+        ],
+    )
+    return comparisons
+
+
+def _require_strict_thread_read_contract(
+    reads: tuple[ThreadReadRecord, ...],
+    *,
+    redacted_event_id: str,
+) -> None:
+    """Fail closed unless the isolated read sequence proves the full contract."""
+    failures = [
+        f"{field}: expected {expected!r}, observed {actual!r}"
+        for field, actual, expected in _strict_thread_read_comparisons(
+            reads,
+            redacted_event_id=redacted_event_id,
+        )
+        if actual != expected
+    ]
+    if failures:
+        msg = f"Strict thread-read verification failed: {'; '.join(failures)}"
+        raise MatrixAuditError(msg)
+
+
 def _expect_tombstone(records: list[InteractionRecord], event_id: str) -> None:
     for index, record in enumerate(records):
         if record.event_id == event_id:
@@ -1309,9 +1380,6 @@ async def _strict_thread_read_sequence(
                     history=history,
                 ),
             )
-        if reads[0].source != "homeserver" or reads[1].source != "cache":
-            msg = "Strict reads did not produce the required refill followed by cache hit"
-            raise MatrixAuditError(msg)
         redaction_event_id = await api.redact(
             room_id,
             strict_child_id,
@@ -1350,10 +1418,12 @@ async def _strict_thread_read_sequence(
                 history=history,
             ),
         )
-        if reads[2].source != "homeserver" or reads[2].cache_reject_reason is None:
-            msg = "Strict read after Matrix redaction did not reject and refill"
-            raise MatrixAuditError(msg)
-        return tuple(reads)
+        strict_reads = tuple(reads)
+        _require_strict_thread_read_contract(
+            strict_reads,
+            redacted_event_id=strict_child_id,
+        )
+        return strict_reads
     finally:
         await client.close()
         await cache.close()
@@ -1531,12 +1601,39 @@ def _interaction_expectation_comparisons(
     return comparisons
 
 
+def _audit_level_expectation_comparisons(
+    records: tuple[InteractionRecord, ...],
+    *,
+    accounting_missing_event_ids: tuple[str, ...],
+    cache_only_event_ids: tuple[str, ...],
+    thread_reads: tuple[ThreadReadRecord, ...],
+) -> list[tuple[str, object, object]]:
+    """Return cache-accounting and strict-read comparisons for the complete audit."""
+    strict_target_ids = tuple(record.event_id for record in records if record.family == "strict_read_rejection_target")
+    comparisons: list[tuple[str, object, object]] = [
+        ("accounting.missing_event_ids", accounting_missing_event_ids, ()),
+        ("accounting.cache_only_event_ids", cache_only_event_ids, ()),
+        ("strict_reads.redaction_target_count", len(strict_target_ids), 1),
+    ]
+    if len(strict_target_ids) == 1:
+        comparisons.extend(
+            (f"strict_reads.{field}", actual, expected)
+            for field, actual, expected in _strict_thread_read_comparisons(
+                thread_reads,
+                redacted_event_id=strict_target_ids[0],
+            )
+        )
+    return comparisons
+
+
 def validate_interaction_expectations(
     records: tuple[InteractionRecord, ...],
     *,
     homeserver_event_ids: tuple[str, ...],
     homeserver_redaction_event_ids: tuple[str, ...],
     cache: CacheSnapshot,
+    accounting_missing_event_ids: tuple[str, ...],
+    cache_only_event_ids: tuple[str, ...],
     thread_reads: tuple[ThreadReadRecord, ...],
 ) -> ExpectationValidation:
     """Compare every declared cache expectation with secret-free observed state."""
@@ -1576,6 +1673,18 @@ def validate_interaction_expectations(
     if cache.orphan_thread_rows != 0:
         errors.append(f"cache.orphan_thread_rows: expected 0, observed {cache.orphan_thread_rows}")
     assertions += 1
+    audit_comparisons = _audit_level_expectation_comparisons(
+        records,
+        accounting_missing_event_ids=accounting_missing_event_ids,
+        cache_only_event_ids=cache_only_event_ids,
+        thread_reads=thread_reads,
+    )
+    assertions += len(audit_comparisons)
+    errors.extend(
+        f"{field}: expected {expected!r}, observed {actual!r}"
+        for field, actual, expected in audit_comparisons
+        if actual != expected
+    )
     if errors:
         detail = "; ".join(errors[:20])
         if len(errors) > 20:
@@ -1619,15 +1728,23 @@ def _secret_free_evidence(
     return payload
 
 
+def _validate_audit_config(config: AuditConfig) -> None:
+    """Reject configurations that cannot produce complete private evidence."""
+    if config.cache_db_path is None or not config.strict_thread_reads:
+        msg = "Audit evidence requires a service cache and strict thread reads"
+        raise MatrixAuditError(msg)
+    if (config.invite_user_id is None) != (config.invite_access_token is None):
+        msg = "An invited audit agent requires both its user ID and access token"
+        raise MatrixAuditError(msg)
+
+
 async def run_audit(  # noqa: PLR0915
     config: AuditConfig,
     *,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> AuditEvidence:
     """Run the disposable interaction matrix and return sanitized evidence."""
-    if config.cache_db_path is None or not config.strict_thread_reads:
-        msg = "Audit evidence requires a service cache and strict thread reads"
-        raise MatrixAuditError(msg)
+    _validate_audit_config(config)
     fixtures = media_fixtures()
     validate_media_fixtures(fixtures)
     records: list[InteractionRecord] = []
@@ -1736,6 +1853,8 @@ async def run_audit(  # noqa: PLR0915
             homeserver_event_ids=homeserver_event_ids,
             homeserver_redaction_event_ids=redaction_event_ids,
             cache=cache,
+            accounting_missing_event_ids=accounting_missing,
+            cache_only_event_ids=cache_only,
             thread_reads=thread_reads,
         )
         if cache is not None and thread_reads
@@ -1785,6 +1904,9 @@ def write_evidence(evidence: AuditEvidence, config: AuditConfig) -> None:
     if evidence.expectation_validation is None or evidence.expectation_validation.status != "passed":
         msg = "Evidence output requires complete passing cache and strict-read expectation validation"
         raise MatrixAuditError(msg)
+    if evidence.accounting_missing_event_ids or evidence.cache_only_event_ids:
+        msg = "Evidence output requires complete homeserver-to-cache accounting"
+        raise MatrixAuditError(msg)
     access_tokens = tuple(token for token in (config.access_token, config.invite_access_token) if token is not None)
     payload = _secret_free_evidence(evidence, access_tokens=access_tokens)
     config.evidence_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1831,6 +1953,8 @@ def _parse_args() -> AuditConfig:
         parser.error(f"{args.access_token_env} must contain the Matrix access token")
     if args.trigger_user_id is not None and args.invite_user_id != args.trigger_user_id:
         parser.error("--trigger-user-id must equal --invite-user-id for the private audit room")
+    if (args.invite_user_id is None) != (args.invite_access_token_env is None):
+        parser.error("--invite-user-id and --invite-access-token-env must be provided together")
     invite_access_token = None if args.invite_access_token_env is None else os.environ.get(args.invite_access_token_env)
     if args.invite_access_token_env is not None and not invite_access_token:
         parser.error(f"{args.invite_access_token_env} must contain the invited agent token")
