@@ -58,7 +58,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
     from typing import Any
 
-    from mindroom.matrix.cache import ThreadHistoryResult
+    from mindroom.matrix.cache import ConversationEventCache, ThreadHistoryResult
     from mindroom.matrix.cache.event_cache import ThreadCacheState
 
 
@@ -332,7 +332,7 @@ async def _reopen_event_cache(event_cache: SqliteEventCache) -> SqliteEventCache
 def _conversation_runtime(
     *,
     client: nio.AsyncClient | None = None,
-    event_cache: SqliteEventCache | None = None,
+    event_cache: ConversationEventCache | None = None,
     coordinator: EventCacheWriteCoordinator | None = None,
 ) -> BotRuntimeState:
     """Build one minimal live runtime state for conversation-cache tests."""

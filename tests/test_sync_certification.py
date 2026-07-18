@@ -87,15 +87,23 @@ def test_successful_sync_certifies_checkpoint(
 
 
 @pytest.mark.parametrize(
-    ("cache_result", "reason"),
+    ("cache_result", "reason", "reset_client_token"),
     [
-        (SyncCacheWriteResult(complete=False), "cache_write_incomplete"),
-        (SyncCacheWriteResult(complete=True, limited_room_ids=("!room:localhost",)), "limited_sync_timeline"),
-        (SyncCacheWriteResult(complete=True, errors=(RuntimeError("boom"),)), "cache_write_failed"),
-        (SyncCacheWriteResult(complete=True, errors=(asyncio.CancelledError(),)), "cache_write_failed"),
+        (SyncCacheWriteResult(complete=False), "cache_write_incomplete", False),
+        (
+            SyncCacheWriteResult(complete=True, limited_room_ids=("!room:localhost",)),
+            "limited_sync_timeline",
+            True,
+        ),
+        (SyncCacheWriteResult(complete=True, errors=(RuntimeError("boom"),)), "cache_write_failed", False),
+        (SyncCacheWriteResult(complete=True, errors=(asyncio.CancelledError(),)), "cache_write_failed", False),
     ],
 )
-def test_uncertain_sync_fails_closed(cache_result: SyncCacheWriteResult, reason: str) -> None:
+def test_uncertain_sync_fails_closed(
+    cache_result: SyncCacheWriteResult,
+    reason: str,
+    reset_client_token: bool,
+) -> None:
     """Limited, failed, incomplete, or cancelled cache writes must not save a token."""
     decision = certify_sync_response(
         SyncTrustState.CERTIFIED,
@@ -107,8 +115,27 @@ def test_uncertain_sync_fails_closed(cache_result: SyncCacheWriteResult, reason:
     assert decision.state is SyncTrustState.UNCERTAIN
     assert decision.checkpoint_to_save is None
     assert decision.clear_saved_token is True
-    assert decision.reset_client_token is False
+    assert decision.reset_client_token is reset_client_token
     assert decision.reason == reason
+
+
+@pytest.mark.parametrize("state", list(SyncTrustState))
+def test_limited_sync_resets_active_client_token_in_every_trust_state(state: SyncTrustState) -> None:
+    """A partial timeline must restart from a complete sync regardless of prior certification state."""
+    decision = certify_sync_response(
+        state,
+        next_batch="s_partial",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            limited_room_ids=("!room:localhost",),
+        ),
+        first_sync=state is SyncTrustState.PENDING,
+    )
+
+    assert decision.state is SyncTrustState.UNCERTAIN
+    assert decision.checkpoint_to_save is None
+    assert decision.clear_saved_token is True
+    assert decision.reset_client_token is True
 
 
 def test_sync_cache_write_diagnostics_explains_uncertainty() -> None:

@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import nio
 import pytest
 
+from mindroom.matrix.cache import thread_cache_rejection_reason
+from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.client_thread_history import bulk_refresh_room_thread_histories
+from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _ROOM_ID = "!room:localhost"
 
@@ -152,3 +159,58 @@ async def test_bulk_refresh_reports_missing_roots_without_storing_partial_thread
     assert stats.missing_root_ids == frozenset({"$ghost:localhost"})
     event_cache.replace_thread_if_not_newer.assert_awaited_once()
     assert event_cache.replace_thread_if_not_newer.await_args.args[1] == "$a:localhost"
+
+
+@pytest.mark.asyncio
+async def test_bulk_refresh_opaque_missing_root_marks_existing_snapshot_stale(tmp_path: Path) -> None:
+    """Ciphertext in a root-missing bulk scan must invalidate an existing populated snapshot."""
+    thread_id = "$root:localhost"
+    root_source = {
+        "event_id": thread_id,
+        "sender": "@alice:localhost",
+        "origin_server_ts": 1000,
+        "room_id": _ROOM_ID,
+        "type": "m.room.message",
+        "content": {"body": "cached root", "msgtype": "m.text"},
+    }
+    opaque_event = nio.MegolmEvent.from_dict(
+        {
+            "event_id": "$opaque:localhost",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 2000,
+            "room_id": _ROOM_ID,
+            "type": "m.room.encrypted",
+            "content": {
+                "algorithm": "m.megolm.v1.aes-sha2",
+                "ciphertext": "opaque ciphertext",
+                "device_id": "DEVICE",
+                "sender_key": "sender-key",
+                "session_id": "session",
+            },
+        },
+    )
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        return_value=_messages_response([opaque_event], end=None),
+    )
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await event_cache.initialize()
+
+    try:
+        await _replace_thread(event_cache, _ROOM_ID, thread_id, [root_source])
+        stats = await bulk_refresh_room_thread_histories(
+            client,
+            _ROOM_ID,
+            event_cache,
+            thread_root_ids=[thread_id],
+            caller_label="test",
+        )
+        cache_state = await event_cache.get_thread_cache_state(_ROOM_ID, thread_id)
+    finally:
+        await event_cache.close()
+
+    assert stats.stored_threads == 0
+    assert stats.missing_root_ids == frozenset({thread_id})
+    assert cache_state is not None
+    assert cache_state.invalidation_reason == "thread_history_opaque_encrypted_event"
+    assert thread_cache_rejection_reason(cache_state) == "thread_invalidated_after_validation"

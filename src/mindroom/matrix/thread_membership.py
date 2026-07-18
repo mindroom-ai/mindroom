@@ -24,7 +24,8 @@ Invariants enforced here (every resolver in the repo must go through this module
    inherit the target's thread transitively.
 
 3. The walk always terminates: a visited set breaks relation cycles and ``_MAX_THREAD_MEMBERSHIP_HOPS``
-   caps pathological chains, resolving to the best answer found so far (initially ROOM_LEVEL).
+   caps pathological chains.
+   Both cases are INDETERMINATE because a truncated relation graph cannot prove room-level impact.
 
 4. Root proof is three-valued (PROVEN, NOT_A_THREAD_ROOT, PROOF_UNAVAILABLE) and proof failure never
    silently demotes to room level.
@@ -174,6 +175,8 @@ def _next_related_event_target(
     current_event_id: str,
 ) -> str | None:
     """Return the next related event to inspect."""
+    if event_info.next_related_event_id("") == current_event_id:
+        return current_event_id
     return event_info.next_related_event_id(current_event_id)
 
 
@@ -243,6 +246,10 @@ async def resolve_related_event_thread_membership(
 
     for _ in range(_MAX_THREAD_MEMBERSHIP_HOPS):
         if current_event_id in visited_event_ids:
+            resolution = ThreadResolution.indeterminate(
+                ThreadMembershipLookupError(f"Relation cycle detected at {current_event_id}"),
+                candidate_thread_root_id=current_event_id,
+            )
             break
         visited_event_ids.add(current_event_id)
 
@@ -284,6 +291,13 @@ async def resolve_related_event_thread_membership(
                 await access.prove_thread_root(room_id, current_event_id),
             )
         break
+    else:
+        resolution = ThreadResolution.indeterminate(
+            ThreadMembershipLookupError(
+                f"Relation chain exceeded {_MAX_THREAD_MEMBERSHIP_HOPS} hops at {current_event_id}",
+            ),
+            candidate_thread_root_id=current_event_id,
+        )
 
     return resolution
 

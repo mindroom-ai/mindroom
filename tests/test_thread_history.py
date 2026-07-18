@@ -18,7 +18,7 @@ import mindroom.matrix.client_thread_history as matrix_client_module
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.matrix.cache import ThreadHistoryResult
+from mindroom.matrix.cache import ThreadHistoryResult, thread_cache_rejection_reason
 from mindroom.matrix.cache.event_cache import ThreadCacheState
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
@@ -2388,6 +2388,180 @@ class TestThreadHistoryCache:
         assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
         assert history.diagnostics[THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC] == "cache_missing_thread_root"
         client.room_messages.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_fetch_dispatch_thread_history_refetches_fresh_cache_with_opaque_event(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A populated snapshot containing ciphertext must refresh through a decryption-capable client."""
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        decrypted_reply = self._make_text_event(
+            event_id="$reply",
+            sender="@user:localhost",
+            body="Decrypted reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "Decrypted reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        opaque_reply = {
+            "content": {
+                "algorithm": "m.megolm.v1.aes-sha2",
+                "ciphertext": "opaque ciphertext",
+                "device_id": "DEVICE",
+                "sender_key": "sender-key",
+                "session_id": "session",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+            "event_id": "$reply",
+            "sender": "@user:localhost",
+            "origin_server_ts": 2000,
+            "room_id": "!room:localhost",
+            "type": "m.room.encrypted",
+        }
+        await self._seed_thread_cache(
+            cache,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            events=[self._cache_source(root_event), opaque_reply],
+        )
+
+        client = MagicMock()
+        page = MagicMock(spec=nio.RoomMessagesResponse)
+        page.chunk = [decrypted_reply, root_event]
+        page.end = None
+        client.room_messages = AsyncMock(return_value=page)
+
+        try:
+            history = await matrix_client_module.fetch_dispatch_thread_history(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                event_cache=cache,
+            )
+        finally:
+            await cache.close()
+
+        assert [message.body for message in history] == ["Root message", "Decrypted reply"]
+        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
+        assert history.diagnostics[THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC] == ("cache_opaque_encrypted_event")
+        client.room_messages.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("relation_visible", [True, False])
+    async def test_opaque_matrix_refresh_stays_stale_until_decrypted_recovery(
+        self,
+        tmp_path: Path,
+        relation_visible: bool,
+    ) -> None:
+        """Fresh ciphertext evidence must block replacement, including when its relation is hidden."""
+        room_id = "!room:localhost"
+        thread_id = "$thread_root"
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+        root_event = self._make_text_event(
+            event_id=thread_id,
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        old_reply = self._make_text_event(
+            event_id="$reply",
+            sender="@user:localhost",
+            body="Old reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "Old reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+            },
+        )
+        decrypted_reply = self._make_text_event(
+            event_id="$opaque",
+            sender="@user:localhost",
+            body="Recovered reply",
+            server_timestamp=3000,
+            source_content={
+                "body": "Recovered reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+            },
+        )
+        opaque_content: dict[str, object] = {
+            "algorithm": "m.megolm.v1.aes-sha2",
+            "ciphertext": "opaque ciphertext",
+            "device_id": "DEVICE",
+            "sender_key": "sender-key",
+            "session_id": "session",
+        }
+        if relation_visible:
+            opaque_content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
+        opaque_reply = nio.MegolmEvent.from_dict(
+            {
+                "content": opaque_content,
+                "event_id": "$opaque",
+                "sender": "@user:localhost",
+                "origin_server_ts": 3000,
+                "room_id": room_id,
+                "type": "m.room.encrypted",
+            },
+        )
+
+        opaque_page = MagicMock(spec=nio.RoomMessagesResponse)
+        opaque_page.chunk = [opaque_reply, root_event]
+        opaque_page.end = None
+        decrypted_page = MagicMock(spec=nio.RoomMessagesResponse)
+        decrypted_page.chunk = [decrypted_reply, root_event]
+        decrypted_page.end = None
+        client = MagicMock()
+        client.room_messages = AsyncMock(side_effect=[opaque_page, decrypted_page])
+
+        try:
+            await self._seed_thread_cache(
+                cache,
+                room_id=room_id,
+                thread_id=thread_id,
+                events=[self._cache_source(root_event), self._cache_source(old_reply)],
+            )
+            with pytest.raises(matrix_client_module._OpaqueEncryptedThreadHistoryError):
+                await matrix_client_module.refresh_thread_history_from_source(
+                    client,
+                    room_id,
+                    thread_id,
+                    cache,
+                    allow_stale_fallback=False,
+                )
+            stale_state = await cache.get_thread_cache_state(room_id, thread_id)
+            stale_events = await cache.get_thread_events(room_id, thread_id)
+
+            recovered_history = await matrix_client_module.refresh_thread_history_from_source(
+                client,
+                room_id,
+                thread_id,
+                cache,
+                allow_stale_fallback=False,
+            )
+            recovered_state = await cache.get_thread_cache_state(room_id, thread_id)
+        finally:
+            await cache.close()
+
+        assert stale_state is not None
+        assert stale_state.invalidation_reason == "thread_history_opaque_encrypted_event"
+        assert thread_cache_rejection_reason(stale_state) == "thread_invalidated_after_validation"
+        assert stale_events is not None
+        assert [event["event_id"] for event in stale_events] == [thread_id, "$reply"]
+        assert [message.body for message in recovered_history] == ["Root message", "Recovered reply"]
+        assert thread_cache_rejection_reason(recovered_state) is None
 
     @pytest.mark.asyncio
     async def test_fetch_dispatch_thread_snapshot_uses_fresh_durable_cache(self, tmp_path: Path) -> None:

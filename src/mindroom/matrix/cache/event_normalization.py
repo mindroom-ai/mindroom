@@ -10,6 +10,12 @@ if TYPE_CHECKING:
     import nio
 
 _RUNTIME_ONLY_EVENT_SOURCE_KEYS = frozenset({"com.mindroom.dispatch_pipeline_timing"})
+_OPAQUE_ENCRYPTED_EVENT_TYPE = "m.room.encrypted"
+
+
+def is_opaque_encrypted_event_source(event_source: Mapping[str, Any]) -> bool:
+    """Return whether one cached event is still an undecrypted Matrix ciphertext envelope."""
+    return event_source.get("type") == _OPAQUE_ENCRYPTED_EVENT_TYPE
 
 
 def normalize_event_source_for_cache(

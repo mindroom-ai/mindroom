@@ -123,7 +123,7 @@ def certify_sync_response(
     if reason is not None:
         return _uncertain_decision(
             reason=reason,
-            reset_client_token=state is SyncTrustState.PENDING and first_sync,
+            reset_client_token=bool(cache_result.limited_room_ids) or (state is SyncTrustState.PENDING and first_sync),
         )
 
     token = normalize_sync_token(next_batch)

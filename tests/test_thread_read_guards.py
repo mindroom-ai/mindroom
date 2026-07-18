@@ -677,7 +677,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             sync_response.__class__ = nio.SyncResponse
             sync_response.rooms = MagicMock()
             sync_response.rooms.join = {
-                "!test:localhost": MagicMock(timeline=MagicMock(events=[reply_edit])),
+                "!test:localhost": MagicMock(timeline=MagicMock(events=[reply_edit], limited=False)),
             }
             access.cache_sync_timeline(sync_response)
             await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
@@ -1047,7 +1047,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             sync_response.__class__ = nio.SyncResponse
             sync_response.rooms = MagicMock()
             sync_response.rooms.join = {
-                "!test:localhost": MagicMock(timeline=MagicMock(events=[ambiguous_edit])),
+                "!test:localhost": MagicMock(timeline=MagicMock(events=[ambiguous_edit], limited=False)),
             }
             access.cache_sync_timeline(sync_response)
             await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)

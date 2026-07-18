@@ -13,7 +13,7 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.attachment_helpers import resolve_canonical_tool_thread_target
-from mindroom.matrix import thread_bookkeeping
+from mindroom.matrix import thread_bookkeeping, thread_membership
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_bookkeeping import (
@@ -30,6 +30,7 @@ from mindroom.matrix.thread_diagnostics import (
 )
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
+    ThreadMembershipLookupError,
     ThreadResolution,
     ThreadResolutionState,
     ThreadRootProof,
@@ -235,7 +236,7 @@ async def test_resolve_event_thread_membership_proves_current_root_when_allowed(
 
 @pytest.mark.asyncio
 async def test_resolve_related_event_thread_membership_terminates_on_relation_cycle() -> None:
-    """A reply cycle must terminate as room-level instead of walking relations forever."""
+    """A reply cycle must fail closed instead of becoming a trusted room-level relation."""
     event_infos = {
         "$cycle-a:localhost": _message_event_info(
             {
@@ -275,8 +276,82 @@ async def test_resolve_related_event_thread_membership_terminates_on_relation_cy
         ),
     )
 
-    assert resolution == ThreadResolution.room_level()
+    assert resolution.state is ThreadResolutionState.INDETERMINATE
+    assert resolution.candidate_thread_root_id == "$cycle-a:localhost"
+    assert isinstance(resolution.error, ThreadMembershipLookupError)
     assert fetched_event_ids == ["$cycle-a:localhost", "$cycle-b:localhost"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_related_event_thread_membership_fails_closed_on_self_cycle() -> None:
+    """A self-relation must remain visible to cycle detection."""
+    event_info = _message_event_info(
+        {
+            "body": "self cycle",
+            "msgtype": "m.text",
+            "m.relates_to": {"m.in_reply_to": {"event_id": "$self:localhost"}},
+        },
+    )
+
+    resolution = await resolve_related_event_thread_membership(
+        "!room:localhost",
+        "$self:localhost",
+        access=map_backed_thread_membership_access(
+            event_infos={"$self:localhost": event_info},
+            resolved_thread_ids={},
+        ),
+    )
+
+    assert resolution.state is ThreadResolutionState.INDETERMINATE
+    assert resolution.candidate_thread_root_id == "$self:localhost"
+    assert isinstance(resolution.error, ThreadMembershipLookupError)
+
+
+@pytest.mark.asyncio
+async def test_resolve_related_event_thread_membership_fails_closed_beyond_hop_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A truncated relation chain cannot prove room-level impact."""
+    monkeypatch.setattr(thread_membership, "_MAX_THREAD_MEMBERSHIP_HOPS", 2)
+    event_infos = {
+        "$a:localhost": _message_event_info(
+            {
+                "body": "a",
+                "msgtype": "m.text",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$b:localhost"}},
+            },
+        ),
+        "$b:localhost": _message_event_info(
+            {
+                "body": "b",
+                "msgtype": "m.text",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$c:localhost"}},
+            },
+        ),
+    }
+    fetched_event_ids: list[str] = []
+
+    async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+        return None
+
+    async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
+        fetched_event_ids.append(event_id)
+        return event_infos[event_id]
+
+    resolution = await resolve_related_event_thread_membership(
+        "!room:localhost",
+        "$a:localhost",
+        access=ThreadMembershipAccess(
+            lookup_thread_id=lookup_thread_id,
+            fetch_event_info=fetch_event_info,
+            prove_thread_root=AsyncMock(),
+        ),
+    )
+
+    assert resolution.state is ThreadResolutionState.INDETERMINATE
+    assert resolution.candidate_thread_root_id == "$c:localhost"
+    assert isinstance(resolution.error, ThreadMembershipLookupError)
+    assert fetched_event_ids == ["$a:localhost", "$b:localhost"]
 
 
 @pytest.mark.asyncio

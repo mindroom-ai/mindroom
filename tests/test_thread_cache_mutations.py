@@ -14,7 +14,7 @@ from nio.api import RelationshipType
 import mindroom.matrix.cache as matrix_cache
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.matrix import thread_bookkeeping
-from mindroom.matrix.cache import thread_writes
+from mindroom.matrix.cache import ConversationEventCache, thread_writes
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
@@ -53,6 +53,34 @@ from tests.threading_helpers import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def _opaque_encrypted_event(
+    *,
+    event_id: str = "$opaque:localhost",
+    content_updates: dict[str, object] | None = None,
+    redacts: str | None = None,
+) -> nio.MegolmEvent:
+    """Build one undecrypted timeline event with visible relation metadata."""
+    content: dict[str, object] = {
+        "algorithm": "m.megolm.v1.aes-sha2",
+        "ciphertext": "opaque ciphertext",
+        "device_id": "DEVICE",
+        "sender_key": "sender-key",
+        "session_id": "session",
+    }
+    content.update(content_updates or {})
+    event_source: dict[str, object] = {
+        "content": content,
+        "event_id": event_id,
+        "sender": "@user:localhost",
+        "origin_server_ts": 1234567890,
+        "room_id": "!test:localhost",
+        "type": "m.room.encrypted",
+    }
+    if redacts is not None:
+        event_source["redacts"] = redacts
+    return nio.MegolmEvent.from_dict(event_source)
 
 
 def test_matrix_cache_package_does_not_export_thread_policy_wrappers() -> None:
@@ -239,18 +267,10 @@ class TestThreadMutationHelpers:
         event_cache.mark_room_threads_stale.assert_not_awaited()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ("context", "redact_room_level_event"),
-        [
-            ("outbound", False),
-            ("live", True),
-            ("sync", True),
-        ],
-    )
-    async def test_thread_redaction_mutation_room_level_skips_thread_invalidations(
+    @pytest.mark.parametrize("context", ["outbound", "live", "sync"])
+    async def test_thread_redaction_mutation_room_level_redacts_without_thread_invalidations(
         self,
         context: str,
-        redact_room_level_event: bool,
     ) -> None:
         """Room-level redactions should never stale-mark thread state."""
         cache_ops, logger, event_cache = _thread_mutation_cache_ops()
@@ -261,22 +281,13 @@ class TestThreadMutationHelpers:
             redacted_event_id="$target:localhost",
             impact=MutationThreadImpact.room_level(),
             context=context,
-            redact_room_level_event=redact_room_level_event,
         )
 
         assert result is False
         event_cache.mark_room_threads_stale.assert_not_awaited()
         event_cache.mark_thread_stale.assert_not_awaited()
-        if redact_room_level_event:
-            event_cache.redact_event.assert_awaited_once_with("!room:localhost", "$target:localhost")
-            logger.debug.assert_not_called()
-        else:
-            event_cache.redact_event.assert_not_awaited()
-            logger.debug.assert_called_once_with(
-                "Skipping outbound thread cache bookkeeping for non-threaded redaction",
-                room_id="!room:localhost",
-                redacted_event_id="$target:localhost",
-            )
+        event_cache.redact_event.assert_awaited_once_with("!room:localhost", "$target:localhost")
+        logger.debug.assert_not_called()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("context", ["outbound", "live", "sync"])
@@ -581,6 +592,185 @@ class TestMatrixConversationCacheThreadReads:
         event_cache.append_event.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_notify_outbound_room_message_persists_point_lookup(self) -> None:
+        """Known room-level sends should be readable before their sync echo arrives."""
+        event_cache = _runtime_event_cache()
+        client = _make_client_mock(user_id="@agent:localhost")
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(client=client, event_cache=event_cache),
+        )
+
+        access.notify_outbound_message(
+            "!room:localhost",
+            "$message:localhost",
+            {"body": "sent locally", "msgtype": "m.text"},
+        )
+        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
+
+        event_cache.store_events_batch.assert_awaited_once()
+        [(event_id, room_id, event_source)] = event_cache.store_events_batch.await_args.args[0]
+        assert event_id == "$message:localhost"
+        assert room_id == "!room:localhost"
+        assert event_source["type"] == "m.room.message"
+        assert event_source["content"]["body"] == "sent locally"
+        event_cache.mark_thread_stale.assert_not_awaited()
+        event_cache.mark_room_threads_stale.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_outbound_send_redaction_and_sync_echo_preserve_read_your_redaction(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """Coordinator ordering and tombstones must keep a late sync echo from restoring a local redaction."""
+        room_id = "!room:localhost"
+        event_id = "$message:localhost"
+        client = _make_client_mock(user_id="@agent:localhost")
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(client=client, event_cache=event_cache),
+        )
+        sync_echo = nio.RoomMessageText.from_dict(
+            {
+                "content": {"body": "sent locally", "msgtype": "m.text"},
+                "event_id": event_id,
+                "sender": "@agent:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+        response = MagicMock()
+        response.__class__ = nio.SyncResponse
+        response.rooms = MagicMock(
+            join={room_id: MagicMock(timeline=MagicMock(events=[sync_echo], limited=False))},
+        )
+
+        async with access.turn_scope():
+            access.notify_outbound_message(
+                room_id,
+                event_id,
+                {"body": "sent locally", "msgtype": "m.text"},
+            )
+            outbound_read = await access.get_event(room_id, event_id)
+            assert isinstance(outbound_read, nio.RoomGetEventResponse)
+            assert outbound_read.event.source["content"]["body"] == "sent locally"
+
+            access.notify_outbound_redaction(room_id, event_id)
+            client.room_get_event.side_effect = None
+            client.room_get_event.return_value = nio.RoomGetEventError(
+                "redacted",
+                status_code="M_NOT_FOUND",
+            )
+            redacted_read = await access.get_event(room_id, event_id)
+            assert isinstance(redacted_read, nio.RoomGetEventError)
+            assert await event_cache.get_event(room_id, event_id) is None
+
+        await asyncio.gather(*access.cache_sync_timeline(response))
+        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
+
+        assert await event_cache.get_event(room_id, event_id) is None
+
+    @pytest.mark.asyncio
+    async def test_outbound_room_edit_refreshes_memoized_original_immediately(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A same-turn read after an outbound edit must see the edited original."""
+        room_id = "!room:localhost"
+        original_event_id = "$original:localhost"
+        client = _make_client_mock(user_id="@agent:localhost")
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(client=client, event_cache=event_cache),
+        )
+        await event_cache.store_event(
+            original_event_id,
+            room_id,
+            {
+                "event_id": original_event_id,
+                "sender": "@agent:localhost",
+                "origin_server_ts": 1000,
+                "room_id": room_id,
+                "type": "m.room.message",
+                "content": {"body": "original", "msgtype": "m.text"},
+            },
+        )
+
+        async with access.turn_scope():
+            original_read = await access.get_event(room_id, original_event_id)
+            assert isinstance(original_read, nio.RoomGetEventResponse)
+            assert original_read.event.source["content"]["body"] == "original"
+
+            access.notify_outbound_message(
+                room_id,
+                "$edit:localhost",
+                {
+                    "body": "* edited",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": "edited", "msgtype": "m.text"},
+                    "m.relates_to": {
+                        "rel_type": "m.replace",
+                        "event_id": original_event_id,
+                    },
+                },
+            )
+            edited_read = await access.get_event(room_id, original_event_id)
+
+        assert isinstance(edited_read, nio.RoomGetEventResponse)
+        assert edited_read.event.source["content"]["body"] == "edited"
+        client.room_get_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_outbound_send_sync_echo_replaces_synthetic_payload_without_duplication(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A canonical clear sync echo should improve the locally synthesized point-cache row."""
+        room_id = "!room:localhost"
+        event_id = "$message:localhost"
+        client = _make_client_mock(user_id="@agent:localhost")
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(client=client, event_cache=event_cache),
+        )
+        sync_echo = nio.RoomMessageText.from_dict(
+            {
+                "content": {"body": "canonical echo", "msgtype": "m.text"},
+                "event_id": event_id,
+                "sender": "@agent:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+        response = MagicMock()
+        response.__class__ = nio.SyncResponse
+        response.rooms = MagicMock(
+            join={room_id: MagicMock(timeline=MagicMock(events=[sync_echo], limited=False))},
+        )
+
+        access.notify_outbound_message(
+            room_id,
+            event_id,
+            {"body": "synthetic local row", "msgtype": "m.text"},
+        )
+        await asyncio.gather(*access.cache_sync_timeline(response))
+        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
+        cached_event = await event_cache.get_event(room_id, event_id)
+        recent_events = await event_cache.get_recent_room_events(
+            room_id,
+            event_type="m.room.message",
+            since_ts_ms=0,
+            limit=10,
+        )
+
+        assert cached_event is not None
+        assert cached_event["content"]["body"] == "canonical echo"
+        assert cached_event["origin_server_ts"] == 1234567890
+        assert [event["event_id"] for event in recent_events].count(event_id) == 1
+
+    @pytest.mark.asyncio
     async def test_notify_outbound_reaction_normalizes_event_for_real_cache(
         self,
         tmp_path: Path,
@@ -803,7 +993,7 @@ class TestMatrixConversationCacheThreadReads:
 
         event_cache.mark_thread_stale.assert_not_awaited()
         event_cache.mark_room_threads_stale.assert_not_awaited()
-        event_cache.redact_event.assert_not_awaited()
+        event_cache.redact_event.assert_awaited_once_with("!room:localhost", "$reaction:localhost")
 
     @pytest.mark.asyncio
     async def test_turn_cache_hit_with_later_persist_request_still_persists_lookup_fill(self) -> None:
@@ -979,6 +1169,365 @@ class TestMatrixConversationCacheThreadReads:
         assert [cached["event_id"] for cached in room_threaded_events["!test:localhost"]] == ["$reference:localhost"]
         assert room_plain_events == {}
         assert room_redactions == {}
+
+    def test_collect_sync_timeline_cache_updates_keeps_relationless_opaque_event(self) -> None:
+        """Opaque payloads may hide relations and must reach fail-closed sync handling."""
+        room_threaded_events: dict[str, list[dict[str, object]]] = {}
+        room_plain_events: dict[str, list[dict[str, object]]] = {}
+        room_redactions: dict[str, list[str]] = {}
+
+        _collect_sync_timeline_cache_updates(
+            "!test:localhost",
+            _opaque_encrypted_event(),
+            room_threaded_events=room_threaded_events,
+            room_plain_events=room_plain_events,
+            room_redactions=room_redactions,
+        )
+
+        assert [cached["event_id"] for cached in room_threaded_events["!test:localhost"]] == [
+            "$opaque:localhost",
+        ]
+        assert room_plain_events == {}
+        assert room_redactions == {}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("relation_case", "expected_scope"),
+        [
+            ("thread_child", "thread"),
+            ("edit", "thread"),
+            ("reply", "thread"),
+            ("reference", "thread"),
+            ("redaction", "room"),
+            ("custom_relation", "room"),
+            ("hidden_relation", "room"),
+        ],
+    )
+    async def test_opaque_encrypted_sync_mutations_leave_snapshots_stale(
+        self,
+        relation_case: str,
+        expected_scope: str,
+    ) -> None:
+        """Opaque children and relation-bearing events must never revalidate reconstructed history."""
+        target_id = "$target:localhost"
+        thread_id = "$thread:localhost"
+        if relation_case == "thread_child":
+            event = _opaque_encrypted_event(
+                content_updates={"m.relates_to": {"rel_type": "m.thread", "event_id": thread_id}},
+            )
+        elif relation_case == "edit":
+            event = _opaque_encrypted_event(
+                content_updates={
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": target_id},
+                    "m.new_content": {
+                        "body": "decrypted only elsewhere",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+                    },
+                },
+            )
+        elif relation_case == "reply":
+            event = _opaque_encrypted_event(
+                content_updates={"m.relates_to": {"m.in_reply_to": {"event_id": target_id}}},
+            )
+        elif relation_case == "reference":
+            event = _opaque_encrypted_event(
+                content_updates={"m.relates_to": {"rel_type": "m.reference", "event_id": target_id}},
+            )
+        elif relation_case == "redaction":
+            event = _opaque_encrypted_event(redacts=target_id)
+        elif relation_case == "custom_relation":
+            event = _opaque_encrypted_event(
+                content_updates={"m.relates_to": {"rel_type": "com.example.custom", "event_id": target_id}},
+            )
+        else:
+            event = _opaque_encrypted_event()
+
+        event_cache = _runtime_event_cache()
+        event_cache.get_thread_id_for_event = AsyncMock(
+            side_effect=lambda room_id, event_id: (
+                thread_id if (room_id, event_id) == ("!test:localhost", target_id) else None
+            ),
+        )
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(
+                client=_make_client_mock(),
+                event_cache=event_cache,
+            ),
+        )
+        response = MagicMock()
+        response.__class__ = nio.SyncResponse
+        response.rooms = MagicMock(
+            join={"!test:localhost": MagicMock(timeline=MagicMock(events=[event], limited=False))},
+        )
+
+        result = await access.cache_sync_timeline_for_certification(response)
+
+        assert result.complete is True
+        event_cache.store_events_batch.assert_awaited_once()
+        event_cache.append_event.assert_not_awaited()
+        event_cache.revalidate_thread_after_incremental_update.assert_not_awaited()
+        if expected_scope == "thread":
+            event_cache.mark_thread_stale.assert_awaited_once_with(
+                "!test:localhost",
+                thread_id,
+                reason="sync_opaque_encrypted_event",
+            )
+            event_cache.mark_room_threads_stale.assert_not_awaited()
+        else:
+            event_cache.mark_room_threads_stale.assert_awaited_once_with(
+                "!test:localhost",
+                reason="sync_opaque_encrypted_event",
+            )
+            event_cache.mark_thread_stale.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cyclic_sync_relation_fails_closed_with_room_invalidation(self) -> None:
+        """A malformed relation cycle must reach UNKNOWN-impact sync handling."""
+        room_id = "!test:localhost"
+        cycle_sources = {
+            "$cycle-a:localhost": {
+                "event_id": "$cycle-a:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1000,
+                "type": "m.room.message",
+                "content": {
+                    "body": "a",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$cycle-b:localhost"}},
+                },
+            },
+            "$cycle-b:localhost": {
+                "event_id": "$cycle-b:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 2000,
+                "type": "m.room.message",
+                "content": {
+                    "body": "b",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$cycle-a:localhost"}},
+                },
+            },
+        }
+        event_cache = _runtime_event_cache()
+        event_cache.get_event = AsyncMock(
+            side_effect=lambda _room_id, event_id: cycle_sources.get(event_id),
+        )
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(
+                client=_make_client_mock(),
+                event_cache=event_cache,
+            ),
+        )
+        incoming_reply = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "new reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$cycle-a:localhost"}},
+                },
+                "event_id": "$incoming:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 3000,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+        response = MagicMock()
+        response.__class__ = nio.SyncResponse
+        response.rooms = MagicMock(
+            join={room_id: MagicMock(timeline=MagicMock(events=[incoming_reply], limited=False))},
+        )
+
+        result = await access.cache_sync_timeline_for_certification(response)
+
+        assert result.complete is True
+        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            room_id,
+            reason="sync_thread_lookup_unavailable",
+        )
+        event_cache.mark_thread_stale.assert_not_awaited()
+        event_cache.append_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_limited_sync_marks_room_stale_before_partial_timeline_write(self) -> None:
+        """Direct sync writes must infer limited rooms and invalidate before persisting partial events."""
+        operations: list[str] = []
+        event_cache = _runtime_event_cache()
+
+        async def mark_room_threads_stale(_room_id: str, *, reason: str) -> None:
+            assert reason == "limited_sync_timeline"
+            operations.append("invalidate")
+
+        async def store_events_batch(_events: object) -> None:
+            operations.append("store")
+
+        event_cache.mark_room_threads_stale = AsyncMock(side_effect=mark_room_threads_stale)
+        event_cache.store_events_batch = AsyncMock(side_effect=store_events_batch)
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(event_cache=event_cache),
+        )
+        partial_event = nio.RoomMessageText.from_dict(
+            {
+                "content": {"body": "partial", "msgtype": "m.text"},
+                "event_id": "$partial:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+        response = MagicMock()
+        response.__class__ = nio.SyncResponse
+        response.rooms = MagicMock(
+            join={
+                "!test:localhost": MagicMock(
+                    timeline=MagicMock(events=[partial_event], limited=True),
+                ),
+            },
+        )
+
+        await asyncio.gather(*access.cache_sync_timeline(response))
+
+        assert operations == ["invalidate", "store"]
+
+    @pytest.mark.asyncio
+    async def test_limited_sync_cannot_revalidate_partial_thread_snapshot(self, tmp_path: Path) -> None:
+        """A limited delta must leave a populated snapshot stale after its partial child is applied."""
+        room_id = "!test:localhost"
+        thread_id = "$thread:localhost"
+        event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+        await event_cache.initialize()
+        validated_at = time.time()
+        root_event = {
+            "event_id": thread_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"body": "root", "msgtype": "m.text"},
+        }
+        old_child = {
+            "event_id": "$old:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "body": "old",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+            },
+        }
+        partial_child = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "newest only",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+                },
+                "event_id": "$newest:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 3000,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(event_cache=event_cache),
+        )
+        response = MagicMock()
+        response.__class__ = nio.SyncResponse
+        response.rooms = MagicMock(
+            join={room_id: MagicMock(timeline=MagicMock(events=[partial_child], limited=True))},
+        )
+
+        try:
+            await _replace_thread(
+                event_cache,
+                room_id,
+                thread_id,
+                [root_event, old_child],
+                validated_at=validated_at,
+            )
+            result = await access.cache_sync_timeline_for_certification(response)
+            state = await event_cache.get_thread_cache_state(room_id, thread_id)
+        finally:
+            await event_cache.close()
+
+        assert result.complete is False
+        assert result.limited_room_ids == (room_id,)
+        assert state is not None
+        assert state.validated_at == validated_at
+        assert state.room_invalidation_reason == "limited_sync_timeline"
+        assert matrix_cache.thread_cache_rejection_reason(state) is not None
+
+    @pytest.mark.asyncio
+    async def test_opaque_encrypted_thread_child_never_revalidates_populated_snapshot(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Applying ciphertext to a populated snapshot must leave its prior validation stale."""
+        room_id = "!test:localhost"
+        thread_id = "$thread:localhost"
+        event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+        await event_cache.initialize()
+        validated_at = time.time()
+        root_event = {
+            "event_id": thread_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"body": "root", "msgtype": "m.text"},
+        }
+        decrypted_child = {
+            "event_id": "$decrypted:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "body": "known clear child",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+            },
+        }
+        opaque_child = _opaque_encrypted_event(
+            event_id="$opaque-child:localhost",
+            content_updates={"m.relates_to": {"rel_type": "m.thread", "event_id": thread_id}},
+        )
+        response = MagicMock()
+        response.__class__ = nio.SyncResponse
+        response.rooms = MagicMock(
+            join={room_id: MagicMock(timeline=MagicMock(events=[opaque_child], limited=False))},
+        )
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(event_cache=event_cache),
+        )
+
+        try:
+            await _replace_thread(
+                event_cache,
+                room_id,
+                thread_id,
+                [root_event, decrypted_child],
+                validated_at=validated_at,
+            )
+            result = await access.cache_sync_timeline_for_certification(response)
+            state = await event_cache.get_thread_cache_state(room_id, thread_id)
+            thread_events = await event_cache.get_thread_events(room_id, thread_id)
+        finally:
+            await event_cache.close()
+
+        assert result.complete is True
+        assert state is not None
+        assert state.validated_at == validated_at
+        assert state.invalidation_reason == "sync_opaque_encrypted_event"
+        assert matrix_cache.thread_cache_rejection_reason(state) == "thread_invalidated_after_validation"
+        assert thread_events is not None
+        assert [event["event_id"] for event in thread_events] == [thread_id, "$decrypted:localhost"]
 
     @pytest.mark.asyncio
     async def test_get_latest_thread_event_id_fails_open_without_write_coordinator(self) -> None:

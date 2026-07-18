@@ -3522,6 +3522,7 @@ expose = [
     "EventCacheWriteCoordinator",
     "ThreadCacheState",
     "ThreadHistoryResult",
+    "is_opaque_encrypted_event_source",
     "normalize_nio_event_for_cache",
     "thread_cache_rejection_reason",
     "thread_cache_state_is_usable",

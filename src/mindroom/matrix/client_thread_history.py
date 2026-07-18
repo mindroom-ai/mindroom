@@ -7,9 +7,9 @@ Cache-trust rules (each encodes a shipped regression fix; do not weaken them):
    ``room_invalidated_at`` is at or after ``validated_at`` (see
    ``mindroom.matrix.cache.thread_cache_helpers`` for the age and restart rules).
 
-2. Cached rows that do not include the thread-root event are never served: both the trusted-read path
-   and the stale-fallback path refuse such rows and invalidate the entry, and a fresh homeserver fetch
-   missing the root is never stored (PR #741).
+2. Cached rows that do not include the thread-root event or still contain opaque ``m.room.encrypted``
+   payloads are never served: both the trusted-read path and the stale-fallback path refuse such rows
+   and invalidate the entry, and an incomplete fresh homeserver fetch is never stored (PR #741).
 
 3. Cache repopulation is guarded against write races: every store passes the fetch start time to
    ``replace_thread_if_not_newer``, so a fetch that raced with a thread or room invalidation cannot bury
@@ -47,6 +47,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
     ThreadCacheState,
     ThreadHistoryResult,
+    is_opaque_encrypted_event_source,
     normalize_nio_event_for_cache,
     thread_cache_rejection_reason,
     thread_history_result,
@@ -85,6 +86,7 @@ _VISIBLE_ROOM_MESSAGE_EVENT_TYPES = (nio.RoomMessageText, nio.RoomMessageNotice)
 _ROOM_HISTORY_MESSAGE_TYPES = ("m.room.message", "m.room.encrypted")
 _MAX_ENUMERATED_THREAD_ROOTS = 2000
 _MAX_THREAD_ENUMERATION_PAGES = 100
+_OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON = "thread_history_opaque_encrypted_event"
 type _ThreadHistoryDiagnosticValue = str | int | float | bool | None
 
 
@@ -165,6 +167,10 @@ class RoomThreadsPageError(ValueError):
         self.response = response
         self.errcode = errcode
         self.retry_after_ms = retry_after_ms
+
+
+class _OpaqueEncryptedThreadHistoryError(RuntimeError):
+    """Raised when a Matrix history scan cannot decrypt every event affecting the thread."""
 
 
 def _room_threads_page_error_from_response(response: object) -> RoomThreadsPageError:
@@ -394,12 +400,17 @@ async def _load_stale_cached_thread_history(
         return None
     if cached_event_sources is None:
         return None
-    if not _thread_history_fetch_is_cacheable(cached_event_sources, thread_id=thread_id):
+    cache_rejection_reason = _thread_history_fetch_cache_rejection_reason(
+        cached_event_sources,
+        thread_id=thread_id,
+    )
+    if cache_rejection_reason is not None:
         logger.warning(
-            "Stale thread cache missing root; refusing degraded history",
+            "Stale thread cache contains incomplete event payloads; refusing degraded history",
             room_id=room_id,
             thread_id=thread_id,
             error=str(fetch_error),
+            cache_rejection_reason=cache_rejection_reason,
         )
         await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
         return None
@@ -528,10 +539,14 @@ async def _load_cached_thread_history_if_usable(
             THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "cache_rows_missing",
         }
         return None, cache_reject_diagnostics
-    if not _thread_history_fetch_is_cacheable(cached_event_sources, thread_id=thread_id):
+    cached_payload_rejection_reason = _thread_history_fetch_cache_rejection_reason(
+        cached_event_sources,
+        thread_id=thread_id,
+    )
+    if cached_payload_rejection_reason is not None:
         await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
         cache_reject_diagnostics: dict[str, str | int | float | bool] = {
-            THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "cache_missing_thread_root",
+            THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: f"cache_{cached_payload_rejection_reason}",
         }
         logger.info(
             "Thread cache rejected for read",
@@ -585,6 +600,28 @@ async def _invalidate_thread_cache_entry(
         )
 
 
+async def _mark_thread_cache_stale_for_opaque_history(
+    event_cache: ConversationEventCache,
+    *,
+    room_id: str,
+    thread_id: str,
+) -> None:
+    """Mark one opaque history fetch stale, deleting the snapshot only when the marker fails."""
+    try:
+        await event_cache.mark_thread_stale(
+            room_id,
+            thread_id,
+            reason=_OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON,
+        )
+    except Exception:
+        logger.warning(
+            "Failed to mark opaque thread history stale; deleting cached snapshot",
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
+
+
 async def _fetch_thread_history_with_events(
     client: nio.AsyncClient,
     room_id: str,
@@ -630,6 +667,13 @@ async def refresh_thread_history_from_source(
             event_cache=event_cache,
             trusted_sender_ids=trusted_sender_ids,
         )
+    except _OpaqueEncryptedThreadHistoryError:
+        await _mark_thread_cache_stale_for_opaque_history(
+            event_cache,
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        raise
     except Exception as exc:
         if allow_stale_fallback:
             stale_history = await _load_stale_cached_thread_history(
@@ -653,7 +697,19 @@ async def refresh_thread_history_from_source(
                 )
                 return stale_history
         raise
-    if _thread_history_fetch_is_cacheable(fetch_result.event_sources, thread_id=thread_id):
+    fetch_cache_rejection_reason = _thread_history_fetch_cache_rejection_reason(
+        fetch_result.event_sources,
+        thread_id=thread_id,
+    )
+    if fetch_cache_rejection_reason == "opaque_encrypted_event":
+        await _mark_thread_cache_stale_for_opaque_history(
+            event_cache,
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        msg = f"thread history for {thread_id} contains undecrypted Matrix events"
+        raise _OpaqueEncryptedThreadHistoryError(msg)
+    if fetch_cache_rejection_reason is None:
         cache_store_written = await _store_thread_history_cache(
             event_cache,
             room_id=room_id,
@@ -677,8 +733,8 @@ async def refresh_thread_history_from_source(
             "Thread history cache store skipped",
             room_id=room_id,
             thread_id=thread_id,
-            cache_store_skipped_reason="missing_thread_root",
-            has_thread_root=False,
+            cache_store_skipped_reason=fetch_cache_rejection_reason,
+            has_thread_root=fetch_cache_rejection_reason != "missing_thread_root",
             event_count=len(fetch_result.event_sources),
             history_event_count=len(fetch_result.history),
             homeserver_scan_pages=fetch_result.room_scan_pages,
@@ -743,13 +799,17 @@ async def _store_thread_history_cache(
         return False
 
 
-def _thread_history_fetch_is_cacheable(
+def _thread_history_fetch_cache_rejection_reason(
     event_sources: Sequence[dict[str, Any]],
     *,
     thread_id: str,
-) -> bool:
-    """Return whether one homeserver fetch contains the root event and is safe to cache."""
-    return any(_event_id_from_source(event_source) == thread_id for event_source in event_sources)
+) -> str | None:
+    """Return why one thread payload cannot certify reconstructed history."""
+    if any(is_opaque_encrypted_event_source(event_source) for event_source in event_sources):
+        return "opaque_encrypted_event"
+    if not any(_event_id_from_source(event_source) == thread_id for event_source in event_sources):
+        return "missing_thread_root"
+    return None
 
 
 async def _resolve_thread_history_message(
@@ -1004,10 +1064,14 @@ def _record_scanned_room_message_source(
     scanned_message_sources: dict[str, dict[str, Any]],
 ) -> str | None:
     """Record one scanned room-message source and return the recorded event ID."""
+    event_source = event.source if isinstance(event.source, dict) else {}
+    if is_opaque_encrypted_event_source(event_source):
+        scanned_message_sources[event.event_id] = _event_source_for_cache(event)
+        return event.event_id
     if not _is_room_message_event(event):
         return None
 
-    event_info = EventInfo.from_event(event.source)
+    event_info = EventInfo.from_event(event_source)
     if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and record_latest_thread_edit(
         event,
         event_info=event_info,
@@ -1029,6 +1093,12 @@ async def fetch_thread_event_sources_via_room_messages(
     """Fetch one thread's event sources by scanning room history pages."""
     scan_result = await _bulk_scan_thread_event_sources(client, room_id, thread_root_ids=(thread_id,))
     if thread_id in scan_result.missing_root_ids:
+        if any(
+            is_opaque_encrypted_event_source(event_source)
+            for event_source in scan_result.thread_event_sources.get(thread_id, ())
+        ):
+            msg = f"thread history for {thread_id} contains undecrypted Matrix events"
+            raise _OpaqueEncryptedThreadHistoryError(msg)
         msg = f"thread root {thread_id} not found during room scan"
         logger.warning(
             "Thread room scan ended without finding root",
@@ -1168,6 +1238,23 @@ async def _bulk_scan_thread_event_sources(
         scanned_message_sources=scanned_message_sources,
         latest_edits_by_original_event_id=latest_edits_by_original_event_id,
     )
+    opaque_event_sources = [
+        event_source
+        for event_source in scanned_message_sources.values()
+        if is_opaque_encrypted_event_source(event_source)
+    ]
+    if opaque_event_sources:
+        for thread_id in thread_root_ids:
+            event_sources = thread_event_sources.get(thread_id, [])
+            event_sources_by_id = {
+                event_id: event_source
+                for event_source in [*event_sources, *opaque_event_sources]
+                if isinstance((event_id := _event_id_from_source(event_source)), str)
+            }
+            thread_event_sources[thread_id] = sort_thread_event_sources_root_first(
+                list(event_sources_by_id.values()),
+                thread_id=thread_id,
+            )
     return _BulkThreadScanResult(
         thread_event_sources=thread_event_sources,
         missing_root_ids=frozenset(remaining_root_ids),
@@ -1197,7 +1284,18 @@ async def bulk_refresh_room_thread_histories(
     scan_result = await _bulk_scan_thread_event_sources(client, room_id, thread_root_ids=thread_root_ids)
     stored_threads = 0
     for thread_id, event_sources in scan_result.thread_event_sources.items():
-        if not _thread_history_fetch_is_cacheable(event_sources, thread_id=thread_id):
+        cache_rejection_reason = _thread_history_fetch_cache_rejection_reason(
+            event_sources,
+            thread_id=thread_id,
+        )
+        if cache_rejection_reason == "opaque_encrypted_event":
+            await _mark_thread_cache_stale_for_opaque_history(
+                event_cache,
+                room_id=room_id,
+                thread_id=thread_id,
+            )
+            continue
+        if cache_rejection_reason is not None:
             continue
         if await _store_thread_history_cache(
             event_cache,
