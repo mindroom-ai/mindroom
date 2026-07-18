@@ -723,7 +723,6 @@ class SqliteEventCache:
         refresh_was_enabled = self._metrics_refresh_enabled
         self._metrics_refresh_enabled = False
         task = self._metrics_refresh_task
-        self._metrics_refresh_task = None
         try:
             if task is None:
                 return
