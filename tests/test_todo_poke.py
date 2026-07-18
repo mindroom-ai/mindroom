@@ -488,6 +488,30 @@ async def test_fingerprint_includes_hidden_items_and_cooldown_precedes_repoke(tm
 
 
 @pytest.mark.asyncio
+async def test_future_dedup_timestamp_cannot_indefinitely_suppress_changed_work(tmp_path: Path) -> None:
+    """A clock-skewed future dedup timestamp must fail open after the cooldown window."""
+    todo_root = tmp_path / "todo"
+    source_path = _write_thread(todo_root, "scope")
+    deps, queried_rooms, sent = _deps(todo_root)
+    policy = TodoPokePolicy(quiet_seconds=0, cooldown_seconds=300)
+
+    assert await scan_todo_pokes(policy, deps) == 1
+    poke_state_path = todo_root / "poke_state.json"
+    poke_state = json.loads(poke_state_path.read_text(encoding="utf-8"))
+    record = next(iter(poke_state["scopes"].values()))
+    record["last_poked_at"] = (_NOW + timedelta(days=365)).timestamp()
+    poke_state_path.write_text(json.dumps(poke_state), encoding="utf-8")
+
+    thread_state = json.loads(source_path.read_text(encoding="utf-8"))
+    thread_state["items"][0]["title"] = "Changed work"
+    source_path.write_text(json.dumps(thread_state), encoding="utf-8")
+
+    assert await scan_todo_pokes(policy, deps) == 1
+    assert queried_rooms == ["!room:localhost", "!room:localhost"]
+    assert len(sent) == 2
+
+
+@pytest.mark.asyncio
 async def test_unchanged_fingerprint_retries_are_bounded_and_reset_after_change(tmp_path: Path) -> None:
     """Unchanged work gets three backstop retries, while changed work resets the counter."""
     todo_root = tmp_path / "todo"
@@ -707,6 +731,35 @@ async def test_consecutive_send_failures_are_bounded_and_reset(tmp_path: Path) -
     record = next(iter(poke_state["scopes"].values()))
     assert record["send_failure_count"] == 0
     assert len(sent) == 6
+
+
+@pytest.mark.asyncio
+async def test_capped_send_failures_retry_after_backstop_window(tmp_path: Path) -> None:
+    """A temporary outage cannot permanently mute unchanged actionable work."""
+    todo_root = tmp_path / "todo"
+    current_time = [_NOW]
+    deps, _queried_rooms, sent = _deps(
+        todo_root,
+        clock=lambda: current_time[0],
+        send_results=[None, None, None, None, "$event-recovered"],
+    )
+    _write_thread(todo_root, "scope")
+    policy = TodoPokePolicy(quiet_seconds=0)
+
+    for _attempt in range(4):
+        assert await scan_todo_pokes(policy, deps) == 0
+
+    current_time[0] = _NOW + timedelta(seconds=3599)
+    assert await scan_todo_pokes(policy, deps) == 0
+    assert len(sent) == 4
+
+    current_time[0] = _NOW + timedelta(hours=1)
+    assert await scan_todo_pokes(policy, deps) == 1
+    poke_state = json.loads((todo_root / "poke_state.json").read_text(encoding="utf-8"))
+    record = next(iter(poke_state["scopes"].values()))
+    assert record["send_failure_count"] == 0
+    assert record["last_send_failed_at"] == 0
+    assert len(sent) == 5
 
 
 @pytest.mark.asyncio

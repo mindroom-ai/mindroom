@@ -94,7 +94,8 @@ The scanner waits for the quiet period measured from the actionable item's last 
 Future item timestamps beyond one quiet window are treated as already quiet so clock skew cannot disable a scope indefinitely.
 A pending schedule for the same room and existing thread suppresses the poke, while schedules that create a new thread do not suppress room-main work.
 Work fingerprints are persisted under `mindroom_data/todo/poke_state.json`, so changed work observes a cooldown and unchanged work receives at most three one-hour anti-stall retries.
-Failed sends are persisted and receive at most three retries for the same fingerprint before a successful send or changed work resets the failure counter.
+Failed sends are persisted and receive at most three immediate retries for the same fingerprint, then one retry per one-hour backstop window until a successful send or changed work resets the failure counter.
+Future persisted timestamps beyond the relevant cooldown or backstop window are treated as elapsed so clock skew cannot mute valid work indefinitely.
 Each scan sends at most one poke to a given agent even when that agent has actionable work in multiple scopes.
 Todo titles are rendered as literal text, and only the assigned agent is mentioned for dispatch.
 

@@ -136,6 +136,23 @@ async def test_todo_poke_schedule_adapter_preserves_read_errors(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_todo_poke_worker_wires_real_orchestrator_callbacks(tmp_path: Path) -> None:
+    """The composition seam must install the production idle, schedule, and sender adapters."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path))
+    orchestrator.config = _config(tmp_path)
+
+    await orchestrator._sync_todo_poke_worker()
+    worker = orchestrator._todo_poke_worker
+    assert worker is not None
+    try:
+        assert worker.deps.idle_check == orchestrator._todo_poke_agent_is_idle
+        assert worker.deps.schedule_query == orchestrator._todo_poke_schedule_query
+        assert worker.deps.sender == orchestrator._send_todo_poke
+    finally:
+        await orchestrator._stop_todo_poke_worker()
+
+
+@pytest.mark.asyncio
 async def test_todo_poke_worker_lifecycle_survives_reload_and_stops(tmp_path: Path) -> None:
     """Runtime support starts one worker, reuses it on reload, and stops it promptly."""
     config = _config(tmp_path)

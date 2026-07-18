@@ -36,9 +36,11 @@ The implementation uses an orchestrator-owned sleep-first worker and does not de
 - Durable scope keys hash the canonical `(assigned_agent, room_id, normalized_thread_id)` tuple.
 - Fingerprints include every actionable item, including items beyond the five shown in the message, plus thread total and terminal counts.
 - An unchanged fingerprint receives at most three one-hour anti-stall retries, while a changed fingerprint waits for the normal cooldown and resets that retry count.
+- Quiet, cooldown, unchanged-retry, and failed-send backstop gates share one future-skew-safe elapsed-period rule, so persisted future timestamps cannot mute a scope indefinitely.
 - Poke messages contain exactly one intentional assignee mention, while todo titles are rendered as literal code text with mention tokens neutralized.
 - Persisted assignees must match the same alphanumeric-and-underscore identifier shape as configured entities before they can reach idle checks or mention formatting.
-- The per-scan cap counts send attempts, including failures, and failed sends persist a consecutive counter that permits the initial attempt plus three retries for one unchanged fingerprint.
+- The per-scan cap counts send attempts, including failures, and failed sends persist a consecutive counter that permits the initial attempt plus three immediate retries for one unchanged fingerprint.
+- A capped failed-send scope becomes eligible once per one-hour backstop window until delivery succeeds or its fingerprint changes.
 - A successful delivery suppresses further scopes for the same agent during that scan, so one tick cannot enqueue multiple new turns for one idle agent.
 - Successful deliveries enter worker memory before durable persistence, so a per-scope write failure neither repeats immediately nor prevents later scopes, and later ticks retry the write.
 - The worker remembers failed scope keys in memory and orders them behind fresh scopes on later scans, preventing deterministic failures from starving healthy work.
@@ -90,6 +92,18 @@ Reviewer A's idle-lifecycle proposal also remains dropped because the in-flight-
 Reviewer B's scan-state plumbing suggestion is a style preference without a correctness benefit at this boundary.
 The plan and report remain intentional branch artifacts for safe squash-merge removal.
 
+## Round-6 review disposition
+
+The branch was rebased onto `7098e66da` and the orchestrator conflict retained both main's runtime API-server address cleanup and the todo pending-schedule query import.
+Capped send failures now persist their latest failure time and regain eligibility after the existing one-hour backstop, while success and fingerprint changes retain their counter-reset behavior.
+The same future-skew-safe elapsed-period helper now owns quiet, cooldown, unchanged-retry, and failed-send recovery gates.
+A focused composition test pins the real orchestrator idle-check, schedule-query, and sender callbacks installed in `TodoPokeDeps`.
+
+The repeated requester-identity, room-membership, fail-open schedule-read, idle-lifecycle, and shutdown-wait proposals remain dropped under the standing round-one through round-four decisions.
+Duplicate todo-ID semantics predate and are untouched by this feature, so changing the todo tool's state contract remains outside ISSUE-245.
+Reviewer B's remaining round-six findings are nits or style preferences without correctness impact.
+`safe-squash-merge.sh` strips `PLAN.md` and this report at merge time, so the artifact finding does not apply to this repository's merge workflow.
+
 ## Assigned-agent defaults
 
 The `plan` and `apply_template` default-assignee behavior was already present on main from `7be4d90af`.
@@ -100,7 +114,7 @@ Regression coverage now locks plan defaults, template defaults, and explicit tem
 
 ## Validation
 
-- `env -u MINDROOM_OWNER_USER_ID -u MINDROOM_DOCKER_WORKER_IMAGE -u MINDROOM_CONFIG_PATH -u MINDROOM_STORAGE_PATH uv run pytest -n auto --no-cov`: 10,749 passed and 120 skipped.
+- `env -u MINDROOM_OWNER_USER_ID -u MINDROOM_DOCKER_WORKER_IMAGE -u MINDROOM_CONFIG_PATH -u MINDROOM_STORAGE_PATH uv run pytest -n auto --no-cov`: 10,786 passed and 120 skipped.
 - `uv run pre-commit run --all-files`: passed.
 - `uv run tach check --dependencies --interfaces`: passed.
 - Focused round-2 todo-poke, orchestrator, and scheduling suites: 92 passed.
@@ -109,6 +123,7 @@ Regression coverage now locks plan defaults, template defaults, and explicit tem
 - Focused round-4 todo-poke and scheduling suites: 103 passed.
 - Focused round-4 todo state, scanner, orchestrator, and scheduling suites: 132 passed.
 - Focused round-5 todo-poke scanner and orchestrator suites: 66 passed.
+- Focused round-6 todo-poke scanner and orchestrator suites: 69 passed.
 - Changed-file `ty` validation: passed without rule overrides.
 
 The first all-files hook pass regenerated three tracked docs-skill reference outputs, and the required second pass was clean.
