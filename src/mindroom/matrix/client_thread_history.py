@@ -45,6 +45,7 @@ from nio.responses import RoomThreadsResponse
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
+    EventCacheBackendUnavailableError,
     ThreadCacheState,
     ThreadHistoryResult,
     is_opaque_encrypted_event_source,
@@ -52,7 +53,6 @@ from mindroom.matrix.cache import (
     thread_cache_rejection_reason,
     thread_history_result,
 )
-from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     apply_latest_edits_to_messages,

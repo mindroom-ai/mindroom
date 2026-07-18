@@ -26,7 +26,7 @@ Main invariants:
 """
 
 from .agent_message_snapshot import AgentMessageSnapshot
-from .event_cache import ConversationEventCache, ThreadCacheState
+from .event_cache import ConversationEventCache, EventCacheBackendUnavailableError, ThreadCacheState
 from .event_normalization import is_opaque_encrypted_event_source, normalize_nio_event_for_cache
 from .thread_cache_helpers import thread_cache_rejection_reason
 from .thread_history_result import ThreadHistoryResult, thread_history_result
@@ -35,6 +35,7 @@ from .write_coordinator import EventCacheWriteCoordinator
 __all__ = [
     "AgentMessageSnapshot",
     "ConversationEventCache",
+    "EventCacheBackendUnavailableError",
     "EventCacheWriteCoordinator",
     "ThreadCacheState",
     "ThreadHistoryResult",
