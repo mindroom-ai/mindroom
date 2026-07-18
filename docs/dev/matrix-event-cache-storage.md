@@ -64,9 +64,13 @@ Unbound legacy token records also start cold because they cannot prove which dur
 
 PostgreSQL migration takes a transaction-scoped global advisory lock, changes the legacy payload column to nullable, creates cold storage, normalizes only the initializing namespace, repairs only that namespace, and commits the schema version and maintenance result together.
 
+Transactional PostgreSQL cutover triggers make a surviving version-1 runtime rehydrate a replayed cold event before removing its archive row and make its tombstone writes remove matching cold events and replacement children.
+
 Other PostgreSQL namespaces retain their legacy payload until their own runtime initializes under schema version 2, so one namespace never deletes another namespace's only pre-migration copy.
 
 Cancellation or failure rolls back SQLite and PostgreSQL DDL, payload normalization, repair, compaction, metadata, and stale markers as one unit.
+
+Cancellation of a background or forced metrics recount also rolls back its read transaction before the shared connection can serve another cache operation.
 
 Migration tests use real version-10 and version-1 shapes on disposable storage and never access a production database.
 

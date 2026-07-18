@@ -16,6 +16,7 @@ from mindroom.constants import (
 )
 from mindroom.matrix.cache import (
     ConversationEventCache,
+    cache_maintenance,
     postgres_event_cache,
     postgres_streaming_compaction,
     sqlite_event_cache,
@@ -534,6 +535,46 @@ async def test_runtime_metrics_refresh_failure_is_advisory(
     assert diagnostics["cache_metrics_dirty"] is True
     assert diagnostics["cache_metrics_refresh_failure_count"] == 1
     assert failure_reason not in str(diagnostics)
+
+
+@pytest.mark.asyncio
+async def test_forced_metrics_refresh_rolls_back_cancelled_transaction(
+    event_cache: ConversationEventCache,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelling an in-flight telemetry transaction cannot poison the shared connection."""
+    monkeypatch.setattr(cache_maintenance, "_RUNTIME_METRICS_REFRESH_INTERVAL_SECONDS", 0.0)
+    first_refresh_started = asyncio.Event()
+    never_resume_first_refresh = asyncio.Event()
+
+    if isinstance(event_cache, SqliteEventCache):
+        metrics_module = sqlite_event_cache
+    else:
+        assert isinstance(event_cache, PostgresEventCache)
+        metrics_module = postgres_event_cache
+    real_refresh = metrics_module.refresh_runtime_metrics
+    refresh_attempts = 0
+
+    async def block_first_refresh(*args: object, **kwargs: object) -> object:
+        nonlocal refresh_attempts
+        refresh_attempts += 1
+        if refresh_attempts == 1:
+            first_refresh_started.set()
+            await never_resume_first_refresh.wait()
+        return await real_refresh(*args, **kwargs)
+
+    monkeypatch.setattr(metrics_module, "refresh_runtime_metrics", block_first_refresh)
+    room_id = "!room:localhost"
+    first = _message_event("$first:localhost", 1)
+    await event_cache.store_event(str(first["event_id"]), room_id, first)
+    await asyncio.wait_for(first_refresh_started.wait(), timeout=5)
+
+    diagnostics = await asyncio.wait_for(event_cache.refresh_runtime_diagnostics(), timeout=5)
+    assert diagnostics["cache_metrics_snapshot"] == "runtime"
+    assert diagnostics["cache_metrics_refresh_failure_count"] == 0
+    second = _message_event("$second:localhost", 2)
+    await event_cache.store_event(str(second["event_id"]), room_id, second)
+    assert await event_cache.get_event(room_id, str(second["event_id"])) == second
 
 
 @pytest.mark.asyncio

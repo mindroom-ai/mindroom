@@ -597,6 +597,9 @@ class SqliteEventCache:
                     db_path=self.db_path,
                 )
                 await db.commit()
+            except asyncio.CancelledError:
+                await _rollback_sqlite_connection_best_effort(db, operation="refresh_runtime_diagnostics")
+                raise
             except Exception as exc:
                 await _rollback_sqlite_connection_best_effort(db, operation="refresh_runtime_diagnostics")
                 self._runtime._metrics.record_refresh_failure()
