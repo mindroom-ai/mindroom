@@ -26,7 +26,12 @@ import json
 import time
 from typing import TYPE_CHECKING, Any
 
-from .event_cache_events import event_id_for_cache, serialize_cacheable_events, serialize_cached_event
+from .event_cache_events import (
+    SerializedCachedEvent,
+    event_id_for_cache,
+    serialize_cacheable_events,
+    serialize_cached_event,
+)
 from .event_normalization import normalize_event_source_for_cache
 from .sqlite_event_cache_events import (
     delete_cached_events,
@@ -146,11 +151,11 @@ async def _store_thread_events_locked(
     *,
     room_id: str,
     thread_id: str,
-    events: list[dict[str, Any]],
+    serialized_events: list[SerializedCachedEvent],
     validated_at: float,
 ) -> None:
     """Persist one authoritative thread snapshot within an existing DB transaction."""
-    if not events:
+    if not serialized_events:
         await db.execute(
             """
             INSERT INTO thread_cache_state(
@@ -170,37 +175,35 @@ async def _store_thread_events_locked(
         )
         return
 
-    normalized_events = [normalize_event_source_for_cache(event) for event in events]
-    cacheable_events = await filter_cacheable_events(
-        db,
-        room_id,
-        [(event_id_for_cache(event), event) for event in normalized_events],
+    await db.executemany(
+        """
+        INSERT INTO thread_events(room_id, thread_id, event_id, origin_server_ts, event_json)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(room_id, event_id) DO UPDATE SET
+            thread_id = excluded.thread_id,
+            origin_server_ts = excluded.origin_server_ts,
+            event_json = excluded.event_json
+        WHERE json_extract(thread_events.event_json, '$.type') = 'm.room.encrypted'
+            OR json_extract(excluded.event_json, '$.type') <> 'm.room.encrypted'
+        """,
+        [
+            (
+                room_id,
+                thread_id,
+                event.event_id,
+                event.origin_server_ts,
+                event.event_json,
+            )
+            for event in serialized_events
+        ],
     )
-    serialized_events = serialize_cacheable_events(cacheable_events)
-    if serialized_events:
-        await db.executemany(
-            """
-            INSERT OR REPLACE INTO thread_events(room_id, thread_id, event_id, origin_server_ts, event_json)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    room_id,
-                    thread_id,
-                    event.event_id,
-                    event.origin_server_ts,
-                    event.event_json,
-                )
-                for event in serialized_events
-            ],
-        )
-        await write_lookup_index_rows(
-            db,
-            room_id=room_id,
-            serialized_events=serialized_events,
-            cached_at=validated_at,
-            thread_id=thread_id,
-        )
+    await write_lookup_index_rows(
+        db,
+        room_id=room_id,
+        serialized_events=serialized_events,
+        cached_at=validated_at,
+        thread_id=thread_id,
+    )
     await db.execute(
         """
         INSERT INTO thread_cache_state(
@@ -229,32 +232,41 @@ async def _replace_thread_locked(
     validated_at: float,
 ) -> None:
     """Replace one thread snapshot atomically within an existing DB transaction."""
-    existing_event_ids = await _thread_event_ids_for_thread(db, room_id=room_id, thread_id=thread_id)
-    await db.execute(
-        """
-        DELETE FROM thread_events
-        WHERE room_id = ? AND thread_id = ?
-        """,
-        (room_id, thread_id),
+    normalized_events = [normalize_event_source_for_cache(event) for event in events]
+    cacheable_events = await filter_cacheable_events(
+        db,
+        room_id,
+        [(event_id_for_cache(event), event) for event in normalized_events],
     )
-    if existing_event_ids:
-        await delete_cached_events(db, event_ids=existing_event_ids)
+    serialized_events = serialize_cacheable_events(cacheable_events)
+    replacement_event_ids = {event.event_id for event in serialized_events}
+    existing_event_ids = await _thread_event_ids_for_thread(db, room_id=room_id, thread_id=thread_id)
+    removed_event_ids = [event_id for event_id in existing_event_ids if event_id not in replacement_event_ids]
+    if removed_event_ids:
+        await db.executemany(
+            """
+            DELETE FROM thread_events
+            WHERE room_id = ? AND thread_id = ? AND event_id = ?
+            """,
+            [(room_id, thread_id, event_id) for event_id in removed_event_ids],
+        )
+        await delete_cached_events(db, event_ids=removed_event_ids)
         await delete_event_edit_rows(
             db,
             room_id,
-            event_ids=existing_event_ids,
+            event_ids=removed_event_ids,
             original_event_id=None,
         )
         await delete_event_thread_rows(
             db,
             room_id,
-            event_ids=existing_event_ids,
+            event_ids=removed_event_ids,
         )
     await _store_thread_events_locked(
         db,
         room_id=room_id,
         thread_id=thread_id,
-        events=events,
+        serialized_events=serialized_events,
         validated_at=validated_at,
     )
 
@@ -501,8 +513,14 @@ async def append_existing_thread_event(
 
     await db.execute(
         """
-        INSERT OR REPLACE INTO thread_events(room_id, thread_id, event_id, origin_server_ts, event_json)
+        INSERT INTO thread_events(room_id, thread_id, event_id, origin_server_ts, event_json)
         VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(room_id, event_id) DO UPDATE SET
+            thread_id = excluded.thread_id,
+            origin_server_ts = excluded.origin_server_ts,
+            event_json = excluded.event_json
+        WHERE json_extract(thread_events.event_json, '$.type') = 'm.room.encrypted'
+            OR json_extract(excluded.event_json, '$.type') <> 'm.room.encrypted'
         """,
         (
             room_id,

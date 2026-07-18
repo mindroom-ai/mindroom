@@ -1591,6 +1591,83 @@ async def test_event_batch_derives_indexes_only_from_final_accepted_payload(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mutation_path", ["replace", "append"])
+@pytest.mark.parametrize("payload_order", [("clear", "opaque"), ("opaque", "clear")])
+async def test_thread_mutations_preserve_decrypted_payload_across_arrival_orders(
+    event_cache: ConversationEventCache,
+    mutation_path: str,
+    payload_order: tuple[str, str],
+) -> None:
+    """Thread replacement and append paths must preserve the best same-ID payload in both backends."""
+    room_id = "!room:localhost"
+    thread_id = "$root:localhost"
+    event_id = "$child:localhost"
+    root_event = {
+        "event_id": thread_id,
+        "sender": "@user:localhost",
+        "origin_server_ts": 1000,
+        "type": "m.room.message",
+        "content": {"body": "root", "msgtype": "m.text"},
+    }
+    clear_event = {
+        "event_id": event_id,
+        "sender": "@user:localhost",
+        "origin_server_ts": 2000,
+        "type": "m.room.message",
+        "content": {
+            "body": "clear child",
+            "msgtype": "m.text",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+        },
+    }
+    opaque_event = {
+        "event_id": event_id,
+        "sender": "@user:localhost",
+        "origin_server_ts": 2000,
+        "type": "m.room.encrypted",
+        "content": {
+            "algorithm": "m.megolm.v1.aes-sha2",
+            "ciphertext": "opaque ciphertext",
+            "device_id": "DEVICE",
+            "sender_key": "sender-key",
+            "session_id": "session",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+        },
+    }
+    payloads = {"clear": clear_event, "opaque": opaque_event}
+
+    if mutation_path == "replace":
+        for payload in payload_order:
+            await _replace_thread(
+                event_cache,
+                room_id,
+                thread_id,
+                [root_event, payloads[payload]],
+            )
+    else:
+        await _replace_thread(event_cache, room_id, thread_id, [root_event])
+        for payload in payload_order:
+            assert await event_cache.append_event(
+                room_id,
+                thread_id,
+                payloads[payload],
+            )
+
+    thread_events = await event_cache.get_thread_events(room_id, thread_id)
+    cached_event = await event_cache.get_event(room_id, event_id)
+
+    assert thread_events is not None
+    thread_child = next(event for event in thread_events if event["event_id"] == event_id)
+    assert thread_child["type"] == "m.room.message"
+    assert thread_child["content"]["body"] == "clear child"
+    assert cached_event is not None
+    assert cached_event["type"] == "m.room.message"
+    assert cached_event["content"]["body"] == "clear child"
+    assert await event_cache.get_thread_id_for_event(room_id, event_id) == thread_id
+    assert await event_cache.get_thread_id_for_event(room_id, thread_id) == thread_id
+
+
+@pytest.mark.asyncio
 async def test_event_payload_improvement_preserves_learned_thread_root_mapping(
     event_cache: ConversationEventCache,
 ) -> None:
