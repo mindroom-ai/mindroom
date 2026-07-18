@@ -48,7 +48,26 @@ async def _prepare_sqlite_version_10(db_path: Path) -> None:
     try:
         await sqlite_event_cache._create_event_cache_schema(db)
         await db.execute("DROP TABLE compacted_streaming_edits")
+        await db.execute("DROP TABLE cache_metadata")
         await db.execute("DROP TABLE thread_events")
+        await db.execute("DROP TABLE events")
+        await db.execute(
+            """
+            CREATE TABLE events (
+                event_id TEXT PRIMARY KEY,
+                room_id TEXT NOT NULL,
+                origin_server_ts INTEGER NOT NULL,
+                event_json TEXT NOT NULL,
+                cached_at REAL NOT NULL
+            )
+            """,
+        )
+        await db.execute(
+            """
+            CREATE INDEX idx_events_room_origin_ts
+            ON events(room_id, origin_server_ts DESC)
+            """,
+        )
         await db.execute(
             """
             CREATE TABLE thread_events (
@@ -93,7 +112,6 @@ async def _prepare_sqlite_version_10(db_path: Path) -> None:
             """,
             [
                 (_ROOM_ID, _THREAD_ID, _THREAD_ID),
-                (_ROOM_ID, _CHILD_ID, _THREAD_ID),
                 (_ROOM_ID, _ORPHAN_ID, "$unlearned:localhost"),
             ],
         )
@@ -188,7 +206,6 @@ async def _prepare_postgres_version_1(database_url: str, *, namespace: str, othe
         )
         for event_id, thread_id in (
             (_THREAD_ID, _THREAD_ID),
-            (_CHILD_ID, _THREAD_ID),
             (_ORPHAN_ID, "$unlearned:localhost"),
         ):
             await db.execute(
@@ -252,10 +269,10 @@ async def test_sqlite_version_10_migrates_without_reset_and_repairs_orphans(tmp_
     try:
         await db.execute(
             """
-            INSERT INTO thread_events(room_id, thread_id, event_id, origin_server_ts)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO thread_events(room_id, thread_id, event_id, origin_server_ts, write_seq)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (_ROOM_ID, "$dangling-thread:localhost", "$dangling:localhost", 20),
+            (_ROOM_ID, "$dangling-thread:localhost", "$dangling:localhost", 20, 100),
         )
         await db.commit()
     finally:

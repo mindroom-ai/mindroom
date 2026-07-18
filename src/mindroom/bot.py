@@ -1030,6 +1030,15 @@ class AgentBot:
             return None
         if token_record is None:
             return None
+        cache_generation = self.event_cache.certification_generation
+        if cache_generation is None or token_record.cache_generation != cache_generation:
+            self.logger.warning(
+                "matrix_sync_token_cache_generation_mismatch",
+                token_generation_present=token_record.cache_generation is not None,
+                cache_generation_present=cache_generation is not None,
+            )
+            self._clear_saved_sync_token()
+            return None
         self.logger.info(
             "matrix_sync_token_restored",
             certified=token_record.certified,
@@ -1061,11 +1070,16 @@ class AgentBot:
         """Persist one certified sync checkpoint if present."""
         if checkpoint is None:
             return
+        cache_generation = self.event_cache.certification_generation
+        if cache_generation is None:
+            self.logger.warning("matrix_sync_token_save_failed", error="cache generation unavailable")
+            return
         try:
             save_sync_token(
                 self.storage_path,
                 self.agent_name,
                 checkpoint.token,
+                cache_generation=cache_generation,
             )
         except (OSError, ValueError) as exc:
             self.logger.warning("matrix_sync_token_save_failed", error=str(exc))
@@ -1822,7 +1836,14 @@ class AgentBot:
             except OSError as exc:
                 self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
             else:
-                retry_token = token_record.token if token_record is not None else None
+                cache_generation = self.event_cache.certification_generation
+                retry_token = (
+                    token_record.token
+                    if token_record is not None
+                    and cache_generation is not None
+                    and token_record.cache_generation == cache_generation
+                    else None
+                )
         cast("Any", client).next_batch = retry_token
         self.logger.warning(
             "matrix_redaction_callback_failed_replaying_sync",

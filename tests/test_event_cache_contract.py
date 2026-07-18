@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -12,7 +13,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
-from mindroom.matrix.cache import ConversationEventCache
+from mindroom.matrix.cache import ConversationEventCache, postgres_streaming_compaction, sqlite_streaming_compaction
 from tests.event_cache_test_support import replace_thread_unconditionally
 
 if TYPE_CHECKING:
@@ -58,6 +59,7 @@ class TestConversationEventCacheContract:
         assert isinstance(event_cache, ConversationEventCache)
         assert event_cache.is_initialized is True
         assert event_cache.durable_writes_available is True
+        assert isinstance(event_cache.certification_generation, str)
         assert isinstance(event_cache.runtime_diagnostics()["cache_backend"], str)
         assert isinstance(event_cache.pending_durable_write_room_ids(), tuple)
 
@@ -392,6 +394,219 @@ async def test_streaming_compaction_survives_backend_restart(
         assert str(pending["content"]["body"]) not in str(diagnostics)
     finally:
         await restarted_cache.close()
+
+
+@pytest.mark.asyncio
+async def test_streaming_compaction_processes_multiple_bounded_batches(
+    event_cache_factory: Callable[[], ConversationEventCache],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both backends archive large candidate sets through bounded transactional batches."""
+    monkeypatch.setattr(sqlite_streaming_compaction, "_COMPACTION_BATCH_SIZE", 2)
+    monkeypatch.setattr(postgres_streaming_compaction, "_COMPACTION_BATCH_SIZE", 2)
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    sender = "@agent:localhost"
+    pending_edits = [
+        _message_event(
+            f"$pending-{index}:localhost",
+            index + 2,
+            sender=sender,
+            edit_of=original_id,
+            stream_status=STREAM_STATUS_PENDING,
+        )
+        for index in range(5)
+    ]
+    terminal = _message_event(
+        "$terminal:localhost",
+        20,
+        sender=sender,
+        edit_of=original_id,
+        stream_status=STREAM_STATUS_COMPLETED,
+    )
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        await cache.store_events_batch(
+            [(str(event["event_id"]), room_id, event) for event in pending_edits],
+        )
+        await cache.store_event(str(terminal["event_id"]), room_id, terminal)
+        for pending in pending_edits:
+            assert await cache.get_event(room_id, str(pending["event_id"])) == pending
+    finally:
+        await cache.close()
+
+    restarted_cache = event_cache_factory()
+    await restarted_cache.initialize()
+    try:
+        assert restarted_cache.runtime_diagnostics()["cache_compacted_streaming_edit_archive_rows"] == 5
+        assert await restarted_cache.get_latest_edit(room_id, original_id, sender=sender) == terminal
+    finally:
+        await restarted_cache.close()
+
+
+@pytest.mark.asyncio
+async def test_streaming_compaction_cancellation_rolls_back_all_batches(
+    event_cache_factory: Callable[[], ConversationEventCache],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation after one archived batch cannot expose a partially moved edit set."""
+    monkeypatch.setattr(sqlite_streaming_compaction, "_COMPACTION_BATCH_SIZE", 2)
+    monkeypatch.setattr(postgres_streaming_compaction, "_COMPACTION_BATCH_SIZE", 2)
+    sqlite_archive_batch = sqlite_streaming_compaction._archive_candidate_batch
+    postgres_archive_batch = postgres_streaming_compaction._archive_candidate_batch
+    cancel_reason = "compaction cancelled after first batch"
+
+    async def cancel_after_sqlite_batch(*args: object, **kwargs: object) -> None:
+        await sqlite_archive_batch(*args, **kwargs)
+        raise asyncio.CancelledError(cancel_reason)
+
+    async def cancel_after_postgres_batch(*args: object, **kwargs: object) -> None:
+        await postgres_archive_batch(*args, **kwargs)
+        raise asyncio.CancelledError(cancel_reason)
+
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    sender = "@agent:localhost"
+    pending_edits = [
+        _message_event(
+            f"$pending-{index}:localhost",
+            index + 2,
+            sender=sender,
+            edit_of=original_id,
+            stream_status=STREAM_STATUS_PENDING,
+        )
+        for index in range(4)
+    ]
+    terminal = _message_event(
+        "$terminal:localhost",
+        20,
+        sender=sender,
+        edit_of=original_id,
+        stream_status=STREAM_STATUS_COMPLETED,
+    )
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        await cache.store_events_batch(
+            [(str(event["event_id"]), room_id, event) for event in pending_edits],
+        )
+        monkeypatch.setattr(sqlite_streaming_compaction, "_archive_candidate_batch", cancel_after_sqlite_batch)
+        monkeypatch.setattr(postgres_streaming_compaction, "_archive_candidate_batch", cancel_after_postgres_batch)
+        with pytest.raises(asyncio.CancelledError, match="compaction cancelled"):
+            await cache.store_event(str(terminal["event_id"]), room_id, terminal)
+        assert await cache.get_event(room_id, str(terminal["event_id"])) is None
+        for pending in pending_edits:
+            assert await cache.get_event(room_id, str(pending["event_id"])) == pending
+    finally:
+        await cache.close()
+
+    restarted_cache = event_cache_factory()
+    await restarted_cache.initialize()
+    try:
+        assert restarted_cache.runtime_diagnostics()["cache_compacted_streaming_edit_archive_rows"] == 0
+    finally:
+        await restarted_cache.close()
+
+
+@pytest.mark.asyncio
+async def test_append_recognizes_archive_only_thread_snapshot(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """Appending preserves membership when the sole existing snapshot member is cold."""
+    room_id = "!room:localhost"
+    thread_id = "$unfetched-root:localhost"
+    sender = "@agent:localhost"
+    pending = _message_event(
+        "$pending:localhost",
+        2,
+        sender=sender,
+        edit_of=thread_id,
+        stream_status=STREAM_STATUS_PENDING,
+    )
+    terminal = _message_event(
+        "$terminal:localhost",
+        3,
+        sender=sender,
+        edit_of=thread_id,
+        stream_status=STREAM_STATUS_COMPLETED,
+    )
+    appended = _message_event(
+        "$appended:localhost",
+        4,
+        sender="@user:localhost",
+        thread_id=thread_id,
+    )
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        await replace_thread_unconditionally(cache, room_id, thread_id, [terminal, pending])
+        assert await cache.redact_event(room_id, str(terminal["event_id"])) is True
+        assert await cache.append_event(room_id, thread_id, appended) is True
+        assert await cache.get_thread_events(room_id, thread_id) == [pending, appended]
+    finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_repeated_compaction_keeps_equal_timestamp_write_order(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """Cold fallback ordering remains stable after active SQLite rows are deleted and reused."""
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    sender = "@agent:localhost"
+    first_pending = _message_event(
+        "$first-pending:localhost",
+        2,
+        sender=sender,
+        edit_of=original_id,
+        stream_status=STREAM_STATUS_PENDING,
+    )
+    first_terminal = _message_event(
+        "$first-terminal:localhost",
+        3,
+        sender=sender,
+        edit_of=original_id,
+        stream_status=STREAM_STATUS_COMPLETED,
+    )
+    second_pending = _message_event(
+        "$second-pending:localhost",
+        2,
+        sender=sender,
+        edit_of=original_id,
+        stream_status=STREAM_STATUS_PENDING,
+    )
+    final_terminal = _message_event(
+        "$final-terminal:localhost",
+        4,
+        sender=sender,
+        edit_of=original_id,
+        stream_status=STREAM_STATUS_COMPLETED,
+    )
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        await cache.store_events_batch(
+            [
+                (str(first_pending["event_id"]), room_id, first_pending),
+                (str(first_terminal["event_id"]), room_id, first_terminal),
+            ],
+        )
+        await cache.store_events_batch(
+            [
+                (str(second_pending["event_id"]), room_id, second_pending),
+                (str(final_terminal["event_id"]), room_id, final_terminal),
+            ],
+        )
+        assert await cache.redact_event(room_id, str(final_terminal["event_id"])) is True
+        assert await cache.get_latest_edit(room_id, original_id, sender=sender) == first_terminal
+        assert await cache.redact_event(room_id, str(first_terminal["event_id"])) is True
+        assert await cache.get_latest_edit(room_id, original_id, sender=sender) == second_pending
+        assert await cache.redact_event(room_id, str(second_pending["event_id"])) is True
+        assert await cache.get_latest_edit(room_id, original_id, sender=sender) == first_pending
+    finally:
+        await cache.close()
 
 
 @pytest.mark.asyncio

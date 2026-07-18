@@ -17,6 +17,36 @@ if TYPE_CHECKING:
 
 async def migrate_version_10_thread_events(db: aiosqlite.Connection) -> None:
     """Normalize a complete version-10 thread snapshot without losing cached events."""
+    await db.execute("ALTER TABLE events RENAME TO events_v10")
+    await db.execute("DROP INDEX IF EXISTS idx_events_room_origin_ts")
+    await db.execute(
+        """
+        CREATE TABLE events (
+            event_id TEXT PRIMARY KEY,
+            room_id TEXT NOT NULL,
+            origin_server_ts INTEGER NOT NULL,
+            event_json TEXT NOT NULL,
+            cached_at REAL NOT NULL,
+            write_seq INTEGER NOT NULL
+        )
+        """,
+    )
+    await db.execute(
+        """
+        CREATE INDEX idx_events_room_origin_ts
+        ON events(room_id, origin_server_ts DESC)
+        """,
+    )
+    await db.execute(
+        """
+        INSERT INTO events(event_id, room_id, origin_server_ts, event_json, cached_at, write_seq)
+        SELECT event_id, room_id, origin_server_ts, event_json, cached_at, rowid
+        FROM events_v10
+        ORDER BY rowid
+        """,
+    )
+    await db.execute("DROP TABLE events_v10")
+
     await db.execute("ALTER TABLE thread_events RENAME TO thread_events_v10")
     await db.execute("DROP INDEX IF EXISTS idx_thread_events_room_thread_ts")
     await db.execute(
@@ -26,6 +56,7 @@ async def migrate_version_10_thread_events(db: aiosqlite.Connection) -> None:
             thread_id TEXT NOT NULL,
             event_id TEXT NOT NULL,
             origin_server_ts INTEGER NOT NULL,
+            write_seq INTEGER NOT NULL,
             PRIMARY KEY (room_id, event_id)
         )
         """,
@@ -66,12 +97,13 @@ async def migrate_version_10_thread_events(db: aiosqlite.Connection) -> None:
     )
     await db.execute(
         """
-        INSERT INTO thread_events(room_id, thread_id, event_id, origin_server_ts)
+        INSERT INTO thread_events(room_id, thread_id, event_id, origin_server_ts, write_seq)
         SELECT
             thread_events_v10.room_id,
             thread_events_v10.thread_id,
             thread_events_v10.event_id,
-            thread_events_v10.origin_server_ts
+            thread_events_v10.origin_server_ts,
+            (SELECT COALESCE(MAX(write_seq), 0) FROM events) + thread_events_v10.rowid
         FROM thread_events_v10
         JOIN events
             ON events.event_id = thread_events_v10.event_id
@@ -121,6 +153,16 @@ _ORPHAN_THREAD_INDEX_PREDICATE = """
                 WHERE child.room_id = event_threads.room_id
                     AND child.thread_id = event_threads.thread_id
                     AND child.event_id != child.thread_id
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM thread_events AS child_membership
+                JOIN events AS child_event
+                    ON child_event.event_id = child_membership.event_id
+                    AND child_event.room_id = child_membership.room_id
+                WHERE child_membership.room_id = event_threads.room_id
+                    AND child_membership.thread_id = event_threads.thread_id
+                    AND child_membership.event_id != child_membership.thread_id
             )
             OR EXISTS (
                 SELECT 1

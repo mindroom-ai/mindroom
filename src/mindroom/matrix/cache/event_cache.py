@@ -40,6 +40,10 @@ class ConversationEventCache(Protocol):
     def startup_requires_sync_reset(self) -> bool:
         """Return whether startup discarded cache contents covered by saved sync checkpoints."""
 
+    @property
+    def certification_generation(self) -> str | None:
+        """Return the durable cache generation bound to certified sync checkpoints."""
+
     async def initialize(self) -> None:
         """Initialize any backing storage."""
 

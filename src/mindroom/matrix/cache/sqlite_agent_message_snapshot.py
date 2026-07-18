@@ -78,7 +78,7 @@ async def _iter_scope_events(
         SELECT event_json, cached_at
         FROM events
         WHERE room_id = ?
-        ORDER BY origin_server_ts DESC, rowid DESC
+        ORDER BY origin_server_ts DESC, write_seq DESC
         """,
         (room_id,),
     )

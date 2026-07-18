@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any, cast
 from .cache_maintenance import NONTERMINAL_STREAM_STATUSES, TERMINAL_STREAM_STATUSES
 from .postgres_cursor import fetchall, fetchone, rowcount
 
+_COMPACTION_BATCH_SIZE = 500
+
 if TYPE_CHECKING:
     from psycopg import AsyncConnection
 
@@ -241,6 +243,7 @@ async def _compaction_candidates(
     *,
     namespace: str,
     room_id: str | None,
+    limit: int,
 ) -> list[_ArchivedPostgresStreamingEdit]:
     room_predicate = "" if room_id is None else "AND nonterminal_index.room_id = %s"
     parameters = (
@@ -248,6 +251,7 @@ async def _compaction_candidates(
         sorted(NONTERMINAL_STREAM_STATUSES),
         sorted(TERMINAL_STREAM_STATUSES),
         *((room_id,) if room_id is not None else ()),
+        limit,
     )
     rows = await fetchall(
         db,
@@ -302,6 +306,7 @@ async def _compaction_candidates(
             )
             {room_predicate}
         ORDER BY nonterminal_event.origin_server_ts, nonterminal_event.write_seq
+        LIMIT %s
         """,  # noqa: S608
         parameters,
     )
@@ -331,9 +336,29 @@ async def compact_superseded_streaming_edits(
     room_id: str | None = None,
 ) -> int:
     """Archive superseded nonterminal edits and remove their active projections."""
-    candidates = await _compaction_candidates(db, namespace=namespace, room_id=room_id)
-    for event in candidates:
-        await db.execute(
+    compacted = 0
+    while candidates := await _compaction_candidates(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        limit=_COMPACTION_BATCH_SIZE,
+    ):
+        await _archive_candidate_batch(db, namespace=namespace, candidates=candidates)
+        compacted += len(candidates)
+    return compacted
+
+
+async def _archive_candidate_batch(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    candidates: list[_ArchivedPostgresStreamingEdit],
+) -> None:
+    """Move one bounded candidate batch into cold storage."""
+    if not candidates:
+        return
+    async with db.cursor() as cursor:
+        await cursor.executemany(
             """
             INSERT INTO mindroom_event_cache_compacted_streaming_edits(
                 namespace,
@@ -364,24 +389,25 @@ async def compact_superseded_streaming_edits(
                 thread_order = excluded.thread_order,
                 indexed_thread_id = excluded.indexed_thread_id
             """,
-            (
-                namespace,
-                event.event_id,
-                event.room_id,
-                event.original_event_id,
-                event.sender,
-                event.origin_server_ts,
-                event.event_json_zlib,
-                event.cached_at,
-                event.event_order,
-                event.thread_id,
-                event.thread_origin_server_ts,
-                event.thread_order,
-                event.indexed_thread_id,
-            ),
+            [
+                (
+                    namespace,
+                    event.event_id,
+                    event.room_id,
+                    event.original_event_id,
+                    event.sender,
+                    event.origin_server_ts,
+                    event.event_json_zlib,
+                    event.cached_at,
+                    event.event_order,
+                    event.thread_id,
+                    event.thread_origin_server_ts,
+                    event.thread_order,
+                    event.indexed_thread_id,
+                )
+                for event in candidates
+            ],
         )
-    if not candidates:
-        return 0
     event_ids = [event.event_id for event in candidates]
     await db.execute(
         """
@@ -411,4 +437,3 @@ async def compact_superseded_streaming_edits(
         """,
         (namespace, event_ids),
     )
-    return len(candidates)

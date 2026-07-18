@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 from .event_cache_events import event_id_for_cache, serialize_cacheable_events, serialize_cached_event
 from .event_normalization import normalize_event_source_for_cache
 from .sqlite_event_cache_events import (
+    allocate_write_sequences,
     delete_cached_events,
     delete_event_edit_rows,
     delete_event_thread_rows,
@@ -64,13 +65,13 @@ async def load_thread_events(
     """Return cached events for one thread sorted by timestamp."""
     cursor = await db.execute(
         """
-        SELECT thread_events.origin_server_ts, thread_events.rowid, events.event_json
+        SELECT thread_events.origin_server_ts, thread_events.write_seq, events.event_json
         FROM thread_events
         JOIN events
             ON events.event_id = thread_events.event_id
             AND events.room_id = thread_events.room_id
         WHERE thread_events.room_id = ? AND thread_events.thread_id = ?
-        ORDER BY thread_events.origin_server_ts ASC, thread_events.rowid ASC
+        ORDER BY thread_events.origin_server_ts ASC, thread_events.write_seq ASC
         """,
         (room_id, thread_id),
     )
@@ -210,10 +211,15 @@ async def _store_thread_events_locked(
             cached_at=validated_at,
             thread_id=thread_id,
         )
+        write_sequences = await allocate_write_sequences(db, len(serialized_events))
         await db.executemany(
             """
-            INSERT OR REPLACE INTO thread_events(room_id, thread_id, event_id, origin_server_ts)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO thread_events(room_id, thread_id, event_id, origin_server_ts, write_seq)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(room_id, event_id) DO UPDATE SET
+                thread_id = excluded.thread_id,
+                origin_server_ts = excluded.origin_server_ts,
+                write_seq = excluded.write_seq
             """,
             [
                 (
@@ -221,8 +227,9 @@ async def _store_thread_events_locked(
                     thread_id,
                     event.event_id,
                     event.origin_server_ts,
+                    write_sequence,
                 )
-                for event in serialized_events
+                for event, write_sequence in zip(serialized_events, write_sequences, strict=True)
             ],
         )
         await compact_superseded_streaming_edits(db, room_id=room_id)
@@ -509,11 +516,18 @@ async def append_existing_thread_event(
     cursor = await db.execute(
         """
         SELECT 1
-        FROM thread_events
-        WHERE room_id = ? AND thread_id = ?
+        FROM (
+            SELECT thread_id
+            FROM thread_events
+            WHERE room_id = ? AND thread_id = ?
+            UNION ALL
+            SELECT thread_id
+            FROM compacted_streaming_edits
+            WHERE room_id = ? AND thread_id = ?
+        )
         LIMIT 1
         """,
-        (room_id, thread_id),
+        (room_id, thread_id, room_id, thread_id),
     )
     row = await cursor.fetchone()
     await cursor.close()
@@ -535,16 +549,22 @@ async def append_existing_thread_event(
         cached_at=time.time(),
         thread_id=thread_id,
     )
+    write_sequence = (await allocate_write_sequences(db, 1))[0]
     await db.execute(
         """
-        INSERT OR REPLACE INTO thread_events(room_id, thread_id, event_id, origin_server_ts)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO thread_events(room_id, thread_id, event_id, origin_server_ts, write_seq)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(room_id, event_id) DO UPDATE SET
+            thread_id = excluded.thread_id,
+            origin_server_ts = excluded.origin_server_ts,
+            write_seq = excluded.write_seq
         """,
         (
             room_id,
             thread_id,
             serialized_event.event_id,
             serialized_event.origin_server_ts,
+            write_sequence,
         ),
     )
     await compact_superseded_streaming_edits(db, room_id=room_id)

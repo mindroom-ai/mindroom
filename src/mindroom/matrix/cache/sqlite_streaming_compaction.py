@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 from .cache_maintenance import NONTERMINAL_STREAM_STATUSES, TERMINAL_STREAM_STATUSES
 
+_COMPACTION_BATCH_SIZE = 500
+
 if TYPE_CHECKING:
     import aiosqlite
 
@@ -241,12 +243,14 @@ async def _compaction_candidates(
     db: aiosqlite.Connection,
     *,
     room_id: str | None,
+    limit: int,
 ) -> list[ArchivedStreamingEdit]:
     room_predicate = "" if room_id is None else "AND nonterminal_index.room_id = ?"
     parameters: tuple[object, ...] = (
         *sorted(NONTERMINAL_STREAM_STATUSES),
         *sorted(TERMINAL_STREAM_STATUSES),
         *((room_id,) if room_id is not None else ()),
+        limit,
     )
     cursor = await db.execute(
         f"""
@@ -258,10 +262,10 @@ async def _compaction_candidates(
             nonterminal_event.origin_server_ts,
             nonterminal_event.event_json,
             nonterminal_event.cached_at,
-            nonterminal_event.rowid,
+            nonterminal_event.write_seq,
             thread_events.thread_id,
             thread_events.origin_server_ts,
-            thread_events.rowid,
+            thread_events.write_seq,
             event_threads.thread_id
         FROM event_edits AS nonterminal_index
         JOIN events AS nonterminal_event
@@ -298,7 +302,8 @@ async def _compaction_candidates(
                     ) IN (?, ?, ?, ?)
             )
             {room_predicate}
-        ORDER BY nonterminal_event.origin_server_ts, nonterminal_event.rowid
+        ORDER BY nonterminal_event.origin_server_ts, nonterminal_event.write_seq
+        LIMIT ?
         """,  # noqa: S608
         parameters,
     )
@@ -329,9 +334,24 @@ async def compact_superseded_streaming_edits(
     room_id: str | None = None,
 ) -> int:
     """Archive superseded nonterminal edits and remove their active projections."""
-    candidates = await _compaction_candidates(db, room_id=room_id)
+    compacted = 0
+    while candidates := await _compaction_candidates(
+        db,
+        room_id=room_id,
+        limit=_COMPACTION_BATCH_SIZE,
+    ):
+        await _archive_candidate_batch(db, candidates)
+        compacted += len(candidates)
+    return compacted
+
+
+async def _archive_candidate_batch(
+    db: aiosqlite.Connection,
+    candidates: list[ArchivedStreamingEdit],
+) -> None:
+    """Move one bounded candidate batch into cold storage."""
     if not candidates:
-        return 0
+        return
     await db.executemany(
         """
         INSERT INTO compacted_streaming_edits(
@@ -388,4 +408,3 @@ async def compact_superseded_streaming_edits(
         [(event_id,) for event_id in event_ids],
     )
     await db.executemany("DELETE FROM events WHERE event_id = ?", [(event_id,) for event_id in event_ids])
-    return len(candidates)

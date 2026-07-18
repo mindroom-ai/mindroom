@@ -8,6 +8,8 @@ The active `events` table is the only full-JSON source for normal point lookups,
 
 The normalized `thread_events` rows store only membership, timestamp, and stable write order.
 
+SQLite assigns active events and thread memberships from a persisted monotonic write sequence, so deleting an active row cannot let a later equal-timestamp row reuse its cold-history order.
+
 PostgreSQL retains a nullable legacy `event_json` column so the shared physical version-1 table can be migrated without rewriting another namespace, but current writes and reads never use that column.
 
 Superseded nonterminal MindRoom streaming edits move from the active tables into `compacted_streaming_edits` as one zlib-compressed JSON payload plus the minimal ordering, edit, and thread projections needed to preserve behavior.
@@ -20,13 +22,15 @@ Compaction never creates a redaction tombstone because compaction is not deletio
 
 Compaction requires a strictly newer terminal edit from the same room, original event, and sender, which avoids ambiguous equal-timestamp replacement races and cross-sender replacement.
 
+Compaction selects, compresses, bulk-writes, and removes bounded batches inside one caller-owned transaction, so startup memory is bounded and cancellation rolls every batch back together.
+
 ## Startup maintenance
 
 Startup maintenance runs inside the same transaction as schema migration.
 
 It audits and repairs edit-index rows whose edit event is absent.
 
-It audits and repairs event-to-thread rows whose event is absent while retaining root self-mappings that are proven by a surviving active or cold child mapping.
+It audits and repairs event-to-thread rows whose event is absent while retaining root self-mappings that are proven by a surviving active child mapping, normalized thread membership, or cold child mapping.
 
 It marks a thread stale before removing a membership row whose active source event is absent.
 
@@ -42,7 +46,13 @@ SQLite version 10 is migrated to version 11 by transactionally rebuilding `threa
 
 A version-10 membership without an active source marks its thread stale instead of copying the duplicated legacy JSON into the new source of truth.
 
-Unsupported SQLite shapes still use a destructive reset, and that reset explicitly invalidates the saved certified sync token so the next sync starts cold.
+Every SQLite database and PostgreSQL namespace persists an opaque certification generation, and every certified sync checkpoint records the generation it covers.
+
+Unsupported SQLite shapes still use a destructive reset, and that reset transactionally creates a new generation before it commits.
+
+A token from the prior generation is rejected on every later process even if the resetting process crashes before any bot can clear its token file.
+
+Unbound legacy token records also start cold because they cannot prove which durable cache generation they certify.
 
 PostgreSQL migration takes a transaction-scoped global advisory lock, changes the legacy payload column to nullable, creates cold storage, normalizes only the initializing namespace, repairs only that namespace, and commits the schema version and maintenance result together.
 

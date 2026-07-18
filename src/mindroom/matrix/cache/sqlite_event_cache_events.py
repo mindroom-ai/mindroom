@@ -75,7 +75,7 @@ async def load_recent_room_events(
         WHERE room_id = ?
             AND origin_server_ts >= ?
             AND json_extract(event_json, '$.type') = ?
-        ORDER BY origin_server_ts DESC, rowid DESC
+        ORDER BY origin_server_ts DESC, write_seq DESC
         LIMIT ?
         """,
         (room_id, since_ts_ms, event_type, limit),
@@ -152,13 +152,13 @@ async def _load_latest_active_edit(
     parameters = (room_id, original_event_id, *((sender,) if sender is not None else ()))
     cursor = await db.execute(
         f"""
-        SELECT events.event_json, event_edits.origin_server_ts, events.rowid, events.cached_at
+        SELECT events.event_json, event_edits.origin_server_ts, events.write_seq, events.cached_at
         FROM event_edits
         JOIN events ON events.event_id = event_edits.edit_event_id
         WHERE event_edits.room_id = ?
             AND event_edits.original_event_id = ?
             {sender_predicate}
-        ORDER BY event_edits.origin_server_ts DESC, events.rowid DESC
+        ORDER BY event_edits.origin_server_ts DESC, events.write_seq DESC
         LIMIT 1
         """,  # noqa: S608
         parameters,
@@ -357,15 +357,17 @@ async def write_lookup_index_rows(
         room_id=room_id,
         event_ids=[event.event_id for event in serialized_events],
     )
+    write_sequences = await allocate_write_sequences(db, len(serialized_events))
     await db.executemany(
         """
-        INSERT INTO events(event_id, room_id, origin_server_ts, event_json, cached_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO events(event_id, room_id, origin_server_ts, event_json, cached_at, write_seq)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(event_id) DO UPDATE SET
             room_id = excluded.room_id,
             origin_server_ts = excluded.origin_server_ts,
             event_json = excluded.event_json,
-            cached_at = excluded.cached_at
+            cached_at = excluded.cached_at,
+            write_seq = excluded.write_seq
         """,
         [
             (
@@ -374,8 +376,9 @@ async def write_lookup_index_rows(
                 event.origin_server_ts,
                 event.event_json,
                 cached_at,
+                write_sequence,
             )
-            for event in serialized_events
+            for event, write_sequence in zip(serialized_events, write_sequences, strict=True)
         ],
     )
     edit_rows = event_edit_rows(room_id, serialized_events)
@@ -396,6 +399,32 @@ async def write_lookup_index_rows(
             """,
             [(row.room_id, row.event_id, row.thread_id) for row in thread_rows],
         )
+
+
+async def allocate_write_sequences(
+    db: aiosqlite.Connection,
+    count: int,
+) -> list[int]:
+    """Reserve a durable monotonic SQLite write-sequence range."""
+    if count <= 0:
+        return []
+    cursor = await db.execute(
+        """
+        INSERT INTO cache_metadata(key, value)
+        VALUES ('write_sequence', ?)
+        ON CONFLICT(key) DO UPDATE SET
+            value = CAST(CAST(cache_metadata.value AS INTEGER) + CAST(excluded.value AS INTEGER) AS TEXT)
+        RETURNING CAST(value AS INTEGER)
+        """,
+        (str(count),),
+    )
+    row = await cursor.fetchone()
+    await cursor.close()
+    if row is None:
+        msg = "SQLite event cache write sequence was not allocated"
+        raise RuntimeError(msg)
+    last_sequence = int(row[0])
+    return list(range(last_sequence - count + 1, last_sequence + 1))
 
 
 async def _dependent_edit_event_ids(

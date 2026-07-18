@@ -532,6 +532,7 @@ def _save_certified_sync_token(
         bot.storage_path,
         bot.agent_name,
         token,
+        cache_generation=bot.event_cache.certification_generation or "test-cache-generation",
     )
 
 

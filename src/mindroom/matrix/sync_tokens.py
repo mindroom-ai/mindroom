@@ -12,7 +12,8 @@ from mindroom.matrix.sync_token_values import normalize_sync_token
 if TYPE_CHECKING:
     from pathlib import Path
 
-_SYNC_TOKEN_RECORD_VERSION = "mindroom-sync-token-v1"  # noqa: S105
+_SYNC_TOKEN_RECORD_VERSION = "mindroom-sync-token-v2"  # noqa: S105
+_LEGACY_SYNC_TOKEN_RECORD_VERSION = "mindroom-sync-token-v1"  # noqa: S105
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,7 @@ class _SyncTokenRecord:
 
     token: str
     checkpoint: SyncCheckpoint | None = None
+    cache_generation: str | None = None
 
     @property
     def certified(self) -> bool:
@@ -38,24 +40,43 @@ def _sync_token_certification_path(storage_path: Path, agent_name: str) -> Path:
     return storage_path / "sync_tokens" / f"{agent_name}.token.certified"
 
 
-def _record_from_json(text: str) -> _SyncTokenRecord | None:
-    """Return a token record from the JSON checkpoint format."""
+def _json_object(text: str) -> dict[str, object] | None:
+    """Parse one JSON object without accepting other JSON value shapes."""
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
         return None
-    if not isinstance(payload, dict) or payload.get("version") != _SYNC_TOKEN_RECORD_VERSION:
+    return payload if isinstance(payload, dict) else None
+
+
+def _record_from_json(text: str) -> _SyncTokenRecord | None:
+    """Return a token record from the JSON checkpoint format."""
+    payload = _json_object(text)
+    if payload is None:
         return None
     token = normalize_sync_token(payload.get("token"))
     if token is None:
         return None
+    version = payload.get("version")
+    if version == _LEGACY_SYNC_TOKEN_RECORD_VERSION:
+        return _SyncTokenRecord(token=token)
+    if version != _SYNC_TOKEN_RECORD_VERSION:
+        return None
+    cache_generation = payload.get("cache_generation")
+    if not isinstance(cache_generation, str) or not cache_generation:
+        return None
     checkpoint = SyncCheckpoint(token=token)
-    return _SyncTokenRecord(token=token, checkpoint=checkpoint)
+    return _SyncTokenRecord(
+        token=token,
+        checkpoint=checkpoint,
+        cache_generation=cache_generation,
+    )
 
 
-def _record_json(checkpoint: SyncCheckpoint) -> str:
+def _record_json(checkpoint: SyncCheckpoint, *, cache_generation: str) -> str:
     """Return the durable JSON token record for one certified checkpoint."""
     payload = {
+        "cache_generation": cache_generation,
         "token": checkpoint.token,
         "version": _SYNC_TOKEN_RECORD_VERSION,
     }
@@ -66,6 +87,8 @@ def save_sync_token(
     storage_path: Path,
     agent_name: str,
     token: str,
+    *,
+    cache_generation: str,
 ) -> None:
     """Persist one cache-certified sync token checkpoint."""
     token_path = _sync_token_path(storage_path, agent_name)
@@ -73,9 +96,15 @@ def save_sync_token(
     if token_value is None:
         msg = "Certified sync tokens require a non-empty token"
         raise ValueError(msg)
+    if not cache_generation:
+        msg = "Certified sync tokens require a cache generation"
+        raise ValueError(msg)
     checkpoint = SyncCheckpoint(token=token_value)
     token_path.parent.mkdir(parents=True, exist_ok=True)
-    token_path.write_text(_record_json(checkpoint), encoding="utf-8")
+    token_path.write_text(
+        _record_json(checkpoint, cache_generation=cache_generation),
+        encoding="utf-8",
+    )
     _sync_token_certification_path(storage_path, agent_name).unlink(missing_ok=True)
 
 
