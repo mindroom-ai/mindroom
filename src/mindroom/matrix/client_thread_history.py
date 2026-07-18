@@ -52,6 +52,7 @@ from mindroom.matrix.cache import (
     thread_cache_rejection_reason,
     thread_history_result,
 )
+from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     apply_latest_edits_to_messages,
@@ -588,7 +589,7 @@ async def _invalidate_thread_cache_entry(
     *,
     room_id: str,
     thread_id: str,
-) -> None:
+) -> bool:
     """Best-effort invalidation for one broken cached thread entry."""
     try:
         await event_cache.invalidate_thread(room_id, thread_id)
@@ -598,6 +599,8 @@ async def _invalidate_thread_cache_entry(
             room_id=room_id,
             thread_id=thread_id,
         )
+        return False
+    return True
 
 
 async def _mark_thread_cache_stale_for_opaque_history(
@@ -613,13 +616,22 @@ async def _mark_thread_cache_stale_for_opaque_history(
             thread_id,
             reason=_OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON,
         )
-    except Exception:
+    except Exception as stale_marker_error:
         logger.warning(
             "Failed to mark opaque thread history stale; deleting cached snapshot",
             room_id=room_id,
             thread_id=thread_id,
         )
-        await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
+        invalidated = await _invalidate_thread_cache_entry(
+            event_cache,
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        if invalidated or isinstance(stale_marker_error, EventCacheBackendUnavailableError):
+            return
+        event_cache.disable(
+            f"stale_marker_failed:thread:{thread_id}:{room_id}:{_OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON}",
+        )
 
 
 async def _fetch_thread_history_with_events(

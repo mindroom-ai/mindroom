@@ -19,7 +19,7 @@ from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.matrix.cache import ThreadHistoryResult, thread_cache_rejection_reason
-from mindroom.matrix.cache.event_cache import ThreadCacheState
+from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError, ThreadCacheState
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage, RoomThreadsPageError, get_room_threads_page
@@ -2562,6 +2562,114 @@ class TestThreadHistoryCache:
         assert [event["event_id"] for event in stale_events] == [thread_id, "$reply"]
         assert [message.body for message in recovered_history] == ["Root message", "Recovered reply"]
         assert thread_cache_rejection_reason(recovered_state) is None
+
+    @pytest.mark.asyncio
+    async def test_opaque_refresh_double_invalidation_failure_disables_old_snapshot(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Marker and deletion failure must disable reads instead of leaving a valid snapshot trusted."""
+        room_id = "!room:localhost"
+        thread_id = "$thread_root"
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+        root_event = self._make_text_event(
+            event_id=thread_id,
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        old_reply = self._make_text_event(
+            event_id="$reply",
+            sender="@user:localhost",
+            body="Old reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "Old reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+            },
+        )
+        opaque_reply = nio.MegolmEvent.from_dict(
+            {
+                "content": {
+                    "algorithm": "m.megolm.v1.aes-sha2",
+                    "ciphertext": "opaque ciphertext",
+                    "device_id": "DEVICE",
+                    "sender_key": "sender-key",
+                    "session_id": "session",
+                },
+                "event_id": "$opaque",
+                "sender": "@user:localhost",
+                "origin_server_ts": 3000,
+                "room_id": room_id,
+                "type": "m.room.encrypted",
+            },
+        )
+        opaque_page = MagicMock(spec=nio.RoomMessagesResponse)
+        opaque_page.chunk = [opaque_reply, root_event]
+        opaque_page.end = None
+        client = MagicMock()
+        client.room_messages = AsyncMock(return_value=opaque_page)
+
+        try:
+            await self._seed_thread_cache(
+                cache,
+                room_id=room_id,
+                thread_id=thread_id,
+                events=[self._cache_source(root_event), self._cache_source(old_reply)],
+            )
+            with (
+                patch.object(
+                    cache,
+                    "mark_thread_stale",
+                    AsyncMock(side_effect=RuntimeError("marker failed")),
+                ),
+                patch.object(
+                    cache,
+                    "invalidate_thread",
+                    AsyncMock(side_effect=RuntimeError("delete failed")),
+                ),
+                pytest.raises(matrix_client_module._OpaqueEncryptedThreadHistoryError),
+            ):
+                await matrix_client_module.refresh_thread_history_from_source(
+                    client,
+                    room_id,
+                    thread_id,
+                    cache,
+                    allow_stale_fallback=False,
+                )
+
+            client.room_messages.side_effect = RuntimeError("Matrix unavailable")
+            with pytest.raises(RuntimeError, match="Matrix unavailable"):
+                await matrix_client_module.fetch_dispatch_thread_history(
+                    client,
+                    room_id,
+                    thread_id,
+                    event_cache=cache,
+                )
+            disabled_thread_events = await cache.get_thread_events(room_id, thread_id)
+        finally:
+            await cache.close()
+
+        assert cache.runtime_diagnostics()["cache_sqlite_disabled"] is True
+        assert disabled_thread_events is None
+
+    @pytest.mark.asyncio
+    async def test_opaque_refresh_backend_outage_preserves_reconnectable_cache(self) -> None:
+        """A transient backend outage should keep pending-marker recovery available after reconnect."""
+        backend_error = EventCacheBackendUnavailableError("PostgreSQL unavailable")
+        event_cache = _event_cache()
+        event_cache.mark_thread_stale.side_effect = backend_error
+        event_cache.invalidate_thread.side_effect = backend_error
+
+        await matrix_client_module._mark_thread_cache_stale_for_opaque_history(
+            event_cache,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+        )
+
+        event_cache.disable.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_fetch_dispatch_thread_snapshot_uses_fresh_durable_cache(self, tmp_path: Path) -> None:
