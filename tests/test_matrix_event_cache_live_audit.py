@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+from contextlib import closing
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -18,6 +20,7 @@ from tests.manual.matrix_event_cache_live_audit import (
     MatrixApi,
     MatrixAuditError,
     ThreadReadRecord,
+    _begin_readonly_snapshot,
     _secret_free_evidence,
     _strict_thread_read_sequence,
     media_fixtures,
@@ -86,6 +89,27 @@ def test_transaction_ids_are_unique_uuids() -> None:
 
     assert len(transaction_ids) == 100
     assert all(str(UUID(transaction_id)) == transaction_id for transaction_id in transaction_ids)
+
+
+def test_readonly_snapshot_is_consistent_across_concurrent_writes(tmp_path: Path) -> None:
+    """Service-cache evidence queries should share one stable read transaction."""
+    database_path = tmp_path / "service.db"
+    database_uri = f"file:{database_path}?mode=ro"
+    with closing(sqlite3.connect(database_path)) as writer:
+        writer.execute("PRAGMA journal_mode = WAL")
+        writer.execute("CREATE TABLE evidence (event_id TEXT PRIMARY KEY)")
+        writer.execute("INSERT INTO evidence VALUES ('$before')")
+        writer.commit()
+        with closing(sqlite3.connect(database_uri, uri=True)) as reader:
+            _begin_readonly_snapshot(reader)
+            assert reader.in_transaction is True
+            assert reader.execute("PRAGMA query_only").fetchone() == (1,)
+            assert reader.execute("SELECT event_id FROM evidence").fetchall() == [("$before",)]
+
+            writer.execute("INSERT INTO evidence VALUES ('$after')")
+            writer.commit()
+
+            assert reader.execute("SELECT event_id FROM evidence").fetchall() == [("$before",)]
 
 
 def test_evidence_rejects_secret_keys_and_values() -> None:

@@ -55,7 +55,11 @@ Redacting only an edit removes that edit and restores the next applicable visibl
 
 Redacting a reaction removes only the reaction and leaves the visible thread snapshot unchanged.
 
-Redacting a poll response, poll end, beacon, or any other non-message event removes only that point event and leaves every thread snapshot unchanged.
+When target metadata identifies a poll response, poll end, beacon, or other non-message event, redaction removes only that point event and leaves every thread snapshot unchanged.
+
+A metadata-less redaction of an absent target is a thread-state no-op.
+
+If target metadata is unavailable but a cached target is removed, the impact is unknown and every cached thread in that room is invalidated fail-closed.
 
 ## Deliberately excluded sync categories
 
@@ -103,11 +107,15 @@ The harness emits the interaction matrix, client-controllable ephemeral categori
 
 The harness can invite and explicitly join a second test agent when its token is supplied through a second environment variable.
 
-The optional service-cache inspection opens SQLite with `mode=ro`, enables `PRAGMA query_only`, and records only IDs, counts, integrity state, hashes, and timings.
+The optional service-cache inspection opens SQLite with `mode=ro`, enables `PRAGMA query_only`, starts one read transaction for a consistent snapshot, and records only IDs, counts, integrity state, hashes, and timings.
 
 Strict thread reads use a separate new disposable SQLite database and refuse an existing path or the service-cache path.
 
 The first strict read refills that isolated cache from the authenticated homeserver, the second proves a zero-fetch cache hit, and a redaction applied through the cache API proves rejection and refill without writing the live service database.
+
+The backend-neutral owning-seam test `test_advisory_stale_fallback_is_labeled_and_dispatch_rejects_it` forces the same homeserver failure against SQLite and PostgreSQL.
+
+It proves that an advisory read may return labeled degraded `stale_cache` history while the strict dispatch snapshot propagates the refill failure instead of serving stale context.
 
 Every declared interaction expectation is compared with homeserver accounting, the read-only service snapshot, and the initial visible thread projection before evidence is written.
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -15,9 +16,16 @@ from mindroom.matrix.cache import (
 )
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.thread_writes import ThreadSyncWritePolicy
-from mindroom.matrix.client_thread_history import fetch_dispatch_thread_snapshot
+from mindroom.matrix.client_thread_history import fetch_dispatch_thread_snapshot, fetch_thread_history
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
+from mindroom.matrix.thread_diagnostics import (
+    THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
+    THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
+    THREAD_HISTORY_ERROR_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_STALE_CACHE,
+)
 from tests.event_cache_test_support import (
     raw_nio_event,
     raw_nio_redaction,
@@ -25,7 +33,7 @@ from tests.event_cache_test_support import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     import nio
 
@@ -35,6 +43,7 @@ if TYPE_CHECKING:
 _ROOM_ID = "!cache-contract:localhost"
 _THREAD_ID = "$thread-root"
 _THREAD_CHILD_ID = "$thread-child"
+_OTHER_THREAD_ID = "$other-thread-root"
 _SENDER = "@user:localhost"
 
 
@@ -458,7 +467,11 @@ def _room_level_timeline_sources() -> list[dict[str, Any]]:
     ]
 
 
-def _build_sync_harness(event_cache: ConversationEventCache) -> _SyncHarness:
+def _build_sync_harness(
+    event_cache: ConversationEventCache,
+    *,
+    fetch_event_info_override: Callable[[str, str], Awaitable[EventInfo | None]] | None = None,
+) -> _SyncHarness:
     logger = get_logger("tests.matrix_cache_interaction_contract")
     coordinator = EventCacheWriteCoordinator(logger=logger)
     runtime = cast(
@@ -476,7 +489,7 @@ def _build_sync_harness(event_cache: ConversationEventCache) -> _SyncHarness:
     resolver = ThreadMutationResolver(
         logger_getter=lambda: logger,
         runtime=runtime,
-        fetch_event_info_for_thread_resolution=fetch_event_info,
+        fetch_event_info_for_thread_resolution=fetch_event_info_override or fetch_event_info,
     )
     cache_ops = ThreadMutationCacheOps(
         logger_getter=lambda: logger,
@@ -503,6 +516,25 @@ async def _seed_thread(event_cache: ConversationEventCache) -> None:
                 timestamp=2,
                 body="child",
                 relation=_thread_relation(),
+            ),
+        ],
+        validated_at=10.0,
+    )
+
+
+async def _seed_other_thread(event_cache: ConversationEventCache) -> None:
+    await replace_thread_unconditionally(
+        event_cache,
+        _ROOM_ID,
+        _OTHER_THREAD_ID,
+        [
+            _message_source(_OTHER_THREAD_ID, "m.text", timestamp=3, body="other root"),
+            _message_source(
+                "$other-thread-child",
+                "m.text",
+                timestamp=4,
+                body="other child",
+                relation=_thread_relation(_OTHER_THREAD_ID),
             ),
         ],
         validated_at=10.0,
@@ -1067,6 +1099,124 @@ async def test_non_message_reference_redactions_are_point_only_and_tombstoned(
         assert await event_cache.get_event(_ROOM_ID, event_id) is None
     assert await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID) == before_events
     assert await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID) == before_state
+
+
+@pytest.mark.asyncio
+async def test_unknown_redaction_without_cached_target_is_a_thread_state_noop(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A metadata-less redaction cannot invalidate threads when no cached target was removed."""
+    await _seed_thread(event_cache)
+    before_state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+
+    await _build_sync_harness(event_cache).apply(
+        _sync_response(
+            [
+                raw_nio_redaction(
+                    _event_source(
+                        "$unknown-target-redaction",
+                        "m.room.redaction",
+                        {"reason": "target absent"},
+                        timestamp=129,
+                    ),
+                    redacts="$unknown-target",
+                ),
+            ],
+        ),
+    )
+
+    assert await event_cache.get_event(_ROOM_ID, "$unknown-target") is None
+    assert await event_cache.get_thread_id_for_event(_ROOM_ID, "$unknown-target") is None
+    assert await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID) == before_state
+
+
+@pytest.mark.asyncio
+async def test_unknown_redaction_of_cached_target_fails_closed_room_wide(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Removing a cached target with unavailable metadata invalidates every room thread."""
+    await _seed_thread(event_cache)
+    await _seed_other_thread(event_cache)
+    target = _event_source(
+        "$metadata-unavailable-target",
+        "m.poll.response",
+        {"m.poll.response": {"answers": ["a"]}},
+        timestamp=130,
+    )
+    await event_cache.store_event("$metadata-unavailable-target", _ROOM_ID, target)
+
+    async def fail_metadata_lookup(_room_id: str, _event_id: str) -> EventInfo | None:
+        msg = "metadata unavailable"
+        raise RuntimeError(msg)
+
+    await _build_sync_harness(
+        event_cache,
+        fetch_event_info_override=fail_metadata_lookup,
+    ).apply(
+        _sync_response(
+            [
+                raw_nio_redaction(
+                    _event_source(
+                        "$metadata-unavailable-redaction",
+                        "m.room.redaction",
+                        {"reason": "lookup failure"},
+                        timestamp=131,
+                    ),
+                    redacts="$metadata-unavailable-target",
+                ),
+            ],
+        ),
+    )
+
+    assert await event_cache.get_event(_ROOM_ID, "$metadata-unavailable-target") is None
+    for thread_id in (_THREAD_ID, _OTHER_THREAD_ID):
+        state = await event_cache.get_thread_cache_state(_ROOM_ID, thread_id)
+        assert state is not None
+        assert state.room_invalidation_reason == "sync_redaction_lookup_unavailable"
+        assert thread_cache_rejection_reason(state) == "room_invalidated_after_validation"
+
+
+@pytest.mark.asyncio
+async def test_advisory_stale_fallback_is_labeled_and_dispatch_rejects_it(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Only advisory reads may return stale rows after a failed homeserver refill."""
+    await _seed_thread(event_cache)
+    await event_cache.mark_thread_stale(
+        _ROOM_ID,
+        _THREAD_ID,
+        reason="contract_fallback",
+    )
+    fetch_error = RuntimeError("deterministic homeserver failure")
+    client = cast("nio.AsyncClient", object())
+
+    with patch(
+        "mindroom.matrix.client_thread_history._fetch_thread_history_with_events",
+        AsyncMock(side_effect=fetch_error),
+    ) as fetch_from_homeserver:
+        advisory_history = await fetch_thread_history(
+            client,
+            _ROOM_ID,
+            _THREAD_ID,
+            event_cache,
+        )
+        with pytest.raises(RuntimeError, match="deterministic homeserver failure"):
+            await fetch_dispatch_thread_snapshot(
+                client,
+                _ROOM_ID,
+                _THREAD_ID,
+                event_cache,
+            )
+
+    assert [message.event_id for message in advisory_history] == [_THREAD_ID, _THREAD_CHILD_ID]
+    assert advisory_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_STALE_CACHE
+    assert advisory_history.diagnostics[THREAD_HISTORY_DEGRADED_DIAGNOSTIC] is True
+    assert advisory_history.diagnostics[THREAD_HISTORY_ERROR_DIAGNOSTIC] == str(fetch_error)
+    assert (
+        advisory_history.diagnostics[THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC]
+        == "thread_invalidated_after_validation"
+    )
+    assert fetch_from_homeserver.await_count == 2
 
 
 @pytest.mark.parametrize(

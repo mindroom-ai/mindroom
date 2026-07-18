@@ -34,10 +34,13 @@ Who may mutate thread state, and how:
    ROOM_LEVEL means no thread-cache change,
    and UNKNOWN means the writer must invalidate the whole room's cached threads
    (or, pre-send in tools, refuse the operation) because membership could not be proven.
+   A redaction with UNKNOWN impact invalidates the room only when it actually removed a cached target;
+   an absent target is a thread-state no-op.
 
-5. Redactions are thread-affecting only when the target is a plaintext or encrypted room message.
-   Reactions and all non-message event families are always ROOM_LEVEL because removing them cannot
-   change a cached thread's visible messages.
+5. Redactions are thread-affecting only when target metadata identifies a plaintext or encrypted
+   room message.
+   Known reactions and non-message targets are ROOM_LEVEL because removing them cannot change a
+   cached thread's visible messages.
 
 6. Redactions whose target metadata is gone fall back to the cache's own event->thread index before
    failing closed: the homeserver strips a redacted event's content, so old redaction targets are

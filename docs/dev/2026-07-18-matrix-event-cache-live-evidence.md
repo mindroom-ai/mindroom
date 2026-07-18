@@ -78,6 +78,10 @@ The third strict read rejected the isolated snapshot with `thread_invalidated_af
 
 All three reads reported `degraded=false` and no error.
 
+The hosted run intentionally did not manufacture a homeserver outage.
+
+The owning-seam SQLite and PostgreSQL contract test `test_advisory_stale_fallback_is_labeled_and_dispatch_rejects_it` deterministically forces refill failure and proves that advisory reads return labeled degraded `stale_cache` history while dispatch reads reject that fallback and propagate the failure.
+
 ## Read-only service-cache validation
 
 The final room snapshot contained 55 active events, six tombstones, three edit indexes, 11 event-to-thread indexes, and one thread state row.

@@ -1344,11 +1344,17 @@ async def _strict_thread_read_sequence(
         await cache.close()
 
 
+def _begin_readonly_snapshot(db: sqlite3.Connection) -> None:
+    """Pin all audit queries to one query-only SQLite read transaction."""
+    db.execute("PRAGMA query_only = ON")
+    db.execute("BEGIN")
+
+
 def read_cache_snapshot(cache_db_path: Path, room_id: str) -> CacheSnapshot:
-    """Read cache evidence through SQLite read-only/query-only mode."""
+    """Read cache evidence through one SQLite read-only/query-only snapshot."""
     database_uri = f"file:{quote(str(cache_db_path.resolve()))}?mode=ro"
     with closing(sqlite3.connect(database_uri, uri=True)) as db:
-        db.execute("PRAGMA query_only = ON")
+        _begin_readonly_snapshot(db)
         quick_check_row = db.execute("PRAGMA quick_check").fetchone()
         active_event_ids = tuple(
             row[0]
