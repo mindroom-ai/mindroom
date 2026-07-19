@@ -949,10 +949,10 @@ async def test_sync_response_side_effect_failure_clears_certified_checkpoint(tmp
     response = MagicMock(spec=nio.SyncResponse)
     response.next_batch = "s_after_side_effect_failure"
     response.rooms = MagicMock(join={})
-    bot._emit_agent_lifecycle_event = AsyncMock(side_effect=RuntimeError("bot ready failed"))  # type: ignore[method-assign]
 
     with (
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock(side_effect=RuntimeError("bot ready failed"))),
         pytest.raises(RuntimeError, match="bot ready failed"),
     ):
         await bot._on_sync_response(response)
@@ -974,10 +974,10 @@ async def test_limited_sync_side_effect_failure_preserves_reset_recovery(tmp_pat
     limited_response.rooms = MagicMock(
         join={"!room:localhost": MagicMock(timeline=MagicMock(events=[], limited=True))},
     )
-    bot._emit_agent_lifecycle_event = AsyncMock(side_effect=RuntimeError("bot ready failed"))  # type: ignore[method-assign]
 
     with (
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock(side_effect=RuntimeError("bot ready failed"))),
         pytest.raises(RuntimeError, match="bot ready failed"),
     ):
         await bot._on_sync_response(limited_response)
