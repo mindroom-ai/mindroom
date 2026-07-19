@@ -1065,21 +1065,17 @@ class AgentBot:
             # earlier device may already have handled; don't re-notify on it.
             raise_notice_floor(self.client.user_id)
 
-    async def _purge_untrusted_principal_cache(self) -> None:
-        """Drop untrusted rows or leave this principal's cache disabled until restart."""
-        try:
-            await clear_untrusted_principal_cache(self.event_cache)
-        except Exception as exc:
-            self.logger.warning(
-                "matrix_untrusted_principal_cache_disabled",
-                error=str(exc),
-            )
-
     async def _prepare_cache_and_restore_saved_sync_token(self) -> None:
         """Restore a trusted checkpoint or clear untrusted principal-owned rows first."""
         loaded_token = self._loaded_sync_token_for_certification()
-        if not isinstance(loaded_token, SyncCheckpoint):
-            await self._purge_untrusted_principal_cache()
+        if loaded_token is None and self._invalidate_sync_checkpoint_for_cache_scope_cleanup():
+            try:
+                await clear_untrusted_principal_cache(self.event_cache)
+            except Exception as exc:
+                self.logger.warning(
+                    "matrix_untrusted_principal_cache_disabled",
+                    error=str(exc),
+                )
         self._restore_loaded_sync_token(loaded_token)
 
     async def _initialize_event_cache_for_sync_restore(self) -> None:

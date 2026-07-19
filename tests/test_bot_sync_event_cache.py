@@ -357,7 +357,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 "mindroom.matrix.cache.sqlite_event_cache_events.purge_principal_locked",
                 AsyncMock(side_effect=RuntimeError(failure_reason)),
             ):
-                await bot._purge_untrusted_principal_cache()
+                await bot._prepare_cache_and_restore_saved_sync_token()
 
             assert bot.event_cache.durable_writes_available is False
             bot.client.next_batch = "s_after_failed_cleanup"
@@ -372,6 +372,68 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             await self._run_sync_response_without_startup_side_effects(bot, later_response)
 
             assert load_sync_token_record(bot.storage_path, bot.agent_name) is None
+        finally:
+            await _close_bound_runtime_support(bot, support)
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_read_failure_clears_token_before_principal_purge(self, bot: AgentBot) -> None:
+        """A transient token read failure cannot leave a checkpoint trusted after cache purge."""
+        support = await _bind_owned_runtime_support(bot)
+        room_id = "!test:localhost"
+        event_id = "$cached-before-restart:localhost"
+        event = {
+            "content": {"body": "Cached event", "msgtype": "m.text"},
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567890,
+            "room_id": room_id,
+            "type": "m.room.message",
+        }
+        await bot.event_cache.store_event(event_id, room_id, event)
+        _save_certified_sync_token(bot, "s_before_read_failure")
+
+        try:
+            with patch(
+                "mindroom.bot.load_sync_token_record",
+                side_effect=OSError("checkpoint temporarily unreadable"),
+            ):
+                await bot._prepare_cache_and_restore_saved_sync_token()
+
+            assert load_sync_token_record(bot.storage_path, bot.agent_name) is None
+            assert await bot.event_cache.get_event(room_id, event_id) is None
+            assert bot.client.next_batch is None
+        finally:
+            await _close_bound_runtime_support(bot, support)
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_clear_failure_preserves_cache_before_principal_purge(self, bot: AgentBot) -> None:
+        """Startup must not purge cache rows while an old checkpoint cannot be removed."""
+        support = await _bind_owned_runtime_support(bot)
+        _save_certified_sync_token(bot, "s_before_clear_failure")
+        purge_untrusted_cache = AsyncMock()
+
+        try:
+            with (
+                patch(
+                    "mindroom.bot.load_sync_token_record",
+                    side_effect=OSError("checkpoint temporarily unreadable"),
+                ),
+                patch(
+                    "mindroom.bot.clear_sync_token",
+                    side_effect=OSError("checkpoint cannot be removed"),
+                ),
+                patch(
+                    "mindroom.bot.clear_untrusted_principal_cache",
+                    purge_untrusted_cache,
+                ),
+            ):
+                await bot._prepare_cache_and_restore_saved_sync_token()
+
+            purge_untrusted_cache.assert_not_awaited()
+            assert _load_sync_token_value(bot.storage_path, bot.agent_name) == "s_before_clear_failure"
+            assert bot.event_cache.durable_writes_available is False
+            assert bot._runtime_view.callback_failure_count == 1
+            assert bot.client.next_batch is None
         finally:
             await _close_bound_runtime_support(bot, support)
 
