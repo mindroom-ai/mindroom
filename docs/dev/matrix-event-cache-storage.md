@@ -38,7 +38,7 @@ It marks a thread stale before removing a membership row whose active source eve
 
 It compacts eligible streaming edits again so replayed or partially processed writes converge after restart.
 
-The startup log includes backend bytes where available, namespace payload bytes for PostgreSQL, normalized legacy thread-payload rows, row counts for active tables and cold history, tombstone counts, stale marker counts, streaming categories, orphan counts before and after repair, and repair and compaction outcomes.
+The startup log includes backend bytes where available, namespace payload bytes for PostgreSQL, normalized legacy thread-payload rows, row counts for active tables and cold history, tombstone counts, stale marker counts, streaming categories, remaining orphan counts, and repair and compaction outcomes.
 
 Runtime diagnostics expose the immutable startup maintenance report plus basic live backend, reconnection, and pending-invalidation state.
 SQLite omits byte size when startup filesystem metadata is unavailable.

@@ -324,10 +324,10 @@ async def test_sqlite_version_10_migrates_without_reset_and_repairs_orphans(tmp_
         stale_state = await cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
 
         assert diagnostics["cache_schema_migrated_from"] == 10
-        assert diagnostics["cache_orphan_edit_indexes_before"] == 1
         assert diagnostics["cache_orphan_edit_indexes_after"] == 0
-        assert diagnostics["cache_orphan_thread_indexes_before"] == 1
         assert diagnostics["cache_orphan_thread_indexes_after"] == 0
+        assert diagnostics["cache_repaired_edit_indexes"] == 1
+        assert diagnostics["cache_repaired_thread_indexes"] == 1
         assert diagnostics["cache_normalized_legacy_thread_payload_rows"] == 2
         assert cached_thread == [_message_event(_CHILD_ID, thread_id=_THREAD_ID)]
         assert stale_state is not None
@@ -380,7 +380,6 @@ async def test_sqlite_startup_repair_stales_orphan_membership(tmp_path: Path) ->
     await repaired_cache.initialize()
     try:
         diagnostics = repaired_cache.runtime_diagnostics()
-        assert diagnostics["cache_orphan_thread_event_references_before"] == 1
         assert diagnostics["cache_orphan_thread_event_references_after"] == 0
         assert diagnostics["cache_repaired_thread_event_references"] == 1
         state = await repaired_cache.get_thread_cache_state(_ROOM_ID, "$dangling-thread:localhost")
@@ -473,10 +472,10 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
             stale_state = await cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
 
             assert diagnostics["cache_schema_migrated_from"] == 1
-            assert diagnostics["cache_orphan_edit_indexes_before"] == 1
             assert diagnostics["cache_orphan_edit_indexes_after"] == 0
-            assert diagnostics["cache_orphan_thread_indexes_before"] == 1
             assert diagnostics["cache_orphan_thread_indexes_after"] == 0
+            assert diagnostics["cache_repaired_edit_indexes"] == 1
+            assert diagnostics["cache_repaired_thread_indexes"] == 1
             assert diagnostics["cache_normalized_legacy_thread_payload_rows"] == 2
             assert diagnostics["cache_storage_bytes"] > 0
             assert diagnostics["cache_namespace_payload_bytes"] > 0
@@ -806,7 +805,6 @@ async def test_postgres_startup_repair_stales_orphan_membership(
         await repaired_cache.initialize()
         try:
             diagnostics = repaired_cache.runtime_diagnostics()
-            assert diagnostics["cache_orphan_thread_event_references_before"] == 1
             assert diagnostics["cache_orphan_thread_event_references_after"] == 0
             assert diagnostics["cache_repaired_thread_event_references"] == 1
             state = await repaired_cache.get_thread_cache_state(_ROOM_ID, thread_id)

@@ -210,9 +210,6 @@ async def _collect_maintenance_report(
     migrated_from_schema_version: int | None,
     destructive_reset: bool,
     normalized_legacy_thread_payload_rows: int,
-    orphan_edit_indexes_before: int,
-    orphan_thread_indexes_before: int,
-    orphan_thread_event_references_before: int,
     repaired_edit_indexes: int,
     repaired_thread_indexes: int,
     repaired_thread_event_references: int,
@@ -281,11 +278,8 @@ async def _collect_maintenance_report(
             db,
             "SELECT COALESCE(SUM(length(event_json_zlib)), 0) FROM compacted_streaming_edits",
         ),
-        orphan_edit_indexes_before=orphan_edit_indexes_before,
         orphan_edit_indexes_after=await _orphan_edit_index_count(db),
-        orphan_thread_indexes_before=orphan_thread_indexes_before,
         orphan_thread_indexes_after=await orphan_thread_index_count(db),
-        orphan_thread_event_references_before=orphan_thread_event_references_before,
         orphan_thread_event_references_after=await _orphan_thread_event_reference_count(db),
         repaired_edit_indexes=repaired_edit_indexes,
         repaired_thread_indexes=repaired_thread_indexes,
@@ -303,9 +297,6 @@ async def run_startup_maintenance(
     normalized_legacy_thread_payload_rows: int,
 ) -> CacheMaintenanceReport:
     """Audit, safely repair, compact, and recount one SQLite cache transaction."""
-    orphan_edit_indexes_before = await _orphan_edit_index_count(db)
-    orphan_thread_indexes_before = await orphan_thread_index_count(db)
-    orphan_thread_event_references_before = await _orphan_thread_event_reference_count(db)
     repaired_counts = await _repair_orphan_derived_rows(db)
     compacted = await compact_superseded_streaming_edits(db)
     return await _collect_maintenance_report(
@@ -314,9 +305,6 @@ async def run_startup_maintenance(
         migrated_from_schema_version=migrated_from_schema_version,
         destructive_reset=destructive_reset,
         normalized_legacy_thread_payload_rows=normalized_legacy_thread_payload_rows,
-        orphan_edit_indexes_before=orphan_edit_indexes_before,
-        orphan_thread_indexes_before=orphan_thread_indexes_before,
-        orphan_thread_event_references_before=orphan_thread_event_references_before,
         repaired_edit_indexes=repaired_counts[0],
         repaired_thread_indexes=repaired_counts[1],
         repaired_thread_event_references=repaired_counts[2],

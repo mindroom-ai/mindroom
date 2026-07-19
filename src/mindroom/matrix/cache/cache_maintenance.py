@@ -68,11 +68,8 @@ class CacheMaintenanceReport:
     terminal_streaming_edit_rows: int = 0
     compacted_streaming_edit_archive_rows: int = 0
     compacted_streaming_edit_archive_bytes: int = 0
-    orphan_edit_indexes_before: int = 0
     orphan_edit_indexes_after: int = 0
-    orphan_thread_indexes_before: int = 0
     orphan_thread_indexes_after: int = 0
-    orphan_thread_event_references_before: int = 0
     orphan_thread_event_references_after: int = 0
     repaired_edit_indexes: int = 0
     repaired_thread_indexes: int = 0
@@ -100,11 +97,8 @@ class CacheMaintenanceReport:
             "cache_terminal_streaming_edit_rows": self.terminal_streaming_edit_rows,
             "cache_compacted_streaming_edit_archive_rows": self.compacted_streaming_edit_archive_rows,
             "cache_compacted_streaming_edit_archive_bytes": self.compacted_streaming_edit_archive_bytes,
-            "cache_orphan_edit_indexes_before": self.orphan_edit_indexes_before,
             "cache_orphan_edit_indexes_after": self.orphan_edit_indexes_after,
-            "cache_orphan_thread_indexes_before": self.orphan_thread_indexes_before,
             "cache_orphan_thread_indexes_after": self.orphan_thread_indexes_after,
-            "cache_orphan_thread_event_references_before": self.orphan_thread_event_references_before,
             "cache_orphan_thread_event_references_after": self.orphan_thread_event_references_after,
             "cache_repaired_edit_indexes": self.repaired_edit_indexes,
             "cache_repaired_thread_indexes": self.repaired_thread_indexes,

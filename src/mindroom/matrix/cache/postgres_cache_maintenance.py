@@ -210,7 +210,6 @@ async def _collect_maintenance_report(
     schema_version: int,
     migrated_from_schema_version: int | None,
     normalized_legacy_thread_payload_rows: int,
-    orphan_counts_before: tuple[int, int, int],
     repaired_counts: tuple[int, int, int],
     compacted_nonterminal_streaming_edits: int,
 ) -> CacheMaintenanceReport:
@@ -346,11 +345,8 @@ async def _collect_maintenance_report(
             """,
             (namespace,),
         ),
-        orphan_edit_indexes_before=orphan_counts_before[0],
         orphan_edit_indexes_after=await _orphan_edit_index_count(db, namespace=namespace),
-        orphan_thread_indexes_before=orphan_counts_before[1],
         orphan_thread_indexes_after=await orphan_thread_index_count(db, namespace=namespace),
-        orphan_thread_event_references_before=orphan_counts_before[2],
         orphan_thread_event_references_after=await _orphan_thread_event_reference_count(db, namespace=namespace),
         repaired_edit_indexes=repaired_counts[0],
         repaired_thread_indexes=repaired_counts[1],
@@ -368,11 +364,6 @@ async def run_startup_maintenance(
     normalized_legacy_thread_payload_rows: int,
 ) -> CacheMaintenanceReport:
     """Audit, safely repair, compact, and recount one PostgreSQL namespace."""
-    orphan_counts = (
-        await _orphan_edit_index_count(db, namespace=namespace),
-        await orphan_thread_index_count(db, namespace=namespace),
-        await _orphan_thread_event_reference_count(db, namespace=namespace),
-    )
     repaired_counts = await _repair_orphan_derived_rows(db, namespace=namespace)
     compacted = await compact_superseded_streaming_edits(db, namespace=namespace)
     return await _collect_maintenance_report(
@@ -381,7 +372,6 @@ async def run_startup_maintenance(
         schema_version=schema_version,
         migrated_from_schema_version=migrated_from_schema_version,
         normalized_legacy_thread_payload_rows=normalized_legacy_thread_payload_rows,
-        orphan_counts_before=orphan_counts,
         repaired_counts=repaired_counts,
         compacted_nonterminal_streaming_edits=compacted,
     )
