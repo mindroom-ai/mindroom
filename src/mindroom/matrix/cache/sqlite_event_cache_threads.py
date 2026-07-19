@@ -26,7 +26,12 @@ import json
 import time
 from typing import TYPE_CHECKING, Any
 
-from .event_cache_events import event_id_for_cache, serialize_cacheable_events, serialize_cached_event
+from .event_cache_events import (
+    event_id_for_cache,
+    has_terminal_streaming_edit,
+    serialize_cacheable_events,
+    serialize_cached_event,
+)
 from .event_normalization import normalize_event_source_for_cache
 from .sqlite_event_cache_events import (
     allocate_write_sequences,
@@ -232,7 +237,8 @@ async def _store_thread_events_locked(
                 for event, write_sequence in zip(serialized_events, write_sequences, strict=True)
             ],
         )
-        await compact_superseded_streaming_edits(db, room_id=room_id)
+        if has_terminal_streaming_edit(serialized_events):
+            await compact_superseded_streaming_edits(db, room_id=room_id)
     await db.execute(
         """
         INSERT INTO thread_cache_state(
@@ -539,7 +545,8 @@ async def append_existing_thread_event(
             cached_at=time.time(),
             thread_id=thread_id,
         )
-        await compact_superseded_streaming_edits(db, room_id=room_id)
+        if has_terminal_streaming_edit([serialized_event]):
+            await compact_superseded_streaming_edits(db, room_id=room_id)
         return False
 
     await write_lookup_index_rows(
@@ -567,7 +574,8 @@ async def append_existing_thread_event(
             write_sequence,
         ),
     )
-    await compact_superseded_streaming_edits(db, room_id=room_id)
+    if has_terminal_streaming_edit([serialized_event]):
+        await compact_superseded_streaming_edits(db, room_id=room_id)
     return True
 
 

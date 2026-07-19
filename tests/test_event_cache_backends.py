@@ -301,7 +301,7 @@ async def test_sqlite_event_cache_initialize_closes_db_after_cancellation(
     async def connect(_db_path: Path) -> object:
         return db
 
-    async def prepare_event_cache_schema(_db: object, *, db_path: Path) -> tuple[int | None, bool]:
+    async def prepare_event_cache_schema(_db: object, *, db_path: Path) -> tuple[int | None, bool, int]:
         _ = db_path
         raise asyncio.CancelledError(cancel_reason)
 

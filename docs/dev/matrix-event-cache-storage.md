@@ -32,7 +32,7 @@ Startup maintenance runs inside the same transaction as schema migration.
 
 It audits and repairs edit-index rows whose edit event is absent.
 
-It audits and repairs non-root event-to-thread rows whose event is absent while retaining learned root self-mappings.
+It audits and repairs event-to-thread rows whose event is absent while retaining root self-mappings proven by a surviving active child mapping, normalized thread membership, or cold child mapping.
 
 It marks a thread stale before removing a membership row whose active source event is absent.
 

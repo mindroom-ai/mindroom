@@ -41,15 +41,6 @@ def test_start_without_token_is_cold() -> None:
     assert startup.sync_token is None
 
 
-def test_start_with_legacy_token_restores_sync_only() -> None:
-    """Plaintext tokens restore nio continuity without checkpoint certification."""
-    startup = start_from_loaded_token("s_legacy")
-
-    assert startup.state is SyncTrustState.COLD
-    assert startup.sync_token == "s_legacy"  # noqa: S105
-    assert startup.legacy_token is True
-
-
 def test_start_with_checkpoint_waits_for_first_sync() -> None:
     """Certified checkpoints become pending until catch-up writes are durable."""
     checkpoint = SyncCheckpoint(token="s_saved")  # noqa: S106

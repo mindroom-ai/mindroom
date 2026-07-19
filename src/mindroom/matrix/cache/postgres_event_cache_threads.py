@@ -6,7 +6,12 @@ import json
 import time
 from typing import TYPE_CHECKING, Any
 
-from .event_cache_events import event_id_for_cache, serialize_cacheable_events, serialize_cached_event
+from .event_cache_events import (
+    event_id_for_cache,
+    has_terminal_streaming_edit,
+    serialize_cacheable_events,
+    serialize_cached_event,
+)
 from .event_normalization import normalize_event_source_for_cache
 from .postgres_cursor import fetchall, fetchone
 from .postgres_event_cache_events import (
@@ -210,11 +215,12 @@ async def _store_thread_events_locked(
                 event.origin_server_ts,
             ),
         )
-    await compact_superseded_streaming_edits(
-        db,
-        namespace=namespace,
-        room_id=room_id,
-    )
+    if has_terminal_streaming_edit(serialized_events):
+        await compact_superseded_streaming_edits(
+            db,
+            namespace=namespace,
+            room_id=room_id,
+        )
     await _upsert_thread_cache_state(
         db,
         namespace=namespace,
@@ -556,7 +562,8 @@ async def append_existing_thread_event(
             cached_at=time.time(),
             thread_id=thread_id,
         )
-        await compact_superseded_streaming_edits(db, namespace=namespace, room_id=room_id)
+        if has_terminal_streaming_edit([serialized_event]):
+            await compact_superseded_streaming_edits(db, namespace=namespace, room_id=room_id)
         return False
 
     await write_lookup_index_rows(
@@ -585,7 +592,8 @@ async def append_existing_thread_event(
             serialized_event.origin_server_ts,
         ),
     )
-    await compact_superseded_streaming_edits(db, namespace=namespace, room_id=room_id)
+    if has_terminal_streaming_edit([serialized_event]):
+        await compact_superseded_streaming_edits(db, namespace=namespace, room_id=room_id)
     return True
 
 

@@ -1743,7 +1743,10 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.matrix.cache.event_cache_events"
-depends_on = ["mindroom.matrix.event_info"]
+depends_on = [
+    "mindroom.constants",
+    "mindroom.matrix.event_info",
+]
 visibility = [
     "mindroom.matrix.cache.postgres_event_cache_events",
     "mindroom.matrix.cache.postgres_event_cache_threads",
@@ -1835,6 +1838,7 @@ visibility = [
 path = "mindroom.matrix.cache.sqlite_cache_maintenance"
 depends_on = [
     "mindroom.matrix.cache.cache_maintenance",
+    "mindroom.matrix.cache.sqlite_event_cache_events",
     "mindroom.matrix.cache.sqlite_streaming_compaction",
 ]
 visibility = ["mindroom.matrix.cache.sqlite_event_cache"]
@@ -1856,6 +1860,7 @@ path = "mindroom.matrix.cache.postgres_cache_maintenance"
 depends_on = [
     "mindroom.matrix.cache.cache_maintenance",
     "mindroom.matrix.cache.postgres_cursor",
+    "mindroom.matrix.cache.postgres_event_cache_events",
     "mindroom.matrix.cache.postgres_streaming_compaction",
 ]
 visibility = ["mindroom.matrix.cache.postgres_event_cache"]

@@ -181,6 +181,26 @@ async def _initialize_postgres_event_cache_db(
     return db, report, certification_generation
 
 
+async def _reconnect_postgres_event_cache_db(
+    database_url: str,
+    *,
+    namespace: str,
+) -> tuple[psycopg.AsyncConnection, str]:
+    """Open a replacement connection without rerunning startup-wide maintenance."""
+    db = await psycopg.AsyncConnection.connect(database_url)
+    try:
+        certification_generation = await _initialize_namespace_certification_generation(
+            db,
+            namespace=namespace,
+        )
+        await db.commit()
+    except BaseException:
+        await _rollback_postgres_connection_best_effort(db, namespace=namespace, operation="reconnect")
+        await _close_postgres_connection_best_effort(db, namespace=namespace, operation="reconnect")
+        raise
+    return db, certification_generation
+
+
 async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
     """Create the current PostgreSQL cache schema in one connection."""
     await db.execute("CREATE SEQUENCE IF NOT EXISTS mindroom_event_cache_write_seq")
@@ -536,11 +556,17 @@ class _PostgresEventCacheRuntime:
             had_previous_connection = self._db is not None
             await self._close_db_locked(operation="initialize")
             try:
-                self._db, report, self._certification_generation = await _initialize_postgres_event_cache_db(
-                    self._database_url,
-                    namespace=self._namespace,
-                )
-                self._maintenance_report = report
+                if self._maintenance_report is None:
+                    self._db, report, self._certification_generation = await _initialize_postgres_event_cache_db(
+                        self._database_url,
+                        namespace=self._namespace,
+                    )
+                    self._maintenance_report = report
+                else:
+                    self._db, self._certification_generation = await _reconnect_postgres_event_cache_db(
+                        self._database_url,
+                        namespace=self._namespace,
+                    )
             except Exception as exc:
                 if _is_transient_postgres_failure(exc):
                     self._transient_failure_count += 1

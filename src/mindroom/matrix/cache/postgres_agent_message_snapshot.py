@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import zlib
 from typing import TYPE_CHECKING, Any
 
 import psycopg
@@ -205,7 +204,7 @@ async def load_postgres_agent_message_snapshot(
             sender=sender,
             runtime_started_at=runtime_started_at,
         )
-    except (json.JSONDecodeError, zlib.error) as exc:
+    except json.JSONDecodeError as exc:
         msg = "Cached Matrix event JSON is corrupt"
         raise AgentMessageSnapshotUnavailable(msg) from exc
     except psycopg.Error as exc:

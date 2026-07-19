@@ -7,6 +7,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from .cache_maintenance import NONTERMINAL_STREAM_STATUSES, TERMINAL_STREAM_STATUSES, CacheMaintenanceReport
+from .sqlite_event_cache_events import orphan_thread_index_count, repair_orphan_thread_indexes
 from .sqlite_streaming_compaction import compact_superseded_streaming_edits
 
 if TYPE_CHECKING:
@@ -120,47 +121,6 @@ _ORPHAN_EDIT_INDEX_PREDICATE = """
     )
 """
 
-_ORPHAN_THREAD_INDEX_PREDICATE = """
-    NOT EXISTS (
-        SELECT 1
-        FROM events
-        WHERE events.event_id = event_threads.event_id
-            AND events.room_id = event_threads.room_id
-    )
-    AND NOT (
-        event_threads.event_id = event_threads.thread_id
-        AND (
-            EXISTS (
-                SELECT 1
-                FROM event_threads AS child
-                JOIN events AS child_event
-                    ON child_event.event_id = child.event_id
-                    AND child_event.room_id = child.room_id
-                WHERE child.room_id = event_threads.room_id
-                    AND child.thread_id = event_threads.thread_id
-                    AND child.event_id != child.thread_id
-            )
-            OR EXISTS (
-                SELECT 1
-                FROM thread_events AS child_membership
-                JOIN events AS child_event
-                    ON child_event.event_id = child_membership.event_id
-                    AND child_event.room_id = child_membership.room_id
-                WHERE child_membership.room_id = event_threads.room_id
-                    AND child_membership.thread_id = event_threads.thread_id
-                    AND child_membership.event_id != child_membership.thread_id
-            )
-            OR EXISTS (
-                SELECT 1
-                FROM compacted_streaming_edits AS archived_child
-                WHERE archived_child.room_id = event_threads.room_id
-                    AND archived_child.indexed_thread_id = event_threads.thread_id
-                    AND archived_child.event_id != event_threads.thread_id
-            )
-        )
-    )
-"""
-
 _ORPHAN_THREAD_EVENT_REFERENCE_PREDICATE = """
     NOT EXISTS (
         SELECT 1
@@ -179,10 +139,7 @@ async def _orphan_edit_index_count(db: aiosqlite.Connection) -> int:
 
 
 async def _orphan_thread_index_count(db: aiosqlite.Connection) -> int:
-    return await _scalar_count(
-        db,
-        f"SELECT COUNT(*) FROM event_threads WHERE {_ORPHAN_THREAD_INDEX_PREDICATE}",  # noqa: S608
-    )
+    return await orphan_thread_index_count(db)
 
 
 async def _orphan_thread_event_reference_count(db: aiosqlite.Connection) -> int:
@@ -244,11 +201,7 @@ async def _repair_orphan_derived_rows(db: aiosqlite.Connection) -> tuple[int, in
     repaired_edit_indexes = 0 if edit_cursor.rowcount is None else int(edit_cursor.rowcount)
     await edit_cursor.close()
 
-    thread_cursor = await db.execute(
-        f"DELETE FROM event_threads WHERE {_ORPHAN_THREAD_INDEX_PREDICATE}",  # noqa: S608
-    )
-    repaired_thread_indexes = 0 if thread_cursor.rowcount is None else int(thread_cursor.rowcount)
-    await thread_cursor.close()
+    repaired_thread_indexes = await repair_orphan_thread_indexes(db)
 
     repaired_thread_event_references = await _repair_orphan_thread_event_references(db)
     return repaired_edit_indexes, repaired_thread_indexes, repaired_thread_event_references

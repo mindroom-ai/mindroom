@@ -16,6 +16,7 @@ from .event_cache_events import (
     event_redaction_candidate_ids,
     event_thread_rows,
     filter_redacted_events,
+    has_terminal_streaming_edit,
     redaction_removal_event_ids,
     serialize_cacheable_events,
 )
@@ -35,6 +36,53 @@ if TYPE_CHECKING:
     from psycopg import AsyncConnection
 
 logger = get_logger(__name__)
+
+_ORPHAN_THREAD_INDEX_PREDICATE = """
+    NOT EXISTS (
+        SELECT 1
+        FROM mindroom_event_cache_events AS events
+        WHERE events.namespace = event_threads.namespace
+            AND events.event_id = event_threads.event_id
+            AND events.room_id = event_threads.room_id
+    )
+    AND NOT (
+        event_threads.event_id = event_threads.thread_id
+        AND (
+            EXISTS (
+                SELECT 1
+                FROM mindroom_event_cache_event_threads AS child
+                JOIN mindroom_event_cache_events AS child_event
+                    ON child_event.namespace = child.namespace
+                    AND child_event.event_id = child.event_id
+                    AND child_event.room_id = child.room_id
+                WHERE child.namespace = event_threads.namespace
+                    AND child.room_id = event_threads.room_id
+                    AND child.thread_id = event_threads.thread_id
+                    AND child.event_id != child.thread_id
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM mindroom_event_cache_thread_events AS child_membership
+                JOIN mindroom_event_cache_events AS child_event
+                    ON child_event.namespace = child_membership.namespace
+                    AND child_event.event_id = child_membership.event_id
+                    AND child_event.room_id = child_membership.room_id
+                WHERE child_membership.namespace = event_threads.namespace
+                    AND child_membership.room_id = event_threads.room_id
+                    AND child_membership.thread_id = event_threads.thread_id
+                    AND child_membership.event_id != child_membership.thread_id
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM mindroom_event_cache_compacted_streaming_edits AS archived_child
+                WHERE archived_child.namespace = event_threads.namespace
+                    AND archived_child.room_id = event_threads.room_id
+                    AND archived_child.indexed_thread_id = event_threads.thread_id
+                    AND archived_child.event_id != event_threads.thread_id
+            )
+        )
+    )
+"""
 
 
 async def load_event(
@@ -248,18 +296,23 @@ async def persist_lookup_events(
 ) -> None:
     """Persist point-lookups and derived indexes for one room-scoped event batch."""
     cacheable_events = await filter_cacheable_events(db, namespace, room_id, room_events)
+    serialized_events = serialize_cacheable_events(cacheable_events)
     await write_lookup_index_rows(
         db,
         namespace=namespace,
         room_id=room_id,
-        serialized_events=serialize_cacheable_events(cacheable_events),
+        serialized_events=serialized_events,
         cached_at=cached_at,
         thread_id=thread_id,
     )
-    compacted = await compact_superseded_streaming_edits(
-        db,
-        namespace=namespace,
-        room_id=room_id,
+    compacted = (
+        await compact_superseded_streaming_edits(
+            db,
+            namespace=namespace,
+            room_id=room_id,
+        )
+        if has_terminal_streaming_edit(serialized_events)
+        else 0
     )
     if compacted:
         logger.info(
@@ -333,16 +386,16 @@ async def redact_event_locked(
         event_ids=removed_event_ids,
         original_event_id=event_id,
     )
-    deleted_thread_index_rows = await delete_event_thread_rows(
-        db,
-        namespace,
-        room_id,
-        event_ids=removed_event_ids,
-    )
     deleted_archived_rows = await delete_archived_events(
         db,
         namespace=namespace,
         room_id=room_id,
+        event_ids=removed_event_ids,
+    )
+    deleted_thread_index_rows = await delete_event_thread_rows(
+        db,
+        namespace,
+        room_id,
         event_ids=removed_event_ids,
     )
     await _record_redacted_events(
@@ -519,13 +572,58 @@ async def delete_event_thread_rows(
     """Delete durable event-to-thread rows for the provided event IDs."""
     if not event_ids:
         return 0
-    return await rowcount(
+    deleted_rows = await rowcount(
         db,
         """
         DELETE FROM mindroom_event_cache_event_threads
         WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
         """,
         (namespace, room_id, event_ids),
+    )
+    return deleted_rows + await repair_orphan_thread_indexes(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+    )
+
+
+async def orphan_thread_index_count(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+) -> int:
+    """Count unsupported event-to-thread rows."""
+    row = await fetchone(
+        db,
+        f"""
+        SELECT COUNT(*)
+        FROM mindroom_event_cache_event_threads AS event_threads
+        WHERE event_threads.namespace = %s
+            AND {_ORPHAN_THREAD_INDEX_PREDICATE}
+        """,  # noqa: S608
+        (namespace,),
+    )
+    return 0 if row is None else int(row[0])
+
+
+async def repair_orphan_thread_indexes(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str | None = None,
+) -> int:
+    """Remove unsupported thread mappings globally at startup or within one mutated room."""
+    room_predicate = "" if room_id is None else "AND event_threads.room_id = %s"
+    parameters = (namespace, *((room_id,) if room_id is not None else ()))
+    return await rowcount(
+        db,
+        f"""
+        DELETE FROM mindroom_event_cache_event_threads AS event_threads
+        WHERE event_threads.namespace = %s
+            AND {_ORPHAN_THREAD_INDEX_PREDICATE}
+            {room_predicate}
+        """,  # noqa: S608
+        parameters,
     )
 
 

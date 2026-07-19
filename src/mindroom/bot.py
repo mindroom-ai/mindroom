@@ -1021,7 +1021,7 @@ class AgentBot:
         """Reset the monotonic watchdog clock for a fresh sync iteration."""
         self._last_sync_monotonic = None
 
-    def _loaded_sync_token_for_certification(self) -> SyncCheckpoint | str | None:
+    def _loaded_sync_token_for_certification(self) -> SyncCheckpoint | None:
         """Load a saved token record without deciding trust in bot code."""
         try:
             token_record = load_sync_token_record(self.storage_path, self.agent_name)
@@ -1043,7 +1043,7 @@ class AgentBot:
             "matrix_sync_token_restored",
             certified=token_record.certified,
         )
-        return token_record.checkpoint if token_record.checkpoint is not None else token_record.token
+        return token_record.checkpoint
 
     def _restore_saved_sync_token(self) -> None:
         """Restore Matrix sync continuity and initialize cache certification state."""
@@ -1057,8 +1057,6 @@ class AgentBot:
             # Without sync continuity the initial sync replays recent history an
             # earlier device may already have handled; don't re-notify on it.
             raise_notice_floor(self.client.user_id)
-        if startup.legacy_token:
-            self.logger.warning("matrix_sync_token_uncertified_legacy")
 
     def _save_sync_checkpoint(self, checkpoint: SyncCheckpoint | None) -> None:
         """Persist one certified sync checkpoint if present."""

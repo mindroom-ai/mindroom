@@ -17,7 +17,11 @@ from mindroom.constants import (
 )
 from mindroom.matrix.cache import (
     ConversationEventCache,
+    postgres_event_cache_events,
+    postgres_event_cache_threads,
     postgres_streaming_compaction,
+    sqlite_event_cache_events,
+    sqlite_event_cache_threads,
     sqlite_streaming_compaction,
 )
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
@@ -143,6 +147,87 @@ class TestConversationEventCacheContract:
             )
             == other_sender_edit
         )
+
+    @pytest.mark.asyncio
+    async def test_lookup_writes_only_probe_compaction_for_terminal_streaming_edits(
+        self,
+        event_cache: ConversationEventCache,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Ordinary and nonterminal lookup writes avoid the compaction query."""
+        compaction_calls: list[str] = []
+
+        async def record_compaction(*_args: object, **_kwargs: object) -> int:
+            compaction_calls.append("called")
+            return 0
+
+        module = sqlite_event_cache_events if isinstance(event_cache, SqliteEventCache) else postgres_event_cache_events
+        monkeypatch.setattr(module, "compact_superseded_streaming_edits", record_compaction)
+        room_id = "!room:localhost"
+        original_id = "$original:localhost"
+
+        await event_cache.store_event(original_id, room_id, _message_event(original_id, 1))
+        await event_cache.store_event(
+            "$pending:localhost",
+            room_id,
+            _message_event(
+                "$pending:localhost",
+                2,
+                edit_of=original_id,
+                stream_status=STREAM_STATUS_PENDING,
+            ),
+        )
+        assert compaction_calls == []
+
+        await event_cache.store_event(
+            "$terminal:localhost",
+            room_id,
+            _message_event(
+                "$terminal:localhost",
+                3,
+                edit_of=original_id,
+                stream_status=STREAM_STATUS_COMPLETED,
+            ),
+        )
+        assert compaction_calls == ["called"]
+
+    @pytest.mark.asyncio
+    async def test_thread_writes_only_probe_compaction_for_terminal_streaming_edits(
+        self,
+        event_cache: ConversationEventCache,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Ordinary and nonterminal thread writes avoid the compaction query."""
+        compaction_calls: list[str] = []
+
+        async def record_compaction(*_args: object, **_kwargs: object) -> int:
+            compaction_calls.append("called")
+            return 0
+
+        module = (
+            sqlite_event_cache_threads if isinstance(event_cache, SqliteEventCache) else postgres_event_cache_threads
+        )
+        monkeypatch.setattr(module, "compact_superseded_streaming_edits", record_compaction)
+        room_id = "!room:localhost"
+        thread_id = "$root:localhost"
+        root = _message_event(thread_id, 1)
+        pending = _message_event(
+            "$pending:localhost",
+            2,
+            edit_of=thread_id,
+            stream_status=STREAM_STATUS_PENDING,
+        )
+        terminal = _message_event(
+            "$terminal:localhost",
+            3,
+            edit_of=thread_id,
+            stream_status=STREAM_STATUS_COMPLETED,
+        )
+
+        await replace_thread_unconditionally(event_cache, room_id, thread_id, [root, pending])
+        assert compaction_calls == []
+        assert await event_cache.append_event(room_id, thread_id, terminal) is True
+        assert compaction_calls == ["called"]
 
     @pytest.mark.asyncio
     async def test_invalid_event_timestamp_is_rejected_consistently(
@@ -976,10 +1061,12 @@ async def test_snapshot_replacement_removes_compacted_members(
 
 
 @pytest.mark.asyncio
-async def test_restart_removes_unproven_thread_root_mapping(
-    event_cache_factory: Callable[[], ConversationEventCache],
+@pytest.mark.parametrize("deletion", ["redaction", "replacement", "invalidation"])
+async def test_last_child_deletion_removes_unproven_thread_root_mapping_immediately(
+    event_cache: ConversationEventCache,
+    deletion: str,
 ) -> None:
-    """A learned root mapping without any surviving child evidence is an orphan."""
+    """Runtime deletions leave no learned root mapping that startup would reject."""
     room_id = "!room:localhost"
     thread_id = "$unfetched-root:localhost"
     child = _message_event(
@@ -987,24 +1074,20 @@ async def test_restart_removes_unproven_thread_root_mapping(
         2,
         thread_id=thread_id,
     )
-    cache = event_cache_factory()
-    await cache.initialize()
-    try:
-        await cache.store_event(str(child["event_id"]), room_id, child)
-        assert await cache.get_thread_id_for_event(room_id, thread_id) == thread_id
-        assert await cache.redact_event(room_id, str(child["event_id"])) is True
-    finally:
-        await cache.close()
+    if deletion == "redaction":
+        await event_cache.store_event(str(child["event_id"]), room_id, child)
+    else:
+        await replace_thread_unconditionally(event_cache, room_id, thread_id, [child])
+    assert await event_cache.get_thread_id_for_event(room_id, thread_id) == thread_id
 
-    restarted_cache = event_cache_factory()
-    await restarted_cache.initialize()
-    try:
-        assert await restarted_cache.get_thread_id_for_event(room_id, thread_id) is None
-        diagnostics = restarted_cache.runtime_diagnostics()
-        assert diagnostics["cache_orphan_thread_indexes_before"] == 1
-        assert diagnostics["cache_orphan_thread_indexes_after"] == 0
-    finally:
-        await restarted_cache.close()
+    if deletion == "redaction":
+        assert await event_cache.redact_event(room_id, str(child["event_id"])) is True
+    elif deletion == "replacement":
+        await replace_thread_unconditionally(event_cache, room_id, thread_id, [])
+    else:
+        await event_cache.invalidate_thread(room_id, thread_id)
+
+    assert await event_cache.get_thread_id_for_event(room_id, thread_id) is None
 
 
 @pytest.mark.asyncio

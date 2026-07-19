@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import zlib
 from typing import TYPE_CHECKING, Any
 
 from . import sqlite_event_cache_events, sqlite_event_cache_threads
@@ -189,7 +188,7 @@ async def load_sqlite_agent_message_snapshot(
             sender=sender,
             runtime_started_at=runtime_started_at,
         )
-    except (json.JSONDecodeError, zlib.error) as exc:
+    except json.JSONDecodeError as exc:
         msg = "Cached Matrix event JSON is corrupt"
         raise AgentMessageSnapshotUnavailable(msg) from exc
     except sqlite3.Error as exc:
