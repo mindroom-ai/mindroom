@@ -29,7 +29,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, TypeGuard
+from typing import TYPE_CHECKING, Any, TypeGuard, cast
 
 from agno.db.base import SessionType
 from agno.run.agent import RunOutput
@@ -352,11 +352,12 @@ def _parse_state(raw_state: dict[str, Any]) -> HistoryScopeState:
 def _parse_carried_summary_unfit(raw_marker: object) -> CarriedSummaryUnfitMarker | None:
     if not isinstance(raw_marker, dict):
         return None
-    summary_digest = raw_marker.get("summary_digest")
-    model_identifier = raw_marker.get("model_identifier")
-    summary_input_budget = raw_marker.get("summary_input_budget")
-    failed_at = raw_marker.get("failed_at")
-    reason = raw_marker.get("reason")
+    marker_data = cast("dict[str, Any]", raw_marker)
+    summary_digest = marker_data.get("summary_digest")
+    model_identifier = marker_data.get("model_identifier")
+    summary_input_budget = marker_data.get("summary_input_budget")
+    failed_at = marker_data.get("failed_at")
+    reason = marker_data.get("reason")
     if (
         not isinstance(summary_digest, str)
         or not summary_digest
