@@ -1136,7 +1136,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
     @pytest.mark.asyncio
     async def test_point_read_barrier_waits_for_queued_predecessor(self) -> None:
-        """The point-read fence must include predecessors queued but not yet started."""
+        """The point-read fence includes prior thread writes but excludes later room writes."""
         first_started = asyncio.Event()
         release_first = asyncio.Event()
         queued_predecessor_started = asyncio.Event()
@@ -1163,8 +1163,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             name="first_room_update",
         )
         await first_started.wait()
-        queued_predecessor_task = coordinator.queue_room_update(
+        queued_predecessor_task = coordinator.queue_thread_update(
             "!test:localhost",
+            "$thread:localhost",
             queued_predecessor,
             name="queued_predecessor",
         )
