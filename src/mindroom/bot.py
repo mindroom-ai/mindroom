@@ -1082,7 +1082,8 @@ class AgentBot:
     def _mark_callback_failed(self) -> None:
         """Mark sync certification unsafe after a Matrix callback failure."""
         self._runtime_view.mark_callback_failed()
-        self._sync_trust_state = SyncTrustState.UNCERTAIN
+        if self._sync_trust_state is not SyncTrustState.RESET_RECOVERY:
+            self._sync_trust_state = SyncTrustState.UNCERTAIN
         self._sync_checkpoint = None
         self._clear_saved_sync_token()
 
