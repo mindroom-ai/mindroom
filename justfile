@@ -31,7 +31,7 @@ local-matrix-reset:
     rm -f matrix_state.yaml
     docker volume prune -f
     rm -rf tmp/
-    @echo "✅ Reset complete! Run 'just create' then 'mindroom run' to start fresh."
+    @echo "✅ Reset complete! Run 'just local-matrix-up' then 'mindroom run' to start fresh."
 
 #########################################
 # Local: Instances orchestration (Compose)

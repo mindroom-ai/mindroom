@@ -1810,6 +1810,25 @@ class TestExtractedModuleLoggerRebinding:
         bot._conversation_resolver.deps.conversation_cache.get_thread_id_for_event = AsyncMock(
             side_effect=lambda _room_id, event_id: "$threadroot" if event_id == "$reply-seed:localhost" else None,
         )
+        bot._conversation_resolver.deps.conversation_cache.get_event = AsyncMock(
+            return_value=nio.RoomGetEventResponse.from_dict(
+                {
+                    "event_id": "$reply-seed:localhost",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567889,
+                    "room_id": room.room_id,
+                    "type": "m.room.message",
+                    "content": {
+                        "msgtype": "m.text",
+                        "body": "thread reply",
+                        "m.relates_to": {
+                            "event_id": "$threadroot",
+                            "rel_type": "m.thread",
+                        },
+                    },
+                },
+            ),
+        )
         thread_lookup = await bot._conversation_resolver._explicit_thread_id_for_event(
             room.room_id,
             event.event_id,
