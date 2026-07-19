@@ -48,6 +48,8 @@ Each principal keeps a runtime departed-room fence after purge commit, and every
 
 An authoritative multi-room leave batch raises every principal-room fence synchronously before awaiting the first ordered purge.
 
+Raising a room fence also records the durable purge synchronously, so cancellation before the queued purge coroutine starts cannot let a later rejoin expose pre-leave rows.
+
 Reads recheck the fence after the backend callback and PostgreSQL transaction completes, so a result obtained before a leave cannot be returned after that leave is observed.
 
 Each room fence has a monotonic runtime epoch, and queued rejoin work may clear the fence only when no newer departure changed that epoch.
@@ -73,6 +75,8 @@ If cold-start cleanup is unavailable or fails, only that principal view is disab
 Process-local plaintext for the departed principal and room is removed immediately even when the durable backend is unavailable.
 
 SQLite write operations begin with `BEGIN IMMEDIATE`, so tombstone and MXC-ownership authorization reads cannot race a second connection's redaction commit.
+
+SQLite write results are reauthorized after commit while the operation lock is still held, so a concurrent leave cannot publish or process-cache plaintext written before the fence.
 
 SQLite schema version 11 resets older advisory cache contents inside one rollback-safe transaction and creates a durable database-generation identifier.
 Each SQLite principal view derives a stable checkpoint generation from that database generation and the full Matrix principal ID, so a retained agent token cannot cross an account or homeserver rebind.

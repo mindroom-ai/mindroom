@@ -668,15 +668,12 @@ class _PostgresEventCacheRuntime:
             reason=reason,
         )
 
-    def record_pending_room_purge(self, room_id: str) -> None:
-        """Remember a room deletion until a PostgreSQL transaction commits it."""
-        self._pending_room_purges.add(room_id)
-
     def mark_room_departed(self, room_id: str) -> int:
-        """Fence one departed room and return its new epoch."""
+        """Fence one departed room, queue its deletion, and return its new epoch."""
         epoch = self._room_departure_epochs.get(room_id, 0) + 1
         self._room_departure_epochs[room_id] = epoch
         self._departed_rooms.add(room_id)
+        self._pending_room_purges.add(room_id)
         return epoch
 
     def mark_room_joined(self, room_id: str, *, expected_departure_epoch: int) -> None:
@@ -1619,7 +1616,6 @@ class PostgresEventCache:
         """Delete this principal namespace's rows for one departed room."""
         if not self._runtime.is_room_departed(room_id):
             self.mark_room_departed(room_id)
-        self._runtime.record_pending_room_purge(room_id)
 
         async def purge_only(_db: psycopg.AsyncConnection) -> None:
             return None

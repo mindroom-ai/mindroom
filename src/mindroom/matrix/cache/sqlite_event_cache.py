@@ -385,16 +385,13 @@ class _SqliteEventCacheRuntime:
         """Return whether one principal view is disabled for this runtime."""
         return principal_id in self._disabled_principal_reasons
 
-    def record_pending_room_purge(self, principal_id: str, room_id: str) -> None:
-        """Remember a room deletion until a SQLite transaction commits it."""
-        self._pending_room_purges.add((principal_id, room_id))
-
     def mark_room_departed(self, principal_id: str, room_id: str) -> int:
-        """Fence one departed principal-room and return its new epoch."""
+        """Fence one departed principal-room, queue its deletion, and return its new epoch."""
         key = (principal_id, room_id)
         epoch = self._room_departure_epochs.get(key, 0) + 1
         self._room_departure_epochs[key] = epoch
         self._departed_rooms.add(key)
+        self._pending_room_purges.add(key)
         return epoch
 
     def mark_room_joined(self, principal_id: str, room_id: str, *, expected_departure_epoch: int) -> None:
@@ -728,16 +725,10 @@ class SqliteEventCache:
         writer: Callable[[aiosqlite.Connection], Awaitable[_T]],
         allow_departed: bool = False,
     ) -> _T:
-        if (
-            self._runtime.is_disabled
-            or self._runtime.is_principal_disabled(self.principal_id)
-            or (not allow_departed and self._runtime.is_room_departed(self.principal_id, room_id))
-        ):
+        if not self._can_expose_write_result(room_id, allow_departed=allow_departed):
             return disabled_result
         async with self._runtime.acquire_db_operation(self.principal_id, room_id, operation=operation) as db:
-            if self._runtime.is_principal_disabled(self.principal_id) or (
-                not allow_departed and self._runtime.is_room_departed(self.principal_id, room_id)
-            ):
+            if not self._can_expose_write_result(room_id, allow_departed=allow_departed):
                 return disabled_result
             pending_principal_purge = self._runtime.has_pending_principal_purge(self.principal_id)
             pending_room_purge = self._runtime.has_pending_room_purge(self.principal_id, room_id)
@@ -766,7 +757,17 @@ class SqliteEventCache:
                 self._runtime.forget_pending_principal_purge(self.principal_id)
             elif pending_room_purge:
                 self._runtime.forget_pending_room_purge(self.principal_id, room_id)
-        return result
+            if not self._can_expose_write_result(room_id, allow_departed=allow_departed):
+                return disabled_result
+            return result
+
+    def _can_expose_write_result(self, room_id: str, *, allow_departed: bool) -> bool:
+        """Return whether current runtime state still authorizes one write result."""
+        return (
+            not self._runtime.is_disabled
+            and not self._runtime.is_principal_disabled(self.principal_id)
+            and (allow_departed or not self._runtime.is_room_departed(self.principal_id, room_id))
+        )
 
     async def get_thread_events(self, room_id: str, thread_id: str) -> list[dict[str, Any]] | None:
         """Return cached events for one thread sorted by timestamp."""
@@ -1118,7 +1119,6 @@ class SqliteEventCache:
         """Delete only this principal's cached ownership for one left or banned room."""
         if not self._runtime.is_room_departed(self.principal_id, room_id):
             self.mark_room_departed(room_id)
-        self._runtime.record_pending_room_purge(self.principal_id, room_id)
 
         async def purge_only(_db: aiosqlite.Connection) -> None:
             return None

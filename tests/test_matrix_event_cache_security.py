@@ -78,6 +78,73 @@ def _shared_cache(
     return cast("SharedConversationEventCache", cache)
 
 
+async def _raw_mxc_text_count(
+    cache: ConversationEventCache,
+    room_id: str,
+    mxc_url: str,
+) -> int:
+    """Count physical plaintext rows without relying on ownership-filtered public reads."""
+    if isinstance(cache, SqliteEventCache):
+        async with cache._runtime.acquire_db_operation(
+            cache.principal_id,
+            room_id,
+            operation="test_raw_mxc_text_count",
+        ) as db:
+            cursor = await db.execute(
+                """
+                SELECT COUNT(*)
+                FROM mxc_text_cache
+                WHERE principal_id = ? AND room_id = ? AND mxc_url = ?
+                """,
+                (cache.principal_id, room_id, mxc_url),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+    else:
+        assert isinstance(cache, PostgresEventCache)
+        async with cache._runtime.acquire_db_operation(room_id, operation="test_raw_mxc_text_count") as db:
+            cursor = await db.execute(
+                """
+                SELECT COUNT(*)
+                FROM mindroom_event_cache_mxc_text
+                WHERE namespace = %s AND room_id = %s AND mxc_url = %s
+                """,
+                (cache.namespace, room_id, mxc_url),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            await db.commit()
+    assert row is not None
+    return int(row[0])
+
+
+async def _assert_redacted_events_do_not_resurrect(
+    event_cache_factory: Callable[[], ConversationEventCache],
+    *,
+    principal_id: str,
+    room_id: str,
+    shared_mxc: str,
+    dependent_mxc: str,
+    events: list[tuple[str, str, dict[str, Any]]],
+) -> None:
+    """Reopen the backend and prove tombstones and physical plaintext deletion survive."""
+    reopened_root = _shared_cache(event_cache_factory)
+    await reopened_root.initialize()
+    reopened = reopened_root.for_principal(principal_id)
+    try:
+        assert await _raw_mxc_text_count(reopened, room_id, shared_mxc) == 0
+        assert await _raw_mxc_text_count(reopened, room_id, dependent_mxc) == 0
+        await reopened.store_events_batch(events)
+        for event_id, _event_room_id, _event_data in events:
+            assert await reopened.get_event(room_id, event_id) is None
+        assert await reopened.store_mxc_text(room_id, "$top", shared_mxc, "late plaintext") is False
+        assert await reopened.store_mxc_text(room_id, "$edit", dependent_mxc, "late plaintext") is False
+        assert await _raw_mxc_text_count(reopened, room_id, shared_mxc) == 0
+        assert await _raw_mxc_text_count(reopened, room_id, dependent_mxc) == 0
+    finally:
+        await reopened_root.close()
+
+
 @pytest.mark.asyncio
 async def test_room_scope_is_part_of_event_and_plaintext_identity(
     event_cache_factory: Callable[[], ConversationEventCache],
@@ -335,28 +402,81 @@ async def test_recovered_purge_discards_the_operation_that_flushes_it(
     await cache.store_event("$old", room_id, old_event)
 
     if isinstance(cache, SqliteEventCache):
-        module = sqlite_event_cache_events
+        original_purge = (
+            sqlite_event_cache_events.purge_room_locked
+            if purge_scope == "room"
+            else sqlite_event_cache_events.purge_principal_locked
+        )
     else:
         assert isinstance(cache, PostgresEventCache)
-        module = postgres_event_cache_events
-    purge_name = f"purge_{purge_scope}_locked"
-    original_purge = getattr(module, purge_name)
+        original_purge = (
+            postgres_event_cache_events.purge_room_locked
+            if purge_scope == "room"
+            else postgres_event_cache_events.purge_principal_locked
+        )
     failure_reason = "temporary purge failure"
 
     async def fail_purge(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError(failure_reason)
 
+    async def purge() -> None:
+        if purge_scope == "room":
+            await cache.purge_room(room_id)
+        else:
+            await cache.purge_principal()
+
+    def replace_purge(replacement: Callable[..., Awaitable[None]]) -> None:
+        if isinstance(cache, SqliteEventCache):
+            if purge_scope == "room":
+                monkeypatch.setattr(sqlite_event_cache_events, "purge_room_locked", replacement)
+            else:
+                monkeypatch.setattr(sqlite_event_cache_events, "purge_principal_locked", replacement)
+        elif purge_scope == "room":
+            monkeypatch.setattr(postgres_event_cache_events, "purge_room_locked", replacement)
+        else:
+            monkeypatch.setattr(postgres_event_cache_events, "purge_principal_locked", replacement)
+
     try:
-        monkeypatch.setattr(module, purge_name, fail_purge)
-        purge = (lambda: cache.purge_room(room_id)) if purge_scope == "room" else cache.purge_principal
+        replace_purge(fail_purge)
         with pytest.raises(RuntimeError, match=failure_reason):
             await purge()
 
-        monkeypatch.setattr(module, purge_name, original_purge)
+        replace_purge(original_purge)
         await cache.store_event("$late", room_id, late_event)
 
         assert await cache.get_event(room_id, "$old") is None
         assert await cache.get_event(room_id, "$late") is None
+    finally:
+        await root.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_prestart_purge_must_flush_before_rejoin(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """Cancelling queued cleanup before it starts cannot expose pre-leave rows after rejoin."""
+    root = _shared_cache(event_cache_factory)
+    await root.initialize()
+    cache = root.for_principal("@alice:localhost")
+    room_id = "!left:localhost"
+    event_id = "$old"
+    mxc_url = "mxc://server/old"
+    event = _event(event_id, 1, sidecar_url=mxc_url)
+    try:
+        await cache.store_event(event_id, room_id, event)
+        assert await cache.store_mxc_text(room_id, event_id, mxc_url, "old plaintext")
+
+        departure_epoch = cache.mark_room_departed(room_id)
+        cancelled_purge = asyncio.create_task(cache.purge_room(room_id))
+        cancelled_purge.cancel()
+        result = await asyncio.gather(cancelled_purge, return_exceptions=True)
+        assert isinstance(result[0], asyncio.CancelledError)
+
+        await cache.mark_room_joined(room_id, expected_departure_epoch=departure_epoch)
+
+        assert await cache.get_event(room_id, event_id) is None
+        assert await cache.get_mxc_text(room_id, event_id, mxc_url) is None
+        assert await _raw_mxc_text_count(cache, room_id, mxc_url) == 0
     finally:
         await root.close()
 
@@ -602,41 +722,39 @@ async def test_redaction_reference_lifecycle_is_durable_and_non_resurrecting(
         )
         assert await cache.store_mxc_text(room_id, "$top", shared_mxc, "shared plaintext")
         assert await cache.store_mxc_text(room_id, "$original", dependent_mxc, "dependent plaintext")
+        assert await _raw_mxc_text_count(cache, room_id, shared_mxc) == 1
+        assert await _raw_mxc_text_count(cache, room_id, dependent_mxc) == 1
 
         assert await cache.redact_event(room_id, "$top")
         assert await cache.get_mxc_text(room_id, "$top", shared_mxc) is None
         assert await cache.get_mxc_text(room_id, "$new-content", shared_mxc) == "shared plaintext"
+        assert await _raw_mxc_text_count(cache, room_id, shared_mxc) == 1
 
         assert await cache.redact_event(room_id, "$new-content")
         assert await cache.get_mxc_text(room_id, "$new-content", shared_mxc) is None
+        assert await _raw_mxc_text_count(cache, room_id, shared_mxc) == 0
 
         assert await cache.redact_event(room_id, "$original")
         assert await cache.get_event(room_id, "$original") is None
         assert await cache.get_event(room_id, "$edit") is None
         assert await cache.get_mxc_text(room_id, "$edit", dependent_mxc) is None
+        assert await _raw_mxc_text_count(cache, room_id, dependent_mxc) == 0
     finally:
         await root.close()
 
-    reopened_root = _shared_cache(event_cache_factory)
-    await reopened_root.initialize()
-    reopened = reopened_root.for_principal(principal_id)
-    try:
-        await reopened.store_events_batch(
-            [
-                ("$top", room_id, top_level),
-                ("$new-content", room_id, new_content),
-                ("$original", room_id, original),
-                ("$edit", room_id, edit),
-            ],
-        )
-        assert await reopened.get_event(room_id, "$top") is None
-        assert await reopened.get_event(room_id, "$new-content") is None
-        assert await reopened.get_event(room_id, "$original") is None
-        assert await reopened.get_event(room_id, "$edit") is None
-        assert await reopened.store_mxc_text(room_id, "$top", shared_mxc, "late plaintext") is False
-        assert await reopened.store_mxc_text(room_id, "$edit", dependent_mxc, "late plaintext") is False
-    finally:
-        await reopened_root.close()
+    await _assert_redacted_events_do_not_resurrect(
+        event_cache_factory,
+        principal_id=principal_id,
+        room_id=room_id,
+        shared_mxc=shared_mxc,
+        dependent_mxc=dependent_mxc,
+        events=[
+            ("$top", room_id, top_level),
+            ("$new-content", room_id, new_content),
+            ("$original", room_id, original),
+            ("$edit", room_id, edit),
+        ],
+    )
 
 
 @pytest.mark.asyncio
@@ -963,3 +1081,44 @@ async def test_sqlite_write_transaction_serializes_mxc_authorization(
         release_plaintext_write.set()
         await first.close()
         await second.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_plaintext_write_result_is_rejected_after_departure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A leave observed during plaintext authorization must reject the committed write result."""
+    cache = SqliteEventCache(tmp_path / "event-cache.db", principal_id="@alice:localhost")
+    room_id = "!room:localhost"
+    event_id = "$sidecar"
+    mxc_url = "mxc://server/plaintext"
+    ownership_checked = asyncio.Event()
+    release_plaintext_write = asyncio.Event()
+    original_ownership_check = sqlite_event_cache_events._event_owns_mxc_text
+
+    async def pause_after_ownership_check(*args: object, **kwargs: object) -> object:
+        owns_plaintext = await original_ownership_check(*args, **kwargs)
+        ownership_checked.set()
+        await release_plaintext_write.wait()
+        return owns_plaintext
+
+    await cache.initialize()
+    try:
+        await cache.store_event(event_id, room_id, _event(event_id, 1, sidecar_url=mxc_url))
+        monkeypatch.setattr(sqlite_event_cache_events, "_event_owns_mxc_text", pause_after_ownership_check)
+        plaintext_store = asyncio.create_task(
+            cache.store_mxc_text(room_id, event_id, mxc_url, "plaintext"),
+        )
+        await ownership_checked.wait()
+
+        departure_epoch = cache.mark_room_departed(room_id)
+        release_plaintext_write.set()
+
+        assert await plaintext_store is False
+        assert await cache.get_mxc_text(room_id, event_id, mxc_url) is None
+        await cache.mark_room_joined(room_id, expected_departure_epoch=departure_epoch)
+        assert await _raw_mxc_text_count(cache, room_id, mxc_url) == 0
+    finally:
+        release_plaintext_write.set()
+        await cache.close()

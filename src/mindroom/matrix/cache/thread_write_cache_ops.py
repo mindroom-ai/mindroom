@@ -184,7 +184,7 @@ class ThreadMutationCacheOps:
             self.purge_process_plaintext(room_id)
 
     def mark_room_departed(self, room_id: str) -> int:
-        """Fence durable/process-local reads and return the new room epoch."""
+        """Fence reads, queue durable cleanup, purge process plaintext, and return the new room epoch."""
         event_cache = self.runtime.event_cache
         departure_epoch = 0 if event_cache is None else event_cache.mark_room_departed(room_id)
         self.purge_process_plaintext(room_id)

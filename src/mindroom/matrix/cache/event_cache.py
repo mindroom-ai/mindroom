@@ -158,7 +158,7 @@ class ConversationEventCache(Protocol):
         """Delete only this principal's cached ownership for one left or banned room."""
 
     def mark_room_departed(self, room_id: str) -> int:
-        """Synchronously reject access and return the new room-fence epoch."""
+        """Synchronously reject access, queue durable cleanup, and return the new room-fence epoch."""
 
     def room_departure_epoch(self, room_id: str) -> int:
         """Return the current room-fence epoch for ordering queued membership work."""
