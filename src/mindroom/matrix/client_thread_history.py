@@ -1218,13 +1218,18 @@ async def _group_scanned_sources_by_thread(
         ordered_event_ids=ordered_event_ids,
     )
     for event_id in ordered_event_ids:
+        event_source = scanned_message_sources[event_id]
+        if is_opaque_encrypted_event_source(event_source) and not event_source_has_thread_affecting_relation(
+            event_source,
+        ):
+            continue
         root_id = resolved_thread_ids.get(event_id)
         if root_id is None or root_id == event_id:
             continue
         bucket = grouped.get(root_id)
         if bucket is None or event_id in bucket:
             continue
-        bucket[event_id] = scanned_message_sources[event_id]
+        bucket[event_id] = event_source
 
     has_unresolved_opaque_relations = await _bucket_opaque_thread_relations(
         room_id=room_id,

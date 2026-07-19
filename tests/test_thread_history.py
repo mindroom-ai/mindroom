@@ -47,8 +47,10 @@ from tests.event_cache_test_support import replace_thread_unconditionally as _re
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
     from pathlib import Path
+
+    from mindroom.matrix.cache import ConversationEventCache
 
 
 def _event_cache() -> AsyncMock:
@@ -2666,6 +2668,82 @@ class TestThreadHistoryCache:
 
         assert [message.body for message in history] == ["Root message"]
         assert thread_cache_rejection_reason(cache_state) is None
+
+    @pytest.mark.asyncio
+    async def test_opaque_reaction_does_not_block_thread_refresh(
+        self,
+        event_cache_factory: Callable[[], ConversationEventCache],
+    ) -> None:
+        """Opaque reactions must remain outside reconstructed thread snapshots."""
+        room_id = "!room:localhost"
+        thread_id = "$thread_root"
+        reply_id = "$thread_reply"
+        reaction_id = "$opaque_reaction"
+        cache = event_cache_factory()
+        await cache.initialize()
+        root_event = self._make_text_event(
+            event_id=thread_id,
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        reply_event = self._make_text_event(
+            event_id=reply_id,
+            sender="@user:localhost",
+            body="Thread reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "Thread reply",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+            },
+        )
+        opaque_reaction = nio.MegolmEvent.from_dict(
+            {
+                "content": {
+                    "algorithm": "m.megolm.v1.aes-sha2",
+                    "ciphertext": "opaque ciphertext",
+                    "device_id": "DEVICE",
+                    "m.relates_to": {
+                        "event_id": reply_id,
+                        "key": "👍",
+                        "rel_type": "m.annotation",
+                    },
+                    "sender_key": "sender-key",
+                    "session_id": "session",
+                },
+                "event_id": reaction_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": 3000,
+                "room_id": room_id,
+                "type": "m.room.encrypted",
+            },
+        )
+        page = MagicMock(spec=nio.RoomMessagesResponse)
+        page.chunk = [opaque_reaction, reply_event, root_event]
+        page.end = None
+        client = MagicMock()
+        client.room_messages = AsyncMock(return_value=page)
+
+        try:
+            history = await matrix_client_module.refresh_thread_history_from_source(
+                client,
+                room_id,
+                thread_id,
+                cache,
+                allow_stale_fallback=False,
+            )
+            cache_state = await cache.get_thread_cache_state(room_id, thread_id)
+            cached_events = await cache.get_thread_events(room_id, thread_id)
+            reaction_thread_id = await cache.get_thread_id_for_event(room_id, reaction_id)
+        finally:
+            await cache.close()
+
+        assert [message.body for message in history] == ["Root message", "Thread reply"]
+        assert thread_cache_rejection_reason(cache_state) is None
+        assert cached_events is not None
+        assert [event["event_id"] for event in cached_events] == [thread_id, reply_id]
+        assert reaction_thread_id is None
 
     @pytest.mark.asyncio
     async def test_opaque_refresh_double_invalidation_failure_disables_old_snapshot(
