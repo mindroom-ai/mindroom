@@ -75,16 +75,6 @@ type _ThreadReadCacheKey = tuple[str, str, ThreadReadMode, int]
 logger = get_logger(__name__)
 
 
-@dataclass
-class _TurnEventLookup:
-    """One memoized event lookup plus metadata for deferred cache persistence."""
-
-    response: EventLookupResult
-    fetched_event_source: dict[str, Any] | None
-    membership_epoch: int
-    lookup_fill_persisted: bool
-
-
 __all__ = [
     "ConversationCacheProtocol",
     "ConversationEventCache",
@@ -393,7 +383,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
     logger: structlog.stdlib.BoundLogger
     runtime: BotRuntimeView
-    _turn_event_cache: ContextVar[dict[_TurnEventCacheKey, _TurnEventLookup] | None] = field(
+    _turn_event_cache: ContextVar[dict[_TurnEventCacheKey, EventLookupResult] | None] = field(
         default_factory=lambda: ContextVar("mindroom_turn_event_lookup_cache", default=None),
     )
     _turn_thread_read_cache: ContextVar[dict[_ThreadReadCacheKey, ThreadReadResult] | None] = field(
@@ -519,8 +509,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         self,
         room_id: str,
         event_id: str,
-        *,
-        persist_lookup_fill: bool = True,
     ) -> EventLookupResult:
         """Resolve one event through per-turn memoization and the advisory cache."""
         normalized_event_id = event_id.strip()
@@ -536,26 +524,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
         turn_cache = self._turn_event_cache.get()
         if turn_cache is not None and cache_key in turn_cache:
-            cached_lookup = turn_cache[cache_key]
-            if (
-                persist_lookup_fill
-                and not cached_lookup.lookup_fill_persisted
-                and cached_lookup.fetched_event_source is not None
-            ):
-                await self._persist_lookup_fill(
-                    room_id=room_id,
-                    event_id=normalized_event_id,
-                    fetched_event_source=cached_lookup.fetched_event_source,
-                    expected_membership_epoch=cached_lookup.membership_epoch,
-                    queue_write=False,
-                )
-                turn_cache[cache_key] = _TurnEventLookup(
-                    response=cached_lookup.response,
-                    fetched_event_source=cached_lookup.fetched_event_source,
-                    membership_epoch=cached_lookup.membership_epoch,
-                    lookup_fill_persisted=True,
-                )
-            return cached_lookup.response
+            return turn_cache[cache_key]
 
         membership_epoch = await self._capture_membership_epoch(room_id)
         response, fetched_event_source = await _cached_room_get_event(
@@ -566,7 +535,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             expected_membership_epoch=membership_epoch,
             trusted_sender_ids=self._trusted_sender_ids(),
         )
-        if fetched_event_source is not None and persist_lookup_fill:
+        if fetched_event_source is not None:
             await self._persist_lookup_fill(
                 room_id=room_id,
                 event_id=normalized_event_id,
@@ -575,12 +544,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 queue_write=not holds_room_barrier,
             )
         if turn_cache is not None:
-            turn_cache[cache_key] = _TurnEventLookup(
-                response=response,
-                fetched_event_source=fetched_event_source,
-                membership_epoch=membership_epoch,
-                lookup_fill_persisted=fetched_event_source is None or persist_lookup_fill,
-            )
+            turn_cache[cache_key] = response
         return response
 
     async def _capture_membership_epoch(self, room_id: str) -> int:
