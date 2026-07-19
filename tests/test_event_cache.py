@@ -2814,6 +2814,55 @@ async def test_store_events_batch_records_thread_root_self_mapping_from_explicit
 
 
 @pytest.mark.asyncio
+async def test_event_batch_keeps_child_mapping_when_child_is_also_referenced_as_root(
+    event_cache: ConversationEventCache,
+) -> None:
+    """An event's own mapping must beat a synthesized self-mapping for the same key."""
+    cache = event_cache
+    room_id = "!room:localhost"
+    parent_id = "$parent"
+    child_id = "$child"
+    nested_child_id = "$nested_child"
+    child_event = _make_text_event(
+        event_id=child_id,
+        sender="@user:localhost",
+        body="Child",
+        server_timestamp=1000,
+        source_content={
+            "body": "Child",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": parent_id},
+        },
+    )
+    nested_child_event = _make_text_event(
+        event_id=nested_child_id,
+        sender="@user:localhost",
+        body="Nested child",
+        server_timestamp=2000,
+        source_content={
+            "body": "Nested child",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": child_id},
+        },
+    )
+
+    try:
+        await cache.store_events_batch(
+            [
+                (child_id, room_id, _cache_source(child_event)),
+                (nested_child_id, room_id, _cache_source(nested_child_event)),
+            ],
+        )
+        parent_thread_id = await cache.get_thread_id_for_event(room_id, parent_id)
+        child_thread_id = await cache.get_thread_id_for_event(room_id, child_id)
+        nested_child_thread_id = await cache.get_thread_id_for_event(room_id, nested_child_id)
+    finally:
+        await cache.close()
+
+    assert parent_thread_id == parent_id
+    assert child_thread_id == parent_id
+    assert nested_child_thread_id == child_id
+
+
+@pytest.mark.asyncio
 async def test_store_events_batch_rolls_back_on_index_derivation_failure(
     event_cache: ConversationEventCache,
 ) -> None:

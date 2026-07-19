@@ -145,10 +145,7 @@ class ThreadMutationCacheOps:
         if not batch:
             return
         try:
-            if thread_id is None:
-                await self.runtime.event_cache.store_events_batch(list(batch))
-            else:
-                await self.runtime.event_cache.store_events_batch(list(batch), thread_id=thread_id)
+            await self.runtime.event_cache.store_events_batch(list(batch), thread_id=thread_id)
         except Exception as exc:
             self.logger.warning(
                 failure_message,

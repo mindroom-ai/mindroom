@@ -153,17 +153,11 @@ def _event_thread_row(room_id: str, event: dict[str, Any]) -> _EventThreadRow | 
 
 def _with_thread_root_self_rows(thread_rows: list[_EventThreadRow]) -> list[_EventThreadRow]:
     """Ensure learned thread membership also records each root's own row."""
-    return list(
-        dict.fromkeys(
-            [
-                *thread_rows,
-                *(
-                    _EventThreadRow(room_id=row.room_id, event_id=row.thread_id, thread_id=row.thread_id)
-                    for row in thread_rows
-                ),
-            ],
-        ),
-    )
+    rows_by_event = {(row.room_id, row.event_id): row for row in thread_rows}
+    for row in thread_rows:
+        root_row = _EventThreadRow(room_id=row.room_id, event_id=row.thread_id, thread_id=row.thread_id)
+        rows_by_event.setdefault((root_row.room_id, root_row.event_id), root_row)
+    return list(rows_by_event.values())
 
 
 def _event_edit_row(room_id: str, event: dict[str, Any]) -> _EventEditRow | None:

@@ -621,7 +621,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         store_started = asyncio.Event()
         allow_store_finish = asyncio.Event()
 
-        async def slow_store_events_batch(_events: object) -> None:
+        async def slow_store_events_batch(_events: object, *, thread_id: str | None = None) -> None:
+            assert thread_id is None
             store_started.set()
             await allow_store_finish.wait()
 
@@ -1152,7 +1153,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         allow_store_finish = asyncio.Event()
         call_order: list[str] = []
 
-        async def slow_store_events_batch(_events: object) -> None:
+        async def slow_store_events_batch(_events: object, *, thread_id: str | None = None) -> None:
+            assert thread_id is None
             call_order.append("store-start")
             store_started.set()
             await allow_store_finish.wait()
