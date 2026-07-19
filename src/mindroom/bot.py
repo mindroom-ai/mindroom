@@ -1034,15 +1034,11 @@ class AgentBot:
         if not token_record.is_bound_to(cache_generation):
             self.logger.warning(
                 "matrix_sync_token_cache_generation_mismatch",
-                token_generation_present=token_record.cache_generation is not None,
                 cache_generation_present=cache_generation is not None,
             )
             self._clear_saved_sync_token()
             return None
-        self.logger.info(
-            "matrix_sync_token_restored",
-            certified=token_record.certified,
-        )
+        self.logger.info("matrix_sync_token_restored")
         return token_record.checkpoint
 
     def _restore_saved_sync_token(self) -> None:

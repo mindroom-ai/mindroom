@@ -76,10 +76,6 @@ def _token_path(tmp_path: Path, *, agent_name: str = "code") -> Path:
     return tmp_path / "sync_tokens" / f"{agent_name}.token"
 
 
-def _certification_path(tmp_path: Path, *, agent_name: str = "code") -> Path:
-    return tmp_path / "sync_tokens" / f"{agent_name}.token.certified"
-
-
 def _load_sync_token_value(tmp_path: Path, agent_name: str) -> str | None:
     token_record = load_sync_token_record(tmp_path, agent_name)
     if token_record is None:
@@ -148,28 +144,10 @@ def test_save_sync_token_round_trip(tmp_path: Path) -> None:
         "cache_generation": _TEST_CACHE_GENERATION,
         "version": "mindroom-sync-token-v2",
     }
-    assert not _certification_path(tmp_path).exists()
     assert _load_sync_token_value(tmp_path, "code") == "s12345"
     token_record = load_sync_token_record(tmp_path, "code")
     assert token_record is not None
-    assert token_record.certified is True
     assert token_record.checkpoint == SyncCheckpoint("s12345")
-
-
-def test_legacy_marker_file_does_not_certify_plaintext_token(tmp_path: Path) -> None:
-    """Older marker-only tokens restore for sync continuity but are not certified checkpoints."""
-    saved_batch = "s_marker_only"
-    token_path = _token_path(tmp_path)
-    certification_path = _certification_path(tmp_path)
-    token_path.parent.mkdir(parents=True, exist_ok=True)
-    token_path.write_text(saved_batch, encoding="utf-8")
-    certification_path.write_text("legacy-marker\n", encoding="utf-8")
-
-    token_record = load_sync_token_record(tmp_path, "code")
-
-    assert token_record is not None
-    assert token_record.token == saved_batch
-    assert token_record.certified is False
 
 
 def test_clear_sync_token_removes_saved_token(tmp_path: Path) -> None:
@@ -180,7 +158,6 @@ def test_clear_sync_token_removes_saved_token(tmp_path: Path) -> None:
 
     assert _load_sync_token_value(tmp_path, "code") is None
     assert not _token_path(tmp_path).exists()
-    assert not _certification_path(tmp_path).exists()
 
 
 def test_clear_sync_token_is_idempotent(tmp_path: Path) -> None:
@@ -233,7 +210,7 @@ async def test_legacy_plaintext_sync_token_forces_cold_sync(tmp_path: Path) -> N
 
     assert client.next_batch is None
     assert bot._sync_trust_state is SyncTrustState.COLD
-    assert not token_path.exists()
+    assert token_path.exists()
 
     response = MagicMock(spec=nio.SyncResponse)
     response.next_batch = "s_after_legacy"
@@ -244,7 +221,6 @@ async def test_legacy_plaintext_sync_token_forces_cold_sync(tmp_path: Path) -> N
     token_record = load_sync_token_record(tmp_path, bot.agent_name)
     assert token_record is not None
     assert token_record.token == "s_after_legacy"  # noqa: S105
-    assert token_record.certified is True
     assert token_record.checkpoint == SyncCheckpoint("s_after_legacy")
 
 
