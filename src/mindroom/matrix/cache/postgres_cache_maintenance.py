@@ -100,10 +100,6 @@ async def _orphan_edit_index_count(db: AsyncConnection, *, namespace: str) -> in
     )
 
 
-async def _orphan_thread_index_count(db: AsyncConnection, *, namespace: str) -> int:
-    return await orphan_thread_index_count(db, namespace=namespace)
-
-
 async def _orphan_thread_event_reference_count(db: AsyncConnection, *, namespace: str) -> int:
     return await _count(
         db,
@@ -353,7 +349,7 @@ async def _collect_maintenance_report(
         orphan_edit_indexes_before=orphan_counts_before[0],
         orphan_edit_indexes_after=await _orphan_edit_index_count(db, namespace=namespace),
         orphan_thread_indexes_before=orphan_counts_before[1],
-        orphan_thread_indexes_after=await _orphan_thread_index_count(db, namespace=namespace),
+        orphan_thread_indexes_after=await orphan_thread_index_count(db, namespace=namespace),
         orphan_thread_event_references_before=orphan_counts_before[2],
         orphan_thread_event_references_after=await _orphan_thread_event_reference_count(db, namespace=namespace),
         repaired_edit_indexes=repaired_counts[0],
@@ -374,7 +370,7 @@ async def run_startup_maintenance(
     """Audit, safely repair, compact, and recount one PostgreSQL namespace."""
     orphan_counts = (
         await _orphan_edit_index_count(db, namespace=namespace),
-        await _orphan_thread_index_count(db, namespace=namespace),
+        await orphan_thread_index_count(db, namespace=namespace),
         await _orphan_thread_event_reference_count(db, namespace=namespace),
     )
     repaired_counts = await _repair_orphan_derived_rows(db, namespace=namespace)

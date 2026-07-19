@@ -96,7 +96,7 @@ async def load_event(
     await cursor.close()
     if row is not None:
         return json.loads(row[0])
-    return await load_archived_event(db, room_id=None, event_id=event_id)
+    return await load_archived_event(db, event_id=event_id)
 
 
 async def load_recent_room_events(

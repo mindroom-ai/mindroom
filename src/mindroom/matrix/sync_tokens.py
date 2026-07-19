@@ -29,6 +29,10 @@ class _SyncTokenRecord:
         """Return whether this token carries cache-trust certification."""
         return self.checkpoint is not None
 
+    def is_bound_to(self, cache_generation: str | None) -> bool:
+        """Return whether this record was certified against the active cache."""
+        return cache_generation is not None and self.cache_generation == cache_generation
+
 
 def _sync_token_path(storage_path: Path, agent_name: str) -> Path:
     """Return the on-disk path for one agent's sync token."""

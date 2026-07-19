@@ -138,10 +138,6 @@ async def _orphan_edit_index_count(db: aiosqlite.Connection) -> int:
     )
 
 
-async def _orphan_thread_index_count(db: aiosqlite.Connection) -> int:
-    return await orphan_thread_index_count(db)
-
-
 async def _orphan_thread_event_reference_count(db: aiosqlite.Connection) -> int:
     return await _scalar_count(
         db,
@@ -288,7 +284,7 @@ async def _collect_maintenance_report(
         orphan_edit_indexes_before=orphan_edit_indexes_before,
         orphan_edit_indexes_after=await _orphan_edit_index_count(db),
         orphan_thread_indexes_before=orphan_thread_indexes_before,
-        orphan_thread_indexes_after=await _orphan_thread_index_count(db),
+        orphan_thread_indexes_after=await orphan_thread_index_count(db),
         orphan_thread_event_references_before=orphan_thread_event_references_before,
         orphan_thread_event_references_after=await _orphan_thread_event_reference_count(db),
         repaired_edit_indexes=repaired_edit_indexes,
@@ -308,7 +304,7 @@ async def run_startup_maintenance(
 ) -> CacheMaintenanceReport:
     """Audit, safely repair, compact, and recount one SQLite cache transaction."""
     orphan_edit_indexes_before = await _orphan_edit_index_count(db)
-    orphan_thread_indexes_before = await _orphan_thread_index_count(db)
+    orphan_thread_indexes_before = await orphan_thread_index_count(db)
     orphan_thread_event_references_before = await _orphan_thread_event_reference_count(db)
     repaired_counts = await _repair_orphan_derived_rows(db)
     compacted = await compact_superseded_streaming_edits(db)

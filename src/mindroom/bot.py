@@ -1031,7 +1031,7 @@ class AgentBot:
         if token_record is None:
             return None
         cache_generation = self.event_cache.certification_generation
-        if cache_generation is None or token_record.cache_generation != cache_generation:
+        if not token_record.is_bound_to(cache_generation):
             self.logger.warning(
                 "matrix_sync_token_cache_generation_mismatch",
                 token_generation_present=token_record.cache_generation is not None,
@@ -1831,9 +1831,7 @@ class AgentBot:
                 cache_generation = self.event_cache.certification_generation
                 retry_token = (
                     token_record.token
-                    if token_record is not None
-                    and cache_generation is not None
-                    and token_record.cache_generation == cache_generation
+                    if token_record is not None and token_record.is_bound_to(cache_generation)
                     else None
                 )
         cast("Any", client).next_batch = retry_token

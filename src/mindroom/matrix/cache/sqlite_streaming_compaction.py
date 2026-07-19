@@ -81,24 +81,13 @@ def _archived_edit_from_row(row: object) -> _ArchivedStreamingEdit:
 async def load_archived_event(
     db: aiosqlite.Connection,
     *,
-    room_id: str | None,
     event_id: str,
 ) -> dict[str, Any] | None:
     """Return one compacted event for point lookup and late-redaction resolution."""
-    if room_id is None:
-        cursor = await db.execute(
-            "SELECT event_json_zlib FROM compacted_streaming_edits WHERE event_id = ?",
-            (event_id,),
-        )
-    else:
-        cursor = await db.execute(
-            """
-            SELECT event_json_zlib
-            FROM compacted_streaming_edits
-            WHERE room_id = ? AND event_id = ?
-            """,
-            (room_id, event_id),
-        )
+    cursor = await db.execute(
+        "SELECT event_json_zlib FROM compacted_streaming_edits WHERE event_id = ?",
+        (event_id,),
+    )
     row = await cursor.fetchone()
     await cursor.close()
     return None if row is None else _decompress_event(bytes(row[0]))
