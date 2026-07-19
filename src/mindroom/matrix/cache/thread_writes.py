@@ -82,7 +82,7 @@ def _collect_sync_timeline_cache_updates(
         event_info,
         event_type=event_type if isinstance(event_type, str) else None,
     ):
-        cache_update = _threaded_sync_event_cache_update(room_id, event)
+        cache_update = _collect_sync_event_cache_update(room_id, event)
         if cache_update is None:
             return
         update_room_id, normalized_event_source = cache_update
@@ -97,16 +97,6 @@ def _collect_sync_timeline_cache_updates(
 
 
 def _collect_sync_event_cache_update(
-    room_id: str,
-    event: nio.Event,
-) -> tuple[str, dict[str, object]] | None:
-    event_id = event.event_id
-    if not isinstance(event_id, str) or not event_id:
-        return None
-    return room_id, normalize_nio_event_for_cache(event)
-
-
-def _threaded_sync_event_cache_update(
     room_id: str,
     event: nio.Event,
 ) -> tuple[str, dict[str, object]] | None:
