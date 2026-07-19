@@ -15,7 +15,6 @@ import pytest
 from nio.api import RelationshipType
 
 import mindroom.matrix.cache.sqlite_event_cache as event_cache_module
-import mindroom.matrix.message_content as message_content_module
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -887,6 +886,7 @@ async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path
     try:
         await sqlite_event_cache_threads._replace_thread_locked(
             db,
+            principal_id="__mindroom_default_principal__",
             room_id="!room:localhost",
             thread_id="$thread_root",
             events=[
@@ -903,12 +903,14 @@ async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path
         with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=200.0):
             await sqlite_event_cache_threads.mark_thread_stale_locked(
                 db,
+                principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 thread_id="$thread_root",
                 reason="thread_stale",
             )
             await sqlite_event_cache_threads.mark_room_stale_locked(
                 db,
+                principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 reason="room_stale",
             )
@@ -916,6 +918,7 @@ async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path
 
         state = await sqlite_event_cache_threads.load_thread_cache_state(
             db,
+            principal_id="__mindroom_default_principal__",
             room_id="!room:localhost",
             thread_id="$thread_root",
         )
@@ -942,24 +945,28 @@ async def test_sqlite_stale_markers_are_monotonic(tmp_path: Path) -> None:
         with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=200.0):
             await sqlite_event_cache_threads.mark_thread_stale_locked(
                 db,
+                principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 thread_id="$thread_root",
                 reason="newer_thread_marker",
             )
             await sqlite_event_cache_threads.mark_room_stale_locked(
                 db,
+                principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 reason="newer_room_marker",
             )
         with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=100.0):
             await sqlite_event_cache_threads.mark_thread_stale_locked(
                 db,
+                principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 thread_id="$thread_root",
                 reason="older_thread_marker",
             )
             await sqlite_event_cache_threads.mark_room_stale_locked(
                 db,
+                principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 reason="older_room_marker",
             )
@@ -967,6 +974,7 @@ async def test_sqlite_stale_markers_are_monotonic(tmp_path: Path) -> None:
 
         state = await sqlite_event_cache_threads.load_thread_cache_state(
             db,
+            principal_id="__mindroom_default_principal__",
             room_id="!room:localhost",
             thread_id="$thread_root",
         )
@@ -1065,6 +1073,7 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_invalidation(
             "!room:localhost",
             "$thread_root",
             [root_source],
+            expected_membership_epoch=await cache.room_membership_epoch("!room:localhost"),
             fetch_started_at=150.0,
             validated_at=300.0,
         )
@@ -1074,6 +1083,7 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_invalidation(
             "!room:localhost",
             "$thread_root",
             [root_source],
+            expected_membership_epoch=await cache.room_membership_epoch("!room:localhost"),
             fetch_started_at=250.0,
             validated_at=300.0,
         )
@@ -1117,6 +1127,7 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_room_invalida
             "!room:localhost",
             "$thread_root",
             [root_source],
+            expected_membership_epoch=await cache.room_membership_epoch("!room:localhost"),
             fetch_started_at=150.0,
             validated_at=300.0,
         )
@@ -1468,139 +1479,6 @@ async def test_individual_event_cache_store_and_retrieve(event_cache: Conversati
     assert missing_event is None
 
 
-def test_event_cache_room_lock_cache_evicts_idle_rooms(tmp_path: Path) -> None:
-    """Idle per-room locks should be evicted instead of growing without bound."""
-    runtime = event_cache_module._SqliteEventCacheRuntime(tmp_path / "event_cache.db")
-
-    for index in range(event_cache_module._MAX_CACHED_ROOM_LOCKS + 8):
-        _ = runtime.room_lock_entry(f"!room-{index}:localhost").lock
-
-    assert len(runtime._room_locks) == event_cache_module._MAX_CACHED_ROOM_LOCKS
-    assert "!room-0:localhost" not in runtime._room_locks
-
-
-@pytest.mark.asyncio
-async def test_event_cache_room_lock_cache_keeps_contended_room_waiters(tmp_path: Path) -> None:
-    """Queued waiters must keep a room lock alive across pruning churn."""
-    runtime = event_cache_module._SqliteEventCacheRuntime(tmp_path / "event_cache.db")
-    room_id = "!busy:localhost"
-    holder_entered = asyncio.Event()
-    release_holder = asyncio.Event()
-    pruned_after_release = asyncio.Event()
-    allow_waiter_exit = asyncio.Event()
-    waiter_acquired = asyncio.Event()
-    post_release_snapshot: dict[str, object] = {}
-
-    async def first_holder() -> None:
-        async with runtime.acquire_room_lock(room_id, operation="first_holder"):
-            holder_entered.set()
-            await release_holder.wait()
-        for index in range(event_cache_module._MAX_CACHED_ROOM_LOCKS + 8):
-            _ = runtime.room_lock_entry(f"!churn-{index}:localhost").lock
-        entry = runtime._room_locks.get(room_id)
-        post_release_snapshot["room_present"] = entry is not None
-        post_release_snapshot["active_users"] = entry.active_users if entry is not None else None
-        post_release_snapshot["lock_locked"] = entry.lock.locked() if entry is not None else None
-        pruned_after_release.set()
-
-    async def queued_waiter() -> None:
-        async with runtime.acquire_room_lock(room_id, operation="queued_waiter"):
-            waiter_acquired.set()
-            await allow_waiter_exit.wait()
-
-    async def wait_for_waiter_registration() -> None:
-        loop = asyncio.get_running_loop()
-        waiter_registered = loop.create_future()
-
-        def check_waiter_registration() -> None:
-            if runtime._room_locks[room_id].active_users >= 2:
-                waiter_registered.set_result(None)
-                return
-            loop.call_soon(check_waiter_registration)
-
-        loop.call_soon(check_waiter_registration)
-        await asyncio.wait_for(waiter_registered, timeout=1.0)
-
-    holder_task = asyncio.create_task(first_holder())
-    waiter_task = asyncio.create_task(queued_waiter())
-
-    await asyncio.wait_for(holder_entered.wait(), timeout=1.0)
-    await wait_for_waiter_registration()
-
-    busy_lock = runtime.room_lock_entry(room_id).lock
-    release_holder.set()
-    await asyncio.wait_for(pruned_after_release.wait(), timeout=1.0)
-
-    assert post_release_snapshot == {
-        "room_present": True,
-        "active_users": 1,
-        "lock_locked": False,
-    }
-    assert runtime.room_lock_entry(room_id).lock is busy_lock
-
-    await asyncio.wait_for(waiter_acquired.wait(), timeout=1.0)
-    allow_waiter_exit.set()
-    await asyncio.gather(holder_task, waiter_task)
-
-
-@pytest.mark.asyncio
-async def test_event_cache_room_lock_cache_keeps_new_active_room_at_capacity(tmp_path: Path) -> None:
-    """A newly acquired room lock must survive pruning when the cache is already full of active rooms."""
-    runtime = event_cache_module._SqliteEventCacheRuntime(tmp_path / "event_cache.db")
-    release_active_rooms = asyncio.Event()
-    active_rooms_registered = asyncio.Event()
-    release_new_room_holder = asyncio.Event()
-    new_room_holder_entered = asyncio.Event()
-    new_room_waiter_acquired = asyncio.Event()
-    active_room_count = 0
-    new_room_id = "!new-room:localhost"
-
-    async def hold_active_room(room_id: str) -> None:
-        nonlocal active_room_count
-        async with runtime.acquire_room_lock(room_id, operation="hold_active_room"):
-            active_room_count += 1
-            if active_room_count == event_cache_module._MAX_CACHED_ROOM_LOCKS:
-                active_rooms_registered.set()
-            await release_active_rooms.wait()
-
-    async def hold_new_room() -> None:
-        async with runtime.acquire_room_lock(new_room_id, operation="hold_new_room"):
-            new_room_holder_entered.set()
-            await release_new_room_holder.wait()
-
-    async def wait_for_new_room() -> None:
-        async with runtime.acquire_room_lock(new_room_id, operation="wait_for_new_room"):
-            new_room_waiter_acquired.set()
-
-    active_room_tasks = [
-        asyncio.create_task(hold_active_room(f"!active-room-{index}:localhost"))
-        for index in range(event_cache_module._MAX_CACHED_ROOM_LOCKS)
-    ]
-    new_room_holder_task: asyncio.Task[None] | None = None
-    new_room_waiter_task: asyncio.Task[None] | None = None
-    try:
-        await asyncio.wait_for(active_rooms_registered.wait(), timeout=1.0)
-
-        new_room_holder_task = asyncio.create_task(hold_new_room())
-        await asyncio.wait_for(new_room_holder_entered.wait(), timeout=1.0)
-
-        new_room_waiter_task = asyncio.create_task(wait_for_new_room())
-        await asyncio.sleep(0)
-
-        assert new_room_waiter_acquired.is_set() is False
-
-        release_new_room_holder.set()
-        await asyncio.wait_for(new_room_waiter_acquired.wait(), timeout=1.0)
-    finally:
-        release_new_room_holder.set()
-        release_active_rooms.set()
-        await asyncio.gather(
-            *active_room_tasks,
-            *(task for task in (new_room_holder_task, new_room_waiter_task) if task is not None),
-            return_exceptions=True,
-        )
-
-
 @pytest.mark.asyncio
 async def test_event_cache_close_waits_for_in_flight_operation(tmp_path: Path) -> None:
     """Closing the cache should wait for active DB work instead of closing mid-query."""
@@ -1624,11 +1502,18 @@ async def test_event_cache_close_waits_for_in_flight_operation(tmp_path: Path) -
     async def blocking_load_event(
         db: object,
         *,
+        principal_id: str,
+        room_id: str,
         event_id: str,
     ) -> dict[str, object] | None:
         operation_started.set()
         await allow_operation_finish.wait()
-        return await original_load_event(db, event_id=event_id)
+        return await original_load_event(
+            db,
+            principal_id=principal_id,
+            room_id=room_id,
+            event_id=event_id,
+        )
 
     try:
         with patch(
@@ -1807,6 +1692,63 @@ async def test_cached_room_get_event_cache_hit_avoids_network_call(event_cache: 
     assert response.event.event_id == "$reply"
     assert response.event.body == "Cached reply"
     client.room_get_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_matrix_conversation_lookup_fill_cannot_cross_leave_and_rejoin(tmp_path: Path) -> None:
+    """A point fetch begun before departure must not repopulate the rejoined cache."""
+    db_path = tmp_path / "event_cache.db"
+    principal_id = "@alice:localhost"
+    room_id = "!room:localhost"
+    event_id = "$lookup"
+    lookup_root = SqliteEventCache(db_path)
+    membership_root = SqliteEventCache(db_path)
+    await lookup_root.initialize()
+    await membership_root.initialize()
+    lookup_cache = lookup_root.for_principal(principal_id)
+    membership_cache = membership_root.for_principal(principal_id)
+    event = _make_text_event(
+        event_id=event_id,
+        sender="@agent:localhost",
+        body="Fetched",
+        server_timestamp=1,
+        source_content={"body": "Fetched"},
+    )
+    fetch_started = asyncio.Event()
+    release_fetch = asyncio.Event()
+
+    async def room_get_event(_room_id: str, _event_id: str) -> MagicMock:
+        fetch_started.set()
+        await release_fetch.wait()
+        return _make_room_get_event_response(event)
+
+    client = MagicMock()
+    client.room_get_event = AsyncMock(side_effect=room_get_event)
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, lookup_cache, client=client)
+    conversation_cache.runtime.event_cache_write_coordinator = EventCacheWriteCoordinator(
+        logger=MagicMock(),
+        background_task_owner=conversation_cache.runtime,
+    )
+    lookup_task = asyncio.create_task(conversation_cache.get_event(room_id, event_id))
+    try:
+        await fetch_started.wait()
+        departure_epoch = membership_cache.mark_room_departed(room_id)
+        await membership_cache.purge_room(room_id)
+        await membership_cache.mark_room_joined(
+            room_id,
+            expected_departure_epoch=departure_epoch,
+        )
+        release_fetch.set()
+
+        response = await lookup_task
+        assert isinstance(response, nio.RoomGetEventResponse)
+        assert await lookup_cache.get_event(room_id, event_id) is None
+    finally:
+        release_fetch.set()
+        if not lookup_task.done():
+            await lookup_task
+        await membership_root.close()
+        await lookup_root.close()
 
 
 @pytest.mark.asyncio
@@ -2658,16 +2600,41 @@ async def test_mxc_text_cache_round_trips_across_event_cache_reopen(
     """Durable MXC text rows should survive closing and reopening the event cache."""
     cache = event_cache_factory()
     await cache.initialize()
+    owner_event = {
+        "event_id": "$sidecar-owner",
+        "origin_server_ts": 1000,
+        "type": "m.room.message",
+        "sender": "@agent:localhost",
+        "content": {
+            "body": "preview",
+            "msgtype": "m.file",
+            "url": "mxc://server/sidecar",
+            "io.mindroom.long_text": {
+                "version": 2,
+                "encoding": "matrix_event_content_json",
+            },
+        },
+    }
 
     try:
-        await cache.store_mxc_text("!room:localhost", "mxc://server/sidecar", "Full text sidecar")
+        await cache.store_event("$sidecar-owner", "!room:localhost", owner_event)
+        assert await cache.store_mxc_text(
+            "!room:localhost",
+            "$sidecar-owner",
+            "mxc://server/sidecar",
+            "Full text sidecar",
+        )
     finally:
         await cache.close()
 
     reopened_cache = event_cache_factory()
     await reopened_cache.initialize()
     try:
-        cached_text = await reopened_cache.get_mxc_text("!room:localhost", "mxc://server/sidecar")
+        cached_text = await reopened_cache.get_mxc_text(
+            "!room:localhost",
+            "$sidecar-owner",
+            "mxc://server/sidecar",
+        )
     finally:
         await reopened_cache.close()
 
@@ -2679,97 +2646,83 @@ async def test_fetch_thread_history_reuses_durable_mxc_text_after_restart(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
     """Cached full-history reads should reuse durable sidecar text after a restart."""
-    message_content_module._mxc_cache.clear()
-    try:
-        cache = event_cache_factory()
-        await cache.initialize()
+    cache = event_cache_factory()
+    await cache.initialize()
 
-        root_event = _make_text_event(
-            event_id="$thread_root",
-            sender="@user:localhost",
-            body="Root message",
-            server_timestamp=1000,
-            source_content={"body": "Root message"},
-        )
-        sidecar_reply = _make_text_event(
-            event_id="$reply",
-            sender="@agent:localhost",
-            body="Preview reply",
-            server_timestamp=2000,
-            source_content={
-                "body": "Preview reply",
-                "msgtype": "m.file",
-                "io.mindroom.long_text": {
-                    "version": 2,
-                    "encoding": "matrix_event_content_json",
-                },
-                "url": "mxc://server/sidecar",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+    root_event = _make_text_event(
+        event_id="$thread_root",
+        sender="@user:localhost",
+        body="Root message",
+        server_timestamp=1000,
+        source_content={"body": "Root message"},
+    )
+    sidecar_reply = _make_text_event(
+        event_id="$reply",
+        sender="@agent:localhost",
+        body="Preview reply",
+        server_timestamp=2000,
+        source_content={
+            "body": "Preview reply",
+            "msgtype": "m.file",
+            "io.mindroom.long_text": {
+                "version": 2,
+                "encoding": "matrix_event_content_json",
             },
+            "url": "mxc://server/sidecar",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+        },
+    )
+    canonical_sidecar_content = {"body": "Full reply", "msgtype": "m.text"}
+
+    first_client = MagicMock()
+    first_client.download = AsyncMock(
+        return_value=MagicMock(
+            spec=nio.DownloadResponse,
+            body=json.dumps(canonical_sidecar_content).encode("utf-8"),
+        ),
+    )
+    first_client.room_get_event = AsyncMock()
+    first_client.room_messages = AsyncMock()
+    first_client.room_get_event_relations = MagicMock()
+
+    try:
+        await _seed_thread_cache(
+            cache,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            events=[_cache_source(root_event), _cache_source(sidecar_reply)],
         )
-        canonical_sidecar_content = {"body": "Full reply", "msgtype": "m.text"}
 
-        first_client = MagicMock()
-        first_client.download = AsyncMock(
-            return_value=MagicMock(
-                spec=nio.DownloadResponse,
-                body=json.dumps(canonical_sidecar_content).encode("utf-8"),
-            ),
+        first_history = await fetch_thread_history(
+            first_client,
+            "!room:localhost",
+            "$thread_root",
+            event_cache=cache,
         )
-        first_client.room_get_event = AsyncMock()
-        first_client.room_messages = AsyncMock()
-        first_client.room_get_event_relations = MagicMock()
-
-        try:
-            await _seed_thread_cache(
-                cache,
-                room_id="!room:localhost",
-                thread_id="$thread_root",
-                events=[_cache_source(root_event), _cache_source(sidecar_reply)],
-            )
-
-            first_history = await fetch_thread_history(
-                first_client,
-                "!room:localhost",
-                "$thread_root",
-                event_cache=cache,
-            )
-        finally:
-            await cache.close()
-
-        message_content_module._mxc_cache.clear()
-
-        reopened_cache = event_cache_factory()
-        await reopened_cache.initialize()
-        second_client = MagicMock()
-        second_client.download = AsyncMock(
-            return_value=MagicMock(spec=nio.DownloadError),
-        )
-        second_client.room_get_event = AsyncMock()
-        second_client.room_messages = AsyncMock()
-        second_client.room_get_event_relations = MagicMock()
-
-        try:
-            second_history = await fetch_thread_history(
-                second_client,
-                "!room:localhost",
-                "$thread_root",
-                event_cache=reopened_cache,
-            )
-        finally:
-            await reopened_cache.close()
     finally:
-        message_content_module._mxc_cache.clear()
+        await cache.close()
+
+    reopened_cache = event_cache_factory()
+    await reopened_cache.initialize()
+    second_client = MagicMock()
+    second_client.download = AsyncMock(
+        return_value=MagicMock(spec=nio.DownloadError),
+    )
+    second_client.room_get_event = AsyncMock()
+    second_client.room_messages = AsyncMock()
+    second_client.room_get_event_relations = MagicMock()
+
+    try:
+        second_history = await fetch_thread_history(
+            second_client,
+            "!room:localhost",
+            "$thread_root",
+            event_cache=reopened_cache,
+        )
+    finally:
+        await reopened_cache.close()
 
     assert [message.body for message in first_history] == ["Root message", "Full reply"]
     assert [message.body for message in second_history] == ["Root message", "Full reply"]
     first_client.download.assert_awaited_once_with(mxc="mxc://server/sidecar")
     second_client.download.assert_not_awaited()
-
-
-def test_event_cache_uses_distinct_locks_per_room(tmp_path: Path) -> None:
-    """Event cache should keep independent locks per room."""
-    runtime = event_cache_module._SqliteEventCacheRuntime(tmp_path / "event_cache.db")
-
-    assert runtime.room_lock_entry("!room:localhost").lock is runtime.room_lock_entry("!room:localhost").lock
-    assert runtime.room_lock_entry("!room:localhost").lock is not runtime.room_lock_entry("!other:localhost").lock

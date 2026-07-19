@@ -9,7 +9,7 @@ import sys
 from contextlib import suppress
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self, cast
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 
 import httpx
 import nio
@@ -1356,11 +1356,17 @@ class TestMultiAgentOrchestrator:
             tmp_path,
         )
         router_bot = _mock_managed_bot(config)
+        router_bot.matrix_id.full_id = "@mindroom_router:localhost"
         general_bot = _mock_managed_bot(config)
+        general_bot.matrix_id.full_id = "@mindroom_general:localhost"
         orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
         initial_support = orchestrator._runtime_support
+        shared_event_cache = make_event_cache_mock()
+        router_event_cache = make_event_cache_mock()
+        general_event_cache = make_event_cache_mock()
+        shared_event_cache.for_principal.side_effect = [router_event_cache, general_event_cache]
         synced_support = SimpleNamespace(
-            event_cache=make_event_cache_mock(),
+            event_cache=shared_event_cache,
             event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
             startup_thread_prewarm_registry=StartupThreadPrewarmRegistry(),
         )
@@ -1383,8 +1389,12 @@ class TestMultiAgentOrchestrator:
             "log_db_path_change": True,
         }
         assert orchestrator._runtime_support is synced_support
-        assert router_bot.event_cache is synced_support.event_cache
-        assert general_bot.event_cache is synced_support.event_cache
+        assert router_bot.event_cache is router_event_cache
+        assert general_bot.event_cache is general_event_cache
+        assert shared_event_cache.for_principal.call_args_list == [
+            call("@mindroom_router:localhost"),
+            call("@mindroom_general:localhost"),
+        ]
         assert router_bot.event_cache_write_coordinator is synced_support.event_cache_write_coordinator
         assert general_bot.event_cache_write_coordinator is synced_support.event_cache_write_coordinator
 
@@ -2029,6 +2039,7 @@ class TestMultiAgentOrchestrator:
         """Recovered background starts should not retry permanent room setup failures forever."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = MagicMock()
+        orchestrator._router_principal_id = "@mindroom_router:localhost"
 
         bot = MagicMock()
         bot.agent_name = "general"
@@ -2471,6 +2482,9 @@ class TestMultiAgentOrchestrator:
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
         old_cache = MagicMock()
         new_cache = MagicMock()
+        router_cache = MagicMock()
+        new_cache.for_principal.return_value = router_cache
+        orchestrator._router_principal_id = "@mindroom_router:localhost"
         support = SimpleNamespace(
             event_cache=new_cache,
             event_cache_write_coordinator=MagicMock(),
@@ -2487,7 +2501,8 @@ class TestMultiAgentOrchestrator:
                 await orchestrator._sync_runtime_support_services(config, start_watcher=False)
 
             assert get_approval_store() is store
-            assert store._event_cache is new_cache
+            assert store._event_cache is router_cache
+            new_cache.for_principal.assert_called_once_with("@mindroom_router:localhost")
         finally:
             await _shutdown_approval_store()
 
@@ -3135,7 +3150,9 @@ class TestMultiAgentOrchestrator:
         orchestrator.config = old_config
         orchestrator.running = True
         router_bot = _mock_managed_bot(old_config)
+        router_bot.matrix_id.full_id = "@mindroom_router:localhost"
         general_bot = _mock_managed_bot(old_config)
+        general_bot.matrix_id.full_id = "@mindroom_general:localhost"
         orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
 
         with (
@@ -3147,8 +3164,10 @@ class TestMultiAgentOrchestrator:
             try:
                 updated = await orchestrator.config_reload.update_config()
                 assert updated is False
-                assert router_bot.event_cache is orchestrator._runtime_support.event_cache
-                assert general_bot.event_cache is orchestrator._runtime_support.event_cache
+                assert router_bot.event_cache.principal_id == "@mindroom_router:localhost"
+                assert general_bot.event_cache.principal_id == "@mindroom_general:localhost"
+                assert router_bot.event_cache.db_path == orchestrator._runtime_support.event_cache.db_path
+                assert general_bot.event_cache.db_path == orchestrator._runtime_support.event_cache.db_path
                 assert (
                     router_bot.event_cache_write_coordinator
                     is orchestrator._runtime_support.event_cache_write_coordinator
@@ -3199,7 +3218,9 @@ class TestMultiAgentOrchestrator:
         orchestrator.config = old_config
         orchestrator.running = True
         router_bot = _mock_managed_bot(old_config)
+        router_bot.matrix_id.full_id = "@mindroom_router:localhost"
         general_bot = _mock_managed_bot(old_config)
+        general_bot.matrix_id.full_id = "@mindroom_general:localhost"
         orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
         await orchestrator._sync_event_cache_service(old_config)
         old_cache = orchestrator._runtime_support.event_cache
@@ -3216,8 +3237,10 @@ class TestMultiAgentOrchestrator:
                 assert updated is False
                 assert orchestrator._runtime_support.event_cache is old_cache
                 assert old_cache.db_path == old_config.cache.resolve_db_path(orchestrator.runtime_paths)
-                assert router_bot.event_cache is old_cache
-                assert general_bot.event_cache is old_cache
+                assert router_bot.event_cache.principal_id == "@mindroom_router:localhost"
+                assert general_bot.event_cache.principal_id == "@mindroom_general:localhost"
+                assert router_bot.event_cache.db_path == old_cache.db_path
+                assert general_bot.event_cache.db_path == old_cache.db_path
                 assert orchestrator._runtime_support.event_cache_write_coordinator is not None
                 assert (
                     router_bot.event_cache_write_coordinator

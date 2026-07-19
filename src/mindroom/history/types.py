@@ -130,6 +130,7 @@ class ResolvedHistoryExecutionPlan:
     summary_input_budget_tokens: int | None
     unavailable_reason: CompactionAvailabilityReason | None = None
     hard_replay_budget_tokens: int | None = None
+    compaction_fallback_model_name: str | None = None
 
 
 @dataclass(frozen=True)

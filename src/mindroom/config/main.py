@@ -45,6 +45,7 @@ from mindroom.config.matrix import (
 from mindroom.config.memory import MemoryBackend, MemoryConfig, MemorySearchConfig
 from mindroom.config.models import (
     CompactionConfig,
+    CompactionOverrideConfig,
     DebugConfig,
     DefaultsConfig,
     EffectiveToolConfig,
@@ -216,9 +217,10 @@ class _AuthoredOptionalModel:
 
 @dataclass(frozen=True)
 class _StaticCompactionConfigSemantics:
-    """Static compaction semantics for one config scope."""
+    """Static compaction semantics for one optional model field in one config scope."""
 
     scope_label: str
+    field_name: str
     authored_model: _AuthoredOptionalModel
 
 
@@ -279,17 +281,34 @@ def _strip_empty_root_sections(payload: dict[str, Any]) -> dict[str, Any]:
     return authored_payload
 
 
+def _authored_compaction_model_fields(
+    compaction: CompactionConfig | CompactionOverrideConfig,
+) -> dict[str, _AuthoredOptionalModel]:
+    """Return authored tri-state semantics for every optional compaction model field."""
+    return {
+        "model": _authored_optional_model(
+            compaction.model,
+            field_is_set="model" in compaction.model_fields_set,
+        ),
+        "fallback_model": _authored_optional_model(
+            compaction.fallback_model,
+            field_is_set="fallback_model" in compaction.model_fields_set,
+        ),
+    }
+
+
 def _effective_static_compaction_enabled(
     *,
     defaults_enabled: bool,
     override_enabled: bool | None,
     override_fields_set: set[str],
-    authored_model: _AuthoredOptionalModel,
+    authored_model_fields: dict[str, _AuthoredOptionalModel],
 ) -> bool:
     """Resolve whether one authored override block is statically enabled."""
     if "enabled" in override_fields_set:
         return override_enabled is True
-    if authored_model.kind == "clear" and override_fields_set == {"model"}:
+    cleared_model_fields = {name for name, authored in authored_model_fields.items() if authored.kind == "clear"}
+    if override_fields_set and override_fields_set <= cleared_model_fields:
         return defaults_enabled
     if override_fields_set:
         return True
@@ -631,7 +650,7 @@ class Config(BaseModel):
         return self
 
     def _invalid_compaction_model_references(self) -> list[str]:
-        """Return any compaction.model references that point at unknown models."""
+        """Return any compaction model references that point at unknown models."""
         invalid_references: list[str] = []
         for semantics in self._static_compaction_semantics():
             if semantics.authored_model.kind != "value":
@@ -639,13 +658,13 @@ class Config(BaseModel):
             assert semantics.authored_model.value is not None
             if semantics.authored_model.value not in self.models:
                 invalid_references.append(
-                    f"{semantics.scope_label}.compaction.model -> {semantics.authored_model.value}",
+                    f"{semantics.scope_label}.compaction.{semantics.field_name} -> {semantics.authored_model.value}",
                 )
 
         return invalid_references
 
     def _compaction_models_missing_context_window(self) -> list[str]:
-        """Return explicit compaction.model references whose target model lacks context_window."""
+        """Return explicit compaction model references whose target model lacks context_window."""
         invalid_references: list[str] = []
         for semantics in self._static_compaction_semantics():
             if semantics.authored_model.kind != "value":
@@ -653,63 +672,40 @@ class Config(BaseModel):
             assert semantics.authored_model.value is not None
             if self.models[semantics.authored_model.value].context_window is None:
                 invalid_references.append(
-                    f"{semantics.scope_label}.compaction.model -> {semantics.authored_model.value}",
+                    f"{semantics.scope_label}.compaction.{semantics.field_name} -> {semantics.authored_model.value}",
                 )
 
         return invalid_references
 
     def _static_compaction_semantics(self) -> list[_StaticCompactionConfigSemantics]:
         """Return static compaction semantics for defaults, agents, and teams."""
-        semantics: list[_StaticCompactionConfigSemantics] = []
+        scoped_compactions: list[tuple[str, CompactionConfig | CompactionOverrideConfig]] = []
         defaults_compaction = self.defaults.compaction
 
         if defaults_compaction is not None:
-            authored_model = _authored_optional_model(
-                defaults_compaction.model,
-                field_is_set="model" in defaults_compaction.model_fields_set,
-            )
-            semantics.append(
-                _StaticCompactionConfigSemantics(
-                    scope_label="defaults",
-                    authored_model=authored_model,
-                ),
-            )
+            scoped_compactions.append(("defaults", defaults_compaction))
 
         for agent_name, agent_config in self.agents.items():
-            override = agent_config.compaction
-            if override is None:
-                continue
-            authored_model = _authored_optional_model(
-                override.model,
-                field_is_set="model" in override.model_fields_set,
-            )
-            semantics.append(
-                _StaticCompactionConfigSemantics(
-                    scope_label=f"agents.{agent_name}",
-                    authored_model=authored_model,
-                ),
-            )
+            if agent_config.compaction is not None:
+                scoped_compactions.append((f"agents.{agent_name}", agent_config.compaction))
 
         for team_name, team_config in self.teams.items():
-            override = team_config.compaction
-            if override is None:
-                continue
-            authored_model = _authored_optional_model(
-                override.model,
-                field_is_set="model" in override.model_fields_set,
-            )
-            semantics.append(
-                _StaticCompactionConfigSemantics(
-                    scope_label=f"teams.{team_name}",
-                    authored_model=authored_model,
-                ),
-            )
+            if team_config.compaction is not None:
+                scoped_compactions.append((f"teams.{team_name}", team_config.compaction))
 
-        return semantics
+        return [
+            _StaticCompactionConfigSemantics(
+                scope_label=scope_label,
+                field_name=field_name,
+                authored_model=authored_model,
+            )
+            for scope_label, compaction in scoped_compactions
+            for field_name, authored_model in _authored_compaction_model_fields(compaction).items()
+        ]
 
     @model_validator(mode="after")
     def validate_compaction_model_references(self) -> Config:
-        """Ensure explicit compaction.model references are statically valid."""
+        """Ensure explicit compaction model and fallback_model references are statically valid."""
         invalid_references = self._invalid_compaction_model_references()
         if invalid_references:
             msg = "Compaction model references unknown models: " + ", ".join(sorted(invalid_references))
@@ -717,7 +713,7 @@ class Config(BaseModel):
 
         missing_context_windows = self._compaction_models_missing_context_window()
         if missing_context_windows:
-            msg = "Explicit compaction.model requires a model with context_window: " + ", ".join(
+            msg = "Explicit compaction model references require a model with context_window: " + ", ".join(
                 sorted(missing_context_windows),
             )
             raise ValueError(msg)
@@ -1192,10 +1188,6 @@ class Config(BaseModel):
             raise ValueError(msg)
         if override is not None:
             authored_override = override.model_dump(exclude_unset=True)
-            authored_model = _authored_optional_model(
-                override.model,
-                field_is_set="model" in override.model_fields_set,
-            )
             explicit_enabled = authored_override.pop(
                 "enabled",
                 override.enabled if "enabled" in override.model_fields_set else None,
@@ -1213,7 +1205,7 @@ class Config(BaseModel):
                 defaults_enabled=defaults_enabled,
                 override_enabled=explicit_enabled,
                 override_fields_set=override.model_fields_set,
-                authored_model=authored_model,
+                authored_model_fields=_authored_compaction_model_fields(override),
             )
         return CompactionConfig.model_validate(merged)
 

@@ -1320,19 +1320,19 @@ def _excluded_sync_response(excluded_events: dict[str, nio.Event]) -> _SyncEnvel
 async def test_sync_categories_outside_joined_timeline_are_deliberately_excluded(
     event_cache: ConversationEventCache,
 ) -> None:
-    """Excluded sync families never affect point rows, indexes, snapshots, or freshness."""
+    """Timeline caching excludes sync families owned by other lifecycle collaborators."""
     await _seed_thread(event_cache)
     leave_room_id = "!leave:localhost"
-    preserved_leave_event = _event_source(
-        "$preserved-after-leave",
+    departed_room_event = _event_source(
+        "$departed-room-event",
         "m.room.message",
-        {"body": "preserved", "msgtype": "m.text"},
+        {"body": "departed", "msgtype": "m.text"},
         timestamp=100,
     )
     await event_cache.store_event(
-        "$preserved-after-leave",
+        "$departed-room-event",
         leave_room_id,
-        preserved_leave_event,
+        departed_room_event,
     )
     before_events = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
     before_state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
@@ -1401,7 +1401,8 @@ async def test_sync_categories_outside_joined_timeline_are_deliberately_excluded
     assert await event_cache.get_latest_edit(leave_room_id, "$leave-original") is None
     assert await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID) == before_events
     assert await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID) == before_state
-    assert await event_cache.get_event(leave_room_id, "$preserved-after-leave") == preserved_leave_event
+    assert event_cache.room_departure_epoch(leave_room_id) == 0
+    assert await event_cache.get_event(leave_room_id, "$departed-room-event") == departed_room_event
 
 
 @pytest.mark.asyncio

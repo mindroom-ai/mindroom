@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.cache import ConversationEventCache
+    from mindroom.matrix.cache import SharedConversationEventCache
 
 
 logger = get_logger(__name__)
@@ -86,7 +86,7 @@ async def _run_export_group(
     homeserver: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache,
+    event_cache: SharedConversationEventCache,
     targets: Sequence[ThreadExportTarget],
     accumulators: Sequence[ThreadExportAccumulator],
     max_thread_roots: int,
@@ -103,7 +103,7 @@ async def _run_export_group(
             client=client,
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=event_cache,
+            event_cache=event_cache.for_principal(group.user.user_id),
             rooms=group.rooms,
             targets=targets,
             max_thread_roots=max_thread_roots,

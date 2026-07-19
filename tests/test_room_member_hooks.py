@@ -132,7 +132,7 @@ def _agent_bot(tmp_path: Path) -> AgentBot:
         display_name="Helper",
         password=TEST_PASSWORD,
     )
-    return AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+    return install_runtime_cache_support(AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths))
 
 
 def test_room_member_joined_is_a_builtin_hook_event() -> None:

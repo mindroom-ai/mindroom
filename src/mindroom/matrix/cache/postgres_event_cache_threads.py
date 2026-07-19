@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from .event_cache_events import (
     event_id_for_cache,
@@ -138,6 +138,78 @@ async def load_thread_cache_state(
     return row.as_public_state()
 
 
+async def load_room_membership_locked(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+) -> tuple[str, int]:
+    """Return the durable membership state and transition epoch for one principal-room."""
+    row = await fetchone(
+        db,
+        """
+        SELECT membership_state, membership_epoch
+        FROM mindroom_event_cache_room_state
+        WHERE namespace = %s AND room_id = %s
+        """,
+        (namespace, room_id),
+    )
+    return ("joined", 0) if row is None else (str(row[0]), int(row[1]))
+
+
+async def certify_room_membership_locked(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+) -> int:
+    """Create a durable generation row and return its current epoch."""
+    await db.execute(
+        """
+        INSERT INTO mindroom_event_cache_room_state(
+            namespace,
+            room_id,
+            membership_state,
+            membership_epoch
+        )
+        VALUES (%s, %s, 'joined', 0)
+        ON CONFLICT(namespace, room_id) DO NOTHING
+        """,
+        (namespace, room_id),
+    )
+    _membership_state, membership_epoch = await load_room_membership_locked(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+    )
+    return membership_epoch
+
+
+async def set_room_membership_locked(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+    membership_state: Literal["joined", "departed"],
+    reason: str,
+) -> None:
+    """Advance one durable room-membership transition and invalidate prior refills."""
+    await mark_room_stale_locked(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        reason=reason,
+    )
+    await db.execute(
+        """
+        UPDATE mindroom_event_cache_room_state
+        SET membership_state = %s, membership_epoch = membership_epoch + 1
+        WHERE namespace = %s AND room_id = %s
+        """,
+        (membership_state, namespace, room_id),
+    )
+
+
 async def _store_thread_events_locked(
     db: AsyncConnection,
     *,
@@ -146,18 +218,8 @@ async def _store_thread_events_locked(
     thread_id: str,
     events: list[dict[str, Any]],
     validated_at: float,
-) -> None:
+) -> frozenset[str]:
     """Persist one authoritative thread snapshot within an existing DB transaction."""
-    if not events:
-        await _upsert_thread_cache_state(
-            db,
-            namespace=namespace,
-            room_id=room_id,
-            thread_id=thread_id,
-            validated_at=validated_at,
-        )
-        return
-
     normalized_events = [normalize_event_source_for_cache(event) for event in events]
     cacheable_events = await filter_cacheable_events(
         db,
@@ -200,6 +262,7 @@ async def _store_thread_events_locked(
         thread_id=thread_id,
         validated_at=validated_at,
     )
+    return frozenset(event.event_id for event in serialized_events)
 
 
 async def _replace_thread_locked(
@@ -218,30 +281,7 @@ async def _replace_thread_locked(
         room_id=room_id,
         thread_id=thread_id,
     )
-    await db.execute(
-        """
-        DELETE FROM mindroom_event_cache_thread_events
-        WHERE namespace = %s AND room_id = %s AND thread_id = %s
-        """,
-        (namespace, room_id, thread_id),
-    )
-    if existing_event_ids:
-        await delete_cached_events(db, namespace=namespace, event_ids=existing_event_ids)
-        await delete_event_edit_rows(
-            db,
-            namespace,
-            room_id,
-            event_ids=existing_event_ids,
-            original_event_id=None,
-        )
-        await delete_event_thread_rows(
-            db,
-            namespace,
-            room_id,
-            event_ids=existing_event_ids,
-            affected_thread_ids=[thread_id],
-        )
-    await _store_thread_events_locked(
+    replacement_event_ids = await _store_thread_events_locked(
         db,
         namespace=namespace,
         room_id=room_id,
@@ -249,6 +289,34 @@ async def _replace_thread_locked(
         events=events,
         validated_at=validated_at,
     )
+    removed_event_ids = sorted(set(existing_event_ids) - replacement_event_ids)
+    if removed_event_ids:
+        await db.execute(
+            """
+            DELETE FROM mindroom_event_cache_thread_events
+            WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
+            """,
+            (namespace, room_id, removed_event_ids),
+        )
+        await delete_cached_events(
+            db,
+            namespace=namespace,
+            room_id=room_id,
+            event_ids=removed_event_ids,
+        )
+        await delete_event_edit_rows(
+            db,
+            namespace,
+            room_id,
+            event_ids=removed_event_ids,
+            original_event_id=None,
+        )
+        await delete_event_thread_rows(
+            db,
+            namespace,
+            room_id,
+            event_ids=removed_event_ids,
+        )
 
 
 async def replace_thread_locked_if_not_newer(
@@ -303,7 +371,7 @@ async def invalidate_thread_locked(
         (namespace, room_id, thread_id),
     )
     if event_ids:
-        await delete_cached_events(db, namespace=namespace, event_ids=event_ids)
+        await delete_cached_events(db, namespace=namespace, room_id=room_id, event_ids=event_ids)
         await delete_event_edit_rows(
             db,
             namespace,
@@ -316,7 +384,6 @@ async def invalidate_thread_locked(
             namespace,
             room_id,
             event_ids=event_ids,
-            affected_thread_ids=[thread_id],
         )
     await db.execute(
         """
@@ -333,9 +400,8 @@ async def invalidate_room_threads_locked(
     namespace: str,
     room_id: str,
 ) -> None:
-    """Delete every cached thread snapshot and room state for one room."""
+    """Delete every cached thread snapshot while preserving durable room membership."""
     event_ids = await _thread_event_ids_for_room(db, namespace=namespace, room_id=room_id)
-    thread_ids = await _thread_ids_for_room(db, namespace=namespace, room_id=room_id)
     await db.execute(
         """
         DELETE FROM mindroom_event_cache_thread_events
@@ -344,7 +410,7 @@ async def invalidate_room_threads_locked(
         (namespace, room_id),
     )
     if event_ids:
-        await delete_cached_events(db, namespace=namespace, event_ids=event_ids)
+        await delete_cached_events(db, namespace=namespace, room_id=room_id, event_ids=event_ids)
         await delete_event_edit_rows(
             db,
             namespace,
@@ -357,18 +423,10 @@ async def invalidate_room_threads_locked(
             namespace,
             room_id,
             event_ids=event_ids,
-            affected_thread_ids=thread_ids,
         )
     await db.execute(
         """
         DELETE FROM mindroom_event_cache_thread_state
-        WHERE namespace = %s AND room_id = %s
-        """,
-        (namespace, room_id),
-    )
-    await db.execute(
-        """
-        DELETE FROM mindroom_event_cache_room_state
         WHERE namespace = %s AND room_id = %s
         """,
         (namespace, room_id),
@@ -626,25 +684,6 @@ async def _thread_event_ids_for_room(
         """
         SELECT event_id
         FROM mindroom_event_cache_thread_events
-        WHERE namespace = %s AND room_id = %s
-        """,
-        (namespace, room_id),
-    )
-    return [str(row[0]) for row in rows]
-
-
-async def _thread_ids_for_room(
-    db: AsyncConnection,
-    *,
-    namespace: str,
-    room_id: str,
-) -> list[str]:
-    """Return roots whose room-wide snapshot proof is about to be removed."""
-    rows = await fetchall(
-        db,
-        """
-        SELECT thread_id
-        FROM mindroom_event_cache_thread_state
         WHERE namespace = %s AND room_id = %s
         """,
         (namespace, room_id),
