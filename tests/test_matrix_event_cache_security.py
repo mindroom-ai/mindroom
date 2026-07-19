@@ -12,6 +12,7 @@ import pytest
 from mindroom.matrix.cache import (
     ConversationEventCache,
     SharedConversationEventCache,
+    clear_untrusted_principal_cache,
     postgres_event_cache_events,
     sqlite_event_cache_events,
 )
@@ -517,6 +518,51 @@ async def test_failed_principal_purge_blocks_generation_and_reads_until_recovery
 
 
 @pytest.mark.asyncio
+async def test_failed_startup_cleanup_disables_only_the_affected_principal(
+    event_cache_factory: Callable[[], ConversationEventCache],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed untrusted-row cleanup must keep one principal network-only until restart."""
+    root = _shared_cache(event_cache_factory)
+    await root.initialize()
+    alice = root.for_principal("@alice:localhost")
+    bob = root.for_principal("@bob:localhost")
+    room_id = "!room:localhost"
+    alice_event = _event("$alice", 1)
+    bob_event = _event("$bob", 2)
+    await alice.store_event("$alice", room_id, alice_event)
+    await bob.store_event("$bob", room_id, bob_event)
+
+    if isinstance(alice, SqliteEventCache):
+        module = sqlite_event_cache_events
+    else:
+        assert isinstance(alice, PostgresEventCache)
+        module = postgres_event_cache_events
+    failure_reason = "startup principal purge failed"
+
+    async def fail_purge(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError(failure_reason)
+
+    try:
+        monkeypatch.setattr(module, "purge_principal_locked", fail_purge)
+        with pytest.raises(RuntimeError, match=failure_reason):
+            await clear_untrusted_principal_cache(alice)
+
+        assert alice.durable_writes_available is False
+        assert alice.cache_generation is None
+        assert await alice.get_event(room_id, "$alice") is None
+        await alice.store_event("$late", room_id, _event("$late", 3))
+        assert await alice.get_event(room_id, "$late") is None
+
+        assert bob.durable_writes_available is True
+        assert await bob.get_event(room_id, "$bob") == bob_event
+        await bob.store_event("$new", room_id, _event("$new", 4))
+        assert await bob.get_event(room_id, "$new") == _event("$new", 4)
+    finally:
+        await root.close()
+
+
+@pytest.mark.asyncio
 async def test_redaction_reference_lifecycle_is_durable_and_non_resurrecting(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
@@ -621,9 +667,14 @@ async def test_postgres_principal_purge_excludes_other_runtime_operations(
         acquired_room_id: str,
         *,
         operation: str,
+        ensure_namespace_exclusive: bool = False,
     ) -> AsyncIterator[Any]:
         store_lock_attempted.set()
-        async with original_acquire(acquired_room_id, operation=operation) as db:
+        async with original_acquire(
+            acquired_room_id,
+            operation=operation,
+            ensure_namespace_exclusive=ensure_namespace_exclusive,
+        ) as db:
             yield db
 
     await first.initialize()
@@ -686,9 +737,14 @@ async def test_postgres_resumed_principal_purge_upgrades_to_exclusive_namespace_
         acquired_room_id: str,
         *,
         operation: str,
+        ensure_namespace_exclusive: bool = False,
     ) -> AsyncIterator[Any]:
         store_lock_attempted.set()
-        async with original_acquire(acquired_room_id, operation=operation) as db:
+        async with original_acquire(
+            acquired_room_id,
+            operation=operation,
+            ensure_namespace_exclusive=ensure_namespace_exclusive,
+        ) as db:
             yield db
 
     await first.initialize()
@@ -713,6 +769,75 @@ async def test_postgres_resumed_principal_purge_upgrades_to_exclusive_namespace_
         assert await second.get_event(second_room_id, event_id) == event
     finally:
         release_purge.set()
+        await first.close()
+        await second.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_late_principal_purges_restart_before_exclusive_lock(
+    postgres_event_cache_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two late purge fences must restart instead of deadlocking shared-lock holders."""
+    namespace = f"late_purge_lock_{uuid.uuid4().hex}"
+    first = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
+    second = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
+    shared_lock_acquired = [asyncio.Event(), asyncio.Event()]
+    release_shared_lock_holders = asyncio.Event()
+
+    def pause_first_shared_lock(
+        cache: PostgresEventCache,
+        acquired: asyncio.Event,
+    ) -> Callable[..., Any]:
+        original_acquire = cache._runtime.acquire_db_operation
+        pause_next = True
+
+        @asynccontextmanager
+        async def paused_acquire(
+            room_id: str,
+            *,
+            operation: str,
+            ensure_namespace_exclusive: bool = False,
+        ) -> AsyncIterator[Any]:
+            nonlocal pause_next
+            async with original_acquire(
+                room_id,
+                operation=operation,
+                ensure_namespace_exclusive=ensure_namespace_exclusive,
+            ) as db:
+                if pause_next and not ensure_namespace_exclusive:
+                    pause_next = False
+                    acquired.set()
+                    await release_shared_lock_holders.wait()
+                yield db
+
+        return paused_acquire
+
+    await first.initialize()
+    await second.initialize()
+    monkeypatch.setattr(first._runtime, "acquire_db_operation", pause_first_shared_lock(first, shared_lock_acquired[0]))
+    monkeypatch.setattr(
+        second._runtime,
+        "acquire_db_operation",
+        pause_first_shared_lock(second, shared_lock_acquired[1]),
+    )
+    first_store = asyncio.create_task(first.store_event("$first", "!first:localhost", _event("$first", 1)))
+    second_store = asyncio.create_task(second.store_event("$second", "!second:localhost", _event("$second", 2)))
+    try:
+        await asyncio.gather(*(event.wait() for event in shared_lock_acquired))
+        first._runtime.record_pending_principal_purge()
+        second._runtime.record_pending_principal_purge()
+        release_shared_lock_holders.set()
+
+        await asyncio.wait_for(asyncio.gather(first_store, second_store), timeout=2)
+
+        assert first._runtime.has_pending_principal_purge is False
+        assert second._runtime.has_pending_principal_purge is False
+        assert await first.get_event("!first:localhost", "$first") is None
+        assert await second.get_event("!second:localhost", "$second") is None
+    finally:
+        release_shared_lock_holders.set()
+        await asyncio.gather(first_store, second_store, return_exceptions=True)
         await first.close()
         await second.close()
 

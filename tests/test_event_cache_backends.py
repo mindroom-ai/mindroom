@@ -695,9 +695,15 @@ async def test_postgres_event_cache_operation_rolls_back_cancelled_callback(
     db = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
 
     @asynccontextmanager
-    async def acquire_db_operation(room_id: str, *, operation: str) -> AsyncIterator[object]:
+    async def acquire_db_operation(
+        room_id: str,
+        *,
+        operation: str,
+        ensure_namespace_exclusive: bool = False,
+    ) -> AsyncIterator[object]:
         assert room_id == "!room:example.test"
         assert operation == "cancelled_callback"
+        assert ensure_namespace_exclusive is False
         yield db
 
     monkeypatch.setattr(
@@ -707,6 +713,7 @@ async def test_postgres_event_cache_operation_rolls_back_cancelled_callback(
             is_disabled=False,
             namespace="tenant-a",
             acquire_db_operation=acquire_db_operation,
+            has_pending_principal_purge=False,
             is_room_departed=Mock(return_value=False),
         ),
     )

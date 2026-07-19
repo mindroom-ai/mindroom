@@ -66,7 +66,9 @@ Thread lookup indexes are rebuilt on event replacement, while root self-mappings
 
 If the process stops before cleanup commits, the next startup has no certified checkpoint and transactionally purges every row for that principal before restoring sync continuity or allowing cache reads.
 
-That cold-start principal purge preserves rows owned by every other principal, and a failed attempt keeps the principal generation unavailable until a later operation commits the purge.
+That cold-start principal purge preserves rows owned by every other principal.
+
+If cold-start cleanup is unavailable or fails, only that principal view is disabled for the rest of the runtime, no later sync checkpoint can certify the missing cache writes, and the next process retries cleanup before using cache continuity.
 
 Process-local plaintext for the departed principal and room is removed immediately even when the durable backend is unavailable.
 
@@ -77,7 +79,9 @@ Each SQLite principal view derives a stable checkpoint generation from that data
 
 PostgreSQL schema version 2 migrates under a global transaction-scoped advisory lock, preserves every namespace, expands event and plaintext keys with room scope, and quarantines legacy unscoped plaintext under an unreachable empty room ID.
 
-PostgreSQL room operations hold a shared principal-namespace advisory lock, while initial and resumed principal purges upgrade to the matching exclusive lock before deleting rows.
+PostgreSQL room operations hold a shared principal-namespace advisory lock, while initial and resumed principal purges acquire the matching exclusive lock before deleting rows.
+
+An operation that discovers a principal purge after taking the shared lock rolls back and restarts with the exclusive lock instead of attempting a deadlock-prone in-transaction upgrade.
 
 Each PostgreSQL principal namespace stores a durable random cache-generation identifier that changes when that namespace metadata is recreated.
 

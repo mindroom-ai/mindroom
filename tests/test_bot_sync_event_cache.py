@@ -281,6 +281,51 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert cached_event["content"]["body"] == "Thread reply"
 
     @pytest.mark.asyncio
+    async def test_failed_untrusted_cleanup_keeps_cold_sync_network_only(self, bot: AgentBot) -> None:
+        """A failed startup purge must prevent this runtime from certifying later sync tokens."""
+        support = await _bind_owned_runtime_support(bot)
+        failure_reason = "startup purge unavailable"
+        room_id = "!test:localhost"
+        event_id = "$first-after-failure:localhost"
+        message_event = nio.RoomMessageText.from_dict(
+            {
+                "content": {"body": "First recovered event", "msgtype": "m.text"},
+                "event_id": event_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+        first_response = self._sync_response(
+            {room_id: MagicMock(timeline=MagicMock(events=[message_event], limited=False))},
+        )
+        first_response.rooms.leave = {}
+
+        try:
+            with patch(
+                "mindroom.matrix.cache.sqlite_event_cache_events.purge_principal_locked",
+                AsyncMock(side_effect=RuntimeError(failure_reason)),
+            ):
+                await bot._purge_untrusted_principal_cache()
+
+            assert bot.event_cache.durable_writes_available is False
+            bot.client.next_batch = "s_after_failed_cleanup"
+            await self._run_sync_response_without_startup_side_effects(bot, first_response)
+
+            assert load_sync_token_record(bot.storage_path, bot.agent_name) is None
+            assert await bot.event_cache.get_event(room_id, event_id) is None
+
+            bot.client.next_batch = "s_later_still_network_only"
+            later_response = self._sync_response({})
+            later_response.rooms.leave = {}
+            await self._run_sync_response_without_startup_side_effects(bot, later_response)
+
+            assert load_sync_token_record(bot.storage_path, bot.agent_name) is None
+        finally:
+            await _close_bound_runtime_support(bot, support)
+
+    @pytest.mark.asyncio
     async def test_non_first_sync_waits_for_cache_write_before_token_persist(self, bot: AgentBot) -> None:
         """Incremental sync tokens must not save until their cache writes are durable."""
         cache_started = asyncio.Event()

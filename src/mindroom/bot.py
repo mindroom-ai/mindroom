@@ -35,6 +35,7 @@ from mindroom.hooks import (
     emit,
     send_hook_message,
 )
+from mindroom.matrix.cache import clear_untrusted_principal_cache
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.decrypt_failure import handle_decrypt_failure, raise_notice_floor
 from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source
@@ -1061,14 +1062,12 @@ class AgentBot:
             self.logger.warning("matrix_sync_token_uncertified_legacy")
 
     async def _purge_untrusted_principal_cache(self) -> None:
-        """Drop this principal's cache when no certified checkpoint can prove continuity."""
-        if not self.event_cache.durable_writes_available:
-            return
+        """Drop untrusted rows or leave this principal's cache disabled until restart."""
         try:
-            await self.event_cache.purge_principal()
+            await clear_untrusted_principal_cache(self.event_cache)
         except Exception as exc:
             self.logger.warning(
-                "matrix_untrusted_principal_cache_purge_deferred",
+                "matrix_untrusted_principal_cache_disabled",
                 error=str(exc),
             )
 

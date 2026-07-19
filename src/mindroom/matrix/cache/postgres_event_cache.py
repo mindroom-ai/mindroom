@@ -481,6 +481,10 @@ class _FlushedPendingWrites:
     invalidations: tuple[tuple[str, str | None, _PendingInvalidation], ...] = ()
 
 
+class _PrincipalPurgeLockRestartError(RuntimeError):
+    """Signal that an operation must restart before taking an exclusive namespace lock."""
+
+
 class _PostgresEventCacheRuntime:
     """Own runtime-only lifecycle, locking, and disable state for one cache instance."""
 
@@ -818,6 +822,7 @@ class _PostgresEventCacheRuntime:
         room_id: str,
         *,
         operation: str,
+        ensure_namespace_exclusive: bool = False,
     ) -> AsyncIterator[psycopg.AsyncConnection]:
         """Serialize one DB operation with lifecycle changes and room ordering."""
         if self._db is None or self.connection_is_closed(self._db):
@@ -825,7 +830,11 @@ class _PostgresEventCacheRuntime:
         async with self._db_lock, self.acquire_room_lock(room_id, operation=operation):
             db = self.require_db()
             try:
-                if room_id == _PRINCIPAL_PURGE_LOCK_SCOPE or self._pending_principal_purge:
+                if (
+                    ensure_namespace_exclusive
+                    or room_id == _PRINCIPAL_PURGE_LOCK_SCOPE
+                    or self._pending_principal_purge
+                ):
                     await self.acquire_namespace_exclusive_lock(db)
                 else:
                     await db.execute(
@@ -1053,28 +1062,27 @@ class PostgresEventCache:
         if not self._can_expose_operation_result(room_id, allow_departed=allow_departed):
             return disabled_result
         transient_error: BaseException | None = None
-        for attempt in range(_MAX_TRANSIENT_OPERATION_ATTEMPTS):
+        transient_attempt = 0
+        ensure_namespace_exclusive = room_id == _PRINCIPAL_PURGE_LOCK_SCOPE
+        while transient_attempt < _MAX_TRANSIENT_OPERATION_ATTEMPTS:
+            ensure_namespace_exclusive = ensure_namespace_exclusive or self._runtime.has_pending_principal_purge
             flushed_pending = _FlushedPendingWrites()
             try:
-                async with self._runtime.acquire_db_operation(room_id, operation=operation) as db:
-                    try:
-                        result, flushed_pending = await self._run_operation_transaction(
-                            db,
-                            room_id=room_id,
-                            disabled_result=disabled_result,
-                            callback=callback,
-                            allow_departed=allow_departed,
-                        )
-                    except BaseException:
-                        await _rollback_postgres_connection_best_effort(
-                            db,
-                            namespace=self._runtime.namespace,
-                            operation=operation,
-                        )
-                        raise
+                result, flushed_pending = await self._run_operation_attempt(
+                    room_id,
+                    operation=operation,
+                    disabled_result=disabled_result,
+                    callback=callback,
+                    allow_departed=allow_departed,
+                    ensure_namespace_exclusive=ensure_namespace_exclusive,
+                )
+            except _PrincipalPurgeLockRestartError:
+                ensure_namespace_exclusive = True
+                continue
             except EventCacheBackendUnavailableError as exc:
                 transient_error = exc
-                if attempt + 1 < _MAX_TRANSIENT_OPERATION_ATTEMPTS:
+                transient_attempt += 1
+                if transient_attempt < _MAX_TRANSIENT_OPERATION_ATTEMPTS:
                     continue
                 raise
             except Exception as exc:
@@ -1082,7 +1090,8 @@ class PostgresEventCache:
                     raise
                 transient_error = exc
                 await self._runtime.handle_transient_failure(exc, operation=operation)
-                if attempt + 1 < _MAX_TRANSIENT_OPERATION_ATTEMPTS:
+                transient_attempt += 1
+                if transient_attempt < _MAX_TRANSIENT_OPERATION_ATTEMPTS:
                     continue
                 raise _cache_backend_unavailable(operation, exc) from exc
             else:
@@ -1094,6 +1103,39 @@ class PostgresEventCache:
                     allow_departed=allow_departed,
                 )
         raise _cache_backend_unavailable(operation, transient_error or RuntimeError("operation did not run"))
+
+    async def _run_operation_attempt(
+        self,
+        room_id: str,
+        *,
+        operation: str,
+        disabled_result: _T,
+        callback: Callable[[psycopg.AsyncConnection], Awaitable[_T]],
+        allow_departed: bool,
+        ensure_namespace_exclusive: bool,
+    ) -> tuple[_T, _FlushedPendingWrites]:
+        """Run one transaction attempt with the requested namespace lock strength."""
+        async with self._runtime.acquire_db_operation(
+            room_id,
+            operation=operation,
+            ensure_namespace_exclusive=ensure_namespace_exclusive,
+        ) as db:
+            try:
+                return await self._run_operation_transaction(
+                    db,
+                    room_id=room_id,
+                    disabled_result=disabled_result,
+                    callback=callback,
+                    allow_departed=allow_departed,
+                    namespace_exclusive=ensure_namespace_exclusive,
+                )
+            except BaseException:
+                await _rollback_postgres_connection_best_effort(
+                    db,
+                    namespace=self._runtime.namespace,
+                    operation=operation,
+                )
+                raise
 
     def _can_expose_operation_result(self, room_id: str, *, allow_departed: bool) -> bool:
         """Return whether current runtime state still authorizes one operation result."""
@@ -1120,12 +1162,17 @@ class PostgresEventCache:
         disabled_result: _T,
         callback: Callable[[psycopg.AsyncConnection], Awaitable[_T]],
         allow_departed: bool,
+        namespace_exclusive: bool,
     ) -> tuple[_T, _FlushedPendingWrites]:
         """Commit one callback unless the transaction first removed its security scope."""
         if self._runtime.is_disabled or (not allow_departed and self._runtime.is_room_departed(room_id)):
             await db.commit()
             return disabled_result, _FlushedPendingWrites()
-        flushed_pending = await self._flush_pending_writes(db, room_id)
+        flushed_pending = await self._flush_pending_writes(
+            db,
+            room_id,
+            namespace_exclusive=namespace_exclusive,
+        )
         if flushed_pending.room_purge or flushed_pending.principal_purge:
             result = disabled_result
         else:
@@ -1137,9 +1184,12 @@ class PostgresEventCache:
         self,
         db: psycopg.AsyncConnection,
         room_id: str,
+        *,
+        namespace_exclusive: bool,
     ) -> _FlushedPendingWrites:
         if self._runtime.has_pending_principal_purge:
-            await self._runtime.acquire_namespace_exclusive_lock(db)
+            if not namespace_exclusive:
+                raise _PrincipalPurgeLockRestartError
             await postgres_event_cache_events.purge_principal_locked(
                 db,
                 namespace=self._runtime.namespace,

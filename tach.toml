@@ -1662,6 +1662,7 @@ depends_on = [
     "mindroom.matrix.cache.event_batching",
     "mindroom.matrix.cache.event_cache",
     "mindroom.matrix.cache.event_normalization",
+    "mindroom.matrix.cache.startup_cleanup",
     "mindroom.matrix.cache.write_coordinator",
     "mindroom.matrix.cache.thread_cache_helpers",
     "mindroom.matrix.cache.thread_history_result",
@@ -1726,6 +1727,11 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix.cache.event_cache"
 depends_on = []
+
+[[modules]]
+path = "mindroom.matrix.cache.startup_cleanup"
+depends_on = []
+visibility = ["mindroom.matrix.cache"]
 
 [[modules]]
 path = "mindroom.matrix.cache.event_cache_events"
@@ -2496,6 +2502,7 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
     "mindroom.knowledge",
+    "mindroom.matrix.cache",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
     "mindroom.matrix.conversation_cache",
@@ -3539,6 +3546,7 @@ expose = [
     "SharedConversationEventCache",
     "ThreadCacheState",
     "ThreadHistoryResult",
+    "clear_untrusted_principal_cache",
     "normalize_nio_event_for_cache",
     "thread_cache_rejection_reason",
     "thread_cache_state_is_usable",
