@@ -322,11 +322,8 @@ async def write_lookup_index_rows(
                 origin_server_ts = excluded.origin_server_ts,
                 event_json = excluded.event_json,
                 cached_at = excluded.cached_at
-            WHERE json_extract(excluded.event_json, '$.type') IS NOT NULL
-                AND (
-                    json_extract(events.event_json, '$.type') = 'm.room.encrypted'
-                    OR json_extract(excluded.event_json, '$.type') <> 'm.room.encrypted'
-                )
+            WHERE json_extract(events.event_json, '$.type') = 'm.room.encrypted'
+                OR json_extract(excluded.event_json, '$.type') <> 'm.room.encrypted'
             RETURNING event_id
             """,
             (room_id, cached_at, candidate_rows_json),
