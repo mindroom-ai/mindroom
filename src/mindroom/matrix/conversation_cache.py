@@ -517,14 +517,14 @@ class MatrixConversationCache(ConversationCacheProtocol):
             normalized_event_id,
             self._write_cache_ops.room_departure_epoch(room_id),
         )
+        turn_cache = self._turn_event_cache.get()
+        if turn_cache is not None and cache_key in turn_cache:
+            return turn_cache[cache_key]
+
         coordinator = self.runtime.event_cache_write_coordinator
         holds_room_barrier = coordinator is not None and coordinator.current_task_holds_room_barrier(room_id)
         if coordinator is not None and not holds_room_barrier:
             await coordinator.wait_for_prior_room_updates(room_id)
-
-        turn_cache = self._turn_event_cache.get()
-        if turn_cache is not None and cache_key in turn_cache:
-            return turn_cache[cache_key]
 
         membership_epoch = await self._capture_membership_epoch(room_id)
         response, fetched_event_source = await _cached_room_get_event(
