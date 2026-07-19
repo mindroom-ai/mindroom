@@ -941,6 +941,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         content: dict[str, Any],
     ) -> None:
         """Schedule one locally sent message or edit for advisory cache bookkeeping."""
+        self._evict_turn_thread_reads_for_room(room_id)
         self._evict_turn_event_lookups_for_outbound_event(
             room_id,
             event_id=event_id,
@@ -954,6 +955,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         event_source: dict[str, Any],
     ) -> None:
         """Schedule one locally sent outbound event for advisory cache bookkeeping."""
+        self._evict_turn_thread_reads_for_room(room_id)
         event_id = event_source.get("event_id")
         self._evict_turn_event_lookups_for_outbound_event(
             room_id,
@@ -964,8 +966,18 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
     def notify_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
         """Schedule one locally redacted message for advisory cache bookkeeping."""
+        self._evict_turn_thread_reads_for_room(room_id)
         self._evict_turn_event_lookups_for_room(room_id)
         self._outbound.notify_outbound_redaction(room_id, redacted_event_id)
+
+    def _evict_turn_thread_reads_for_room(self, room_id: str) -> None:
+        """Discard thread reads changed by a successful outbound mutation."""
+        turn_cache = self._turn_thread_read_cache.get()
+        if turn_cache is None:
+            return
+        for cache_key in tuple(turn_cache):
+            if cache_key[0] == room_id:
+                turn_cache.pop(cache_key)
 
     def _evict_turn_event_lookup(self, room_id: str, event_id: str) -> None:
         """Discard point-read memoization invalidated by one successful outbound mutation."""

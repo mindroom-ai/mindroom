@@ -1270,6 +1270,57 @@ class TestMatrixConversationCacheThreadReads:
         )
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "notification",
+        [
+            "message",
+            "event",
+            "redaction",
+        ],
+    )
+    async def test_outbound_mutation_evicts_same_turn_thread_read(
+        self,
+        notification: str,
+    ) -> None:
+        """A same-turn read after an outbound mutation must not replay the old thread snapshot."""
+        room_id = "!test:localhost"
+        thread_id = "$thread_root"
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(client=_make_client_mock(), event_cache=_runtime_event_cache()),
+        )
+        before = thread_history_result(
+            [_message(event_id=thread_id, body="Before")],
+            is_full_history=True,
+        )
+        after = thread_history_result(
+            [
+                _message(event_id=thread_id, body="Before"),
+                _message(event_id="$reply", body="After"),
+            ],
+            is_full_history=True,
+        )
+
+        with (
+            patch.object(access._reads, "read_thread", new=AsyncMock(side_effect=[before, after])) as read_thread,
+            patch.object(access._outbound, f"notify_outbound_{notification}") as notify,
+        ):
+            async with access.turn_scope():
+                first = await access.get_dispatch_thread_history(room_id, thread_id)
+                if notification == "message":
+                    access.notify_outbound_message(room_id, "$reply", {"body": "After", "msgtype": "m.text"})
+                elif notification == "event":
+                    access.notify_outbound_event(room_id, {"event_id": "$reply", "type": "m.reaction", "content": {}})
+                else:
+                    access.notify_outbound_redaction(room_id, "$reply")
+                second = await access.get_dispatch_thread_history(room_id, thread_id)
+
+        assert [event.event_id for event in first] == [thread_id]
+        assert [event.event_id for event in second] == [thread_id, "$reply"]
+        assert read_thread.await_count == 2
+        notify.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_departure_epoch_invalidates_event_and_thread_turn_memos(self) -> None:
         """An active turn must not replay event or thread content memoized before a leave."""
         room_id = "!test:localhost"
