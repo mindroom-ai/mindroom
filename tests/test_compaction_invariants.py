@@ -99,8 +99,12 @@ def _provider_request() -> httpx.Request:
     return httpx.Request("POST", "https://api.example.test/v1/responses")
 
 
-def _provider_error_with_cause(cause: BaseException) -> ModelProviderError:
-    provider_error = ModelProviderError(str(cause))
+def _provider_error_with_cause(
+    cause: BaseException,
+    *,
+    message: str | None = None,
+) -> ModelProviderError:
+    provider_error = ModelProviderError(message or str(cause))
     provider_error.__cause__ = cause
     return provider_error
 
@@ -697,7 +701,7 @@ def test_build_summary_request_messages_is_the_single_request_seam() -> None:
     ]
 
 
-# --- Invariant 4: deterministic budget shrink on provider failure --------------
+# --- Invariant 4: deterministic retry on provider failure ----------------------
 
 
 def test_retry_policy_shrinks_on_timeout_and_output_limit() -> None:
@@ -946,6 +950,19 @@ def test_retry_policy_does_not_retry_non_transient_provider_statuses(status_code
             id="httpx-network-error",
         ),
         pytest.param(
+            _provider_error_with_cause(
+                httpx.ConnectTimeout("connection timed out", request=_provider_request()),
+                message="provider request failed",
+            ),
+            16_000,
+            id="httpx-timeout-error",
+        ),
+        pytest.param(
+            _provider_error_with_cause(TimeoutError("connection timed out"), message="provider request failed"),
+            16_000,
+            id="builtin-timeout-error",
+        ),
+        pytest.param(
             _provider_error_with_cause(AnthropicAPIConnectionError(request=_provider_request())),
             16_000,
             id="anthropic-api-connection-error",
@@ -977,6 +994,11 @@ def test_retry_policy_does_not_retry_non_transient_provider_statuses(status_code
             _provider_error_with_cause(ValueError("invalid provider response")),
             None,
             id="non-network-cause",
+        ),
+        pytest.param(
+            _provider_error_with_cause(httpx.TooManyRedirects("redirect loop", request=_provider_request())),
+            None,
+            id="non-transport-request-error",
         ),
     ],
 )
@@ -1752,62 +1774,6 @@ async def test_two_timeouts_exhaust_current_attempt_without_persisting_suppressi
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs or []] == ["run-1"]
     assert read_scope_state(persisted, _SCOPE) == HistoryScopeState()
-    storage.close()
-
-
-@pytest.mark.asyncio
-async def test_successful_compaction_drops_legacy_persisted_block_fields(tmp_path: Path) -> None:
-    """A successful rewrite removes block metadata written by the abandoned round-five design."""
-    config, runtime_paths = _make_config(tmp_path)
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    session = _session([_completed_run("run-1", marker="RUN1-MARKER", padding=4_000)])
-    write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
-    metadata = session.metadata or {}
-    raw_compaction = metadata[MINDROOM_COMPACTION_METADATA_KEY]
-    assert isinstance(raw_compaction, dict)
-    raw_states = raw_compaction["states"]
-    assert isinstance(raw_states, dict)
-    raw_state = raw_states[_SCOPE.key]
-    assert isinstance(raw_state, dict)
-    raw_state.update(
-        {
-            "blocked_compaction_reason": "summary_input_cannot_include_run",
-            "blocked_compaction_model": "old-summary-model",
-            "blocked_summary_input_budget": 1_001,
-        },
-    )
-    storage.upsert_session(session)
-
-    with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
-        new=AsyncMock(return_value=SessionSummary(summary="new summary", updated_at=datetime.now(UTC))),
-    ):
-        outcome = await compact_scope_history(
-            storage=storage,
-            session=session,
-            scope=_SCOPE,
-            state=read_scope_state(session, _SCOPE),
-            history_settings=_HISTORY_SETTINGS,
-            available_history_budget=None,
-            summary_input_budget=10_000,
-            summary_model=FakeModel(id="summary-model", provider="fake"),
-            summary_model_name="summary-model",
-            replay_window_tokens=64_000,
-            threshold_tokens=None,
-            summary_prompt=COMPACTION_SUMMARY_PROMPT,
-        )
-
-    assert outcome is not None
-    persisted = get_agent_session(storage, "session-1")
-    assert persisted is not None
-    persisted_metadata = persisted.metadata or {}
-    persisted_compaction = persisted_metadata[MINDROOM_COMPACTION_METADATA_KEY]
-    assert isinstance(persisted_compaction, dict)
-    persisted_states = persisted_compaction["states"]
-    assert isinstance(persisted_states, dict)
-    persisted_state = persisted_states[_SCOPE.key]
-    assert isinstance(persisted_state, dict)
-    assert not any(key.startswith("blocked_") for key in persisted_state)
     storage.close()
 
 

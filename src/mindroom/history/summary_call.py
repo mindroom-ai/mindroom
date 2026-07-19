@@ -97,7 +97,11 @@ def _has_typed_network_cause(error: ModelProviderError) -> bool:
         seen.add(id(cause))
         if isinstance(
             cause,
-            ConnectionError | httpx.NetworkError | AnthropicAPIConnectionError | OpenAIAPIConnectionError,
+            ConnectionError
+            | TimeoutError
+            | httpx.TransportError
+            | AnthropicAPIConnectionError
+            | OpenAIAPIConnectionError,
         ):
             return True
         cause = cause.__cause__ or (None if cause.__suppress_context__ else cause.__context__)
