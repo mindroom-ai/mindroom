@@ -16,9 +16,6 @@ class SyncTrustState(Enum):
     PENDING = "pending"
     CERTIFIED = "certified"
     UNCERTAIN = "uncertain"
-    # Without a sync position, the next response is a fresh initial window whose
-    # limited timelines are expected whether the position was absent or reset.
-    RESET_RECOVERY = "reset_recovery"
 
 
 @dataclass(frozen=True)
@@ -57,33 +54,6 @@ class SyncCertificationDecision:
     reason: str | None = None
 
 
-@dataclass(frozen=True)
-class _SyncCertificationStart:
-    """Initial runtime sync-token trust state."""
-
-    state: SyncTrustState
-    sync_token: str | None
-
-
-def start_from_loaded_token(loaded: SyncCheckpoint | None) -> _SyncCertificationStart:
-    """Build initial certifier state from a generation-bound checkpoint."""
-    if loaded is None:
-        return _SyncCertificationStart(
-            state=SyncTrustState.RESET_RECOVERY,
-            sync_token=None,
-        )
-    token = normalize_sync_token(loaded.token)
-    if token is None:
-        return _SyncCertificationStart(
-            state=SyncTrustState.RESET_RECOVERY,
-            sync_token=None,
-        )
-    return _SyncCertificationStart(
-        state=SyncTrustState.PENDING,
-        sync_token=token,
-    )
-
-
 def _uncertain_decision(
     *,
     reason: str,
@@ -91,7 +61,7 @@ def _uncertain_decision(
 ) -> SyncCertificationDecision:
     """Return a fail-closed uncertainty decision."""
     return SyncCertificationDecision(
-        state=SyncTrustState.RESET_RECOVERY if reset_client_token else SyncTrustState.UNCERTAIN,
+        state=SyncTrustState.UNCERTAIN,
         clear_saved_token=True,
         reset_client_token=reset_client_token,
         reason=reason,
@@ -118,19 +88,12 @@ def certify_sync_response(
     cache_result: SyncCacheWriteResult,
     first_sync: bool,
 ) -> SyncCertificationDecision:
-    """Return the certifier decision for one sync response.
-
-    A limited timeline after a sync position may omit events, so the active and
-    persisted positions are reset to replay a fresh initial window.
-    A client that already lacks a position consumes that expected limited initial
-    window without repeating the same since-less request.
-    """
+    """Return the certifier decision for one sync response."""
     reason = _uncertain_reason(cache_result, next_batch=next_batch)
     if reason is not None:
-        newly_limited = bool(cache_result.limited_room_ids) and state is not SyncTrustState.RESET_RECOVERY
         return _uncertain_decision(
             reason=reason,
-            reset_client_token=newly_limited or (state is SyncTrustState.PENDING and first_sync),
+            reset_client_token=state is SyncTrustState.PENDING and first_sync,
         )
 
     token = normalize_sync_token(next_batch)

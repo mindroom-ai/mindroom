@@ -332,113 +332,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             await _close_bound_runtime_support(bot, support)
 
     @pytest.mark.asyncio
-    async def test_failed_untrusted_cleanup_keeps_cold_sync_network_only(self, bot: AgentBot) -> None:
-        """A failed startup purge must prevent this runtime from certifying later sync tokens."""
-        support = await _bind_owned_runtime_support(bot)
-        failure_reason = "startup purge unavailable"
-        room_id = "!test:localhost"
-        event_id = "$first-after-failure:localhost"
-        message_event = nio.RoomMessageText.from_dict(
-            {
-                "content": {"body": "First recovered event", "msgtype": "m.text"},
-                "event_id": event_id,
-                "sender": "@user:localhost",
-                "origin_server_ts": 1234567890,
-                "room_id": room_id,
-                "type": "m.room.message",
-            },
-        )
-        first_response = self._sync_response(
-            {room_id: MagicMock(timeline=MagicMock(events=[message_event], limited=False))},
-        )
-        first_response.rooms.leave = {}
-
-        try:
-            with patch(
-                "mindroom.matrix.cache.sqlite_event_cache_events.purge_principal_locked",
-                AsyncMock(side_effect=RuntimeError(failure_reason)),
-            ):
-                await bot._prepare_cache_and_restore_saved_sync_token()
-
-            assert bot.event_cache.durable_writes_available is False
-            bot.client.next_batch = "s_after_failed_cleanup"
-            await self._run_sync_response_without_startup_side_effects(bot, first_response)
-
-            assert load_sync_checkpoint(bot.storage_path, bot.agent_name) is None
-            assert await bot.event_cache.get_event(room_id, event_id) is None
-
-            bot.client.next_batch = "s_later_still_network_only"
-            later_response = self._sync_response({})
-            later_response.rooms.leave = {}
-            await self._run_sync_response_without_startup_side_effects(bot, later_response)
-
-            assert load_sync_checkpoint(bot.storage_path, bot.agent_name) is None
-        finally:
-            await _close_bound_runtime_support(bot, support)
-
-    @pytest.mark.asyncio
-    async def test_checkpoint_read_failure_clears_token_before_principal_purge(self, bot: AgentBot) -> None:
-        """A transient token read failure cannot leave a checkpoint trusted after cache purge."""
-        support = await _bind_owned_runtime_support(bot)
-        room_id = "!test:localhost"
-        event_id = "$cached-before-restart:localhost"
-        event = {
-            "content": {"body": "Cached event", "msgtype": "m.text"},
-            "event_id": event_id,
-            "sender": "@user:localhost",
-            "origin_server_ts": 1234567890,
-            "room_id": room_id,
-            "type": "m.room.message",
-        }
-        await bot.event_cache.store_event(event_id, room_id, event)
-        _save_certified_sync_token(bot, "s_before_read_failure")
-
-        try:
-            with patch(
-                "mindroom.bot.load_sync_checkpoint",
-                side_effect=OSError("checkpoint temporarily unreadable"),
-            ):
-                await bot._prepare_cache_and_restore_saved_sync_token()
-
-            assert load_sync_checkpoint(bot.storage_path, bot.agent_name) is None
-            assert await bot.event_cache.get_event(room_id, event_id) is None
-            assert bot.client.next_batch is None
-        finally:
-            await _close_bound_runtime_support(bot, support)
-
-    @pytest.mark.asyncio
-    async def test_checkpoint_clear_failure_preserves_cache_before_principal_purge(self, bot: AgentBot) -> None:
-        """Startup must not purge cache rows while an old checkpoint cannot be removed."""
-        support = await _bind_owned_runtime_support(bot)
-        _save_certified_sync_token(bot, "s_before_clear_failure")
-        purge_untrusted_cache = AsyncMock()
-
-        try:
-            with (
-                patch(
-                    "mindroom.bot.load_sync_checkpoint",
-                    side_effect=OSError("checkpoint temporarily unreadable"),
-                ),
-                patch(
-                    "mindroom.bot.clear_sync_token",
-                    side_effect=OSError("checkpoint cannot be removed"),
-                ),
-                patch(
-                    "mindroom.bot.clear_untrusted_principal_cache",
-                    purge_untrusted_cache,
-                ),
-            ):
-                await bot._prepare_cache_and_restore_saved_sync_token()
-
-            purge_untrusted_cache.assert_not_awaited()
-            assert _load_sync_token_value(bot.storage_path, bot.agent_name) == "s_before_clear_failure"
-            assert bot.event_cache.durable_writes_available is False
-            assert bot._runtime_view.callback_failure_count == 1
-            assert bot.client.next_batch is None
-        finally:
-            await _close_bound_runtime_support(bot, support)
-
-    @pytest.mark.asyncio
     async def test_non_first_sync_waits_for_cache_write_before_token_persist(self, bot: AgentBot) -> None:
         """Incremental sync tokens must not save until their cache writes are durable."""
         cache_started = asyncio.Event()
@@ -482,7 +375,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """Successful restored-token catch-up should save the new checkpoint token."""
         _save_certified_sync_token(bot, "s_before_complete")
         bot._runtime_view.mark_runtime_started()
-        bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification())
+        bot._sync_cache_trust.state = SyncTrustState.PENDING
         bot.client.next_batch = "s_after_complete"
 
         await self._run_sync_response_without_startup_side_effects(bot, self._sync_response({}))
@@ -496,7 +389,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """Limited restored-token catch-up must fail closed and force a cold retry token."""
         _save_certified_sync_token(bot, "s_before_limited")
         bot._runtime_view.mark_runtime_started()
-        bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification())
+        bot._sync_cache_trust.state = SyncTrustState.PENDING
         bot.client.next_batch = "s_after_limited"
         sync_response = self._sync_response(
             {"!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=True))},
@@ -504,85 +397,13 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         await self._run_sync_response_without_startup_side_effects(bot, sync_response)
 
-        assert bot._sync_trust_state is SyncTrustState.RESET_RECOVERY
+        assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
         assert bot.client.next_batch is None
         assert _load_sync_token_value(bot.storage_path, bot.agent_name) is None
         bot.event_cache.mark_room_threads_stale.assert_awaited_once_with(
             "!test:localhost",
             reason="limited_sync_timeline",
         )
-
-    @pytest.mark.asyncio
-    async def test_limited_cold_first_sync_keeps_new_position_and_stales_snapshots(self, bot: AgentBot) -> None:
-        """A limited token-less initial window must stale-mark the room without replaying the same window."""
-        bot._runtime_view.mark_runtime_started()
-        bot._restore_loaded_sync_token(None)
-        assert bot._sync_trust_state is SyncTrustState.RESET_RECOVERY
-        bot.client.next_batch = "s_after_partial_cold_start"
-        sync_response = self._sync_response(
-            {"!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=True))},
-        )
-
-        await self._run_sync_response_without_startup_side_effects(bot, sync_response)
-
-        assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
-        assert bot.client.next_batch == "s_after_partial_cold_start"
-        assert _load_sync_token_value(bot.storage_path, bot.agent_name) is None
-        bot.event_cache.mark_room_threads_stale.assert_awaited_once_with(
-            "!test:localhost",
-            reason="limited_sync_timeline",
-        )
-
-    @pytest.mark.asyncio
-    async def test_limited_certified_sync_rewinds_then_only_complete_response_recertifies(
-        self,
-        bot: AgentBot,
-    ) -> None:
-        """A mid-run gap must reset once, consume one limited window, then certify a complete delta."""
-        _save_certified_sync_token(bot, "s_before_partial")
-        bot._runtime_view.mark_runtime_started()
-        bot._first_sync_done = True
-        bot._sync_trust_state = SyncTrustState.CERTIFIED
-        bot._sync_checkpoint = SyncCheckpoint("s_before_partial")
-        bot.client.next_batch = "s_after_partial"
-        partial_response = self._sync_response(
-            {"!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=True))},
-        )
-
-        await self._run_sync_response_without_startup_side_effects(bot, partial_response)
-
-        assert bot._sync_trust_state is SyncTrustState.RESET_RECOVERY
-        assert bot.client.next_batch is None
-        assert _load_sync_token_value(bot.storage_path, bot.agent_name) is None
-        bot.event_cache.mark_room_threads_stale.assert_awaited_once_with(
-            "!test:localhost",
-            reason="limited_sync_timeline",
-        )
-
-        initial_recovery_response = self._sync_response(
-            {"!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=True))},
-        )
-        initial_recovery_response.next_batch = "s_after_initial_recovery"
-        bot.client.next_batch = initial_recovery_response.next_batch
-
-        await self._run_sync_response_without_startup_side_effects(bot, initial_recovery_response)
-
-        assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
-        assert bot.client.next_batch == "s_after_initial_recovery"
-        assert _load_sync_token_value(bot.storage_path, bot.agent_name) is None
-        assert bot.event_cache.mark_room_threads_stale.await_count == 2
-
-        complete_response = self._sync_response({})
-        complete_response.next_batch = "s_after_complete_recovery"
-        bot.client.next_batch = complete_response.next_batch
-
-        await self._run_sync_response_without_startup_side_effects(bot, complete_response)
-
-        checkpoint = load_sync_checkpoint(bot.storage_path, bot.agent_name)
-        assert bot._sync_trust_state is SyncTrustState.CERTIFIED
-        assert bot.client.next_batch == "s_after_complete_recovery"
-        assert checkpoint is not None
-        assert checkpoint.token == "s_after_complete_recovery"  # noqa: S105
 
     @pytest.mark.asyncio
     async def test_limited_sync_marks_room_stale_before_admitting_partial_events(self, bot: AgentBot) -> None:
@@ -763,7 +584,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """After cache uncertainty, later successful sync responses can save a checkpoint."""
         _save_certified_sync_token(bot, "s_before_failure")
         bot._runtime_view.mark_runtime_started()
-        bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification())
+        bot._sync_cache_trust.state = SyncTrustState.PENDING
         bot._first_sync_done = True
         bot.client.next_batch = "s_after_failure"
         failed_result = SyncCacheWriteResult(complete=True, errors=(RuntimeError("cache failed"),))
@@ -794,7 +615,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """A non-limited empty sync response can certify that there were no room deltas."""
         _save_certified_sync_token(bot, "s_before_empty")
         bot._runtime_view.mark_runtime_started()
-        bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification())
+        bot._sync_cache_trust.state = SyncTrustState.PENDING
         bot.client.next_batch = "s_after_empty"
 
         await self._run_sync_response_without_startup_side_effects(bot, self._sync_response({}))
@@ -1725,7 +1546,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_agent:localhost")
         redaction_event = MagicMock(spec=nio.RedactionEvent)
         _save_certified_sync_token(bot, "s_before_redaction")
-        bot._sync_checkpoint = SyncCheckpoint("s_before_redaction")
+        bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_redaction")
         bot.client.next_batch = "s_after_redaction"
 
         with (
