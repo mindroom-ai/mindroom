@@ -127,6 +127,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "$event:localhost",
             "!test:localhost",
             response.event.source,
+            expected_membership_epoch=0,
         )
 
     @pytest.mark.asyncio
