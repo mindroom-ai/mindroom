@@ -43,6 +43,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
+    import aiosqlite
+
     from mindroom.matrix.cache import ConversationEventCache
 
 
@@ -484,8 +486,10 @@ async def test_sqlite_v10_reset_rolls_back_on_schema_creation_cancellation(
     legacy.close()
 
     cancel_reason = "schema cancelled"
+    create_schema = sqlite_event_cache._create_event_cache_schema
 
-    async def cancelled_schema(_db: object) -> None:
+    async def cancelled_schema(db: aiosqlite.Connection) -> None:
+        await create_schema(db)
         raise asyncio.CancelledError(cancel_reason)
 
     monkeypatch.setattr(sqlite_event_cache, "_create_event_cache_schema", cancelled_schema)
