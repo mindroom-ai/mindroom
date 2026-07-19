@@ -4,17 +4,19 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from agno.exceptions import ModelProviderError, ModelRateLimitError
+from agno.exceptions import ContextWindowExceededError, ModelProviderError, ModelRateLimitError
 from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.summary import SessionSummary
+from structlog.testing import capture_logs
 
 from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.models import CompactionOverrideConfig
@@ -24,9 +26,12 @@ from mindroom.constants import (
 from mindroom.error_handling import ModelSafeguardRefusalError
 from mindroom.history.compaction import (
     _build_summary_input,
+    _CarriedSummaryUnfitError,
     _emit_compaction_hook,
+    _previous_summary_block,
     _rewrite_working_session_for_compaction,
     _strip_stale_anthropic_replay_fields,
+    _summary_digest,
     compact_scope_history,
     estimate_prompt_visible_history_tokens,
 )
@@ -35,8 +40,13 @@ from mindroom.history.storage import (
     record_compaction_chunk,
     write_scope_state,
 )
-from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, CompactionSummaryOutputLimitError
+from mindroom.history.summary_call import (
+    DEFAULT_SUMMARY_RETRY_POLICY,
+    CompactionSummaryOutputLimitError,
+    CompactionSummaryOversizedOutputError,
+)
 from mindroom.history.types import (
+    CarriedSummaryUnfitMarker,
     CompactionLifecycleProgress,
     HistoryPolicy,
     HistoryScope,
@@ -55,7 +65,7 @@ from mindroom.hooks import (
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.message_target import MessageTarget
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
-from mindroom.token_budget import estimate_text_tokens
+from mindroom.token_budget import estimate_text_tokens, persistable_summary_limit
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
     FakeModel,
@@ -95,6 +105,8 @@ async def _rewrite_single_run(
     summary_model: FakeModel | None = None,
     fallback_summary_model: FakeModel | None = None,
     fallback_summary_model_name: str | None = None,
+    fallback_summary_input_budget: int | None = None,
+    state: HistoryScopeState | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
 ) -> _CompactionRewriteResult | None:
     return await _rewrite_working_session_for_compaction(
@@ -105,9 +117,10 @@ async def _rewrite_single_run(
         summary_model_name="summary-model",
         fallback_summary_model=fallback_summary_model,
         fallback_summary_model_name=fallback_summary_model_name,
+        fallback_summary_input_budget=fallback_summary_input_budget,
         session_id=working_session.session_id,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
-        state=HistoryScopeState(force_compact_before_next_run=True),
+        state=state if state is not None else HistoryScopeState(force_compact_before_next_run=True),
         history_settings=_ALL_HISTORY_SETTINGS,
         available_history_budget=None,
         selected_run_ids=selected_run_ids,
@@ -219,6 +232,11 @@ async def test_rewrite_condenses_an_inherited_oversized_summary_into_durable_sum
             (tuple(kwargs["compacted_run_ids"]), working.summary.summary),  # type: ignore[union-attr, arg-type]
         )
 
+    progress_events: list[CompactionLifecycleProgress] = []
+
+    async def record_progress(event: CompactionLifecycleProgress) -> None:
+        progress_events.append(event)
+
     with (
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
@@ -234,6 +252,7 @@ async def test_rewrite_condenses_an_inherited_oversized_summary_into_durable_sum
             working_session=working_session,
             selected_run_ids=("run-1", "run-2"),
             summary_input_budget=6_000,
+            progress_callback=record_progress,
         )
 
     assert rewrite_result is not None
@@ -253,6 +272,9 @@ async def test_rewrite_condenses_an_inherited_oversized_summary_into_durable_sum
     # and the admitted result carries the sentinel verbatim.
     assert persisted_summaries[0] == ((), "condensed carry CRITICAL-CONTEXT-SENTINEL")
     assert [run_ids for run_ids, _summary in persisted_summaries[1:]] == [("run-1",), ("run-2",)]
+    # The lifecycle notice reports both the summary-only progress and the run
+    # chunk (the final chunk empties the scope, which suppresses its event).
+    assert [(event.compacted_run_count, event.runs_remaining) for event in progress_events] == [(0, 2), (1, 1)]
     # Chunk merges build against the condensed text, never a truncated copy.
     assert "condensed carry CRITICAL-CONTEXT-SENTINEL" in summary_inputs[1]
     assert "RUN1-MARKER" in summary_inputs[1]
@@ -1865,3 +1887,594 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
     assert progress_events[0].compacted_run_count == 1
     assert progress_events[0].runs_before == 2
     assert progress_events[0].runs_remaining == 1
+
+
+# --- ISSUE-246 redesign: persisted-summary fit invariant and condensation backstop ---
+
+_SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
+
+
+def test_acceptance_limit_guarantees_next_build_includes_a_run() -> None:
+    """I1 property test (redesign test 1), pinned to the rebuild path.
+
+    Across the admissible budget range — including the planner floor B=2,001 —
+    a summary whose wrapped block sizes at or below persistable_summary_limit
+    must always leave room for at least one run, so the acceptance arithmetic
+    and _build_summary_input cannot drift apart.
+    """
+    tiny_run = _completed_run("run-1", messages=[Message(role="user", content="tiny payload")])
+    block_overhead = len(_previous_summary_block("").encode())
+    for budget in (2_001, 2_100, 6_000, 24_000, 161_616):
+        limit = persistable_summary_limit(budget)
+        for block_size in (limit, limit - 1, max(block_overhead + 1, limit // 2)):
+            summary = "s" * (block_size - block_overhead)
+            assert len(_previous_summary_block(summary).encode()) == block_size
+            summary_input, included_runs = _build_summary_input(
+                previous_summary=summary,
+                compacted_runs=[tiny_run],
+                history_settings=_ALL_HISTORY_SETTINGS,
+                max_input_tokens=budget,
+                token_estimator=_SUMMARY_MODEL_BOUND,
+            )
+            assert included_runs, (budget, block_size)
+            # The complete summary rides along untruncated (E1).
+            assert summary in summary_input
+
+
+@pytest.mark.asyncio
+async def test_rewrite_rejects_oversized_merge_output_and_persists_nothing(tmp_path: Path) -> None:
+    """Redesign test 2: a >L candidate raises typed, shrinks once, then propagates.
+
+    Both attempts return a summary whose block exceeds the acceptance limit,
+    so the second failure propagates and the persisted session is untouched.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    working_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1", messages=[Message(role="user", content="u" * 20_000)])],
+    )
+    storage.upsert_session(working_session)
+    oversized_output = "x" * 5_000
+    assert len(_previous_summary_block(oversized_output).encode()) > persistable_summary_limit(6_000)
+    generate_summary = AsyncMock(
+        side_effect=[
+            SessionSummary(summary=oversized_output, updated_at=datetime.now(UTC)),
+            SessionSummary(summary=oversized_output, updated_at=datetime.now(UTC)),
+        ],
+    )
+
+    with (
+        patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
+        pytest.raises(CompactionSummaryOversizedOutputError),
+    ):
+        await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            summary_input_budget=6_000,
+        )
+
+    assert generate_summary.await_count == 2
+    request_inputs = [call.kwargs["summary_input"] for call in generate_summary.await_args_list]
+    assert len(request_inputs[1]) < len(request_inputs[0])
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    assert [run.run_id for run in persisted.runs or []] == ["run-1"]
+    assert read_scope_state(persisted, _SCOPE).carried_summary_unfit is None
+
+
+@pytest.mark.asyncio
+async def test_condensation_that_cannot_shrink_writes_marker_and_next_pass_is_free(tmp_path: Path) -> None:
+    """B3 regression (redesign test 4): identical condensation output converges.
+
+    The model echoes the carried summary byte-identically twice (initial call
+    plus the strengthened numeric-target retry), so nothing persists, the
+    unfit marker lands durably, the NEXT pass makes zero model calls, and a
+    forced compaction bypasses the marker for exactly one fresh attempt-set.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    stored_summary = ("word " * 2_600) + "TAIL-FACT-MUST-SURVIVE"
+    working_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1")],
+        summary=SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC)),
+    )
+    storage.upsert_session(working_session)
+    condense_inputs: list[str] = []
+
+    async def echo_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+        condense_inputs.append(summary_input)
+        return SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC))
+
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(side_effect=echo_summary),
+    ) as generate_summary:
+        rewrite_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            summary_input_budget=2_100,
+        )
+
+    assert rewrite_result is None
+    assert generate_summary.await_count == 2
+    # The strengthened retry adds the explicit numeric size target.
+    assert "MUST stay under" not in condense_inputs[0]
+    assert "MUST stay under" in condense_inputs[1]
+    assert stored_summary in condense_inputs[1]
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == stored_summary
+    assert [run.run_id for run in persisted.runs or []] == ["run-1"]
+    persisted_state = read_scope_state(persisted, _SCOPE)
+    marker = persisted_state.carried_summary_unfit
+    assert marker is not None
+    assert marker.reason == "condensation_not_smaller"
+    assert marker.summary_digest == _summary_digest(stored_summary)
+    assert marker.model_identifier == "summary-model"
+    assert marker.summary_input_budget == 2_100
+    # The consumed force flag was cleared in the same durable write.
+    assert persisted_state.force_compact_before_next_run is False
+
+    # Next pass: the marker matches, so condensation costs zero model calls.
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(),
+    ) as second_pass_summary:
+        second_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=persisted,
+            state=persisted_state,
+            summary_input_budget=2_100,
+        )
+    assert second_result is None
+    second_pass_summary.assert_not_awaited()
+
+    # Forced compaction bypasses the marker for exactly one fresh attempt-set.
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(side_effect=echo_summary),
+    ) as forced_summary:
+        forced_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=persisted,
+            state=replace(persisted_state, force_compact_before_next_run=True),
+            summary_input_budget=2_100,
+        )
+    assert forced_result is None
+    assert forced_summary.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_condensation_context_rejection_is_terminal_with_marker_and_remedies(tmp_path: Path) -> None:
+    """Redesign test 6: a typed provider context rejection is a durable one-shot verdict.
+
+    Nothing persists, the marker lands with the terminal reason, the raised
+    error names the remedies for the lifecycle failure notice, a distinct
+    warning is logged, and the next pass makes zero model calls.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    stored_summary = ("word " * 2_600) + "TAIL-FACT-MUST-SURVIVE"
+    working_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1")],
+        summary=SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC)),
+    )
+    storage.upsert_session(working_session)
+
+    with (
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(side_effect=ContextWindowExceededError("prompt is too long for this model")),
+        ) as generate_summary,
+        capture_logs() as logs,
+        pytest.raises(_CarriedSummaryUnfitError, match="raise the compaction model's context_window"),
+    ):
+        await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            summary_input_budget=2_100,
+        )
+
+    assert generate_summary.await_count == 1
+    rejection_warnings = [
+        entry for entry in logs if entry["event"] == "Compaction condensation rejected by the provider context window"
+    ]
+    assert len(rejection_warnings) == 1
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == stored_summary
+    assert [run.run_id for run in persisted.runs or []] == ["run-1"]
+    persisted_state = read_scope_state(persisted, _SCOPE)
+    marker = persisted_state.carried_summary_unfit
+    assert marker is not None
+    assert marker.reason == "provider_context_window_rejection"
+    assert marker.summary_digest == _summary_digest(stored_summary)
+
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(),
+    ) as second_pass_summary:
+        second_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=persisted,
+            state=persisted_state,
+            summary_input_budget=2_100,
+        )
+    assert second_result is None
+    second_pass_summary.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_condensation_transient_failure_retries_same_budget_then_persists(tmp_path: Path) -> None:
+    """Redesign test 7: a 429 on the backstop gets one delayed same-budget retry, never a shrink."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    stored_summary = ("word " * 2_600) + "TAIL-FACT-MUST-SURVIVE"
+    working_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1")],
+        summary=SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC)),
+    )
+    storage.upsert_session(working_session)
+    summary_inputs: list[str] = []
+    outputs = [
+        SessionSummary(summary="condensed TAIL-FACT-MUST-SURVIVE", updated_at=datetime.now(UTC)),
+        SessionSummary(summary="merged TAIL-FACT-MUST-SURVIVE", updated_at=datetime.now(UTC)),
+    ]
+
+    async def flaky_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+        summary_inputs.append(summary_input)
+        if len(summary_inputs) == 1:
+            message = "rate limited"
+            raise ModelRateLimitError(message, status_code=429)
+        return outputs[len(summary_inputs) - 2]
+
+    retry_sleep = AsyncMock()
+    with (
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(side_effect=flaky_summary),
+        ) as generate_summary,
+        patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
+    ):
+        rewrite_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            summary_input_budget=2_100,
+        )
+
+    assert rewrite_result is not None
+    assert generate_summary.await_count == 3
+    retry_sleep.assert_awaited_once_with(DEFAULT_SUMMARY_RETRY_POLICY.same_input_retry_delay_seconds)
+    # The retried condensation request is byte-identical: no shrink decision
+    # was ever granted for the complete-summary input.
+    assert summary_inputs[1] == summary_inputs[0]
+    assert stored_summary in summary_inputs[0]
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "merged TAIL-FACT-MUST-SURVIVE"
+    assert read_scope_state(persisted, _SCOPE).carried_summary_unfit is None
+
+
+@pytest.mark.asyncio
+async def test_condensation_smaller_but_unfit_output_persists_with_marker_on_new_digest(tmp_path: Path) -> None:
+    """Redesign test 8: strictly smaller yet unfit output is durable progress plus a marker.
+
+    Discarding it would re-buy the same call, so it persists as a summary-only
+    chunk while the marker on the NEW digest prevents any automatic follow-up.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    stored_summary = ("word " * 2_600) + "TAIL-FACT-MUST-SURVIVE"
+    condensed_summary = ("condensed word " * 300) + "TAIL-FACT-MUST-SURVIVE"
+    assert len(_previous_summary_block(condensed_summary).encode()) > persistable_summary_limit(2_100)
+    assert len(condensed_summary) < len(stored_summary)
+    working_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1")],
+        summary=SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC)),
+    )
+    storage.upsert_session(working_session)
+
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(return_value=SessionSummary(summary=condensed_summary, updated_at=datetime.now(UTC))),
+    ) as generate_summary:
+        rewrite_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            summary_input_budget=2_100,
+        )
+
+    assert rewrite_result is None
+    assert generate_summary.await_count == 1
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == condensed_summary
+    assert [run.run_id for run in persisted.runs or []] == ["run-1"]
+    persisted_state = read_scope_state(persisted, _SCOPE)
+    marker = persisted_state.carried_summary_unfit
+    assert marker is not None
+    assert marker.reason == "condensed_summary_still_unfit"
+    assert marker.summary_digest == _summary_digest(condensed_summary)
+
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(),
+    ) as second_pass_summary:
+        second_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=persisted,
+            state=persisted_state,
+            summary_input_budget=2_100,
+        )
+    assert second_result is None
+    second_pass_summary.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mismatch", ["digest", "model", "budget"])
+async def test_marker_invalidates_when_any_key_dimension_changes(tmp_path: Path, mismatch: str) -> None:
+    """Redesign test 9: changing digest, model, or budget re-enables one fresh attempt."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    stored_summary = ("word " * 2_600) + "TAIL-FACT-MUST-SURVIVE"
+    working_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1", messages=[Message(role="user", content="RUN1-MARKER payload")])],
+        summary=SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC)),
+    )
+    storage.upsert_session(working_session)
+    marker = CarriedSummaryUnfitMarker(
+        summary_digest=_summary_digest("some other summary" if mismatch == "digest" else stored_summary),
+        model_identifier="other-model" if mismatch == "model" else "summary-model",
+        summary_input_budget=4_000 if mismatch == "budget" else 2_100,
+        failed_at="2026-07-19T00:00:00Z",
+        reason="condensation_not_smaller",
+    )
+    summaries = [
+        SessionSummary(summary="condensed TAIL-FACT-MUST-SURVIVE", updated_at=datetime.now(UTC)),
+        SessionSummary(summary="merged TAIL-FACT-MUST-SURVIVE", updated_at=datetime.now(UTC)),
+    ]
+
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(side_effect=summaries),
+    ) as generate_summary:
+        rewrite_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            state=HistoryScopeState(carried_summary_unfit=marker),
+            summary_input_budget=2_100,
+        )
+
+    assert rewrite_result is not None
+    assert generate_summary.await_count == 2
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "merged TAIL-FACT-MUST-SURVIVE"
+
+
+@pytest.mark.asyncio
+async def test_matching_marker_skips_condensation_without_model_calls(tmp_path: Path) -> None:
+    """Redesign test 9 control: a fully matching marker suppresses the attempt outright."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    stored_summary = ("word " * 2_600) + "TAIL-FACT-MUST-SURVIVE"
+    working_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1")],
+        summary=SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC)),
+    )
+    storage.upsert_session(working_session)
+    marker = CarriedSummaryUnfitMarker(
+        summary_digest=_summary_digest(stored_summary),
+        model_identifier="summary-model",
+        summary_input_budget=2_100,
+        failed_at="2026-07-19T00:00:00Z",
+        reason="condensation_not_smaller",
+    )
+
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(),
+    ) as generate_summary:
+        rewrite_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            state=HistoryScopeState(carried_summary_unfit=marker),
+            summary_input_budget=2_100,
+        )
+
+    assert rewrite_result is None
+    generate_summary.assert_not_awaited()
+    assert working_session.summary is not None
+    assert working_session.summary.summary == stored_summary
+
+
+@pytest.mark.asyncio
+async def test_condensation_call_failure_propagates_with_persisted_state_untouched(tmp_path: Path) -> None:
+    """Redesign test 11a: a generic condensation failure leaves everything as it was."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    stored_summary = ("word " * 2_600) + "TAIL-FACT-MUST-SURVIVE"
+    working_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1")],
+        summary=SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC)),
+    )
+    storage.upsert_session(working_session)
+
+    with (
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(side_effect=RuntimeError("provider exploded")),
+        ),
+        pytest.raises(RuntimeError, match="provider exploded"),
+    ):
+        await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            summary_input_budget=2_100,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == stored_summary
+    assert [run.run_id for run in persisted.runs or []] == ["run-1"]
+    assert read_scope_state(persisted, _SCOPE).carried_summary_unfit is None
+
+
+@pytest.mark.asyncio
+async def test_persisted_condensation_survives_a_later_chunk_failure(tmp_path: Path) -> None:
+    """Redesign test 11c: summary-only progress is durable even when the next chunk fails (I5)."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    stored_summary = ("word " * 2_600) + "TAIL-FACT-MUST-SURVIVE"
+    working_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1")],
+        summary=SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC)),
+    )
+    storage.upsert_session(working_session)
+
+    with (
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(
+                side_effect=[
+                    SessionSummary(summary="condensed TAIL-FACT-MUST-SURVIVE", updated_at=datetime.now(UTC)),
+                    RuntimeError("provider exploded"),
+                ],
+            ),
+        ),
+        pytest.raises(RuntimeError, match="provider exploded"),
+    ):
+        await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            summary_input_budget=2_100,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "condensed TAIL-FACT-MUST-SURVIVE"
+    assert [run.run_id for run in persisted.runs or []] == ["run-1"]
+
+
+@pytest.mark.asyncio
+async def test_inherited_unfit_summary_with_fitting_runs_heals_through_a_normal_chunk(tmp_path: Path) -> None:
+    """Migration case (a) (redesign test 12): the common population needs no backstop.
+
+    The stored summary violates the acceptance limit but still leaves room for
+    a run, so one ordinary chunk cycle heals it with zero condensation calls.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    stored_summary = "s" * 6_500
+    budget = 8_000
+    assert len(_previous_summary_block(stored_summary).encode()) > persistable_summary_limit(budget)
+    working_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1", messages=[Message(role="user", content="RUN1-MARKER payload")])],
+        summary=SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC)),
+    )
+    storage.upsert_session(working_session)
+
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(return_value=SessionSummary(summary="healed merged summary", updated_at=datetime.now(UTC))),
+    ) as generate_summary:
+        rewrite_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            summary_input_budget=budget,
+        )
+
+    assert rewrite_result is not None
+    assert rewrite_result.compacted_run_count == 1
+    generate_summary.assert_awaited_once()
+    merge_input = generate_summary.await_args.kwargs["summary_input"]
+    assert "<note>" not in merge_input
+    assert stored_summary in merge_input
+    assert "RUN1-MARKER" in merge_input
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "healed merged summary"
+    assert persisted.runs == []
+
+
+@pytest.mark.asyncio
+async def test_multi_profile_acceptance_rejects_candidate_failing_the_fallback_budget(tmp_path: Path) -> None:
+    """Binding codex borrowing B1: acceptance must pass EVERY next-serving profile.
+
+    A candidate under the primary's limit but over the configured fallback's
+    smaller-budget limit must not persist; without the fallback profile the
+    identical candidate persists, pinning the fallback profile as the rejector.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    candidate = "y" * 5_000
+    assert len(_previous_summary_block(candidate).encode()) <= persistable_summary_limit(12_000)
+    assert len(_previous_summary_block(candidate).encode()) > persistable_summary_limit(4_000)
+
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    working_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1", messages=[Message(role="user", content="u" * 30_000)])],
+    )
+    storage.upsert_session(working_session)
+    with (
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(return_value=SessionSummary(summary=candidate, updated_at=datetime.now(UTC))),
+        ) as generate_summary,
+        pytest.raises(CompactionSummaryOversizedOutputError, match="fallback-model"),
+    ):
+        await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            summary_input_budget=12_000,
+            fallback_summary_model=FakeModel(id="fallback-model-id", provider="fake"),
+            fallback_summary_model_name="fallback-model",
+            fallback_summary_input_budget=4_000,
+        )
+    assert generate_summary.await_count == 2
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    assert [run.run_id for run in persisted.runs or []] == ["run-1"]
+    storage.close()
+
+    # Control: with no fallback profile the identical candidate is accepted.
+    control_storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    control_session = _session(
+        "session-2",
+        runs=[_completed_run("run-1", messages=[Message(role="user", content="u" * 30_000)])],
+    )
+    control_storage.upsert_session(control_session)
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(return_value=SessionSummary(summary=candidate, updated_at=datetime.now(UTC))),
+    ):
+        control_result = await _rewrite_single_run(
+            storage=control_storage,
+            working_session=control_session,
+            summary_input_budget=12_000,
+        )
+    assert control_result is not None
+    control_persisted = get_agent_session(control_storage, "session-2")
+    assert control_persisted is not None
+    assert control_persisted.summary is not None
+    assert control_persisted.summary.summary == candidate

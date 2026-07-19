@@ -42,7 +42,7 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
     ResolvedReplayPlan,
 )
-from mindroom.token_budget import estimate_text_tokens
+from mindroom.token_budget import compute_compaction_input_budget, estimate_text_tokens
 from tests.conftest import (
     FakeModel,
     bind_runtime_paths,
@@ -710,6 +710,65 @@ def test_resolve_history_execution_plan_carries_fallback_model_name(tmp_path: Pa
 
     assert execution_plan.compaction_model_name == "summary-model"
     assert execution_plan.compaction_fallback_model_name == "fallback-model"
+
+
+def test_resolve_history_execution_plan_resolves_fallback_summary_budget_from_its_own_window(
+    tmp_path: Path,
+) -> None:
+    """The fallback profile is sized by its OWN window so summary acceptance can cover it (ISSUE-246).
+
+    A fallback whose resolved budget fails the availability floor contributes
+    no profile: no fallback-served next attempt can exist under its own plan.
+    """
+    for fallback_window, expected_budget in (
+        # Normalized reserve is min(16_384, window // 2); replay window 48_000 never binds.
+        (16_000, compute_compaction_input_budget(16_000, reserve_tokens=8_000)),
+        # Budget resolves to exactly the 2,000-token floor: unavailable, no profile.
+        (10_000, None),
+    ):
+        config = bind_runtime_paths(
+            Config(
+                agents={
+                    "test_agent": AgentConfig(
+                        display_name="Test Agent",
+                        compaction=CompactionOverrideConfig(enabled=True),
+                    ),
+                },
+                defaults=DefaultsConfig(
+                    tools=[],
+                    compaction=CompactionConfig(
+                        enabled=True,
+                        model="summary-model",
+                        fallback_model="fallback-model",
+                    ),
+                ),
+                models={
+                    "default": ModelConfig(provider="openai", id="test-model", context_window=48_000),
+                    "summary-model": ModelConfig(
+                        provider="openai",
+                        id="summary-model-id",
+                        context_window=32_000,
+                    ),
+                    "fallback-model": ModelConfig(
+                        provider="anthropic",
+                        id="fallback-model-id",
+                        context_window=fallback_window,
+                    ),
+                },
+            ),
+            _runtime_paths(tmp_path),
+        )
+
+        execution_plan = resolve_history_execution_plan(
+            config=config,
+            compaction_config=config.resolve_entity("test_agent").compaction_config,
+            has_authored_compaction_config=True,
+            active_model_name="default",
+            active_context_window=48_000,
+            static_prompt_tokens=1_000,
+        )
+
+        assert execution_plan.compaction_fallback_summary_input_budget_tokens == expected_budget
 
 
 def test_compaction_fallback_is_distinct_guards_same_alias_and_same_target(tmp_path: Path) -> None:
