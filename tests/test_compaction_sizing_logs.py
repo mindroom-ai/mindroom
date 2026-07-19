@@ -165,6 +165,53 @@ async def test_chunk_request_and_completed_events_use_truthful_sizing_fields(
 
 
 @pytest.mark.asyncio
+async def test_logged_kind_stays_frozen_when_env_flips_mid_compaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin (ISSUE-246 fix round 3): the logged kind describes the frozen estimator.
+
+    The endpoint flag is resolved once next to the estimator partial, so an
+    OPENAI_BASE_URL appearing mid-compaction must not relabel the arithmetic
+    the frozen estimator actually used.
+    """
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    working_session = _session("session-1", runs=[_completed_run("run-1")])
+    summary_inputs: list[str] = []
+
+    async def record_summary_and_flip_env(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+        summary_inputs.append(summary_input)
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:9292/v1")
+        return SessionSummary(summary="chunk summary", updated_at=datetime.now(UTC))
+
+    with (
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(side_effect=record_summary_and_flip_env),
+        ),
+        capture_logs() as logs,
+    ):
+        rewrite_result = await _rewrite_with_summary_model(
+            storage=storage,
+            working_session=working_session,
+            summary_input_budget=8_000,
+            summary_model=OpenAIChat(id="gpt-4o"),
+        )
+
+    assert rewrite_result is not None
+    expected_estimate = _expected_estimate(summary_inputs[0], "model_tiktoken_tokens")
+    completed_event = _single_event(logs, "Compaction summary chunk completed")
+    _assert_truthful_sizing_fields(
+        completed_event,
+        estimate=expected_estimate,
+        budget_tokens=8_000,
+        expected_kind="model_tiktoken_tokens",
+    )
+
+
+@pytest.mark.asyncio
 async def test_chunk_failed_event_uses_truthful_sizing_fields(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)

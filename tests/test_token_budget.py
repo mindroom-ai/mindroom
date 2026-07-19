@@ -6,12 +6,15 @@ from __future__ import annotations
 import unicodedata
 from functools import partial
 
+import httpx
 import pytest
 import tiktoken
 from agno.models.message import Message
 from agno.models.openai.chat import OpenAIChat
 from agno.models.openai.like import OpenAILike
+from agno.models.openai.open_responses import OpenResponses
 from agno.models.openai.responses import OpenAIResponses
+from openai import AsyncOpenAI, OpenAI
 
 from mindroom.history.compaction import _build_summary_input
 from mindroom.model_instance_checks import is_genuine_openai_endpoint
@@ -203,4 +206,26 @@ def test_genuine_openai_endpoint_rejects_env_base_url_override(monkeypatch: pyte
 def test_genuine_openai_endpoint_rejects_openai_like_and_foreign_models(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     assert is_genuine_openai_endpoint(OpenAILike(id="gpt-4o")) is False
+    assert is_genuine_openai_endpoint(OpenResponses(id="gpt-4o")) is False
     assert is_genuine_openai_endpoint(FakeModel(id="gpt-4o", provider="fake")) is False
+
+
+def test_genuine_openai_endpoint_rejects_client_params(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Agno merges client_params over the base client kwargs, so they can redirect the endpoint."""
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    custom = {"base_url": "http://localhost:9292/v1"}
+    assert is_genuine_openai_endpoint(OpenAIChat(id="gpt-4o", client_params=custom)) is False
+    assert is_genuine_openai_endpoint(OpenAIResponses(id="gpt-4o", client_params=custom)) is False
+    # Fail-closed pin (ISSUE-246 fix round 3): ANY client_params content is
+    # distrusted, not just base_url — timeouts-only users get the byte bound.
+    assert is_genuine_openai_endpoint(OpenAIChat(id="gpt-4o", client_params={"timeout": 5})) is False
+
+
+def test_genuine_openai_endpoint_rejects_prebuilt_and_custom_clients(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    prebuilt = OpenAI(api_key="test-key", base_url="http://localhost:9292/v1")
+    assert is_genuine_openai_endpoint(OpenAIChat(id="gpt-4o", client=prebuilt)) is False
+    prebuilt_async = AsyncOpenAI(api_key="test-key", base_url="http://localhost:9292/v1")
+    assert is_genuine_openai_endpoint(OpenAIChat(id="gpt-4o", async_client=prebuilt_async)) is False
+    with httpx.Client() as http_client:
+        assert is_genuine_openai_endpoint(OpenAIChat(id="gpt-4o", http_client=http_client)) is False

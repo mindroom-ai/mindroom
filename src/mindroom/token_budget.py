@@ -12,7 +12,7 @@ from typing import Literal
 
 import tiktoken
 
-_CompactionEstimateKind = Literal[
+CompactionEstimateKind = Literal[
     "model_tiktoken_tokens",
     "utf8_bytes_token_upper_bound",
 ]
@@ -39,7 +39,7 @@ def _compaction_encoding(model_id: str | None) -> tiktoken.Encoding | None:
     return None
 
 
-def compaction_estimate_kind(model_id: str | None, *, genuine_openai_endpoint: bool) -> _CompactionEstimateKind:
+def compaction_estimate_kind(model_id: str | None, *, genuine_openai_endpoint: bool) -> CompactionEstimateKind:
     """Resolve how compaction sizes summary payloads for one summary model.
 
     Single source of truth for the sizing branch:
@@ -64,13 +64,15 @@ def compaction_payload_token_upper_bound(value: str, *, model_id: str | None, ge
     provider payloads) countable at 3 bytes each instead of raising.
 
     The byte count is a proven token upper bound for byte-level BPE
-    tokenizers, where every token consumes at least one byte; that covers the
-    providers routed through this path today. Tokenizers that normalize text
-    before segmentation (NFKC/SentencePiece-class) can expand rare
-    compatibility characters (for example U+FDFA) beyond their byte length,
-    so the bound is not universal there — realistic chat and tool content
-    sits well below the bound, and the compaction budget's reserve and safety
-    margin absorb such pockets.
+    tokenizers, where every token consumes at least one byte; that is
+    established for Claude and the o200k-family OpenAI encodings.
+    SentencePiece-based tokenizers such as Gemini's can normalize text before
+    segmentation (NFKC-class), where rare compatibility characters (for
+    example U+FDFA) can expand beyond their byte length, so the bound is not
+    proven for that class — realistic chat and tool content sits well below
+    the bound, the compaction budget's reserve and safety margin absorb such
+    pockets, and an oversized request recovers through the existing
+    shrink-retry path.
     """
     kind = compaction_estimate_kind(model_id, genuine_openai_endpoint=genuine_openai_endpoint)
     if kind == "model_tiktoken_tokens":

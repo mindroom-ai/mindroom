@@ -1158,6 +1158,7 @@ async def test_retry_helper_propagates_original_error_when_rebuilt_input_is_not_
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             token_estimator=lambda _value: 2_000,
+            estimate_kind="utf8_bytes_token_upper_bound",
         )
 
     assert raised.value is original_error
@@ -1197,6 +1198,7 @@ async def test_retry_helper_honors_transient_fallthrough_for_shrink_message_at_f
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             token_estimator=lambda _value: COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
+            estimate_kind="utf8_bytes_token_upper_bound",
         )
 
     assert generated.summary is recovered_summary
@@ -1251,6 +1253,7 @@ async def test_retry_helper_shrinks_around_a_large_durable_summary() -> None:
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             token_estimator=_chars_per_token_estimator,
+            estimate_kind="utf8_bytes_token_upper_bound",
         )
 
     assert generated.summary is recovered_summary
@@ -1296,6 +1299,7 @@ async def test_retry_helper_propagates_error_when_no_smaller_progress_input_exis
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             token_estimator=_chars_per_token_estimator,
+            estimate_kind="utf8_bytes_token_upper_bound",
         )
 
     assert raised.value is original_error

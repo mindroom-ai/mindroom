@@ -174,6 +174,59 @@ async def test_rewrite_passes_full_summary_input_budget_into_chunk_construction(
     assert rewrite_result.compacted_run_count == 5
 
 
+@pytest.mark.asyncio
+async def test_rewrite_advances_past_a_carried_summary_that_fills_the_byte_budget(tmp_path: Path) -> None:
+    """Regression for review round 3 (B3): a carried summary near the byte budget must not stall.
+
+    The first chunk's summary is token-valid (~1,400 o200k tokens, fine under
+    any token-domain output reserve) but consumes the whole 6,000 byte-denominated
+    input budget, so without the truncation fallback chunk 2 would include zero
+    runs, the loop would break, and every later pass would return None on the
+    same summary.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    working_session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1", messages=[Message(role="user", content="RUN1-MARKER " + ("u" * 3_500))]),
+            _completed_run("run-2", messages=[Message(role="user", content="RUN2-MARKER " + ("v" * 3_500))]),
+        ],
+    )
+    oversized_summary = ("chunk one summary " * 336) + "SUMMARY-TAIL"
+    summary_inputs: list[str] = []
+    summaries = [
+        SessionSummary(summary=oversized_summary, updated_at=datetime.now(UTC)),
+        SessionSummary(summary="final merged summary", updated_at=datetime.now(UTC)),
+    ]
+
+    async def fake_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+        summary_inputs.append(summary_input)
+        return summaries[len(summary_inputs) - 1]
+
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(side_effect=fake_summary),
+    ):
+        rewrite_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            selected_run_ids=("run-1", "run-2"),
+            summary_input_budget=6_000,
+        )
+
+    assert rewrite_result is not None
+    assert rewrite_result.compacted_run_count == 2
+    assert rewrite_result.summary_text == "final merged summary"
+    assert len(summary_inputs) == 2
+    assert "RUN1-MARKER" in summary_inputs[0]
+    assert "RUN2-MARKER" in summary_inputs[1]
+    # Only the second request's copy of the carried summary is truncated; the
+    # truncation drops the tail but keeps the head.
+    assert "chunk one summary" in summary_inputs[1]
+    assert "SUMMARY-TAIL" not in summary_inputs[1]
+
+
 def test_build_summary_input_accounts_for_wrappers_separators_and_run_indexes() -> None:
     runs = [
         _completed_run(

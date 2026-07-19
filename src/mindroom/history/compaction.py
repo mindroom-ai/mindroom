@@ -32,6 +32,7 @@ from mindroom.history.storage import (
 )
 from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, generate_compaction_summary
 from mindroom.history.types import (
+    COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
     CompactionLifecycleProgress,
     CompactionOutcome,
     HistoryScope,
@@ -58,6 +59,7 @@ if TYPE_CHECKING:
     from agno.session.team import TeamSession
 
     from mindroom.history.summary_call import SummaryRetryDecision
+    from mindroom.token_budget import CompactionEstimateKind
 
 logger = get_logger(__name__)
 
@@ -366,7 +368,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
     before_persist_callback: Callable[[Sequence[RunOutput | TeamRunOutput]], Awaitable[None]] | None = None,
 ) -> _CompactionRewriteResult | None:
     final_summary_text = _current_summary_text(working_session) or ""
-    token_estimator = _compaction_token_estimator(summary_model)
+    token_estimator, estimate_kind = _compaction_sizing(summary_model)
     total_compacted_run_count = 0
     all_compacted_run_ids: list[str] = []
     all_compacted_run_id_set: set[str] = set()
@@ -383,13 +385,40 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
         if not compactable_runs:
             break
 
+        previous_summary = _current_summary_text(working_session)
         summary_input, included_runs = _build_summary_input(
-            previous_summary=_current_summary_text(working_session),
+            previous_summary=previous_summary,
             compacted_runs=compactable_runs,
             history_settings=history_settings,
             max_input_tokens=summary_input_budget,
             token_estimator=token_estimator,
         )
+        if (
+            not included_runs
+            and previous_summary is not None
+            and summary_input_budget > 2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS
+        ):
+            # A carried summary near a healthy input budget must not stall
+            # compaction: without this, no run ever fits beside it, the loop
+            # breaks, and every later pass returns None on the same summary.
+            # Truncate this request's copy (the stored summary is untouched
+            # until the chunk's merged summary replaces it) so at least one
+            # run fits beside it. Degenerate budgets at or below the planner's
+            # availability floor keep the no-op contract instead: there the
+            # plan is already unavailable and a destructive rewrite would only
+            # lose summary facts.
+            previous_summary = _truncated_summary_for_budget(
+                previous_summary,
+                max_tokens=summary_input_budget // 2,
+                token_estimator=token_estimator,
+            )
+            summary_input, included_runs = _build_summary_input(
+                previous_summary=previous_summary,
+                compacted_runs=compactable_runs,
+                history_settings=history_settings,
+                max_input_tokens=summary_input_budget,
+                token_estimator=token_estimator,
+            )
         if not included_runs:
             logger.warning(
                 "Compaction skipped because no run fit the single-pass summary budget",
@@ -405,7 +434,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
         new_summary = await _generate_compaction_summary_with_retry(
             model=summary_model,
             model_name=summary_model_name,
-            previous_summary=_current_summary_text(working_session),
+            previous_summary=previous_summary,
             compactable_runs=compactable_runs,
             initial_summary_input=summary_input,
             initial_included_runs=included_runs,
@@ -415,6 +444,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
             history_settings=history_settings,
             summary_prompt=summary_prompt,
             token_estimator=token_estimator,
+            estimate_kind=estimate_kind,
             fallback_model=fallback_summary_model,
             fallback_model_name=fallback_summary_model_name,
         )
@@ -423,7 +453,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
             # summary model for every later chunk, including token estimation.
             summary_model = new_summary.model
             summary_model_name = new_summary.model_name
-            token_estimator = _compaction_token_estimator(summary_model)
+            token_estimator, estimate_kind = _compaction_sizing(summary_model)
             fallback_summary_model = None
             fallback_summary_model_name = None
         included_runs = new_summary.included_runs
@@ -485,13 +515,23 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
     )
 
 
-def _compaction_token_estimator(summary_model: Model) -> Callable[[str], int]:
-    """Return the summary-input token estimator tuned for one loaded summary model."""
-    return partial(
+def _compaction_sizing(summary_model: Model) -> tuple[Callable[[str], int], CompactionEstimateKind]:
+    """Resolve the sizing estimator and its logged kind for one serving summary model.
+
+    Both derive from a single endpoint-trust evaluation, so the estimator
+    arithmetic and the logged estimate kind provably describe the same branch
+    for every request this serving model receives, even if the environment
+    changes mid-compaction. A safeguard-fallback switch re-resolves both for
+    the new serving model.
+    """
+    genuine_openai_endpoint = is_genuine_openai_endpoint(summary_model)
+    token_estimator = partial(
         compaction_payload_token_upper_bound,
         model_id=summary_model.id,
-        genuine_openai_endpoint=is_genuine_openai_endpoint(summary_model),
+        genuine_openai_endpoint=genuine_openai_endpoint,
     )
+    estimate_kind = compaction_estimate_kind(summary_model.id, genuine_openai_endpoint=genuine_openai_endpoint)
+    return token_estimator, estimate_kind
 
 
 async def _emit_lifecycle_progress_after_persist(
@@ -538,19 +578,18 @@ async def _emit_lifecycle_progress_after_persist(
     )
 
 
-def _sizing_log_fields(*, model: Model, estimate: int, budget_tokens: int) -> dict[str, object]:
+def _sizing_log_fields(*, kind: CompactionEstimateKind, estimate: int, budget_tokens: int) -> dict[str, object]:
     """Truthful sizing fields shared by the compaction chunk log events.
 
+    ``kind`` is resolved once next to the estimator partial, so the logged
+    kind provably describes the arithmetic the frozen estimator used.
     ``summary_input_budget_tokens`` is denominated in the same units as the
     estimate — shrink retries derive the next budget from the estimate — so
     ``summary_input_estimate_kind`` disambiguates both fields.
     """
     return {
         "summary_input_estimate": estimate,
-        "summary_input_estimate_kind": compaction_estimate_kind(
-            model.id,
-            genuine_openai_endpoint=is_genuine_openai_endpoint(model),
-        ),
+        "summary_input_estimate_kind": kind,
         "summary_input_budget_tokens": budget_tokens,
     }
 
@@ -569,6 +608,7 @@ async def _generate_compaction_summary_with_retry(
     history_settings: ResolvedHistorySettings,
     summary_prompt: str,
     token_estimator: Callable[[str], int],
+    estimate_kind: CompactionEstimateKind,
     fallback_model: Model | None = None,
     fallback_model_name: str | None = None,
 ) -> _GeneratedSummaryChunk:
@@ -604,7 +644,7 @@ async def _generate_compaction_summary_with_retry(
             attempt=attempt,
             candidate_runs=len(compactable_runs),
             included_runs=len(included_runs),
-            **_sizing_log_fields(model=model, estimate=estimated_input_tokens, budget_tokens=budget),
+            **_sizing_log_fields(kind=estimate_kind, estimate=estimated_input_tokens, budget_tokens=budget),
             timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
         )
         try:
@@ -623,7 +663,7 @@ async def _generate_compaction_summary_with_retry(
                 attempt=attempt,
                 candidate_runs=len(compactable_runs),
                 included_runs=len(included_runs),
-                **_sizing_log_fields(model=model, estimate=estimated_input_tokens, budget_tokens=budget),
+                **_sizing_log_fields(kind=estimate_kind, estimate=estimated_input_tokens, budget_tokens=budget),
                 timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
                 duration_ms=duration_ms,
                 error=str(exc) or type(exc).__name__,
@@ -687,7 +727,7 @@ async def _generate_compaction_summary_with_retry(
             attempt=attempt,
             candidate_runs=len(compactable_runs),
             included_runs=len(included_runs),
-            **_sizing_log_fields(model=model, estimate=estimated_input_tokens, budget_tokens=budget),
+            **_sizing_log_fields(kind=estimate_kind, estimate=estimated_input_tokens, budget_tokens=budget),
             timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
             duration_ms=duration_ms,
         )
@@ -907,6 +947,27 @@ def _compose_summary_input(summary_block: str, serialized_runs: str) -> str:
         parts.append(summary_block)
     parts.append(f"<new_conversation>\n{serialized_runs}\n</new_conversation>")
     return "\n\n".join(parts)
+
+
+def _truncated_summary_for_budget(
+    summary: str,
+    *,
+    max_tokens: int,
+    token_estimator: Callable[[str], int],
+) -> str:
+    """Truncate a carried summary so its block fits ``max_tokens`` in estimator space.
+
+    Used only when the full summary left no room for any run in a chunk
+    input; trading summary-tail fidelity for liveness beats never advancing
+    past the same summary.
+    """
+    budget_chars = max(max_tokens, 1) * 4
+    while budget_chars > 1:
+        candidate = _truncate_excerpt(summary, budget_chars)
+        if token_estimator(_previous_summary_block(candidate)) <= max_tokens:
+            return candidate
+        budget_chars //= 2
+    return _truncate_excerpt(summary, 1)
 
 
 def _previous_summary_block(summary: str) -> str:
