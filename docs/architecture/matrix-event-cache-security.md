@@ -52,6 +52,8 @@ Reads recheck the fence after the backend callback and PostgreSQL transaction co
 
 Each room fence has a monotonic runtime epoch, and queued rejoin work may clear the fence only when no newer departure changed that epoch.
 
+Per-turn event and thread memoization includes that epoch in every key, so active turns cannot replay pre-leave cached content.
+
 Principal-scoped safety disables affect only that bot's SQLite or PostgreSQL view, while root-owned shared-service disables still stop every current and future principal.
 
 Every authoritative leave invalidates both the in-memory and saved checkpoint before durable cleanup starts.

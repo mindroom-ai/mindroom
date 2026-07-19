@@ -1112,6 +1112,66 @@ class TestMatrixConversationCacheThreadReads:
         )
 
     @pytest.mark.asyncio
+    async def test_departure_epoch_invalidates_event_and_thread_turn_memos(self) -> None:
+        """An active turn must not replay event or thread content memoized before a leave."""
+        room_id = "!test:localhost"
+        event_id = "$event:localhost"
+        thread_id = "$thread_root"
+        event_cache = _runtime_event_cache()
+        departure_epoch = 0
+
+        def mark_room_departed(_room_id: str) -> int:
+            nonlocal departure_epoch
+            departure_epoch += 1
+            return departure_epoch
+
+        event_cache.mark_room_departed.side_effect = mark_room_departed
+        event_cache.room_departure_epoch.side_effect = lambda _room_id: departure_epoch
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(client=_make_client_mock(), event_cache=event_cache),
+        )
+        visible_event = _make_room_get_event_response(event_id)
+        departed_event = MagicMock(spec=nio.RoomGetEventError)
+        visible_thread = thread_history_result(
+            [_message(event_id=thread_id, body="Root")],
+            is_full_history=True,
+            diagnostics={THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_CACHE},
+        )
+        departed_thread = thread_history_result(
+            [],
+            is_full_history=False,
+            diagnostics={
+                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
+                THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+                THREAD_HISTORY_ERROR_DIAGNOSTIC: "departed_room",
+            },
+        )
+
+        with (
+            patch(
+                "mindroom.matrix.conversation_cache._cached_room_get_event",
+                new=AsyncMock(side_effect=[(visible_event, None), (departed_event, None)]),
+            ) as mock_get_event,
+            patch.object(
+                access._reads,
+                "read_thread",
+                new=AsyncMock(side_effect=[visible_thread, departed_thread]),
+            ) as mock_read_thread,
+        ):
+            async with access.turn_scope():
+                assert await access.get_event(room_id, event_id) is visible_event
+                assert await access.get_dispatch_thread_history(room_id, thread_id)
+
+                await access.purge_room(room_id)
+
+                assert await access.get_event(room_id, event_id) is departed_event
+                assert not await access.get_dispatch_thread_history(room_id, thread_id)
+
+        assert mock_get_event.await_count == 2
+        assert mock_read_thread.await_count == 2
+
+    @pytest.mark.asyncio
     async def test_turn_scope_does_not_memoize_degraded_full_thread_history_reads(self) -> None:
         """A degraded full-history read should not block a later retry in the same turn."""
         access = MatrixConversationCache(

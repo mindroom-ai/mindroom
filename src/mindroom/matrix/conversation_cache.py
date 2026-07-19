@@ -64,7 +64,8 @@ if TYPE_CHECKING:
 
 type ThreadReadResult = ThreadHistoryResult
 type EventLookupResult = nio.RoomGetEventResponse | RoomGetEventError
-type _ThreadReadCacheKey = tuple[str, str, ThreadReadMode]
+type _TurnEventCacheKey = tuple[str, str, int]
+type _ThreadReadCacheKey = tuple[str, str, ThreadReadMode, int]
 
 logger = get_logger(__name__)
 
@@ -371,7 +372,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
     logger: structlog.stdlib.BoundLogger
     runtime: BotRuntimeView
-    _turn_event_cache: ContextVar[dict[tuple[str, str], _TurnEventLookup] | None] = field(
+    _turn_event_cache: ContextVar[dict[_TurnEventCacheKey, _TurnEventLookup] | None] = field(
         default_factory=lambda: ContextVar("mindroom_turn_event_lookup_cache", default=None),
     )
     _turn_thread_read_cache: ContextVar[dict[_ThreadReadCacheKey, ThreadReadResult] | None] = field(
@@ -472,7 +473,12 @@ class MatrixConversationCache(ConversationCacheProtocol):
         caller_label: str,
     ) -> ThreadReadResult:
         """Resolve one thread read through per-turn memoization."""
-        cache_key: _ThreadReadCacheKey = (room_id, thread_id, mode)
+        cache_key: _ThreadReadCacheKey = (
+            room_id,
+            thread_id,
+            mode,
+            self._write_cache_ops.room_departure_epoch(room_id),
+        )
         turn_cache = self._turn_thread_read_cache.get()
         if turn_cache is not None and cache_key in turn_cache:
             return self._copy_thread_read_result(turn_cache[cache_key])
@@ -497,7 +503,11 @@ class MatrixConversationCache(ConversationCacheProtocol):
     ) -> EventLookupResult:
         """Resolve one event through per-turn memoization and the advisory cache."""
         normalized_event_id = event_id.strip()
-        cache_key = (room_id, normalized_event_id)
+        cache_key: _TurnEventCacheKey = (
+            room_id,
+            normalized_event_id,
+            self._write_cache_ops.room_departure_epoch(room_id),
+        )
         turn_cache = self._turn_event_cache.get()
         if turn_cache is not None and cache_key in turn_cache:
             cached_lookup = turn_cache[cache_key]
