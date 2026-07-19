@@ -138,13 +138,17 @@ class ThreadMutationCacheOps:
         batch: Sequence[tuple[str, str, dict[str, object]]],
         *,
         failure_message: str,
+        thread_id: str | None = None,
         raise_on_failure: bool = False,
     ) -> None:
         """Persist one sync batch fail-open so later mutation handling can continue."""
         if not batch:
             return
         try:
-            await self.runtime.event_cache.store_events_batch(list(batch))
+            if thread_id is None:
+                await self.runtime.event_cache.store_events_batch(list(batch))
+            else:
+                await self.runtime.event_cache.store_events_batch(list(batch), thread_id=thread_id)
         except Exception as exc:
             self.logger.warning(
                 failure_message,
@@ -257,7 +261,6 @@ class ThreadMutationCacheOps:
         event_source: dict[str, Any],
         *,
         context: str,
-        revalidate_after_append: bool = True,
         raise_on_failure: bool = False,
     ) -> bool:
         """Append one event into a cached thread fail-open and report whether a row changed."""
@@ -285,8 +288,6 @@ class ThreadMutationCacheOps:
                 context=context,
             )
             return False
-        if not revalidate_after_append:
-            return True
         try:
             await self.runtime.event_cache.revalidate_thread_after_incremental_update(
                 room_id,

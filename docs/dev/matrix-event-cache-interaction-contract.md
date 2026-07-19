@@ -10,6 +10,8 @@ The point cache is intentionally broader than visible conversation history.
 
 Every admitted joined-room timeline event with an event ID can be retained for point lookup, relation resolution, recent-event lookup, and redaction bookkeeping.
 
+Point payload quality is monotonic: an opaque `m.room.encrypted` payload can be replaced by decrypted content, but ciphertext can never overwrite an already decrypted payload or its derived indexes.
+
 Visible thread history projects supported `m.room.message` events, collapses edits into their originals, and omits non-message events and still-opaque encrypted payloads.
 
 Durable conversation history is distinct from ephemeral sync state.
@@ -33,7 +35,7 @@ The following treatment is covered against both SQLite and PostgreSQL backends b
 | Member, name, topic, avatar, power, join-rule, history-visibility, guest-access, alias, encryption, and pin state | Retained when delivered in the joined timeline | Not visible | These families remain room-level |
 | Call invite, candidates, answer, select-answer, reject, negotiate, and hangup | Retained | Not visible | These families remain room-level |
 | RTC membership, focus, and notification events | Retained | Not visible | These families remain room-level |
-| Encrypted relation-bearing events | Retained as opaque events | Not visible until decryption supplies message content | Thread, reply, edit, and message-reference relations are indexed while the affected snapshot remains stale |
+| Encrypted relation-bearing events | Retained as opaque events | Not visible until decryption supplies message content | Thread, reply, edit, and message-reference relations are indexed and leave the known thread stale until decrypted reconstruction |
 
 Relation names such as `m.reference` and `m.thread` are reused by non-message families.
 
@@ -46,6 +48,14 @@ Plaintext message replies and references cannot inherit visible thread membershi
 Explicit snapshot writes apply the same event-family filter, and relation walks validate cached index targets before trusting their thread IDs.
 
 Page-local, cached, and homeserver-scan root proof accepts only plaintext or encrypted message children.
+
+An opaque encrypted event with exposed thread-affecting relation metadata leaves the resolved thread snapshot stale until a decryption-capable refresh succeeds.
+
+Opaque replies or references whose target cannot be resolved leave every requested snapshot stale because their impact is unknown.
+
+Relationless ciphertext outside a requested thread does not prevent that thread from being reconstructed.
+
+Opaque reactions remain point-only and do not receive event-to-thread index rows.
 
 ## Redactions
 
@@ -66,6 +76,22 @@ When target metadata identifies a poll response, poll end, beacon, or other non-
 A metadata-less redaction of an absent target is a thread-state no-op.
 
 If target metadata is unavailable but a cached target is removed, the impact is unknown and every cached thread in that room is invalidated fail-closed.
+
+Successful outbound room messages, edits, and redactions enter the same ordered cache boundary as sync writes.
+
+Point reads wait for earlier room and thread writes to drain, and per-turn memoized point reads are evicted when a successful outbound mutation changes their event.
+
+## Limited sync timelines
+
+A limited joined-room timeline is admitted only after every cached thread in that room is marked stale.
+
+Its partial events may update point storage, but the response cannot certify or persist a new sync checkpoint.
+
+The active and persisted sync positions are reset after a newly observed limited response in every trust state.
+
+The first response after that reset does not trigger another reset solely because it is limited, which avoids an initial-sync reset loop while keeping the room snapshots stale.
+
+Only a later complete response may establish a new certified checkpoint.
 
 ## Deliberately excluded sync categories
 
@@ -91,7 +117,11 @@ A durable thread snapshot is usable only when its state row exists, `validated_a
 
 A snapshot without its thread root is rejected.
 
+A snapshot containing any still-opaque encrypted event is rejected and marked stale.
+
 A rejected or absent snapshot causes an authoritative homeserver room-history scan and guarded cache refill.
+
+A reconstructed thread containing opaque encrypted evidence cannot replace the prior snapshot and remains stale until a decryption-capable scan reconstructs complete history.
 
 A second unchanged read is served from cache and performs no homeserver scan.
 
@@ -169,12 +199,6 @@ PR-specific classification remains proven by the SQLite and PostgreSQL owning-se
 Membership-loss cleanup is not owned by this contract track.
 
 A deterministic reproduction is to cache a joined-room event, deliver the same room under `rooms.leave`, and observe that the point row remains while no new leave-timeline event is admitted.
-
-An opaque encrypted event with exposed thread-affecting relation metadata leaves the resolved thread snapshot stale until a decryption-capable refresh succeeds.
-
-Opaque replies or references whose target cannot be resolved leave every requested snapshot stale because their impact is unknown.
-
-Relationless ciphertext outside a requested thread does not prevent that thread from being reconstructed.
 
 Thread snapshot replacement currently owns point-row deletion through the duplicated storage layout, which belongs to the storage normalization track.
 

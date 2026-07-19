@@ -1021,6 +1021,10 @@ async def test_encrypted_relation_bearing_events_are_point_cached_indexed_and_no
     assert state.invalidation_reason == "sync_opaque_encrypted_event"
     assert thread_cache_rejection_reason(state) == "thread_invalidated_after_validation"
 
+    cached_sources = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+    assert cached_sources is not None
+    assert [source["event_id"] for source in cached_sources] == [_THREAD_ID, _THREAD_CHILD_ID]
+
 
 @pytest.mark.asyncio
 async def test_visible_thread_history_message_and_non_message_family_boundary(

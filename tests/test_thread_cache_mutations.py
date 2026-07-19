@@ -1217,19 +1217,20 @@ class TestMatrixConversationCacheThreadReads:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("relation_case", "expected_scope"),
+        ("relation_case", "expected_scope", "needs_resolved_index"),
         [
-            ("thread_child", "thread"),
-            ("edit", "thread"),
-            ("reply", "thread"),
-            ("reference", "thread"),
-            ("redaction", "room"),
+            ("thread_child", "thread", False),
+            ("edit", "thread", False),
+            ("reply", "thread", True),
+            ("reference", "thread", True),
+            ("redaction", "room", False),
         ],
     )
     async def test_opaque_encrypted_sync_mutations_leave_snapshots_stale(
         self,
         relation_case: str,
         expected_scope: str,
+        needs_resolved_index: bool,
     ) -> None:
         """Opaque children and relation-bearing events must never revalidate reconstructed history."""
         target_id = "$target:localhost"
@@ -1282,10 +1283,12 @@ class TestMatrixConversationCacheThreadReads:
         result = await access.cache_sync_timeline_for_certification(response)
 
         assert result.complete is True
-        event_cache.store_events_batch.assert_awaited_once()
+        assert event_cache.store_events_batch.await_count == 1 + int(needs_resolved_index)
+        if needs_resolved_index:
+            assert event_cache.store_events_batch.await_args_list[-1].kwargs == {"thread_id": thread_id}
+        event_cache.append_event.assert_not_awaited()
         event_cache.revalidate_thread_after_incremental_update.assert_not_awaited()
         if expected_scope == "thread":
-            event_cache.append_event.assert_awaited_once()
             event_cache.mark_thread_stale.assert_awaited_once_with(
                 "!test:localhost",
                 thread_id,
@@ -1293,7 +1296,6 @@ class TestMatrixConversationCacheThreadReads:
             )
             event_cache.mark_room_threads_stale.assert_not_awaited()
         else:
-            event_cache.append_event.assert_not_awaited()
             event_cache.mark_room_threads_stale.assert_awaited_once_with(
                 "!test:localhost",
                 reason="sync_opaque_encrypted_event",
@@ -1379,7 +1381,8 @@ class TestMatrixConversationCacheThreadReads:
             assert reason == "limited_sync_timeline"
             operations.append("invalidate")
 
-        async def store_events_batch(_events: object) -> None:
+        async def store_events_batch(_events: object, *, thread_id: str | None = None) -> None:
+            assert thread_id is None
             operations.append("store")
 
         event_cache.mark_room_threads_stale = AsyncMock(side_effect=mark_room_threads_stale)
@@ -1545,11 +1548,7 @@ class TestMatrixConversationCacheThreadReads:
         assert state.invalidation_reason == "sync_opaque_encrypted_event"
         assert matrix_cache.thread_cache_rejection_reason(state) == "thread_invalidated_after_validation"
         assert thread_events is not None
-        assert [event["event_id"] for event in thread_events] == [
-            thread_id,
-            "$decrypted:localhost",
-            "$opaque-child:localhost",
-        ]
+        assert [event["event_id"] for event in thread_events] == [thread_id, "$decrypted:localhost"]
 
     @pytest.mark.asyncio
     async def test_get_latest_thread_event_id_fails_open_without_write_coordinator(self) -> None:

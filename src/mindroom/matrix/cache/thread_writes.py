@@ -1012,18 +1012,21 @@ class ThreadSyncWritePolicy:
             if is_opaque_encrypted_event_source(event_source):
                 if impact.state is MutationThreadImpactState.THREADED:
                     assert impact.thread_id is not None
+                    directly_indexed_thread_id = event_info.thread_id or event_info.thread_id_from_edit
+                    if not event_info.is_reaction and directly_indexed_thread_id != impact.thread_id:
+                        assert isinstance(event_id, str)
+                        assert event_id
+                        await self._cache_ops.store_events_batch(
+                            room_id,
+                            [(event_id, room_id, event_source)],
+                            failure_message="Failed to persist resolved opaque sync event thread mapping",
+                            thread_id=impact.thread_id,
+                            raise_on_failure=raise_on_cache_write_failure,
+                        )
                     await self._cache_ops.invalidate_known_thread(
                         room_id,
                         impact.thread_id,
                         reason=_OPAQUE_ENCRYPTED_SYNC_EVENT_REASON,
-                        raise_on_failure=raise_on_cache_write_failure,
-                    )
-                    await self._cache_ops.append_event_to_cache(
-                        room_id,
-                        impact.thread_id,
-                        event_source,
-                        context="sync",
-                        revalidate_after_append=False,
                         raise_on_failure=raise_on_cache_write_failure,
                     )
                 elif not room_threads_invalidated:

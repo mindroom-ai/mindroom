@@ -105,8 +105,13 @@ class ConversationEventCache(Protocol):
     async def store_event(self, event_id: str, room_id: str, event_data: dict[str, Any]) -> None:
         """Insert or replace one individually cached Matrix event."""
 
-    async def store_events_batch(self, events: list[tuple[str, str, dict[str, Any]]]) -> None:
-        """Insert or replace a batch of individually cached Matrix events."""
+    async def store_events_batch(
+        self,
+        events: list[tuple[str, str, dict[str, Any]]],
+        *,
+        thread_id: str | None = None,
+    ) -> None:
+        """Insert or replace cached events with an optional known thread mapping."""
 
     async def store_mxc_text(self, room_id: str, mxc_url: str, text: str) -> None:
         """Insert or replace one durably cached MXC text payload."""
