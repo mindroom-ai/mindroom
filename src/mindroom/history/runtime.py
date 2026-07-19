@@ -111,6 +111,27 @@ def _load_compaction_model(
     return model_loading.get_model_instance(config, runtime_paths, model_name)
 
 
+def _compaction_fallback_is_distinct(
+    config: Config,
+    *,
+    primary_model_name: str,
+    fallback_model_name: str,
+) -> bool:
+    """Return whether the configured fallback targets a different serving model.
+
+    A fallback that names the primary alias, or a different alias resolving to
+    the same ``(provider, id)``, would resend the refused request to the same
+    model, so it is not loaded at all.
+    """
+    if fallback_model_name == primary_model_name:
+        return False
+    primary_config = config.models.get(primary_model_name)
+    fallback_config = config.models.get(fallback_model_name)
+    if primary_config is None or fallback_config is None:
+        return True
+    return (primary_config.provider, primary_config.id) != (fallback_config.provider, fallback_config.id)
+
+
 @dataclass(frozen=True)
 class ScopeSessionContext:
     """Resolved storage/session context for one logical history scope."""
@@ -524,6 +545,14 @@ async def _run_scope_compaction(
         runtime_paths,
         execution_plan.compaction_model_name,
     )
+    fallback_model_name = execution_plan.compaction_fallback_model_name
+    fallback_model: Model | None = None
+    if fallback_model_name is not None and _compaction_fallback_is_distinct(
+        config,
+        primary_model_name=execution_plan.compaction_model_name,
+        fallback_model_name=fallback_model_name,
+    ):
+        fallback_model = _load_compaction_model(config, runtime_paths, fallback_model_name)
     return await compact_scope_history(
         storage=storage,
         session=session,
@@ -537,6 +566,8 @@ async def _run_scope_compaction(
         replay_window_tokens=execution_plan.replay_window_tokens,
         threshold_tokens=execution_plan.trigger_threshold_tokens,
         summary_prompt=config.get_prompt("COMPACTION_SUMMARY_PROMPT"),
+        fallback_summary_model=fallback_model,
+        fallback_summary_model_name=fallback_model_name if fallback_model is not None else None,
         lifecycle_notice_event_id=lifecycle_notice_event_id,
         progress_callback=progress_callback,
     )

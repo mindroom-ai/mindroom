@@ -25,6 +25,7 @@ from mindroom.history.policy import (
     resolve_history_execution_plan,
 )
 from mindroom.history.runtime import (
+    _compaction_fallback_is_distinct,
     _plan_replay_that_fits,
     apply_replay_plan,
 )
@@ -599,6 +600,157 @@ def test_resolved_compaction_config_inherits_disabled_defaults_for_pure_model_cl
 
     assert compaction_config.enabled is False
     assert compaction_config.model is None
+
+
+def test_validate_compaction_fallback_model_rejects_unknown_model(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+
+    with pytest.raises(
+        ValueError,
+        match=r"Compaction model references unknown models: agents\.test_agent\.compaction\.fallback_model -> missing-model",
+    ):
+        bind_runtime_paths(
+            Config(
+                agents={
+                    "test_agent": AgentConfig(
+                        display_name="Test Agent",
+                        compaction=CompactionOverrideConfig(fallback_model="missing-model"),
+                    ),
+                },
+                defaults=DefaultsConfig(tools=[]),
+                models={
+                    "default": ModelConfig(provider="openai", id="test-model", context_window=48_000),
+                },
+            ),
+            runtime_paths,
+        )
+
+
+def test_validate_compaction_fallback_model_rejects_missing_context_window(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+
+    with pytest.raises(
+        ValueError,
+        match=r"context_window: defaults\.compaction\.fallback_model -> fallback-model",
+    ):
+        bind_runtime_paths(
+            Config(
+                defaults=DefaultsConfig(
+                    tools=[],
+                    compaction=CompactionConfig(fallback_model="fallback-model"),
+                ),
+                models={
+                    "default": ModelConfig(provider="openai", id="test-model", context_window=48_000),
+                    "fallback-model": ModelConfig(provider="openai", id="fallback-model-id", context_window=None),
+                },
+            ),
+            runtime_paths,
+        )
+
+
+def _fallback_inheritance_config(tmp_path: Path, *, override: CompactionOverrideConfig) -> Config:
+    return bind_runtime_paths(
+        Config(
+            agents={
+                "test_agent": AgentConfig(display_name="Test Agent", compaction=override),
+            },
+            defaults=DefaultsConfig(
+                tools=[],
+                compaction=CompactionConfig(
+                    enabled=False,
+                    model="summary-model",
+                    fallback_model="fallback-model",
+                ),
+            ),
+            models={
+                "default": ModelConfig(provider="openai", id="test-model", context_window=48_000),
+                "summary-model": ModelConfig(provider="openai", id="summary-model-id", context_window=32_000),
+                "fallback-model": ModelConfig(provider="openai", id="fallback-model-id", context_window=32_000),
+            },
+        ),
+        _runtime_paths(tmp_path),
+    )
+
+
+def test_resolved_compaction_config_inherits_fallback_model_from_defaults(tmp_path: Path) -> None:
+    config = _fallback_inheritance_config(tmp_path, override=CompactionOverrideConfig(enabled=True))
+
+    compaction_config = config.resolve_entity("test_agent").compaction_config
+
+    assert compaction_config.enabled is True
+    assert compaction_config.model == "summary-model"
+    assert compaction_config.fallback_model == "fallback-model"
+
+
+def test_resolved_compaction_config_inherits_disabled_defaults_for_pure_model_field_clears(tmp_path: Path) -> None:
+    """Clearing only inherited model fields must not statically enable compaction."""
+    for override in (
+        CompactionOverrideConfig(fallback_model=None),
+        CompactionOverrideConfig(model=None, fallback_model=None),
+    ):
+        config = _fallback_inheritance_config(tmp_path, override=override)
+
+        compaction_config = config.resolve_entity("test_agent").compaction_config
+
+        assert compaction_config.enabled is False
+        assert compaction_config.fallback_model is None
+
+
+def test_resolve_history_execution_plan_carries_fallback_model_name(tmp_path: Path) -> None:
+    config = _fallback_inheritance_config(tmp_path, override=CompactionOverrideConfig(enabled=True))
+
+    execution_plan = resolve_history_execution_plan(
+        config=config,
+        compaction_config=config.resolve_entity("test_agent").compaction_config,
+        has_authored_compaction_config=True,
+        active_model_name="default",
+        active_context_window=48_000,
+        static_prompt_tokens=1_000,
+    )
+
+    assert execution_plan.compaction_model_name == "summary-model"
+    assert execution_plan.compaction_fallback_model_name == "fallback-model"
+
+
+def test_compaction_fallback_is_distinct_guards_same_alias_and_same_target(tmp_path: Path) -> None:
+    """A fallback naming the primary alias or the same (provider, id) target is never loaded."""
+    config = bind_runtime_paths(
+        Config(
+            defaults=DefaultsConfig(tools=[]),
+            models={
+                "default": ModelConfig(provider="openai", id="test-model", context_window=48_000),
+                "summary-model": ModelConfig(provider="openai", id="summary-model-id", context_window=32_000),
+                "summary-model-alias": ModelConfig(provider="openai", id="summary-model-id", context_window=32_000),
+                "fallback-model": ModelConfig(provider="anthropic", id="summary-model-id", context_window=32_000),
+            },
+        ),
+        _runtime_paths(tmp_path),
+    )
+
+    assert (
+        _compaction_fallback_is_distinct(
+            config,
+            primary_model_name="summary-model",
+            fallback_model_name="summary-model",
+        )
+        is False
+    )
+    assert (
+        _compaction_fallback_is_distinct(
+            config,
+            primary_model_name="summary-model",
+            fallback_model_name="summary-model-alias",
+        )
+        is False
+    )
+    assert (
+        _compaction_fallback_is_distinct(
+            config,
+            primary_model_name="summary-model",
+            fallback_model_name="fallback-model",
+        )
+        is True
+    )
 
 
 def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_summary_budget(

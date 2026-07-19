@@ -256,6 +256,7 @@ You can tune compaction behavior with these settings:
 - Use `threshold_tokens` or `threshold_percent` to set the soft trigger budget. Crossing this soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting for that reply.
 - Use `replay_window_tokens` to keep persisted replay, required-compaction planning, and summary input chunks within a smaller operational window without presenting that smaller value as the provider's request limit.
 - Use `reserve_tokens` to leave hard-budget headroom for the current prompt and output.
+- Use `model` to choose the summary model, and `fallback_model` to name a different model config that resends the unchanged summary prompt and input once (only the target model differs) when the summary model refuses for safeguards; after a successful fallback, that model serves the remaining compaction chunks and is reported as the summary model.
 
 When the active runtime model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
 When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
@@ -267,6 +268,7 @@ Manual `compact_context` records a durable request that runs before the next rep
 Manual `compact_context` remains available when a compaction model and context window are configured and the resolved summary input budget exceeds 2,000 tokens.
 It still uses the active runtime window for the final replay-fit step, while an explicit `compaction.model` can supply the summary-generation window subject to the same minimum summary-input budget.
 If you set `compaction.model`, that summary model must also define its own `context_window` for the durable summary-generation pass.
+`compaction.fallback_model` must also name a configured model with its own `context_window`; a fallback naming the summary model's alias, or another alias resolving to the same provider and model ID, is ignored because it would resend the refused request to the same model.
 Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place.
 Otherwise MindRoom leaves the session unchanged and relies on replay fitting for that reply.
 Replay planning uses a chars/4 approximation and reserves headroom for the current prompt and output.

@@ -80,6 +80,7 @@ def resolve_history_execution_plan(
         summary_input_budget_tokens=summary_input_budget_tokens,
         unavailable_reason=unavailable_reason,
         hard_replay_budget_tokens=hard_replay_budget_tokens,
+        compaction_fallback_model_name=compaction_config.fallback_model,
     )
 
 

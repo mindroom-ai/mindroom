@@ -258,6 +258,10 @@ class CompactionOverrideConfig(BaseModel):
         default=None,
         description="Optional model config name to use for summary generation",
     )
+    fallback_model: str | None = Field(
+        default=None,
+        description="Optional model config name retried once when the summary model refuses for safeguards",
+    )
 
     @model_validator(mode="after")
     def validate_threshold_choice(self) -> Self:
@@ -306,6 +310,10 @@ class CompactionConfig(BaseModel):
     model: str | None = Field(
         default=None,
         description="Optional model config name to use for summary generation",
+    )
+    fallback_model: str | None = Field(
+        default=None,
+        description="Optional model config name retried once when the summary model refuses for safeguards",
     )
 
     @model_validator(mode="after")
