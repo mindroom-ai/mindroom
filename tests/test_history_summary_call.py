@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
@@ -53,9 +52,6 @@ from tests.history_helpers import (  # noqa: F401
     _make_config,
     _session,
 )
-
-if TYPE_CHECKING:
-    from agno.run.agent import RunOutput
 
 
 @pytest.mark.asyncio
@@ -560,7 +556,7 @@ def test_build_summary_input_normal_run_omits_non_summary_metadata() -> None:
     assert AI_RUN_METADATA_KEY not in summary_input
     assert MINDROOM_COMPACTION_METADATA_KEY not in summary_input
     assert MINDROOM_MATRIX_HISTORY_METADATA_KEY not in summary_input
-    assert MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY not in summary_input
+    assert MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY in summary_input
     assert "$request" in summary_input
     assert "2026-07-17T20:00:00Z" in summary_input
     assert "durable_outcome" in summary_input
@@ -570,259 +566,6 @@ def test_build_summary_input_normal_run_omits_non_summary_metadata() -> None:
     assert '{"state":"succeeded"}' in summary_input
     assert "The deployment succeeded." in summary_input
     assert "https://example.test/deployment.png" in summary_input
-
-
-def test_build_summary_input_preserves_source_prompt_metadata_when_message_text_is_missing() -> None:
-    run = _completed_run(
-        "run-source-prompt",
-        messages=[
-            Message(role="user", content="Visible combined prompt."),
-            Message(role="assistant", content="Visible answer."),
-        ],
-    )
-    run.metadata = {
-        MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {
-            "$visible": "Visible combined prompt.",
-            "$missing": "Original coalesced prompt missing from replay.",
-        },
-    }
-
-    summary_input, included_runs = _build_summary_input(
-        previous_summary=None,
-        compacted_runs=[run],
-        max_input_tokens=10_000,
-        history_settings=_ALL_HISTORY_SETTINGS,
-    )
-
-    assert included_runs == [run]
-    assert MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY in summary_input
-    assert "Original coalesced prompt missing from replay." in summary_input
-
-
-def test_build_summary_input_preserves_source_prompt_metadata_for_coincidental_substring() -> None:
-    run = _completed_run(
-        "run-short-source-prompt",
-        messages=[
-            Message(role="user", content="The smoke test passed."),
-            Message(role="assistant", content="Visible answer."),
-        ],
-    )
-    run.metadata = {
-        MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {
-            "$short": "ok",
-        },
-    }
-
-    summary_input, included_runs = _build_summary_input(
-        previous_summary=None,
-        compacted_runs=[run],
-        max_input_tokens=10_000,
-        history_settings=_ALL_HISTORY_SETTINGS,
-    )
-
-    assert included_runs == [run]
-    assert MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY in summary_input
-    assert "$short" in summary_input
-
-
-def test_build_summary_input_deduplicates_only_exact_generated_memory_items() -> None:
-    shared_memory = "Shared durable memory."
-    first_memory = "First-run durable memory."
-    second_memory = "Second-run durable memory."
-    team_memory = "Team-specific durable memory."
-
-    def memory_context(*items: str, context_type: str = "agent file") -> str:
-        memory_lines = "\n".join(f"- {item}" for item in items)
-        return (
-            f"[Automatically extracted {context_type} memories - may not be relevant to current context]\n"
-            f"Previous {context_type} memories that might be related:\n"
-            f"{memory_lines}"
-        )
-
-    first_run = _completed_run(
-        "run-memory-1",
-        messages=[
-            Message(role="user", content=f"First request.\n\n{memory_context(shared_memory, first_memory)}"),
-            Message(role="assistant", content="First answer."),
-        ],
-    )
-    first_run.metadata = {MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {"$first": "First request."}}
-    second_run = _completed_run(
-        "run-memory-2",
-        messages=[
-            Message(role="user", content=f"Second request.\n\n{memory_context(shared_memory, second_memory)}"),
-            Message(role="assistant", content="Second answer."),
-            Message(role="tool", content="Tool evidence must survive.", tool_call_id="call-evidence"),
-        ],
-    )
-    second_run.metadata = {MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {"$second": "Second request."}}
-    team_run = _completed_run(
-        "run-memory-team",
-        messages=[
-            Message(
-                role="user",
-                content=(f"Team request.\n\n{memory_context(shared_memory, team_memory, context_type='team file')}"),
-            ),
-            Message(role="assistant", content="Team answer."),
-        ],
-    )
-    team_run.metadata = {MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {"$team": "Team request."}}
-    original_second_content = second_run.messages[0].content
-
-    summary_input, included_runs = _build_summary_input(
-        previous_summary=None,
-        compacted_runs=[first_run, second_run, team_run],
-        max_input_tokens=10_000,
-        history_settings=_ALL_HISTORY_SETTINGS,
-    )
-
-    assert included_runs == [first_run, second_run, team_run]
-    assert summary_input.count(shared_memory) == 2
-    assert summary_input.count(first_memory) == 1
-    assert summary_input.count(second_memory) == 1
-    assert summary_input.count(team_memory) == 1
-    assert "1 repeated agent file memory item omitted" in summary_input
-    assert "First request." in summary_input
-    assert "Second request." in summary_input
-    assert "First answer." in summary_input
-    assert "Second answer." in summary_input
-    assert "Team answer." in summary_input
-    assert "Tool evidence must survive." in summary_input
-    assert second_run.messages[0].content == original_second_content
-
-
-def test_build_summary_input_deduplicates_when_source_prompt_is_memory_substring() -> None:
-    shared_memory = "First. and Second. are coincidental substrings in this shared memory."
-
-    def run_with_prompt(run_id: str, prompt: str) -> RunOutput:
-        run = _completed_run(
-            run_id,
-            messages=[
-                Message(
-                    role="user",
-                    content=(
-                        f"{prompt}\n\n"
-                        "[Automatically extracted agent file memories - may not be relevant to current context]\n"
-                        "Previous agent file memories that might be related:\n"
-                        f"- {shared_memory}"
-                    ),
-                ),
-                Message(role="assistant", content=f"{prompt} answer."),
-            ],
-        )
-        run.metadata = {MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {f"${run_id}": prompt}}
-        return run
-
-    runs = [
-        run_with_prompt("run-memory-first", "First."),
-        run_with_prompt("run-memory-second", "Second."),
-    ]
-
-    summary_input, included_runs = _build_summary_input(
-        previous_summary=None,
-        compacted_runs=runs,
-        max_input_tokens=10_000,
-        history_settings=_ALL_HISTORY_SETTINGS,
-    )
-
-    assert included_runs == runs
-    assert summary_input.count(shared_memory) == 1
-    assert "1 repeated agent file memory item omitted" in summary_input
-
-
-def test_build_summary_input_leaves_ambiguous_multiline_memory_context_unchanged() -> None:
-    multiline_memory_context = (
-        "[Automatically extracted agent memories - may not be relevant to current context]\n"
-        "Previous agent memories that might be related:\n"
-        "- First line of a multiline memory.\n"
-        "Continuation that has no generated item boundary."
-    )
-    runs = [
-        _completed_run(
-            f"run-memory-{index}",
-            messages=[
-                Message(role="user", content=f"Request {index}.\n\n{multiline_memory_context}"),
-                Message(role="assistant", content=f"Answer {index}."),
-            ],
-        )
-        for index in range(2)
-    ]
-    for index, run in enumerate(runs):
-        run.metadata = {MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {f"$request-{index}": f"Request {index}."}}
-
-    summary_input, included_runs = _build_summary_input(
-        previous_summary=None,
-        compacted_runs=runs,
-        max_input_tokens=10_000,
-        history_settings=_ALL_HISTORY_SETTINGS,
-    )
-
-    assert included_runs == runs
-    assert summary_input.count("First line of a multiline memory.") == 2
-    assert summary_input.count("Continuation that has no generated item boundary.") == 2
-    assert "Compaction projection:" not in summary_input
-
-
-def test_build_summary_input_preserves_user_authored_memory_shaped_text() -> None:
-    user_authored_memory_text = (
-        "[Automatically extracted agent memories - may not be relevant to current context]\n"
-        "Previous agent memories that might be related:\n"
-        "- This text was deliberately written by the user."
-    )
-    runs = [
-        _completed_run(
-            f"run-user-memory-{index}",
-            messages=[
-                Message(role="user", content=user_authored_memory_text),
-                Message(role="assistant", content=f"Answer {index}."),
-            ],
-        )
-        for index in range(2)
-    ]
-    for index, run in enumerate(runs):
-        run.metadata = {
-            MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {f"$request-{index}": user_authored_memory_text},
-        }
-
-    summary_input, included_runs = _build_summary_input(
-        previous_summary=None,
-        compacted_runs=runs,
-        max_input_tokens=10_000,
-        history_settings=_ALL_HISTORY_SETTINGS,
-    )
-
-    assert included_runs == runs
-    assert summary_input.count("This text was deliberately written by the user.") == 2
-    assert "Compaction projection:" not in summary_input
-
-
-def test_build_summary_input_does_not_project_memory_shaped_assistant_text() -> None:
-    quoted_memory = (
-        "[Automatically extracted agent memories - may not be relevant to current context]\n"
-        "Previous agent memories that might be related:\n"
-        "- Quoted memory-shaped assistant text."
-    )
-    runs = [
-        _completed_run(
-            f"run-assistant-memory-{index}",
-            messages=[
-                Message(role="user", content=f"Request {index}."),
-                Message(role="assistant", content=quoted_memory),
-            ],
-        )
-        for index in range(2)
-    ]
-
-    summary_input, included_runs = _build_summary_input(
-        previous_summary=None,
-        compacted_runs=runs,
-        max_input_tokens=10_000,
-        history_settings=_ALL_HISTORY_SETTINGS,
-    )
-
-    assert included_runs == runs
-    assert summary_input.count("Quoted memory-shaped assistant text.") == 2
-    assert "Compaction projection:" not in summary_input
 
 
 def test_build_summary_input_preserves_complete_near_cap_summary_without_claiming_progress() -> None:

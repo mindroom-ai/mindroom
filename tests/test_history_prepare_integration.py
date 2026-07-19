@@ -25,6 +25,7 @@ from mindroom.execution_preparation import (
     _build_matrix_prompt_with_history,
     _PreparedExecutionContext,
 )
+from mindroom.history.compaction import _build_summary_input
 from mindroom.history.prompt_tokens import (
     estimate_agent_static_tokens,
 )
@@ -44,6 +45,7 @@ from tests.conftest import (
     make_visible_message,
 )
 from tests.history_helpers import (  # noqa: F401
+    _ALL_HISTORY_SETTINGS,
     RecordingModel,
     _agent,
     _close_test_storages,
@@ -777,26 +779,26 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
 
 
 @pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_keeps_prior_request_message_prefix_byte_identical(
+async def test_prepare_agent_and_prompt_keeps_transient_memory_out_of_replay_and_compaction(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path, num_history_runs=10)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     recording_model = RecordingModel(id="recording-model", provider="fake")
-    recorded_requests: list[list[dict[str, str]]] = []
+    recorded_requests: list[list[dict[str, object]]] = []
 
     prompt_parts_by_prompt = {
         "First prompt": MemoryPromptParts(
             session_preamble="[File memory entrypoint (agent)]\nStable MEMORY.md",
-            turn_context="turn context one",
+            transient_turn_context="turn context one",
         ),
         "Second prompt": MemoryPromptParts(
             session_preamble="[File memory entrypoint (agent)]\nStable MEMORY.md",
-            turn_context="turn context two",
+            transient_turn_context="turn context two",
         ),
         "Third prompt": MemoryPromptParts(
             session_preamble="[File memory entrypoint (agent)]\nStable MEMORY.md",
-            turn_context="turn context three",
+            transient_turn_context="turn context three",
         ),
     }
 
@@ -837,6 +839,7 @@ async def test_prepare_agent_and_prompt_keeps_prior_request_message_prefix_byte_
                     {
                         "role": message.role,
                         "content": str(message.content),
+                        "add_to_agent_memory": message.add_to_agent_memory,
                     }
                     for message in recording_model.seen_messages
                 ],
@@ -845,8 +848,47 @@ async def test_prepare_agent_and_prompt_keeps_prior_request_message_prefix_byte_
     second_request = recorded_requests[1]
     third_request = recorded_requests[2]
 
-    assert stable_serialize(second_request) == stable_serialize(third_request[: len(second_request)])
-    assert third_request[-1]["content"] == "Third prompt\n\nturn context three"
+    assert stable_serialize(second_request[:-2]) == stable_serialize(third_request[: len(second_request) - 2])
+    session_preamble = "[File memory entrypoint (agent)]\nStable MEMORY.md"
+    assert [message["content"] for message in recorded_requests[0]] == [
+        session_preamble,
+        "turn context one",
+        "First prompt",
+    ]
+    assert [message["content"] for message in second_request] == [
+        session_preamble,
+        "First prompt",
+        "ok",
+        "turn context two",
+        "Second prompt",
+    ]
+    assert [message["content"] for message in third_request] == [
+        session_preamble,
+        "First prompt",
+        "ok",
+        "Second prompt",
+        "ok",
+        "turn context three",
+        "Third prompt",
+    ]
+    assert third_request[-2]["add_to_agent_memory"] is False
+    assert third_request[-1]["add_to_agent_memory"] is True
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    persisted_contents = [str(message.content) for run in persisted.runs or [] for message in run.messages or []]
+    assert persisted_contents == ["First prompt", "ok", "Second prompt", "ok", "Third prompt", "ok"]
+
+    summary_input, included_runs = _build_summary_input(
+        previous_summary=None,
+        compacted_runs=persisted.runs or [],
+        max_input_tokens=10_000,
+        history_settings=_ALL_HISTORY_SETTINGS,
+    )
+    assert included_runs == persisted.runs
+    assert "turn context" not in summary_input
+    assert "First prompt" in summary_input
+    assert "Third prompt" in summary_input
 
 
 @pytest.mark.asyncio
@@ -857,20 +899,20 @@ async def test_prepare_agent_and_prompt_timestamps_current_turn_without_duplicat
     config.timezone = "America/Los_Angeles"
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     recording_model = RecordingModel(id="recording-model", provider="fake")
-    recorded_requests: list[list[dict[str, str]]] = []
+    recorded_requests: list[list[dict[str, object]]] = []
 
     prompt_parts_by_prompt = {
         "First prompt": MemoryPromptParts(
             session_preamble="[File memory entrypoint (agent)]\nStable MEMORY.md",
-            turn_context="turn context one",
+            transient_turn_context="turn context one",
         ),
         "Second prompt": MemoryPromptParts(
             session_preamble="[File memory entrypoint (agent)]\nStable MEMORY.md",
-            turn_context="turn context two",
+            transient_turn_context="turn context two",
         ),
         "Third prompt": MemoryPromptParts(
             session_preamble="[File memory entrypoint (agent)]\nStable MEMORY.md",
-            turn_context="turn context three",
+            transient_turn_context="turn context three",
         ),
     }
     model_prompt_by_prompt = {
@@ -927,6 +969,7 @@ async def test_prepare_agent_and_prompt_timestamps_current_turn_without_duplicat
                     {
                         "role": message.role,
                         "content": str(message.content),
+                        "add_to_agent_memory": message.add_to_agent_memory,
                     }
                     for message in recording_model.seen_messages
                 ],
@@ -935,10 +978,15 @@ async def test_prepare_agent_and_prompt_timestamps_current_turn_without_duplicat
     second_request = recorded_requests[1]
     third_request = recorded_requests[2]
 
-    assert stable_serialize(second_request) == stable_serialize(third_request[: len(second_request)])
+    assert stable_serialize(second_request[:-2]) == stable_serialize(third_request[: len(second_request) - 2])
+    assert third_request[-2] == {
+        "role": "user",
+        "content": "turn context three",
+        "add_to_agent_memory": False,
+    }
     assert third_request[-1]["content"] == (
         'Current message:\n<msg from="@alice:localhost" ts="2026-03-20 08:17 PDT"><![CDATA['
         "Third prompt\n\n"
-        "turn context three\n\n"
         "Available attachment IDs: att_3. Use tool calls to inspect or process them.]]></msg>"
     )
+    assert third_request[-1]["add_to_agent_memory"] is True

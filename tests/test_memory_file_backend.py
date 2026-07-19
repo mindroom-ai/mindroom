@@ -908,9 +908,9 @@ async def test_prompt_parts_carry_degradation_notice_with_keyword_matches(
             runtime_paths_for(config),
         )
 
-    assert "Semantic memory search is unavailable this turn" in prompt_parts.turn_context
-    assert "semantic memory search failed (RuntimeError)" in prompt_parts.turn_context
-    assert "Keyword fallback memory" in prompt_parts.turn_context
+    assert "Semantic memory search is unavailable this turn" in prompt_parts.transient_turn_context
+    assert "semantic memory search failed (RuntimeError)" in prompt_parts.transient_turn_context
+    assert "Keyword fallback memory" in prompt_parts.transient_turn_context
 
 
 @pytest.mark.asyncio
@@ -1466,8 +1466,8 @@ async def test_file_backend_build_memory_prompt_parts_splits_entrypoint_from_tur
 
     assert "[File memory entrypoint (agent)]" in prompt_parts.session_preamble
     assert "Project uses FastAPI." in prompt_parts.session_preamble
-    assert "Deployment runbook lives in docs/deploy.md" in prompt_parts.turn_context
-    assert "Project uses FastAPI." not in prompt_parts.turn_context
+    assert "Deployment runbook lives in docs/deploy.md" in prompt_parts.transient_turn_context
+    assert "Project uses FastAPI." not in prompt_parts.transient_turn_context
 
 
 @pytest.mark.asyncio

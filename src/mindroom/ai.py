@@ -65,7 +65,7 @@ from mindroom.media_fallback import (
     unsupported_media_kinds_for_route,
 )
 from mindroom.media_inputs import MediaInputs, MediaKind
-from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
+from mindroom.memory import build_memory_prompt_parts, strip_user_turn_time_prefix
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.pre_model_preparation import prepare_mem0_prompt_branches
 from mindroom.response_turn import (
@@ -132,14 +132,11 @@ def _compose_current_turn_prompt(
     *,
     raw_prompt: str,
     model_prompt: str | None,
-    prompt_parts: MemoryPromptParts,
 ) -> str:
-    """Build the current-turn user message without rewriting persisted history."""
+    """Build the persisted current-turn user message without transient context."""
     prompt_chunks: list[str] = []
     if raw_prompt:
         prompt_chunks.append(raw_prompt)
-    if prompt_parts.turn_context:
-        prompt_chunks.append(prompt_parts.turn_context)
     model_prompt_tail = _model_prompt_tail_after_raw_prompt(raw_prompt=raw_prompt, model_prompt=model_prompt)
     if model_prompt_tail:
         prompt_chunks.append(model_prompt_tail)
@@ -1159,7 +1156,6 @@ async def _prepare_agent_and_prompt(
         current_turn_prompt = _compose_current_turn_prompt(
             raw_prompt=prompt,
             model_prompt=model_prompt,
-            prompt_parts=prompt_parts,
         )
     else:
         _mark_pipeline_timing(pipeline_timing, "memory_prepare_start")
@@ -1174,7 +1170,6 @@ async def _prepare_agent_and_prompt(
         current_turn_prompt = _compose_current_turn_prompt(
             raw_prompt=prompt,
             model_prompt=model_prompt,
-            prompt_parts=prompt_parts,
         )
         _mark_pipeline_timing(pipeline_timing, "memory_prepare_ready")
         _mark_pipeline_timing(pipeline_timing, "agent_build_start")
@@ -1193,6 +1188,17 @@ async def _prepare_agent_and_prompt(
         scope_context=scope_context,
         agent=agent,
         prompt=current_turn_prompt,
+        transient_context_messages=(
+            (
+                Message(
+                    role="user",
+                    content=prompt_parts.transient_turn_context,
+                    add_to_agent_memory=False,
+                ),
+            )
+            if prompt_parts.transient_turn_context
+            else ()
+        ),
         thread_history=thread_history,
         runtime_paths=runtime_paths,
         config=config,

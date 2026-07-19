@@ -26,6 +26,7 @@ from mindroom.execution_preparation import (
     _messages_with_current_prompt,
     _prepare_execution_context_common,
     _prepared_history_with_scheduled_limit,
+    _PreparedExecutionContext,
     _ThreadAttachmentContext,
     prepare_agent_execution_context,
     render_prepared_messages_text,
@@ -665,6 +666,39 @@ def test_current_matrix_message_renders_timestamp_as_msg_attribute() -> None:
     assert messages[0].content == (
         'Current message:\n<msg from="@alice:localhost" ts="2026-03-20 08:15 PDT"><![CDATA[Hello <world>]]></msg>'
     )
+
+
+def test_transient_context_precedes_current_prompt_without_entering_replay_context() -> None:
+    """One-turn context should reach the model without becoming persisted replay."""
+    persisted_context = Message(role="assistant", content="Earlier answer")
+    transient_context = Message(
+        role="user",
+        content="Retrieved memory for this turn",
+        add_to_agent_memory=False,
+    )
+
+    messages = _messages_with_current_prompt(
+        "Current request",
+        context_messages=(persisted_context,),
+        transient_context_messages=(transient_context,),
+        config=_config(),
+    )
+
+    assert [message.content for message in messages] == [
+        "Earlier answer",
+        "Retrieved memory for this turn",
+        "Current request",
+    ]
+    assert messages[1] is not transient_context
+    assert messages[1].add_to_agent_memory is False
+    assert messages[2].add_to_agent_memory is True
+
+    prepared = _PreparedExecutionContext(
+        messages=messages,
+        unseen_event_ids=[],
+        prepared_history=PreparedHistoryState(),
+    )
+    assert prepared.context_messages == (messages[0],)
 
 
 def test_current_matrix_message_splits_cdata_terminator_without_escaping_body() -> None:

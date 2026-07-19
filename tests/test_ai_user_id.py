@@ -266,7 +266,6 @@ def test_compose_current_turn_prompt_uses_normalized_tail_comparison() -> None:
     prompt = _compose_current_turn_prompt(
         raw_prompt=" report ",
         model_prompt="report\n\nAvailable attachment IDs: att_report.",
-        prompt_parts=MemoryPromptParts(session_preamble="", turn_context=""),
     )
 
     assert prompt == " report \n\nAvailable attachment IDs: att_report."
@@ -277,7 +276,6 @@ def test_compose_current_turn_prompt_strips_stale_model_timestamp_before_tail_co
     prompt = _compose_current_turn_prompt(
         raw_prompt=" report ",
         model_prompt="[1999-01-01 00:00 UTC] report\n\nAvailable attachment IDs: att_report.",
-        prompt_parts=MemoryPromptParts(session_preamble="", turn_context=""),
     )
 
     assert prompt == " report \n\nAvailable attachment IDs: att_report."
@@ -288,7 +286,6 @@ def test_compose_current_turn_prompt_keeps_model_only_tail_without_timestamp() -
     prompt = _compose_current_turn_prompt(
         raw_prompt="",
         model_prompt="Available attachment IDs: att_report.",
-        prompt_parts=MemoryPromptParts(session_preamble="", turn_context=""),
     )
 
     assert prompt == "Available attachment IDs: att_report."
@@ -722,7 +719,7 @@ class TestUserIdPassthrough:
                 new_callable=AsyncMock,
                 return_value=MemoryPromptParts(
                     session_preamble="session preamble",
-                    turn_context="turn context",
+                    transient_turn_context="turn context",
                 ),
             ) as mock_build_prompt_parts,
             patch("mindroom.ai.create_agent", return_value=mock_agent),
@@ -754,7 +751,12 @@ class TestUserIdPassthrough:
         assert mock_build_prompt_parts.await_args is not None
         assert mock_build_prompt_parts.await_args.args[0] == "raw prompt"
         assert mock_prepare_execution.await_args is not None
-        assert mock_prepare_execution.await_args.kwargs["prompt"] == "raw prompt\n\nturn context\n\nmodel metadata"
+        assert mock_prepare_execution.await_args.kwargs["prompt"] == "raw prompt\n\nmodel metadata"
+        transient_messages = mock_prepare_execution.await_args.kwargs["transient_context_messages"]
+        assert len(transient_messages) == 1
+        assert transient_messages[0].role == "user"
+        assert transient_messages[0].content == "turn context"
+        assert transient_messages[0].add_to_agent_memory is False
         assert mock_agent.additional_context == "existing context\n\nsession preamble\n\nsystem enrichment"
 
     @pytest.mark.asyncio
