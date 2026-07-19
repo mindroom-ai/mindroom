@@ -1665,7 +1665,6 @@ depends_on = [
     "mindroom.matrix.cache.event_batching",
     "mindroom.matrix.cache.event_cache",
     "mindroom.matrix.cache.event_normalization",
-    "mindroom.matrix.cache.startup_cleanup",
     "mindroom.matrix.cache.write_coordinator",
     "mindroom.matrix.cache.thread_cache_helpers",
     "mindroom.matrix.cache.thread_history_result",
@@ -1740,11 +1739,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix.cache.event_cache"
 depends_on = []
-
-[[modules]]
-path = "mindroom.matrix.cache.startup_cleanup"
-depends_on = []
-visibility = ["mindroom.matrix.cache"]
 
 [[modules]]
 path = "mindroom.matrix.cache.event_cache_events"
@@ -1895,6 +1889,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.cache.event_normalization",
     "mindroom.matrix.event_info",
+    "mindroom.matrix.sync_certification",
     "mindroom.matrix.thread_bookkeeping",
 ]
 
@@ -1916,6 +1911,40 @@ depends_on = [
     "mindroom.matrix.thread_membership",
     "mindroom.matrix.thread_room_scan",
     "mindroom.matrix.visible_body",
+]
+
+[[modules]]
+path = "mindroom.matrix.sync_cache_trust"
+depends_on = [
+    "mindroom.matrix.sync_certification",
+    "mindroom.matrix.sync_tokens",
+]
+visibility = ["mindroom.bot"]
+
+[[modules]]
+path = "mindroom.matrix.sync_certification"
+depends_on = ["mindroom.matrix.sync_token_values"]
+visibility = [
+    "mindroom.bot",
+    "mindroom.matrix.cache.thread_writes",
+    "mindroom.matrix.sync_cache_trust",
+    "mindroom.matrix.sync_tokens",
+]
+
+[[modules]]
+path = "mindroom.matrix.sync_tokens"
+depends_on = [
+    "mindroom.matrix.sync_certification",
+    "mindroom.matrix.sync_token_values",
+]
+visibility = ["mindroom.matrix.sync_cache_trust"]
+
+[[modules]]
+path = "mindroom.matrix.sync_token_values"
+depends_on = []
+visibility = [
+    "mindroom.matrix.sync_certification",
+    "mindroom.matrix.sync_tokens",
 ]
 
 [[modules]]
@@ -2556,7 +2585,6 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
     "mindroom.knowledge",
-    "mindroom.matrix.cache",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
     "mindroom.matrix.conversation_cache",
@@ -2565,6 +2593,8 @@ depends_on = [
     "mindroom.matrix.room_cleanup",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
+    "mindroom.matrix.sync_cache_trust",
+    "mindroom.matrix.sync_certification",
     "mindroom.matrix.to_device",
     "mindroom.matrix.users",
     "mindroom.matrix.visible_body",
@@ -3600,7 +3630,6 @@ expose = [
     "SharedConversationEventCache",
     "ThreadCacheState",
     "ThreadHistoryResult",
-    "clear_untrusted_principal_cache",
     "is_opaque_encrypted_event_source",
     "normalize_nio_event_for_cache",
     "thread_cache_rejection_reason",

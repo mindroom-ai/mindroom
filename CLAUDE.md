@@ -129,6 +129,7 @@ Matrix sync callback
 | `credentials.py` | Unified credential management (CredentialsManager) |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |
 | `matrix/large_messages.py` | Large-message sidecar storage and retrieval for oversized Matrix payloads |
+| `matrix/sync_cache_trust.py` | Sync-checkpoint persistence, cache-generation trust, and cold-start principal cleanup |
 | `matrix/message_content.py` | Canonical Matrix message content building for text, edits, and tool traces |
 | `matrix/message_builder.py` | Message content building helpers |
 | `matrix/provisioning.py` | Hosted provisioning client flow used for local pairing and server-side agent registration |
