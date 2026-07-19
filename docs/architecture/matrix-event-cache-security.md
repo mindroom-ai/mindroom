@@ -87,6 +87,8 @@ If cold-start cleanup is unavailable or fails, only that principal view is disab
 
 SQLite write operations begin with `BEGIN IMMEDIATE`, so tombstone and MXC-ownership authorization reads cannot race a second connection's redaction commit.
 
+SQLite content writes establish a durable room-membership row, and reads use `BEGIN IMMEDIATE` so they are ordered strictly before or after departure, principal cleanup, redaction, and other content mutations committed through another connection.
+
 SQLite write results are reauthorized after commit while the operation lock is still held, so a concurrent leave cannot expose plaintext written before the fence.
 
 SQLite schema version 11 resets older advisory cache contents inside one rollback-safe transaction and creates a durable database-generation identifier.

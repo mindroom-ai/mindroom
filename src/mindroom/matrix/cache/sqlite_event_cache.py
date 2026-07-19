@@ -596,25 +596,28 @@ class SqliteEventCache:
                 room_id,
             ):
                 return disabled_result
-            if self._runtime.has_pending_principal_purge(self.principal_id):
-                try:
+            pending_principal_purge = self._runtime.has_pending_principal_purge(self.principal_id)
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                if pending_principal_purge:
                     await sqlite_event_cache_events.purge_principal_locked(
                         db,
                         principal_id=self.principal_id,
                     )
-                    await db.commit()
-                except BaseException:
-                    await _rollback_sqlite_connection_best_effort(db, operation=operation)
-                    raise
+                    result = disabled_result
+                else:
+                    membership_state, _membership_epoch = await sqlite_event_cache_threads.load_room_membership_locked(
+                        db,
+                        principal_id=self.principal_id,
+                        room_id=room_id,
+                    )
+                    result = disabled_result if membership_state != "joined" else await reader(db)
+                await db.commit()
+            except BaseException:
+                await _rollback_sqlite_connection_best_effort(db, operation=operation)
+                raise
+            if pending_principal_purge:
                 self._runtime.forget_pending_principal_purge(self.principal_id)
-            membership_state, _membership_epoch = await sqlite_event_cache_threads.load_room_membership_locked(
-                db,
-                principal_id=self.principal_id,
-                room_id=room_id,
-            )
-            if membership_state != "joined":
-                return disabled_result
-            result = await reader(db)
             if (
                 self._runtime.is_disabled
                 or self._runtime.is_principal_disabled(self.principal_id)
@@ -665,6 +668,11 @@ class SqliteEventCache:
                 elif allow_departed:
                     result = await writer(db)
                 else:
+                    await sqlite_event_cache_threads.certify_room_membership_locked(
+                        db,
+                        principal_id=self.principal_id,
+                        room_id=room_id,
+                    )
                     membership_state, membership_epoch = await sqlite_event_cache_threads.load_room_membership_locked(
                         db,
                         principal_id=self.principal_id,

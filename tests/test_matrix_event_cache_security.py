@@ -410,6 +410,85 @@ async def test_departure_discards_read_that_started_before_fence(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("lookup_kind", ["event", "mxc"])
+@pytest.mark.parametrize("cleanup", ["departure", "departure-rejoin", "principal-purge", "redaction"])
+async def test_sqlite_cleanup_in_another_runtime_serializes_with_inflight_read(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    lookup_kind: str,
+    cleanup: str,
+) -> None:
+    """Cross-runtime cleanup must commit strictly after an overlapping SQLite read."""
+    db_path = tmp_path / "event_cache.db"
+    read_root = SqliteEventCache(db_path)
+    departure_root = SqliteEventCache(db_path)
+    await read_root.initialize()
+    await departure_root.initialize()
+    principal_id = "@alice:localhost"
+    read_cache = read_root.for_principal(principal_id)
+    departure_cache = departure_root.for_principal(principal_id)
+    room_id = "!left:localhost"
+    event_id = "$event"
+    mxc_url = "mxc://server/plaintext"
+    event = _event(event_id, 1, sidecar_url=mxc_url)
+    read_obtained_result = asyncio.Event()
+    release_read = asyncio.Event()
+    sqlite_loader = (
+        sqlite_event_cache_events.load_event if lookup_kind == "event" else sqlite_event_cache_events.load_mxc_text
+    )
+    original_loader = cast("Callable[..., Awaitable[object]]", sqlite_loader)
+
+    async def pause_after_read(*args: object, **kwargs: object) -> object:
+        result = await original_loader(*args, **kwargs)
+        read_obtained_result.set()
+        await release_read.wait()
+        return result
+
+    try:
+        await read_cache.store_event(event_id, room_id, event)
+        assert await read_cache.store_mxc_text(room_id, event_id, mxc_url, "plaintext")
+        if lookup_kind == "event":
+            monkeypatch.setattr(sqlite_event_cache_events, "load_event", pause_after_read)
+            read_task = asyncio.create_task(read_cache.get_event(room_id, event_id))
+        else:
+            monkeypatch.setattr(sqlite_event_cache_events, "load_mxc_text", pause_after_read)
+            read_task = asyncio.create_task(read_cache.get_mxc_text(room_id, event_id, mxc_url))
+        await read_obtained_result.wait()
+
+        async def cleanup_room() -> None:
+            if cleanup == "principal-purge":
+                await departure_cache.purge_principal()
+                return
+            if cleanup == "redaction":
+                assert await departure_cache.redact_event(room_id, event_id)
+                return
+            departure_epoch = departure_cache.mark_room_departed(room_id)
+            await departure_cache.purge_room(room_id)
+            if cleanup == "departure-rejoin":
+                await departure_cache.mark_room_joined(
+                    room_id,
+                    expected_departure_epoch=departure_epoch,
+                )
+
+        cleanup_task = asyncio.create_task(cleanup_room())
+        await asyncio.sleep(0)
+        assert not cleanup_task.done()
+        release_read.set()
+
+        assert await read_task == (event if lookup_kind == "event" else "plaintext")
+        await cleanup_task
+        if lookup_kind == "event":
+            assert await read_cache.get_event(room_id, event_id) is None
+        else:
+            assert await read_cache.get_mxc_text(room_id, event_id, mxc_url) is None
+    finally:
+        release_read.set()
+        await read_root.close()
+        await departure_root.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("purge_scope", ["room", "principal"])
 async def test_recovered_purge_discards_the_operation_that_flushes_it(
     event_cache_factory: Callable[[], ConversationEventCache],
