@@ -513,7 +513,7 @@ async def _generate_compaction_summary_with_retry(
     summary_prompt: str,
     token_estimator: Callable[[str], int],
 ) -> _GeneratedSummaryChunk:
-    """Generate one summary chunk, shrinking the input per the retry policy when safe."""
+    """Generate one summary chunk, retrying the same or smaller input when safe."""
     summary_input = initial_summary_input
     included_runs = initial_included_runs
     budget = summary_input_budget
@@ -556,6 +556,10 @@ async def _generate_compaction_summary_with_retry(
             )
             retry_budget = retry_policy.retry_budget(attempt=attempt, budget=budget, error=exc)
             if retry_budget is not None:
+                if retry_budget == budget:
+                    await asyncio.sleep(retry_policy.same_input_retry_delay_seconds)
+                    attempt += 1
+                    continue
                 rebuilt_input, rebuilt_runs = _build_summary_input(
                     previous_summary=previous_summary,
                     compacted_runs=compactable_runs,
