@@ -3,7 +3,8 @@
 Durable trust-state invariants (mirrored by ``postgres_event_cache_threads``):
 
 1. Stale markers are monotonic: ``mark_thread_stale_locked`` and ``mark_room_stale_locked`` never let an
-   older ``invalidated_at`` or its reason overwrite a newer one.
+   older ``invalidated_at`` overwrite a newer one.
+   A revalidatable incremental reason also cannot overwrite an active full-refetch reason.
 
 2. Snapshot replacement is race-guarded: ``replace_thread_locked_if_not_newer`` refuses when
    ``validated_at``, ``invalidated_at``, or ``room_invalidated_at`` changed after the fetch began, so a
@@ -44,6 +45,8 @@ from .sqlite_event_cache_events import (
 from .thread_cache_state import (
     ThreadCacheStateRow,
     can_revalidate_after_incremental_update,
+    incremental_thread_revalidation_reasons,
+    is_incremental_thread_revalidation_reason,
     thread_cache_state_changed_after,
     thread_cache_state_row,
 )
@@ -386,6 +389,8 @@ async def mark_thread_stale_locked(
     reason: str,
 ) -> None:
     """Persist a durable invalidate-and-refetch marker within an active transaction."""
+    incremental_reasons_json = json.dumps(incremental_thread_revalidation_reasons())
+    incoming_is_incremental = is_incremental_thread_revalidation_reason(reason)
     await db.execute(
         """
         INSERT INTO thread_cache_state(
@@ -405,12 +410,36 @@ async def mark_thread_stale_locked(
             END,
             invalidation_reason = CASE
                 WHEN thread_cache_state.invalidated_at IS NULL
-                    OR excluded.invalidated_at >= thread_cache_state.invalidated_at
+                    THEN excluded.invalidation_reason
+                WHEN ?
+                    AND NOT COALESCE(
+                        thread_cache_state.invalidation_reason
+                            IN (SELECT value FROM json_each(?)),
+                        FALSE
+                    )
+                    THEN thread_cache_state.invalidation_reason
+                WHEN NOT ?
+                    AND COALESCE(
+                        thread_cache_state.invalidation_reason
+                            IN (SELECT value FROM json_each(?)),
+                        FALSE
+                    )
+                    THEN excluded.invalidation_reason
+                WHEN excluded.invalidated_at >= thread_cache_state.invalidated_at
                     THEN excluded.invalidation_reason
                 ELSE thread_cache_state.invalidation_reason
             END
         """,
-        (room_id, thread_id, time.time(), reason),
+        (
+            room_id,
+            thread_id,
+            time.time(),
+            reason,
+            incoming_is_incremental,
+            incremental_reasons_json,
+            incoming_is_incremental,
+            incremental_reasons_json,
+        ),
     )
 
 

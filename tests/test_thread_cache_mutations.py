@@ -1591,6 +1591,91 @@ class TestMatrixConversationCacheThreadReads:
         assert [event["event_id"] for event in thread_events] == [thread_id, "$decrypted:localhost"]
 
     @pytest.mark.asyncio
+    async def test_clear_child_after_opaque_child_keeps_snapshot_stale(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A later clear append cannot certify a snapshot still missing an opaque child."""
+        room_id = "!test:localhost"
+        thread_id = "$thread:localhost"
+        validated_at = time.time()
+        root_event = {
+            "event_id": thread_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"body": "root", "msgtype": "m.text"},
+        }
+        decrypted_child = {
+            "event_id": "$decrypted:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "body": "known clear child",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+            },
+        }
+        opaque_child = _opaque_encrypted_event(
+            event_id="$opaque-child:localhost",
+            content_updates={"m.relates_to": {"rel_type": "m.thread", "event_id": thread_id}},
+        )
+        later_clear_child = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "later clear reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+                },
+                "event_id": "$later-clear:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 4000,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(event_cache=event_cache),
+        )
+        opaque_response = MagicMock()
+        opaque_response.__class__ = nio.SyncResponse
+        opaque_response.rooms = MagicMock(
+            join={room_id: MagicMock(timeline=MagicMock(events=[opaque_child], limited=False))},
+        )
+        clear_response = MagicMock()
+        clear_response.__class__ = nio.SyncResponse
+        clear_response.rooms = MagicMock(
+            join={room_id: MagicMock(timeline=MagicMock(events=[later_clear_child], limited=False))},
+        )
+
+        await _replace_thread(
+            event_cache,
+            room_id,
+            thread_id,
+            [root_event, decrypted_child],
+            validated_at=validated_at,
+        )
+        opaque_result = await access.cache_sync_timeline_for_certification(opaque_response)
+        clear_result = await access.cache_sync_timeline_for_certification(clear_response)
+        state = await event_cache.get_thread_cache_state(room_id, thread_id)
+        thread_events = await event_cache.get_thread_events(room_id, thread_id)
+
+        assert opaque_result.complete is True
+        assert clear_result.complete is True
+        assert state is not None
+        assert state.validated_at == validated_at
+        assert state.invalidation_reason == "sync_opaque_encrypted_event"
+        assert matrix_cache.thread_cache_rejection_reason(state) == "thread_invalidated_after_validation"
+        assert thread_events is not None
+        assert [event["event_id"] for event in thread_events] == [
+            thread_id,
+            "$decrypted:localhost",
+            "$later-clear:localhost",
+        ]
+
+    @pytest.mark.asyncio
     async def test_get_latest_thread_event_id_fails_open_without_write_coordinator(self) -> None:
         """Thread reads should fail open when runtime support omitted the write coordinator."""
         config = _conversation_runtime_config()

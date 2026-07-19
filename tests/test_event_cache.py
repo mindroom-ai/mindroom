@@ -1129,10 +1129,20 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_room_invalida
 
 
 @pytest.mark.asyncio
-async def test_incremental_revalidation_requires_incremental_invalidation_reason(tmp_path: Path) -> None:
-    """Appends may only clear invalidations caused by incremental mutations, never other reasons."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
+@pytest.mark.parametrize(
+    "incremental_reason",
+    [
+        "live_thread_mutation",
+        "sync_thread_mutation",
+        "outbound_thread_mutation",
+    ],
+)
+async def test_incremental_revalidation_requires_incremental_invalidation_reason(
+    event_cache: ConversationEventCache,
+    incremental_reason: str,
+) -> None:
+    """Incremental markers and appends must never supersede an active full-refetch marker."""
+    cache = event_cache
     root_source = {
         "event_id": "$thread_root",
         "sender": "@user:localhost",
@@ -1141,25 +1151,34 @@ async def test_incremental_revalidation_requires_incremental_invalidation_reason
         "content": {"body": "Root message", "msgtype": "m.text"},
     }
 
-    try:
-        await _replace_thread(cache, "!room:localhost", "$thread_root", [root_source], validated_at=100.0)
+    await _replace_thread(cache, "!room:localhost", "$thread_root", [root_source], validated_at=100.0)
 
-        not_invalidated = await cache.revalidate_thread_after_incremental_update("!room:localhost", "$thread_root")
+    not_invalidated = await cache.revalidate_thread_after_incremental_update("!room:localhost", "$thread_root")
 
-        await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="live_append_failed")
-        non_incremental = await cache.revalidate_thread_after_incremental_update("!room:localhost", "$thread_root")
-        state_after_non_incremental = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+    await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="live_append_failed")
+    non_incremental = await cache.revalidate_thread_after_incremental_update("!room:localhost", "$thread_root")
+    state_after_non_incremental = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
 
-        await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="live_thread_mutation")
-        incremental = await cache.revalidate_thread_after_incremental_update("!room:localhost", "$thread_root")
-        state_after_incremental = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
-    finally:
-        await cache.close()
+    await cache.mark_thread_stale("!room:localhost", "$thread_root", reason=incremental_reason)
+    masked_incremental = await cache.revalidate_thread_after_incremental_update(
+        "!room:localhost",
+        "$thread_root",
+    )
+    state_after_masked_incremental = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+
+    await _replace_thread(cache, "!room:localhost", "$thread_root", [root_source], validated_at=200.0)
+    await cache.mark_thread_stale("!room:localhost", "$thread_root", reason=incremental_reason)
+    incremental = await cache.revalidate_thread_after_incremental_update("!room:localhost", "$thread_root")
+    state_after_incremental = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
 
     assert not_invalidated is False
     assert non_incremental is False
     assert state_after_non_incremental is not None
     assert thread_cache_rejection_reason(state_after_non_incremental) == "thread_invalidated_after_validation"
+    assert masked_incremental is False
+    assert state_after_masked_incremental is not None
+    assert state_after_masked_incremental.invalidation_reason == "live_append_failed"
+    assert thread_cache_rejection_reason(state_after_masked_incremental) == "thread_invalidated_after_validation"
     assert incremental is True
     assert state_after_incremental is not None
     assert thread_cache_rejection_reason(state_after_incremental) is None
