@@ -389,10 +389,10 @@ async def mark_thread_stale_locked(
 ) -> None:
     """Persist a durable invalidate-and-refetch marker within an active transaction."""
     stale_at = time.time() if invalidated_at is None else invalidated_at
-    incremental_reasons = incremental_thread_revalidation_reasons()
-    incremental_reason_placeholders = ", ".join("%s" for _ in incremental_reasons)
+    incremental_reasons = list(incremental_thread_revalidation_reasons())
+    incoming_is_incremental = is_incremental_thread_revalidation_reason(reason)
     await db.execute(
-        f"""
+        """
         INSERT INTO mindroom_event_cache_thread_state(
             namespace,
             room_id,
@@ -412,22 +412,33 @@ async def mark_thread_stale_locked(
             invalidation_reason = CASE
                 WHEN mindroom_event_cache_thread_state.invalidated_at IS NULL
                     THEN excluded.invalidation_reason
-                WHEN %s AND mindroom_event_cache_thread_state.invalidation_reason
-                    NOT IN ({incremental_reason_placeholders})
+                WHEN %s
+                    AND NOT COALESCE(
+                        mindroom_event_cache_thread_state.invalidation_reason = ANY(%s),
+                        FALSE
+                    )
                     THEN mindroom_event_cache_thread_state.invalidation_reason
+                WHEN NOT %s
+                    AND COALESCE(
+                        mindroom_event_cache_thread_state.invalidation_reason = ANY(%s),
+                        FALSE
+                    )
+                    THEN excluded.invalidation_reason
                 WHEN excluded.invalidated_at >= mindroom_event_cache_thread_state.invalidated_at
                     THEN excluded.invalidation_reason
                 ELSE mindroom_event_cache_thread_state.invalidation_reason
             END
-        """,  # noqa: S608
+        """,
         (
             namespace,
             room_id,
             thread_id,
             stale_at,
             reason,
-            is_incremental_thread_revalidation_reason(reason),
-            *incremental_reasons,
+            incoming_is_incremental,
+            incremental_reasons,
+            incoming_is_incremental,
+            incremental_reasons,
         ),
     )
 
