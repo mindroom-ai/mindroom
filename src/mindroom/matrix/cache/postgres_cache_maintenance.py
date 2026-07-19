@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -39,12 +40,80 @@ async def migrate_postgres_schema(
         raise RuntimeError(msg)
 
     migrated_from = 1 if current_schema_version == 1 else None
+    migrated_legacy_payload_rows: int | None = None
     if migrated_from is not None:
         await db.execute(
             """
             ALTER TABLE mindroom_event_cache_thread_events
             ALTER COLUMN event_json DROP NOT NULL
             """,
+        )
+        legacy_payload_row = await fetchone(
+            db,
+            """
+            SELECT COUNT(*)
+            FROM mindroom_event_cache_thread_events
+            WHERE namespace = %s AND event_json IS NOT NULL
+            """,
+            (namespace,),
+        )
+        migrated_legacy_payload_rows = 0 if legacy_payload_row is None else int(legacy_payload_row[0])
+        await db.execute(
+            """
+            INSERT INTO mindroom_event_cache_thread_state(
+                namespace,
+                room_id,
+                thread_id,
+                validated_at,
+                invalidated_at,
+                invalidation_reason
+            )
+            SELECT DISTINCT
+                thread_events.namespace,
+                thread_events.room_id,
+                thread_events.thread_id,
+                NULL::DOUBLE PRECISION,
+                %s,
+                'schema_migration_missing_thread_event_source'
+            FROM mindroom_event_cache_thread_events AS thread_events
+            WHERE thread_events.namespace = %s
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM mindroom_event_cache_events AS events
+                    WHERE events.namespace = thread_events.namespace
+                        AND events.event_id = thread_events.event_id
+                        AND events.room_id = thread_events.room_id
+                )
+            ON CONFLICT(namespace, room_id, thread_id) DO UPDATE SET
+                validated_at = NULL,
+                invalidated_at = CASE
+                    WHEN mindroom_event_cache_thread_state.invalidated_at IS NULL
+                        OR excluded.invalidated_at >= mindroom_event_cache_thread_state.invalidated_at
+                        THEN excluded.invalidated_at
+                    ELSE mindroom_event_cache_thread_state.invalidated_at
+                END,
+                invalidation_reason = CASE
+                    WHEN mindroom_event_cache_thread_state.invalidated_at IS NULL
+                        OR excluded.invalidated_at >= mindroom_event_cache_thread_state.invalidated_at
+                        THEN excluded.invalidation_reason
+                    ELSE mindroom_event_cache_thread_state.invalidation_reason
+                END
+            """,
+            (time.time(), namespace),
+        )
+        await db.execute(
+            """
+            DELETE FROM mindroom_event_cache_thread_events AS thread_events
+            WHERE thread_events.namespace = %s
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM mindroom_event_cache_events AS events
+                    WHERE events.namespace = thread_events.namespace
+                        AND events.event_id = thread_events.event_id
+                        AND events.room_id = thread_events.room_id
+                )
+            """,
+            (namespace,),
         )
 
     normalized_legacy_thread_payload_rows = await rowcount(
@@ -56,6 +125,8 @@ async def migrate_postgres_schema(
         """,
         (namespace,),
     )
+    if migrated_legacy_payload_rows is not None:
+        normalized_legacy_thread_payload_rows = migrated_legacy_payload_rows
     await db.execute(
         """
         INSERT INTO mindroom_event_cache_metadata(key, value)
