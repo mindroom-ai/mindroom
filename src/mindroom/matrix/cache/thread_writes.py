@@ -1015,7 +1015,8 @@ class ThreadSyncWritePolicy:
                     assert impact.thread_id is not None
                     directly_indexed_thread_id = event_info.thread_id or event_info.thread_id_from_edit
                     if not event_info.is_reaction and directly_indexed_thread_id != impact.thread_id:
-                        assert isinstance(event_id, str) and event_id
+                        assert isinstance(event_id, str)
+                        assert event_id
                         await self._cache_ops.store_events_batch(
                             room_id,
                             [(event_id, room_id, event_source)],
