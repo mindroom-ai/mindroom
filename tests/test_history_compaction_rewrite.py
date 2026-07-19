@@ -1132,6 +1132,7 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
         )
     assert rewrite_result is not None
     assert rewrite_result.compacted_run_count == 1
+    assert rewrite_result.blocked_reason == "summary_input_cannot_include_run"
     assert [run.run_id for run in working_session.runs] == ["run-2"]
     remaining_messages = working_session.runs[0].messages or []
     assert remaining_messages[1].provider_data == {"keep": "yes"}
@@ -1280,6 +1281,10 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
     assert [run.run_id for run in persisted.runs or []] == ["run-2"]
+    blocked_state = read_scope_state(persisted, scope)
+    assert blocked_state.blocked_compaction_reason == "summary_input_cannot_include_run"
+    assert blocked_state.blocked_compaction_model == "summary-model"
+    assert blocked_state.blocked_summary_input_budget == summary_input_budget
     remaining_messages = (persisted.runs or [])[0].messages or []
     assert remaining_messages[1].provider_data == {"keep": "yes"}
     assert remaining_messages[1].reasoning_content is None

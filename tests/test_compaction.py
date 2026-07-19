@@ -13,7 +13,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
-from mindroom.history.policy import classify_compaction_decision
+from mindroom.history.policy import active_compaction_block_reason, classify_compaction_decision
 from mindroom.history.runtime import create_scope_session_storage
 from mindroom.history.storage import read_scope_state, write_scope_state
 from mindroom.history.types import (
@@ -142,6 +142,31 @@ def test_compaction_policy_classifies_trigger_and_required_modes() -> None:
     assert required.reason == "history_exceeds_hard_budget"
     assert forced.mode == "required"
     assert forced.reason == "forced"
+
+
+def test_compaction_block_applies_only_to_the_persisted_model_and_budget() -> None:
+    """Changing either scoped plan input makes a durable no-progress block inactive."""
+    state = HistoryScopeState(
+        blocked_compaction_reason="summary_retry_cannot_shrink_input",
+        blocked_compaction_model="summary-model",
+        blocked_summary_input_budget=20_000,
+    )
+
+    assert active_compaction_block_reason(_make_execution_plan(), state) == "summary_retry_cannot_shrink_input"
+    assert (
+        active_compaction_block_reason(
+            _make_execution_plan(compaction_model_name="replacement-model"),
+            state,
+        )
+        is None
+    )
+    assert (
+        active_compaction_block_reason(
+            _make_execution_plan(summary_input_budget_tokens=20_001),
+            state,
+        )
+        is None
+    )
 
 
 # ---------------------------------------------------------------------------

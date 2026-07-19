@@ -19,6 +19,10 @@ CompactionAvailabilityReason = Literal[
     "non_positive_summary_input_budget",
     "summary_input_budget_at_or_below_retry_floor",
 ]
+CompactionBlockReason = Literal[
+    "summary_input_cannot_include_run",
+    "summary_retry_cannot_shrink_input",
+]
 _ReplayPlanMode = Literal["configured", "limited", "disabled"]
 
 
@@ -104,6 +108,8 @@ class HistoryScopeState:
     ``compacted_run_ids`` are tombstones for runs already folded into the durable
     summary; they let the state owner prune runs that a stale session write
     reintroduced after compaction progress was persisted.
+    Compaction block fields suppress repeated no-progress attempts only while the
+    resolved model and summary-input budget still match the blocked attempt.
     """
 
     last_compacted_at: str | None = None
@@ -111,6 +117,9 @@ class HistoryScopeState:
     last_compacted_run_count: int | None = None
     compacted_run_ids: tuple[str, ...] = ()
     force_compact_before_next_run: bool = False
+    blocked_compaction_reason: CompactionBlockReason | None = None
+    blocked_compaction_model: str | None = None
+    blocked_summary_input_budget: int | None = None
 
 
 @dataclass(frozen=True)

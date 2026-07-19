@@ -27,7 +27,9 @@ from mindroom.history.compaction import (
     scope_visible_runs,
 )
 from mindroom.history.policy import (
+    active_compaction_block_reason,
     classify_compaction_decision,
+    describe_compaction_block,
     describe_compaction_unavailability,
     resolve_history_execution_plan,
 )
@@ -95,9 +97,14 @@ def _elapsed_ms(start: float) -> int:
 
 
 def _compaction_failure_status(error: BaseException) -> Literal["failed", "timeout"]:
-    failure_reason = str(error) or type(error).__name__
-    if isinstance(error, TimeoutError) or "timed out" in failure_reason.casefold():
-        return "timeout"
+    candidate: BaseException | None = error
+    seen: set[int] = set()
+    while candidate is not None and id(candidate) not in seen:
+        seen.add(id(candidate))
+        failure_reason = str(candidate) or type(candidate).__name__
+        if isinstance(candidate, TimeoutError) or "timed out" in failure_reason.casefold():
+            return "timeout"
+        candidate = candidate.__cause__ or (None if candidate.__suppress_context__ else candidate.__context__)
     return "failed"
 
 
@@ -332,10 +339,12 @@ async def prepare_scope_history(
         history_settings=resolved_inputs.history_settings,
     )
     visible_runs = scope_visible_runs(session, scope_context.scope)
+    blocked_reason = active_compaction_block_reason(execution_plan, state)
     compaction_decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=state.force_compact_before_next_run,
         current_history_tokens=current_history_tokens,
+        blocked_reason=blocked_reason,
     )
     logger.info(
         "History preparation check",
@@ -351,6 +360,7 @@ async def prepare_scope_history(
         compaction_decision=compaction_decision.mode,
         compaction_reason=compaction_decision.reason,
         unavailable_reason=execution_plan.unavailable_reason,
+        blocked_reason=blocked_reason,
     )
     if pipeline_timing is not None:
         pipeline_timing.mark("history_classify_ready")
@@ -1165,6 +1175,16 @@ def _prepare_scope_state_for_run(
             session_id=session.session_id,
             scope=scope.key,
             reason=description,
+        )
+    blocked_reason = active_compaction_block_reason(execution_plan, state)
+    if state.force_compact_before_next_run and blocked_reason is not None:
+        state = clear_force_compaction_state(session, scope, state)
+        storage.upsert_session(session)
+        logger.warning(
+            "Forced compaction skipped because destructive compaction is blocked",
+            session_id=session.session_id,
+            scope=scope.key,
+            reason=describe_compaction_block(blocked_reason),
         )
     return state
 

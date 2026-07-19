@@ -32,6 +32,7 @@ from mindroom.history.storage import (
 )
 from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, generate_compaction_summary
 from mindroom.history.types import (
+    CompactionBlockReason,
     CompactionLifecycleProgress,
     CompactionOutcome,
     HistoryScope,
@@ -82,12 +83,17 @@ class _CompactionRewriteResult:
     compacted_run_count: int
     compacted_run_ids: tuple[str, ...]
     compacted_messages: tuple[Message, ...]
+    blocked_reason: CompactionBlockReason | None = None
 
 
 @dataclass(frozen=True)
 class _GeneratedSummaryChunk:
     summary: SessionSummary
     included_runs: list[RunOutput | TeamRunOutput]
+
+
+class _CompactionBlockedError(RuntimeError):
+    """Raised after a terminal no-progress state has been durably blocked."""
 
 
 def _persist_cleared_force_state_if_needed(
@@ -106,6 +112,30 @@ def _persist_cleared_force_state_if_needed(
         # Only clear when the durable row still matches the state this run read;
         # a concurrent write (for example a fresh manual request) wins otherwise.
         lambda latest: replace(latest, force_compact_before_next_run=False) if latest == state else latest,
+    )
+
+
+def _persist_compaction_block(
+    *,
+    storage: BaseDb,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    summary_model_name: str,
+    summary_input_budget: int,
+    reason: CompactionBlockReason,
+) -> None:
+    """Persist a no-progress block scoped to the current summary model and budget."""
+    update_scope_state_on_latest(
+        storage,
+        session,
+        scope,
+        lambda latest: replace(
+            latest,
+            force_compact_before_next_run=False,
+            blocked_compaction_reason=reason,
+            blocked_compaction_model=summary_model_name,
+            blocked_summary_input_budget=summary_input_budget,
+        ),
     )
 
 
@@ -267,6 +297,9 @@ async def compact_scope_history(
         last_compacted_run_count=rewrite_result.compacted_run_count,
         compacted_run_ids=compacted_run_ids_with(state, rewrite_result.compacted_run_ids),
         force_compact_before_next_run=False,
+        blocked_compaction_reason=rewrite_result.blocked_reason,
+        blocked_compaction_model=summary_model_name if rewrite_result.blocked_reason is not None else None,
+        blocked_summary_input_budget=summary_input_budget if rewrite_result.blocked_reason is not None else None,
     )
     write_scope_state(session, scope, new_state)
     write_scope_state(working_session, scope, new_state)
@@ -355,6 +388,17 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
     all_compacted_run_id_set: set[str] = set()
     compacted_messages: list[Message] = []
     pending_selected_run_ids = set(selected_run_ids)
+    blocked_reason: CompactionBlockReason | None = None
+
+    def block_compaction(reason: CompactionBlockReason) -> None:
+        _persist_compaction_block(
+            storage=storage,
+            session=persisted_session,
+            scope=scope,
+            summary_model_name=summary_model_name,
+            summary_input_budget=summary_input_budget,
+            reason=reason,
+        )
 
     while pending_selected_run_ids:
         working_visible_runs = scope_visible_runs(working_session, scope)
@@ -374,16 +418,19 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
             token_estimator=token_estimator,
         )
         if not included_runs:
+            blocked_reason = "summary_input_cannot_include_run"
+            block_compaction(blocked_reason)
             logger.warning(
-                "Compaction skipped because no run fit the single-pass summary budget",
+                "Compaction blocked because the complete summary and one run cannot fit together",
                 session_id=session_id,
                 scope=scope.key,
                 candidate_runs=len(compactable_runs),
                 summary_input_budget=summary_input_budget,
             )
-            if total_compacted_run_count == 0:
-                return None
-            break
+            if total_compacted_run_count > 0:
+                break
+            message = "complete durable summary leaves no room for a compactable run"
+            raise _CompactionBlockedError(message)
 
         new_summary = await _generate_compaction_summary_with_retry(
             model=summary_model,
@@ -397,6 +444,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
             history_settings=history_settings,
             summary_prompt=summary_prompt,
             token_estimator=token_estimator,
+            block_compaction=block_compaction,
         )
         included_runs = new_summary.included_runs
         generated_summary = new_summary.summary
@@ -452,6 +500,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
         compacted_run_count=total_compacted_run_count,
         compacted_run_ids=tuple(all_compacted_run_ids),
         compacted_messages=tuple(compacted_messages),
+        blocked_reason=blocked_reason,
     )
 
 
@@ -512,6 +561,7 @@ async def _generate_compaction_summary_with_retry(
     history_settings: ResolvedHistorySettings,
     summary_prompt: str,
     token_estimator: Callable[[str], int],
+    block_compaction: Callable[[CompactionBlockReason], None],
 ) -> _GeneratedSummaryChunk:
     """Generate one summary chunk, shrinking the input per the retry policy when safe."""
     summary_input = initial_summary_input
@@ -554,7 +604,13 @@ async def _generate_compaction_summary_with_retry(
                 duration_ms=duration_ms,
                 error=str(exc) or type(exc).__name__,
             )
-            retry_budget = retry_policy.retry_budget(attempt=attempt, budget=budget, error=exc)
+            shrink_retry = retry_policy.should_shrink(exc)
+            retry_budget = retry_policy.retry_budget(
+                attempt=attempt,
+                budget=budget,
+                input_tokens=estimated_input_tokens,
+                error=exc,
+            )
             if retry_budget is not None:
                 rebuilt_input, rebuilt_runs = _build_summary_input(
                     previous_summary=previous_summary,
@@ -563,15 +619,23 @@ async def _generate_compaction_summary_with_retry(
                     max_input_tokens=retry_budget,
                     token_estimator=token_estimator,
                 )
-                # The policy decides whether a retry is allowed; rebuilt_runs is the
-                # feasibility gate. If no run fits the smaller budget, fall through
-                # to raise instead of resending the original input.
                 if rebuilt_runs:
+                    rebuilt_input_tokens = token_estimator(rebuilt_input)
+                    if shrink_retry and (
+                        rebuilt_input == summary_input or rebuilt_input_tokens >= estimated_input_tokens
+                    ):
+                        block_compaction("summary_retry_cannot_shrink_input")
+                        message = "shrink retry could not build a strictly smaller summary request"
+                        raise _CompactionBlockedError(message) from exc
                     summary_input = rebuilt_input
                     included_runs = rebuilt_runs
                     budget = retry_budget
                     attempt += 1
                     continue
+            if shrink_retry:
+                block_compaction("summary_retry_cannot_shrink_input")
+                message = "failed summary request cannot be rebuilt with a smaller legal input"
+                raise _CompactionBlockedError(message) from exc
             raise
         duration_ms = int((asyncio.get_running_loop().time() - started) * 1000)
         logger.info(
@@ -608,7 +672,6 @@ def _build_summary_input(
     if remaining <= 0:
         return _build_oversized_summary_input(
             previous_summary=previous_summary,
-            summary_block=summary_block,
             compacted_runs=compacted_runs[:1],
             history_settings=history_settings,
             max_input_tokens=max_input_tokens,
@@ -625,7 +688,6 @@ def _build_summary_input(
             if not included_runs:
                 return _build_oversized_summary_input(
                     previous_summary=previous_summary,
-                    summary_block=summary_block,
                     compacted_runs=[run],
                     history_settings=history_settings,
                     max_input_tokens=max_input_tokens,
@@ -645,12 +707,14 @@ def _build_summary_input(
 def _build_oversized_summary_input(
     *,
     previous_summary: str | None,
-    summary_block: str,
     compacted_runs: Sequence[RunOutput | TeamRunOutput],
     history_settings: ResolvedHistorySettings,
     max_input_tokens: int,
     token_estimator: Callable[[str], int],
 ) -> tuple[str, list[RunOutput | TeamRunOutput]]:
+    summary_block = (
+        _previous_summary_block(previous_summary) if previous_summary is not None and previous_summary.strip() else ""
+    )
     if not compacted_runs:
         return summary_block, []
     first_run = compacted_runs[0]
@@ -662,73 +726,8 @@ def _build_oversized_summary_input(
         token_estimator=token_estimator,
     )
     if oversized_excerpt is None:
-        return _build_summary_input_with_truncated_previous_summary(
-            previous_summary=previous_summary,
-            summary_block=summary_block,
-            first_run=first_run,
-            history_settings=history_settings,
-            max_input_tokens=max_input_tokens,
-            token_estimator=token_estimator,
-        )
+        return summary_block, []
     return _compose_summary_input(summary_block, oversized_excerpt), [first_run]
-
-
-def _build_summary_input_with_truncated_previous_summary(
-    *,
-    previous_summary: str | None,
-    summary_block: str,
-    first_run: RunOutput | TeamRunOutput,
-    history_settings: ResolvedHistorySettings,
-    max_input_tokens: int,
-    token_estimator: Callable[[str], int],
-) -> tuple[str, list[RunOutput | TeamRunOutput]]:
-    """Admit one run by truncating a prior summary only when verbatim preservation cannot fit."""
-    if previous_summary is None or not previous_summary.strip():
-        return summary_block, []
-
-    minimum_summary_block = _previous_summary_block(_truncate_excerpt(previous_summary, 1))
-    run_excerpt = _serialize_oversized_run_excerpt(
-        first_run,
-        index=0,
-        history_settings=history_settings,
-        max_tokens=_remaining_excerpt_budget(max_input_tokens, minimum_summary_block, token_estimator),
-        token_estimator=token_estimator,
-    )
-    if run_excerpt is None:
-        return summary_block, []
-
-    truncated_input = _largest_truncated_summary_input(
-        previous_summary=previous_summary,
-        serialized_run=run_excerpt,
-        max_input_tokens=max_input_tokens,
-        token_estimator=token_estimator,
-    )
-    if truncated_input is None:
-        return summary_block, []
-    return truncated_input, [first_run]
-
-
-def _largest_truncated_summary_input(
-    *,
-    previous_summary: str,
-    serialized_run: str,
-    max_input_tokens: int,
-    token_estimator: Callable[[str], int],
-) -> str | None:
-    """Return the longest summary prefix that fits beside one serialized run."""
-    best_input: str | None = None
-    lower = 1
-    upper = len(previous_summary)
-    while lower <= upper:
-        midpoint = (lower + upper) // 2
-        truncated_summary = _truncate_excerpt(previous_summary, midpoint)
-        candidate = _compose_summary_input(_previous_summary_block(truncated_summary), serialized_run)
-        if token_estimator(candidate) <= max_input_tokens:
-            best_input = candidate
-            lower = midpoint + 1
-        else:
-            upper = midpoint - 1
-    return best_input
 
 
 def _serialize_oversized_run_excerpt(

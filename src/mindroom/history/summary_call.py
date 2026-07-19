@@ -115,10 +115,10 @@ class _CompactionSummaryEmptyResultError(RuntimeError):
 class SummaryRetryPolicy:
     """Explicit retry policy for failed compaction summary calls.
 
-    Each shrinkable failure divides the input budget by ``shrink_divisor``
-    (clamped to the shared compaction-summary retry floor), while selected typed
-    transient failures retry the same budget. Once ``max_attempts`` is reached
-    or no retry applies, the error propagates.
+    Each shrinkable failure divides the actual serialized input size by
+    ``shrink_divisor`` (clamped to the shared compaction-summary retry floor),
+    while selected typed transient failures retry the same configured budget.
+    Once ``max_attempts`` is reached or no retry applies, the error propagates.
     """
 
     max_attempts: int = 2
@@ -138,13 +138,23 @@ class SummaryRetryPolicy:
         message = str(error).lower()
         return any(fragment in message for fragment in _RETRYABLE_PROVIDER_ERROR_FRAGMENTS)
 
-    def retry_budget(self, *, attempt: int, budget: int, error: Exception) -> int | None:
+    def retry_budget(
+        self,
+        *,
+        attempt: int,
+        budget: int,
+        input_tokens: int,
+        error: Exception,
+    ) -> int | None:
         """Return the next smaller or same input budget, or None when retries end."""
         if attempt >= self.max_attempts:
             return None
         if self.should_shrink(error):
-            smaller_budget = max(COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS, budget // self.shrink_divisor)
-            if smaller_budget >= budget:
+            smaller_budget = min(
+                budget,
+                max(COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS, input_tokens // self.shrink_divisor),
+            )
+            if smaller_budget >= input_tokens:
                 return None
             return smaller_budget
         if isinstance(error, ModelProviderError):

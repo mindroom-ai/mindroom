@@ -33,7 +33,6 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
-from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,
@@ -555,9 +554,9 @@ def test_build_summary_input_normal_run_omits_only_bulky_metadata() -> None:
     assert "https://example.test/deployment.png" in summary_input
 
 
-def test_build_summary_input_truncates_near_cap_summary_to_admit_a_run() -> None:
+def test_build_summary_input_preserves_complete_near_cap_summary_without_claiming_progress() -> None:
     run = _completed_run("run-1")
-    previous_summary = "word " * 975
+    previous_summary = ("word " * 975) + "TAIL-FACT-MUST-SURVIVE"
 
     summary_input, included_runs = _build_summary_input(
         previous_summary=previous_summary,
@@ -566,12 +565,23 @@ def test_build_summary_input_truncates_near_cap_summary_to_admit_a_run() -> None
         history_settings=_ALL_HISTORY_SETTINGS,
     )
 
-    assert included_runs == [run]
-    assert estimate_compaction_input_tokens(summary_input) <= 1_001
+    assert included_runs == []
     assert "<previous_summary>" in summary_input
-    assert previous_summary.strip() not in summary_input
-    assert "run-1 question" in summary_input
-    assert "run-1 answer" in summary_input
+    assert previous_summary in summary_input
+    assert "TAIL-FACT-MUST-SURVIVE" in summary_input
+    assert "<new_conversation>" not in summary_input
+
+
+def test_build_summary_input_returns_no_progress_when_run_envelope_cannot_fit() -> None:
+    summary_input, included_runs = _build_summary_input(
+        previous_summary=None,
+        compacted_runs=[_completed_run("run-1")],
+        max_input_tokens=1,
+        history_settings=_ALL_HISTORY_SETTINGS,
+    )
+
+    assert summary_input == ""
+    assert included_runs == []
 
 
 def test_build_summary_input_preserves_previous_summary_text() -> None:
