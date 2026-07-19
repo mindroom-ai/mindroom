@@ -3601,10 +3601,17 @@ class TestThreadHistoryCache:
         self,
         tmp_path: Path,
     ) -> None:
-        """An opaque relation pointing outside the scan window must fail the refresh."""
+        """An opaque relation with unknown ownership must stale every cached thread in the room."""
         cache = SqliteEventCache(tmp_path / "event_cache.db")
         await cache.initialize()
         root_event, _child_event = self._thread_root_and_child()
+        unrelated_root = self._make_text_event(
+            event_id="$unrelated_root",
+            sender="@user:localhost",
+            body="Unrelated root",
+            server_timestamp=500,
+            source_content={"body": "Unrelated root"},
+        )
         unresolved_opaque = raw_nio_event(
             self._opaque_source(
                 "$opaque_unresolved",
@@ -3614,6 +3621,12 @@ class TestThreadHistoryCache:
         )
 
         try:
+            await self._seed_thread_cache(
+                cache,
+                room_id="!room:localhost",
+                thread_id="$unrelated_root",
+                events=[self._cache_source(unrelated_root)],
+            )
             client = self._room_messages_client([unresolved_opaque, root_event])
             with pytest.raises(matrix_client_module.OpaqueEncryptedThreadHistoryError):
                 await matrix_client_module.fetch_dispatch_thread_snapshot(
@@ -3623,11 +3636,14 @@ class TestThreadHistoryCache:
                     event_cache=cache,
                 )
             state = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+            unrelated_state = await cache.get_thread_cache_state("!room:localhost", "$unrelated_root")
         finally:
             await cache.close()
 
         assert state is not None
-        assert state.invalidation_reason == "thread_history_opaque_encrypted_event"
+        assert state.room_invalidation_reason == "thread_history_opaque_encrypted_event"
+        assert unrelated_state is not None
+        assert unrelated_state.room_invalidation_reason == "thread_history_opaque_encrypted_event"
 
     @pytest.mark.asyncio
     async def test_cached_snapshot_with_opaque_payload_is_rejected_and_refetched(
@@ -3798,7 +3814,7 @@ class TestThreadHistoryCache:
         for thread_id in ("$thread_root", "$other_root"):
             state = states[thread_id]
             assert state is not None
-            assert state.invalidation_reason == "thread_history_opaque_encrypted_event"
+            assert state.room_invalidation_reason == "thread_history_opaque_encrypted_event"
             assert rows[thread_id] is None
 
     @pytest.mark.asyncio
