@@ -1029,6 +1029,67 @@ class TestMatrixConversationCacheThreadReads:
         event_cache.store_event.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_post_barrier_turn_cache_hit_honors_disabled_lookup_fill(self) -> None:
+        """A concurrent memo fill must not override the caller's no-persist request."""
+        event_cache = _runtime_event_cache()
+        coordinator = _runtime_write_coordinator()
+        update_started = asyncio.Event()
+        allow_lookup = asyncio.Event()
+        client = _make_client_mock()
+        client.room_get_event = AsyncMock(
+            return_value=nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": {"body": "hello", "msgtype": "m.text"},
+                    "event_id": "$event:localhost",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567890,
+                    "room_id": "!test:localhost",
+                    "type": "m.room.message",
+                },
+            ),
+        )
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(
+                client=client,
+                event_cache=event_cache,
+                coordinator=coordinator,
+            ),
+        )
+
+        async with access.turn_scope():
+
+            async def populate_turn_cache_inside_barrier() -> None:
+                update_started.set()
+                await allow_lookup.wait()
+                await access.get_event(
+                    "!test:localhost",
+                    "$event:localhost",
+                    persist_lookup_fill=False,
+                )
+
+            update_task = coordinator.queue_room_update(
+                "!test:localhost",
+                populate_turn_cache_inside_barrier,
+                name="populate_turn_cache_inside_barrier",
+            )
+            await update_started.wait()
+            waiting_lookup = asyncio.create_task(
+                access.get_event(
+                    "!test:localhost",
+                    "$event:localhost",
+                    persist_lookup_fill=False,
+                ),
+            )
+            await asyncio.sleep(0)
+            allow_lookup.set()
+            await update_task
+            await waiting_lookup
+
+        client.room_get_event.assert_awaited_once_with("!test:localhost", "$event:localhost")
+        event_cache.store_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_turn_scope_memoizes_strict_thread_history_reads(self) -> None:
         """Strict dispatch thread reads should be memoized for the lifetime of one inbound turn."""
         access = MatrixConversationCache(

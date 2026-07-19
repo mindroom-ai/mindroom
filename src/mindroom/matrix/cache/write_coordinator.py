@@ -560,17 +560,6 @@ class EventCacheWriteCoordinator:
             return True
         return any(entry.task is current_task for entry in state.active_threads.values())
 
-    def _fallback_room_tasks(self, room_id: str) -> tuple[_UpdateTask, ...]:
-        pending_tasks = [
-            task
-            for task in (
-                self._room_update_tasks.get(room_id),
-                *self._thread_update_tasks_by_room.get(room_id, {}).values(),
-            )
-            if task is not None and not task.done()
-        ]
-        return tuple(dict.fromkeys(pending_tasks))
-
     def _fallback_thread_tasks(self, room_id: str, thread_id: str) -> tuple[_UpdateTask, ...]:
         pending_tasks: list[_UpdateTask] = []
         room_task = self._room_update_tasks.get(room_id)
@@ -701,7 +690,8 @@ class EventCacheWriteCoordinator:
     async def wait_for_prior_room_updates(self, room_id: str) -> None:
         """Wait only for room writes that were already queued when this read began."""
         self._reevaluate_room(room_id)
-        pending_tasks = self._fallback_room_tasks(room_id)
+        state = self._room_states.get(room_id)
+        pending_tasks = () if state is None else self._pending_entry_tasks(state.entries)
         for pending_task in pending_tasks:
             await self._await_idle_task(
                 pending_task,
