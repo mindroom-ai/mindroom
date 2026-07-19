@@ -6,13 +6,19 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, TypedDict, cast
 
+COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS = 1_000
+
 _ScopeKind = Literal["agent", "team"]
 _HistoryMode = Literal["all", "runs", "messages"]
 _CompactionMode = Literal["auto", "manual"]
 _CompactionDecisionMode = Literal["none", "required"]
 CompactionReplyOutcome = Literal["none", "success", "failed", "timeout"]
 _CompactionLifecycleStatus = Literal["success", "failed", "timeout"]
-CompactionAvailabilityReason = Literal["no_context_window", "non_positive_summary_input_budget"]
+CompactionAvailabilityReason = Literal[
+    "no_context_window",
+    "non_positive_summary_input_budget",
+    "summary_input_budget_without_retry_headroom",
+]
 _ReplayPlanMode = Literal["configured", "limited", "disabled"]
 
 

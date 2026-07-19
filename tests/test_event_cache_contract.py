@@ -46,6 +46,7 @@ class TestConversationEventCacheContract:
         assert isinstance(event_cache, ConversationEventCache)
         assert event_cache.is_initialized is True
         assert event_cache.durable_writes_available is True
+        assert isinstance(event_cache.certification_generation, str)
         assert isinstance(event_cache.runtime_diagnostics()["cache_backend"], str)
         assert isinstance(event_cache.pending_durable_write_room_ids(), tuple)
 
@@ -209,3 +210,52 @@ class TestConversationEventCacheContract:
         assert await event_cache.get_event(room_id, original_id) is None
         assert await event_cache.get_event(room_id, edit_id) is None
         assert await event_cache.redact_event(room_id, original_id) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deletion", ["redaction", "replacement", "invalidation"])
+async def test_last_child_deletion_removes_unproven_thread_root_mapping_immediately(
+    event_cache: ConversationEventCache,
+    deletion: str,
+) -> None:
+    """Runtime deletions leave no learned root mapping that startup would reject."""
+    room_id = "!room:localhost"
+    thread_id = "$unfetched-root:localhost"
+    child = _message_event(
+        "$child:localhost",
+        2,
+        thread_id=thread_id,
+    )
+    if deletion == "redaction":
+        await event_cache.store_event(str(child["event_id"]), room_id, child)
+    else:
+        await replace_thread_unconditionally(event_cache, room_id, thread_id, [child])
+    assert await event_cache.get_thread_id_for_event(room_id, thread_id) == thread_id
+
+    if deletion == "redaction":
+        assert await event_cache.redact_event(room_id, str(child["event_id"])) is True
+    elif deletion == "replacement":
+        await replace_thread_unconditionally(event_cache, room_id, thread_id, [])
+    else:
+        await event_cache.invalidate_thread(room_id, thread_id)
+
+    assert await event_cache.get_thread_id_for_event(room_id, thread_id) is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_deletion_removes_dependent_root_proof(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Runtime cleanup removes a root mapping whose dependent edit supplied its only proof."""
+    room_id = "!room:localhost"
+    thread_id = "$unfetched-root:localhost"
+    original_id = "$uncached-original:localhost"
+    edit = _message_event("$edit:localhost", 2, edit_of=original_id)
+    new_content = edit["content"]["m.new_content"]
+    assert isinstance(new_content, dict)
+    new_content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
+    await event_cache.store_event(str(edit["event_id"]), room_id, edit)
+    assert await event_cache.get_thread_id_for_event(room_id, thread_id) == thread_id
+
+    assert await event_cache.redact_event(room_id, original_id) is True
+    assert await event_cache.get_thread_id_for_event(room_id, thread_id) is None

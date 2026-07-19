@@ -389,21 +389,33 @@ async def test_rewrite_retries_transient_provider_error_with_same_input_and_one_
 
 
 @pytest.mark.parametrize(
-    "error",
+    ("error", "expected_attempts", "expected_delay"),
     [
-        ModelSafeguardRefusalError(message="Vertex Claude returned stop_reason=refusal"),
-        ModelProviderError(message="service unavailable", status_code=503),
+        pytest.param(
+            ModelSafeguardRefusalError(message="Vertex Claude returned stop_reason=refusal"),
+            1,
+            False,
+            id="unshrinkable-refusal",
+        ),
+        pytest.param(
+            ModelProviderError(message="service unavailable", status_code=503),
+            2,
+            True,
+            id="transient-provider-error",
+        ),
     ],
 )
 @pytest.mark.asyncio
-async def test_rewrite_gives_up_after_one_bounded_retry(
+async def test_rewrite_bounds_retry_attempts(
     tmp_path: Path,
     error: ModelProviderError,
+    expected_attempts: int,
+    expected_delay: bool,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     working_session = _session("session-1", runs=[_completed_run("run-1")])
-    summary_mock = AsyncMock(side_effect=[error, error])
+    summary_mock = AsyncMock(side_effect=error)
     retry_sleep = AsyncMock()
 
     with (
@@ -417,11 +429,11 @@ async def test_rewrite_gives_up_after_one_bounded_retry(
     ):
         await _rewrite_single_run(storage=storage, working_session=working_session)
 
-    assert summary_mock.await_count == 2
-    if isinstance(error, ModelSafeguardRefusalError):
-        retry_sleep.assert_not_awaited()
-    else:
+    assert summary_mock.await_count == expected_attempts
+    if expected_delay:
         retry_sleep.assert_awaited_once_with(DEFAULT_SUMMARY_RETRY_POLICY.same_input_retry_delay_seconds)
+    else:
+        retry_sleep.assert_not_awaited()
     persist_spy.assert_not_called()
     assert working_session.summary is None
     assert [run.run_id for run in working_session.runs or []] == ["run-1"]

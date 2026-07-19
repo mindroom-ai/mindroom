@@ -37,7 +37,7 @@ import asyncio
 import time
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import nio
 from aiohttp import ClientError
@@ -57,6 +57,10 @@ from mindroom.matrix.client_visible_messages import (
     record_latest_thread_edit,
 )
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.media import (
+    is_encrypted_media_event_source,
+    parse_matrix_media_event_source,
+)
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_content import extract_and_resolve_message, resolve_event_source_content
 from mindroom.matrix.thread_diagnostics import (
@@ -248,11 +252,18 @@ def _snapshot_message_dict(
 
 def _parse_room_message_event(event_source: dict[str, Any]) -> nio.Event | None:
     """Parse one event dict into a room-message event when possible."""
-    try:
-        parsed_event = nio.Event.parse_event(event_source)
-    except Exception:
+    if is_encrypted_media_event_source(event_source):
+        parsed_event = parse_matrix_media_event_source(event_source)
+    else:
+        try:
+            parsed_event = nio.Event.parse_event(event_source)
+        except Exception:
+            return None
+    if parsed_event is None:
         return None
-    return parsed_event if _is_room_message_event(parsed_event) else None
+    # nio's parser returns BadEvent even though its public return type is Event.
+    event = cast("nio.Event", parsed_event)
+    return event if _is_room_message_event(event) else None
 
 
 def _parse_visible_text_message_event(

@@ -1252,5 +1252,5 @@ class ThreadSyncWritePolicy:
             errors=errors,
             runtime_available=runtime_available,
             task_count=len(tasks),
-            runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
+            runtime_diagnostics=None if complete else self._cache_ops.cache_runtime_diagnostics(),
         )

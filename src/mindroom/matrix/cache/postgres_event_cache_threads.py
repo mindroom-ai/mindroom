@@ -6,7 +6,11 @@ import json
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
-from .event_cache_events import event_id_for_cache, serialize_cacheable_events, serialize_cached_event
+from .event_cache_events import (
+    event_id_for_cache,
+    serialize_cacheable_events,
+    serialize_cached_event,
+)
 from .event_normalization import normalize_event_source_for_cache
 from .postgres_cursor import fetchall, fetchone
 from .postgres_event_cache_events import (
@@ -41,16 +45,22 @@ async def load_thread_events(
     rows = await fetchall(
         db,
         """
-        SELECT event_json
-        FROM mindroom_event_cache_thread_events
-        WHERE namespace = %s AND room_id = %s AND thread_id = %s
-        ORDER BY origin_server_ts ASC, write_seq ASC
+        SELECT thread_events.origin_server_ts, thread_events.write_seq, events.event_json
+        FROM mindroom_event_cache_thread_events AS thread_events
+        JOIN mindroom_event_cache_events AS events
+            ON events.namespace = thread_events.namespace
+            AND events.room_id = thread_events.room_id
+            AND events.event_id = thread_events.event_id
+        WHERE thread_events.namespace = %s
+            AND thread_events.room_id = %s
+            AND thread_events.thread_id = %s
+        ORDER BY thread_events.origin_server_ts ASC, thread_events.write_seq ASC
         """,
         (namespace, room_id, thread_id),
     )
     if not rows:
         return None
-    return [json.loads(row[0]) for row in rows]
+    return [json.loads(row[2]) for row in rows]
 
 
 async def load_recent_room_thread_ids(
@@ -216,26 +226,6 @@ async def _store_thread_events_locked(
         [(event_id_for_cache(event), event) for event in normalized_events],
     )
     serialized_events = serialize_cacheable_events(cacheable_events)
-    for event in serialized_events:
-        await db.execute(
-            """
-            INSERT INTO mindroom_event_cache_thread_events(namespace, room_id, thread_id, event_id, origin_server_ts, event_json)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
-                thread_id = excluded.thread_id,
-                origin_server_ts = excluded.origin_server_ts,
-                event_json = excluded.event_json,
-                write_seq = nextval('mindroom_event_cache_write_seq')
-            """,
-            (
-                namespace,
-                room_id,
-                thread_id,
-                event.event_id,
-                event.origin_server_ts,
-                event.event_json,
-            ),
-        )
     await write_lookup_index_rows(
         db,
         namespace=namespace,
@@ -244,6 +234,25 @@ async def _store_thread_events_locked(
         cached_at=validated_at,
         thread_id=thread_id,
     )
+    for event in serialized_events:
+        await db.execute(
+            """
+            INSERT INTO mindroom_event_cache_thread_events(namespace, room_id, thread_id, event_id, origin_server_ts)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
+                thread_id = excluded.thread_id,
+                origin_server_ts = excluded.origin_server_ts,
+                event_json = NULL,
+                write_seq = nextval('mindroom_event_cache_write_seq')
+            """,
+            (
+                namespace,
+                room_id,
+                thread_id,
+                event.event_id,
+                event.origin_server_ts,
+            ),
+        )
     await _upsert_thread_cache_state(
         db,
         namespace=namespace,
@@ -305,6 +314,7 @@ async def _replace_thread_locked(
             namespace,
             room_id,
             event_ids=removed_event_ids,
+            affected_thread_ids=[thread_id],
         )
 
 
@@ -373,6 +383,7 @@ async def invalidate_thread_locked(
             namespace,
             room_id,
             event_ids=event_ids,
+            affected_thread_ids=[thread_id],
         )
     await db.execute(
         """
@@ -391,6 +402,7 @@ async def invalidate_room_threads_locked(
 ) -> None:
     """Delete every cached thread snapshot while preserving durable room membership."""
     event_ids = await _thread_event_ids_for_room(db, namespace=namespace, room_id=room_id)
+    thread_ids = await _thread_ids_for_room(db, namespace=namespace, room_id=room_id)
     await db.execute(
         """
         DELETE FROM mindroom_event_cache_thread_events
@@ -412,6 +424,7 @@ async def invalidate_room_threads_locked(
             namespace,
             room_id,
             event_ids=event_ids,
+            affected_thread_ids=thread_ids,
         )
     await db.execute(
         """
@@ -545,42 +558,19 @@ async def append_existing_thread_event(
         db,
         """
         SELECT 1
-        FROM mindroom_event_cache_thread_events
-        WHERE namespace = %s AND room_id = %s AND thread_id = %s
+        FROM mindroom_event_cache_thread_events AS membership
+        JOIN mindroom_event_cache_events AS events
+            ON events.namespace = membership.namespace
+            AND events.event_id = membership.event_id
+            AND events.room_id = membership.room_id
+        WHERE membership.namespace = %s
+            AND membership.room_id = %s
+            AND membership.thread_id = %s
         LIMIT 1
         """,
         (namespace, room_id, thread_id),
     )
-    if row is None:
-        await write_lookup_index_rows(
-            db,
-            namespace=namespace,
-            room_id=room_id,
-            serialized_events=[serialized_event],
-            cached_at=time.time(),
-            thread_id=thread_id,
-        )
-        return False
-
-    await db.execute(
-        """
-        INSERT INTO mindroom_event_cache_thread_events(namespace, room_id, thread_id, event_id, origin_server_ts, event_json)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
-            thread_id = excluded.thread_id,
-            origin_server_ts = excluded.origin_server_ts,
-            event_json = excluded.event_json,
-            write_seq = nextval('mindroom_event_cache_write_seq')
-        """,
-        (
-            namespace,
-            room_id,
-            thread_id,
-            serialized_event.event_id,
-            serialized_event.origin_server_ts,
-            serialized_event.event_json,
-        ),
-    )
+    thread_exists = row is not None
     await write_lookup_index_rows(
         db,
         namespace=namespace,
@@ -589,7 +579,26 @@ async def append_existing_thread_event(
         cached_at=time.time(),
         thread_id=thread_id,
     )
-    return True
+    if thread_exists:
+        await db.execute(
+            """
+            INSERT INTO mindroom_event_cache_thread_events(namespace, room_id, thread_id, event_id, origin_server_ts)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
+                thread_id = excluded.thread_id,
+                origin_server_ts = excluded.origin_server_ts,
+                event_json = NULL,
+                write_seq = nextval('mindroom_event_cache_write_seq')
+            """,
+            (
+                namespace,
+                room_id,
+                thread_id,
+                serialized_event.event_id,
+                serialized_event.origin_server_ts,
+            ),
+        )
+    return thread_exists
 
 
 async def _upsert_thread_cache_state(
@@ -652,6 +661,25 @@ async def _thread_event_ids_for_room(
         """
         SELECT event_id
         FROM mindroom_event_cache_thread_events
+        WHERE namespace = %s AND room_id = %s
+        """,
+        (namespace, room_id),
+    )
+    return [str(row[0]) for row in rows]
+
+
+async def _thread_ids_for_room(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+) -> list[str]:
+    """Return roots whose room-wide snapshot proof is about to be removed."""
+    rows = await fetchall(
+        db,
+        """
+        SELECT thread_id
+        FROM mindroom_event_cache_thread_state
         WHERE namespace = %s AND room_id = %s
         """,
         (namespace, room_id),

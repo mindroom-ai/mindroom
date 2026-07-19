@@ -63,16 +63,21 @@ class _SyncCertificationStart:
 
 
 def start_from_loaded_token(loaded: SyncCheckpoint | None) -> _SyncCertificationStart:
-    """Build initial certifier state from a loaded token or checkpoint."""
-    if loaded is not None:
+    """Build initial certifier state from a generation-bound checkpoint."""
+    if loaded is None:
         return _SyncCertificationStart(
-            state=SyncTrustState.PENDING,
-            sync_token=loaded.token,
+            state=SyncTrustState.COLD,
+            sync_token=None,
         )
-
+    token = normalize_sync_token(loaded.token)
+    if token is None:
+        return _SyncCertificationStart(
+            state=SyncTrustState.COLD,
+            sync_token=None,
+        )
     return _SyncCertificationStart(
-        state=SyncTrustState.COLD,
-        sync_token=None,
+        state=SyncTrustState.PENDING,
+        sync_token=token,
     )
 
 

@@ -1044,9 +1044,11 @@ class AgentBot:
         current_cache_generation = self.event_cache.cache_generation
         if current_cache_generation is None:
             self.logger.warning("matrix_sync_token_cache_generation_unavailable")
+            self._clear_saved_sync_token()
             return None
         if checkpoint.cache_generation != current_cache_generation:
             self.logger.warning("matrix_sync_token_cache_generation_mismatch")
+            self._clear_saved_sync_token()
             return None
         self.logger.info(
             "matrix_sync_token_restored",
@@ -1898,7 +1900,14 @@ class AgentBot:
             except OSError as exc:
                 self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
             else:
-                retry_token = saved_checkpoint.token if saved_checkpoint is not None else None
+                cache_generation = self.event_cache.cache_generation
+                retry_token = (
+                    saved_checkpoint.token
+                    if saved_checkpoint is not None
+                    and cache_generation is not None
+                    and saved_checkpoint.cache_generation == cache_generation
+                    else None
+                )
         cast("Any", client).next_batch = retry_token
         self.logger.warning(
             "matrix_redaction_callback_failed_replaying_sync",

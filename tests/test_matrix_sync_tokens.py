@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiosqlite
 import nio
 import pytest
 
@@ -751,6 +752,7 @@ async def test_legacy_plaintext_sync_token_starts_cold(tmp_path: Path) -> None:
 
     assert client.next_batch is None
     assert bot._sync_trust_state is SyncTrustState.COLD
+    assert not token_path.exists()
 
     response = MagicMock(spec=nio.SyncResponse)
     response.next_batch = "s_after_legacy"
@@ -761,6 +763,57 @@ async def test_legacy_plaintext_sync_token_starts_cold(tmp_path: Path) -> None:
     checkpoint = load_sync_checkpoint(tmp_path, bot.agent_name)
     assert checkpoint is not None
     assert checkpoint.token == "s_after_legacy"  # noqa: S105
+
+
+@pytest.mark.asyncio
+async def test_cache_generation_rejects_token_after_reset_crash_window(tmp_path: Path) -> None:
+    """A committed reset remains a principal-bound token barrier after a crash window."""
+    db_path = tmp_path / "event_cache.db"
+    principal_id = "@mindroom_code:localhost"
+    first_root = SqliteEventCache(db_path)
+    await first_root.initialize()
+    first_cache = first_root.for_principal(principal_id)
+    first_generation = first_cache.cache_generation
+    assert first_generation is not None
+    save_sync_token(
+        tmp_path,
+        "code",
+        "s_before_reset",
+        cache_generation=first_generation,
+    )
+    await first_root.close()
+
+    db = await aiosqlite.connect(db_path)
+    try:
+        await db.execute("DROP TABLE event_edits")
+        await db.commit()
+    finally:
+        await db.close()
+
+    reset_root = SqliteEventCache(db_path)
+    await reset_root.initialize()
+    reset_generation = reset_root.for_principal(principal_id).cache_generation
+    assert reset_generation is not None
+    assert reset_generation != first_generation
+    await reset_root.close()
+
+    restarted_root = SqliteEventCache(db_path)
+    await restarted_root.initialize()
+    try:
+        restarted_cache = restarted_root.for_principal(principal_id)
+        assert restarted_cache.cache_generation == reset_generation
+
+        bot = _agent_bot(tmp_path)
+        bot.event_cache = restarted_cache
+        bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+        bot.client.next_batch = None
+        await bot._prepare_cache_and_restore_saved_sync_token()
+
+        assert bot.client.next_batch is None
+        assert bot._sync_trust_state is SyncTrustState.COLD
+        assert not _token_path(tmp_path).exists()
+    finally:
+        await restarted_root.close()
 
 
 def test_restore_saved_sync_token_ignores_invalid_utf8(tmp_path: Path) -> None:

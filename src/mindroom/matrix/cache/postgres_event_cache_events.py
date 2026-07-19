@@ -34,6 +34,51 @@ _ROOM_CONTENT_TABLES = (
     "mindroom_event_cache_thread_state",
 )
 
+_ORPHAN_THREAD_INDEX_PREDICATE = """
+    NOT EXISTS (
+        SELECT 1
+        FROM mindroom_event_cache_events AS events
+        WHERE events.namespace = event_threads.namespace
+            AND events.event_id = event_threads.event_id
+            AND events.room_id = event_threads.room_id
+    )
+    AND NOT (
+        event_threads.event_id = event_threads.thread_id
+        AND (
+            EXISTS (
+                SELECT 1
+                FROM mindroom_event_cache_event_threads AS child
+                WHERE child.namespace = event_threads.namespace
+                    AND child.room_id = event_threads.room_id
+                    AND child.thread_id = event_threads.thread_id
+                    AND child.event_id != child.thread_id
+                    AND EXISTS (
+                        SELECT 1
+                        FROM mindroom_event_cache_events AS child_event
+                        WHERE child_event.namespace = child.namespace
+                            AND child_event.event_id = child.event_id
+                            AND child_event.room_id = child.room_id
+                    )
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM mindroom_event_cache_thread_events AS child_membership
+                WHERE child_membership.namespace = event_threads.namespace
+                    AND child_membership.room_id = event_threads.room_id
+                    AND child_membership.thread_id = event_threads.thread_id
+                    AND child_membership.event_id != child_membership.thread_id
+                    AND EXISTS (
+                        SELECT 1
+                        FROM mindroom_event_cache_events AS child_event
+                        WHERE child_event.namespace = child_membership.namespace
+                            AND child_event.event_id = child_membership.event_id
+                            AND child_event.room_id = child_membership.room_id
+                    )
+            )
+        )
+    )
+"""
+
 
 async def load_event(
     db: AsyncConnection,
@@ -93,45 +138,14 @@ async def load_latest_edit(
     sender: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the latest cached edit event for one original event."""
-    if sender is None:
-        row = await fetchone(
-            db,
-            """
-            SELECT mindroom_event_cache_events.event_json
-            FROM mindroom_event_cache_event_edits
-            JOIN mindroom_event_cache_events
-                ON mindroom_event_cache_events.namespace = mindroom_event_cache_event_edits.namespace
-                AND mindroom_event_cache_events.room_id = mindroom_event_cache_event_edits.room_id
-                AND mindroom_event_cache_events.event_id = mindroom_event_cache_event_edits.edit_event_id
-            WHERE mindroom_event_cache_event_edits.namespace = %s
-                AND mindroom_event_cache_event_edits.room_id = %s
-                AND mindroom_event_cache_event_edits.original_event_id = %s
-            ORDER BY mindroom_event_cache_event_edits.origin_server_ts DESC, mindroom_event_cache_events.write_seq DESC
-            LIMIT 1
-            """,
-            (namespace, room_id, original_event_id),
-        )
-        return None if row is None else json.loads(row[0])
-
-    row = await fetchone(
+    row = await _load_latest_edit_row(
         db,
-        """
-        SELECT mindroom_event_cache_events.event_json
-        FROM mindroom_event_cache_event_edits
-        JOIN mindroom_event_cache_events
-            ON mindroom_event_cache_events.namespace = mindroom_event_cache_event_edits.namespace
-            AND mindroom_event_cache_events.room_id = mindroom_event_cache_event_edits.room_id
-            AND mindroom_event_cache_events.event_id = mindroom_event_cache_event_edits.edit_event_id
-        WHERE mindroom_event_cache_event_edits.namespace = %s
-            AND mindroom_event_cache_event_edits.room_id = %s
-            AND mindroom_event_cache_event_edits.original_event_id = %s
-            AND mindroom_event_cache_events.event_json::jsonb ->> 'sender' = %s
-        ORDER BY mindroom_event_cache_event_edits.origin_server_ts DESC, mindroom_event_cache_events.write_seq DESC
-        LIMIT 1
-        """,
-        (namespace, room_id, original_event_id, sender),
+        namespace=namespace,
+        room_id=room_id,
+        original_event_id=original_event_id,
+        sender=sender,
     )
-    return None if row is None else json.loads(row[0])
+    return None if row is None else row.event
 
 
 async def load_latest_edit_row(
@@ -143,23 +157,42 @@ async def load_latest_edit_row(
     sender: str,
 ) -> CachedEventRow | None:
     """Return the latest cached edit event plus its lookup-row write time."""
+    return await _load_latest_edit_row(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        original_event_id=original_event_id,
+        sender=sender,
+    )
+
+
+async def _load_latest_edit_row(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+    original_event_id: str,
+    sender: str | None,
+) -> CachedEventRow | None:
+    sender_predicate = "" if sender is None else "AND events.event_json::jsonb ->> 'sender' = %s"
+    parameters = (namespace, room_id, original_event_id, *((sender,) if sender is not None else ()))
     row = await fetchone(
         db,
-        """
-        SELECT mindroom_event_cache_events.event_json, mindroom_event_cache_events.cached_at
-        FROM mindroom_event_cache_event_edits
-        JOIN mindroom_event_cache_events
-            ON mindroom_event_cache_events.namespace = mindroom_event_cache_event_edits.namespace
-            AND mindroom_event_cache_events.room_id = mindroom_event_cache_event_edits.room_id
-            AND mindroom_event_cache_events.event_id = mindroom_event_cache_event_edits.edit_event_id
-        WHERE mindroom_event_cache_event_edits.namespace = %s
-            AND mindroom_event_cache_event_edits.room_id = %s
-            AND mindroom_event_cache_event_edits.original_event_id = %s
-            AND mindroom_event_cache_events.event_json::jsonb ->> 'sender' = %s
-        ORDER BY mindroom_event_cache_event_edits.origin_server_ts DESC, mindroom_event_cache_events.write_seq DESC
+        f"""
+        SELECT events.event_json, events.cached_at
+        FROM mindroom_event_cache_event_edits AS edits
+        JOIN mindroom_event_cache_events AS events
+            ON events.namespace = edits.namespace
+            AND events.room_id = edits.room_id
+            AND events.event_id = edits.edit_event_id
+        WHERE edits.namespace = %s
+            AND edits.room_id = %s
+            AND edits.original_event_id = %s
+            {sender_predicate}
+        ORDER BY edits.origin_server_ts DESC, events.write_seq DESC
         LIMIT 1
-        """,
-        (namespace, room_id, original_event_id, sender),
+        """,  # noqa: S608
+        parameters,
     )
     if row is None:
         return None
@@ -299,6 +332,12 @@ async def redact_event_locked(
         original_event_id=event_id,
     )
     removed_event_ids = redaction_removal_event_ids(event_id, dependent_edit_ids)
+    affected_thread_ids = await _thread_ids_for_event_ids(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        event_ids=removed_event_ids,
+    )
     deleted_thread_rows = await rowcount(
         db,
         """
@@ -325,6 +364,7 @@ async def redact_event_locked(
         namespace,
         room_id,
         event_ids=removed_event_ids,
+        affected_thread_ids=affected_thread_ids,
     )
     await _record_redacted_events(
         db,
@@ -605,16 +645,11 @@ async def delete_event_thread_rows(
     room_id: str,
     *,
     event_ids: list[str],
+    affected_thread_ids: list[str],
 ) -> int:
-    """Delete durable event-to-thread rows for the provided event IDs."""
+    """Delete event mappings and unsupported roots whose proof was removed."""
     if not event_ids:
         return 0
-    affected_thread_ids = await _thread_ids_for_events(
-        db,
-        namespace,
-        room_id,
-        event_ids=event_ids,
-    )
     deleted_rows = await rowcount(
         db,
         """
@@ -623,14 +658,77 @@ async def delete_event_thread_rows(
         """,
         (namespace, room_id, event_ids),
     )
-    await _reconcile_thread_root_self_rows(
+    if not affected_thread_ids:
+        return deleted_rows
+    deleted_rows += await rowcount(
         db,
-        namespace,
-        room_id,
-        candidate_root_ids=affected_thread_ids,
-        current_self_root_ids=set(),
+        f"""
+        DELETE FROM mindroom_event_cache_event_threads AS event_threads
+        WHERE event_threads.namespace = %s
+            AND event_threads.room_id = %s
+            AND event_threads.event_id = ANY(%s)
+            AND event_threads.thread_id = event_threads.event_id
+            AND {_ORPHAN_THREAD_INDEX_PREDICATE}
+        """,  # noqa: S608
+        (namespace, room_id, sorted(set(affected_thread_ids))),
     )
     return deleted_rows
+
+
+async def _thread_ids_for_event_ids(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+    event_ids: list[str],
+) -> list[str]:
+    """Return roots whose supporting rows will be removed."""
+    rows = await fetchall(
+        db,
+        """
+        SELECT thread_id
+        FROM mindroom_event_cache_event_threads
+        WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
+        """,
+        (namespace, room_id, event_ids),
+    )
+    return [str(row[0]) for row in rows]
+
+
+async def orphan_thread_index_count(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+) -> int:
+    """Count unsupported event-to-thread rows."""
+    row = await fetchone(
+        db,
+        f"""
+        SELECT COUNT(*)
+        FROM mindroom_event_cache_event_threads AS event_threads
+        WHERE event_threads.namespace = %s
+            AND {_ORPHAN_THREAD_INDEX_PREDICATE}
+        """,  # noqa: S608
+        (namespace,),
+    )
+    return 0 if row is None else int(row[0])
+
+
+async def repair_orphan_thread_indexes(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+) -> int:
+    """Remove every unsupported thread mapping during startup maintenance."""
+    return await rowcount(
+        db,
+        f"""
+        DELETE FROM mindroom_event_cache_event_threads AS event_threads
+        WHERE event_threads.namespace = %s
+            AND {_ORPHAN_THREAD_INDEX_PREDICATE}
+        """,  # noqa: S608
+        (namespace,),
+    )
 
 
 async def delete_event_edit_rows(

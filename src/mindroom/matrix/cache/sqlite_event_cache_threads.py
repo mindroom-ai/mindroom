@@ -26,9 +26,14 @@ import json
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
-from .event_cache_events import event_id_for_cache, serialize_cacheable_events, serialize_cached_event
+from .event_cache_events import (
+    event_id_for_cache,
+    serialize_cacheable_events,
+    serialize_cached_event,
+)
 from .event_normalization import normalize_event_source_for_cache
 from .sqlite_event_cache_events import (
+    allocate_write_sequences,
     delete_cached_events,
     delete_event_edit_rows,
     delete_event_thread_rows,
@@ -59,10 +64,16 @@ async def load_thread_events(
     """Return cached events for one thread sorted by timestamp."""
     cursor = await db.execute(
         """
-        SELECT event_json
+        SELECT thread_events.origin_server_ts, thread_events.write_seq, events.event_json
         FROM thread_events
-        WHERE principal_id = ? AND room_id = ? AND thread_id = ?
-        ORDER BY origin_server_ts ASC, rowid ASC
+        JOIN events
+            ON events.principal_id = thread_events.principal_id
+            AND events.room_id = thread_events.room_id
+            AND events.event_id = thread_events.event_id
+        WHERE thread_events.principal_id = ?
+            AND thread_events.room_id = ?
+            AND thread_events.thread_id = ?
+        ORDER BY thread_events.origin_server_ts ASC, thread_events.write_seq ASC
         """,
         (principal_id, room_id, thread_id),
     )
@@ -70,7 +81,7 @@ async def load_thread_events(
     await cursor.close()
     if not rows:
         return None
-    return [json.loads(row[0]) for row in rows]
+    return [json.loads(row[2]) for row in rows]
 
 
 async def load_recent_room_thread_ids(
@@ -241,12 +252,30 @@ async def _store_thread_events_locked(
     )
     serialized_events = serialize_cacheable_events(cacheable_events)
     if serialized_events:
+        await write_lookup_index_rows(
+            db,
+            principal_id=principal_id,
+            room_id=room_id,
+            serialized_events=serialized_events,
+            cached_at=validated_at,
+            thread_id=thread_id,
+        )
+        write_sequences = await allocate_write_sequences(db, len(serialized_events))
         await db.executemany(
             """
-            INSERT OR REPLACE INTO thread_events(
-                principal_id, room_id, thread_id, event_id, origin_server_ts, event_json
+            INSERT INTO thread_events(
+                principal_id,
+                room_id,
+                thread_id,
+                event_id,
+                origin_server_ts,
+                write_seq
             )
             VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(principal_id, room_id, event_id) DO UPDATE SET
+                thread_id = excluded.thread_id,
+                origin_server_ts = excluded.origin_server_ts,
+                write_seq = excluded.write_seq
             """,
             [
                 (
@@ -255,18 +284,10 @@ async def _store_thread_events_locked(
                     thread_id,
                     event.event_id,
                     event.origin_server_ts,
-                    event.event_json,
+                    write_sequence,
                 )
-                for event in serialized_events
+                for event, write_sequence in zip(serialized_events, write_sequences, strict=True)
             ],
-        )
-        await write_lookup_index_rows(
-            db,
-            principal_id=principal_id,
-            room_id=room_id,
-            serialized_events=serialized_events,
-            cached_at=validated_at,
-            thread_id=thread_id,
         )
     await db.execute(
         """
@@ -591,13 +612,20 @@ async def append_existing_thread_event(
         """
         SELECT 1
         FROM thread_events
-        WHERE principal_id = ? AND room_id = ? AND thread_id = ?
+        JOIN events
+            ON events.principal_id = thread_events.principal_id
+            AND events.room_id = thread_events.room_id
+            AND events.event_id = thread_events.event_id
+        WHERE thread_events.principal_id = ?
+            AND thread_events.room_id = ?
+            AND thread_events.thread_id = ?
         LIMIT 1
         """,
         (principal_id, room_id, thread_id),
     )
     row = await cursor.fetchone()
     await cursor.close()
+    thread_exists = row is not None
     if row is None:
         await write_lookup_index_rows(
             db,
@@ -609,22 +637,6 @@ async def append_existing_thread_event(
         )
         return False
 
-    await db.execute(
-        """
-        INSERT OR REPLACE INTO thread_events(
-            principal_id, room_id, thread_id, event_id, origin_server_ts, event_json
-        )
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (
-            principal_id,
-            room_id,
-            thread_id,
-            serialized_event.event_id,
-            serialized_event.origin_server_ts,
-            serialized_event.event_json,
-        ),
-    )
     await write_lookup_index_rows(
         db,
         principal_id=principal_id,
@@ -633,7 +645,34 @@ async def append_existing_thread_event(
         cached_at=time.time(),
         thread_id=thread_id,
     )
-    return True
+    if thread_exists:
+        write_sequence = (await allocate_write_sequences(db, 1))[0]
+        await db.execute(
+            """
+            INSERT INTO thread_events(
+                principal_id,
+                room_id,
+                thread_id,
+                event_id,
+                origin_server_ts,
+                write_seq
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(principal_id, room_id, event_id) DO UPDATE SET
+                thread_id = excluded.thread_id,
+                origin_server_ts = excluded.origin_server_ts,
+                write_seq = excluded.write_seq
+            """,
+            (
+                principal_id,
+                room_id,
+                thread_id,
+                serialized_event.event_id,
+                serialized_event.origin_server_ts,
+                write_sequence,
+            ),
+        )
+    return thread_exists
 
 
 async def _thread_event_ids_for_thread(

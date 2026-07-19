@@ -32,6 +32,50 @@ _ROOM_CONTENT_TABLES = (
     "mxc_text_cache",
     "thread_cache_state",
 )
+_ORPHAN_THREAD_INDEX_PREDICATE = """
+    NOT EXISTS (
+        SELECT 1
+        FROM events
+        WHERE events.principal_id = event_threads.principal_id
+            AND events.room_id = event_threads.room_id
+            AND events.event_id = event_threads.event_id
+    )
+    AND NOT (
+        event_threads.event_id = event_threads.thread_id
+        AND (
+            EXISTS (
+                SELECT 1
+                FROM event_threads AS child
+                WHERE child.principal_id = event_threads.principal_id
+                    AND child.room_id = event_threads.room_id
+                    AND child.thread_id = event_threads.thread_id
+                    AND child.event_id != child.thread_id
+                    AND EXISTS (
+                        SELECT 1
+                        FROM events AS child_event
+                        WHERE child_event.principal_id = child.principal_id
+                            AND child_event.room_id = child.room_id
+                            AND child_event.event_id = child.event_id
+                    )
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM thread_events AS child_membership
+                WHERE child_membership.principal_id = event_threads.principal_id
+                    AND child_membership.room_id = event_threads.room_id
+                    AND child_membership.thread_id = event_threads.thread_id
+                    AND child_membership.event_id != child_membership.thread_id
+                    AND EXISTS (
+                        SELECT 1
+                        FROM events AS child_event
+                        WHERE child_event.principal_id = child_membership.principal_id
+                            AND child_event.room_id = child_membership.room_id
+                            AND child_event.event_id = child_membership.event_id
+                    )
+            )
+        )
+    )
+"""
 
 
 async def load_event(
@@ -75,7 +119,7 @@ async def load_recent_room_events(
             AND room_id = ?
             AND origin_server_ts >= ?
             AND json_extract(event_json, '$.type') = ?
-        ORDER BY origin_server_ts DESC, rowid DESC
+        ORDER BY origin_server_ts DESC, write_seq DESC
         LIMIT ?
         """,
         (principal_id, room_id, since_ts_ms, event_type, limit),
@@ -94,30 +138,14 @@ async def load_latest_edit(
     sender: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the latest principal- and room-scoped edit."""
-    sender_clause = "" if sender is None else "AND json_extract(events.event_json, '$.sender') = ?"
-    parameters: tuple[object, ...] = (principal_id, room_id, original_event_id)
-    if sender is not None:
-        parameters = (*parameters, sender)
-    cursor = await db.execute(
-        f"""
-        SELECT events.event_json
-        FROM event_edits
-        JOIN events
-          ON events.principal_id = event_edits.principal_id
-         AND events.room_id = event_edits.room_id
-         AND events.event_id = event_edits.edit_event_id
-        WHERE event_edits.principal_id = ?
-          AND event_edits.room_id = ?
-          AND event_edits.original_event_id = ?
-          {sender_clause}
-        ORDER BY event_edits.origin_server_ts DESC, events.rowid DESC
-        LIMIT 1
-        """,  # noqa: S608
-        parameters,
+    row = await _load_latest_edit_row(
+        db,
+        principal_id=principal_id,
+        room_id=room_id,
+        original_event_id=original_event_id,
+        sender=sender,
     )
-    row = await cursor.fetchone()
-    await cursor.close()
-    return None if row is None else json.loads(row[0])
+    return None if row is None else row.event
 
 
 async def load_latest_edit_row(
@@ -129,8 +157,27 @@ async def load_latest_edit_row(
     sender: str,
 ) -> CachedEventRow | None:
     """Return the latest edit and its write time within one ownership scope."""
+    return await _load_latest_edit_row(
+        db,
+        principal_id=principal_id,
+        room_id=room_id,
+        original_event_id=original_event_id,
+        sender=sender,
+    )
+
+
+async def _load_latest_edit_row(
+    db: aiosqlite.Connection,
+    *,
+    principal_id: str,
+    room_id: str,
+    original_event_id: str,
+    sender: str | None,
+) -> CachedEventRow | None:
+    sender_predicate = "" if sender is None else "AND json_extract(events.event_json, '$.sender') = ?"
+    parameters = (principal_id, room_id, original_event_id, *((sender,) if sender is not None else ()))
     cursor = await db.execute(
-        """
+        f"""
         SELECT events.event_json, events.cached_at
         FROM event_edits
         JOIN events
@@ -140,11 +187,11 @@ async def load_latest_edit_row(
         WHERE event_edits.principal_id = ?
           AND event_edits.room_id = ?
           AND event_edits.original_event_id = ?
-          AND json_extract(events.event_json, '$.sender') = ?
-        ORDER BY event_edits.origin_server_ts DESC, events.rowid DESC
+          {sender_predicate}
+        ORDER BY event_edits.origin_server_ts DESC, events.write_seq DESC
         LIMIT 1
-        """,
-        (principal_id, room_id, original_event_id, sender),
+        """,  # noqa: S608
+        parameters,
     )
     row = await cursor.fetchone()
     await cursor.close()
@@ -455,18 +502,36 @@ async def write_lookup_index_rows(
         room_id,
         event_ids=event_ids,
     )
+    write_sequences = await allocate_write_sequences(db, len(serialized_events))
     await db.executemany(
         """
-        INSERT INTO events(principal_id, event_id, room_id, origin_server_ts, event_json, cached_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO events(
+            principal_id,
+            event_id,
+            room_id,
+            origin_server_ts,
+            event_json,
+            cached_at,
+            write_seq
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(principal_id, room_id, event_id) DO UPDATE SET
             origin_server_ts = excluded.origin_server_ts,
             event_json = excluded.event_json,
-            cached_at = excluded.cached_at
+            cached_at = excluded.cached_at,
+            write_seq = excluded.write_seq
         """,
         [
-            (principal_id, event.event_id, room_id, event.origin_server_ts, event.event_json, cached_at)
-            for event in serialized_events
+            (
+                principal_id,
+                event.event_id,
+                room_id,
+                event.origin_server_ts,
+                event.event_json,
+                cached_at,
+                write_sequence,
+            )
+            for event, write_sequence in zip(serialized_events, write_sequences, strict=True)
         ],
     )
     await db.executemany(
@@ -677,6 +742,32 @@ async def purge_principal_locked(
     )
 
 
+async def allocate_write_sequences(
+    db: aiosqlite.Connection,
+    count: int,
+) -> list[int]:
+    """Reserve a durable monotonic SQLite write-sequence range."""
+    if count <= 0:
+        return []
+    cursor = await db.execute(
+        """
+        INSERT INTO cache_metadata(key, value)
+        VALUES ('write_sequence', ?)
+        ON CONFLICT(key) DO UPDATE SET
+            value = CAST(CAST(cache_metadata.value AS INTEGER) + CAST(excluded.value AS INTEGER) AS TEXT)
+        RETURNING CAST(value AS INTEGER)
+        """,
+        (str(count),),
+    )
+    row = await cursor.fetchone()
+    await cursor.close()
+    if row is None:
+        msg = "SQLite event cache write sequence was not allocated"
+        raise RuntimeError(msg)
+    last_sequence = int(row[0])
+    return list(range(last_sequence - count + 1, last_sequence + 1))
+
+
 async def _dependent_edit_event_ids(
     db: aiosqlite.Connection,
     principal_id: str,
@@ -718,6 +809,31 @@ async def _delete_scoped_event_rows(
     deleted_rows = 0 if cursor.rowcount is None else int(cursor.rowcount)
     await cursor.close()
     return deleted_rows
+
+
+async def orphan_thread_index_count(db: aiosqlite.Connection) -> int:
+    """Count unsupported principal-scoped event-to-thread rows."""
+    cursor = await db.execute(
+        f"SELECT COUNT(*) FROM event_threads WHERE {_ORPHAN_THREAD_INDEX_PREDICATE}",  # noqa: S608
+    )
+    row = await cursor.fetchone()
+    await cursor.close()
+    return 0 if row is None else int(row[0])
+
+
+async def repair_orphan_thread_indexes(
+    db: aiosqlite.Connection,
+) -> int:
+    """Remove every unsupported principal-scoped thread mapping."""
+    cursor = await db.execute(
+        f"""
+        DELETE FROM event_threads
+        WHERE {_ORPHAN_THREAD_INDEX_PREDICATE}
+        """,  # noqa: S608
+    )
+    repaired = 0 if cursor.rowcount is None else int(cursor.rowcount)
+    await cursor.close()
+    return repaired
 
 
 async def _record_redacted_events(

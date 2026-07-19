@@ -64,6 +64,10 @@ class ConversationEventCache(Protocol):
     def is_initialized(self) -> bool:
         """Return whether the backing storage is currently initialized."""
 
+    @property
+    def certification_generation(self) -> str | None:
+        """Return the durable cache generation bound to certified sync checkpoints."""
+
     async def initialize(self) -> None:
         """Initialize any backing storage."""
 

@@ -17,6 +17,10 @@ from . import sqlite_event_cache_events, sqlite_event_cache_threads
 from .event_batching import group_lookup_events_by_room
 from .event_normalization import normalize_event_source_for_cache
 from .sqlite_agent_message_snapshot import load_sqlite_agent_message_snapshot
+from .sqlite_cache_maintenance import (
+    run_startup_maintenance,
+    with_sqlite_storage_bytes,
+)
 from .thread_cache_state import replacement_validated_at
 
 if TYPE_CHECKING:
@@ -24,10 +28,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from .agent_message_snapshot import AgentMessageSnapshot
+    from .cache_maintenance import CacheMaintenanceReport
     from .event_cache import ThreadCacheState
 
-_EVENT_CACHE_SCHEMA_VERSION = 11
+_EVENT_CACHE_SCHEMA_VERSION = 12
 _EVENT_CACHE_TABLES = (
+    "cache_metadata",
     "thread_events",
     "events",
     "event_edits",
@@ -37,7 +43,6 @@ _EVENT_CACHE_TABLES = (
     "mxc_text_cache",
     "thread_cache_state",
     "room_cache_state",
-    "event_cache_metadata",
 )
 _REQUIRED_EVENT_CACHE_TABLES = frozenset(_EVENT_CACHE_TABLES)
 _DEFAULT_PRINCIPAL_ID = "__mindroom_default_principal__"
@@ -77,7 +82,9 @@ async def _rollback_sqlite_connection_best_effort(db: aiosqlite.Connection, *, o
         )
 
 
-async def _initialize_event_cache_db(db_path: Path) -> aiosqlite.Connection:
+async def _initialize_event_cache_db(
+    db_path: Path,
+) -> tuple[aiosqlite.Connection, CacheMaintenanceReport, str]:
     """Open the SQLite database and ensure the event-cache schema exists."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     db = await aiosqlite.connect(db_path)
@@ -85,21 +92,43 @@ async def _initialize_event_cache_db(db_path: Path) -> aiosqlite.Connection:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA busy_timeout=5000")
         await db.execute("BEGIN IMMEDIATE")
-        try:
-            await _reset_stale_cache_if_needed(db, db_path=db_path)
-            await _create_event_cache_schema(db)
-            await db.commit()
-        except BaseException:
-            await _rollback_sqlite_connection_best_effort(db, operation="initialize")
-            raise
+        (
+            migrated_from_schema_version,
+            destructive_reset,
+            normalized_legacy_thread_payload_rows,
+        ) = await _prepare_event_cache_schema(
+            db,
+            db_path=db_path,
+        )
+        await _create_event_cache_schema(db)
+        certification_generation = await _initialize_cache_metadata(db)
+        report = await run_startup_maintenance(
+            db,
+            schema_version=_EVENT_CACHE_SCHEMA_VERSION,
+            migrated_from_schema_version=migrated_from_schema_version,
+            destructive_reset=destructive_reset,
+            normalized_legacy_thread_payload_rows=normalized_legacy_thread_payload_rows,
+        )
+        await db.commit()
     except BaseException:
+        await _rollback_sqlite_connection_best_effort(db, operation="initialize")
         await _close_sqlite_connection_best_effort(db, operation="initialize")
         raise
-    return db
+    report = with_sqlite_storage_bytes(report, db_path)
+    logger.info("Matrix event cache startup maintenance complete", backend="sqlite", **report.as_runtime_diagnostics())
+    return db, report, certification_generation
 
 
 async def _create_event_cache_schema(db: aiosqlite.Connection) -> None:
     """Create the current cache schema in one SQLite connection."""
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cache_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """,
+    )
     await db.execute(
         """
         CREATE TABLE IF NOT EXISTS thread_events (
@@ -108,7 +137,7 @@ async def _create_event_cache_schema(db: aiosqlite.Connection) -> None:
             thread_id TEXT NOT NULL,
             event_id TEXT NOT NULL,
             origin_server_ts INTEGER NOT NULL,
-            event_json TEXT NOT NULL,
+            write_seq INTEGER NOT NULL,
             PRIMARY KEY (principal_id, room_id, event_id)
         )
         """,
@@ -128,6 +157,7 @@ async def _create_event_cache_schema(db: aiosqlite.Connection) -> None:
             origin_server_ts INTEGER NOT NULL,
             event_json TEXT NOT NULL,
             cached_at REAL NOT NULL,
+            write_seq INTEGER NOT NULL,
             PRIMARY KEY (principal_id, room_id, event_id)
         )
         """,
@@ -238,22 +268,50 @@ async def _create_event_cache_schema(db: aiosqlite.Connection) -> None:
         )
         """,
     )
-    await db.execute(
+    await db.execute(f"PRAGMA user_version = {_EVENT_CACHE_SCHEMA_VERSION}")
+
+
+async def _initialize_cache_metadata(db: aiosqlite.Connection) -> str:
+    """Initialize durable ordering and sync-certification metadata."""
+    cursor = await db.execute(
         """
-        CREATE TABLE IF NOT EXISTS event_cache_metadata (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
+        SELECT MAX(value)
+        FROM (
+            SELECT COALESCE(MAX(write_seq), 0) AS value FROM events
+            UNION ALL
+            SELECT COALESCE(MAX(write_seq), 0) AS value FROM thread_events
         )
         """,
     )
+    row = await cursor.fetchone()
+    await cursor.close()
+    maximum_write_sequence = 0 if row is None or row[0] is None else int(row[0])
     await db.execute(
         """
-        INSERT OR IGNORE INTO event_cache_metadata(key, value)
-        VALUES ('generation', ?)
+        INSERT INTO cache_metadata(key, value)
+        VALUES ('write_sequence', ?)
+        ON CONFLICT(key) DO UPDATE SET
+            value = CAST(MAX(CAST(cache_metadata.value AS INTEGER), CAST(excluded.value AS INTEGER)) AS TEXT)
+        """,
+        (str(maximum_write_sequence),),
+    )
+    await db.execute(
+        """
+        INSERT INTO cache_metadata(key, value)
+        VALUES ('certification_generation', ?)
+        ON CONFLICT(key) DO NOTHING
         """,
         (uuid.uuid4().hex,),
     )
-    await db.execute(f"PRAGMA user_version = {_EVENT_CACHE_SCHEMA_VERSION}")
+    generation_cursor = await db.execute(
+        "SELECT value FROM cache_metadata WHERE key = 'certification_generation'",
+    )
+    generation_row = await generation_cursor.fetchone()
+    await generation_cursor.close()
+    if generation_row is None or not str(generation_row[0]):
+        msg = "SQLite event cache certification generation was not initialized"
+        raise RuntimeError(msg)
+    return str(generation_row[0])
 
 
 async def _schema_version(db: aiosqlite.Connection) -> int:
@@ -278,30 +336,31 @@ async def _existing_table_names(db: aiosqlite.Connection) -> set[str]:
     return {str(row[0]) for row in rows}
 
 
-async def _reset_stale_cache_if_needed(
+async def _prepare_event_cache_schema(
     db: aiosqlite.Connection,
     *,
     db_path: Path,
-) -> None:
-    """Drop stale cache contents instead of migrating old cache schemas forward."""
+) -> tuple[int | None, bool, int]:
+    """Keep the current owned schema or reset unsupported cache shapes transactionally."""
     current_schema_version = await _schema_version(db)
     current_table_names = await _existing_table_names(db)
     if not current_table_names:
-        return
+        return None, False, 0
     if current_schema_version == _EVENT_CACHE_SCHEMA_VERSION and _REQUIRED_EVENT_CACHE_TABLES.issubset(
         current_table_names,
     ):
-        return
+        return None, False, 0
 
     logger.info(
-        "Resetting stale Matrix event cache instead of migrating it",
+        "Resetting unsupported Matrix event cache schema",
         db_path=str(db_path),
         _schema_version=current_schema_version,
         existing_tables=sorted(current_table_names),
     )
-    for table_name in _EVENT_CACHE_TABLES:
+    for table_name in (*_EVENT_CACHE_TABLES, "event_cache_metadata", "thread_events_v10"):
         await db.execute(f"DROP TABLE IF EXISTS {table_name}")
     await db.execute("PRAGMA user_version = 0")
+    return None, True, 0
 
 
 class _SqliteEventCacheRuntime:
@@ -310,10 +369,11 @@ class _SqliteEventCacheRuntime:
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
         self._db: aiosqlite.Connection | None = None
+        self._maintenance_report: CacheMaintenanceReport | None = None
+        self._certification_generation: str | None = None
         self._disabled_reason: str | None = None
         self._disabled_principal_reasons: dict[str, str] = {}
         self._db_lock = asyncio.Lock()
-        self._generation: str | None = None
         self._pending_room_purges: set[tuple[str, str]] = set()
         self._pending_principal_purges: set[str] = set()
         self._departed_rooms: set[tuple[str, str]] = set()
@@ -340,9 +400,19 @@ class _SqliteEventCacheRuntime:
         return self._disabled_reason is not None
 
     @property
-    def generation(self) -> str | None:
-        """Return the durable cache generation when the database is initialized."""
-        return self._generation
+    def disabled_reason(self) -> str | None:
+        """Return the log-safe reason this advisory cache was disabled."""
+        return self._disabled_reason
+
+    @property
+    def maintenance_report(self) -> CacheMaintenanceReport | None:
+        """Return the immutable startup maintenance report."""
+        return self._maintenance_report
+
+    @property
+    def certification_generation(self) -> str | None:
+        """Return the durable generation bound to certified sync checkpoints."""
+        return self._certification_generation
 
     def disable(self, reason: str) -> None:
         """Disable the advisory cache for the rest of the runtime."""
@@ -428,18 +498,8 @@ class _SqliteEventCacheRuntime:
         async with self._db_lock:
             if self._disabled_reason is not None or self._db is not None:
                 return
-            db = await _initialize_event_cache_db(self._db_path)
-            cursor = await db.execute(
-                "SELECT value FROM event_cache_metadata WHERE key = 'generation'",
-            )
-            row = await cursor.fetchone()
-            await cursor.close()
-            if row is None:
-                await _close_sqlite_connection_best_effort(db, operation="initialize_generation")
-                msg = "SQLite event cache generation metadata is missing"
-                raise RuntimeError(msg)
-            self._db = db
-            self._generation = str(row[0])
+            self._db, report, self._certification_generation = await _initialize_event_cache_db(self._db_path)
+            self._maintenance_report = report
 
     async def close(self) -> None:
         """Close the SQLite connection when the cache is no longer needed."""
@@ -448,7 +508,7 @@ class _SqliteEventCacheRuntime:
                 return
             await self._db.close()
             self._db = None
-            self._generation = None
+            self._certification_generation = None
 
     @asynccontextmanager
     async def acquire_db_operation(self) -> AsyncIterator[aiosqlite.Connection]:
@@ -519,7 +579,7 @@ class SqliteEventCache:
     @property
     def cache_generation(self) -> str | None:
         """Return the generation that certified sync checkpoints must match when available."""
-        generation = self._runtime.generation
+        generation = self._runtime.certification_generation
         if (
             generation is None
             or self._runtime.is_principal_disabled(self.principal_id)
@@ -529,9 +589,14 @@ class SqliteEventCache:
         principal_generation = f"{generation}\0{self.principal_id}".encode()
         return hashlib.sha256(principal_generation).hexdigest()
 
+    @property
+    def certification_generation(self) -> str | None:
+        """Return the durable generation bound to certified sync checkpoints."""
+        return self._runtime.certification_generation
+
     def runtime_diagnostics(self) -> dict[str, object]:
         """Return log-safe runtime state for sync certification diagnostics."""
-        return {
+        diagnostics: dict[str, object] = {
             "cache_backend": "sqlite",
             "cache_sqlite_initialized": self._runtime.is_initialized,
             "cache_sqlite_disabled": self._runtime.is_disabled,
@@ -543,7 +608,14 @@ class SqliteEventCache:
                 self.principal_id,
             ),
             "cache_sqlite_departed_room_count": len(self._runtime.departed_room_ids(self.principal_id)),
+            "cache_certification_generation_present": self.certification_generation is not None,
         }
+        if self._runtime.disabled_reason is not None:
+            diagnostics["cache_sqlite_disabled_reason"] = self._runtime.disabled_reason
+        report = self._runtime.maintenance_report
+        if report is not None:
+            diagnostics.update(report.as_runtime_diagnostics())
+        return diagnostics
 
     def pending_durable_write_room_ids(self) -> tuple[str, ...]:
         """Return rooms with runtime-only writes that must persist before certifying a sync token."""

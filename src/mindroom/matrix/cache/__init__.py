@@ -4,6 +4,7 @@ Developer note:
 - `event_cache.py` owns the storage-agnostic durable cache protocol.
 - `event_normalization.py` owns storage-agnostic event payload shaping before backend writes.
 - `event_cache_events.py` owns backend-neutral serialized event values, indexes, and redaction decisions.
+- `cache_maintenance.py` owns backend-neutral maintenance reports.
 - `thread_cache_state.py` owns backend-neutral durable state values and comparison rules.
 - `startup_cleanup.py` owns fail-closed cold-start principal cleanup policy.
 - `agent_message_snapshot_semantics.py` owns backend-neutral latest-message selection rules.
@@ -13,6 +14,7 @@ Developer note:
 - `sqlite_event_cache_threads.py` owns thread snapshot rows, cache-state reads, and thread/room invalidation state.
 - `sqlite_agent_message_snapshot.py` owns SQLite reads for latest cached agent message snapshots.
 - `postgres_event_cache_events.py`, `postgres_event_cache_threads.py`, and `postgres_agent_message_snapshot.py` own the equivalent PostgreSQL row helpers.
+- `sqlite_cache_maintenance.py` and `postgres_cache_maintenance.py` own transactional migration, invariant repair, and startup diagnostics.
 - `thread_writes.py` owns live, outbound, and sync mutation flows; `thread_bookkeeping.py` resolves thread impact and `thread_write_cache_ops.py` applies queued cache mutations.
 
 Package boundary:
@@ -23,6 +25,7 @@ Package boundary:
 Main invariants:
 - Runtime disable and room/db ordering live only in the concrete event-cache implementation.
 - Event lookup rows and thread snapshot rows are written together so lookup, edit, and thread indexes stay consistent.
+- Full event JSON has one source of truth in the event lookup table.
 - Thread invalidation is durable state first, with fail-closed deletion only when stale markers cannot be written.
 """
 

@@ -79,24 +79,30 @@ async def _iter_scope_events(
     room_id: str,
     thread_id: str | None,
 ) -> AsyncCursor[tuple[str, float | None]]:
-    if thread_id is None:
+    if thread_id is not None:
         return await db.execute(
             """
-            SELECT event_json, cached_at
-            FROM mindroom_event_cache_events
-            WHERE namespace = %s AND room_id = %s
-            ORDER BY origin_server_ts DESC, write_seq DESC
+            SELECT events.event_json, events.cached_at
+            FROM mindroom_event_cache_thread_events AS thread_events
+            JOIN mindroom_event_cache_events AS events
+                ON events.namespace = thread_events.namespace
+                AND events.event_id = thread_events.event_id
+                AND events.room_id = thread_events.room_id
+            WHERE thread_events.namespace = %s
+                AND thread_events.room_id = %s
+                AND thread_events.thread_id = %s
+            ORDER BY thread_events.origin_server_ts DESC, thread_events.write_seq DESC
             """,
-            (namespace, room_id),
+            (namespace, room_id, thread_id),
         )
     return await db.execute(
         """
-        SELECT event_json, NULL AS cached_at
-        FROM mindroom_event_cache_thread_events
-        WHERE namespace = %s AND room_id = %s AND thread_id = %s
+        SELECT event_json, cached_at
+        FROM mindroom_event_cache_events
+        WHERE namespace = %s AND room_id = %s
         ORDER BY origin_server_ts DESC, write_seq DESC
         """,
-        (namespace, room_id, thread_id),
+        (namespace, room_id),
     )
 
 

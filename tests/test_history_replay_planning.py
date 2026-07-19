@@ -21,6 +21,7 @@ from mindroom.history.compaction import (
 from mindroom.history.policy import (
     classify_compaction_decision,
     context_budget_after_reserve,
+    describe_compaction_unavailability,
     resolve_history_execution_plan,
 )
 from mindroom.history.runtime import (
@@ -32,6 +33,7 @@ from mindroom.history.storage import (
     write_scope_state,
 )
 from mindroom.history.types import (
+    COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
     HistoryPolicy,
     HistoryScope,
     HistoryScopeState,
@@ -109,6 +111,68 @@ async def test_prepare_history_for_run_authored_compaction_still_plans_safe_repl
     assert prepared.replay_plan.add_history_to_context is True
     assert prepared.replay_plan.num_history_runs == 1
     assert prepared.replay_plan.num_history_messages is None
+
+
+@pytest.mark.asyncio
+async def test_small_replay_window_cannot_select_required_compaction_without_progress(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, replay_window_tokens=1),
+        context_window=1_000_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+        ],
+    )
+    storage.upsert_session(session)
+
+    execution_plan = resolve_history_execution_plan(
+        config=config,
+        compaction_config=config.resolve_entity("test_agent").compaction_config,
+        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        active_model_name="default",
+        active_context_window=1_000_000,
+        static_prompt_tokens=10,
+    )
+
+    assert execution_plan.summary_input_budget_tokens == 1
+    assert execution_plan.destructive_compaction_available is False
+    assert execution_plan.unavailable_reason == "summary_input_budget_without_retry_headroom"
+    assert describe_compaction_unavailability(execution_plan) == (
+        "the summary input budget must exceed 2,000 tokens to provide meaningful headroom for a smaller retry"
+    )
+
+    with patch("mindroom.history.runtime._run_scope_compaction_with_lifecycle", new=AsyncMock()) as compact_mock:
+        prepared_attempts = [
+            await prepare_history_for_run_for_test(
+                agent=_agent(db=storage),
+                agent_name="test_agent",
+                full_prompt="Current prompt",
+                session_id="session-1",
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=None,
+                storage=storage,
+                session=session,
+            )
+            for _attempt in range(2)
+        ]
+
+    assert [
+        (prepared.compaction_decision.mode, prepared.compaction_decision.reason) for prepared in prepared_attempts
+    ] == [
+        ("none", "compaction_unavailable"),
+        ("none", "compaction_unavailable"),
+    ]
+    compact_mock.assert_not_awaited()
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
 
 
 @pytest.mark.asyncio
@@ -683,6 +747,38 @@ def test_resolve_history_execution_plan_marks_non_positive_summary_budget_unavai
 
 
 @pytest.mark.parametrize(
+    ("replay_window_tokens", "expected_available"),
+    [
+        (2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS, False),
+        (2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS + 1, True),
+    ],
+)
+def test_resolve_history_execution_plan_enforces_minimum_summary_input_budget(
+    tmp_path: Path,
+    replay_window_tokens: int,
+    expected_available: bool,
+) -> None:
+    config, _runtime_paths_value = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, replay_window_tokens=replay_window_tokens),
+        context_window=1_000_000,
+    )
+
+    execution_plan = resolve_history_execution_plan(
+        config=config,
+        compaction_config=config.resolve_entity("test_agent").compaction_config,
+        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        active_model_name="default",
+        active_context_window=1_000_000,
+        static_prompt_tokens=10,
+    )
+
+    assert execution_plan.summary_input_budget_tokens == replay_window_tokens
+    assert execution_plan.destructive_compaction_available is expected_available
+    assert (execution_plan.unavailable_reason is None) is expected_available
+
+
+@pytest.mark.parametrize(
     ("context_window_tokens", "reserve_tokens", "spent_tokens", "expected"),
     [
         (1_000, 100, 25, 875),
@@ -727,16 +823,17 @@ def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_di
 
 
 @pytest.mark.parametrize(
-    ("active_context_window", "expected_replay_window"),
+    ("active_context_window", "expected_replay_window", "expected_summary_input_budget"),
     [
-        (1_000_000, 200_000),
-        (100_000, 100_000),
+        (1_000_000, 200_000, 200_000),
+        (100_000, 100_000, 71_616),
     ],
 )
 def test_resolve_history_execution_plan_caps_replay_without_changing_model_window(
     tmp_path: Path,
     active_context_window: int,
     expected_replay_window: int,
+    expected_summary_input_budget: int,
 ) -> None:
     config, _runtime_paths_value = _make_config(
         tmp_path,
@@ -755,6 +852,7 @@ def test_resolve_history_execution_plan_caps_replay_without_changing_model_windo
 
     assert execution_plan.compaction_context_window == active_context_window
     assert execution_plan.replay_window_tokens == expected_replay_window
+    assert execution_plan.summary_input_budget_tokens == expected_summary_input_budget
     assert execution_plan.trigger_threshold_tokens == int(expected_replay_window * 0.8)
     hard_replay_budget = execution_plan.hard_replay_budget_tokens
     assert hard_replay_budget is not None

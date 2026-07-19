@@ -435,12 +435,12 @@ async def test_sqlite_event_cache_initialize_closes_db_after_cancellation(
     async def connect(_db_path: Path) -> object:
         return db
 
-    async def reset_stale_cache_if_needed(_db: object, *, db_path: Path) -> None:
+    async def prepare_event_cache_schema(_db: object, *, db_path: Path) -> tuple[int | None, bool, int]:
         _ = db_path
         raise asyncio.CancelledError(cancel_reason)
 
     monkeypatch.setattr(sqlite_event_cache.aiosqlite, "connect", connect)
-    monkeypatch.setattr(sqlite_event_cache, "_reset_stale_cache_if_needed", reset_stale_cache_if_needed)
+    monkeypatch.setattr(sqlite_event_cache, "_prepare_event_cache_schema", prepare_event_cache_schema)
 
     with pytest.raises(asyncio.CancelledError, match=cancel_reason):
         await sqlite_event_cache._initialize_event_cache_db(tmp_path / "event_cache.db")
@@ -466,7 +466,7 @@ async def test_sqlite_v10_reset_is_atomic_and_creates_new_generation(tmp_path: P
         assert await cache.get_event("!room:localhost", "$legacy") is None
         assert cache._runtime.db is not None
         version_row = await (await cache._runtime.db.execute("PRAGMA user_version")).fetchone()
-        assert version_row == (11,)
+        assert version_row == (12,)
     finally:
         await cache.close()
 
@@ -601,7 +601,7 @@ async def test_postgres_v1_migration_is_concurrent_and_namespace_preserving(
             )
         ).fetchall()
         await db.close()
-        assert version == ("2",)
+        assert version == ("3",)
         assert namespaces == [("legacy_a",), ("legacy_b",)]
         assert legacy_plaintext == []
         assert membership_columns == [("membership_epoch",), ("membership_state",)]
@@ -619,14 +619,14 @@ async def test_postgres_v1_migration_rolls_back_on_cancellation(
     isolated_url = await _seed_postgres_v1_schema(postgres_event_cache_url, schema_name)
     from mindroom.matrix.cache import postgres_event_cache as postgres_module  # noqa: PLC0415
 
-    original_migration = postgres_module._migrate_postgres_event_cache_v1_to_v2
+    original_migration = postgres_module._migrate_postgres_event_cache_security_schema
     cancel_reason = "migration cancelled"
 
     async def cancelled_migration(db: object) -> None:
         await original_migration(cast("psycopg.AsyncConnection", db))
         raise asyncio.CancelledError(cancel_reason)
 
-    monkeypatch.setattr(postgres_module, "_migrate_postgres_event_cache_v1_to_v2", cancelled_migration)
+    monkeypatch.setattr(postgres_module, "_migrate_postgres_event_cache_security_schema", cancelled_migration)
     cache = PostgresEventCache(database_url=isolated_url, namespace="runtime")
     with pytest.raises(asyncio.CancelledError, match="migration cancelled"):
         await cache.initialize()
@@ -688,19 +688,26 @@ async def test_postgres_cache_generation_is_durable_and_changes_after_namespace_
     db = await psycopg.AsyncConnection.connect(postgres_event_cache_url)
     try:
         await db.execute(
-            "DELETE FROM mindroom_event_cache_metadata WHERE key = %s",
-            (f"cache_generation:{namespace}",),
+            """
+            DELETE FROM mindroom_event_cache_namespace_metadata
+            WHERE namespace = %s AND key = 'certification_generation'
+            """,
+            (namespace,),
         )
         await db.commit()
     finally:
         await db.close()
 
-    await cache.initialize()
+    reset_cache = PostgresEventCache(
+        database_url=postgres_event_cache_url,
+        namespace=namespace,
+    )
+    await reset_cache.initialize()
     try:
-        assert cache.cache_generation is not None
-        assert cache.cache_generation != first_generation
+        assert reset_cache.cache_generation is not None
+        assert reset_cache.cache_generation != first_generation
     finally:
-        await cache.close()
+        await reset_cache.close()
 
 
 @pytest.mark.asyncio

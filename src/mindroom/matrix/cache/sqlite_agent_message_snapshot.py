@@ -78,24 +78,30 @@ async def _iter_scope_events(
     room_id: str,
     thread_id: str | None,
 ) -> aiosqlite.Cursor:
-    if thread_id is None:
+    if thread_id is not None:
         return await db.execute(
             """
-            SELECT event_json, cached_at
-            FROM events
-            WHERE principal_id = ? AND room_id = ?
-            ORDER BY origin_server_ts DESC, rowid DESC
+            SELECT events.event_json, events.cached_at
+            FROM thread_events
+            JOIN events
+                ON events.principal_id = thread_events.principal_id
+                AND events.room_id = thread_events.room_id
+                AND events.event_id = thread_events.event_id
+            WHERE thread_events.principal_id = ?
+                AND thread_events.room_id = ?
+                AND thread_events.thread_id = ?
+            ORDER BY thread_events.origin_server_ts DESC, thread_events.write_seq DESC
             """,
-            (principal_id, room_id),
+            (principal_id, room_id, thread_id),
         )
     return await db.execute(
         """
-        SELECT event_json, NULL AS cached_at
-        FROM thread_events
-        WHERE principal_id = ? AND room_id = ? AND thread_id = ?
-        ORDER BY origin_server_ts DESC, rowid DESC
+        SELECT event_json, cached_at
+        FROM events
+        WHERE principal_id = ? AND room_id = ?
+        ORDER BY origin_server_ts DESC, write_seq DESC
         """,
-        (principal_id, room_id, thread_id),
+        (principal_id, room_id),
     )
 
 

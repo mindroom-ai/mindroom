@@ -589,7 +589,6 @@ def test_interaction_expectations_are_executable_and_fail_closed() -> None:
             cache_reject_reason="thread_invalidated_after_validation",
         ),
     )
-
     validation = validate_interaction_expectations(
         records,
         homeserver_event_ids=("$child", "$target", "$redaction", "$strict-child"),

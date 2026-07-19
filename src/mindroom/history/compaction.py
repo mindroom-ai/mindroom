@@ -51,6 +51,8 @@ if TYPE_CHECKING:
     from agno.session.agent import AgentSession
     from agno.session.team import TeamSession
 
+    from mindroom.history.summary_call import SummaryRetryDecision
+
 logger = get_logger(__name__)
 
 _WRAPPER_OVERHEAD_TOKENS = 200
@@ -518,6 +520,11 @@ async def _generate_compaction_summary_with_retry(
     included_runs = initial_included_runs
     budget = summary_input_budget
     retry_policy = DEFAULT_SUMMARY_RETRY_POLICY
+    minimum_progress_input_tokens = _minimum_progress_input_tokens(
+        previous_summary=previous_summary,
+        first_run=compactable_runs[0],
+        token_estimator=token_estimator,
+    )
     attempt = 1
     while True:
         estimated_input_tokens = token_estimator(summary_input)
@@ -554,9 +561,15 @@ async def _generate_compaction_summary_with_retry(
                 duration_ms=duration_ms,
                 error=str(exc) or type(exc).__name__,
             )
-            retry_budget = retry_policy.retry_budget(attempt=attempt, budget=budget, error=exc)
-            if retry_budget is not None:
-                if retry_budget == budget:
+            retry_decision: SummaryRetryDecision | None = retry_policy.retry_budget(
+                attempt=attempt,
+                budget=budget,
+                input_tokens=estimated_input_tokens,
+                minimum_progress_input_tokens=minimum_progress_input_tokens,
+                error=exc,
+            )
+            if retry_decision is not None:
+                if retry_decision.kind == "same-budget-transient":
                     await asyncio.sleep(retry_policy.same_input_retry_delay_seconds)
                     attempt += 1
                     continue
@@ -564,16 +577,16 @@ async def _generate_compaction_summary_with_retry(
                     previous_summary=previous_summary,
                     compacted_runs=compactable_runs,
                     history_settings=history_settings,
-                    max_input_tokens=retry_budget,
+                    max_input_tokens=retry_decision.budget,
                     token_estimator=token_estimator,
                 )
-                # The policy decides whether a retry is allowed; rebuilt_runs is the
-                # feasibility gate. If no run fits the smaller budget, fall through
-                # to raise instead of resending the original input.
                 if rebuilt_runs:
+                    rebuilt_input_tokens = token_estimator(rebuilt_input)
+                    if retry_decision.kind == "shrink" and rebuilt_input_tokens >= estimated_input_tokens:
+                        raise
                     summary_input = rebuilt_input
                     included_runs = rebuilt_runs
-                    budget = retry_budget
+                    budget = retry_decision.budget
                     attempt += 1
                     continue
             raise
@@ -604,15 +617,14 @@ def _build_summary_input(
 ) -> tuple[str, list[RunOutput | TeamRunOutput]]:
     summary_block = ""
     if previous_summary is not None and previous_summary.strip():
-        escaped_summary = _escape_xml_content(previous_summary)
-        summary_block = f"<previous_summary>\n{escaped_summary}\n</previous_summary>"
+        summary_block = _previous_summary_block(previous_summary)
 
     empty_input = _compose_summary_input(summary_block, "")
     remaining = max_input_tokens - token_estimator(empty_input) - _WRAPPER_OVERHEAD_TOKENS
 
     if remaining <= 0:
         return _build_oversized_summary_input(
-            summary_block=summary_block,
+            previous_summary=previous_summary,
             compacted_runs=compacted_runs[:1],
             history_settings=history_settings,
             max_input_tokens=max_input_tokens,
@@ -628,7 +640,7 @@ def _build_summary_input(
         if run_tokens > remaining:
             if not included_runs:
                 return _build_oversized_summary_input(
-                    summary_block=summary_block,
+                    previous_summary=previous_summary,
                     compacted_runs=[run],
                     history_settings=history_settings,
                     max_input_tokens=max_input_tokens,
@@ -647,12 +659,15 @@ def _build_summary_input(
 
 def _build_oversized_summary_input(
     *,
-    summary_block: str,
+    previous_summary: str | None,
     compacted_runs: Sequence[RunOutput | TeamRunOutput],
     history_settings: ResolvedHistorySettings,
     max_input_tokens: int,
     token_estimator: Callable[[str], int],
 ) -> tuple[str, list[RunOutput | TeamRunOutput]]:
+    summary_block = (
+        _previous_summary_block(previous_summary) if previous_summary is not None and previous_summary.strip() else ""
+    )
     if not compacted_runs:
         return summary_block, []
     first_run = compacted_runs[0]
@@ -666,6 +681,28 @@ def _build_oversized_summary_input(
     if oversized_excerpt is None:
         return summary_block, []
     return _compose_summary_input(summary_block, oversized_excerpt), [first_run]
+
+
+def _minimum_progress_input_tokens(
+    *,
+    previous_summary: str | None,
+    first_run: RunOutput | TeamRunOutput,
+    token_estimator: Callable[[str], int],
+) -> int:
+    """Return the smallest shrink budget preserving the prior summary and one run envelope.
+
+    Below this size ``_build_summary_input`` rebuilds to a run-less input
+    because the previous-summary block alone swallows the envelope, so
+    ``SummaryRetryPolicy`` clamps shrink targets here. A zero content budget
+    renders the run as its open tag, truncation note, and close tag; the
+    wrapper overhead covers the builder's own envelope accounting and
+    tokenizer boundary effects.
+    """
+    summary_block = (
+        _previous_summary_block(previous_summary) if previous_summary is not None and previous_summary.strip() else ""
+    )
+    minimal_excerpt = _serialize_run_excerpt(first_run, index=0, blocks=(), content_budget_chars=0)
+    return token_estimator(_compose_summary_input(summary_block, minimal_excerpt)) + _WRAPPER_OVERHEAD_TOKENS
 
 
 def _serialize_oversized_run_excerpt(
@@ -777,6 +814,10 @@ def _compose_summary_input(summary_block: str, serialized_runs: str) -> str:
         parts.append(summary_block)
     parts.append(f"<new_conversation>\n{serialized_runs}\n</new_conversation>")
     return "\n\n".join(parts)
+
+
+def _previous_summary_block(summary: str) -> str:
+    return f"<previous_summary>\n{_escape_xml_content(summary)}\n</previous_summary>"
 
 
 def _messages_for_runs(
