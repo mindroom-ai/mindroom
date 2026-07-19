@@ -81,6 +81,50 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         mock_queue.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_same_turn_point_cache_hit_skips_room_write_barrier(self) -> None:
+        """A memoized point read should not wait behind unrelated room writes."""
+        event_cache = _runtime_event_cache()
+        coordinator = _runtime_write_coordinator()
+        response = nio.RoomGetEventResponse.from_dict(
+            {
+                "content": {"body": "hello", "msgtype": "m.text"},
+                "event_id": "$event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(
+                client=_make_client_mock(),
+                event_cache=event_cache,
+                coordinator=coordinator,
+            ),
+        )
+
+        with (
+            patch(
+                "mindroom.matrix.conversation_cache._cached_room_get_event",
+                new=AsyncMock(return_value=(response, None)),
+            ) as get_event,
+            patch.object(
+                coordinator,
+                "wait_for_prior_room_updates",
+                new=AsyncMock(),
+            ) as wait_for_prior_room_updates,
+        ):
+            async with access.turn_scope():
+                first = await access.get_event("!test:localhost", "$event:localhost")
+                second = await access.get_event("!test:localhost", "$event:localhost")
+
+        assert first is response
+        assert second is response
+        get_event.assert_awaited_once()
+        wait_for_prior_room_updates.assert_awaited_once_with("!test:localhost")
+
+    @pytest.mark.asyncio
     async def test_get_event_persists_lookup_inline_inside_room_write_barrier(self) -> None:
         """A lookup fill inside the active barrier must not queue a write behind itself."""
         event_cache = _runtime_event_cache()
