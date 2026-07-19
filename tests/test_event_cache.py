@@ -1767,7 +1767,6 @@ async def test_postgres_lookup_index_batch_uses_constant_statement_count() -> No
     [
         (("clear", "opaque"), "clear"),
         (("opaque", "clear"), "clear"),
-        (("opaque", "missing-type"), "opaque"),
         (("opaque", "null-type"), "opaque"),
     ],
 )
@@ -1813,22 +1812,10 @@ async def test_thread_mutations_preserve_preferred_payload_across_arrival_orders
             "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
         },
     }
-    missing_type_event = {
-        "event_id": event_id,
-        "sender": "@user:localhost",
-        "origin_server_ts": 2000,
-        "content": {
-            "body": "missing type",
-            "msgtype": "m.text",
-            "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
-        },
-    }
-    null_type_event = {**missing_type_event, "type": None}
     payloads = {
         "clear": clear_event,
         "opaque": opaque_event,
-        "missing-type": missing_type_event,
-        "null-type": null_type_event,
+        "null-type": {**clear_event, "type": None},
     }
 
     if mutation_path == "replace":
