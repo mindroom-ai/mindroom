@@ -1158,9 +1158,9 @@ async def _bucket_opaque_thread_relations(
             continue
         redacted_event_id = event_source.get("redacts")
         if isinstance(redacted_event_id, str):
-            thread_id = resolved_thread_ids.get(redacted_event_id)
-            if thread_id is None and redacted_event_id in grouped:
-                thread_id = redacted_event_id
+            thread_id = resolved_thread_ids.get(redacted_event_id) or (
+                redacted_event_id if redacted_event_id in grouped else None
+            )
             if thread_id in grouped:
                 grouped[thread_id][event_id] = event_source
                 continue

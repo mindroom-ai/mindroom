@@ -1030,8 +1030,7 @@ class ThreadSyncWritePolicy:
                         raise_on_failure=raise_on_cache_write_failure,
                     )
                 elif (
-                    impact.state is MutationThreadImpactState.UNKNOWN
-                    or isinstance(event_source.get("redacts"), str)
+                    impact.state is MutationThreadImpactState.UNKNOWN or isinstance(event_source.get("redacts"), str)
                 ) and not room_threads_invalidated:
                     await self._cache_ops.invalidate_room_threads(
                         room_id,
