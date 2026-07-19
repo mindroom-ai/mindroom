@@ -46,6 +46,11 @@ class BotRuntimeView(Protocol):
     @property
     def runtime_started_at(self) -> float: ...  # noqa: D102
 
+    @property
+    def callback_failure_count(self) -> int: ...  # noqa: D102
+
+    def mark_callback_failed(self) -> None: ...  # noqa: D102
+
 
 @dataclass
 class BotRuntimeState:
