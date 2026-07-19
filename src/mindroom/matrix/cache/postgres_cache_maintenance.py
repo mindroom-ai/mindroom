@@ -113,7 +113,43 @@ async def _orphan_thread_index_count(db: AsyncConnection, *, namespace: str) -> 
                     AND events.event_id = event_threads.event_id
                     AND events.room_id = event_threads.room_id
             )
-            AND event_threads.event_id != event_threads.thread_id
+            AND NOT (
+                event_threads.event_id = event_threads.thread_id
+                AND (
+                    EXISTS (
+                        SELECT 1
+                        FROM mindroom_event_cache_event_threads AS child
+                        JOIN mindroom_event_cache_events AS child_event
+                            ON child_event.namespace = child.namespace
+                            AND child_event.event_id = child.event_id
+                            AND child_event.room_id = child.room_id
+                        WHERE child.namespace = event_threads.namespace
+                            AND child.room_id = event_threads.room_id
+                            AND child.thread_id = event_threads.thread_id
+                            AND child.event_id != child.thread_id
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM mindroom_event_cache_thread_events AS child_membership
+                        JOIN mindroom_event_cache_events AS child_event
+                            ON child_event.namespace = child_membership.namespace
+                            AND child_event.event_id = child_membership.event_id
+                            AND child_event.room_id = child_membership.room_id
+                        WHERE child_membership.namespace = event_threads.namespace
+                            AND child_membership.room_id = event_threads.room_id
+                            AND child_membership.thread_id = event_threads.thread_id
+                            AND child_membership.event_id != child_membership.thread_id
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM mindroom_event_cache_compacted_streaming_edits AS archived_child
+                        WHERE archived_child.namespace = event_threads.namespace
+                            AND archived_child.room_id = event_threads.room_id
+                            AND archived_child.indexed_thread_id = event_threads.thread_id
+                            AND archived_child.event_id != event_threads.thread_id
+                    )
+                )
+            )
         """,
         (namespace,),
     )
@@ -171,7 +207,43 @@ async def _repair_orphan_derived_rows(
                     AND events.event_id = event_threads.event_id
                     AND events.room_id = event_threads.room_id
             )
-            AND event_threads.event_id != event_threads.thread_id
+            AND NOT (
+                event_threads.event_id = event_threads.thread_id
+                AND (
+                    EXISTS (
+                        SELECT 1
+                        FROM mindroom_event_cache_event_threads AS child
+                        JOIN mindroom_event_cache_events AS child_event
+                            ON child_event.namespace = child.namespace
+                            AND child_event.event_id = child.event_id
+                            AND child_event.room_id = child.room_id
+                        WHERE child.namespace = event_threads.namespace
+                            AND child.room_id = event_threads.room_id
+                            AND child.thread_id = event_threads.thread_id
+                            AND child.event_id != child.thread_id
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM mindroom_event_cache_thread_events AS child_membership
+                        JOIN mindroom_event_cache_events AS child_event
+                            ON child_event.namespace = child_membership.namespace
+                            AND child_event.event_id = child_membership.event_id
+                            AND child_event.room_id = child_membership.room_id
+                        WHERE child_membership.namespace = event_threads.namespace
+                            AND child_membership.room_id = event_threads.room_id
+                            AND child_membership.thread_id = event_threads.thread_id
+                            AND child_membership.event_id != child_membership.thread_id
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM mindroom_event_cache_compacted_streaming_edits AS archived_child
+                        WHERE archived_child.namespace = event_threads.namespace
+                            AND archived_child.room_id = event_threads.room_id
+                            AND archived_child.indexed_thread_id = event_threads.thread_id
+                            AND archived_child.event_id != event_threads.thread_id
+                    )
+                )
+            )
         """,
         (namespace,),
     )

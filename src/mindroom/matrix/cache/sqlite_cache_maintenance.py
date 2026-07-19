@@ -127,7 +127,38 @@ _ORPHAN_THREAD_INDEX_PREDICATE = """
         WHERE events.event_id = event_threads.event_id
             AND events.room_id = event_threads.room_id
     )
-    AND event_threads.event_id != event_threads.thread_id
+    AND NOT (
+        event_threads.event_id = event_threads.thread_id
+        AND (
+            EXISTS (
+                SELECT 1
+                FROM event_threads AS child
+                JOIN events AS child_event
+                    ON child_event.event_id = child.event_id
+                    AND child_event.room_id = child.room_id
+                WHERE child.room_id = event_threads.room_id
+                    AND child.thread_id = event_threads.thread_id
+                    AND child.event_id != child.thread_id
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM thread_events AS child_membership
+                JOIN events AS child_event
+                    ON child_event.event_id = child_membership.event_id
+                    AND child_event.room_id = child_membership.room_id
+                WHERE child_membership.room_id = event_threads.room_id
+                    AND child_membership.thread_id = event_threads.thread_id
+                    AND child_membership.event_id != child_membership.thread_id
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM compacted_streaming_edits AS archived_child
+                WHERE archived_child.room_id = event_threads.room_id
+                    AND archived_child.indexed_thread_id = event_threads.thread_id
+                    AND archived_child.event_id != event_threads.thread_id
+            )
+        )
+    )
 """
 
 _ORPHAN_THREAD_EVENT_REFERENCE_PREDICATE = """

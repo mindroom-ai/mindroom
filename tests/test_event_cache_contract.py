@@ -976,6 +976,38 @@ async def test_snapshot_replacement_removes_compacted_members(
 
 
 @pytest.mark.asyncio
+async def test_restart_removes_unproven_thread_root_mapping(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """A learned root mapping without any surviving child evidence is an orphan."""
+    room_id = "!room:localhost"
+    thread_id = "$unfetched-root:localhost"
+    child = _message_event(
+        "$child:localhost",
+        2,
+        thread_id=thread_id,
+    )
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        await cache.store_event(str(child["event_id"]), room_id, child)
+        assert await cache.get_thread_id_for_event(room_id, thread_id) == thread_id
+        assert await cache.redact_event(room_id, str(child["event_id"])) is True
+    finally:
+        await cache.close()
+
+    restarted_cache = event_cache_factory()
+    await restarted_cache.initialize()
+    try:
+        assert await restarted_cache.get_thread_id_for_event(room_id, thread_id) is None
+        diagnostics = restarted_cache.runtime_diagnostics()
+        assert diagnostics["cache_orphan_thread_indexes_before"] == 1
+        assert diagnostics["cache_orphan_thread_indexes_after"] == 0
+    finally:
+        await restarted_cache.close()
+
+
+@pytest.mark.asyncio
 async def test_restart_preserves_learned_root_mapping_proven_by_cold_child(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
