@@ -1082,7 +1082,8 @@ class AgentBot:
     def _mark_callback_failed(self) -> None:
         """Mark sync certification unsafe after a Matrix callback failure."""
         self._runtime_view.mark_callback_failed()
-        self._sync_trust_state = SyncTrustState.UNCERTAIN
+        if self._sync_trust_state is not SyncTrustState.RESET_RECOVERY:
+            self._sync_trust_state = SyncTrustState.UNCERTAIN
         self._sync_checkpoint = None
         self._clear_saved_sync_token()
 
@@ -1097,7 +1098,11 @@ class AgentBot:
             if decision.reset_client_token and self.client is not None:
                 client = cast("Any", self.client)
                 client.next_batch = None
-            self._sync_trust_state = SyncTrustState.UNCERTAIN
+            # Keep RESET_RECOVERY when this decision reset the client token so the
+            # next limited initial window is consumed instead of reset-looping.
+            self._sync_trust_state = (
+                SyncTrustState.RESET_RECOVERY if decision.reset_client_token else SyncTrustState.UNCERTAIN
+            )
             self._sync_checkpoint = None
             self._clear_saved_sync_token()
             self.logger.warning(

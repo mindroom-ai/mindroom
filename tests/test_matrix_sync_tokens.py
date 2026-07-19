@@ -189,8 +189,8 @@ async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_legacy_plaintext_sync_token_forces_cold_sync(tmp_path: Path) -> None:
-    """Unbound legacy tokens cannot skip history outside the durable cache generation."""
+async def test_legacy_plaintext_sync_token_forces_initial_recovery(tmp_path: Path) -> None:
+    """Unbound legacy tokens cannot skip the tokenless initial recovery window."""
     bot = _agent_bot(tmp_path)
     token_path = _token_path(tmp_path, agent_name=bot.agent_name)
     token_path.parent.mkdir(parents=True, exist_ok=True)
@@ -209,7 +209,7 @@ async def test_legacy_plaintext_sync_token_forces_cold_sync(tmp_path: Path) -> N
         await bot.start()
 
     assert client.next_batch is None
-    assert bot._sync_trust_state is SyncTrustState.COLD
+    assert bot._sync_trust_state is SyncTrustState.RESET_RECOVERY
     assert token_path.exists()
 
     response = MagicMock(spec=nio.SyncResponse)
@@ -266,7 +266,7 @@ async def test_cache_generation_rejects_token_after_reset_crash_window(tmp_path:
         bot._restore_saved_sync_token()
 
         assert bot.client.next_batch is None
-        assert bot._sync_trust_state is SyncTrustState.COLD
+        assert bot._sync_trust_state is SyncTrustState.RESET_RECOVERY
         assert not _token_path(tmp_path).exists()
     finally:
         await restarted_cache.close()
@@ -302,7 +302,7 @@ async def test_unknown_pos_first_sync_clears_client_and_saved_token(tmp_path: Pa
 
     assert bot.client.next_batch is None
     assert _load_sync_token_value(tmp_path, bot.agent_name) is None
-    assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
+    assert bot._sync_trust_state is SyncTrustState.RESET_RECOVERY
 
 
 @pytest.mark.asyncio
@@ -351,7 +351,7 @@ async def test_unknown_pos_after_first_sync_clears_client_and_saved_token(tmp_pa
 
     assert bot.client.next_batch is None
     assert _load_sync_token_value(tmp_path, bot.agent_name) is None
-    assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
+    assert bot._sync_trust_state is SyncTrustState.RESET_RECOVERY
 
 
 @pytest.mark.asyncio
@@ -419,6 +419,43 @@ async def test_sync_response_side_effect_failure_clears_certified_checkpoint(tmp
     assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
     assert bot._sync_checkpoint is None
     assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+
+
+@pytest.mark.asyncio
+async def test_limited_sync_side_effect_failure_preserves_reset_recovery(tmp_path: Path) -> None:
+    """A post-reset side-effect failure must not make the next limited window reset again."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_after_limited"
+    limited_response = MagicMock(spec=nio.SyncResponse)
+    limited_response.next_batch = "s_after_limited"
+    limited_response.rooms = MagicMock(
+        join={"!room:localhost": MagicMock(timeline=MagicMock(events=[], limited=True))},
+    )
+    bot._emit_agent_lifecycle_event = AsyncMock(side_effect=RuntimeError("bot ready failed"))  # type: ignore[method-assign]
+
+    with (
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        pytest.raises(RuntimeError, match="bot ready failed"),
+    ):
+        await bot._on_sync_response(limited_response)
+
+    assert bot._runtime_view.callback_failure_count == 1
+    assert bot._sync_trust_state is SyncTrustState.RESET_RECOVERY
+    assert bot.client.next_batch is None
+
+    bot.client.next_batch = "s_after_recovery_window"
+    recovery_response = MagicMock(spec=nio.SyncResponse)
+    recovery_response.next_batch = "s_after_recovery_window"
+    recovery_response.rooms = MagicMock(
+        join={"!room:localhost": MagicMock(timeline=MagicMock(events=[], limited=True))},
+    )
+
+    with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+        await bot._on_sync_response(recovery_response)
+
+    assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
+    assert bot.client.next_batch == "s_after_recovery_window"
 
 
 @pytest.mark.asyncio
