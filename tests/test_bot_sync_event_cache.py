@@ -331,7 +331,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         token_record = load_sync_token_record(bot.storage_path, bot.agent_name)
         assert token_record is not None
-        assert token_record.token == "s_after_complete"  # noqa: S105
+        assert token_record.checkpoint.token == "s_after_complete"  # noqa: S105
         assert token_record.checkpoint == SyncCheckpoint("s_after_complete")
 
     @pytest.mark.asyncio
@@ -382,7 +382,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         token_record = load_sync_token_record(bot.storage_path, bot.agent_name)
         assert token_record is not None
-        assert token_record.token == "s_after_recovery"  # noqa: S105
+        assert token_record.checkpoint.token == "s_after_recovery"  # noqa: S105
         assert token_record.checkpoint == SyncCheckpoint("s_after_recovery")
 
     @pytest.mark.asyncio
@@ -397,7 +397,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         token_record = load_sync_token_record(bot.storage_path, bot.agent_name)
         assert token_record is not None
-        assert token_record.token == "s_after_empty"  # noqa: S105
+        assert token_record.checkpoint.token == "s_after_empty"  # noqa: S105
         assert token_record.checkpoint == SyncCheckpoint("s_after_empty")
 
     @pytest.mark.asyncio
