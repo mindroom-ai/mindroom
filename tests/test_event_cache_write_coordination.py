@@ -1086,6 +1086,72 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             await coordinator.close()
 
     @pytest.mark.asyncio
+    async def test_point_read_barrier_waits_for_queued_predecessor(self) -> None:
+        """The point-read fence must include predecessors queued but not yet started."""
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        queued_predecessor_started = asyncio.Event()
+        release_queued_predecessor = asyncio.Event()
+        later_started = asyncio.Event()
+        release_later = asyncio.Event()
+        coordinator = _runtime_write_coordinator()
+
+        async def first_update() -> None:
+            first_started.set()
+            await release_first.wait()
+
+        async def queued_predecessor() -> None:
+            queued_predecessor_started.set()
+            await release_queued_predecessor.wait()
+
+        async def later_update() -> None:
+            later_started.set()
+            await release_later.wait()
+
+        first_task = coordinator.queue_room_update(
+            "!test:localhost",
+            first_update,
+            name="first_room_update",
+        )
+        await first_started.wait()
+        queued_predecessor_task = coordinator.queue_room_update(
+            "!test:localhost",
+            queued_predecessor,
+            name="queued_predecessor",
+        )
+        read_barrier = asyncio.create_task(
+            coordinator.wait_for_prior_room_updates("!test:localhost"),
+        )
+        await asyncio.sleep(0)
+        later_task = coordinator.queue_room_update(
+            "!test:localhost",
+            later_update,
+            name="later_room_update",
+        )
+
+        try:
+            release_first.set()
+            await queued_predecessor_started.wait()
+            await asyncio.sleep(0)
+            assert read_barrier.done() is False
+
+            release_queued_predecessor.set()
+            await later_started.wait()
+            await asyncio.wait_for(read_barrier, timeout=1.0)
+            assert later_task.done() is False
+        finally:
+            release_first.set()
+            release_queued_predecessor.set()
+            release_later.set()
+            await asyncio.gather(
+                first_task,
+                queued_predecessor_task,
+                later_task,
+                return_exceptions=True,
+            )
+            await coordinator.close()
+
+    @pytest.mark.asyncio
     async def test_wait_for_thread_idle_ignores_cancelled_room_fence_for_unrelated_thread(self) -> None:
         """Thread reads should ignore cancelled room fences that only preserve write ordering."""
         first_thread_started = asyncio.Event()

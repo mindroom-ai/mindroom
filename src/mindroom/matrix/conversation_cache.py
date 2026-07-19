@@ -524,7 +524,13 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
         if turn_cache is not None and cache_key in turn_cache:
             cached_lookup = turn_cache[cache_key]
-            if cached_lookup.fetched_event_source is not None:
+            requires_lookup_fill = (
+                persist_lookup_fill
+                and not cached_lookup.lookup_fill_persisted
+                and cached_lookup.fetched_event_source is not None
+            )
+            if requires_lookup_fill:
+                assert cached_lookup.fetched_event_source is not None
                 await self._persist_lookup_fill(
                     room_id=room_id,
                     event_id=normalized_event_id,
