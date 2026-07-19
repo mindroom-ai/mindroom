@@ -48,6 +48,8 @@ Each principal keeps a runtime departed-room fence after purge commit, and every
 
 A proactive multi-room leave fences and durably purges each room immediately after its leave succeeds and before processing the next room.
 
+Each leave request and its confirmed cleanup run as one shielded operation, so caller cancellation waits for the final leave outcome and purge before propagating.
+
 Raising a room fence also records the durable purge synchronously, so cancellation before the queued purge coroutine starts cannot let a later rejoin expose pre-leave rows.
 
 Reads recheck the fence after the backend callback and PostgreSQL transaction completes, so a result obtained before a leave cannot be returned after that leave is observed.

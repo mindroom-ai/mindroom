@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -711,6 +712,34 @@ async def filter_non_dm_rooms(client: nio.AsyncClient, room_ids: list[str]) -> l
     return [room_id for room_id in room_ids if not await is_dm_room(client, room_id)]
 
 
+async def _leave_room_and_cleanup(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    on_room_left: Callable[[str], Awaitable[None]],
+) -> bool:
+    """Finish one leave outcome and its confirmed cleanup as one operation."""
+    success = await leave_room(client, room_id)
+    if success:
+        logger.info("room_left", room_id=room_id)
+        await on_room_left(room_id)
+    else:
+        logger.error("room_leave_failed", room_id=room_id)
+    return success
+
+
+async def _await_leave_operation(task: asyncio.Task[bool]) -> tuple[bool, asyncio.CancelledError | None]:
+    """Await a leave operation to completion without letting caller cancellation abort cleanup."""
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            return await asyncio.shield(task), cancellation
+        except asyncio.CancelledError as exc:
+            if task.done():
+                return task.result(), cancellation or exc
+            cancellation = cancellation or exc
+
+
 async def leave_non_dm_rooms(
     client: nio.AsyncClient,
     room_ids: list[str],
@@ -723,11 +752,17 @@ async def leave_non_dm_rooms(
         if await is_dm_room(client, room_id):
             logger.debug("dm_room_preserved", room_id=room_id)
             continue
-        success = await leave_room(client, room_id)
+        operation = asyncio.create_task(
+            _leave_room_and_cleanup(
+                client,
+                room_id,
+                on_room_left=on_room_left,
+            ),
+            name="matrix_leave_room_and_cleanup",
+        )
+        success, cancellation = await _await_leave_operation(operation)
         if success:
-            logger.info("room_left", room_id=room_id)
             left_room_ids.append(room_id)
-            await on_room_left(room_id)
-        else:
-            logger.error("room_leave_failed", room_id=room_id)
+        if cancellation is not None:
+            raise cancellation
     return left_room_ids

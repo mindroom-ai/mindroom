@@ -147,6 +147,25 @@ async def _assert_redacted_events_do_not_resurrect(
         await reopened_root.close()
 
 
+async def _assert_room_purge_survives_restart(
+    event_cache_factory: Callable[[], ConversationEventCache],
+    *,
+    principal_id: str,
+    room_id: str,
+    event_id: str,
+    mxc_url: str,
+) -> None:
+    """Reopen a backend and prove one departed principal-room remains empty."""
+    reopened_root = _shared_cache(event_cache_factory)
+    await reopened_root.initialize()
+    reopened = reopened_root.for_principal(principal_id)
+    try:
+        assert await reopened.get_event(room_id, event_id) is None
+        assert await _raw_mxc_text_count(reopened, room_id, mxc_url) == 0
+    finally:
+        await reopened_root.close()
+
+
 @pytest.mark.asyncio
 async def test_room_scope_is_part_of_event_and_plaintext_identity(
     event_cache_factory: Callable[[], ConversationEventCache],
@@ -856,14 +875,84 @@ async def test_proactive_leave_purges_each_room_before_processing_the_next(
             await asyncio.gather(leave_task, return_exceptions=True)
         await root.close()
 
-    reopened_root = _shared_cache(event_cache_factory)
-    await reopened_root.initialize()
-    reopened = reopened_root.for_principal(principal_id)
+    await _assert_room_purge_survives_restart(
+        event_cache_factory,
+        principal_id=principal_id,
+        room_id=departed_room_id,
+        event_id=event_id,
+        mxc_url=mxc_url,
+    )
+
+
+@pytest.mark.asyncio
+async def test_proactive_leave_cancellation_after_server_commit_finishes_cleanup(
+    event_cache_factory: Callable[[], ConversationEventCache],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation cannot abort cleanup after the homeserver commits a leave."""
+    root = _shared_cache(event_cache_factory)
+    await root.initialize()
+    principal_id = "@alice:localhost"
+    cache = root.for_principal(principal_id)
+    room_id = "!departed:localhost"
+    event_id = "$sidecar"
+    mxc_url = "mxc://server/departed"
+    event = _event(event_id, 1, sidecar_url=mxc_url, encrypted=True)
+    server_committed = asyncio.Event()
+    deliver_response = asyncio.Event()
+    leave_request_cancelled = False
+
+    async def is_dm_room(_client: object, _room_id: str) -> bool:
+        return False
+
+    async def leave_room(_client: object, _room_id: str) -> bool:
+        nonlocal leave_request_cancelled
+        server_committed.set()
+        try:
+            await deliver_response.wait()
+        except asyncio.CancelledError:
+            leave_request_cancelled = True
+            raise
+        return True
+
+    monkeypatch.setattr("mindroom.matrix.rooms.is_dm_room", is_dm_room)
+    monkeypatch.setattr("mindroom.matrix.rooms.leave_room", leave_room)
+    await cache.store_event(event_id, room_id, event)
+    assert await cache.store_mxc_text(room_id, event_id, mxc_url, "departed plaintext")
+
+    leave_task = asyncio.create_task(
+        leave_non_dm_rooms(
+            cast("Any", object()),
+            [room_id],
+            on_room_left=cache.purge_room,
+        ),
+    )
     try:
-        assert await reopened.get_event(departed_room_id, event_id) is None
-        assert await _raw_mxc_text_count(reopened, departed_room_id, mxc_url) == 0
+        await server_committed.wait()
+        leave_task.cancel()
+        deliver_response.set()
+        with pytest.raises(asyncio.CancelledError):
+            await leave_task
+
+        assert leave_request_cancelled is False
+        assert cache.room_departure_epoch(room_id) > 0
+        assert await cache.get_event(room_id, event_id) is None
+        assert await cache.get_mxc_text(room_id, event_id, mxc_url) is None
+        assert await _raw_mxc_text_count(cache, room_id, mxc_url) == 0
     finally:
-        await reopened_root.close()
+        deliver_response.set()
+        if not leave_task.done():
+            leave_task.cancel()
+            await asyncio.gather(leave_task, return_exceptions=True)
+        await root.close()
+
+    await _assert_room_purge_survives_restart(
+        event_cache_factory,
+        principal_id=principal_id,
+        room_id=room_id,
+        event_id=event_id,
+        mxc_url=mxc_url,
+    )
 
 
 @pytest.mark.asyncio
