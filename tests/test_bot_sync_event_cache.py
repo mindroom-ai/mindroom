@@ -486,6 +486,37 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         event_cache.disable.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_limited_sync_event_write_failure_preserves_gap_marker(self, bot: AgentBot) -> None:
+        """A later event-write failure must not replace the durable limited-timeline reason."""
+        room_id = "!room:localhost"
+        write_error = RuntimeError("event write failed")
+        event_cache = _runtime_event_cache()
+        event_cache.store_events_batch = AsyncMock(side_effect=write_error)
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+        message_event = nio.RoomMessageText.from_dict(
+            {
+                "content": {"body": "Partial window message", "msgtype": "m.text"},
+                "event_id": "$partial:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        result = await bot._conversation_cache.cache_sync_timeline_for_certification(
+            self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[message_event], limited=True))}),
+        )
+
+        assert result.complete is False
+        assert result.errors == (write_error,)
+        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            room_id,
+            reason="limited_sync_timeline",
+        )
+
+    @pytest.mark.asyncio
     async def test_limited_rooms_reported_when_cache_runtime_unavailable(self, bot: AgentBot) -> None:
         """Limited classification must reach the certifier even when cache writes are unavailable."""
         room_id = "!room:localhost"

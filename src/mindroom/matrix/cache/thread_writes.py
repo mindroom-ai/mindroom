@@ -1052,16 +1052,18 @@ class ThreadSyncWritePolicy:
         limited_timeline: bool,
         raise_on_cache_write_failure: bool,
     ) -> None:
+        if limited_timeline:
+            # A limited timeline skipped events, so this room's cached thread
+            # snapshots must durably stop being trusted before the partial
+            # window is admitted.
+            await self._cache_ops.invalidate_room_threads(
+                room_id,
+                reason=_LIMITED_SYNC_TIMELINE_REASON,
+                raise_on_failure=raise_on_cache_write_failure,
+            )
+        if not plain_events and not threaded_events and not redacted_event_ids:
+            return
         try:
-            if limited_timeline:
-                # A limited timeline skipped events, so this room's cached thread
-                # snapshots must durably stop being trusted before the partial
-                # window is admitted.
-                await self._cache_ops.invalidate_room_threads(
-                    room_id,
-                    reason=_LIMITED_SYNC_TIMELINE_REASON,
-                    raise_on_failure=raise_on_cache_write_failure,
-                )
             plain_batch = [
                 (event_id, room_id, event_source)
                 for event_source in plain_events
@@ -1102,7 +1104,7 @@ class ThreadSyncWritePolicy:
                 raise_on_cache_write_failure=raise_on_cache_write_failure,
             )
         except Exception:
-            if raise_on_cache_write_failure:
+            if raise_on_cache_write_failure and not limited_timeline:
                 await self._cache_ops.invalidate_room_threads(
                     room_id,
                     reason=_SYNC_TIMELINE_WRITE_FAILED_REASON,
