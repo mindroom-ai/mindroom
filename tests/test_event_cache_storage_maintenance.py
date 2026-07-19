@@ -15,6 +15,7 @@ from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
 from mindroom.matrix.cache import (
+    ThreadCacheState,
     postgres_event_cache,
     sqlite_event_cache,
 )
@@ -47,6 +48,12 @@ def _message_event(event_id: str, *, thread_id: str | None = None) -> dict[str, 
         "origin_server_ts": 10,
         "content": content,
     }
+
+
+def _assert_missing_source_state(state: ThreadCacheState | None) -> None:
+    assert state is not None
+    assert state.validated_at is None
+    assert state.invalidation_reason == "schema_migration_missing_thread_event_source"
 
 
 async def _prepare_sqlite_version_10(db_path: Path) -> None:
@@ -207,20 +214,21 @@ async def _prepare_postgres_version_1(database_url: str, *, namespace: str, othe
                 """,
                 (row_namespace, _ROOM_ID, _THREAD_ID, _CHILD_ID, 10, child_json),
             )
-        await db.execute(
-            """
-            INSERT INTO mindroom_event_cache_thread_events(
-                namespace,
-                room_id,
-                thread_id,
-                event_id,
-                origin_server_ts,
-                event_json
+        for row_namespace in (namespace, other_namespace):
+            await db.execute(
+                """
+                INSERT INTO mindroom_event_cache_thread_events(
+                    namespace,
+                    room_id,
+                    thread_id,
+                    event_id,
+                    origin_server_ts,
+                    event_json
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (row_namespace, _ROOM_ID, _THREAD_ID, _MISSING_ID, 11, missing_json),
             )
-            VALUES (%s, %s, %s, %s, %s, %s)
-            """,
-            (namespace, _ROOM_ID, _THREAD_ID, _MISSING_ID, 11, missing_json),
-        )
         for event_id, thread_id in (
             (_THREAD_ID, _THREAD_ID),
             (_ORPHAN_ID, "$unlearned:localhost"),
@@ -429,7 +437,7 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
         await other_cache.initialize()
         try:
             other_diagnostics = other_cache.runtime_diagnostics()
-            assert other_diagnostics["cache_normalized_legacy_thread_payload_rows"] == 1
+            assert other_diagnostics["cache_normalized_legacy_thread_payload_rows"] == 2
             cursor = await other_cache._runtime.require_db().execute(
                 """
                 SELECT event_json
@@ -440,6 +448,11 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
             )
             assert await cursor.fetchone() == (None,)
             await cursor.close()
+            assert await other_cache.get_thread_events(_ROOM_ID, _THREAD_ID) == [
+                _message_event(_CHILD_ID, thread_id=_THREAD_ID),
+            ]
+            other_stale_state = await other_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+            _assert_missing_source_state(other_stale_state)
         finally:
             await other_cache.close()
 

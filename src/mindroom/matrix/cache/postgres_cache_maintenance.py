@@ -40,7 +40,6 @@ async def migrate_postgres_schema(
         raise RuntimeError(msg)
 
     migrated_from = 1 if current_schema_version == 1 else None
-    migrated_legacy_payload_rows: int | None = None
     if migrated_from is not None:
         await db.execute(
             """
@@ -48,16 +47,17 @@ async def migrate_postgres_schema(
             ALTER COLUMN event_json DROP NOT NULL
             """,
         )
-        legacy_payload_row = await fetchone(
-            db,
-            """
-            SELECT COUNT(*)
-            FROM mindroom_event_cache_thread_events
-            WHERE namespace = %s AND event_json IS NOT NULL
-            """,
-            (namespace,),
-        )
-        migrated_legacy_payload_rows = 0 if legacy_payload_row is None else int(legacy_payload_row[0])
+
+    normalized_legacy_thread_payload_rows = await rowcount(
+        db,
+        """
+        UPDATE mindroom_event_cache_thread_events
+        SET event_json = NULL
+        WHERE namespace = %s AND event_json IS NOT NULL
+        """,
+        (namespace,),
+    )
+    if normalized_legacy_thread_payload_rows:
         await db.execute(
             """
             INSERT INTO mindroom_event_cache_thread_state(
@@ -116,17 +116,6 @@ async def migrate_postgres_schema(
             (namespace,),
         )
 
-    normalized_legacy_thread_payload_rows = await rowcount(
-        db,
-        """
-        UPDATE mindroom_event_cache_thread_events
-        SET event_json = NULL
-        WHERE namespace = %s AND event_json IS NOT NULL
-        """,
-        (namespace,),
-    )
-    if migrated_legacy_payload_rows is not None:
-        normalized_legacy_thread_payload_rows = migrated_legacy_payload_rows
     await db.execute(
         """
         INSERT INTO mindroom_event_cache_metadata(key, value)
