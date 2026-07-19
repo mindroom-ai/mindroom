@@ -329,6 +329,7 @@ async def test_sqlite_version_10_migrates_without_reset_and_repairs_orphans(tmp_
         assert diagnostics["cache_repaired_edit_indexes"] == 1
         assert diagnostics["cache_repaired_thread_indexes"] == 1
         assert diagnostics["cache_normalized_legacy_thread_payload_rows"] == 2
+        assert diagnostics["cache_storage_bytes"] > 0
         assert cached_thread == [_message_event(_CHILD_ID, thread_id=_THREAD_ID)]
         assert stale_state is not None
         assert stale_state.validated_at is None
