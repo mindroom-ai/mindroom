@@ -546,7 +546,7 @@ Common `just` recipes for development:
 just local-matrix-up              # Boot Synapse + Postgres dev stack
 just local-platform-compose-up    # Full SaaS sandbox
 
-# Testing (IMPORTANT: enter `nix-shell shell.nix` first on NixOS hosts)
+# Testing (IMPORTANT: enter the Node.js 24 `nix-shell shell.nix` first on NixOS hosts)
 # If `uv run pytest` fails with 'module mindroom has no attribute bot',
 # use the repo dev shell so `libstdc++.so.6` is available:
 nix-shell shell.nix
@@ -576,10 +576,10 @@ Matty is a Matrix CLI client that allows you to interact with MindRoom AI agents
 
 ### Prerequisites
 ```bash
-# Matty is installed as a project dependency
-# Activate the virtual environment
+# Matty is optional and is not installed by `uv sync --all-extras`
+# Activate an environment where Matty is installed
 source .venv/bin/activate
-# Now you can use matty directly
+# If Matty is unavailable, use the authenticated raw Matrix client API
 ```
 
 ### Configuration

@@ -515,12 +515,12 @@ async def _generate_compaction_summary_with_retry(
     summary_prompt: str,
     token_estimator: Callable[[str], int],
 ) -> _GeneratedSummaryChunk:
-    """Generate one summary chunk, shrinking the input per the retry policy when safe."""
+    """Generate one summary chunk, retrying the same or smaller input when safe."""
     summary_input = initial_summary_input
     included_runs = initial_included_runs
     budget = summary_input_budget
     retry_policy = DEFAULT_SUMMARY_RETRY_POLICY
-    minimum_input_tokens = _minimum_lossless_input_tokens(
+    minimum_progress_input_tokens = _minimum_progress_input_tokens(
         previous_summary=previous_summary,
         first_run=compactable_runs[0],
         token_estimator=token_estimator,
@@ -565,10 +565,14 @@ async def _generate_compaction_summary_with_retry(
                 attempt=attempt,
                 budget=budget,
                 input_tokens=estimated_input_tokens,
-                minimum_input_tokens=minimum_input_tokens,
+                minimum_progress_input_tokens=minimum_progress_input_tokens,
                 error=exc,
             )
             if retry_decision is not None:
+                if retry_decision.kind == "same-budget-transient":
+                    await asyncio.sleep(retry_policy.same_input_retry_delay_seconds)
+                    attempt += 1
+                    continue
                 rebuilt_input, rebuilt_runs = _build_summary_input(
                     previous_summary=previous_summary,
                     compacted_runs=compactable_runs,
@@ -679,13 +683,13 @@ def _build_oversized_summary_input(
     return _compose_summary_input(summary_block, oversized_excerpt), [first_run]
 
 
-def _minimum_lossless_input_tokens(
+def _minimum_progress_input_tokens(
     *,
     previous_summary: str | None,
     first_run: RunOutput | TeamRunOutput,
     token_estimator: Callable[[str], int],
 ) -> int:
-    """Return the smallest shrink budget keeping the complete prior summary plus one minimal run.
+    """Return the smallest shrink budget preserving the prior summary and one run envelope.
 
     Below this size ``_build_summary_input`` rebuilds to a run-less input
     because the previous-summary block alone swallows the envelope, so

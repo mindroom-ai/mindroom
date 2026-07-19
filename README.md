@@ -114,7 +114,7 @@ See the [hosted Matrix deployment guide](docs/deployment/hosted-matrix.md) for f
 
 ### Self-hosted, from source
 
-Requires Python 3.12+ and [uv](https://github.com/astral-sh/uv); Node.js 20+ with [bun](https://bun.sh/) is optional for building the web dashboard.
+Requires Python 3.12+ and [uv](https://github.com/astral-sh/uv); the repo dev shell provides Node.js 24 with [bun](https://bun.sh/) for optionally building the web dashboard.
 
 ```bash
 git clone https://github.com/mindroom-ai/mindroom

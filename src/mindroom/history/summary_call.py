@@ -18,9 +18,9 @@ It enforces the call-side half of the compaction invariants
    ``SummaryRetryPolicy`` decides which error classes warrant a smaller retry
    (timeouts, typed context-window and safeguard errors, empty results, output
    limits, and named legacy context-length fragments), the shrink schedule
-   (halving, clamped to the caller's smallest lossless rebuild), and the
+   (halving, clamped to the caller's smallest progress-preserving rebuild), and the
    give-up floor — no inline string matching at call sites. Selected typed
-   transient provider errors get one same-budget retry.
+   transient provider errors get one delayed same-budget retry.
 
 5. Output-capped summaries use an explicit retry signal.
    ``generate_compaction_summary`` refuses to return a likely truncated summary,
@@ -48,7 +48,7 @@ from agno.session.summary import SessionSummary
 from mindroom.cancellation import request_task_cancel
 from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
-from mindroom.error_handling import ModelSafeguardRefusalError
+from mindroom.error_handling import TRANSIENT_PROVIDER_STATUS_CODES, ModelSafeguardRefusalError
 from mindroom.history.types import COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
@@ -61,16 +61,12 @@ logger = get_logger(__name__)
 
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
 
-# Deliberately narrower than ``TRANSIENT_PROVIDER_STATUS_CODES``. Status 502 is
-# excluded because ``ModelProviderError`` uses it for unclassified errors;
-# default-502 errors retry only when their cause chain proves a typed network
-# failure. Explicit 408/500/504 responses are excluded separately as a
-# conservative scope decision: only observed 429/503/529 summary-call failures
-# receive a status-based retry. Safeguard refusals shrink before either path.
-_TRANSIENT_SUMMARY_STATUS_CODES = frozenset({429, 503, 529})
+# Status 502 is excluded because ``ModelProviderError`` uses it for unclassified
+# errors. Default-502 errors retry only when their cause chain proves a typed
+# network failure. Safeguard refusals shrink before either transient path.
+_TRANSIENT_SUMMARY_STATUS_CODES = TRANSIENT_PROVIDER_STATUS_CODES - {502}
 
-_RETRYABLE_PROVIDER_ERROR_FRAGMENTS = (
-    "timed out",
+_SHRINKABLE_PROVIDER_ERROR_FRAGMENTS = (
     "context length",
     "context_length_exceeded",
     "too many tokens",
@@ -84,6 +80,7 @@ _RETRYABLE_PROVIDER_ERROR_FRAGMENTS = (
     "request too large",
     "reduce the length",
 )
+_TIMEOUT_PROVIDER_ERROR_FRAGMENT = "timed out"
 
 
 def _has_typed_network_cause(error: ModelProviderError) -> bool:
@@ -108,12 +105,30 @@ def _has_typed_network_cause(error: ModelProviderError) -> bool:
     return False
 
 
+def _is_same_budget_transient(error: Exception) -> bool:
+    """Return whether a provider failure warrants one unchanged retry."""
+    if not isinstance(error, ModelProviderError):
+        return False
+    if error.status_code in _TRANSIENT_SUMMARY_STATUS_CODES:
+        return True
+    return error.status_code == 502 and _has_typed_network_cause(error)
+
+
 class CompactionSummaryOutputLimitError(RuntimeError):
     """Raised when the summary response reaches the configured output-token cap."""
 
 
 class _CompactionSummaryEmptyResultError(RuntimeError):
     """Raised when the summary model returns a success response with no text."""
+
+
+_TYPED_SHRINKABLE_ERRORS = (
+    _CompactionSummaryEmptyResultError,
+    TimeoutError,
+    ContextWindowExceededError,
+    ModelSafeguardRefusalError,
+    CompactionSummaryOutputLimitError,
+)
 
 
 @dataclass(frozen=True)
@@ -130,27 +145,24 @@ class SummaryRetryPolicy:
 
     Each shrinkable failure divides the actual serialized input size by
     ``shrink_divisor``, clamped to the shared compaction-summary retry floor
-    and to the caller's smallest lossless rebuild, while selected typed
-    transient failures retry the same configured budget.
+    and to the caller's smallest progress-preserving rebuild, while selected typed
+    transient failures wait ``same_input_retry_delay_seconds`` and retry the
+    same configured budget.
     Once ``max_attempts`` is reached or no retry applies, the error propagates.
     """
 
     max_attempts: int = 2
     shrink_divisor: int = 2
+    same_input_retry_delay_seconds: float = 1.0
 
     def should_shrink(self, error: Exception) -> bool:
         """Return whether rebuilding a smaller summary input may resolve the failure."""
-        if isinstance(
-            error,
-            TimeoutError
-            | ContextWindowExceededError
-            | CompactionSummaryOutputLimitError
-            | ModelSafeguardRefusalError
-            | _CompactionSummaryEmptyResultError,
-        ):
+        if isinstance(error, _TYPED_SHRINKABLE_ERRORS):
             return True
         message = str(error).lower()
-        return any(fragment in message for fragment in _RETRYABLE_PROVIDER_ERROR_FRAGMENTS)
+        if any(fragment in message for fragment in _SHRINKABLE_PROVIDER_ERROR_FRAGMENTS):
+            return True
+        return _TIMEOUT_PROVIDER_ERROR_FRAGMENT in message and not _is_same_budget_transient(error)
 
     def retry_budget(
         self,
@@ -158,18 +170,17 @@ class SummaryRetryPolicy:
         attempt: int,
         budget: int,
         input_tokens: int,
-        minimum_input_tokens: int,
+        minimum_progress_input_tokens: int,
         error: Exception,
     ) -> SummaryRetryDecision | None:
         """Return the next retry action, or None when retries end.
 
         The decision kind is authoritative so callers cannot independently
         reclassify the error and apply shrink-only safeguards to a same-budget
-        transient retry. ``minimum_input_tokens`` is the smallest budget at
-        which the caller can rebuild without dropping the prior summary or
-        every run; shrink targets clamp there so a granted shrink is only
-        issued when it rebuilds to a strictly smaller request that still
-        carries summarizable content.
+        transient retry. ``minimum_progress_input_tokens`` is the smallest budget
+        at which the caller can rebuild without dropping the prior summary or
+        every run; shrink targets clamp there so a granted shrink is issued only
+        when it rebuilds to a strictly smaller request with summarizable content.
         """
         if attempt >= self.max_attempts:
             return None
@@ -178,17 +189,14 @@ class SummaryRetryPolicy:
                 budget,
                 max(
                     COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
-                    minimum_input_tokens,
+                    minimum_progress_input_tokens,
                     input_tokens // self.shrink_divisor,
                 ),
             )
             if smaller_budget < input_tokens:
                 return SummaryRetryDecision(budget=smaller_budget, kind="shrink")
-        if isinstance(error, ModelProviderError):
-            if error.status_code in _TRANSIENT_SUMMARY_STATUS_CODES:
-                return SummaryRetryDecision(budget=budget, kind="same-budget-transient")
-            if error.status_code == 502 and _has_typed_network_cause(error):
-                return SummaryRetryDecision(budget=budget, kind="same-budget-transient")
+        if _is_same_budget_transient(error):
+            return SummaryRetryDecision(budget=budget, kind="same-budget-transient")
         return None
 
 

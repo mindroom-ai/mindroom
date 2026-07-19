@@ -146,14 +146,14 @@ def _retry_budget_value(
     attempt: int,
     budget: int,
     input_tokens: int,
-    minimum_input_tokens: int = 0,
+    minimum_progress_input_tokens: int = 0,
     error: Exception,
 ) -> int | None:
     decision = policy.retry_budget(
         attempt=attempt,
         budget=budget,
         input_tokens=input_tokens,
-        minimum_input_tokens=minimum_input_tokens,
+        minimum_progress_input_tokens=minimum_progress_input_tokens,
         error=error,
     )
     return None if decision is None else decision.budget
@@ -804,27 +804,27 @@ def test_retry_policy_shrinks_from_actual_serialized_input_size() -> None:
     )
 
 
-def test_retry_policy_clamps_shrink_target_to_minimum_lossless_input() -> None:
+def test_retry_policy_clamps_shrink_target_to_minimum_progress_input() -> None:
     """A durable summary above half the failed input raises the shrink target instead of cancelling it."""
     decision = DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(
         attempt=1,
         budget=10_000,
         input_tokens=8_573,
-        minimum_input_tokens=6_230,
+        minimum_progress_input_tokens=6_230,
         error=ModelSafeguardRefusalError("provider-specific refusal wording"),
     )
 
     assert decision == SummaryRetryDecision(budget=6_230, kind="shrink")
 
 
-def test_retry_policy_declines_shrink_when_no_smaller_lossless_input_exists() -> None:
-    """An input already at the lossless minimum gets no shrink retry (bounded degrade)."""
+def test_retry_policy_declines_shrink_when_no_smaller_progress_input_exists() -> None:
+    """An input already at the progress minimum gets no shrink retry."""
     assert (
         DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(
             attempt=1,
             budget=10_000,
             input_tokens=6_230,
-            minimum_input_tokens=6_230,
+            minimum_progress_input_tokens=6_230,
             error=TimeoutError(),
         )
         is None
@@ -837,7 +837,7 @@ def test_retry_policy_shrink_classification_precedes_transient_status() -> None:
         attempt=1,
         budget=16_000,
         input_tokens=6_000,
-        minimum_input_tokens=0,
+        minimum_progress_input_tokens=0,
         error=error,
     )
 
@@ -852,7 +852,7 @@ def test_retry_policy_falls_through_to_transient_retry_when_input_cannot_shrink(
         attempt=1,
         budget=16_000,
         input_tokens=1_000,
-        minimum_input_tokens=0,
+        minimum_progress_input_tokens=0,
         error=error,
     )
 
@@ -894,14 +894,14 @@ def test_retry_policy_does_not_resend_non_transient_shrink_errors_at_floor() -> 
     )
 
 
-@pytest.mark.parametrize("status_code", [429, 503, 529])
-def test_retry_policy_retries_selected_transient_provider_errors_at_same_budget(status_code: int) -> None:
+@pytest.mark.parametrize("status_code", [200, 408, 409, 429, 500, 503, 504, 529])
+def test_retry_policy_retries_transient_provider_errors_at_same_budget(status_code: int) -> None:
     error = ModelProviderError("temporary provider failure", status_code=status_code)
     decision = DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(
         attempt=1,
         budget=16_000,
         input_tokens=4_000,
-        minimum_input_tokens=0,
+        minimum_progress_input_tokens=0,
         error=error,
     )
 
@@ -920,7 +920,7 @@ def test_retry_policy_retries_selected_transient_provider_errors_at_same_budget(
     )
 
 
-@pytest.mark.parametrize("status_code", [400, 401, 408, 500, 502, 504])
+@pytest.mark.parametrize("status_code", [400, 401, 404, 422, 502])
 def test_retry_policy_does_not_retry_non_transient_provider_statuses(status_code: int) -> None:
     error = ModelProviderError("provider failure", status_code=status_code)
 
@@ -1183,16 +1183,14 @@ async def test_retry_helper_honors_transient_fallthrough_for_shrink_message_at_f
             recovered_summary,
         ],
     )
+    retry_sleep = AsyncMock()
 
     with (
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
             new=generate_summary,
         ),
-        patch(
-            "mindroom.history.compaction._build_summary_input",
-            return_value=("same-budget rebuilt request", [run]),
-        ) as build_summary_input,
+        patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
     ):
         generated = await _generate_compaction_summary_with_retry(
             model=FakeModel(id="summary-model", provider="fake"),
@@ -1213,9 +1211,9 @@ async def test_retry_helper_honors_transient_fallthrough_for_shrink_message_at_f
     assert generate_summary.await_count == 2
     assert [call.kwargs["summary_input"] for call in generate_summary.await_args_list] == [
         "original request",
-        "same-budget rebuilt request",
+        "original request",
     ]
-    assert build_summary_input.call_args.kwargs["max_input_tokens"] == 4_000
+    retry_sleep.assert_awaited_once_with(DEFAULT_SUMMARY_RETRY_POLICY.same_input_retry_delay_seconds)
 
 
 @pytest.mark.asyncio
@@ -1271,8 +1269,8 @@ async def test_retry_helper_shrinks_around_a_large_durable_summary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_retry_helper_propagates_error_when_no_smaller_lossless_input_exists() -> None:
-    """An input already at the lossless minimum fails after one call without a run-less request."""
+async def test_retry_helper_propagates_error_when_no_smaller_progress_input_exists() -> None:
+    """An input at the progress minimum fails after one call without a run-less request."""
     previous_summary = "s" * 24_000
     runs = [_completed_run("run-1", padding=2_000)]
     summary_input_budget = 6_100
@@ -1804,15 +1802,13 @@ async def test_compaction_retries_transient_provider_error_at_same_budget(
             raise first_error
         return SessionSummary(summary="recovered summary", updated_at=datetime.now(UTC))
 
+    retry_sleep = AsyncMock()
     with (
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(side_effect=flaky_summary),
         ),
-        patch(
-            "mindroom.history.compaction._build_summary_input",
-            wraps=_build_summary_input,
-        ) as build_summary_input_spy,
+        patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
     ):
         outcome = await compact_scope_history(
             storage=storage,
@@ -1833,7 +1829,7 @@ async def test_compaction_retries_transient_provider_error_at_same_budget(
     assert outcome.compacted_run_count == 1
     assert len(attempts) == 2
     assert attempts[1] == attempts[0]
-    assert [call.kwargs["max_input_tokens"] for call in build_summary_input_spy.call_args_list] == [10_000, 10_000]
+    retry_sleep.assert_awaited_once_with(DEFAULT_SUMMARY_RETRY_POLICY.same_input_retry_delay_seconds)
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
     assert persisted.summary is not None
