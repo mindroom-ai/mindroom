@@ -18,6 +18,8 @@ from mindroom.matrix.cache import (
 )
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
+from mindroom.matrix.rooms import leave_non_dm_rooms
+from tests.event_cache_test_support import replace_thread_unconditionally
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -755,6 +757,113 @@ async def test_redaction_reference_lifecycle_is_durable_and_non_resurrecting(
             ("$edit", room_id, edit),
         ],
     )
+
+
+@pytest.mark.asyncio
+async def test_thread_refresh_prunes_only_plaintext_absent_from_replacement(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """A replacement installs surviving references before pruning removed plaintext."""
+    root = _shared_cache(event_cache_factory)
+    await root.initialize()
+    cache = root.for_principal("@alice:localhost")
+    room_id = "!room:localhost"
+    thread_id = "$thread"
+    surviving_mxc = "mxc://server/surviving"
+    removed_mxc = "mxc://server/removed"
+    surviving_event = _event("$surviving", 1, sidecar_url=surviving_mxc)
+    removed_event = _event("$removed", 2, sidecar_url=removed_mxc, encrypted=True)
+    try:
+        await replace_thread_unconditionally(
+            cache,
+            room_id,
+            thread_id,
+            [surviving_event, removed_event],
+            validated_at=1.0,
+        )
+        assert await cache.store_mxc_text(room_id, "$surviving", surviving_mxc, "surviving plaintext")
+        assert await cache.store_mxc_text(room_id, "$removed", removed_mxc, "removed plaintext")
+
+        await replace_thread_unconditionally(
+            cache,
+            room_id,
+            thread_id,
+            [surviving_event],
+            validated_at=2.0,
+        )
+
+        assert await cache.get_mxc_text(room_id, "$surviving", surviving_mxc) == "surviving plaintext"
+        assert await _raw_mxc_text_count(cache, room_id, surviving_mxc) == 1
+        assert await cache.get_mxc_text(room_id, "$removed", removed_mxc) is None
+        assert await _raw_mxc_text_count(cache, room_id, removed_mxc) == 0
+    finally:
+        await root.close()
+
+
+@pytest.mark.asyncio
+async def test_proactive_leave_purges_each_room_before_processing_the_next(
+    event_cache_factory: Callable[[], ConversationEventCache],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation during a later room cannot skip an earlier confirmed departure."""
+    root = _shared_cache(event_cache_factory)
+    await root.initialize()
+    principal_id = "@alice:localhost"
+    cache = root.for_principal(principal_id)
+    departed_room_id = "!departed:localhost"
+    pending_room_id = "!pending:localhost"
+    event_id = "$sidecar"
+    mxc_url = "mxc://server/departed"
+    event = _event(event_id, 1, sidecar_url=mxc_url, encrypted=True)
+    second_room_waiting = asyncio.Event()
+    release_second_room = asyncio.Event()
+
+    async def is_dm_room(_client: object, room_id: str) -> bool:
+        if room_id == pending_room_id:
+            second_room_waiting.set()
+            await release_second_room.wait()
+        return False
+
+    async def leave_room(_client: object, room_id: str) -> bool:
+        assert room_id == departed_room_id
+        return True
+
+    monkeypatch.setattr("mindroom.matrix.rooms.is_dm_room", is_dm_room)
+    monkeypatch.setattr("mindroom.matrix.rooms.leave_room", leave_room)
+    await cache.store_event(event_id, departed_room_id, event)
+    assert await cache.store_mxc_text(departed_room_id, event_id, mxc_url, "departed plaintext")
+
+    leave_task = asyncio.create_task(
+        leave_non_dm_rooms(
+            cast("Any", object()),
+            [departed_room_id, pending_room_id],
+            on_room_left=cache.purge_room,
+        ),
+    )
+    try:
+        await second_room_waiting.wait()
+        assert cache.room_departure_epoch(departed_room_id) > 0
+        assert await cache.get_event(departed_room_id, event_id) is None
+        assert await cache.get_mxc_text(departed_room_id, event_id, mxc_url) is None
+        assert await _raw_mxc_text_count(cache, departed_room_id, mxc_url) == 0
+
+        leave_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await leave_task
+    finally:
+        if not leave_task.done():
+            leave_task.cancel()
+            await asyncio.gather(leave_task, return_exceptions=True)
+        await root.close()
+
+    reopened_root = _shared_cache(event_cache_factory)
+    await reopened_root.initialize()
+    reopened = reopened_root.for_principal(principal_id)
+    try:
+        assert await reopened.get_event(departed_room_id, event_id) is None
+        assert await _raw_mxc_text_count(reopened, departed_room_id, mxc_url) == 0
+    finally:
+        await reopened_root.close()
 
 
 @pytest.mark.asyncio

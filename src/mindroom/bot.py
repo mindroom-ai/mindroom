@@ -120,7 +120,7 @@ from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable
     from datetime import datetime
     from pathlib import Path
 
@@ -375,7 +375,7 @@ class AgentBot:
                 get_configured_rooms=lambda: self.rooms,
                 send_response=send_room_lifecycle_response,
                 on_configured_room_joined=lambda room_id: self._post_join_room_setup(room_id),
-                on_rooms_left=self._purge_left_rooms,
+                on_room_left=self._purge_left_room,
             ),
         )
         self._init_runtime_components()
@@ -1614,19 +1614,21 @@ class AgentBot:
         try:
             joined_rooms = await get_joined_rooms(self.client)
             if joined_rooms:
-                left_room_ids = await leave_non_dm_rooms(self.client, joined_rooms)
-                await self._purge_left_rooms(left_room_ids)
+                await leave_non_dm_rooms(
+                    self.client,
+                    joined_rooms,
+                    on_room_left=self._purge_left_room,
+                )
         except Exception:
             self.logger.exception("Error leaving rooms during cleanup")
 
         # Stop the bot
         await self.stop(shutdown_intent=ENTITY_REMOVED_SHUTDOWN)
 
-    async def _purge_left_rooms(self, room_ids: Sequence[str]) -> None:
-        """Purge principal-owned cache rows only after confirmed room departures."""
-        if room_ids:
-            self._invalidate_sync_checkpoint_for_cache_scope_cleanup()
-        await self._conversation_cache.purge_rooms(room_ids)
+    async def _purge_left_room(self, room_id: str) -> None:
+        """Fence and purge one principal-owned room immediately after departure."""
+        self._invalidate_sync_checkpoint_for_cache_scope_cleanup()
+        await self._conversation_cache.purge_room(room_id)
 
     async def stop(
         self,

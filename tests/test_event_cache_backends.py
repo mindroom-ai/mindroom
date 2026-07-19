@@ -549,7 +549,7 @@ async def test_postgres_event_cache_initialize_attempts_cleanup_without_masking_
 async def test_postgres_v1_migration_is_concurrent_and_namespace_preserving(
     postgres_event_cache_url: str,
 ) -> None:
-    """The advisory-locked v2 migration preserves every legacy namespace."""
+    """The advisory-locked v2 migration preserves namespaces but drops ownerless plaintext."""
     schema_name = f"cache_migration_{uuid.uuid4().hex}"
     isolated_url = await _seed_postgres_v1_schema(postgres_event_cache_url, schema_name)
     cache_a = PostgresEventCache(database_url=isolated_url, namespace="runtime_a")
@@ -567,7 +567,7 @@ async def test_postgres_v1_migration_is_concurrent_and_namespace_preserving(
                 "SELECT namespace FROM mindroom_event_cache_events ORDER BY namespace",
             )
         ).fetchall()
-        quarantined_mxc = await (
+        legacy_plaintext = await (
             await db.execute(
                 """
             SELECT namespace, room_id
@@ -579,7 +579,7 @@ async def test_postgres_v1_migration_is_concurrent_and_namespace_preserving(
         await db.close()
         assert version == ("2",)
         assert namespaces == [("legacy_a",), ("legacy_b",)]
-        assert quarantined_mxc == [("legacy_a", ""), ("legacy_b", "")]
+        assert legacy_plaintext == []
     finally:
         await asyncio.gather(cache_a.close(), cache_b.close())
 
@@ -623,9 +623,22 @@ async def test_postgres_v1_migration_rolls_back_on_cancellation(
         """,
         )
     ).fetchall()
+    legacy_plaintext = await (
+        await db.execute(
+            """
+        SELECT namespace, mxc_url, text_content
+        FROM mindroom_event_cache_mxc_text
+        ORDER BY namespace
+        """,
+        )
+    ).fetchall()
     await db.close()
     assert version == ("1",)
     assert "room_id" not in {str(row[0]) for row in columns}
+    assert legacy_plaintext == [
+        ("legacy_a", "mxc://legacy/value", "legacy plaintext"),
+        ("legacy_b", "mxc://legacy/value", "legacy plaintext"),
+    ]
 
 
 @pytest.mark.asyncio

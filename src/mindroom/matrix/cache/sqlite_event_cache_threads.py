@@ -158,7 +158,7 @@ async def _store_thread_events_locked(
     thread_id: str,
     events: list[dict[str, Any]],
     validated_at: float,
-) -> None:
+) -> frozenset[str]:
     """Persist one authoritative thread snapshot within an existing DB transaction."""
     if not events:
         await db.execute(
@@ -179,7 +179,7 @@ async def _store_thread_events_locked(
             """,
             (principal_id, room_id, thread_id, validated_at),
         )
-        return
+        return frozenset()
 
     normalized_events = [normalize_event_source_for_cache(event) for event in events]
     cacheable_events = await filter_cacheable_events(
@@ -235,6 +235,7 @@ async def _store_thread_events_locked(
         """,
         (principal_id, room_id, thread_id, validated_at),
     )
+    return frozenset(event.event_id for event in serialized_events)
 
 
 async def _replace_thread_locked(
@@ -253,34 +254,7 @@ async def _replace_thread_locked(
         room_id=room_id,
         thread_id=thread_id,
     )
-    await db.execute(
-        """
-        DELETE FROM thread_events
-        WHERE principal_id = ? AND room_id = ? AND thread_id = ?
-        """,
-        (principal_id, room_id, thread_id),
-    )
-    if existing_event_ids:
-        await delete_cached_events(
-            db,
-            principal_id=principal_id,
-            room_id=room_id,
-            event_ids=existing_event_ids,
-        )
-        await delete_event_edit_rows(
-            db,
-            principal_id,
-            room_id,
-            event_ids=existing_event_ids,
-            original_event_id=None,
-        )
-        await delete_event_thread_rows(
-            db,
-            principal_id,
-            room_id,
-            event_ids=existing_event_ids,
-        )
-    await _store_thread_events_locked(
+    replacement_event_ids = await _store_thread_events_locked(
         db,
         principal_id=principal_id,
         room_id=room_id,
@@ -288,6 +262,34 @@ async def _replace_thread_locked(
         events=events,
         validated_at=validated_at,
     )
+    removed_event_ids = sorted(set(existing_event_ids) - replacement_event_ids)
+    if removed_event_ids:
+        await db.executemany(
+            """
+            DELETE FROM thread_events
+            WHERE principal_id = ? AND room_id = ? AND event_id = ?
+            """,
+            [(principal_id, room_id, event_id) for event_id in removed_event_ids],
+        )
+        await delete_cached_events(
+            db,
+            principal_id=principal_id,
+            room_id=room_id,
+            event_ids=removed_event_ids,
+        )
+        await delete_event_edit_rows(
+            db,
+            principal_id,
+            room_id,
+            event_ids=removed_event_ids,
+            original_event_id=None,
+        )
+        await delete_event_thread_rows(
+            db,
+            principal_id,
+            room_id,
+            event_ids=removed_event_ids,
+        )
 
 
 async def replace_thread_locked_if_not_newer(

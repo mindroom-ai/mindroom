@@ -37,7 +37,7 @@ from mindroom.matrix_identifiers import (
 from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_ai
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -714,8 +714,10 @@ async def filter_non_dm_rooms(client: nio.AsyncClient, room_ids: list[str]) -> l
 async def leave_non_dm_rooms(
     client: nio.AsyncClient,
     room_ids: list[str],
+    *,
+    on_room_left: Callable[[str], Awaitable[None]],
 ) -> list[str]:
-    """Leave non-DM rooms and return only confirmed successful room IDs."""
+    """Leave non-DM rooms and clean each confirmed departure before continuing."""
     left_room_ids: list[str] = []
     for room_id in room_ids:
         if await is_dm_room(client, room_id):
@@ -725,6 +727,7 @@ async def leave_non_dm_rooms(
         if success:
             logger.info("room_left", room_id=room_id)
             left_room_ids.append(room_id)
+            await on_room_left(room_id)
         else:
             logger.error("room_leave_failed", room_id=room_id)
     return left_room_ids

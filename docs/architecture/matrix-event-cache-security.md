@@ -32,7 +32,7 @@ Candidate plaintext is deleted only when no surviving reference in the same prin
 
 Redaction tombstones prevent late event delivery or late hydration from recreating a removed event or plaintext row.
 
-Thread replacement and invalidation use the same reference cleanup path, so non-redaction event deletion cannot orphan decrypted plaintext.
+Thread replacement installs the authoritative snapshot's surviving references before pruning removed-event references, while invalidation uses the same orphan cleanup path.
 
 An authoritative sync leave, a live own-user leave or ban, and a successful proactive leave purge only the departed principal's rows for that room.
 
@@ -46,7 +46,7 @@ The operation that commits a pending room or principal purge is discarded, so it
 
 Each principal keeps a runtime departed-room fence after purge commit, and every backend read or write rechecks that fence under the room lock until an authoritative rejoin finishes any pending cleanup.
 
-An authoritative multi-room leave batch raises every principal-room fence synchronously before awaiting the first ordered purge.
+A proactive multi-room leave fences and durably purges each room immediately after its leave succeeds and before processing the next room.
 
 Raising a room fence also records the durable purge synchronously, so cancellation before the queued purge coroutine starts cannot let a later rejoin expose pre-leave rows.
 
@@ -81,7 +81,7 @@ SQLite write results are reauthorized after commit while the operation lock is s
 SQLite schema version 11 resets older advisory cache contents inside one rollback-safe transaction and creates a durable database-generation identifier.
 Each SQLite principal view derives a stable checkpoint generation from that database generation and the full Matrix principal ID, so a retained agent token cannot cross an account or homeserver rebind.
 
-PostgreSQL schema version 2 migrates under a global transaction-scoped advisory lock, preserves every namespace, expands event and plaintext keys with room scope, and quarantines legacy unscoped plaintext under an unreachable empty room ID.
+PostgreSQL schema version 2 migrates under a global transaction-scoped advisory lock, preserves scoped rows from every namespace, expands event and plaintext keys with room scope, and deletes legacy plaintext whose room and event ownership cannot be proven.
 
 PostgreSQL room operations hold a shared principal-namespace advisory lock, while initial and resumed principal purges acquire the matching exclusive lock before deleting rows.
 

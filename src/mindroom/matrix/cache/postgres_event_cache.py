@@ -339,7 +339,7 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
 
 
 async def _migrate_postgres_event_cache_v1_to_v2(db: AsyncConnection) -> None:
-    """Migrate global cache tables transactionally without deleting any namespace."""
+    """Migrate global cache tables and discard plaintext with unprovable ownership."""
     await db.execute(
         """
         ALTER TABLE mindroom_event_cache_events
@@ -362,9 +362,7 @@ async def _migrate_postgres_event_cache_v1_to_v2(db: AsyncConnection) -> None:
     )
     await db.execute(
         """
-        UPDATE mindroom_event_cache_mxc_text
-        SET room_id = ''
-        WHERE room_id IS NULL
+        DELETE FROM mindroom_event_cache_mxc_text
         """,
     )
     await db.execute(

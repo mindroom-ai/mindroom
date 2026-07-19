@@ -37,6 +37,8 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from nio.responses import Response
 
 
@@ -834,8 +836,16 @@ async def test_router_leave_unconfigured_rooms_preserves_persisted_invited_room(
 
     left_room_ids: list[str] = []
 
-    async def mock_leave_non_dm_rooms(_client: AsyncMock, room_ids: list[str]) -> None:
+    async def mock_leave_non_dm_rooms(
+        _client: AsyncMock,
+        room_ids: list[str],
+        *,
+        on_room_left: Callable[[str], Awaitable[None]],
+    ) -> list[str]:
         left_room_ids.extend(room_ids)
+        for room_id in room_ids:
+            await on_room_left(room_id)
+        return room_ids
 
     monkeypatch.setattr(
         "mindroom.bot_room_lifecycle.get_joined_rooms",
@@ -974,8 +984,16 @@ async def test_router_preserves_root_space_when_leaving_unconfigured_rooms(
 
     left_room_ids: list[str] = []
 
-    async def mock_leave_non_dm_rooms(_client: AsyncMock, room_ids: list[str]) -> None:
+    async def mock_leave_non_dm_rooms(
+        _client: AsyncMock,
+        room_ids: list[str],
+        *,
+        on_room_left: Callable[[str], Awaitable[None]],
+    ) -> list[str]:
         left_room_ids.extend(room_ids)
+        for room_id in room_ids:
+            await on_room_left(room_id)
+        return room_ids
 
     monkeypatch.setattr(
         "mindroom.bot_room_lifecycle.get_joined_rooms",
@@ -1354,8 +1372,16 @@ async def test_leave_unconfigured_rooms_preserves_persisted_invited_room(
 
     left_room_ids: list[str] = []
 
-    async def mock_leave_non_dm_rooms(_client: AsyncMock, room_ids: list[str]) -> None:
+    async def mock_leave_non_dm_rooms(
+        _client: AsyncMock,
+        room_ids: list[str],
+        *,
+        on_room_left: Callable[[str], Awaitable[None]],
+    ) -> list[str]:
         left_room_ids.extend(room_ids)
+        for room_id in room_ids:
+            await on_room_left(room_id)
+        return room_ids
 
     monkeypatch.setattr(
         "mindroom.bot_room_lifecycle.get_joined_rooms",
