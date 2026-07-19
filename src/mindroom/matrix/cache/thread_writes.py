@@ -21,6 +21,12 @@ These three policies are the only writers of durable thread-cache state:
 5. Within one sync batch, UNKNOWN impacts invalidate the room at most once per pass (once across the
    message pass and once across the redaction pass); later UNKNOWN mutations in the same pass reuse
    that invalidation instead of writing duplicate markers.
+
+6. A still-opaque ``m.room.encrypted`` mutation with a known thread never appends into the snapshot or
+   revalidates it; it only marks that thread stale under a non-incremental reason, so the snapshot
+   stays rejected until a decryption-capable refresh replaces it.
+   Point rows and explicit relation indexes are still persisted by the batch store, and unknown-impact
+   opaque mutations fail closed through the standard room-scope invalidation.
 """
 
 from __future__ import annotations
@@ -33,7 +39,7 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_info import EventInfo, is_thread_affecting_relation
 from mindroom.matrix.sync_certification import SyncCacheWriteResult
 from mindroom.matrix.thread_bookkeeping import (
     MutationResolutionContext,
@@ -41,11 +47,14 @@ from mindroom.matrix.thread_bookkeeping import (
     MutationThreadImpactState,
     MutationWriteContext,
     ThreadMutationResolver,
-    is_thread_affecting_relation,
 )
 from mindroom.timing import elapsed_ms_since, emit_timing_event, timing_enabled
 
-from .event_normalization import normalize_event_source_for_cache, normalize_nio_event_for_cache
+from .event_normalization import (
+    is_opaque_encrypted_event_source,
+    normalize_event_source_for_cache,
+    normalize_nio_event_for_cache,
+)
 
 if TYPE_CHECKING:
     from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
@@ -171,6 +180,16 @@ async def _apply_thread_message_mutation(
         return True
     assert impact.thread_id is not None
     assert event_source is not None
+    if is_opaque_encrypted_event_source(event_source):
+        # A still-undecryptable payload cannot make the visible snapshot complete, so the thread
+        # stays stale under a non-incremental reason until a decryption-capable refresh replaces it.
+        await cache_ops.invalidate_known_thread(
+            room_id,
+            impact.thread_id,
+            reason=_mutation_reason(context, "opaque_encrypted_event"),
+            raise_on_failure=raise_on_cache_write_failure,
+        )
+        return False
     await cache_ops.invalidate_known_thread(
         room_id,
         impact.thread_id,

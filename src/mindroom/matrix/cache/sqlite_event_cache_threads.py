@@ -4,6 +4,8 @@ Durable trust-state invariants (mirrored by ``postgres_event_cache_threads``):
 
 1. Stale markers are monotonic: ``mark_thread_stale_locked`` and ``mark_room_stale_locked`` never let an
    older ``invalidated_at`` or its reason overwrite a newer one.
+   A revalidatable incremental reason additionally never overwrites an active full-refetch reason, so a
+   later clear mutation cannot weaken a fail-closed invalidation into one an append may clear.
 
 2. Snapshot replacement is race-guarded: ``replace_thread_locked_if_not_newer`` refuses when
    ``validated_at``, ``invalidated_at``, or ``room_invalidated_at`` changed after the fetch began, so a
@@ -44,6 +46,8 @@ from .sqlite_event_cache_events import (
 from .thread_cache_state import (
     ThreadCacheStateRow,
     can_revalidate_after_incremental_update,
+    incremental_thread_revalidation_reasons,
+    is_incremental_thread_revalidation_reason,
     thread_cache_state_changed_after,
     thread_cache_state_row,
 )
@@ -391,8 +395,10 @@ async def mark_thread_stale_locked(
     reason: str,
 ) -> None:
     """Persist a durable invalidate-and-refetch marker within an active transaction."""
+    incremental_reasons = incremental_thread_revalidation_reasons()
+    incremental_reason_placeholders = ", ".join("?" for _ in incremental_reasons)
     await db.execute(
-        """
+        f"""
         INSERT INTO thread_cache_state(
             room_id,
             thread_id,
@@ -410,12 +416,22 @@ async def mark_thread_stale_locked(
             END,
             invalidation_reason = CASE
                 WHEN thread_cache_state.invalidated_at IS NULL
-                    OR excluded.invalidated_at >= thread_cache_state.invalidated_at
+                    THEN excluded.invalidation_reason
+                WHEN ? AND thread_cache_state.invalidation_reason NOT IN ({incremental_reason_placeholders})
+                    THEN thread_cache_state.invalidation_reason
+                WHEN excluded.invalidated_at >= thread_cache_state.invalidated_at
                     THEN excluded.invalidation_reason
                 ELSE thread_cache_state.invalidation_reason
             END
-        """,
-        (room_id, thread_id, time.time(), reason),
+        """,  # noqa: S608
+        (
+            room_id,
+            thread_id,
+            time.time(),
+            reason,
+            is_incremental_thread_revalidation_reason(reason),
+            *incremental_reasons,
+        ),
     )
 
 
