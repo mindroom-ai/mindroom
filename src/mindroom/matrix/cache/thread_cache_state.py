@@ -27,6 +27,21 @@ def is_incremental_thread_revalidation_reason(reason: str | None) -> bool:
     return reason in _INCREMENTAL_THREAD_REVALIDATION_REASONS
 
 
+def incoming_thread_invalidation_takes_precedence(
+    *,
+    current_invalidated_at: float,
+    current_reason: str | None,
+    incoming_invalidated_at: float,
+    incoming_reason: str,
+) -> bool:
+    """Return whether an incoming marker's reason should replace the current reason."""
+    current_is_incremental = is_incremental_thread_revalidation_reason(current_reason)
+    incoming_is_incremental = is_incremental_thread_revalidation_reason(incoming_reason)
+    if current_is_incremental != incoming_is_incremental:
+        return not incoming_is_incremental
+    return incoming_invalidated_at >= current_invalidated_at
+
+
 @dataclass(frozen=True, slots=True)
 class ThreadCacheStateRow:
     """Backend-neutral values loaded from thread and room cache-state rows."""
