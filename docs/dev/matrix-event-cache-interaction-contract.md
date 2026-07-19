@@ -47,6 +47,12 @@ Explicit snapshot writes apply the same event-family filter, and relation walks 
 
 Page-local, cached, and homeserver-scan root proof accepts only plaintext or encrypted message children.
 
+Point-event payload quality is monotonic per event ID: clear normalized content may replace a retained opaque `m.room.encrypted` payload, but a later opaque payload never replaces already-clear content.
+The upsert refuses the downgrade atomically inside the database conflict clause, so opposite arrival orders, duplicate IDs in one batch, and separate cache clients on one backing store all converge on the clear payload.
+The same rule guards a thread snapshot row when an incremental append rewrites an event the snapshot already holds.
+Payload-derived edit and relation index rows are written only for payloads the point store actually accepted.
+Explicit thread snapshots still record authoritative event-to-thread membership for every eligible snapshot event, even when the point store retains an existing clear payload.
+
 ## Redactions
 
 Redaction envelope events are intentionally omitted from the point cache.

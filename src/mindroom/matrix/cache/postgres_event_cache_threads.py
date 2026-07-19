@@ -565,7 +565,10 @@ async def append_existing_thread_event(
     thread_id: str,
     normalized_event: dict[str, Any],
 ) -> bool:
-    """Append one event to an existing cached thread."""
+    """Append one event to an existing cached thread.
+
+    An opaque ``m.room.encrypted`` payload never replaces stored clear content for the same event ID.
+    """
     event_id = event_id_for_cache(normalized_event)
     if await event_or_original_is_redacted(
         db,

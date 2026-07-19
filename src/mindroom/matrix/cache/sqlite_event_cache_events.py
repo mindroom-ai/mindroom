@@ -492,36 +492,39 @@ async def write_lookup_index_rows(
     cached_at: float,
     thread_id: str | None = None,
 ) -> None:
-    """Write visible events and reconcile edit, thread, and MXC references."""
+    """Persist point-lookup, edit-index, and thread-index rows for cached events.
+
+    Point payload quality is monotonic per event ID: clear content may replace a stored opaque
+    ``m.room.encrypted`` payload, but an opaque payload never replaces stored clear content.
+    Payload-derived indexes use only accepted payloads; explicit snapshots always record their
+    authoritative event-to-thread membership.
+    """
     if not serialized_events:
         return
-    event_ids = [event.event_id for event in serialized_events]
-    previous_mxc_urls = await _mxc_urls_for_events(
-        db,
-        principal_id,
-        room_id,
-        event_ids=event_ids,
-    )
     write_sequences = await allocate_write_sequences(db, len(serialized_events))
-    await db.executemany(
-        """
-        INSERT INTO events(
-            principal_id,
-            event_id,
-            room_id,
-            origin_server_ts,
-            event_json,
-            cached_at,
-            write_seq
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(principal_id, room_id, event_id) DO UPDATE SET
-            origin_server_ts = excluded.origin_server_ts,
-            event_json = excluded.event_json,
-            cached_at = excluded.cached_at,
-            write_seq = excluded.write_seq
-        """,
-        [
+    accepted_events: list[SerializedCachedEvent] = []
+    for event, write_sequence in zip(serialized_events, write_sequences, strict=True):
+        cursor = await db.execute(
+            """
+            INSERT INTO events(
+                principal_id,
+                event_id,
+                room_id,
+                origin_server_ts,
+                event_json,
+                cached_at,
+                write_seq
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(principal_id, room_id, event_id) DO UPDATE SET
+                origin_server_ts = excluded.origin_server_ts,
+                event_json = excluded.event_json,
+                cached_at = excluded.cached_at,
+                write_seq = excluded.write_seq
+            WHERE json_extract(events.event_json, '$.type') = 'm.room.encrypted'
+                OR json_extract(excluded.event_json, '$.type') <> 'm.room.encrypted'
+            RETURNING event_id
+            """,
             (
                 principal_id,
                 event.event_id,
@@ -530,20 +533,34 @@ async def write_lookup_index_rows(
                 event.event_json,
                 cached_at,
                 write_sequence,
-            )
-            for event, write_sequence in zip(serialized_events, write_sequences, strict=True)
-        ],
+            ),
+        )
+        accepted = await cursor.fetchone() is not None
+        await cursor.close()
+        if accepted:
+            accepted_events.append(event)
+
+    accepted_event_ids = [event.event_id for event in accepted_events]
+    previous_mxc_urls = (
+        await _mxc_urls_for_events(
+            db,
+            principal_id,
+            room_id,
+            event_ids=accepted_event_ids,
+        )
+        if accepted_event_ids
+        else frozenset()
     )
     await db.executemany(
         """
         DELETE FROM event_mxc_references
         WHERE principal_id = ? AND room_id = ? AND event_id = ?
         """,
-        [(principal_id, room_id, event_id) for event_id in event_ids],
+        [(principal_id, room_id, event_id) for event_id in accepted_event_ids],
     )
     reference_rows = [
         (principal_id, room_id, event.event_id, mxc_url)
-        for event in serialized_events
+        for event in accepted_events
         for mxc_url in event_mxc_urls(event.event)
     ]
     if reference_rows:
@@ -561,9 +578,9 @@ async def write_lookup_index_rows(
         DELETE FROM event_edits
         WHERE principal_id = ? AND room_id = ? AND edit_event_id = ?
         """,
-        [(principal_id, room_id, event_id) for event_id in event_ids],
+        [(principal_id, room_id, event_id) for event_id in accepted_event_ids],
     )
-    edit_rows = event_edit_rows(room_id, serialized_events)
+    edit_rows = event_edit_rows(room_id, accepted_events)
     if edit_rows:
         await db.executemany(
             """
@@ -580,20 +597,25 @@ async def write_lookup_index_rows(
                 for row in edit_rows
             ],
         )
-
-    previous_thread_ids = await _thread_ids_for_events(
-        db,
-        principal_id,
-        room_id,
-        event_ids=event_ids,
+    thread_index_events = serialized_events if thread_id is not None else accepted_events
+    thread_index_event_ids = [event.event_id for event in thread_index_events]
+    previous_thread_ids = (
+        await _thread_ids_for_events(
+            db,
+            principal_id,
+            room_id,
+            event_ids=thread_index_event_ids,
+        )
+        if thread_index_event_ids
+        else set()
     )
-    thread_rows = event_thread_rows(room_id, serialized_events, thread_id=thread_id)
+    thread_rows = event_thread_rows(room_id, thread_index_events, thread_id=thread_id)
     await db.executemany(
         """
         DELETE FROM event_threads
         WHERE principal_id = ? AND room_id = ? AND event_id = ?
         """,
-        [(principal_id, room_id, event_id) for event_id in event_ids],
+        [(principal_id, room_id, event_id) for event_id in thread_index_event_ids],
     )
     if thread_rows:
         await db.executemany(
