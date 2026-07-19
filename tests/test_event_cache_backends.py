@@ -28,6 +28,10 @@ from mindroom.matrix.cache.postgres_event_cache import (
     _PostgresEventCacheRuntime,
 )
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
+from mindroom.matrix.cache.thread_cache_state import (
+    THREAD_HISTORY_TRUST_METADATA_KEY,
+    THREAD_HISTORY_TRUST_VERSION,
+)
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.runtime_support import (
     OwnedRuntimeSupport,
@@ -698,6 +702,160 @@ async def test_sqlite_v11_reset_rolls_back_generation_on_cancellation(
         inspected.close()
 
 
+@pytest.mark.asyncio
+async def test_sqlite_opaque_history_trust_upgrade_clears_only_certified_snapshots_once(  # noqa: PLR0915
+    tmp_path: Path,
+) -> None:
+    """The opaque-history trust upgrade must invalidate snapshots while preserving safe lookup data."""
+    db_path = tmp_path / "event_cache.db"
+    room_id = "!room:localhost"
+    thread_id = "$root"
+    root_event = _message_event(
+        event_id=thread_id,
+        sender="@user:localhost",
+        body="root",
+        origin_server_ts=1000,
+    )
+    reply_event = _message_event(
+        event_id="$reply",
+        sender="@agent:localhost",
+        body="reply",
+        origin_server_ts=2000,
+        thread_id=thread_id,
+    )
+    standalone_event = _message_event(
+        event_id="$standalone",
+        sender="@user:localhost",
+        body="standalone",
+        origin_server_ts=3000,
+    )
+    seeded = SqliteEventCache(db_path)
+    await seeded.initialize()
+    try:
+        await _replace_thread(seeded, room_id, thread_id, [reply_event, root_event], validated_at=100.0)
+        await seeded.store_event("$standalone", room_id, standalone_event)
+        original_generation = seeded.cache_generation
+        original_membership_epoch = await seeded.room_membership_epoch(room_id)
+    finally:
+        await seeded.close()
+
+    legacy = sqlite3.connect(db_path)
+    try:
+        legacy.execute(
+            "DELETE FROM cache_metadata WHERE key = ?",
+            (THREAD_HISTORY_TRUST_METADATA_KEY,),
+        )
+        legacy.commit()
+    finally:
+        legacy.close()
+
+    upgraded = SqliteEventCache(db_path)
+    await upgraded.initialize()
+    try:
+        upgraded_generation = upgraded.cache_generation
+        assert upgraded_generation is not None
+        assert upgraded_generation != original_generation
+        assert await upgraded.get_thread_events(room_id, thread_id) is None
+        assert await upgraded.get_thread_cache_state(room_id, thread_id) is None
+        assert await upgraded.get_event(room_id, thread_id) == root_event
+        assert await upgraded.get_event(room_id, "$reply") == reply_event
+        assert await upgraded.get_event(room_id, "$standalone") == standalone_event
+        assert await upgraded.get_thread_id_for_event(room_id, thread_id) == thread_id
+        assert await upgraded.get_thread_id_for_event(room_id, "$reply") == thread_id
+        assert await upgraded.room_membership_epoch(room_id) == original_membership_epoch
+    finally:
+        await upgraded.close()
+
+    reopened = SqliteEventCache(db_path)
+    await reopened.initialize()
+    try:
+        assert reopened.cache_generation == upgraded_generation
+        assert await reopened.get_event(room_id, "$standalone") == standalone_event
+        assert await reopened.get_thread_events(room_id, thread_id) is None
+        assert reopened._runtime.db is not None
+        trust_row = await (
+            await reopened._runtime.db.execute(
+                "SELECT value FROM cache_metadata WHERE key = ?",
+                (THREAD_HISTORY_TRUST_METADATA_KEY,),
+            )
+        ).fetchone()
+        assert trust_row == (THREAD_HISTORY_TRUST_VERSION,)
+    finally:
+        await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_opaque_history_trust_upgrade_rolls_back_on_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation must roll back the trust marker, snapshot deletion, and generation rotation."""
+    db_path = tmp_path / "event_cache.db"
+    room_id = "!room:localhost"
+    thread_id = "$root"
+    root_event = _message_event(
+        event_id=thread_id,
+        sender="@user:localhost",
+        body="root",
+        origin_server_ts=1000,
+    )
+    seeded = SqliteEventCache(db_path)
+    await seeded.initialize()
+    try:
+        await _replace_thread(seeded, room_id, thread_id, [root_event], validated_at=100.0)
+    finally:
+        await seeded.close()
+
+    legacy = sqlite3.connect(db_path)
+    try:
+        original_generation = legacy.execute(
+            "SELECT value FROM cache_metadata WHERE key = 'certification_generation'",
+        ).fetchone()
+        assert original_generation is not None
+        legacy.execute(
+            "DELETE FROM cache_metadata WHERE key = ?",
+            (THREAD_HISTORY_TRUST_METADATA_KEY,),
+        )
+        legacy.commit()
+    finally:
+        legacy.close()
+
+    cancel_reason = "maintenance cancelled"
+
+    async def cancel_maintenance(*_args: object, **_kwargs: object) -> None:
+        raise asyncio.CancelledError(cancel_reason)
+
+    monkeypatch.setattr(sqlite_event_cache, "run_startup_maintenance", cancel_maintenance)
+    with pytest.raises(asyncio.CancelledError, match=cancel_reason):
+        await sqlite_event_cache._initialize_event_cache_db(db_path)
+
+    inspected = sqlite3.connect(db_path)
+    try:
+        assert (
+            inspected.execute(
+                "SELECT value FROM cache_metadata WHERE key = ?",
+                (THREAD_HISTORY_TRUST_METADATA_KEY,),
+            ).fetchone()
+            is None
+        )
+        assert (
+            inspected.execute(
+                "SELECT value FROM cache_metadata WHERE key = 'certification_generation'",
+            ).fetchone()
+            == original_generation
+        )
+        assert inspected.execute(
+            "SELECT event_id FROM thread_events WHERE room_id = ? AND thread_id = ?",
+            (room_id, thread_id),
+        ).fetchall() == [(thread_id,)]
+        assert inspected.execute(
+            "SELECT validated_at FROM thread_cache_state WHERE room_id = ? AND thread_id = ?",
+            (room_id, thread_id),
+        ).fetchone() == (100.0,)
+    finally:
+        inspected.close()
+
+
 def test_build_event_cache_uses_postgres_when_configured(tmp_path: Path) -> None:
     """The runtime factory should construct the Postgres cache backend only when requested."""
     runtime_paths = _runtime_paths(
@@ -1073,6 +1231,205 @@ async def test_postgres_cache_generation_is_durable_and_changes_after_namespace_
         assert reset_cache.cache_generation != first_generation
     finally:
         await reset_cache.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_opaque_history_trust_upgrade_is_namespace_scoped_and_one_time(  # noqa: PLR0915
+    postgres_event_cache_url: str,
+) -> None:
+    """The real PostgreSQL upgrade must reset only one namespace's certified snapshots."""
+    namespace = f"trust_upgrade_{uuid.uuid4().hex}"
+    isolated_namespace = f"trust_upgrade_other_{uuid.uuid4().hex}"
+    room_id = "!room:localhost"
+    thread_id = "$root"
+    root_event = _message_event(
+        event_id=thread_id,
+        sender="@user:localhost",
+        body="root",
+        origin_server_ts=1000,
+    )
+    reply_event = _message_event(
+        event_id="$reply",
+        sender="@agent:localhost",
+        body="reply",
+        origin_server_ts=2000,
+        thread_id=thread_id,
+    )
+    standalone_event = _message_event(
+        event_id="$standalone",
+        sender="@user:localhost",
+        body="standalone",
+        origin_server_ts=3000,
+    )
+    seeded = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
+    isolated = PostgresEventCache(database_url=postgres_event_cache_url, namespace=isolated_namespace)
+    try:
+        await seeded.initialize()
+        await isolated.initialize()
+        await _replace_thread(seeded, room_id, thread_id, [reply_event, root_event], validated_at=100.0)
+        await seeded.store_event("$standalone", room_id, standalone_event)
+        await _replace_thread(isolated, room_id, thread_id, [reply_event, root_event], validated_at=100.0)
+        original_generation = seeded.cache_generation
+        isolated_generation = isolated.cache_generation
+        original_membership_epoch = await seeded.room_membership_epoch(room_id)
+    finally:
+        await seeded.close()
+        await isolated.close()
+
+    db = await psycopg.AsyncConnection.connect(postgres_event_cache_url)
+    try:
+        await db.execute(
+            """
+            DELETE FROM mindroom_event_cache_namespace_metadata
+            WHERE namespace = %s AND key = %s
+            """,
+            (namespace, THREAD_HISTORY_TRUST_METADATA_KEY),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    upgraded = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
+    untouched = PostgresEventCache(database_url=postgres_event_cache_url, namespace=isolated_namespace)
+    try:
+        await upgraded.initialize()
+        await untouched.initialize()
+        upgraded_generation = upgraded.cache_generation
+        assert upgraded_generation is not None
+        assert upgraded_generation != original_generation
+        assert await upgraded.get_thread_events(room_id, thread_id) is None
+        assert await upgraded.get_thread_cache_state(room_id, thread_id) is None
+        assert await upgraded.get_event(room_id, thread_id) == root_event
+        assert await upgraded.get_event(room_id, "$reply") == reply_event
+        assert await upgraded.get_event(room_id, "$standalone") == standalone_event
+        assert await upgraded.get_thread_id_for_event(room_id, thread_id) == thread_id
+        assert await upgraded.get_thread_id_for_event(room_id, "$reply") == thread_id
+        assert await upgraded.room_membership_epoch(room_id) == original_membership_epoch
+        assert untouched.cache_generation == isolated_generation
+        assert await untouched.get_thread_events(room_id, thread_id) is not None
+    finally:
+        await upgraded.close()
+        await untouched.close()
+
+    reopened = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
+    await reopened.initialize()
+    try:
+        assert reopened.cache_generation == upgraded_generation
+        assert await reopened.get_event(room_id, "$standalone") == standalone_event
+        assert await reopened.get_thread_events(room_id, thread_id) is None
+    finally:
+        await reopened.close()
+
+    db = await psycopg.AsyncConnection.connect(postgres_event_cache_url)
+    try:
+        trust_row = await (
+            await db.execute(
+                """
+                SELECT value
+                FROM mindroom_event_cache_namespace_metadata
+                WHERE namespace = %s AND key = %s
+                """,
+                (namespace, THREAD_HISTORY_TRUST_METADATA_KEY),
+            )
+        ).fetchone()
+        assert trust_row == (THREAD_HISTORY_TRUST_VERSION,)
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_opaque_history_trust_upgrade_rolls_back_on_cancellation(
+    postgres_event_cache_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed real PostgreSQL startup must preserve the legacy snapshot and generation."""
+    namespace = f"trust_upgrade_cancel_{uuid.uuid4().hex}"
+    room_id = "!room:localhost"
+    thread_id = "$root"
+    root_event = _message_event(
+        event_id=thread_id,
+        sender="@user:localhost",
+        body="root",
+        origin_server_ts=1000,
+    )
+    seeded = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
+    await seeded.initialize()
+    try:
+        await _replace_thread(seeded, room_id, thread_id, [root_event], validated_at=100.0)
+        original_generation = seeded.cache_generation
+    finally:
+        await seeded.close()
+
+    db = await psycopg.AsyncConnection.connect(postgres_event_cache_url)
+    try:
+        await db.execute(
+            """
+            DELETE FROM mindroom_event_cache_namespace_metadata
+            WHERE namespace = %s AND key = %s
+            """,
+            (namespace, THREAD_HISTORY_TRUST_METADATA_KEY),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    cancel_reason = "maintenance cancelled"
+
+    async def cancel_maintenance(*_args: object, **_kwargs: object) -> None:
+        raise asyncio.CancelledError(cancel_reason)
+
+    monkeypatch.setattr("mindroom.matrix.cache.postgres_event_cache.run_startup_maintenance", cancel_maintenance)
+    with pytest.raises(asyncio.CancelledError, match=cancel_reason):
+        await _initialize_postgres_event_cache_db(postgres_event_cache_url, namespace=namespace)
+
+    db = await psycopg.AsyncConnection.connect(postgres_event_cache_url)
+    try:
+        trust_row = await (
+            await db.execute(
+                """
+                SELECT value
+                FROM mindroom_event_cache_namespace_metadata
+                WHERE namespace = %s AND key = %s
+                """,
+                (namespace, THREAD_HISTORY_TRUST_METADATA_KEY),
+            )
+        ).fetchone()
+        generation_row = await (
+            await db.execute(
+                """
+                SELECT value
+                FROM mindroom_event_cache_namespace_metadata
+                WHERE namespace = %s AND key = 'certification_generation'
+                """,
+                (namespace,),
+            )
+        ).fetchone()
+        snapshot_rows = await (
+            await db.execute(
+                """
+                SELECT event_id
+                FROM mindroom_event_cache_thread_events
+                WHERE namespace = %s AND room_id = %s AND thread_id = %s
+                """,
+                (namespace, room_id, thread_id),
+            )
+        ).fetchall()
+        state_row = await (
+            await db.execute(
+                """
+                SELECT validated_at
+                FROM mindroom_event_cache_thread_state
+                WHERE namespace = %s AND room_id = %s AND thread_id = %s
+                """,
+                (namespace, room_id, thread_id),
+            )
+        ).fetchone()
+        assert trust_row is None
+        assert generation_row == (original_generation,)
+        assert snapshot_rows == [(thread_id,)]
+        assert state_row == (100.0,)
+    finally:
+        await db.close()
 
 
 @pytest.mark.asyncio

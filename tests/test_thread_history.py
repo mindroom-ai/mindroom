@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import time
 from typing import TYPE_CHECKING
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -21,6 +22,7 @@ from mindroom.config.main import Config
 from mindroom.matrix.cache import ThreadHistoryResult, thread_cache_rejection_reason
 from mindroom.matrix.cache.event_cache import ThreadCacheState
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
+from mindroom.matrix.cache.thread_cache_state import THREAD_HISTORY_TRUST_METADATA_KEY
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage, RoomThreadsPageError, get_room_threads_page
 from mindroom.matrix.client_delivery import build_threaded_edit_content as _build_threaded_edit_content_impl
@@ -3551,6 +3553,69 @@ class TestThreadHistoryCache:
         assert thread_cache_rejection_reason(state_after_recovery) is None
         assert [message.event_id for message in cached_history] == ["$thread_root", "$clear_child"]
         assert cached_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
+
+    @pytest.mark.asyncio
+    async def test_upgrade_refetches_prechange_snapshot_that_omitted_opaque_thread_child(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Upgrade must discard a legacy certified snapshot before checking opaque source history."""
+        db_path = tmp_path / "event_cache.db"
+        room_id = "!room:localhost"
+        thread_id = "$thread_root"
+        legacy_cache = SqliteEventCache(db_path)
+        await legacy_cache.initialize()
+        root_event, clear_child = self._thread_root_and_child()
+        try:
+            await self._seed_thread_cache(
+                legacy_cache,
+                room_id=room_id,
+                thread_id=thread_id,
+                events=[self._cache_source(root_event), self._cache_source(clear_child)],
+            )
+            legacy_generation = legacy_cache.cache_generation
+        finally:
+            await legacy_cache.close()
+
+        legacy_db = sqlite3.connect(db_path)
+        try:
+            legacy_db.execute(
+                "DELETE FROM cache_metadata WHERE key = ?",
+                (THREAD_HISTORY_TRUST_METADATA_KEY,),
+            )
+            legacy_db.commit()
+        finally:
+            legacy_db.close()
+
+        upgraded_cache = SqliteEventCache(db_path)
+        await upgraded_cache.initialize()
+        opaque_child = raw_nio_event(
+            self._opaque_source(
+                "$opaque_child",
+                origin_server_ts=1500,
+                relation={"rel_type": "m.thread", "event_id": thread_id},
+            ),
+        )
+        client = self._room_messages_client([clear_child, opaque_child, root_event])
+        try:
+            assert upgraded_cache.cache_generation != legacy_generation
+            assert await upgraded_cache.get_thread_events(room_id, thread_id) is None
+            with pytest.raises(matrix_client_module.OpaqueEncryptedThreadHistoryError):
+                await matrix_client_module.fetch_dispatch_thread_snapshot(
+                    client,
+                    room_id,
+                    thread_id,
+                    event_cache=upgraded_cache,
+                )
+            state = await upgraded_cache.get_thread_cache_state(room_id, thread_id)
+            rows = await upgraded_cache.get_thread_events(room_id, thread_id)
+        finally:
+            await upgraded_cache.close()
+
+        client.room_messages.assert_awaited_once()
+        assert state is not None
+        assert state.invalidation_reason == "thread_history_opaque_encrypted_event"
+        assert rows is None
 
     @pytest.mark.asyncio
     async def test_refresh_ignores_opaque_events_outside_the_requested_thread(

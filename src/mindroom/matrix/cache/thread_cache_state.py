@@ -15,6 +15,8 @@ _INCREMENTAL_THREAD_REVALIDATION_REASONS = (
     "sync_thread_mutation",
     "outbound_thread_mutation",
 )
+THREAD_HISTORY_TRUST_METADATA_KEY = "thread_history_trust_version"
+THREAD_HISTORY_TRUST_VERSION = "opaque_encrypted_relations_v1"
 
 
 def incremental_thread_revalidation_reasons() -> tuple[str, ...]:

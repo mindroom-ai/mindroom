@@ -99,6 +99,8 @@ A refill whose reconstruction contains still-opaque encrypted evidence for the r
 
 Relation-less ciphertext and opaque annotations are excluded from that rejection because they cannot change any visible thread snapshot.
 
+The opaque-history trust upgrade clears only previously certified thread snapshots and their state, preserves point and relation indexes, rotates the durable certification generation, and records a one-time storage marker transactionally.
+
 A second unchanged read is served from cache and performs no homeserver scan.
 
 The advisory read path may use a labelled stale-cache fallback when a required refill fails.
