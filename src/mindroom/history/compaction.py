@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Awaitable, Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -12,6 +13,7 @@ from html import escape
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
+from agno.exceptions import ContextWindowExceededError
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 from agno.session.summary import SessionSummary
@@ -30,9 +32,15 @@ from mindroom.history.storage import (
     update_scope_state_on_latest,
     write_scope_state,
 )
-from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, generate_compaction_summary
+from mindroom.history.summary_call import (
+    DEFAULT_SUMMARY_RETRY_POLICY,
+    CompactionSummaryOversizedOutputError,
+    SummaryRetryPolicy,
+    generate_compaction_summary,
+)
 from mindroom.history.types import (
     COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
+    CarriedSummaryUnfitMarker,
     CompactionLifecycleProgress,
     CompactionOutcome,
     HistoryScope,
@@ -44,10 +52,10 @@ from mindroom.logging_config import get_logger
 from mindroom.model_instance_checks import is_genuine_openai_endpoint
 from mindroom.timing import timed
 from mindroom.token_budget import (
-    approximate_o200k_tokens,
     compaction_estimate_kind,
     compaction_payload_token_upper_bound,
     estimate_text_tokens,
+    persistable_summary_limit,
     stable_serialize,
 )
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
@@ -66,12 +74,10 @@ logger = get_logger(__name__)
 
 _WRAPPER_OVERHEAD_TOKENS = 200
 _OVERSIZED_RUN_NOTE = "Run truncated to fit compaction budget."
-_CONDENSE_SUMMARY_NOTE = (
-    "<note>The previous summary alone exceeds the compaction input budget, "
-    "so there are no new runs in this pass. Rewrite the previous summary "
-    "more concisely in the required structure, preserving every "
-    "still-relevant fact, especially Next Steps and Critical Context.</note>"
-)
+# Soft steering conversion between estimator units (bytes or tiktoken tokens)
+# and prose words; only prompt wording depends on it, never the acceptance
+# arithmetic.
+_STEERING_ESTIMATOR_UNITS_PER_WORD = 5
 _SUMMARY_METADATA_OMIT_KEYS = frozenset(
     {
         "model_params",
@@ -200,6 +206,7 @@ async def compact_scope_history(
     summary_prompt: str,
     fallback_summary_model: Model | None = None,
     fallback_summary_model_name: str | None = None,
+    fallback_summary_input_budget: int | None = None,
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
 ) -> CompactionOutcome | None:
@@ -263,6 +270,7 @@ async def compact_scope_history(
         summary_model_name=summary_model_name,
         fallback_summary_model=fallback_summary_model,
         fallback_summary_model_name=fallback_summary_model_name,
+        fallback_summary_input_budget=fallback_summary_input_budget,
         session_id=session.session_id,
         scope=scope,
         state=state,
@@ -349,7 +357,7 @@ async def compact_scope_history(
 
 
 @timed("system_prompt_assembly.history_prepare.compaction.rewrite_working_session")
-async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
+async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR0915
     *,
     storage: BaseDb,
     persisted_session: AgentSession | TeamSession,
@@ -372,10 +380,31 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
     summary_prompt: str,
     fallback_summary_model: Model | None = None,
     fallback_summary_model_name: str | None = None,
+    fallback_summary_input_budget: int | None = None,
     before_persist_callback: Callable[[Sequence[RunOutput | TeamRunOutput]], Awaitable[None]] | None = None,
 ) -> _CompactionRewriteResult | None:
     final_summary_text = _current_summary_text(working_session) or ""
-    token_estimator, estimate_kind = _compaction_sizing(summary_model)
+    sizing = _resolve_compaction_sizing_context(summary_model, summary_model_name, summary_input_budget)
+    fallback_sizing: _CompactionSizingContext | None = None
+    if fallback_summary_model is not None:
+        assert fallback_summary_model_name is not None
+        fallback_sizing = _resolve_compaction_sizing_context(
+            fallback_summary_model,
+            fallback_summary_model_name,
+            # Without a resolved fallback budget the fallback inherits the
+            # primary's, matching how a mid-rewrite switch resends
+            # primary-sized requests unchanged.
+            summary_input_budget if fallback_summary_input_budget is None else fallback_summary_input_budget,
+        )
+    # I1 must hold for every profile that can serve the next compaction
+    # attempt: the configured primary serves the next turn even after a
+    # mid-rewrite fallback switch, so this set never shrinks during a rewrite.
+    acceptance_contexts = (sizing,) if fallback_sizing is None else (sizing, fallback_sizing)
+    # The fit invariant's consequence proof holds exactly on the planner's
+    # admissible budget range (budgets above twice the retry floor, where the
+    # acceptance limit clears the floor). Below it the plan is already
+    # unavailable and the degenerate-budget no-op contract applies instead.
+    enforce_acceptance = summary_input_budget > 2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS
     total_compacted_run_count = 0
     all_compacted_run_ids: list[str] = []
     all_compacted_run_id_set: set[str] = set()
@@ -398,41 +427,60 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
             compacted_runs=compactable_runs,
             history_settings=history_settings,
             max_input_tokens=summary_input_budget,
-            token_estimator=token_estimator,
+            token_estimator=sizing.token_estimator,
         )
         if (
             not included_runs
             and previous_summary is not None
             and summary_input_budget > 2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS
         ):
-            # A carried summary that leaves no room for any run must not stall
-            # compaction, and truncating it is never acceptable: the merge
-            # would be persisted and the dropped tail (Next Steps, Critical
-            # Context) lost for good. Condense the COMPLETE summary in its own
-            # loss-aware request instead, then keep chunking against the
-            # condensed text; when even that request cannot fit, summary and
-            # runs stay untouched. Degenerate budgets at or below the
-            # planner's availability floor keep the no-op contract outright.
+            # The acceptance check (I1) makes this corner unreachable from
+            # summaries this loop persists, so only an inherited stored
+            # summary — written before the check existed, or under a larger
+            # model/budget — lands here. Condense the COMPLETE summary in its
+            # own provider-arbitrated request; every terminal verdict is
+            # durable (persisted summary-only progress or a one-shot unfit
+            # marker), so the attempt is never silently re-bought. Degenerate
+            # budgets at or below the planner's availability floor keep the
+            # no-op contract outright.
             condensed_summary = await _condense_carried_summary(
-                model=summary_model,
+                storage=storage,
+                persisted_session=persisted_session,
+                working_session=working_session,
+                sizing=sizing,
+                acceptance_contexts=acceptance_contexts,
                 previous_summary=previous_summary,
-                summary_input_budget=summary_input_budget,
                 session_id=session_id,
                 scope=scope,
+                state=state,
+                history_settings=history_settings,
                 summary_prompt=summary_prompt,
-                token_estimator=token_estimator,
-                estimate_kind=estimate_kind,
             )
             if condensed_summary is not None:
                 previous_summary = condensed_summary
                 final_summary_text = condensed_summary
-                working_session.summary = SessionSummary(summary=condensed_summary, updated_at=datetime.now(UTC))
+                await _emit_lifecycle_progress_after_persist(
+                    working_session=working_session,
+                    scope=scope,
+                    state=state,
+                    history_settings=history_settings,
+                    lifecycle_notice_event_id=lifecycle_notice_event_id,
+                    progress_callback=progress_callback,
+                    session_id=session_id,
+                    summary_model_name=sizing.model_name,
+                    before_tokens=before_tokens,
+                    available_history_budget=available_history_budget,
+                    runs_before=runs_before,
+                    threshold_tokens=threshold_tokens,
+                    total_compacted_run_count=total_compacted_run_count,
+                    selected_runs_remaining=len(pending_selected_run_ids),
+                )
                 summary_input, included_runs = _build_summary_input(
                     previous_summary=previous_summary,
                     compacted_runs=compactable_runs,
                     history_settings=history_settings,
                     max_input_tokens=summary_input_budget,
-                    token_estimator=token_estimator,
+                    token_estimator=sizing.token_estimator,
                 )
         if not included_runs:
             logger.warning(
@@ -447,8 +495,9 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
             break
 
         new_summary = await _generate_compaction_summary_with_retry(
-            model=summary_model,
-            model_name=summary_model_name,
+            sizing=sizing,
+            acceptance_contexts=acceptance_contexts,
+            enforce_acceptance=enforce_acceptance,
             previous_summary=previous_summary,
             compactable_runs=compactable_runs,
             initial_summary_input=summary_input,
@@ -458,19 +507,17 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
             scope=scope,
             history_settings=history_settings,
             summary_prompt=summary_prompt,
-            token_estimator=token_estimator,
-            estimate_kind=estimate_kind,
-            fallback_model=fallback_summary_model,
-            fallback_model_name=fallback_summary_model_name,
+            fallback_sizing=fallback_sizing,
         )
-        if new_summary.model is not summary_model:
-            # A safeguard-refusal fallback served this chunk; it becomes the
-            # summary model for every later chunk, including token estimation.
-            summary_model = new_summary.model
-            summary_model_name = new_summary.model_name
-            token_estimator, estimate_kind = _compaction_sizing(summary_model)
-            fallback_summary_model = None
-            fallback_summary_model_name = None
+        if new_summary.model is not sizing.model:
+            # A safeguard-refusal fallback served this chunk; its sizing
+            # context serves every later chunk — token estimation, logged
+            # estimate kind, and acceptance limit switch together. Acceptance
+            # still covers the configured primary, which serves the next
+            # turn's attempt.
+            assert fallback_sizing is not None
+            sizing = fallback_sizing
+            fallback_sizing = None
         included_runs = new_summary.included_runs
         generated_summary = new_summary.summary
         if before_persist_callback is not None:
@@ -507,7 +554,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
             lifecycle_notice_event_id=lifecycle_notice_event_id,
             progress_callback=progress_callback,
             session_id=session_id,
-            summary_model_name=summary_model_name,
+            summary_model_name=sizing.model_name,
             before_tokens=before_tokens,
             available_history_budget=available_history_budget,
             runs_before=runs_before,
@@ -525,28 +572,52 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
         compacted_run_count=total_compacted_run_count,
         compacted_run_ids=tuple(all_compacted_run_ids),
         compacted_messages=tuple(compacted_messages),
-        summary_model=summary_model,
-        summary_model_name=summary_model_name,
+        summary_model=sizing.model,
+        summary_model_name=sizing.model_name,
     )
 
 
-def _compaction_sizing(summary_model: Model) -> tuple[Callable[[str], int], CompactionEstimateKind]:
-    """Resolve the sizing estimator and its logged kind for one serving summary model.
+@dataclass(frozen=True)
+class _CompactionSizingContext:
+    """Sizing facts for one model profile that can serve a compaction attempt.
 
-    Both derive from a single endpoint-trust evaluation, so the estimator
-    arithmetic and the logged estimate kind provably describe the same branch
-    for every request this serving model receives, even if the environment
-    changes mid-compaction. A safeguard-fallback switch re-resolves both for
-    the new serving model.
+    The estimator, its logged kind, and the persisted-summary acceptance limit
+    resolve together from one endpoint-trust evaluation, so the logged kind
+    provably describes the arithmetic used for every request this profile
+    receives even if the environment changes mid-compaction. The rewrite
+    re-resolves the serving context at the safeguard-fallback switch seam, so
+    the frozen-labels property holds per serving model instead of per rewrite.
     """
+
+    model: Model
+    model_name: str
+    genuine_openai_endpoint: bool
+    token_estimator: Callable[[str], int]
+    estimate_kind: CompactionEstimateKind
+    summary_input_budget: int
+    acceptance_limit: int
+
+
+def _resolve_compaction_sizing_context(
+    summary_model: Model,
+    summary_model_name: str,
+    summary_input_budget: int,
+) -> _CompactionSizingContext:
+    """Resolve the sizing context for one loaded summary model and input budget."""
     genuine_openai_endpoint = is_genuine_openai_endpoint(summary_model)
-    token_estimator = partial(
-        compaction_payload_token_upper_bound,
-        model_id=summary_model.id,
+    return _CompactionSizingContext(
+        model=summary_model,
+        model_name=summary_model_name,
         genuine_openai_endpoint=genuine_openai_endpoint,
+        token_estimator=partial(
+            compaction_payload_token_upper_bound,
+            model_id=summary_model.id,
+            genuine_openai_endpoint=genuine_openai_endpoint,
+        ),
+        estimate_kind=compaction_estimate_kind(summary_model.id, genuine_openai_endpoint=genuine_openai_endpoint),
+        summary_input_budget=summary_input_budget,
+        acceptance_limit=persistable_summary_limit(summary_input_budget),
     )
-    estimate_kind = compaction_estimate_kind(summary_model.id, genuine_openai_endpoint=genuine_openai_endpoint)
-    return token_estimator, estimate_kind
 
 
 async def _emit_lifecycle_progress_after_persist(
@@ -609,10 +680,68 @@ def _sizing_log_fields(*, kind: CompactionEstimateKind, estimate: int, budget_to
     }
 
 
+def _acceptance_violation(
+    summary_text: str,
+    acceptance_contexts: tuple[_CompactionSizingContext, ...],
+) -> tuple[_CompactionSizingContext, int] | None:
+    """Return the first profile whose acceptance limit the candidate exceeds, with its estimate.
+
+    Evaluates the exact pure function the next turn's builder evaluates — the
+    profile's estimator over the escaped, wrapped previous-summary block — so
+    there is no estimation gap between what is persisted and what must fit.
+    """
+    summary_block = _previous_summary_block(summary_text)
+    for context in acceptance_contexts:
+        estimate = context.token_estimator(summary_block)
+        if estimate > context.acceptance_limit:
+            return context, estimate
+    return None
+
+
+def _require_acceptable_summary(
+    summary_text: str,
+    acceptance_contexts: tuple[_CompactionSizingContext, ...],
+) -> None:
+    """Enforce the persisted-summary fit invariant (I1) on one candidate."""
+    violation = _acceptance_violation(summary_text, acceptance_contexts)
+    if violation is None:
+        return
+    context, estimate = violation
+    msg = (
+        f"generated summary block sizes at {estimate} {context.estimate_kind} units for "
+        f"model {context.model_name}, above the {context.acceptance_limit}-unit persistable-summary "
+        f"limit of its {context.summary_input_budget}-unit input budget"
+    )
+    raise CompactionSummaryOversizedOutputError(msg)
+
+
+def _steer_summary_prompt(
+    summary_prompt: str,
+    acceptance_contexts: tuple[_CompactionSizingContext, ...],
+) -> str:
+    """Append a soft word target derived from the tightest acceptance limit.
+
+    Steering only, so the acceptance check almost never fires; the check is
+    the guarantee. Provider ``max_tokens`` is deliberately untouched: no
+    client-known bound converts output tokens to estimator units, and lowering
+    it would turn legitimately long merges into output-limit retry loops.
+    """
+    if not acceptance_contexts:
+        return summary_prompt
+    word_target = min(context.acceptance_limit for context in acceptance_contexts) // _STEERING_ESTIMATOR_UNITS_PER_WORD
+    if word_target <= 0:
+        return summary_prompt
+    return (
+        f"{summary_prompt}\n"
+        f"Keep the merged summary under roughly {word_target:,} words. "
+        "The target is soft: never drop a still-relevant fact to meet it."
+    )
+
+
 async def _generate_compaction_summary_with_retry(
     *,
-    model: Model,
-    model_name: str,
+    sizing: _CompactionSizingContext,
+    acceptance_contexts: tuple[_CompactionSizingContext, ...],
     previous_summary: str | None,
     compactable_runs: Sequence[RunOutput | TeamRunOutput],
     initial_summary_input: str,
@@ -622,63 +751,77 @@ async def _generate_compaction_summary_with_retry(
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
     summary_prompt: str,
-    token_estimator: Callable[[str], int],
-    estimate_kind: CompactionEstimateKind,
-    fallback_model: Model | None = None,
-    fallback_model_name: str | None = None,
+    retry_policy: SummaryRetryPolicy = DEFAULT_SUMMARY_RETRY_POLICY,
+    enforce_acceptance: bool = True,
+    fallback_sizing: _CompactionSizingContext | None = None,
 ) -> _GeneratedSummaryChunk:
     """Generate one summary chunk, retrying the same or smaller input when safe.
 
+    With ``enforce_acceptance`` (every chunk merge), a returned candidate must
+    satisfy the persisted-summary fit invariant for every profile in
+    ``acceptance_contexts``; a failing candidate raises the typed shrinkable
+    ``CompactionSummaryOversizedOutputError`` so the policy shrinks the input
+    and retries once, and exhaustion propagates with nothing persisted. The
+    condensation backstop disables enforcement and categorizes the candidate
+    itself, because a strictly smaller but still unfit output is durable
+    progress there, not a failure.
+
     A safeguard refusal from the primary model switches once to
-    ``fallback_model``, keeping the ``summary_prompt`` and ``summary_input``
-    bytes, included runs, and budget unchanged (only the target model
-    differs); a refusal or failure from the fallback propagates. The switch
-    shares the retry policy's attempt bound, so a
-    refusal after an earlier shrink or transient retry propagates without a
-    fallback call. All other failures keep the existing shrink and transient
-    same-input retry behavior.
+    ``fallback_sizing``, keeping the ``summary_prompt`` and ``summary_input``
+    bytes, included runs, and budget unchanged (only the target model and its
+    sizing labels differ); a refusal or failure from the fallback propagates.
+    The switch shares the retry policy's attempt bound, so a refusal after an
+    earlier shrink or transient retry propagates without a fallback call. All
+    other failures keep the existing shrink and transient same-input retry
+    behavior.
     """
     summary_input = initial_summary_input
     included_runs = initial_included_runs
     budget = summary_input_budget
-    retry_policy = DEFAULT_SUMMARY_RETRY_POLICY
-    minimum_progress_input_tokens = _minimum_progress_input_tokens(
-        previous_summary=previous_summary,
-        first_run=compactable_runs[0],
-        token_estimator=token_estimator,
+    steered_summary_prompt = _steer_summary_prompt(summary_prompt, acceptance_contexts)
+    minimum_progress_input_tokens = (
+        _minimum_progress_input_tokens(
+            previous_summary=previous_summary,
+            first_run=compactable_runs[0],
+            token_estimator=sizing.token_estimator,
+        )
+        if compactable_runs and retry_policy.shrink_allowed
+        else 0
     )
     attempt = 1
     while True:
-        estimated_input_tokens = token_estimator(summary_input)
+        estimated_input_tokens = sizing.token_estimator(summary_input)
         started = asyncio.get_running_loop().time()
         logger.info(
             "Compaction summary chunk request",
             session_id=session_id,
             scope=scope.key,
-            model_name=model_name,
+            model_name=sizing.model_name,
             attempt=attempt,
             candidate_runs=len(compactable_runs),
             included_runs=len(included_runs),
-            **_sizing_log_fields(kind=estimate_kind, estimate=estimated_input_tokens, budget_tokens=budget),
+            **_sizing_log_fields(kind=sizing.estimate_kind, estimate=estimated_input_tokens, budget_tokens=budget),
             timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
         )
         try:
             summary = await generate_compaction_summary(
-                model=model,
+                model=sizing.model,
                 summary_input=summary_input,
-                summary_prompt=summary_prompt,
+                summary_prompt=steered_summary_prompt,
             )
+            if enforce_acceptance:
+                _require_acceptable_summary(summary.summary, acceptance_contexts)
         except Exception as exc:
             duration_ms = int((asyncio.get_running_loop().time() - started) * 1000)
             logger.warning(
                 "Compaction summary chunk failed",
                 session_id=session_id,
                 scope=scope.key,
-                model_name=model_name,
+                model_name=sizing.model_name,
                 attempt=attempt,
                 candidate_runs=len(compactable_runs),
                 included_runs=len(included_runs),
-                **_sizing_log_fields(kind=estimate_kind, estimate=estimated_input_tokens, budget_tokens=budget),
+                **_sizing_log_fields(kind=sizing.estimate_kind, estimate=estimated_input_tokens, budget_tokens=budget),
                 timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
                 duration_ms=duration_ms,
                 error=str(exc) or type(exc).__name__,
@@ -686,22 +829,20 @@ async def _generate_compaction_summary_with_retry(
             # The attempt bound covers the fallback call too: a refusal after an
             # earlier shrink or transient retry propagates instead of issuing a
             # third provider call.
-            if fallback_model is not None and attempt < retry_policy.max_attempts and is_model_safeguard_refusal(exc):
+            if fallback_sizing is not None and attempt < retry_policy.max_attempts and is_model_safeguard_refusal(exc):
                 logger.info(
                     "Compaction summary refused; switching to fallback model",
                     session_id=session_id,
                     scope=scope.key,
                     attempt=attempt,
-                    refused_model=model_name,
-                    fallback_model=fallback_model_name,
+                    refused_model=sizing.model_name,
+                    fallback_model=fallback_sizing.model_name,
                 )
-                assert fallback_model_name is not None
-                model = fallback_model
-                model_name = fallback_model_name
                 # The fallback resends the unchanged prompt and input bytes
-                # exactly once; only the target model differs.
-                fallback_model = None
-                fallback_model_name = None
+                # exactly once; only the target model and its sizing labels
+                # differ.
+                sizing = fallback_sizing
+                fallback_sizing = None
                 attempt += 1
                 continue
             retry_decision: SummaryRetryDecision | None = retry_policy.retry_budget(
@@ -721,10 +862,10 @@ async def _generate_compaction_summary_with_retry(
                     compacted_runs=compactable_runs,
                     history_settings=history_settings,
                     max_input_tokens=retry_decision.budget,
-                    token_estimator=token_estimator,
+                    token_estimator=sizing.token_estimator,
                 )
                 if rebuilt_runs:
-                    rebuilt_input_tokens = token_estimator(rebuilt_input)
+                    rebuilt_input_tokens = sizing.token_estimator(rebuilt_input)
                     if retry_decision.kind == "shrink" and rebuilt_input_tokens >= estimated_input_tokens:
                         raise
                     summary_input = rebuilt_input
@@ -738,19 +879,19 @@ async def _generate_compaction_summary_with_retry(
             "Compaction summary chunk completed",
             session_id=session_id,
             scope=scope.key,
-            model_name=model_name,
+            model_name=sizing.model_name,
             attempt=attempt,
             candidate_runs=len(compactable_runs),
             included_runs=len(included_runs),
-            **_sizing_log_fields(kind=estimate_kind, estimate=estimated_input_tokens, budget_tokens=budget),
+            **_sizing_log_fields(kind=sizing.estimate_kind, estimate=estimated_input_tokens, budget_tokens=budget),
             timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
             duration_ms=duration_ms,
         )
         return _GeneratedSummaryChunk(
             summary=summary,
             included_runs=included_runs,
-            model=model,
-            model_name=model_name,
+            model=sizing.model,
+            model_name=sizing.model_name,
         )
 
 
@@ -964,57 +1105,253 @@ def _compose_summary_input(summary_block: str, serialized_runs: str) -> str:
     return "\n\n".join(parts)
 
 
+class _CarriedSummaryUnfitError(RuntimeError):
+    """Terminal condensation failure: the provider verified the summary cannot fit its window."""
+
+
+# The backstop input is complete-summary-or-nothing (E1), so shrink is
+# structurally impossible; transient failures keep the standard one delayed
+# same-budget retry. The strengthened retry disables even that so the corner's
+# provider spend stays bounded per distinct (summary, model, budget) state.
+_CONDENSATION_RETRY_POLICY = SummaryRetryPolicy(shrink_allowed=False)
+_CONDENSATION_STRENGTHENED_RETRY_POLICY = SummaryRetryPolicy(max_attempts=1, shrink_allowed=False)
+
+
+def _condense_note(*, word_target: int | None) -> str:
+    """Build the loss-aware condensation instruction, optionally with the numeric target."""
+    base = (
+        "The previous summary alone exceeds the compaction input budget, "
+        "so there are no new runs in this pass. Rewrite the previous summary "
+        "more concisely in the required structure, preserving every "
+        "still-relevant fact, especially Next Steps and Critical Context."
+    )
+    if word_target is None:
+        return f"<note>{base}</note>"
+    return f"<note>{base} The rewritten summary MUST stay under {word_target:,} words.</note>"
+
+
+def _summary_digest(summary_text: str) -> str:
+    """Return the stable identity of one stored summary text for the unfit marker."""
+    return hashlib.sha256(summary_text.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+
+def _persist_summary_only_chunk(
+    *,
+    storage: BaseDb,
+    persisted_session: AgentSession | TeamSession,
+    working_session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    summary_text: str,
+) -> None:
+    """Durably persist condensed-summary progress with no run removals (I5).
+
+    A summary-only chunk is a complete, E1-valid state transition: runs and
+    tombstones stay untouched, so successful condensation work is never
+    generated-and-discarded and never re-bought.
+    """
+    working_session.summary = SessionSummary(summary=summary_text, updated_at=datetime.now(UTC))
+    record_compaction_chunk(
+        storage=storage,
+        persisted_session=persisted_session,
+        working_session=working_session,
+        scope=scope,
+        compacted_run_ids=(),
+    )
+
+
+def _record_carried_summary_unfit(
+    *,
+    storage: BaseDb,
+    persisted_session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    state: HistoryScopeState,
+    marker: CarriedSummaryUnfitMarker,
+) -> None:
+    """Durably write the one-shot unfit marker (control state only; I3, I4).
+
+    Also clears a force flag this attempt consumed, while preserving a force
+    flag written concurrently after this attempt read its state, so a fresh
+    manual request still wins.
+    """
+
+    def _with_marker(latest: HistoryScopeState) -> HistoryScopeState:
+        return replace(
+            latest,
+            carried_summary_unfit=marker,
+            force_compact_before_next_run=(
+                latest.force_compact_before_next_run and not state.force_compact_before_next_run
+            ),
+        )
+
+    update_scope_state_on_latest(storage, persisted_session, scope, _with_marker)
+
+
 async def _condense_carried_summary(
     *,
-    model: Model,
+    storage: BaseDb,
+    persisted_session: AgentSession | TeamSession,
+    working_session: AgentSession | TeamSession,
+    sizing: _CompactionSizingContext,
+    acceptance_contexts: tuple[_CompactionSizingContext, ...],
     previous_summary: str,
-    summary_input_budget: int,
     session_id: str,
     scope: HistoryScope,
+    state: HistoryScopeState,
+    history_settings: ResolvedHistorySettings,
     summary_prompt: str,
-    token_estimator: Callable[[str], int],
-    estimate_kind: CompactionEstimateKind,
 ) -> str | None:
     """Condense a complete carried summary that left no room for any run.
 
-    Returns the condensed summary text, or None when even the bare complete
-    summary cannot fit one request, in which case the caller leaves the
-    existing summary and runs untouched. The model always receives the
-    COMPLETE previous summary; nothing derived from a truncated copy is ever
-    persisted.
+    There is deliberately no client-side send gate: the provider is the only
+    accurate arbiter of whether the request fits, so neither the conservative
+    false-negative stall nor an approximate over-context guess can occur here.
+    The model always receives the COMPLETE previous summary (E1); acceptance
+    gates only what is persisted. Every terminal verdict is durable: a fitting
+    or strictly smaller output persists immediately as a summary-only chunk,
+    and a failure verdict writes a one-shot marker keyed on (summary digest,
+    model identity, budget) so it is never automatically re-purchased for the
+    same state. Returns the durably persisted condensed text, or None when
+    nothing was persisted.
     """
-    condensation_input = _compose_summary_input(_previous_summary_block(previous_summary), _CONDENSE_SUMMARY_NOTE)
-    # Send/no-send is all-or-nothing: either the complete summary is condensed
-    # or compaction stays a no-op, so the conservative sizing bound is the
-    # wrong gate here — its headroom would turn into a permanent stall, while
-    # an oversized request merely fails this attempt recoverably with nothing
-    # persisted. Gate on the o200k approximation instead; a genuine prior
-    # summary output comfortably fits its own model's request budget in real
-    # tokens.
-    if approximate_o200k_tokens(condensation_input) > summary_input_budget:
-        logger.warning(
-            "Compaction skipped because the carried summary alone exceeds the summary budget",
+    stored_digest = _summary_digest(previous_summary)
+    marker = state.carried_summary_unfit
+    if (
+        marker is not None
+        and not state.force_compact_before_next_run
+        and marker.summary_digest == stored_digest
+        and marker.model_identifier == _model_identifier(sizing.model)
+        and marker.summary_input_budget == sizing.summary_input_budget
+    ):
+        logger.info(
+            "Compaction condensation skipped by carried-summary unfit marker",
             session_id=session_id,
             scope=scope.key,
-            summary_input_budget_tokens=summary_input_budget,
+            marker_reason=marker.reason,
+            marker_failed_at=marker.failed_at,
+            summary_input_budget_tokens=sizing.summary_input_budget,
         )
         return None
-    logger.info(
-        "Compaction condensing carried summary",
+
+    def _mark_unfit(summary_digest: str, reason: str) -> None:
+        _record_carried_summary_unfit(
+            storage=storage,
+            persisted_session=persisted_session,
+            scope=scope,
+            state=state,
+            marker=CarriedSummaryUnfitMarker(
+                summary_digest=summary_digest,
+                model_identifier=_model_identifier(sizing.model),
+                summary_input_budget=sizing.summary_input_budget,
+                failed_at=_iso_utc_now(),
+                reason=reason,
+            ),
+        )
+
+    async def _condense_once(*, word_target: int | None, retry_policy: SummaryRetryPolicy) -> SessionSummary:
+        condensation_input = _compose_summary_input(
+            _previous_summary_block(previous_summary),
+            _condense_note(word_target=word_target),
+        )
+        logger.info(
+            "Compaction condensing carried summary",
+            session_id=session_id,
+            scope=scope.key,
+            model_name=sizing.model_name,
+            **_sizing_log_fields(
+                kind=sizing.estimate_kind,
+                estimate=sizing.token_estimator(condensation_input),
+                budget_tokens=sizing.summary_input_budget,
+            ),
+        )
+        chunk = await _generate_compaction_summary_with_retry(
+            sizing=sizing,
+            acceptance_contexts=acceptance_contexts,
+            enforce_acceptance=False,
+            retry_policy=retry_policy,
+            previous_summary=previous_summary,
+            compactable_runs=[],
+            initial_summary_input=condensation_input,
+            initial_included_runs=[],
+            summary_input_budget=sizing.summary_input_budget,
+            session_id=session_id,
+            scope=scope,
+            history_settings=history_settings,
+            summary_prompt=summary_prompt,
+        )
+        return chunk.summary
+
+    previous_block_size = sizing.token_estimator(_previous_summary_block(previous_summary))
+    word_target = min(context.acceptance_limit for context in acceptance_contexts) // _STEERING_ESTIMATOR_UNITS_PER_WORD
+    try:
+        candidate = await _condense_once(word_target=None, retry_policy=_CONDENSATION_RETRY_POLICY)
+        candidate_block_size = sizing.token_estimator(_previous_summary_block(candidate.summary))
+        if candidate_block_size >= previous_block_size:
+            # The model failed to compress; one strengthened retry with the
+            # explicit numeric target, then a terminal marker (I4).
+            candidate = await _condense_once(
+                word_target=word_target,
+                retry_policy=_CONDENSATION_STRENGTHENED_RETRY_POLICY,
+            )
+            candidate_block_size = sizing.token_estimator(_previous_summary_block(candidate.summary))
+    except ContextWindowExceededError as exc:
+        # Provider-verified impossibility: under the complete-input invariant
+        # no replacement can ever be produced by this model, so record the
+        # verdict once and surface the remedies instead of re-buying the same
+        # rejection every turn.
+        _mark_unfit(stored_digest, "provider_context_window_rejection")
+        logger.warning(
+            "Compaction condensation rejected by the provider context window",
+            session_id=session_id,
+            scope=scope.key,
+            model_name=sizing.model_name,
+            summary_input_budget_tokens=sizing.summary_input_budget,
+            error=str(exc) or type(exc).__name__,
+        )
+        msg = (
+            "the carried summary exceeds the compaction model's context window; "
+            "raise the compaction model's context_window, switch compaction.model to a "
+            "larger-context model, or force a retry with the compact_context tool"
+        )
+        raise _CarriedSummaryUnfitError(msg) from exc
+
+    if candidate_block_size >= previous_block_size:
+        _mark_unfit(stored_digest, "condensation_not_smaller")
+        logger.warning(
+            "Compaction condensation did not shrink the carried summary",
+            session_id=session_id,
+            scope=scope.key,
+            model_name=sizing.model_name,
+            summary_input_estimate=candidate_block_size,
+            previous_summary_estimate=previous_block_size,
+            summary_input_budget_tokens=sizing.summary_input_budget,
+        )
+        return None
+
+    _persist_summary_only_chunk(
+        storage=storage,
+        persisted_session=persisted_session,
+        working_session=working_session,
+        scope=scope,
+        summary_text=candidate.summary,
+    )
+    violation = _acceptance_violation(candidate.summary, acceptance_contexts)
+    if violation is None:
+        return candidate.summary
+    # Strictly smaller but still above an acceptance limit: valid complete-
+    # input progress worth keeping — discarding it would re-buy the same call
+    # — with a marker on the NEW digest so no automatic attempt follows.
+    violating_context, violating_estimate = violation
+    _mark_unfit(_summary_digest(candidate.summary), "condensed_summary_still_unfit")
+    logger.warning(
+        "Compaction condensation shrank the carried summary but it still exceeds the persistable limit",
         session_id=session_id,
         scope=scope.key,
-        **_sizing_log_fields(
-            kind=estimate_kind,
-            estimate=token_estimator(condensation_input),
-            budget_tokens=summary_input_budget,
-        ),
+        model_name=violating_context.model_name,
+        summary_input_estimate=violating_estimate,
+        acceptance_limit=violating_context.acceptance_limit,
+        summary_input_budget_tokens=violating_context.summary_input_budget,
     )
-    condensed = await generate_compaction_summary(
-        model=model,
-        summary_input=condensation_input,
-        summary_prompt=summary_prompt,
-    )
-    return condensed.summary
+    return candidate.summary
 
 
 def _previous_summary_block(summary: str) -> str:

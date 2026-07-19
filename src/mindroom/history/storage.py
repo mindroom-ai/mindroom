@@ -44,7 +44,7 @@ from mindroom.constants import (
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
 )
-from mindroom.history.types import HistoryScope, HistoryScopeState
+from mindroom.history.types import CarriedSummaryUnfitMarker, HistoryScope, HistoryScopeState
 from mindroom.metadata_merge import deep_merge_metadata
 
 if TYPE_CHECKING:
@@ -345,6 +345,34 @@ def _parse_state(raw_state: dict[str, Any]) -> HistoryScopeState:
             _normalize_compacted_run_ids(compacted_run_ids) if isinstance(compacted_run_ids, list) else ()
         ),
         force_compact_before_next_run=bool(force_flag),
+        carried_summary_unfit=_parse_carried_summary_unfit(raw_state.get("carried_summary_unfit")),
+    )
+
+
+def _parse_carried_summary_unfit(raw_marker: object) -> CarriedSummaryUnfitMarker | None:
+    if not isinstance(raw_marker, dict):
+        return None
+    summary_digest = raw_marker.get("summary_digest")
+    model_identifier = raw_marker.get("model_identifier")
+    summary_input_budget = raw_marker.get("summary_input_budget")
+    failed_at = raw_marker.get("failed_at")
+    reason = raw_marker.get("reason")
+    if (
+        not isinstance(summary_digest, str)
+        or not summary_digest
+        or not isinstance(model_identifier, str)
+        or not model_identifier
+        or not isinstance(summary_input_budget, int)
+        or not isinstance(failed_at, str)
+        or not isinstance(reason, str)
+    ):
+        return None
+    return CarriedSummaryUnfitMarker(
+        summary_digest=summary_digest,
+        model_identifier=model_identifier,
+        summary_input_budget=summary_input_budget,
+        failed_at=failed_at,
+        reason=reason,
     )
 
 
@@ -360,6 +388,14 @@ def _state_to_metadata(state: HistoryScopeState) -> dict[str, object]:
         payload["last_compacted_run_count"] = state.last_compacted_run_count
     if state.compacted_run_ids:
         payload["compacted_run_ids"] = list(_normalize_compacted_run_ids(state.compacted_run_ids))
+    if state.carried_summary_unfit is not None:
+        payload["carried_summary_unfit"] = {
+            "summary_digest": state.carried_summary_unfit.summary_digest,
+            "model_identifier": state.carried_summary_unfit.model_identifier,
+            "summary_input_budget": state.carried_summary_unfit.summary_input_budget,
+            "failed_at": state.carried_summary_unfit.failed_at,
+            "reason": state.carried_summary_unfit.reason,
+        }
     return payload
 
 
@@ -370,6 +406,7 @@ def _state_is_empty(state: HistoryScopeState) -> bool:
         and state.last_compacted_run_count is None
         and not state.compacted_run_ids
         and not state.force_compact_before_next_run
+        and state.carried_summary_unfit is None
     )
 
 

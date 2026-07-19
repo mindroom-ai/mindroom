@@ -44,6 +44,12 @@ def resolve_history_execution_plan(
         replay_window_tokens=replay_window_tokens,
         reserve_tokens=compaction_config.reserve_tokens,
     )
+    fallback_summary_input_budget_tokens = _resolve_fallback_summary_input_budget(
+        config=config,
+        fallback_model_name=compaction_config.fallback_model,
+        replay_window_tokens=replay_window_tokens,
+        reserve_tokens=compaction_config.reserve_tokens,
+    )
 
     threshold_tokens = None
     replay_budget_tokens = None
@@ -81,7 +87,36 @@ def resolve_history_execution_plan(
         unavailable_reason=unavailable_reason,
         hard_replay_budget_tokens=hard_replay_budget_tokens,
         compaction_fallback_model_name=compaction_config.fallback_model,
+        compaction_fallback_summary_input_budget_tokens=fallback_summary_input_budget_tokens,
     )
+
+
+def _resolve_fallback_summary_input_budget(
+    *,
+    config: Config,
+    fallback_model_name: str | None,
+    replay_window_tokens: int | None,
+    reserve_tokens: int,
+) -> int | None:
+    """Resolve the safeguard fallback's own summary-input budget, or None.
+
+    None when no fallback is configured, its context window is unknown, or its
+    budget fails the same availability floor as the primary — in each of those
+    cases no fallback-served next attempt can exist under its own plan, so
+    summary acceptance sizes the fallback profile with the primary's budget
+    instead.
+    """
+    if fallback_model_name is None:
+        return None
+    fallback_context_window = config.get_model_context_window(fallback_model_name)
+    if fallback_context_window is None:
+        return None
+    fallback_budget, fallback_unavailable_reason = _resolve_summary_input_budget(
+        compaction_context_window=fallback_context_window,
+        replay_window_tokens=replay_window_tokens,
+        reserve_tokens=reserve_tokens,
+    )
+    return fallback_budget if fallback_unavailable_reason is None else None
 
 
 def classify_compaction_decision(  # noqa: PLR0911

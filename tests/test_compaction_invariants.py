@@ -11,6 +11,7 @@ These tests exercise the owning interfaces directly, not the bot runtime.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,6 +44,7 @@ from mindroom.constants import (
 from mindroom.error_handling import ModelSafeguardRefusalError
 from mindroom.history.compaction import (
     _build_summary_input,
+    _CompactionSizingContext,
     _generate_compaction_summary_with_retry,
     compact_scope_history,
 )
@@ -72,12 +74,35 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
-from mindroom.token_budget import approximate_o200k_tokens, compaction_payload_token_upper_bound
+from mindroom.token_budget import (
+    approximate_o200k_tokens,
+    compaction_payload_token_upper_bound,
+    persistable_summary_limit,
+)
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 from tests.conftest import FakeModel, bind_runtime_paths, prepare_history_for_run_for_test
 
 _SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
 _HISTORY_SETTINGS = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+
+
+def _sizing_context(
+    model: FakeModel,
+    *,
+    model_name: str = "summary-model",
+    budget: int,
+    token_estimator: Callable[[str], int],
+) -> _CompactionSizingContext:
+    """Build one non-genuine-endpoint sizing context around a test estimator."""
+    return _CompactionSizingContext(
+        model=model,
+        model_name=model_name,
+        genuine_openai_endpoint=False,
+        token_estimator=token_estimator,
+        estimate_kind="utf8_bytes_token_upper_bound",
+        summary_input_budget=budget,
+        acceptance_limit=persistable_summary_limit(budget),
+    )
 
 
 class _RecordingClaude(Claude):
@@ -1134,6 +1159,11 @@ async def test_retry_helper_propagates_original_error_when_rebuilt_input_is_not_
     original_error = CompactionSummaryOutputLimitError("renamed owned output-limit signal")
     generate_summary = AsyncMock(side_effect=original_error)
 
+    sizing = _sizing_context(
+        FakeModel(id="summary-model", provider="fake"),
+        budget=4_000,
+        token_estimator=lambda _value: 2_000,
+    )
     with (
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
@@ -1146,8 +1176,8 @@ async def test_retry_helper_propagates_original_error_when_rebuilt_input_is_not_
         pytest.raises(CompactionSummaryOutputLimitError) as raised,
     ):
         await _generate_compaction_summary_with_retry(
-            model=FakeModel(id="summary-model", provider="fake"),
-            model_name="summary-model",
+            sizing=sizing,
+            acceptance_contexts=(sizing,),
             previous_summary=None,
             compactable_runs=[run],
             initial_summary_input="original request",
@@ -1157,8 +1187,6 @@ async def test_retry_helper_propagates_original_error_when_rebuilt_input_is_not_
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            token_estimator=lambda _value: 2_000,
-            estimate_kind="utf8_bytes_token_upper_bound",
         )
 
     assert raised.value is original_error
@@ -1185,9 +1213,14 @@ async def test_retry_helper_honors_transient_fallthrough_for_shrink_message_at_f
         ),
         patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
     ):
+        sizing = _sizing_context(
+            FakeModel(id="summary-model", provider="fake"),
+            budget=4_000,
+            token_estimator=lambda _value: COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
+        )
         generated = await _generate_compaction_summary_with_retry(
-            model=FakeModel(id="summary-model", provider="fake"),
-            model_name="summary-model",
+            sizing=sizing,
+            acceptance_contexts=(sizing,),
             previous_summary=None,
             compactable_runs=[run],
             initial_summary_input="original request",
@@ -1197,8 +1230,6 @@ async def test_retry_helper_honors_transient_fallthrough_for_shrink_message_at_f
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            token_estimator=lambda _value: COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
-            estimate_kind="utf8_bytes_token_upper_bound",
         )
 
     assert generated.summary is recovered_summary
@@ -1240,9 +1271,14 @@ async def test_retry_helper_shrinks_around_a_large_durable_summary() -> None:
     )
 
     with patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary):
+        sizing = _sizing_context(
+            FakeModel(id="summary-model", provider="fake"),
+            budget=summary_input_budget,
+            token_estimator=_chars_per_token_estimator,
+        )
         generated = await _generate_compaction_summary_with_retry(
-            model=FakeModel(id="summary-model", provider="fake"),
-            model_name="summary-model",
+            sizing=sizing,
+            acceptance_contexts=(sizing,),
             previous_summary=previous_summary,
             compactable_runs=runs,
             initial_summary_input=initial_input,
@@ -1252,8 +1288,6 @@ async def test_retry_helper_shrinks_around_a_large_durable_summary() -> None:
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            token_estimator=_chars_per_token_estimator,
-            estimate_kind="utf8_bytes_token_upper_bound",
         )
 
     assert generated.summary is recovered_summary
@@ -1282,13 +1316,18 @@ async def test_retry_helper_propagates_error_when_no_smaller_progress_input_exis
     original_error = CompactionSummaryOutputLimitError("renamed owned output-limit signal")
     generate_summary = AsyncMock(side_effect=original_error)
 
+    sizing = _sizing_context(
+        FakeModel(id="summary-model", provider="fake"),
+        budget=summary_input_budget,
+        token_estimator=_chars_per_token_estimator,
+    )
     with (
         patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
         pytest.raises(CompactionSummaryOutputLimitError) as raised,
     ):
         await _generate_compaction_summary_with_retry(
-            model=FakeModel(id="summary-model", provider="fake"),
-            model_name="summary-model",
+            sizing=sizing,
+            acceptance_contexts=(sizing,),
             previous_summary=previous_summary,
             compactable_runs=runs,
             initial_summary_input=initial_input,
@@ -1298,8 +1337,6 @@ async def test_retry_helper_propagates_error_when_no_smaller_progress_input_exis
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            token_estimator=_chars_per_token_estimator,
-            estimate_kind="utf8_bytes_token_upper_bound",
         )
 
     assert raised.value is original_error
@@ -1502,9 +1539,16 @@ async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_
         patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
         patch("mindroom.history.compaction.logger", logger_mock),
     ):
+        sizing = _sizing_context(primary, budget=4_000, token_estimator=lambda _value: 2_000)
+        fallback_sizing = _sizing_context(
+            fallback,
+            model_name="fallback-model",
+            budget=4_000,
+            token_estimator=lambda _value: 2_000,
+        )
         generated = await _generate_compaction_summary_with_retry(
-            model=primary,
-            model_name="summary-model",
+            sizing=sizing,
+            acceptance_contexts=(sizing, fallback_sizing),
             previous_summary=None,
             compactable_runs=[run],
             initial_summary_input="original request",
@@ -1514,10 +1558,7 @@ async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            token_estimator=lambda _value: 2_000,
-            estimate_kind="utf8_bytes_token_upper_bound",
-            fallback_model=fallback,
-            fallback_model_name="fallback-model",
+            fallback_sizing=fallback_sizing,
         )
 
     assert generated.summary is recovered_summary
@@ -1530,10 +1571,11 @@ async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_
         "original request",
         "original request",
     ]
-    assert [call.kwargs["summary_prompt"] for call in generate_summary.await_args_list] == [
-        COMPACTION_SUMMARY_PROMPT,
-        COMPACTION_SUMMARY_PROMPT,
-    ]
+    # Both calls carry the identical steered prompt: the base summary prompt
+    # plus the soft word target, unchanged across the fallback switch.
+    prompts = [call.kwargs["summary_prompt"] for call in generate_summary.await_args_list]
+    assert prompts[1] == prompts[0]
+    assert prompts[0].startswith(COMPACTION_SUMMARY_PROMPT)
     retry_sleep.assert_not_awaited()
     # Structured request/failure/completion logs identify the actual serving model.
     assert [
@@ -1570,13 +1612,20 @@ async def test_retry_helper_propagates_fallback_refusal_or_failure(fallback_erro
         side_effect=[ModelSafeguardRefusalError("provider-specific refusal wording"), fallback_error],
     )
 
+    sizing = _sizing_context(primary, budget=4_000, token_estimator=lambda _value: 2_000)
+    fallback_sizing = _sizing_context(
+        fallback,
+        model_name="fallback-model",
+        budget=4_000,
+        token_estimator=lambda _value: 2_000,
+    )
     with (
         patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
         pytest.raises(type(fallback_error)) as raised,
     ):
         await _generate_compaction_summary_with_retry(
-            model=primary,
-            model_name="summary-model",
+            sizing=sizing,
+            acceptance_contexts=(sizing, fallback_sizing),
             previous_summary=None,
             compactable_runs=[run],
             initial_summary_input="original request",
@@ -1586,10 +1635,7 @@ async def test_retry_helper_propagates_fallback_refusal_or_failure(fallback_erro
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            token_estimator=lambda _value: 2_000,
-            estimate_kind="utf8_bytes_token_upper_bound",
-            fallback_model=fallback,
-            fallback_model_name="fallback-model",
+            fallback_sizing=fallback_sizing,
         )
 
     assert raised.value is fallback_error
@@ -1612,14 +1658,21 @@ async def test_retry_helper_refusal_after_transient_retry_propagates_within_atte
     )
     retry_sleep = AsyncMock()
 
+    sizing = _sizing_context(primary, budget=4_000, token_estimator=lambda _value: 2_000)
+    fallback_sizing = _sizing_context(
+        fallback,
+        model_name="fallback-model",
+        budget=4_000,
+        token_estimator=lambda _value: 2_000,
+    )
     with (
         patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
         patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
         pytest.raises(ModelSafeguardRefusalError) as raised,
     ):
         await _generate_compaction_summary_with_retry(
-            model=primary,
-            model_name="summary-model",
+            sizing=sizing,
+            acceptance_contexts=(sizing, fallback_sizing),
             previous_summary=None,
             compactable_runs=[run],
             initial_summary_input="original request",
@@ -1629,10 +1682,7 @@ async def test_retry_helper_refusal_after_transient_retry_propagates_within_atte
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            token_estimator=lambda _value: 2_000,
-            estimate_kind="utf8_bytes_token_upper_bound",
-            fallback_model=fallback,
-            fallback_model_name="fallback-model",
+            fallback_sizing=fallback_sizing,
         )
 
     assert raised.value is refusal

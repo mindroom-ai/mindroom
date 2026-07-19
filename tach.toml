@@ -3438,6 +3438,7 @@ from = ["mindroom.memory._backend"]
 [[interfaces]]
 expose = [
     "CompactionSummaryOutputLimitError",
+    "CompactionSummaryOversizedOutputError",
     "DEFAULT_SUMMARY_RETRY_POLICY",
     "SummaryRetryPolicy",
     "build_summary_request_messages",

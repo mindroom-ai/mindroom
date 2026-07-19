@@ -98,12 +98,33 @@ class ResolvedHistorySettings:
 
 
 @dataclass(frozen=True)
+class CarriedSummaryUnfitMarker:
+    """Durable one-shot record that condensing one stored summary ended terminally.
+
+    Control state only: it never touches the summary or runs. It matches — and
+    suppresses further automatic condensation attempts — only while the stored
+    summary digest, the serving compaction model identity, and the summary
+    input budget all equal the values recorded here; changing any of the three
+    implicitly re-enables exactly one fresh attempt, and a forced compaction
+    bypasses it outright.
+    """
+
+    summary_digest: str
+    model_identifier: str
+    summary_input_budget: int
+    failed_at: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class HistoryScopeState:
     """Persisted compaction control/audit state stored in session metadata.
 
     ``compacted_run_ids`` are tombstones for runs already folded into the durable
     summary; they let the state owner prune runs that a stale session write
     reintroduced after compaction progress was persisted.
+    ``carried_summary_unfit`` bounds spend on inherited oversized summaries to
+    one condensation attempt-set per distinct (summary, model, budget) state.
     """
 
     last_compacted_at: str | None = None
@@ -111,6 +132,7 @@ class HistoryScopeState:
     last_compacted_run_count: int | None = None
     compacted_run_ids: tuple[str, ...] = ()
     force_compact_before_next_run: bool = False
+    carried_summary_unfit: CarriedSummaryUnfitMarker | None = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +153,12 @@ class ResolvedHistoryExecutionPlan:
     unavailable_reason: CompactionAvailabilityReason | None = None
     hard_replay_budget_tokens: int | None = None
     compaction_fallback_model_name: str | None = None
+    # The fallback's own summary-input budget (its window min'd with the replay
+    # window, minus reserve/overhead/margin), resolved only when it clears the
+    # same availability floor as the primary; None otherwise. Summary
+    # acceptance sizes the fallback profile with this budget so a persisted
+    # summary also fits a fallback-served next attempt.
+    compaction_fallback_summary_input_budget_tokens: int | None = None
 
 
 @dataclass(frozen=True)

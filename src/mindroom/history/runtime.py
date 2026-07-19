@@ -602,6 +602,7 @@ async def _run_scope_compaction(
         summary_prompt=config.get_prompt("COMPACTION_SUMMARY_PROMPT"),
         fallback_summary_model=fallback_model,
         fallback_summary_model_name=fallback_model_name if fallback_model is not None else None,
+        fallback_summary_input_budget=execution_plan.compaction_fallback_summary_input_budget_tokens,
         lifecycle_notice_event_id=lifecycle_notice_event_id,
         progress_callback=progress_callback,
     )

@@ -12,6 +12,8 @@ from typing import Literal
 
 import tiktoken
 
+from mindroom.history.types import COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS
+
 CompactionEstimateKind = Literal[
     "model_tiktoken_tokens",
     "utf8_bytes_token_upper_bound",
@@ -111,6 +113,19 @@ def compute_compaction_input_budget(
     safety = int(context_window * safety_margin_ratio)
     budget = context_window - reserve_tokens - prompt_overhead_tokens - safety
     return max(0, budget)
+
+
+def persistable_summary_limit(budget: int) -> int:
+    """Return the acceptance limit for one persisted summary block under one input budget.
+
+    A summary may be persisted only when the active estimator sizes its
+    escaped-and-wrapped ``<previous_summary>`` block at or below this limit.
+    The reserved headroom ``max(retry floor, budget // 4)`` guarantees that the
+    next compaction request under the same budget always fits at least one run
+    (at worst a minimal excerpt) beside the carried summary, so the zero-run
+    corner is unreachable from summaries MindRoom wrote itself.
+    """
+    return budget - max(COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS, budget // 4)
 
 
 def stable_serialize(value: object) -> str:

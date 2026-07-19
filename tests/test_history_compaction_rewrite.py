@@ -175,32 +175,33 @@ async def test_rewrite_passes_full_summary_input_budget_into_chunk_construction(
 
 
 @pytest.mark.asyncio
-async def test_rewrite_condenses_a_carried_summary_that_fills_the_byte_budget_without_tail_loss(
+async def test_rewrite_condenses_an_inherited_oversized_summary_into_durable_summary_only_progress(
     tmp_path: Path,
 ) -> None:
-    """Regression for review rounds 3-4 (B3 liveness, then A1/B1 tail loss).
+    """Corner happy path (redesign test 3 + the migration sentinel borrowing).
 
-    Chunk 1's summary is token-valid (~1,400 o200k tokens, fine under any
-    token-domain output reserve) but consumes the whole 6,000 byte-denominated
-    input budget. The rewrite must neither stall on it nor truncate it:
-    it condenses the COMPLETE summary in its own request — the tail sections
-    (Next Steps / Critical Context) reach the model — persists only the
-    model's condensed text, and then keeps chunking against it.
+    An INHERITED stored summary fills the whole 6,000 byte-denominated input
+    budget, so no run fits beside it. The rewrite must neither stall on it nor
+    truncate it: it condenses the COMPLETE summary in its own request — the
+    sentinel in the final Critical Context line reaches the model verbatim —
+    persists the model's fitting output IMMEDIATELY as a summary-only chunk
+    (empty run set), and then keeps chunking against the condensed text.
     """
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    oversized_summary = ("chunk one summary " * 336) + "\n\n## Critical Context\nCRITICAL-CONTEXT-SENTINEL"
     working_session = _session(
         "session-1",
         runs=[
             _completed_run("run-1", messages=[Message(role="user", content="RUN1-MARKER " + ("u" * 3_500))]),
             _completed_run("run-2", messages=[Message(role="user", content="RUN2-MARKER " + ("v" * 3_500))]),
         ],
+        summary=SessionSummary(summary=oversized_summary, updated_at=datetime.now(UTC)),
     )
-    oversized_summary = ("chunk one summary " * 336) + "\n\n## Critical Context\nCRITICAL-CONTEXT-SENTINEL"
     summary_inputs: list[str] = []
     summaries = [
-        SessionSummary(summary=oversized_summary, updated_at=datetime.now(UTC)),
         SessionSummary(summary="condensed carry CRITICAL-CONTEXT-SENTINEL", updated_at=datetime.now(UTC)),
+        SessionSummary(summary="chunk one merged summary CRITICAL-CONTEXT-SENTINEL", updated_at=datetime.now(UTC)),
         SessionSummary(summary="final merged summary CRITICAL-CONTEXT-SENTINEL", updated_at=datetime.now(UTC)),
     ]
 
@@ -208,9 +209,25 @@ async def test_rewrite_condenses_a_carried_summary_that_fills_the_byte_budget_wi
         summary_inputs.append(summary_input)
         return summaries[len(summary_inputs) - 1]
 
-    with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
-        new=AsyncMock(side_effect=fake_summary),
+    persisted_summaries: list[tuple[tuple[str, ...], str]] = []
+
+    def record_and_snapshot(**kwargs: object) -> None:
+        record_compaction_chunk(**kwargs)  # type: ignore[arg-type]
+        working = kwargs["working_session"]
+        assert working.summary is not None  # type: ignore[union-attr]
+        persisted_summaries.append(
+            (tuple(kwargs["compacted_run_ids"]), working.summary.summary),  # type: ignore[union-attr, arg-type]
+        )
+
+    with (
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(side_effect=fake_summary),
+        ),
+        patch(
+            "mindroom.history.compaction.record_compaction_chunk",
+            side_effect=record_and_snapshot,
+        ),
     ):
         rewrite_result = await _rewrite_single_run(
             storage=storage,
@@ -223,23 +240,28 @@ async def test_rewrite_condenses_a_carried_summary_that_fills_the_byte_budget_wi
     assert rewrite_result.compacted_run_count == 2
     assert rewrite_result.summary_text == "final merged summary CRITICAL-CONTEXT-SENTINEL"
     assert len(summary_inputs) == 3
-    assert "RUN1-MARKER" in summary_inputs[0]
     # The condensation request carries the COMPLETE previous summary — the
-    # sentinel in the final Critical Context section reaches the model — and
-    # no run content.
-    assert oversized_summary in summary_inputs[1]
-    assert "CRITICAL-CONTEXT-SENTINEL" in summary_inputs[1]
-    assert "<note>" in summary_inputs[1]
-    assert "RUN1-MARKER" not in summary_inputs[1]
-    assert "RUN2-MARKER" not in summary_inputs[1]
-    # Chunk 2 then merges against the condensed text, never a truncated copy.
-    assert "condensed carry CRITICAL-CONTEXT-SENTINEL" in summary_inputs[2]
+    # sentinel in the final Critical Context line reaches the model verbatim —
+    # and no run content.
+    assert oversized_summary in summary_inputs[0]
+    assert "CRITICAL-CONTEXT-SENTINEL" in summary_inputs[0]
+    assert "<note>" in summary_inputs[0]
+    assert "RUN1-MARKER" not in summary_inputs[0]
+    assert "RUN2-MARKER" not in summary_inputs[0]
+    # The fitting condensation persists FIRST as a summary-only chunk (empty
+    # run set), before any run chunk — durable progress, never discarded —
+    # and the admitted result carries the sentinel verbatim.
+    assert persisted_summaries[0] == ((), "condensed carry CRITICAL-CONTEXT-SENTINEL")
+    assert [run_ids for run_ids, _summary in persisted_summaries[1:]] == [("run-1",), ("run-2",)]
+    # Chunk merges build against the condensed text, never a truncated copy.
+    assert "condensed carry CRITICAL-CONTEXT-SENTINEL" in summary_inputs[1]
+    assert "RUN1-MARKER" in summary_inputs[1]
     assert "RUN2-MARKER" in summary_inputs[2]
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.summary == "final merged summary CRITICAL-CONTEXT-SENTINEL"
-    assert "CRITICAL-CONTEXT-SENTINEL" in persisted.summary.summary
+    assert persisted.runs == []
 
 
 @pytest.mark.asyncio
@@ -274,36 +296,55 @@ async def test_rewrite_keeps_noop_contract_for_degenerate_budget_with_carried_su
 
 
 @pytest.mark.asyncio
-async def test_rewrite_noops_when_the_bare_carried_summary_cannot_fit_a_request(tmp_path: Path) -> None:
-    """When even the complete summary alone exceeds the request budget, nothing is touched.
+async def test_rewrite_sends_condensation_even_when_the_estimate_exceeds_the_budget(tmp_path: Path) -> None:
+    """Round-3 stall regression (redesign test 5): no client-side send gate.
 
-    Truncate-and-persist is never acceptable, so the rewrite leaves the
-    summary and runs untouched and reports no progress.
+    The byte-bound estimate of the complete condensation request (~13,000
+    units) dwarfs the 2,100-unit budget — the round-3 population where the
+    bound over-estimates ~4.5x — but the provider accepts. The request must be
+    SENT, with the complete summary and its tail sentinel, and the fitting
+    condensed output must persist durably before chunking continues.
     """
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    # ~13,000 ASCII chars is ~2,600 o200k tokens: over the 2,100-token budget
-    # even under the realistic approximation, so no condensation is attempted.
     stored_summary = ("word " * 2_600) + "TAIL-FACT-MUST-SURVIVE"
     working_session = _session(
         "session-1",
-        runs=[_completed_run("run-1")],
+        runs=[_completed_run("run-1", messages=[Message(role="user", content="RUN1-MARKER payload")])],
         summary=SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC)),
     )
-    generate_summary = AsyncMock()
+    summary_inputs: list[str] = []
+    summaries = [
+        SessionSummary(summary="condensed TAIL-FACT-MUST-SURVIVE", updated_at=datetime.now(UTC)),
+        SessionSummary(summary="merged TAIL-FACT-MUST-SURVIVE", updated_at=datetime.now(UTC)),
+    ]
 
-    with patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary):
+    async def fake_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+        summary_inputs.append(summary_input)
+        return summaries[len(summary_inputs) - 1]
+
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(side_effect=fake_summary),
+    ):
         rewrite_result = await _rewrite_single_run(
             storage=storage,
             working_session=working_session,
             summary_input_budget=2_100,
         )
 
-    assert rewrite_result is None
-    generate_summary.assert_not_awaited()
-    assert working_session.summary is not None
-    assert working_session.summary.summary == stored_summary
-    assert [run.run_id for run in working_session.runs or []] == ["run-1"]
+    assert rewrite_result is not None
+    assert rewrite_result.compacted_run_count == 1
+    assert len(summary_inputs) == 2
+    # The complete summary — tail sentinel included — reached the provider.
+    assert stored_summary in summary_inputs[0]
+    assert "RUN1-MARKER" not in summary_inputs[0]
+    assert "condensed TAIL-FACT-MUST-SURVIVE" in summary_inputs[1]
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "merged TAIL-FACT-MUST-SURVIVE"
+    assert persisted.runs == []
 
 
 def test_build_summary_input_accounts_for_wrappers_separators_and_run_indexes() -> None:

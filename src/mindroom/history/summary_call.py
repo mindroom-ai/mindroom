@@ -123,6 +123,16 @@ class CompactionSummaryOutputLimitError(RuntimeError):
     """Raised when the summary response reaches the configured output-token cap."""
 
 
+class CompactionSummaryOversizedOutputError(RuntimeError):
+    """Raised when a generated summary fails the persisted-summary fit check.
+
+    The candidate's escaped ``<previous_summary>`` block exceeds the acceptance
+    limit of a model profile that can serve the next compaction attempt, so
+    persisting it would recreate the zero-run corner. Shrinking the input and
+    retrying usually yields a shorter merge, so the error is typed shrinkable.
+    """
+
+
 class _CompactionSummaryEmptyResultError(RuntimeError):
     """Raised when the summary model returns a success response with no text."""
 
@@ -132,6 +142,7 @@ _TYPED_SHRINKABLE_ERRORS = (
     TimeoutError,
     ContextWindowExceededError,
     CompactionSummaryOutputLimitError,
+    CompactionSummaryOversizedOutputError,
 )
 
 
@@ -152,12 +163,16 @@ class SummaryRetryPolicy:
     and to the caller's smallest progress-preserving rebuild, while selected typed
     transient failures wait ``same_input_retry_delay_seconds`` and retry the
     same configured budget.
+    ``shrink_allowed=False`` disables the shrink branch entirely for callers
+    whose input is indivisible under the complete-input invariant (the
+    carried-summary condensation backstop); transient same-budget retries stay.
     Once ``max_attempts`` is reached or no retry applies, the error propagates.
     """
 
     max_attempts: int = 2
     shrink_divisor: int = 2
     same_input_retry_delay_seconds: float = 1.0
+    shrink_allowed: bool = True
 
     def should_shrink(self, error: Exception) -> bool:
         """Return whether rebuilding a smaller summary input may resolve the failure."""
@@ -188,7 +203,7 @@ class SummaryRetryPolicy:
         """
         if attempt >= self.max_attempts:
             return None
-        if self.should_shrink(error):
+        if self.shrink_allowed and self.should_shrink(error):
             smaller_budget = min(
                 budget,
                 max(
