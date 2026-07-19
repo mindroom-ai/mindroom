@@ -21,7 +21,7 @@ from .event_normalization import normalize_event_source_for_cache
 from .postgres_agent_message_snapshot import load_postgres_agent_message_snapshot
 from .postgres_cache_maintenance import migrate_postgres_schema, run_startup_maintenance
 from .postgres_redaction import redact_postgres_connection_info
-from .thread_cache_state import replacement_validated_at
+from .thread_cache_state import incoming_thread_invalidation_takes_precedence, replacement_validated_at
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -707,8 +707,15 @@ class _PostgresEventCacheRuntime:
         """Remember a best-effort stale marker that must be persisted before trusting cache rows."""
         key = (room_id, thread_id)
         existing = self._pending_thread_invalidations.get(key)
-        if existing is not None and existing.invalidated_at >= invalidated_at:
-            return
+        if existing is not None:
+            incoming_takes_precedence = incoming_thread_invalidation_takes_precedence(
+                current_invalidated_at=existing.invalidated_at,
+                current_reason=existing.reason,
+                incoming_invalidated_at=invalidated_at,
+                incoming_reason=reason,
+            )
+            reason = reason if incoming_takes_precedence else existing.reason
+            invalidated_at = max(existing.invalidated_at, invalidated_at)
         self._pending_thread_invalidations[key] = _PendingInvalidation(
             invalidated_at=invalidated_at,
             reason=reason,

@@ -1652,13 +1652,27 @@ def test_postgres_pending_invalidation_records_are_monotonic() -> None:
         invalidated_at=100.0,
         reason="older_room_marker",
     )
+    runtime.record_pending_thread_invalidation(
+        "!room:localhost",
+        "$strong-thread",
+        invalidated_at=100.0,
+        reason="sync_opaque_encrypted_event",
+    )
+    runtime.record_pending_thread_invalidation(
+        "!room:localhost",
+        "$strong-thread",
+        invalidated_at=300.0,
+        reason="sync_thread_mutation",
+    )
 
     thread_pending = runtime.pending_thread_invalidations("!room:localhost")
     room_pending = runtime.pending_room_invalidation("!room:localhost")
 
-    assert thread_pending == (("$thread", runtime._pending_thread_invalidations[("!room:localhost", "$thread")]),)
-    assert thread_pending[0][1].invalidated_at == 200.0
-    assert thread_pending[0][1].reason == "newer_thread_marker"
+    pending_by_thread = dict(thread_pending)
+    assert pending_by_thread["$thread"].invalidated_at == 200.0
+    assert pending_by_thread["$thread"].reason == "newer_thread_marker"
+    assert pending_by_thread["$strong-thread"].invalidated_at == 300.0
+    assert pending_by_thread["$strong-thread"].reason == "sync_opaque_encrypted_event"
     assert room_pending is not None
     assert room_pending.invalidated_at == 200.0
     assert room_pending.reason == "newer_room_marker"

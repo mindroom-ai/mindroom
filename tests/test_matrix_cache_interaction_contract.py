@@ -924,11 +924,12 @@ async def test_joined_timeline_thread_relations_indexes_edits_and_visible_histor
 
 
 @pytest.mark.asyncio
-async def test_encrypted_relation_bearing_events_are_point_cached_indexed_and_not_visible(
+async def test_encrypted_relation_bearing_events_are_point_cached_and_fail_the_thread_closed(
     event_cache: ConversationEventCache,
 ) -> None:
-    """Opaque encrypted relations retain routing metadata but never render as plaintext history."""
+    """Opaque encrypted relations keep point evidence while the affected thread stays stale."""
     await _seed_thread(event_cache)
+    seeded_thread_events = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
     encrypted_sources = [
         _event_source(
             "$encrypted-thread",
@@ -1008,24 +1009,175 @@ async def test_encrypted_relation_bearing_events_are_point_cached_indexed_and_no
     for source in encrypted_sources:
         event_id = cast("str", source["event_id"])
         assert await event_cache.get_event(_ROOM_ID, event_id) == source
-    for event_id in (
-        "$encrypted-thread",
-        "$encrypted-reply",
-        "$encrypted-edit",
-        "$encrypted-reference",
-    ):
-        assert await event_cache.get_thread_id_for_event(_ROOM_ID, event_id) == _THREAD_ID
-    assert await event_cache.get_thread_id_for_event(_ROOM_ID, "$encrypted-reaction") is None
+    assert await event_cache.get_thread_id_for_event(_ROOM_ID, "$encrypted-thread") == _THREAD_ID
+    for event_id in ("$encrypted-reply", "$encrypted-edit", "$encrypted-reference", "$encrypted-reaction"):
+        assert await event_cache.get_thread_id_for_event(_ROOM_ID, event_id) is None
+    assert await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID) == seeded_thread_events
     state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
     assert state is not None
+    assert state.invalidation_reason == "sync_opaque_encrypted_event"
+    assert state.room_invalidated_at is None
+    assert thread_cache_rejection_reason(state) == "thread_invalidated_after_validation"
 
-    history = await fetch_dispatch_thread_snapshot(
-        cast("nio.AsyncClient", object()),
-        _ROOM_ID,
-        _THREAD_ID,
-        event_cache,
+
+def _encrypted_source(
+    event_id: str,
+    *,
+    timestamp: int,
+    relation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    content: dict[str, Any] = {
+        "algorithm": "m.megolm.v1.aes-sha2",
+        "ciphertext": "opaque",
+        "device_id": "DEVICE",
+        "sender_key": "sender-key",
+        "session_id": "session",
+    }
+    if relation is not None:
+        content["m.relates_to"] = relation
+    return _event_source(event_id, "m.room.encrypted", content, timestamp=timestamp)
+
+
+@pytest.mark.asyncio
+async def test_opaque_encrypted_thread_child_leaves_only_its_thread_stale(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A known-impact opaque encrypted child must not invalidate unrelated thread snapshots."""
+    await _seed_thread(event_cache)
+    await _seed_other_thread(event_cache)
+    opaque_child = _encrypted_source("$opaque-child", timestamp=60, relation=_thread_relation())
+
+    await _build_sync_harness(event_cache).apply(_sync_response([raw_nio_event(opaque_child)]))
+
+    assert await event_cache.get_event(_ROOM_ID, "$opaque-child") == opaque_child
+    affected_state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    assert affected_state is not None
+    assert affected_state.invalidation_reason == "sync_opaque_encrypted_event"
+    assert thread_cache_rejection_reason(affected_state) == "thread_invalidated_after_validation"
+    other_state = await event_cache.get_thread_cache_state(_ROOM_ID, _OTHER_THREAD_ID)
+    assert other_state is not None
+    assert thread_cache_rejection_reason(other_state) is None
+
+
+@pytest.mark.asyncio
+async def test_relationless_ciphertext_and_opaque_reaction_do_not_poison_thread_snapshots(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Ciphertext without thread-affecting relations must leave every thread snapshot trusted."""
+    await _seed_thread(event_cache)
+    before_state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    relationless = _encrypted_source("$opaque-relationless", timestamp=60)
+    reaction = _encrypted_source(
+        "$opaque-reaction",
+        timestamp=61,
+        relation={"event_id": _THREAD_CHILD_ID, "key": "👍", "rel_type": "m.annotation"},
     )
-    assert [message.event_id for message in history] == [_THREAD_ID, _THREAD_CHILD_ID]
+
+    await _build_sync_harness(event_cache).apply(
+        _sync_response([raw_nio_event(relationless), raw_nio_event(reaction)]),
+    )
+
+    assert await event_cache.get_event(_ROOM_ID, "$opaque-relationless") == relationless
+    assert await event_cache.get_event(_ROOM_ID, "$opaque-reaction") == reaction
+    assert await event_cache.get_thread_id_for_event(_ROOM_ID, "$opaque-relationless") is None
+    assert await event_cache.get_thread_id_for_event(_ROOM_ID, "$opaque-reaction") is None
+    state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    assert state == before_state
+    assert thread_cache_rejection_reason(state) is None
+
+
+@pytest.mark.asyncio
+async def test_later_clear_incremental_event_cannot_weaken_opaque_invalidation(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A plaintext append after opaque evidence must not revalidate the stale thread."""
+    await _seed_thread(event_cache)
+    harness = _build_sync_harness(event_cache)
+    opaque_child = _encrypted_source("$opaque-child", timestamp=60, relation=_thread_relation())
+    await harness.apply(_sync_response([raw_nio_event(opaque_child)]))
+
+    clear_child = _message_source("$clear-child", "m.text", timestamp=61, relation=_thread_relation())
+    await harness.apply(_sync_response([raw_nio_event(clear_child)]))
+
+    cached_event_ids = {
+        source["event_id"] for source in (await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID) or [])
+    }
+    assert "$clear-child" in cached_event_ids
+    assert "$opaque-child" not in cached_event_ids
+    state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    assert state is not None
+    assert state.invalidation_reason == "sync_opaque_encrypted_event"
+    assert thread_cache_rejection_reason(state) == "thread_invalidated_after_validation"
+
+
+@pytest.mark.asyncio
+async def test_unknown_impact_opaque_encrypted_event_fails_closed_at_room_scope(
+    event_cache: ConversationEventCache,
+) -> None:
+    """An opaque relation that cannot be resolved must invalidate the room's cached threads."""
+    await _seed_thread(event_cache)
+    await _seed_other_thread(event_cache)
+    opaque_reply = _encrypted_source(
+        "$opaque-unknown-reply",
+        timestamp=60,
+        relation=_reply_relation("$never-seen-event"),
+    )
+
+    await _build_sync_harness(event_cache).apply(_sync_response([raw_nio_event(opaque_reply)]))
+
+    assert await event_cache.get_event(_ROOM_ID, "$opaque-unknown-reply") == opaque_reply
+    for thread_id in (_THREAD_ID, _OTHER_THREAD_ID):
+        state = await event_cache.get_thread_cache_state(_ROOM_ID, thread_id)
+        assert state is not None
+        assert state.room_invalidation_reason == "sync_thread_lookup_unavailable"
+        assert thread_cache_rejection_reason(state) == "room_invalidated_after_validation"
+
+
+@pytest.mark.asyncio
+async def test_mark_thread_stale_upgrades_incremental_reason_to_full_refetch_reason(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A newer full-refetch marker must replace an incremental reason on both backends."""
+    await _seed_thread(event_cache)
+    await event_cache.mark_thread_stale(_ROOM_ID, _THREAD_ID, reason="sync_thread_mutation")
+    await event_cache.mark_thread_stale(_ROOM_ID, _THREAD_ID, reason="sync_opaque_encrypted_event")
+
+    state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    assert state is not None
+    assert state.invalidation_reason == "sync_opaque_encrypted_event"
+
+    await event_cache.mark_thread_stale(_ROOM_ID, _THREAD_ID, reason="sync_thread_mutation")
+    downgraded_state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    assert downgraded_state is not None
+    assert downgraded_state.invalidation_reason == "sync_opaque_encrypted_event"
+    assert downgraded_state.invalidated_at is not None
+    assert state.invalidated_at is not None
+    assert downgraded_state.invalidated_at >= state.invalidated_at
+    assert await event_cache.revalidate_thread_after_incremental_update(_ROOM_ID, _THREAD_ID) is False
+
+
+@pytest.mark.asyncio
+async def test_sync_opaque_stale_marker_failure_deletes_snapshot_instead_of_serving_it(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A failed opaque stale marker must remove the cached snapshot rather than leave it trusted."""
+    await _seed_thread(event_cache)
+    opaque_child = _encrypted_source("$opaque-child", timestamp=60, relation=_thread_relation())
+
+    with patch.object(
+        event_cache,
+        "mark_thread_stale",
+        AsyncMock(side_effect=RuntimeError("stale marker write refused")),
+    ):
+        result = await _build_sync_harness(event_cache).policy.cache_sync_timeline_for_certification(
+            cast("nio.SyncResponse", _sync_response([raw_nio_event(opaque_child)])),
+        )
+
+    assert result.complete is False
+    assert result.errors
+    assert await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID) is None
+    state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    assert thread_cache_rejection_reason(state) is not None
 
 
 @pytest.mark.asyncio
@@ -1107,19 +1259,6 @@ async def test_visible_thread_history_message_and_non_message_family_boundary(
             {"m.relates_to": _thread_relation()},
             timestamp=95,
             state_key="@user:localhost_DEVICE",
-        ),
-        _event_source(
-            "$raw-encrypted",
-            "m.room.encrypted",
-            {
-                "algorithm": "m.megolm.v1.aes-sha2",
-                "ciphertext": "opaque",
-                "device_id": "DEVICE",
-                "m.relates_to": _thread_relation(),
-                "sender_key": "sender-key",
-                "session_id": "session",
-            },
-            timestamp=96,
         ),
     ]
     await replace_thread_unconditionally(

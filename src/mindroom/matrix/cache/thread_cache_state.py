@@ -10,13 +10,36 @@ from .event_cache import ThreadCacheState
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-_INCREMENTAL_THREAD_REVALIDATION_REASONS = frozenset(
-    {
-        "live_thread_mutation",
-        "sync_thread_mutation",
-        "outbound_thread_mutation",
-    },
+_INCREMENTAL_THREAD_REVALIDATION_REASONS = (
+    "live_thread_mutation",
+    "sync_thread_mutation",
+    "outbound_thread_mutation",
 )
+
+
+def incremental_thread_revalidation_reasons() -> tuple[str, ...]:
+    """Return the invalidation reasons that one successful incremental append may clear."""
+    return _INCREMENTAL_THREAD_REVALIDATION_REASONS
+
+
+def is_incremental_thread_revalidation_reason(reason: str | None) -> bool:
+    """Return whether one invalidation reason may be cleared after an incremental append."""
+    return reason in _INCREMENTAL_THREAD_REVALIDATION_REASONS
+
+
+def incoming_thread_invalidation_takes_precedence(
+    *,
+    current_invalidated_at: float,
+    current_reason: str | None,
+    incoming_invalidated_at: float,
+    incoming_reason: str,
+) -> bool:
+    """Return whether an incoming marker's reason should replace the current reason."""
+    current_is_incremental = is_incremental_thread_revalidation_reason(current_reason)
+    incoming_is_incremental = is_incremental_thread_revalidation_reason(incoming_reason)
+    if current_is_incremental != incoming_is_incremental:
+        return not incoming_is_incremental
+    return incoming_invalidated_at >= current_invalidated_at
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +102,7 @@ def can_revalidate_after_incremental_update(cache_state: ThreadCacheStateRow | N
     return (
         cache_state.validated_at is not None
         and cache_state.invalidated_at is not None
-        and cache_state.invalidation_reason in _INCREMENTAL_THREAD_REVALIDATION_REASONS
+        and is_incremental_thread_revalidation_reason(cache_state.invalidation_reason)
         and not (
             cache_state.room_invalidated_at is not None and cache_state.room_invalidated_at >= cache_state.validated_at
         )
