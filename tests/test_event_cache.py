@@ -1583,21 +1583,23 @@ async def test_separate_cache_clients_cannot_downgrade_decrypted_payload(
     event_id = "$shared:localhost"
     thread_root_id = "$root:localhost"
     decrypting_client = event_cache_factory()
-    keyless_client = event_cache_factory()
     await decrypting_client.initialize()
-    await keyless_client.initialize()
     try:
-        writers = {"clear": decrypting_client, "opaque": keyless_client}
-        payloads = {
-            "clear": _clear_payload(event_id, body="decrypted", thread_root_id=thread_root_id),
-            "opaque": _opaque_payload(event_id, thread_root_id=thread_root_id),
-        }
-        for payload_kind in arrival_order:
-            await writers[payload_kind].store_event(event_id, room_id, payloads[payload_kind])
-        cached_by_decrypting = await decrypting_client.get_event(room_id, event_id)
-        cached_by_keyless = await keyless_client.get_event(room_id, event_id)
+        keyless_client = event_cache_factory()
+        await keyless_client.initialize()
+        try:
+            writers = {"clear": decrypting_client, "opaque": keyless_client}
+            payloads = {
+                "clear": _clear_payload(event_id, body="decrypted", thread_root_id=thread_root_id),
+                "opaque": _opaque_payload(event_id, thread_root_id=thread_root_id),
+            }
+            for payload_kind in arrival_order:
+                await writers[payload_kind].store_event(event_id, room_id, payloads[payload_kind])
+            cached_by_decrypting = await decrypting_client.get_event(room_id, event_id)
+            cached_by_keyless = await keyless_client.get_event(room_id, event_id)
+        finally:
+            await keyless_client.close()
     finally:
-        await keyless_client.close()
         await decrypting_client.close()
 
     for cached_event in (cached_by_decrypting, cached_by_keyless):
