@@ -100,9 +100,22 @@ def _provider_error_with_cause(cause: BaseException) -> ModelProviderError:
     return provider_error
 
 
-def _provider_error_with_context(context: BaseException) -> ModelProviderError:
+def _provider_error_with_context(
+    context: BaseException,
+    *,
+    suppress_context: bool = False,
+) -> ModelProviderError:
     provider_error = ModelProviderError(str(context))
     provider_error.__context__ = context
+    provider_error.__suppress_context__ = suppress_context
+    return provider_error
+
+
+def _provider_error_with_cyclic_cause() -> ModelProviderError:
+    provider_error = ModelProviderError("cyclic provider failure")
+    wrapper = RuntimeError("cyclic wrapper")
+    provider_error.__cause__ = wrapper
+    wrapper.__cause__ = provider_error
     return provider_error
 
 
@@ -739,6 +752,19 @@ def test_retry_policy_does_not_retry_non_transient_provider_statuses(status_code
             id="implicit-connection-context",
         ),
         pytest.param(
+            _provider_error_with_context(
+                ConnectionError("connection reset"),
+                suppress_context=True,
+            ),
+            None,
+            id="suppressed-connection-context",
+        ),
+        pytest.param(
+            _provider_error_with_cyclic_cause(),
+            None,
+            id="cyclic-cause-chain",
+        ),
+        pytest.param(
             _provider_error_with_cause(ValueError("invalid provider response")),
             None,
             id="non-network-cause",
@@ -1073,6 +1099,56 @@ async def test_minimum_available_budget_can_retry_safeguard_refusal(tmp_path: Pa
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.summary == "recovered summary"
+    storage.close()
+
+
+@pytest.mark.asyncio
+async def test_subsequent_compaction_progresses_with_near_cap_durable_summary(tmp_path: Path) -> None:
+    """A prior summary cannot strand later runs outside a viable summary-input budget."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    previous_summary = "word " * 975
+    session = _session([_completed_run("run-1", marker="RUN1-MARKER")])
+    session.summary = SessionSummary(summary=previous_summary, updated_at=datetime.now(UTC))
+    write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+    attempts: list[str] = []
+
+    async def record_summary_input(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+        attempts.append(summary_input)
+        return SessionSummary(summary="recovered summary", updated_at=datetime.now(UTC))
+
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(side_effect=record_summary_input),
+    ):
+        outcome = await compact_scope_history(
+            storage=storage,
+            session=session,
+            scope=_SCOPE,
+            state=read_scope_state(session, _SCOPE),
+            history_settings=_HISTORY_SETTINGS,
+            available_history_budget=None,
+            summary_input_budget=COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS + 1,
+            summary_model=FakeModel(id="summary-model", provider="fake"),
+            summary_model_name="summary-model",
+            replay_window_tokens=COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS + 1,
+            threshold_tokens=None,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+        )
+
+    assert outcome is not None
+    assert outcome.compacted_run_count == 1
+    assert len(attempts) == 1
+    assert estimate_compaction_input_tokens(attempts[0]) <= COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS + 1
+    assert previous_summary.strip() not in attempts[0]
+    assert "RUN1-MARKER question" in attempts[0]
+    assert "RUN1-MARKER answer" in attempts[0]
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "recovered summary"
+    assert persisted.runs == []
     storage.close()
 
 

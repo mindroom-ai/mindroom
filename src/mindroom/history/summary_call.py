@@ -60,11 +60,12 @@ logger = get_logger(__name__)
 
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
 
-# Deliberately narrower than ``TRANSIENT_PROVIDER_STATUS_CODES`` because
-# ``ModelProviderError`` defaults to status 502, which would silently make
-# unclassified errors eligible for a full-budget retry. Safeguard refusals share
-# that default, so shrink classification must remain first. Default-502 errors
-# are retried only when their cause chain proves a typed network failure.
+# Deliberately narrower than ``TRANSIENT_PROVIDER_STATUS_CODES``. Status 502 is
+# excluded because ``ModelProviderError`` uses it for unclassified errors;
+# default-502 errors retry only when their cause chain proves a typed network
+# failure. Explicit 408/500/504 responses are excluded separately as a
+# conservative scope decision: only observed 429/503/529 summary-call failures
+# receive a status-based retry. Safeguard refusals shrink before either path.
 _TRANSIENT_SUMMARY_STATUS_CODES = frozenset({429, 503, 529})
 
 _RETRYABLE_PROVIDER_ERROR_FRAGMENTS = (
@@ -90,7 +91,9 @@ def _has_typed_network_cause(error: ModelProviderError) -> bool:
     from openai import APIConnectionError as OpenAIAPIConnectionError  # noqa: PLC0415
 
     cause = error.__cause__ or (None if error.__suppress_context__ else error.__context__)
-    while cause is not None:
+    seen: set[int] = set()
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
         if isinstance(
             cause,
             ConnectionError | httpx.NetworkError | AnthropicAPIConnectionError | OpenAIAPIConnectionError,

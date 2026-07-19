@@ -600,14 +600,14 @@ def _build_summary_input(
 ) -> tuple[str, list[RunOutput | TeamRunOutput]]:
     summary_block = ""
     if previous_summary is not None and previous_summary.strip():
-        escaped_summary = _escape_xml_content(previous_summary)
-        summary_block = f"<previous_summary>\n{escaped_summary}\n</previous_summary>"
+        summary_block = _previous_summary_block(previous_summary)
 
     empty_input = _compose_summary_input(summary_block, "")
     remaining = max_input_tokens - token_estimator(empty_input) - _WRAPPER_OVERHEAD_TOKENS
 
     if remaining <= 0:
         return _build_oversized_summary_input(
+            previous_summary=previous_summary,
             summary_block=summary_block,
             compacted_runs=compacted_runs[:1],
             history_settings=history_settings,
@@ -624,6 +624,7 @@ def _build_summary_input(
         if run_tokens > remaining:
             if not included_runs:
                 return _build_oversized_summary_input(
+                    previous_summary=previous_summary,
                     summary_block=summary_block,
                     compacted_runs=[run],
                     history_settings=history_settings,
@@ -643,6 +644,7 @@ def _build_summary_input(
 
 def _build_oversized_summary_input(
     *,
+    previous_summary: str | None,
     summary_block: str,
     compacted_runs: Sequence[RunOutput | TeamRunOutput],
     history_settings: ResolvedHistorySettings,
@@ -660,8 +662,73 @@ def _build_oversized_summary_input(
         token_estimator=token_estimator,
     )
     if oversized_excerpt is None:
-        return summary_block, []
+        return _build_summary_input_with_truncated_previous_summary(
+            previous_summary=previous_summary,
+            summary_block=summary_block,
+            first_run=first_run,
+            history_settings=history_settings,
+            max_input_tokens=max_input_tokens,
+            token_estimator=token_estimator,
+        )
     return _compose_summary_input(summary_block, oversized_excerpt), [first_run]
+
+
+def _build_summary_input_with_truncated_previous_summary(
+    *,
+    previous_summary: str | None,
+    summary_block: str,
+    first_run: RunOutput | TeamRunOutput,
+    history_settings: ResolvedHistorySettings,
+    max_input_tokens: int,
+    token_estimator: Callable[[str], int],
+) -> tuple[str, list[RunOutput | TeamRunOutput]]:
+    """Admit one run by truncating a prior summary only when verbatim preservation cannot fit."""
+    if previous_summary is None or not previous_summary.strip():
+        return summary_block, []
+
+    minimum_summary_block = _previous_summary_block(_truncate_excerpt(previous_summary, 1))
+    run_excerpt = _serialize_oversized_run_excerpt(
+        first_run,
+        index=0,
+        history_settings=history_settings,
+        max_tokens=_remaining_excerpt_budget(max_input_tokens, minimum_summary_block, token_estimator),
+        token_estimator=token_estimator,
+    )
+    if run_excerpt is None:
+        return summary_block, []
+
+    truncated_input = _largest_truncated_summary_input(
+        previous_summary=previous_summary,
+        serialized_run=run_excerpt,
+        max_input_tokens=max_input_tokens,
+        token_estimator=token_estimator,
+    )
+    if truncated_input is None:
+        return summary_block, []
+    return truncated_input, [first_run]
+
+
+def _largest_truncated_summary_input(
+    *,
+    previous_summary: str,
+    serialized_run: str,
+    max_input_tokens: int,
+    token_estimator: Callable[[str], int],
+) -> str | None:
+    """Return the longest summary prefix that fits beside one serialized run."""
+    best_input: str | None = None
+    lower = 1
+    upper = len(previous_summary)
+    while lower <= upper:
+        midpoint = (lower + upper) // 2
+        truncated_summary = _truncate_excerpt(previous_summary, midpoint)
+        candidate = _compose_summary_input(_previous_summary_block(truncated_summary), serialized_run)
+        if token_estimator(candidate) <= max_input_tokens:
+            best_input = candidate
+            lower = midpoint + 1
+        else:
+            upper = midpoint - 1
+    return best_input
 
 
 def _serialize_oversized_run_excerpt(
@@ -773,6 +840,10 @@ def _compose_summary_input(summary_block: str, serialized_runs: str) -> str:
         parts.append(summary_block)
     parts.append(f"<new_conversation>\n{serialized_runs}\n</new_conversation>")
     return "\n\n".join(parts)
+
+
+def _previous_summary_block(summary: str) -> str:
+    return f"<previous_summary>\n{_escape_xml_content(summary)}\n</previous_summary>"
 
 
 def _messages_for_runs(

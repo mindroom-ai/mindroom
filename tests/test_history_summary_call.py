@@ -33,6 +33,7 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
+from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,
@@ -554,18 +555,23 @@ def test_build_summary_input_normal_run_omits_only_bulky_metadata() -> None:
     assert "https://example.test/deployment.png" in summary_input
 
 
-def test_build_summary_input_skips_when_previous_summary_cannot_be_preserved() -> None:
+def test_build_summary_input_truncates_near_cap_summary_to_admit_a_run() -> None:
     run = _completed_run("run-1")
+    previous_summary = "word " * 975
 
     summary_input, included_runs = _build_summary_input(
-        previous_summary="existing durable summary " * 50,
+        previous_summary=previous_summary,
         compacted_runs=[run],
-        max_input_tokens=50,
+        max_input_tokens=1_001,
         history_settings=_ALL_HISTORY_SETTINGS,
     )
 
-    assert included_runs == []
+    assert included_runs == [run]
+    assert estimate_compaction_input_tokens(summary_input) <= 1_001
     assert "<previous_summary>" in summary_input
+    assert previous_summary.strip() not in summary_input
+    assert "run-1 question" in summary_input
+    assert "run-1 answer" in summary_input
 
 
 def test_build_summary_input_preserves_previous_summary_text() -> None:
