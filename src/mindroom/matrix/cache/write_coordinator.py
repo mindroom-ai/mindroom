@@ -688,7 +688,7 @@ class EventCacheWriteCoordinator:
                 raise
 
     async def wait_for_prior_room_updates(self, room_id: str) -> None:
-        """Wait only for room writes that were already queued when this read began."""
+        """Wait for all writes in this room that were already queued when this read began."""
         self._reevaluate_room(room_id)
         state = self._room_states.get(room_id)
         pending_tasks = () if state is None else self._pending_entry_tasks(state.entries)
