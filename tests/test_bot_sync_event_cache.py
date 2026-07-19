@@ -13,11 +13,12 @@ from mindroom.background_tasks import create_background_task, wait_for_backgroun
 from mindroom.bot import AgentBot
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.hooks import EVENT_AGENT_STARTED
+from mindroom.matrix.cache import thread_cache_rejection_reason
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import PermanentMatrixStartupError
-from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint
+from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_tokens import load_sync_checkpoint
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
@@ -503,8 +504,256 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         await self._run_sync_response_without_startup_side_effects(bot, sync_response)
 
+        assert bot._sync_trust_state is SyncTrustState.RESET_RECOVERY
         assert bot.client.next_batch is None
         assert _load_sync_token_value(bot.storage_path, bot.agent_name) is None
+        bot.event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            "!test:localhost",
+            reason="limited_sync_timeline",
+        )
+
+    @pytest.mark.asyncio
+    async def test_limited_cold_first_sync_keeps_new_position_and_stales_snapshots(self, bot: AgentBot) -> None:
+        """A limited token-less initial window must stale-mark the room without replaying the same window."""
+        bot._runtime_view.mark_runtime_started()
+        bot._restore_loaded_sync_token(None)
+        assert bot._sync_trust_state is SyncTrustState.RESET_RECOVERY
+        bot.client.next_batch = "s_after_partial_cold_start"
+        sync_response = self._sync_response(
+            {"!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=True))},
+        )
+
+        await self._run_sync_response_without_startup_side_effects(bot, sync_response)
+
+        assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
+        assert bot.client.next_batch == "s_after_partial_cold_start"
+        assert _load_sync_token_value(bot.storage_path, bot.agent_name) is None
+        bot.event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            "!test:localhost",
+            reason="limited_sync_timeline",
+        )
+
+    @pytest.mark.asyncio
+    async def test_limited_certified_sync_rewinds_then_only_complete_response_recertifies(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """A mid-run gap must reset once, consume one limited window, then certify a complete delta."""
+        _save_certified_sync_token(bot, "s_before_partial")
+        bot._runtime_view.mark_runtime_started()
+        bot._first_sync_done = True
+        bot._sync_trust_state = SyncTrustState.CERTIFIED
+        bot._sync_checkpoint = SyncCheckpoint("s_before_partial")
+        bot.client.next_batch = "s_after_partial"
+        partial_response = self._sync_response(
+            {"!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=True))},
+        )
+
+        await self._run_sync_response_without_startup_side_effects(bot, partial_response)
+
+        assert bot._sync_trust_state is SyncTrustState.RESET_RECOVERY
+        assert bot.client.next_batch is None
+        assert _load_sync_token_value(bot.storage_path, bot.agent_name) is None
+        bot.event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            "!test:localhost",
+            reason="limited_sync_timeline",
+        )
+
+        initial_recovery_response = self._sync_response(
+            {"!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=True))},
+        )
+        initial_recovery_response.next_batch = "s_after_initial_recovery"
+        bot.client.next_batch = initial_recovery_response.next_batch
+
+        await self._run_sync_response_without_startup_side_effects(bot, initial_recovery_response)
+
+        assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
+        assert bot.client.next_batch == "s_after_initial_recovery"
+        assert _load_sync_token_value(bot.storage_path, bot.agent_name) is None
+        assert bot.event_cache.mark_room_threads_stale.await_count == 2
+
+        complete_response = self._sync_response({})
+        complete_response.next_batch = "s_after_complete_recovery"
+        bot.client.next_batch = complete_response.next_batch
+
+        await self._run_sync_response_without_startup_side_effects(bot, complete_response)
+
+        checkpoint = load_sync_checkpoint(bot.storage_path, bot.agent_name)
+        assert bot._sync_trust_state is SyncTrustState.CERTIFIED
+        assert bot.client.next_batch == "s_after_complete_recovery"
+        assert checkpoint is not None
+        assert checkpoint.token == "s_after_complete_recovery"  # noqa: S105
+
+    @pytest.mark.asyncio
+    async def test_limited_sync_marks_room_stale_before_admitting_partial_events(self, bot: AgentBot) -> None:
+        """The durable room stale marker must land before any partial timeline event is admitted."""
+        room_id = "!room:localhost"
+        event_cache = _runtime_event_cache()
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+        message_event = nio.RoomMessageText.from_dict(
+            {
+                "content": {"body": "Partial window message", "msgtype": "m.text"},
+                "event_id": "$partial:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        result = await bot._conversation_cache.cache_sync_timeline_for_certification(
+            self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[message_event], limited=True))}),
+        )
+
+        assert result.certified is False
+        assert result.limited_room_ids == (room_id,)
+        assert result.errors == ()
+        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            room_id,
+            reason="limited_sync_timeline",
+        )
+        call_names = [name for name, _args, _kwargs in event_cache.mock_calls]
+        assert call_names.index("mark_room_threads_stale") < call_names.index("store_events_batch")
+
+    @pytest.mark.asyncio
+    async def test_limited_sync_stale_marker_failure_fails_certification_closed(self, bot: AgentBot) -> None:
+        """A limited room whose stale marker cannot be written must fail certification closed."""
+        room_id = "!room:localhost"
+        marker_error = RuntimeError("stale marker write failed")
+        event_cache = _runtime_event_cache()
+        event_cache.mark_room_threads_stale = AsyncMock(side_effect=marker_error)
+        event_cache.disable = Mock()
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+
+        result = await bot._conversation_cache.cache_sync_timeline_for_certification(
+            self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[], limited=True))}),
+        )
+
+        assert result.certified is False
+        assert result.complete is False
+        assert result.errors == (marker_error,)
+        assert result.limited_room_ids == (room_id,)
+        assert bot.event_cache.mark_room_threads_stale.await_args_list[0] == call(
+            room_id,
+            reason="limited_sync_timeline",
+        )
+        # Fail-closed fallback deleted the room's cached thread rows instead.
+        event_cache.invalidate_room_threads.assert_awaited_with(room_id)
+        event_cache.disable.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_limited_sync_event_write_failure_preserves_gap_marker(self, bot: AgentBot) -> None:
+        """A later event-write failure must not replace the durable limited-timeline reason."""
+        room_id = "!room:localhost"
+        write_error = RuntimeError("event write failed")
+        event_cache = _runtime_event_cache()
+        event_cache.store_events_batch = AsyncMock(side_effect=write_error)
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+        message_event = nio.RoomMessageText.from_dict(
+            {
+                "content": {"body": "Partial window message", "msgtype": "m.text"},
+                "event_id": "$partial:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        result = await bot._conversation_cache.cache_sync_timeline_for_certification(
+            self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[message_event], limited=True))}),
+        )
+
+        assert result.complete is False
+        assert result.errors == (write_error,)
+        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            room_id,
+            reason="limited_sync_timeline",
+        )
+
+    @pytest.mark.asyncio
+    async def test_limited_rooms_reported_when_cache_runtime_unavailable(self, bot: AgentBot) -> None:
+        """Limited classification must reach the certifier even when cache writes are unavailable."""
+        room_id = "!room:localhost"
+        event_cache = _runtime_event_cache()
+        event_cache.durable_writes_available = False
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+
+        result = await bot._conversation_cache.cache_sync_timeline_for_certification(
+            self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[], limited=True))}),
+        )
+
+        assert result.certified is False
+        assert result.complete is False
+        assert result.runtime_available is False
+        assert result.limited_room_ids == (room_id,)
+
+    @pytest.mark.asyncio
+    async def test_limited_sync_keeps_thread_snapshot_stale_despite_threaded_append(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """A validated snapshot must stay rejected after a limited window appends into its thread."""
+        support = await _bind_owned_runtime_support(bot)
+        room_id = "!test:localhost"
+        thread_id = "$thread_root:localhost"
+        assert bot.event_cache
+
+        try:
+            await _replace_thread(
+                bot.event_cache,
+                room_id,
+                thread_id,
+                [
+                    {
+                        "event_id": thread_id,
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1000,
+                        "room_id": room_id,
+                        "type": "m.room.message",
+                        "content": {"body": "Root", "msgtype": "m.text"},
+                    },
+                ],
+            )
+            state_before = await bot.event_cache.get_thread_cache_state(room_id, thread_id)
+            assert state_before is not None
+            assert thread_cache_rejection_reason(state_before) is None
+
+            partial_reply = nio.RoomMessageText.from_dict(
+                {
+                    "content": {
+                        "body": "Reply after gap",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+                    },
+                    "event_id": "$partial_reply:localhost",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 2000,
+                    "room_id": room_id,
+                    "type": "m.room.message",
+                },
+            )
+            result = await bot._conversation_cache.cache_sync_timeline_for_certification(
+                self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[partial_reply], limited=True))}),
+            )
+            cached_event = await bot.event_cache.get_event(room_id, "$partial_reply:localhost")
+            state_after = await bot.event_cache.get_thread_cache_state(room_id, thread_id)
+        finally:
+            await _close_bound_runtime_support(bot, support)
+
+        assert result.certified is False
+        assert result.limited_room_ids == (room_id,)
+        assert result.errors == ()
+        assert cached_event is not None
+        assert cached_event["event_id"] == "$partial_reply:localhost"
+        assert state_after is not None
+        assert state_after.room_invalidated_at is not None
+        assert state_after.room_invalidation_reason == "limited_sync_timeline"
+        assert thread_cache_rejection_reason(state_after) is not None
 
     @pytest.mark.asyncio
     async def test_cache_failure_clears_token_then_later_success_saves_checkpoint(
@@ -718,7 +967,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         sync_response.__class__ = nio.SyncResponse
         sync_response.rooms = MagicMock()
         sync_response.rooms.join = {
-            "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event])),
+            "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event], limited=False)),
         }
 
         bot._conversation_cache.cache_sync_timeline(sync_response)
@@ -759,7 +1008,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         sync_response.__class__ = nio.SyncResponse
         sync_response.rooms = MagicMock()
         sync_response.rooms.join = {
-            "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event])),
+            "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event], limited=False)),
         }
 
         bot._conversation_cache.cache_sync_timeline(sync_response)
@@ -804,7 +1053,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         sync_response.__class__ = nio.SyncResponse
         sync_response.rooms = MagicMock()
         sync_response.rooms.join = {
-            "!test:localhost": MagicMock(timeline=MagicMock(events=[edit_event])),
+            "!test:localhost": MagicMock(timeline=MagicMock(events=[edit_event], limited=False)),
         }
 
         bot._conversation_cache.cache_sync_timeline(sync_response)
@@ -871,7 +1120,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             sync_response.__class__ = nio.SyncResponse
             sync_response.rooms = MagicMock()
             sync_response.rooms.join = {
-                "!test:localhost": MagicMock(timeline=MagicMock(events=[edit_event])),
+                "!test:localhost": MagicMock(timeline=MagicMock(events=[edit_event], limited=False)),
             }
 
             bot._conversation_cache.cache_sync_timeline(sync_response)
@@ -923,7 +1172,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         sync_response.__class__ = nio.SyncResponse
         sync_response.rooms = MagicMock()
         sync_response.rooms.join = {
-            "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event])),
+            "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event], limited=False)),
         }
 
         bot._conversation_cache.cache_sync_timeline(sync_response)
@@ -976,7 +1225,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         sync_response.__class__ = nio.SyncResponse
         sync_response.rooms = MagicMock()
         sync_response.rooms.join = {
-            "!test:localhost": MagicMock(timeline=MagicMock(events=[edit_event])),
+            "!test:localhost": MagicMock(timeline=MagicMock(events=[edit_event], limited=False)),
         }
 
         bot._conversation_cache.cache_sync_timeline(sync_response)
@@ -1026,7 +1275,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         sync_response.__class__ = nio.SyncResponse
         sync_response.rooms = MagicMock()
         sync_response.rooms.join = {
-            "!test:localhost": MagicMock(timeline=MagicMock(events=[edit_event])),
+            "!test:localhost": MagicMock(timeline=MagicMock(events=[edit_event], limited=False)),
         }
 
         bot._conversation_cache.cache_sync_timeline(sync_response)
@@ -1072,7 +1321,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         sync_response.__class__ = nio.SyncResponse
         sync_response.rooms = MagicMock()
         sync_response.rooms.join = {
-            "!test:localhost": MagicMock(timeline=MagicMock(events=[redaction_event])),
+            "!test:localhost": MagicMock(timeline=MagicMock(events=[redaction_event], limited=False)),
         }
 
         bot._conversation_cache.cache_sync_timeline(sync_response)
@@ -1137,7 +1386,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         sync_response.__class__ = nio.SyncResponse
         sync_response.rooms = MagicMock()
         sync_response.rooms.join = {
-            "!test:localhost": MagicMock(timeline=MagicMock(events=[first_edit_event, second_edit_event])),
+            "!test:localhost": MagicMock(
+                timeline=MagicMock(events=[first_edit_event, second_edit_event], limited=False),
+            ),
         }
 
         bot._conversation_cache.cache_sync_timeline(sync_response)
@@ -1195,7 +1446,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         sync_response.rooms = MagicMock()
         sync_response.rooms.join = {
             "!test:localhost": MagicMock(
-                timeline=MagicMock(events=[first_redaction_event, second_redaction_event]),
+                timeline=MagicMock(events=[first_redaction_event, second_redaction_event], limited=False),
             ),
         }
 
@@ -1268,14 +1519,14 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         first_sync_response.__class__ = nio.SyncResponse
         first_sync_response.rooms = MagicMock()
         first_sync_response.rooms.join = {
-            "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event])),
+            "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event], limited=False)),
         }
 
         second_sync_response = MagicMock()
         second_sync_response.__class__ = nio.SyncResponse
         second_sync_response.rooms = MagicMock()
         second_sync_response.rooms.join = {
-            "!test:localhost": MagicMock(timeline=MagicMock(events=[redaction_event])),
+            "!test:localhost": MagicMock(timeline=MagicMock(events=[redaction_event], limited=False)),
         }
 
         bot._conversation_cache.cache_sync_timeline(first_sync_response)
@@ -1332,7 +1583,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         sync_response.__class__ = nio.SyncResponse
         sync_response.rooms = MagicMock()
         sync_response.rooms.join = {
-            "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event, redaction_event])),
+            "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event, redaction_event], limited=False)),
         }
 
         bot._conversation_cache.cache_sync_timeline(sync_response)
@@ -1378,7 +1629,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             sync_response = MagicMock()
             sync_response.__class__ = nio.SyncResponse
             sync_response.rooms = MagicMock()
-            sync_response.rooms.join = {room_id: MagicMock(timeline=MagicMock(events=[message_event]))}
+            sync_response.rooms.join = {room_id: MagicMock(timeline=MagicMock(events=[message_event], limited=False))}
             return sync_response
 
         event_cache = _runtime_event_cache()
@@ -1544,7 +1795,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             sync_response.__class__ = nio.SyncResponse
             sync_response.rooms = MagicMock()
             sync_response.rooms.join = {
-                "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event, redaction_event])),
+                "!test:localhost": MagicMock(
+                    timeline=MagicMock(events=[message_event, redaction_event], limited=False),
+                ),
             }
 
             bot._conversation_cache.cache_sync_timeline(sync_response)
@@ -1603,7 +1856,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         sync_response.__class__ = nio.SyncResponse
         sync_response.rooms = MagicMock()
         sync_response.rooms.join = {
-            "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event, redaction_event])),
+            "!test:localhost": MagicMock(timeline=MagicMock(events=[message_event, redaction_event], limited=False)),
         }
 
         bot._conversation_cache.cache_sync_timeline(sync_response)

@@ -33,11 +33,11 @@ def test_normalize_sync_token_accepts_only_non_empty_strings(value: object, expe
     assert normalize_sync_token(value) == expected
 
 
-def test_start_without_token_is_cold() -> None:
-    """Missing saved token should start from cold sync state."""
+def test_start_without_token_consumes_initial_window() -> None:
+    """Missing sync continuity should treat the first response as an initial recovery window."""
     startup = start_from_loaded_token(None)
 
-    assert startup.state is SyncTrustState.COLD
+    assert startup.state is SyncTrustState.RESET_RECOVERY
     assert startup.sync_token is None
 
 
@@ -51,15 +51,7 @@ def test_start_with_checkpoint_waits_for_first_sync() -> None:
     assert startup.sync_token == "s_saved"  # noqa: S105
 
 
-@pytest.mark.parametrize(
-    "state",
-    [
-        SyncTrustState.COLD,
-        SyncTrustState.PENDING,
-        SyncTrustState.CERTIFIED,
-        SyncTrustState.UNCERTAIN,
-    ],
-)
+@pytest.mark.parametrize("state", list(SyncTrustState))
 def test_successful_sync_certifies_checkpoint(
     state: SyncTrustState,
 ) -> None:
@@ -78,15 +70,45 @@ def test_successful_sync_certifies_checkpoint(
 
 
 @pytest.mark.parametrize(
-    ("cache_result", "reason"),
+    ("cache_result", "reason", "expected_state", "expected_reset"),
     [
-        (SyncCacheWriteResult(complete=False), "cache_write_incomplete"),
-        (SyncCacheWriteResult(complete=True, limited_room_ids=("!room:localhost",)), "limited_sync_timeline"),
-        (SyncCacheWriteResult(complete=True, errors=(RuntimeError("boom"),)), "cache_write_failed"),
-        (SyncCacheWriteResult(complete=True, errors=(asyncio.CancelledError(),)), "cache_write_failed"),
+        (SyncCacheWriteResult(complete=False), "cache_write_incomplete", SyncTrustState.UNCERTAIN, False),
+        (
+            SyncCacheWriteResult(complete=True, limited_room_ids=("!room:localhost",)),
+            "limited_sync_timeline",
+            SyncTrustState.RESET_RECOVERY,
+            True,
+        ),
+        (
+            SyncCacheWriteResult(complete=True, errors=(RuntimeError("boom"),)),
+            "cache_write_failed",
+            SyncTrustState.UNCERTAIN,
+            False,
+        ),
+        (
+            SyncCacheWriteResult(complete=True, errors=(asyncio.CancelledError(),)),
+            "cache_write_failed",
+            SyncTrustState.UNCERTAIN,
+            False,
+        ),
+        (
+            SyncCacheWriteResult(
+                complete=False,
+                limited_room_ids=("!room:localhost",),
+                errors=(RuntimeError("boom"),),
+            ),
+            "cache_write_failed",
+            SyncTrustState.RESET_RECOVERY,
+            True,
+        ),
     ],
 )
-def test_uncertain_sync_fails_closed(cache_result: SyncCacheWriteResult, reason: str) -> None:
+def test_uncertain_sync_fails_closed(
+    cache_result: SyncCacheWriteResult,
+    reason: str,
+    expected_state: SyncTrustState,
+    expected_reset: bool,
+) -> None:
     """Limited, failed, incomplete, or cancelled cache writes must not save a token."""
     decision = certify_sync_response(
         SyncTrustState.CERTIFIED,
@@ -95,11 +117,77 @@ def test_uncertain_sync_fails_closed(cache_result: SyncCacheWriteResult, reason:
         first_sync=False,
     )
 
+    assert decision.state is expected_state
+    assert decision.checkpoint_to_save is None
+    assert decision.clear_saved_token is True
+    assert decision.reset_client_token is expected_reset
+    assert decision.reason == reason
+
+
+@pytest.mark.parametrize(
+    ("state", "first_sync"),
+    [
+        (SyncTrustState.COLD, True),
+        (SyncTrustState.PENDING, True),
+        (SyncTrustState.CERTIFIED, False),
+        (SyncTrustState.UNCERTAIN, False),
+    ],
+)
+def test_newly_limited_sync_resets_active_and_persisted_positions(
+    state: SyncTrustState,
+    first_sync: bool,
+) -> None:
+    """A limited positioned timeline must reset both sync positions in every positioned trust state."""
+    decision = certify_sync_response(
+        state,
+        next_batch="s_partial",
+        cache_result=SyncCacheWriteResult(complete=True, limited_room_ids=("!room:localhost",)),
+        first_sync=first_sync,
+    )
+
+    assert decision.state is SyncTrustState.RESET_RECOVERY
+    assert decision.checkpoint_to_save is None
+    assert decision.clear_saved_token is True
+    assert decision.reset_client_token is True
+    assert decision.reason == "limited_sync_timeline"
+
+
+def test_reset_recovery_consumes_one_limited_response_without_reset() -> None:
+    """The limited initial window right after a deliberate reset must not reset again."""
+    decision = certify_sync_response(
+        SyncTrustState.RESET_RECOVERY,
+        next_batch="s_initial_recovery",
+        cache_result=SyncCacheWriteResult(complete=True, limited_room_ids=("!room:localhost",)),
+        first_sync=False,
+    )
+
     assert decision.state is SyncTrustState.UNCERTAIN
     assert decision.checkpoint_to_save is None
     assert decision.clear_saved_token is True
     assert decision.reset_client_token is False
-    assert decision.reason == reason
+    assert decision.reason == "limited_sync_timeline"
+
+
+def test_only_complete_response_after_consumed_reset_certifies_checkpoint() -> None:
+    """After the consumed limited window, only a complete response establishes a checkpoint."""
+    consumed = certify_sync_response(
+        SyncTrustState.RESET_RECOVERY,
+        next_batch="s_initial_recovery",
+        cache_result=SyncCacheWriteResult(complete=True, limited_room_ids=("!room:localhost",)),
+        first_sync=False,
+    )
+    certified = certify_sync_response(
+        consumed.state,
+        next_batch="s_complete_recovery",
+        cache_result=SyncCacheWriteResult(complete=True),
+        first_sync=False,
+    )
+
+    assert consumed.checkpoint_to_save is None
+    assert certified.state is SyncTrustState.CERTIFIED
+    assert certified.checkpoint_to_save == SyncCheckpoint("s_complete_recovery")
+    assert certified.clear_saved_token is False
+    assert certified.reset_client_token is False
 
 
 def test_sync_cache_write_diagnostics_explains_uncertainty() -> None:
@@ -142,7 +230,7 @@ def test_pending_first_sync_uncertainty_resets_client_token() -> None:
         first_sync=True,
     )
 
-    assert decision.state is SyncTrustState.UNCERTAIN
+    assert decision.state is SyncTrustState.RESET_RECOVERY
     assert decision.clear_saved_token is True
     assert decision.reset_client_token is True
 
@@ -165,7 +253,7 @@ def test_unknown_pos_clears_saved_and_client_token() -> None:
     """M_UNKNOWN_POS must fail closed regardless of current state."""
     decision = handle_unknown_pos()
 
-    assert decision.state is SyncTrustState.UNCERTAIN
+    assert decision.state is SyncTrustState.RESET_RECOVERY
     assert decision.checkpoint_to_save is None
     assert decision.clear_saved_token is True
     assert decision.reset_client_token is True
