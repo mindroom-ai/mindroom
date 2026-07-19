@@ -266,9 +266,10 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_output_cap(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_rewrite_aborts_safeguard_refusal_without_persisting(tmp_path: Path) -> None:
+async def test_rewrite_aborts_safeguard_refusal_and_preserves_existing_state(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    existing_summary = SessionSummary(summary="existing summary", updated_at=datetime.now(UTC))
     working_session = _session(
         "session-1",
         runs=[
@@ -287,6 +288,7 @@ async def test_rewrite_aborts_safeguard_refusal_without_persisting(tmp_path: Pat
                 ],
             ),
         ],
+        summary=existing_summary,
     )
     storage.upsert_session(working_session)
     summary_mock = AsyncMock(
@@ -312,15 +314,17 @@ async def test_rewrite_aborts_safeguard_refusal_without_persisting(tmp_path: Pat
 
     summary_mock.assert_awaited_once()
     summary_input = summary_mock.await_args.kwargs["summary_input"]
+    assert "existing summary" in summary_input
     assert "RUN1-MARKER" in summary_input
     assert "RUN2-MARKER" in summary_input
     retry_sleep.assert_not_awaited()
     persist_spy.assert_not_called()
-    assert working_session.summary is None
+    assert working_session.summary is existing_summary
     assert [run.run_id for run in working_session.runs or []] == ["run-1", "run-2"]
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
-    assert persisted.summary is None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "existing summary"
     assert [run.run_id for run in persisted.runs or []] == ["run-1", "run-2"]
 
 
