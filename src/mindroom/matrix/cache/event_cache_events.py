@@ -6,10 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.matrix.event_info import EventInfo, event_type_supports_thread_relations
-
-from .cache_maintenance import TERMINAL_STREAM_STATUSES
 
 _EDITABLE_EVENT_TYPES = frozenset({"m.room.message", "io.mindroom.tool_approval"})
 
@@ -84,23 +81,6 @@ def serialize_cached_event(event_id: str, event: dict[str, Any]) -> SerializedCa
 def serialize_cacheable_events(cacheable_events: list[_CachedEventValue]) -> list[SerializedCachedEvent]:
     """Return serialized storage values for normalized cacheable events."""
     return [serialize_cached_event(event_id, event) for event_id, event in cacheable_events]
-
-
-def has_terminal_streaming_edit(events: list[SerializedCachedEvent]) -> bool:
-    """Return whether a durable batch can make nonterminal streaming edits superseded."""
-    for serialized_event in events:
-        event = serialized_event.event
-        if event.get("type") != "m.room.message" or not isinstance(event.get("sender"), str):
-            continue
-        if not EventInfo.from_event(event).is_edit:
-            continue
-        content = event.get("content")
-        if not isinstance(content, dict):
-            continue
-        new_content = content.get("m.new_content")
-        if isinstance(new_content, dict) and new_content.get(STREAM_STATUS_KEY) in TERMINAL_STREAM_STATUSES:
-            return True
-    return False
 
 
 def event_redaction_candidate_ids(event_id: str, event: dict[str, Any]) -> frozenset[str]:

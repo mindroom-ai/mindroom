@@ -129,7 +129,6 @@ class CacheSnapshot:
     """Read-only SQLite cache evidence for the disposable room."""
 
     active_event_ids: tuple[str, ...]
-    compacted_event_ids: tuple[str, ...]
     tombstoned_event_ids: tuple[str, ...]
     edit_event_ids: tuple[str, ...]
     event_thread_ids: tuple[str, ...]
@@ -1502,18 +1501,6 @@ def read_cache_snapshot(cache_db_path: Path, room_id: str) -> CacheSnapshot:
                 (room_id,),
             ).fetchall()
         )
-        compacted_event_ids = tuple(
-            row[0]
-            for row in db.execute(
-                """
-                SELECT event_id
-                FROM compacted_streaming_edits
-                WHERE room_id = ?
-                ORDER BY event_id
-                """,
-                (room_id,),
-            ).fetchall()
-        )
         tombstoned_event_ids = tuple(
             row[0]
             for row in db.execute(
@@ -1569,7 +1556,6 @@ def read_cache_snapshot(cache_db_path: Path, room_id: str) -> CacheSnapshot:
         )
     return CacheSnapshot(
         active_event_ids=active_event_ids,
-        compacted_event_ids=compacted_event_ids,
         tombstoned_event_ids=tombstoned_event_ids,
         edit_event_ids=edit_event_ids,
         event_thread_ids=event_thread_ids,
@@ -1669,7 +1655,7 @@ def validate_interaction_expectations(
     assertions = 0
     homeserver_ids = set(homeserver_event_ids)
     redaction_ids = set(homeserver_redaction_event_ids)
-    active_ids = set(cache.active_event_ids) | set(cache.compacted_event_ids)
+    active_ids = set(cache.active_event_ids)
     tombstoned_ids = set(cache.tombstoned_event_ids)
     edit_ids = set(cache.edit_event_ids)
     mapped_ids = set(cache.event_thread_ids)
@@ -1904,10 +1890,9 @@ async def run_audit(  # noqa: PLR0915
     accounting_missing: tuple[str, ...] = ()
     cache_only: tuple[str, ...] = ()
     if cache is not None:
-        point_event_ids = set(cache.active_event_ids) | set(cache.compacted_event_ids)
-        represented_event_ids = point_event_ids | set(cache.tombstoned_event_ids) | set(redaction_event_ids)
+        represented_event_ids = set(cache.active_event_ids) | set(cache.tombstoned_event_ids) | set(redaction_event_ids)
         accounting_missing = tuple(sorted(set(homeserver_event_ids) - represented_event_ids))
-        cache_only = tuple(sorted(point_event_ids - set(homeserver_event_ids)))
+        cache_only = tuple(sorted(set(cache.active_event_ids) - set(homeserver_event_ids)))
     expectation_validation = (
         validate_interaction_expectations(
             tuple(records),

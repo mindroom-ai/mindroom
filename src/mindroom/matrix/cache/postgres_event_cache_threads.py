@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 
 from .event_cache_events import (
     event_id_for_cache,
-    has_terminal_streaming_edit,
     serialize_cacheable_events,
     serialize_cached_event,
 )
@@ -21,11 +20,6 @@ from .postgres_event_cache_events import (
     event_or_original_is_redacted,
     filter_cacheable_events,
     write_lookup_index_rows,
-)
-from .postgres_streaming_compaction import (
-    compact_superseded_streaming_edits,
-    delete_archived_events,
-    load_archived_thread_events,
 )
 from .thread_cache_state import (
     ThreadCacheStateRow,
@@ -48,7 +42,7 @@ async def load_thread_events(
     thread_id: str,
 ) -> list[dict[str, Any]] | None:
     """Return cached events for one thread sorted by timestamp."""
-    active_rows = await fetchall(
+    rows = await fetchall(
         db,
         """
         SELECT thread_events.origin_server_ts, thread_events.write_seq, events.event_json
@@ -64,19 +58,9 @@ async def load_thread_events(
         """,
         (namespace, room_id, thread_id),
     )
-    ordered_events = [(int(row[0]), int(row[1]), json.loads(row[2])) for row in active_rows]
-    ordered_events.extend(
-        await load_archived_thread_events(
-            db,
-            namespace=namespace,
-            room_id=room_id,
-            thread_id=thread_id,
-        ),
-    )
-    if not ordered_events:
+    if not rows:
         return None
-    ordered_events.sort(key=lambda item: (item[0], item[1]))
-    return [event for _, _, event in ordered_events]
+    return [json.loads(row[2]) for row in rows]
 
 
 async def load_recent_room_thread_ids(
@@ -207,12 +191,6 @@ async def _store_thread_events_locked(
                 event.origin_server_ts,
             ),
         )
-    if has_terminal_streaming_edit(serialized_events):
-        await compact_superseded_streaming_edits(
-            db,
-            namespace=namespace,
-            room_id=room_id,
-        )
     await _upsert_thread_cache_state(
         db,
         namespace=namespace,
@@ -246,12 +224,6 @@ async def _replace_thread_locked(
         (namespace, room_id, thread_id),
     )
     if existing_event_ids:
-        await delete_archived_events(
-            db,
-            namespace=namespace,
-            room_id=room_id,
-            event_ids=existing_event_ids,
-        )
         await delete_cached_events(db, namespace=namespace, event_ids=existing_event_ids)
         await delete_event_edit_rows(
             db,
@@ -329,12 +301,6 @@ async def invalidate_thread_locked(
         (namespace, room_id, thread_id),
     )
     if event_ids:
-        await delete_archived_events(
-            db,
-            namespace=namespace,
-            room_id=room_id,
-            event_ids=event_ids,
-        )
         await delete_cached_events(db, namespace=namespace, event_ids=event_ids)
         await delete_event_edit_rows(
             db,
@@ -376,12 +342,6 @@ async def invalidate_room_threads_locked(
         (namespace, room_id),
     )
     if event_ids:
-        await delete_archived_events(
-            db,
-            namespace=namespace,
-            room_id=room_id,
-            event_ids=event_ids,
-        )
         await delete_cached_events(db, namespace=namespace, event_ids=event_ids)
         await delete_event_edit_rows(
             db,
@@ -537,18 +497,13 @@ async def append_existing_thread_event(
         """
         SELECT 1
         FROM mindroom_event_cache_thread_events AS membership
-        LEFT JOIN mindroom_event_cache_events AS events
+        JOIN mindroom_event_cache_events AS events
             ON events.namespace = membership.namespace
             AND events.event_id = membership.event_id
             AND events.room_id = membership.room_id
-        LEFT JOIN mindroom_event_cache_compacted_streaming_edits AS archived
-            ON archived.namespace = membership.namespace
-            AND archived.event_id = membership.event_id
-            AND archived.room_id = membership.room_id
         WHERE membership.namespace = %s
             AND membership.room_id = %s
             AND membership.thread_id = %s
-            AND (events.event_id IS NOT NULL OR archived.event_id IS NOT NULL)
         LIMIT 1
         """,
         (namespace, room_id, thread_id),
@@ -581,8 +536,6 @@ async def append_existing_thread_event(
                 serialized_event.origin_server_ts,
             ),
         )
-    if has_terminal_streaming_edit([serialized_event]):
-        await compact_superseded_streaming_edits(db, namespace=namespace, room_id=room_id)
     return thread_exists
 
 

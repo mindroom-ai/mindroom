@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from mindroom.logging_config import get_logger
-
 from .event_cache_events import (
     CachedEventRow,
     SerializedCachedEvent,
@@ -16,22 +14,13 @@ from .event_cache_events import (
     event_redaction_candidate_ids,
     event_thread_rows,
     filter_redacted_events,
-    has_terminal_streaming_edit,
     redaction_removal_event_ids,
     serialize_cacheable_events,
 )
 from .postgres_cursor import fetchall, fetchone, rowcount
-from .postgres_streaming_compaction import (
-    compact_superseded_streaming_edits,
-    delete_archived_events,
-    load_archived_event,
-    load_latest_archived_edit,
-)
 
 if TYPE_CHECKING:
     from psycopg import AsyncConnection
-
-logger = get_logger(__name__)
 
 _ORPHAN_THREAD_INDEX_PREDICATE = """
     NOT EXISTS (
@@ -40,13 +29,6 @@ _ORPHAN_THREAD_INDEX_PREDICATE = """
         WHERE events.namespace = event_threads.namespace
             AND events.event_id = event_threads.event_id
             AND events.room_id = event_threads.room_id
-    )
-    AND NOT EXISTS (
-        SELECT 1
-        FROM mindroom_event_cache_compacted_streaming_edits AS archived
-        WHERE archived.namespace = event_threads.namespace
-            AND archived.event_id = event_threads.event_id
-            AND archived.room_id = event_threads.room_id
     )
     AND NOT (
         event_threads.event_id = event_threads.thread_id
@@ -58,21 +40,12 @@ _ORPHAN_THREAD_INDEX_PREDICATE = """
                     AND child.room_id = event_threads.room_id
                     AND child.thread_id = event_threads.thread_id
                     AND child.event_id != child.thread_id
-                    AND (
-                        EXISTS (
-                            SELECT 1
-                            FROM mindroom_event_cache_events AS child_event
-                            WHERE child_event.namespace = child.namespace
-                                AND child_event.event_id = child.event_id
-                                AND child_event.room_id = child.room_id
-                        )
-                        OR EXISTS (
-                            SELECT 1
-                            FROM mindroom_event_cache_compacted_streaming_edits AS archived_child
-                            WHERE archived_child.namespace = child.namespace
-                                AND archived_child.event_id = child.event_id
-                                AND archived_child.room_id = child.room_id
-                        )
+                    AND EXISTS (
+                        SELECT 1
+                        FROM mindroom_event_cache_events AS child_event
+                        WHERE child_event.namespace = child.namespace
+                            AND child_event.event_id = child.event_id
+                            AND child_event.room_id = child.room_id
                     )
             )
             OR EXISTS (
@@ -82,21 +55,12 @@ _ORPHAN_THREAD_INDEX_PREDICATE = """
                     AND child_membership.room_id = event_threads.room_id
                     AND child_membership.thread_id = event_threads.thread_id
                     AND child_membership.event_id != child_membership.thread_id
-                    AND (
-                        EXISTS (
-                            SELECT 1
-                            FROM mindroom_event_cache_events AS child_event
-                            WHERE child_event.namespace = child_membership.namespace
-                                AND child_event.event_id = child_membership.event_id
-                                AND child_event.room_id = child_membership.room_id
-                        )
-                        OR EXISTS (
-                            SELECT 1
-                            FROM mindroom_event_cache_compacted_streaming_edits AS archived_child
-                            WHERE archived_child.namespace = child_membership.namespace
-                                AND archived_child.event_id = child_membership.event_id
-                                AND archived_child.room_id = child_membership.room_id
-                        )
+                    AND EXISTS (
+                        SELECT 1
+                        FROM mindroom_event_cache_events AS child_event
+                        WHERE child_event.namespace = child_membership.namespace
+                            AND child_event.event_id = child_membership.event_id
+                            AND child_event.room_id = child_membership.room_id
                     )
             )
         )
@@ -120,9 +84,7 @@ async def load_event(
         """,
         (namespace, event_id),
     )
-    if row is not None:
-        return json.loads(row[0])
-    return await load_archived_event(db, namespace=namespace, event_id=event_id)
+    return None if row is None else json.loads(row[0])
 
 
 async def load_recent_room_events(
@@ -163,25 +125,14 @@ async def load_latest_edit(
     sender: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the latest cached edit event for one original event."""
-    active = await _load_latest_active_edit(
+    row = await _load_latest_edit_row(
         db,
         namespace=namespace,
         room_id=room_id,
         original_event_id=original_event_id,
         sender=sender,
     )
-    archived = await load_latest_archived_edit(
-        db,
-        namespace=namespace,
-        room_id=room_id,
-        original_event_id=original_event_id,
-        sender=sender,
-    )
-    if active is None:
-        return None if archived is None else archived.event_payload()
-    if archived is None or active[1:3] >= (archived.origin_server_ts, archived.event_order):
-        return active[0]
-    return archived.event_payload()
+    return None if row is None else row.event
 
 
 async def load_latest_edit_row(
@@ -193,43 +144,29 @@ async def load_latest_edit_row(
     sender: str,
 ) -> CachedEventRow | None:
     """Return the latest cached edit event plus its lookup-row write time."""
-    active = await _load_latest_active_edit(
+    return await _load_latest_edit_row(
         db,
         namespace=namespace,
         room_id=room_id,
         original_event_id=original_event_id,
         sender=sender,
     )
-    archived = await load_latest_archived_edit(
-        db,
-        namespace=namespace,
-        room_id=room_id,
-        original_event_id=original_event_id,
-        sender=sender,
-    )
-    if active is None:
-        if archived is None:
-            return None
-        return CachedEventRow(event=archived.event_payload(), cached_at=archived.cached_at)
-    if archived is not None and active[1:3] < (archived.origin_server_ts, archived.event_order):
-        return CachedEventRow(event=archived.event_payload(), cached_at=archived.cached_at)
-    return CachedEventRow(event=active[0], cached_at=active[3])
 
 
-async def _load_latest_active_edit(
+async def _load_latest_edit_row(
     db: AsyncConnection,
     *,
     namespace: str,
     room_id: str,
     original_event_id: str,
     sender: str | None,
-) -> tuple[dict[str, Any], int, int, float | None] | None:
+) -> CachedEventRow | None:
     sender_predicate = "" if sender is None else "AND events.event_json::jsonb ->> 'sender' = %s"
     parameters = (namespace, room_id, original_event_id, *((sender,) if sender is not None else ()))
     row = await fetchone(
         db,
         f"""
-        SELECT events.event_json, edits.origin_server_ts, events.write_seq, events.cached_at
+        SELECT events.event_json, events.cached_at
         FROM mindroom_event_cache_event_edits AS edits
         JOIN mindroom_event_cache_events AS events
             ON events.namespace = edits.namespace
@@ -245,11 +182,9 @@ async def _load_latest_active_edit(
     )
     if row is None:
         return None
-    return (
-        json.loads(row[0]),
-        int(row[1]),
-        int(row[2]),
-        None if row[3] is None else float(row[3]),
+    return CachedEventRow(
+        event=json.loads(row[0]),
+        cached_at=None if row[1] is None else float(row[1]),
     )
 
 
@@ -304,32 +239,14 @@ async def persist_lookup_events(
 ) -> None:
     """Persist point-lookups and derived indexes for one room-scoped event batch."""
     cacheable_events = await filter_cacheable_events(db, namespace, room_id, room_events)
-    serialized_events = serialize_cacheable_events(cacheable_events)
     await write_lookup_index_rows(
         db,
         namespace=namespace,
         room_id=room_id,
-        serialized_events=serialized_events,
+        serialized_events=serialize_cacheable_events(cacheable_events),
         cached_at=cached_at,
         thread_id=thread_id,
     )
-    compacted = (
-        await compact_superseded_streaming_edits(
-            db,
-            namespace=namespace,
-            room_id=room_id,
-        )
-        if has_terminal_streaming_edit(serialized_events)
-        else 0
-    )
-    if compacted:
-        logger.info(
-            "Compacted superseded Matrix streaming edits",
-            backend="postgres",
-            namespace=namespace,
-            room_id=room_id,
-            compacted_event_count=compacted,
-        )
 
 
 async def load_thread_id_for_event(
@@ -387,12 +304,6 @@ async def redact_event_locked(
         event_ids=removed_event_ids,
         original_event_id=event_id,
     )
-    deleted_archived_rows = await delete_archived_events(
-        db,
-        namespace=namespace,
-        room_id=room_id,
-        event_ids=removed_event_ids,
-    )
     deleted_thread_index_rows = await delete_event_thread_rows(
         db,
         namespace,
@@ -411,7 +322,6 @@ async def redact_event_locked(
         deleted_event_rows,
         deleted_edit_rows,
         deleted_thread_index_rows,
-        deleted_archived_rows,
     )
 
 
@@ -462,13 +372,6 @@ async def write_lookup_index_rows(
     """Persist point-lookup, edit-index, and thread-index rows for cached events."""
     if not serialized_events:
         return
-    event_ids = [event.event_id for event in serialized_events]
-    await delete_archived_events(
-        db,
-        namespace=namespace,
-        room_id=room_id,
-        event_ids=event_ids,
-    )
     for event in serialized_events:
         await db.execute(
             """

@@ -563,15 +563,9 @@ def test_interaction_expectations_are_executable_and_fail_closed() -> None:
             expected_representation="tombstone",
             expected_visible_thread_history=True,
         ),
-        InteractionRecord(
-            family="compacted_streaming_edit",
-            event_type="m.room.message",
-            event_id="$compacted",
-        ),
     )
     cache = CacheSnapshot(
         active_event_ids=("$child",),
-        compacted_event_ids=("$compacted",),
         tombstoned_event_ids=("$strict-child", "$target"),
         edit_event_ids=(),
         event_thread_ids=("$child",),
@@ -595,11 +589,9 @@ def test_interaction_expectations_are_executable_and_fail_closed() -> None:
             cache_reject_reason="thread_invalidated_after_validation",
         ),
     )
-    homeserver_event_ids = ("$child", "$target", "$redaction", "$strict-child", "$compacted")
-
     validation = validate_interaction_expectations(
         records,
-        homeserver_event_ids=homeserver_event_ids,
+        homeserver_event_ids=("$child", "$target", "$redaction", "$strict-child"),
         homeserver_redaction_event_ids=("$redaction",),
         cache=cache,
         accounting_missing_event_ids=(),
@@ -608,12 +600,12 @@ def test_interaction_expectations_are_executable_and_fail_closed() -> None:
     )
 
     assert validation.status == "passed"
-    assert validation.interaction_records == 5
+    assert validation.interaction_records == 4
     assert validation.assertions > 20
     with pytest.raises(MatrixAuditError, match=r"thread_child\.point_cache"):
         validate_interaction_expectations(
             records,
-            homeserver_event_ids=homeserver_event_ids,
+            homeserver_event_ids=("$child", "$target", "$redaction", "$strict-child"),
             homeserver_redaction_event_ids=("$redaction",),
             cache=replace(cache, active_event_ids=()),
             accounting_missing_event_ids=(),
@@ -624,7 +616,7 @@ def test_interaction_expectations_are_executable_and_fail_closed() -> None:
     with pytest.raises(MatrixAuditError, match=r"accounting\.missing_event_ids"):
         validate_interaction_expectations(
             records,
-            homeserver_event_ids=homeserver_event_ids,
+            homeserver_event_ids=("$child", "$target", "$redaction", "$strict-child"),
             homeserver_redaction_event_ids=("$redaction",),
             cache=cache,
             accounting_missing_event_ids=("$unrepresented",),
@@ -635,7 +627,7 @@ def test_interaction_expectations_are_executable_and_fail_closed() -> None:
     with pytest.raises(MatrixAuditError, match=r"accounting\.cache_only_event_ids"):
         validate_interaction_expectations(
             records,
-            homeserver_event_ids=homeserver_event_ids,
+            homeserver_event_ids=("$child", "$target", "$redaction", "$strict-child"),
             homeserver_redaction_event_ids=("$redaction",),
             cache=cache,
             accounting_missing_event_ids=(),
@@ -650,7 +642,7 @@ def test_interaction_expectations_are_executable_and_fail_closed() -> None:
     with pytest.raises(MatrixAuditError, match=r"strict_reads\.second\.visible_event_ids"):
         validate_interaction_expectations(
             records,
-            homeserver_event_ids=homeserver_event_ids,
+            homeserver_event_ids=("$child", "$target", "$redaction", "$strict-child"),
             homeserver_redaction_event_ids=("$redaction",),
             cache=cache,
             accounting_missing_event_ids=(),
@@ -661,7 +653,7 @@ def test_interaction_expectations_are_executable_and_fail_closed() -> None:
     with pytest.raises(MatrixAuditError, match=r"strict_reads\.second\.homeserver_fetch_ms"):
         validate_interaction_expectations(
             records,
-            homeserver_event_ids=homeserver_event_ids,
+            homeserver_event_ids=("$child", "$target", "$redaction", "$strict-child"),
             homeserver_redaction_event_ids=("$redaction",),
             cache=cache,
             accounting_missing_event_ids=(),
@@ -672,7 +664,7 @@ def test_interaction_expectations_are_executable_and_fail_closed() -> None:
     with pytest.raises(MatrixAuditError, match=r"strict_reads\.third\.cache_reject_reason"):
         validate_interaction_expectations(
             records,
-            homeserver_event_ids=homeserver_event_ids,
+            homeserver_event_ids=("$child", "$target", "$redaction", "$strict-child"),
             homeserver_redaction_event_ids=("$redaction",),
             cache=cache,
             accounting_missing_event_ids=(),
@@ -683,7 +675,7 @@ def test_interaction_expectations_are_executable_and_fail_closed() -> None:
     with pytest.raises(MatrixAuditError, match=r"strict_reads\.third\.redacted_event_absent"):
         validate_interaction_expectations(
             records,
-            homeserver_event_ids=homeserver_event_ids,
+            homeserver_event_ids=("$child", "$target", "$redaction", "$strict-child"),
             homeserver_redaction_event_ids=("$redaction",),
             cache=cache,
             accounting_missing_event_ids=(),

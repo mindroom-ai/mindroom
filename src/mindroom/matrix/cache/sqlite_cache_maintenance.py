@@ -1,4 +1,4 @@
-"""SQLite schema migration, integrity repair, compaction, and storage diagnostics."""
+"""SQLite schema migration, integrity repair, and storage diagnostics."""
 
 from __future__ import annotations
 
@@ -6,9 +6,8 @@ import time
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from .cache_maintenance import NONTERMINAL_STREAM_STATUSES, TERMINAL_STREAM_STATUSES, CacheMaintenanceReport
+from .cache_maintenance import CacheMaintenanceReport
 from .sqlite_event_cache_events import orphan_thread_index_count, repair_orphan_thread_indexes
-from .sqlite_streaming_compaction import compact_superseded_streaming_edits
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -119,27 +118,6 @@ _ORPHAN_EDIT_INDEX_PREDICATE = """
         WHERE events.event_id = event_edits.edit_event_id
             AND events.room_id = event_edits.room_id
     )
-    AND NOT EXISTS (
-        SELECT 1
-        FROM compacted_streaming_edits
-        WHERE compacted_streaming_edits.event_id = event_edits.edit_event_id
-            AND compacted_streaming_edits.room_id = event_edits.room_id
-    )
-"""
-
-_ORPHAN_THREAD_EVENT_REFERENCE_PREDICATE = """
-    NOT EXISTS (
-        SELECT 1
-        FROM events
-        WHERE events.event_id = thread_events.event_id
-            AND events.room_id = thread_events.room_id
-    )
-    AND NOT EXISTS (
-        SELECT 1
-        FROM compacted_streaming_edits
-        WHERE compacted_streaming_edits.event_id = thread_events.event_id
-            AND compacted_streaming_edits.room_id = thread_events.room_id
-    )
 """
 
 
@@ -150,58 +128,7 @@ async def _orphan_edit_index_count(db: aiosqlite.Connection) -> int:
     )
 
 
-async def _orphan_thread_event_reference_count(db: aiosqlite.Connection) -> int:
-    return await _scalar_count(
-        db,
-        f"SELECT COUNT(*) FROM thread_events WHERE {_ORPHAN_THREAD_EVENT_REFERENCE_PREDICATE}",  # noqa: S608
-    )
-
-
-async def _repair_orphan_thread_event_references(db: aiosqlite.Connection) -> int:
-    stale_at = time.time()
-    await db.execute(
-        f"""
-        INSERT INTO thread_cache_state(
-            room_id,
-            thread_id,
-            validated_at,
-            invalidated_at,
-            invalidation_reason
-        )
-        SELECT DISTINCT
-            thread_events.room_id,
-            thread_events.thread_id,
-            NULL,
-            ?,
-            'startup_orphan_thread_event_reference'
-        FROM thread_events
-        WHERE {_ORPHAN_THREAD_EVENT_REFERENCE_PREDICATE}
-        ON CONFLICT(room_id, thread_id) DO UPDATE SET
-            validated_at = NULL,
-            invalidated_at = CASE
-                WHEN thread_cache_state.invalidated_at IS NULL
-                    OR excluded.invalidated_at >= thread_cache_state.invalidated_at
-                    THEN excluded.invalidated_at
-                ELSE thread_cache_state.invalidated_at
-            END,
-            invalidation_reason = CASE
-                WHEN thread_cache_state.invalidated_at IS NULL
-                    OR excluded.invalidated_at >= thread_cache_state.invalidated_at
-                    THEN excluded.invalidation_reason
-                ELSE thread_cache_state.invalidation_reason
-            END
-        """,  # noqa: S608
-        (stale_at,),
-    )
-    cursor = await db.execute(
-        f"DELETE FROM thread_events WHERE {_ORPHAN_THREAD_EVENT_REFERENCE_PREDICATE}",  # noqa: S608
-    )
-    deleted = 0 if cursor.rowcount is None else int(cursor.rowcount)
-    await cursor.close()
-    return deleted
-
-
-async def _repair_orphan_derived_rows(db: aiosqlite.Connection) -> tuple[int, int, int]:
+async def _repair_orphan_derived_rows(db: aiosqlite.Connection) -> tuple[int, int]:
     """Remove invalid derived rows while preserving learned thread-root self mappings."""
     edit_cursor = await db.execute(
         f"DELETE FROM event_edits WHERE {_ORPHAN_EDIT_INDEX_PREDICATE}",  # noqa: S608
@@ -210,9 +137,7 @@ async def _repair_orphan_derived_rows(db: aiosqlite.Connection) -> tuple[int, in
     await edit_cursor.close()
 
     repaired_thread_indexes = await repair_orphan_thread_indexes(db)
-
-    repaired_thread_event_references = await _repair_orphan_thread_event_references(db)
-    return repaired_edit_indexes, repaired_thread_indexes, repaired_thread_event_references
+    return repaired_edit_indexes, repaired_thread_indexes
 
 
 async def _collect_maintenance_report(
@@ -224,12 +149,8 @@ async def _collect_maintenance_report(
     normalized_legacy_thread_payload_rows: int,
     repaired_edit_indexes: int,
     repaired_thread_indexes: int,
-    repaired_thread_event_references: int,
-    compacted_nonterminal_streaming_edits: int,
 ) -> CacheMaintenanceReport:
     """Collect current SQLite row/category counts after startup maintenance."""
-    nonterminal_placeholders = ",".join("?" for _ in NONTERMINAL_STREAM_STATUSES)
-    terminal_placeholders = ",".join("?" for _ in TERMINAL_STREAM_STATUSES)
     return CacheMaintenanceReport(
         schema_version=schema_version,
         migrated_from_schema_version=migrated_from_schema_version,
@@ -256,47 +177,10 @@ async def _collect_maintenance_report(
             db,
             "SELECT COUNT(*) FROM room_cache_state WHERE invalidated_at IS NOT NULL",
         ),
-        nonterminal_streaming_edit_rows=await _scalar_count(
-            db,
-            f"""
-            SELECT COUNT(*)
-            FROM event_edits
-            JOIN events ON events.event_id = event_edits.edit_event_id
-            WHERE json_extract(
-                events.event_json,
-                '$.content."m.new_content"."io.mindroom.stream_status"'
-            ) IN ({nonterminal_placeholders})
-            """,  # noqa: S608
-            tuple(sorted(NONTERMINAL_STREAM_STATUSES)),
-        ),
-        terminal_streaming_edit_rows=await _scalar_count(
-            db,
-            f"""
-            SELECT COUNT(*)
-            FROM event_edits
-            JOIN events ON events.event_id = event_edits.edit_event_id
-            WHERE json_extract(
-                events.event_json,
-                '$.content."m.new_content"."io.mindroom.stream_status"'
-            ) IN ({terminal_placeholders})
-            """,  # noqa: S608
-            tuple(sorted(TERMINAL_STREAM_STATUSES)),
-        ),
-        compacted_streaming_edit_archive_rows=await _scalar_count(
-            db,
-            "SELECT COUNT(*) FROM compacted_streaming_edits",
-        ),
-        compacted_streaming_edit_archive_bytes=await _scalar_count(
-            db,
-            "SELECT COALESCE(SUM(length(event_json_zlib)), 0) FROM compacted_streaming_edits",
-        ),
         orphan_edit_indexes_after=await _orphan_edit_index_count(db),
         orphan_thread_indexes_after=await orphan_thread_index_count(db),
-        orphan_thread_event_references_after=await _orphan_thread_event_reference_count(db),
         repaired_edit_indexes=repaired_edit_indexes,
         repaired_thread_indexes=repaired_thread_indexes,
-        repaired_thread_event_references=repaired_thread_event_references,
-        compacted_nonterminal_streaming_edits=compacted_nonterminal_streaming_edits,
     )
 
 
@@ -308,9 +192,8 @@ async def run_startup_maintenance(
     destructive_reset: bool,
     normalized_legacy_thread_payload_rows: int,
 ) -> CacheMaintenanceReport:
-    """Audit, safely repair, compact, and recount one SQLite cache transaction."""
+    """Audit, safely repair, and recount one SQLite cache transaction."""
     repaired_counts = await _repair_orphan_derived_rows(db)
-    compacted = await compact_superseded_streaming_edits(db)
     return await _collect_maintenance_report(
         db,
         schema_version=schema_version,
@@ -319,8 +202,6 @@ async def run_startup_maintenance(
         normalized_legacy_thread_payload_rows=normalized_legacy_thread_payload_rows,
         repaired_edit_indexes=repaired_counts[0],
         repaired_thread_indexes=repaired_counts[1],
-        repaired_thread_event_references=repaired_counts[2],
-        compacted_nonterminal_streaming_edits=compacted,
     )
 
 

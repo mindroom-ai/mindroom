@@ -16,7 +16,6 @@ from mindroom.logging_config import get_logger
 from mindroom.timing import milliseconds
 
 from . import postgres_event_cache_events, postgres_event_cache_threads
-from .cache_maintenance import CorruptEventCachePayloadError
 from .event_batching import group_lookup_events_by_room
 from .event_cache import EventCacheBackendUnavailableError
 from .event_normalization import normalize_event_source_for_cache
@@ -351,20 +350,6 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
             invalidated_at DOUBLE PRECISION,
             invalidation_reason TEXT,
             PRIMARY KEY (namespace, room_id)
-        )
-        """,
-    )
-    await db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS mindroom_event_cache_compacted_streaming_edits (
-            namespace TEXT NOT NULL,
-            event_id TEXT NOT NULL,
-            room_id TEXT NOT NULL,
-            sender TEXT NOT NULL,
-            event_json_zlib BYTEA NOT NULL,
-            cached_at DOUBLE PRECISION NOT NULL,
-            event_order BIGINT NOT NULL,
-            PRIMARY KEY (namespace, event_id)
         )
         """,
     )
@@ -874,9 +859,6 @@ class PostgresEventCache:
                 disabled_result=disabled_result,
                 callback=reader,
             )
-        except CorruptEventCachePayloadError:
-            self._runtime.disable("corrupt_compacted_event_payload")
-            return disabled_result
         except _CertificationGenerationChangedError:
             return disabled_result
 

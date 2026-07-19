@@ -28,7 +28,6 @@ from typing import TYPE_CHECKING, Any
 
 from .event_cache_events import (
     event_id_for_cache,
-    has_terminal_streaming_edit,
     serialize_cacheable_events,
     serialize_cached_event,
 )
@@ -41,11 +40,6 @@ from .sqlite_event_cache_events import (
     event_or_original_is_redacted,
     filter_cacheable_events,
     write_lookup_index_rows,
-)
-from .sqlite_streaming_compaction import (
-    compact_superseded_streaming_edits,
-    delete_archived_events,
-    load_archived_thread_events,
 )
 from .thread_cache_state import (
     ThreadCacheStateRow,
@@ -79,20 +73,11 @@ async def load_thread_events(
         """,
         (room_id, thread_id),
     )
-    active_rows = await cursor.fetchall()
+    rows = await cursor.fetchall()
     await cursor.close()
-    ordered_events = [(int(row[0]), int(row[1]), json.loads(row[2])) for row in active_rows]
-    ordered_events.extend(
-        await load_archived_thread_events(
-            db,
-            room_id=room_id,
-            thread_id=thread_id,
-        ),
-    )
-    if not ordered_events:
+    if not rows:
         return None
-    ordered_events.sort(key=lambda item: (item[0], item[1]))
-    return [event for _, _, event in ordered_events]
+    return [json.loads(row[2]) for row in rows]
 
 
 async def load_recent_room_thread_ids(
@@ -229,8 +214,6 @@ async def _store_thread_events_locked(
                 for event, write_sequence in zip(serialized_events, write_sequences, strict=True)
             ],
         )
-        if has_terminal_streaming_edit(serialized_events):
-            await compact_superseded_streaming_edits(db, room_id=room_id)
     await db.execute(
         """
         INSERT INTO thread_cache_state(
@@ -268,7 +251,6 @@ async def _replace_thread_locked(
         (room_id, thread_id),
     )
     if existing_event_ids:
-        await delete_archived_events(db, room_id=room_id, event_ids=existing_event_ids)
         await delete_cached_events(db, event_ids=existing_event_ids)
         await delete_event_edit_rows(
             db,
@@ -334,7 +316,6 @@ async def invalidate_thread_locked(
         (room_id, thread_id),
     )
     if event_ids:
-        await delete_archived_events(db, room_id=room_id, event_ids=event_ids)
         await delete_cached_events(db, event_ids=event_ids)
         await delete_event_edit_rows(
             db,
@@ -373,7 +354,6 @@ async def invalidate_room_threads_locked(
         (room_id,),
     )
     if event_ids:
-        await delete_archived_events(db, room_id=room_id, event_ids=event_ids)
         await delete_cached_events(db, event_ids=event_ids)
         await delete_event_edit_rows(
             db,
@@ -519,17 +499,10 @@ async def append_existing_thread_event(
         """
         SELECT 1
         FROM thread_events
-        LEFT JOIN events
+        JOIN events
             ON events.event_id = thread_events.event_id
             AND events.room_id = thread_events.room_id
-        LEFT JOIN compacted_streaming_edits
-            ON compacted_streaming_edits.event_id = thread_events.event_id
-            AND compacted_streaming_edits.room_id = thread_events.room_id
         WHERE thread_events.room_id = ? AND thread_events.thread_id = ?
-            AND (
-                events.event_id IS NOT NULL
-                OR compacted_streaming_edits.event_id IS NOT NULL
-            )
         LIMIT 1
         """,
         (room_id, thread_id),
@@ -563,8 +536,6 @@ async def append_existing_thread_event(
                 write_sequence,
             ),
         )
-    if has_terminal_streaming_edit([serialized_event]):
-        await compact_superseded_streaming_edits(db, room_id=room_id)
     return thread_exists
 
 

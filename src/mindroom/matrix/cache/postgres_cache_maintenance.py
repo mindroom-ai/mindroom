@@ -1,15 +1,13 @@
-"""PostgreSQL schema migration, integrity repair, compaction, and diagnostics."""
+"""PostgreSQL schema migration, integrity repair, and diagnostics."""
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .cache_maintenance import NONTERMINAL_STREAM_STATUSES, TERMINAL_STREAM_STATUSES, CacheMaintenanceReport
+from .cache_maintenance import CacheMaintenanceReport
 from .postgres_cursor import fetchone, rowcount
 from .postgres_event_cache_events import orphan_thread_index_count, repair_orphan_thread_indexes
-from .postgres_streaming_compaction import compact_superseded_streaming_edits
 
 if TYPE_CHECKING:
     from typing import LiteralString
@@ -89,30 +87,6 @@ _ORPHAN_EDIT_INDEX_PREDICATE = """
             AND events.event_id = event_edits.edit_event_id
             AND events.room_id = event_edits.room_id
     )
-    AND NOT EXISTS (
-        SELECT 1
-        FROM mindroom_event_cache_compacted_streaming_edits AS archived
-        WHERE archived.namespace = event_edits.namespace
-            AND archived.event_id = event_edits.edit_event_id
-            AND archived.room_id = event_edits.room_id
-    )
-"""
-
-_ORPHAN_THREAD_EVENT_REFERENCE_PREDICATE = """
-    NOT EXISTS (
-        SELECT 1
-        FROM mindroom_event_cache_events AS events
-        WHERE events.namespace = thread_events.namespace
-            AND events.event_id = thread_events.event_id
-            AND events.room_id = thread_events.room_id
-    )
-    AND NOT EXISTS (
-        SELECT 1
-        FROM mindroom_event_cache_compacted_streaming_edits AS archived
-        WHERE archived.namespace = thread_events.namespace
-            AND archived.event_id = thread_events.event_id
-            AND archived.room_id = thread_events.room_id
-    )
 """
 
 
@@ -129,24 +103,11 @@ async def _orphan_edit_index_count(db: AsyncConnection, *, namespace: str) -> in
     )
 
 
-async def _orphan_thread_event_reference_count(db: AsyncConnection, *, namespace: str) -> int:
-    return await _count(
-        db,
-        f"""
-        SELECT COUNT(*)
-        FROM mindroom_event_cache_thread_events AS thread_events
-        WHERE thread_events.namespace = %s
-            AND {_ORPHAN_THREAD_EVENT_REFERENCE_PREDICATE}
-        """,  # noqa: S608
-        (namespace,),
-    )
-
-
 async def _repair_orphan_derived_rows(
     db: AsyncConnection,
     *,
     namespace: str,
-) -> tuple[int, int, int]:
+) -> tuple[int, int]:
     """Remove invalid derived rows while preserving learned thread-root mappings."""
     repaired_edit_indexes = await rowcount(
         db,
@@ -158,54 +119,7 @@ async def _repair_orphan_derived_rows(
         (namespace,),
     )
     repaired_thread_indexes = await repair_orphan_thread_indexes(db, namespace=namespace)
-    stale_at = time.time()
-    await db.execute(
-        f"""
-        INSERT INTO mindroom_event_cache_thread_state(
-            namespace,
-            room_id,
-            thread_id,
-            validated_at,
-            invalidated_at,
-            invalidation_reason
-        )
-        SELECT DISTINCT
-            thread_events.namespace,
-            thread_events.room_id,
-            thread_events.thread_id,
-            NULL::DOUBLE PRECISION,
-            %s,
-            'startup_orphan_thread_event_reference'
-        FROM mindroom_event_cache_thread_events AS thread_events
-        WHERE thread_events.namespace = %s
-            AND {_ORPHAN_THREAD_EVENT_REFERENCE_PREDICATE}
-        ON CONFLICT(namespace, room_id, thread_id) DO UPDATE SET
-            validated_at = NULL,
-            invalidated_at = CASE
-                WHEN mindroom_event_cache_thread_state.invalidated_at IS NULL
-                    OR excluded.invalidated_at >= mindroom_event_cache_thread_state.invalidated_at
-                    THEN excluded.invalidated_at
-                ELSE mindroom_event_cache_thread_state.invalidated_at
-            END,
-            invalidation_reason = CASE
-                WHEN mindroom_event_cache_thread_state.invalidated_at IS NULL
-                    OR excluded.invalidated_at >= mindroom_event_cache_thread_state.invalidated_at
-                    THEN excluded.invalidation_reason
-                ELSE mindroom_event_cache_thread_state.invalidation_reason
-            END
-        """,  # noqa: S608
-        (stale_at, namespace),
-    )
-    repaired_thread_event_references = await rowcount(
-        db,
-        f"""
-        DELETE FROM mindroom_event_cache_thread_events AS thread_events
-        WHERE thread_events.namespace = %s
-            AND {_ORPHAN_THREAD_EVENT_REFERENCE_PREDICATE}
-        """,  # noqa: S608
-        (namespace,),
-    )
-    return repaired_edit_indexes, repaired_thread_indexes, repaired_thread_event_references
+    return repaired_edit_indexes, repaired_thread_indexes
 
 
 async def _collect_maintenance_report(
@@ -215,8 +129,7 @@ async def _collect_maintenance_report(
     schema_version: int,
     migrated_from_schema_version: int | None,
     normalized_legacy_thread_payload_rows: int,
-    repaired_counts: tuple[int, int, int],
-    compacted_nonterminal_streaming_edits: int,
+    repaired_counts: tuple[int, int],
 ) -> CacheMaintenanceReport:
     """Collect log-safe backend and namespace storage diagnostics."""
     return CacheMaintenanceReport(
@@ -224,28 +137,6 @@ async def _collect_maintenance_report(
         migrated_from_schema_version=migrated_from_schema_version,
         normalized_legacy_thread_payload_rows=normalized_legacy_thread_payload_rows,
         storage_bytes=await _count(db, "SELECT pg_database_size(current_database())", ()),
-        namespace_payload_bytes=await _count(
-            db,
-            """
-            SELECT
-                COALESCE((
-                    SELECT SUM(octet_length(event_json))
-                    FROM mindroom_event_cache_events
-                    WHERE namespace = %s
-                ), 0)
-                + COALESCE((
-                    SELECT SUM(octet_length(event_json_zlib))
-                    FROM mindroom_event_cache_compacted_streaming_edits
-                    WHERE namespace = %s
-                ), 0)
-                + COALESCE((
-                    SELECT SUM(octet_length(text_content))
-                    FROM mindroom_event_cache_mxc_text
-                    WHERE namespace = %s
-                ), 0)
-            """,
-            (namespace, namespace, namespace),
-        ),
         event_rows=await _count(
             db,
             "SELECT COUNT(*) FROM mindroom_event_cache_events WHERE namespace = %s",
@@ -306,57 +197,10 @@ async def _collect_maintenance_report(
             """,
             (namespace,),
         ),
-        nonterminal_streaming_edit_rows=await _count(
-            db,
-            """
-            SELECT COUNT(*)
-            FROM mindroom_event_cache_event_edits AS edits
-            JOIN mindroom_event_cache_events AS events
-                ON events.namespace = edits.namespace AND events.event_id = edits.edit_event_id
-            WHERE edits.namespace = %s
-                AND events.event_json::jsonb
-                    -> 'content' -> 'm.new_content' ->> 'io.mindroom.stream_status' = ANY(%s)
-            """,
-            (namespace, sorted(NONTERMINAL_STREAM_STATUSES)),
-        ),
-        terminal_streaming_edit_rows=await _count(
-            db,
-            """
-            SELECT COUNT(*)
-            FROM mindroom_event_cache_event_edits AS edits
-            JOIN mindroom_event_cache_events AS events
-                ON events.namespace = edits.namespace AND events.event_id = edits.edit_event_id
-            WHERE edits.namespace = %s
-                AND events.event_json::jsonb
-                    -> 'content' -> 'm.new_content' ->> 'io.mindroom.stream_status' = ANY(%s)
-            """,
-            (namespace, sorted(TERMINAL_STREAM_STATUSES)),
-        ),
-        compacted_streaming_edit_archive_rows=await _count(
-            db,
-            """
-            SELECT COUNT(*)
-            FROM mindroom_event_cache_compacted_streaming_edits
-            WHERE namespace = %s
-            """,
-            (namespace,),
-        ),
-        compacted_streaming_edit_archive_bytes=await _count(
-            db,
-            """
-            SELECT COALESCE(SUM(octet_length(event_json_zlib)), 0)
-            FROM mindroom_event_cache_compacted_streaming_edits
-            WHERE namespace = %s
-            """,
-            (namespace,),
-        ),
         orphan_edit_indexes_after=await _orphan_edit_index_count(db, namespace=namespace),
         orphan_thread_indexes_after=await orphan_thread_index_count(db, namespace=namespace),
-        orphan_thread_event_references_after=await _orphan_thread_event_reference_count(db, namespace=namespace),
         repaired_edit_indexes=repaired_counts[0],
         repaired_thread_indexes=repaired_counts[1],
-        repaired_thread_event_references=repaired_counts[2],
-        compacted_nonterminal_streaming_edits=compacted_nonterminal_streaming_edits,
     )
 
 
@@ -368,9 +212,8 @@ async def run_startup_maintenance(
     migrated_from_schema_version: int | None,
     normalized_legacy_thread_payload_rows: int,
 ) -> CacheMaintenanceReport:
-    """Audit, safely repair, compact, and recount one PostgreSQL namespace."""
+    """Audit, safely repair, and recount one PostgreSQL namespace."""
     repaired_counts = await _repair_orphan_derived_rows(db, namespace=namespace)
-    compacted = await compact_superseded_streaming_edits(db, namespace=namespace)
     return await _collect_maintenance_report(
         db,
         namespace=namespace,
@@ -378,5 +221,4 @@ async def run_startup_maintenance(
         migrated_from_schema_version=migrated_from_schema_version,
         normalized_legacy_thread_payload_rows=normalized_legacy_thread_payload_rows,
         repaired_counts=repaired_counts,
-        compacted_nonterminal_streaming_edits=compacted,
     )
