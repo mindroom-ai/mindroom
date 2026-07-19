@@ -175,6 +175,7 @@ class AuditEvidence:
     generated_at: str
     homeserver: str
     user_id: str
+    joined_members: tuple[str, ...]
     room_id: str
     thread_root_id: str
     interactions: tuple[InteractionRecord, ...]
@@ -430,6 +431,19 @@ class MatrixApi:
             operation="join_private_room",
             json_body={},
         )
+
+    async def joined_members(self, room_id: str) -> tuple[str, ...]:
+        """Return the authenticated joined-member set for one room."""
+        response = await self._request(
+            "GET",
+            f"/_matrix/client/v3/rooms/{_encoded_path_segment(room_id)}/joined_members",
+            operation="joined_members",
+        )
+        joined = response.get("joined")
+        if not isinstance(joined, dict) or any(not isinstance(user_id, str) or not user_id for user_id in joined):
+            msg = "Matrix joined_members response omitted a valid joined map"
+            raise MatrixAuditError(msg)
+        return tuple(sorted(joined))
 
     async def upload(self, fixture: MediaFixture) -> str:
         response = await self._request(
@@ -1738,6 +1752,25 @@ def _validate_audit_config(config: AuditConfig) -> None:
         raise MatrixAuditError(msg)
 
 
+async def _verify_private_room_membership(
+    api: MatrixApi,
+    *,
+    room_id: str,
+    user_id: str,
+    invite_user_id: str | None,
+) -> tuple[str, ...]:
+    """Require the private room to contain exactly the authenticated audit accounts."""
+    expected = (user_id,) if invite_user_id is None else tuple(sorted((user_id, invite_user_id)))
+    joined_members = await api.joined_members(room_id)
+    if joined_members != expected:
+        msg = (
+            "Private audit room joined membership differs from the authenticated expected accounts: "
+            f"expected {expected!r}, received {joined_members!r}"
+        )
+        raise MatrixAuditError(msg)
+    return joined_members
+
+
 async def run_audit(  # noqa: PLR0915
     config: AuditConfig,
     *,
@@ -1776,6 +1809,12 @@ async def run_audit(  # noqa: PLR0915
         if invite_api is not None:
             await invite_api.join(room_id)
             invite_timings = tuple(invite_api.timings)
+        joined_members = await _verify_private_room_membership(
+            api,
+            room_id=room_id,
+            user_id=user_id,
+            invite_user_id=config.invite_user_id,
+        )
         media_urls = {fixture.filename: await api.upload(fixture) for fixture in fixtures}
         for fixture in fixtures:
             downloaded = await api.download(media_urls[fixture.filename], filename=fixture.filename)
@@ -1873,6 +1912,7 @@ async def run_audit(  # noqa: PLR0915
         generated_at=datetime.now(UTC).isoformat(),
         homeserver=config.base_url.rstrip("/"),
         user_id=user_id,
+        joined_members=joined_members,
         room_id=room_id,
         thread_root_id=root_id,
         interactions=tuple(records),

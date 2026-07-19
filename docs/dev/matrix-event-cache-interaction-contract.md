@@ -115,6 +115,8 @@ Before redacting an original with a dependent edit, the harness waits through re
 
 The harness can invite and explicitly join a second test agent when its token is supplied through a second environment variable.
 
+After room creation and any invited join, the harness queries authenticated joined membership, requires exactly the expected authenticated accounts, and records the sorted member IDs in raw evidence.
+
 Evidence collection opens the service cache with SQLite `mode=ro`, enables `PRAGMA query_only`, starts one read transaction for a consistent snapshot, and records only IDs, counts, integrity state, hashes, and timings.
 
 Strict thread reads use a separate new disposable SQLite database and refuse an existing path or the service-cache path.

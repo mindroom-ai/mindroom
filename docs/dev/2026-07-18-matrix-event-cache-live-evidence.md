@@ -26,6 +26,10 @@ The new private room was `!g178yDFmvMAT2iDiBn:mindroom.chat`.
 
 The room was created by `@mindroom_code:mindroom.chat`, and authenticated membership verification returned only that user.
 
+For the checked-in run, the authenticated `/joined_members` response was captured alongside the harness output and copied into the sanitized summary.
+
+The current harness now performs the same authenticated query fail-closed and records the sorted joined-member IDs in its raw evidence.
+
 The primary thread root was `$RLlVnt7Z04PV8IdyDQbwEZmk--UcNL_SCdU01fGiPi8`.
 
 The service remained active with `NRestarts=0`.

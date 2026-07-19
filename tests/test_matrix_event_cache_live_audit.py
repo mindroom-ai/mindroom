@@ -45,6 +45,7 @@ def _empty_evidence() -> AuditEvidence:
         generated_at="2026-07-18T00:00:00+00:00",
         homeserver="https://matrix.example",
         user_id="@audit:example",
+        joined_members=("@audit:example",),
         room_id="!audit:example",
         thread_root_id="$root",
         interactions=(),
@@ -287,6 +288,90 @@ async def test_audit_verifies_invite_token_before_room_creation(tmp_path: Path) 
 
     assert len(requested_paths) == 2
     assert all("/createRoom" not in path for path in requested_paths)
+
+
+@pytest.mark.asyncio
+async def test_audit_rejects_unexpected_private_room_membership_before_event_work(
+    tmp_path: Path,
+) -> None:
+    """Unexpected joined members must abort the audit before media or event writes."""
+    owner_token = UUID("10000000-0000-4000-8000-000000000010").hex
+    requested_paths: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        assert request.headers["Authorization"] == f"Bearer {owner_token}"
+        if request.url.path.endswith("/account/whoami"):
+            return httpx.Response(200, json={"device_id": "OWNER", "user_id": "@owner:example"})
+        if request.url.path.endswith("/createRoom"):
+            return httpx.Response(200, json={"room_id": "!audit:example"})
+        if request.url.path.endswith("/joined_members"):
+            return httpx.Response(
+                200,
+                json={
+                    "joined": {
+                        "@intruder:example": {},
+                        "@owner:example": {},
+                    },
+                },
+            )
+        msg = f"Unexpected request after membership verification: {request.url.path}"
+        raise AssertionError(msg)
+
+    config = AuditConfig(
+        base_url="https://matrix.example",
+        access_token=owner_token,
+        invite_access_token=None,
+        evidence_path=tmp_path / "evidence.json",
+        cache_db_path=tmp_path / "service.db",
+        strict_read_cache_db_path=tmp_path / "strict.db",
+        invite_user_id=None,
+        trigger_user_id=None,
+        strict_thread_reads=True,
+        settle_seconds=0.0,
+        trigger_wait_seconds=0.0,
+    )
+
+    with (
+        patch("tests.manual.matrix_event_cache_live_audit.validate_media_fixtures"),
+        pytest.raises(MatrixAuditError, match="joined membership differs"),
+    ):
+        await run_audit(config, transport=httpx.MockTransport(handler))
+
+    assert requested_paths == [
+        "/_matrix/client/v3/account/whoami",
+        "/_matrix/client/v3/createRoom",
+        "/_matrix/client/v3/rooms/!audit:example/joined_members",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_records_authenticated_joined_members_in_sorted_order() -> None:
+    """Raw evidence membership should come from the authenticated Matrix endpoint."""
+    access_token = UUID("10000000-0000-4000-8000-000000000011").hex
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == f"Bearer {access_token}"
+        assert request.url.path == "/_matrix/client/v3/rooms/!audit:example/joined_members"
+        return httpx.Response(
+            200,
+            json={
+                "joined": {
+                    "@zeta:example": {},
+                    "@alpha:example": {},
+                },
+            },
+        )
+
+    async with MatrixApi(
+        base_url="https://matrix.example",
+        access_token=access_token,
+        transport=httpx.MockTransport(handler),
+    ) as api:
+        joined_members = await api.joined_members("!audit:example")
+
+    assert joined_members == ("@alpha:example", "@zeta:example")
+    assert [timing.operation for timing in api.timings] == ["joined_members"]
 
 
 def test_cli_requires_invited_user_and_token_environment_together(
