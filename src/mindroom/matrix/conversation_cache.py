@@ -211,7 +211,7 @@ class ConversationCacheProtocol(Protocol):
         event_id: str | None,
         content: dict[str, Any],
     ) -> None:
-        """Schedule one locally sent threaded message or edit for advisory cache bookkeeping.
+        """Schedule one locally sent message or edit for advisory cache bookkeeping.
 
         This is advisory post-send bookkeeping and must fail open.
         Callers should treat Matrix delivery as complete before this local cache work runs.
@@ -221,7 +221,7 @@ class ConversationCacheProtocol(Protocol):
         """Schedule one locally sent outbound event for advisory cache bookkeeping."""
 
     def notify_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
-        """Schedule one locally redacted threaded message for advisory cache bookkeeping.
+        """Schedule one locally redacted message for advisory cache bookkeeping.
 
         This is advisory post-redaction bookkeeping and must fail open.
         """

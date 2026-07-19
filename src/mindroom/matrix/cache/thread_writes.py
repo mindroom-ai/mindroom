@@ -473,7 +473,7 @@ class ThreadOutboundWritePolicy:
         event_id: str | None,
         content: dict[str, Any],
     ) -> None:
-        """Schedule advisory bookkeeping for one locally sent threaded message or edit."""
+        """Schedule advisory bookkeeping for one locally sent message or edit."""
         if not self._cache_ops.cache_runtime_available():
             return
         if not isinstance(event_id, str) or not event_id:
@@ -537,7 +537,7 @@ class ThreadOutboundWritePolicy:
         room_id: str,
         redacted_event_id: str,
     ) -> None:
-        """Schedule advisory bookkeeping for one locally redacted threaded message."""
+        """Schedule advisory bookkeeping for one locally redacted message."""
         try:
             if not redacted_event_id or not self._cache_ops.cache_runtime_available():
                 return
