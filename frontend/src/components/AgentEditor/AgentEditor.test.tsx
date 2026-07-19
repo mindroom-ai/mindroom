@@ -1166,6 +1166,15 @@ describe("AgentEditor", () => {
     });
   });
 
+  it("preserves explicit compaction fallback model clears during normalization", () => {
+    expect(
+      normalizeAgentUpdates(mockAgent, { compaction: { fallback_model: null } })
+        .compaction,
+    ).toEqual({
+      fallback_model: null,
+    });
+  });
+
   it("enables authored compaction overrides and clears the inherited sibling threshold", () => {
     expect(
       normalizeAgentUpdates(mockAgent, {
@@ -1296,6 +1305,35 @@ describe("AgentEditor", () => {
     const compactionAgent: Agent = {
       ...mockAgent,
       compaction: { model: null },
+    };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [compactionAgent],
+      config: {
+        ...mockConfig,
+        defaults: {
+          ...mockConfig.defaults,
+          compaction: {
+            enabled: false,
+            reserve_tokens: 16384,
+            threshold_percent: 0.8,
+          },
+        },
+        agents: { test_agent: compactionAgent },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    expect(
+      screen.getByLabelText("Enable automatic required compaction"),
+    ).not.toBeChecked();
+  });
+
+  it("shows automatic required compaction as disabled for a pure fallback model clear when defaults are disabled", () => {
+    const compactionAgent: Agent = {
+      ...mockAgent,
+      compaction: { fallback_model: null },
     };
     (useConfigStore as any).mockReturnValue({
       ...mockStore,
