@@ -589,7 +589,7 @@ async def _invalidate_thread_cache_entry(
     *,
     room_id: str,
     thread_id: str,
-) -> bool:
+) -> None:
     """Best-effort invalidation for one broken cached thread entry."""
     try:
         await event_cache.invalidate_thread(room_id, thread_id)
@@ -599,8 +599,6 @@ async def _invalidate_thread_cache_entry(
             room_id=room_id,
             thread_id=thread_id,
         )
-        return False
-    return True
 
 
 async def _mark_thread_cache_stale_for_opaque_history(
@@ -1089,13 +1087,10 @@ async def fetch_thread_event_sources_via_room_messages(
 ) -> _ThreadEventSourceScanResult:
     """Fetch one thread's event sources by scanning room history pages."""
     scan_result = await _bulk_scan_thread_event_sources(client, room_id, thread_root_ids=(thread_id,))
+    if scan_result.has_opaque_events:
+        msg = f"thread history for {thread_id} contains undecrypted Matrix events"
+        raise _OpaqueEncryptedThreadHistoryError(msg)
     if thread_id in scan_result.missing_root_ids:
-        if any(
-            is_opaque_encrypted_event_source(event_source)
-            for event_source in scan_result.thread_event_sources.get(thread_id, ())
-        ):
-            msg = f"thread history for {thread_id} contains undecrypted Matrix events"
-            raise _OpaqueEncryptedThreadHistoryError(msg)
         msg = f"thread root {thread_id} not found during room scan"
         logger.warning(
             "Thread room scan ended without finding root",
@@ -1118,6 +1113,7 @@ class _BulkThreadScanResult:
 
     thread_event_sources: dict[str, list[dict[str, Any]]]
     missing_root_ids: frozenset[str]
+    has_opaque_events: bool
     page_count: int
     scanned_event_count: int
 
@@ -1235,26 +1231,12 @@ async def _bulk_scan_thread_event_sources(
         scanned_message_sources=scanned_message_sources,
         latest_edits_by_original_event_id=latest_edits_by_original_event_id,
     )
-    opaque_event_sources = [
-        event_source
-        for event_source in scanned_message_sources.values()
-        if is_opaque_encrypted_event_source(event_source)
-    ]
-    if opaque_event_sources:
-        for thread_id in thread_root_ids:
-            event_sources = thread_event_sources.get(thread_id, [])
-            event_sources_by_id = {
-                event_id: event_source
-                for event_source in [*event_sources, *opaque_event_sources]
-                if isinstance((event_id := _event_id_from_source(event_source)), str)
-            }
-            thread_event_sources[thread_id] = sort_thread_event_sources_root_first(
-                list(event_sources_by_id.values()),
-                thread_id=thread_id,
-            )
     return _BulkThreadScanResult(
         thread_event_sources=thread_event_sources,
         missing_root_ids=frozenset(remaining_root_ids),
+        has_opaque_events=any(
+            is_opaque_encrypted_event_source(event_source) for event_source in scanned_message_sources.values()
+        ),
         page_count=page_count,
         scanned_event_count=scanned_event_count,
     )
@@ -1280,28 +1262,29 @@ async def bulk_refresh_room_thread_histories(
     fetch_started_at = time.time()
     scan_result = await _bulk_scan_thread_event_sources(client, room_id, thread_root_ids=thread_root_ids)
     stored_threads = 0
-    for thread_id, event_sources in scan_result.thread_event_sources.items():
-        cache_rejection_reason = _thread_history_fetch_cache_rejection_reason(
-            event_sources,
-            thread_id=thread_id,
-        )
-        if cache_rejection_reason == "opaque_encrypted_event":
+    if scan_result.has_opaque_events:
+        for thread_id in set(thread_root_ids):
             await _mark_thread_cache_stale_for_opaque_history(
                 event_cache,
                 room_id=room_id,
                 thread_id=thread_id,
             )
-            continue
-        if cache_rejection_reason is not None:
-            continue
-        if await _store_thread_history_cache(
-            event_cache,
-            room_id=room_id,
-            thread_id=thread_id,
-            event_sources=event_sources,
-            fetch_started_at=fetch_started_at,
-        ):
-            stored_threads += 1
+    else:
+        for thread_id, event_sources in scan_result.thread_event_sources.items():
+            cache_rejection_reason = _thread_history_fetch_cache_rejection_reason(
+                event_sources,
+                thread_id=thread_id,
+            )
+            if cache_rejection_reason is not None:
+                continue
+            if await _store_thread_history_cache(
+                event_cache,
+                room_id=room_id,
+                thread_id=thread_id,
+                event_sources=event_sources,
+                fetch_started_at=fetch_started_at,
+            ):
+                stored_threads += 1
     stats = BulkThreadRefreshStats(
         requested_threads=len(set(thread_root_ids)),
         stored_threads=stored_threads,

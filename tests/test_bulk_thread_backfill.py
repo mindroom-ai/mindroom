@@ -162,17 +162,12 @@ async def test_bulk_refresh_reports_missing_roots_without_storing_partial_thread
 
 
 @pytest.mark.asyncio
-async def test_bulk_refresh_opaque_missing_root_marks_existing_snapshot_stale(tmp_path: Path) -> None:
-    """Ciphertext in a root-missing bulk scan must invalidate an existing populated snapshot."""
-    thread_id = "$root:localhost"
-    root_source = {
-        "event_id": thread_id,
-        "sender": "@alice:localhost",
-        "origin_server_ts": 1000,
-        "room_id": _ROOM_ID,
-        "type": "m.room.message",
-        "content": {"body": "cached root", "msgtype": "m.text"},
-    }
+async def test_bulk_refresh_opaque_room_scan_marks_all_requested_snapshots_stale(tmp_path: Path) -> None:
+    """Ciphertext in a room scan must invalidate every requested populated snapshot."""
+    found_thread_id = "$found-root:localhost"
+    missing_thread_id = "$missing-root:localhost"
+    found_root = _message_event(found_thread_id, "found root", timestamp=1000)
+    missing_root = _message_event(missing_thread_id, "missing root", timestamp=1000)
     opaque_event = nio.MegolmEvent.from_dict(
         {
             "event_id": "$opaque:localhost",
@@ -191,26 +186,29 @@ async def test_bulk_refresh_opaque_missing_root_marks_existing_snapshot_stale(tm
     )
     client = AsyncMock()
     client.room_messages = AsyncMock(
-        return_value=_messages_response([opaque_event], end=None),
+        return_value=_messages_response([opaque_event, found_root], end=None),
     )
     event_cache = SqliteEventCache(tmp_path / "event_cache.db")
     await event_cache.initialize()
 
     try:
-        await _replace_thread(event_cache, _ROOM_ID, thread_id, [root_source])
+        await _replace_thread(event_cache, _ROOM_ID, found_thread_id, [found_root.source])
+        await _replace_thread(event_cache, _ROOM_ID, missing_thread_id, [missing_root.source])
         stats = await bulk_refresh_room_thread_histories(
             client,
             _ROOM_ID,
             event_cache,
-            thread_root_ids=[thread_id],
+            thread_root_ids=[found_thread_id, missing_thread_id],
             caller_label="test",
         )
-        cache_state = await event_cache.get_thread_cache_state(_ROOM_ID, thread_id)
+        found_cache_state = await event_cache.get_thread_cache_state(_ROOM_ID, found_thread_id)
+        missing_cache_state = await event_cache.get_thread_cache_state(_ROOM_ID, missing_thread_id)
     finally:
         await event_cache.close()
 
     assert stats.stored_threads == 0
-    assert stats.missing_root_ids == frozenset({thread_id})
-    assert cache_state is not None
-    assert cache_state.invalidation_reason == "thread_history_opaque_encrypted_event"
-    assert thread_cache_rejection_reason(cache_state) == "thread_invalidated_after_validation"
+    assert stats.missing_root_ids == frozenset({missing_thread_id})
+    for cache_state in (found_cache_state, missing_cache_state):
+        assert cache_state is not None
+        assert cache_state.invalidation_reason == "thread_history_opaque_encrypted_event"
+        assert thread_cache_rejection_reason(cache_state) == "thread_invalidated_after_validation"

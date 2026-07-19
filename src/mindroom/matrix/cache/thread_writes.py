@@ -1178,18 +1178,14 @@ class ThreadSyncWritePolicy:
         self,
         response: nio.SyncResponse,
         *,
-        limited_room_ids: typing.Collection[str] | None = None,
         raise_on_cache_write_failure: bool = False,
     ) -> list[asyncio.Task[object]]:
         """Queue sync timeline persistence through the room-ordered cache barrier."""
         if not self._cache_ops.cache_runtime_available():
             return []
-        if limited_room_ids is None:
-            limited_room_ids, validation_errors = self._limited_sync_timeline_room_ids(response)
-            if validation_errors:
-                if raise_on_cache_write_failure:
-                    raise validation_errors[0]
-                return []
+        limited_room_ids, validation_errors = self._limited_sync_timeline_room_ids(response)
+        if validation_errors:
+            raise validation_errors[0]
         room_plain_events, room_threaded_events, room_redactions = self._group_sync_timeline_updates(response)
         tasks: list[asyncio.Task[object]] = []
         limited_room_id_set = set(limited_room_ids)
@@ -1285,7 +1281,6 @@ class ThreadSyncWritePolicy:
         try:
             tasks = self.cache_sync_timeline(
                 response,
-                limited_room_ids=limited_room_ids,
                 raise_on_cache_write_failure=True,
             )
             tasks.extend(self._cache_ops.queue_pending_durable_write_flushes())

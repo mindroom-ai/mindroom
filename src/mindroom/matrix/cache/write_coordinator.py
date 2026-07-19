@@ -558,29 +558,6 @@ class EventCacheWriteCoordinator:
             return False
         return not self._thread_update_tasks_by_room.get(room_id)
 
-    def current_task_holds_room_barrier(self, room_id: str) -> bool:
-        """Return whether the caller is already executing inside this room's write barrier."""
-        current_task = asyncio.current_task()
-        if current_task is None:
-            return False
-        state = self._room_states.get(room_id)
-        if state is None:
-            return False
-        if state.active_room is not None and state.active_room.task is current_task:
-            return True
-        return any(entry.task is current_task for entry in state.active_threads.values())
-
-    def _fallback_room_tasks(self, room_id: str) -> tuple[_UpdateTask, ...]:
-        pending_tasks = [
-            task
-            for task in (
-                self._room_update_tasks.get(room_id),
-                *self._thread_update_tasks_by_room.get(room_id, {}).values(),
-            )
-            if task is not None and not task.done()
-        ]
-        return tuple(dict.fromkeys(pending_tasks))
-
     def _fallback_thread_tasks(self, room_id: str, thread_id: str) -> tuple[_UpdateTask, ...]:
         pending_tasks: list[_UpdateTask] = []
         room_task = self._room_update_tasks.get(room_id)
@@ -715,16 +692,8 @@ class EventCacheWriteCoordinator:
             if self._room_is_idle(room_id):
                 return
 
-            state = self._room_states.get(room_id)
-            if state is None or not state.entries:
-                for pending_task in self._fallback_room_tasks(room_id):
-                    await self._await_idle_task(
-                        pending_task,
-                        room_id=room_id,
-                        log_message="Room cache update failed before room became idle",
-                    )
-                continue
-
+            state = self._room_states[room_id]
+            assert state.entries
             waiter = asyncio.get_running_loop().create_future()
             state.waiters.append(waiter)
             self._reevaluate_room(room_id)

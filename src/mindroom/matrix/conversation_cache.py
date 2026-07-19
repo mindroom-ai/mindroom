@@ -495,7 +495,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         """Resolve one event through per-turn memoization and the advisory cache."""
         normalized_event_id = event_id.strip()
         coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is not None and not coordinator.current_task_holds_room_barrier(room_id):
+        if coordinator is not None:
             await coordinator.wait_for_room_idle(room_id)
         cache_key = (room_id, normalized_event_id)
         turn_cache = self._turn_event_cache.get()

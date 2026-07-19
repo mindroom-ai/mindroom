@@ -3529,7 +3529,6 @@ expose = [
     "AgentMessageSnapshot",
     "AgentMessageSnapshotUnavailable",
     "ConversationEventCache",
-    "EventCacheBackendUnavailableError",
     "EventCacheWriteCoordinator",
     "ThreadCacheState",
     "ThreadHistoryResult",
