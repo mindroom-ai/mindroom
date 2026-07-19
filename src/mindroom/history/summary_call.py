@@ -18,8 +18,9 @@ It enforces the call-side half of the compaction invariants
    ``SummaryRetryPolicy`` decides which error classes warrant a smaller retry
    (timeouts, typed context-window and safeguard errors, empty results, output
    limits, and named legacy context-length fragments), the shrink schedule
-   (halving), and the give-up floor — no inline string matching at call sites.
-   Selected typed transient provider errors get one same-budget retry.
+   (halving, clamped to the caller's smallest lossless rebuild), and the
+   give-up floor — no inline string matching at call sites. Selected typed
+   transient provider errors get one same-budget retry.
 
 5. Output-capped summaries use an explicit retry signal.
    ``generate_compaction_summary`` refuses to return a likely truncated summary,
@@ -111,15 +112,12 @@ class _CompactionSummaryEmptyResultError(RuntimeError):
     """Raised when the summary model returns a success response with no text."""
 
 
-_SummaryRetryKind = Literal["shrink", "same-budget-transient"]
-
-
 @dataclass(frozen=True)
-class _SummaryRetryDecision:
+class SummaryRetryDecision:
     """One policy-owned retry action for the compaction summary caller."""
 
     budget: int
-    kind: _SummaryRetryKind
+    kind: Literal["shrink", "same-budget-transient"]
 
 
 @dataclass(frozen=True)
@@ -127,8 +125,9 @@ class SummaryRetryPolicy:
     """Explicit retry policy for failed compaction summary calls.
 
     Each shrinkable failure divides the actual serialized input size by
-    ``shrink_divisor`` (clamped to the shared compaction-summary retry floor),
-    while selected typed transient failures retry the same configured budget.
+    ``shrink_divisor``, clamped to the shared compaction-summary retry floor
+    and to the caller's smallest lossless rebuild, while selected typed
+    transient failures retry the same configured budget.
     Once ``max_attempts`` is reached or no retry applies, the error propagates.
     """
 
@@ -155,28 +154,37 @@ class SummaryRetryPolicy:
         attempt: int,
         budget: int,
         input_tokens: int,
+        minimum_input_tokens: int,
         error: Exception,
-    ) -> _SummaryRetryDecision | None:
+    ) -> SummaryRetryDecision | None:
         """Return the next retry action, or None when retries end.
 
         The decision kind is authoritative so callers cannot independently
         reclassify the error and apply shrink-only safeguards to a same-budget
-        transient retry.
+        transient retry. ``minimum_input_tokens`` is the smallest budget at
+        which the caller can rebuild without dropping the prior summary or
+        every run; shrink targets clamp there so a granted shrink is only
+        issued when it rebuilds to a strictly smaller request that still
+        carries summarizable content.
         """
         if attempt >= self.max_attempts:
             return None
         if self.should_shrink(error):
             smaller_budget = min(
                 budget,
-                max(COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS, input_tokens // self.shrink_divisor),
+                max(
+                    COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
+                    minimum_input_tokens,
+                    input_tokens // self.shrink_divisor,
+                ),
             )
             if smaller_budget < input_tokens:
-                return _SummaryRetryDecision(budget=smaller_budget, kind="shrink")
+                return SummaryRetryDecision(budget=smaller_budget, kind="shrink")
         if isinstance(error, ModelProviderError):
             if error.status_code in _TRANSIENT_SUMMARY_STATUS_CODES:
-                return _SummaryRetryDecision(budget=budget, kind="same-budget-transient")
+                return SummaryRetryDecision(budget=budget, kind="same-budget-transient")
             if error.status_code == 502 and _has_typed_network_cause(error):
-                return _SummaryRetryDecision(budget=budget, kind="same-budget-transient")
+                return SummaryRetryDecision(budget=budget, kind="same-budget-transient")
         return None
 
 

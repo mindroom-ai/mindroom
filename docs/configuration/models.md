@@ -265,6 +265,7 @@ When the active runtime model window is known, replay safety uses the smaller of
 When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
 The effective replay window also caps each compaction summary input chunk.
 Destructive compaction requires the resolved summary input budget to exceed 2,000 tokens.
+With the default `reserve_tokens`, this makes destructive compaction unavailable when the compaction model's context window is roughly 10,000 tokens or smaller; lowering `reserve_tokens` restores availability for such small windows.
 
 Manual `compact_context` records a durable request that runs before the next reply in the same conversation scope.
 Manual `compact_context` remains available when a compaction model and context window are configured and the resolved summary input budget exceeds 2,000 tokens.

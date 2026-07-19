@@ -51,6 +51,8 @@ if TYPE_CHECKING:
     from agno.session.agent import AgentSession
     from agno.session.team import TeamSession
 
+    from mindroom.history.summary_call import SummaryRetryDecision
+
 logger = get_logger(__name__)
 
 _WRAPPER_OVERHEAD_TOKENS = 200
@@ -518,6 +520,11 @@ async def _generate_compaction_summary_with_retry(
     included_runs = initial_included_runs
     budget = summary_input_budget
     retry_policy = DEFAULT_SUMMARY_RETRY_POLICY
+    minimum_input_tokens = _minimum_lossless_input_tokens(
+        previous_summary=previous_summary,
+        first_run=compactable_runs[0],
+        token_estimator=token_estimator,
+    )
     attempt = 1
     while True:
         estimated_input_tokens = token_estimator(summary_input)
@@ -554,10 +561,11 @@ async def _generate_compaction_summary_with_retry(
                 duration_ms=duration_ms,
                 error=str(exc) or type(exc).__name__,
             )
-            retry_decision = retry_policy.retry_budget(
+            retry_decision: SummaryRetryDecision | None = retry_policy.retry_budget(
                 attempt=attempt,
                 budget=budget,
                 input_tokens=estimated_input_tokens,
+                minimum_input_tokens=minimum_input_tokens,
                 error=exc,
             )
             if retry_decision is not None:
@@ -669,6 +677,28 @@ def _build_oversized_summary_input(
     if oversized_excerpt is None:
         return summary_block, []
     return _compose_summary_input(summary_block, oversized_excerpt), [first_run]
+
+
+def _minimum_lossless_input_tokens(
+    *,
+    previous_summary: str | None,
+    first_run: RunOutput | TeamRunOutput,
+    token_estimator: Callable[[str], int],
+) -> int:
+    """Return the smallest shrink budget keeping the complete prior summary plus one minimal run.
+
+    Below this size ``_build_summary_input`` rebuilds to a run-less input
+    because the previous-summary block alone swallows the envelope, so
+    ``SummaryRetryPolicy`` clamps shrink targets here. A zero content budget
+    renders the run as its open tag, truncation note, and close tag; the
+    wrapper overhead covers the builder's own envelope accounting and
+    tokenizer boundary effects.
+    """
+    summary_block = (
+        _previous_summary_block(previous_summary) if previous_summary is not None and previous_summary.strip() else ""
+    )
+    minimal_excerpt = _serialize_run_excerpt(first_run, index=0, blocks=(), content_budget_chars=0)
+    return token_estimator(_compose_summary_input(summary_block, minimal_excerpt)) + _WRAPPER_OVERHEAD_TOKENS
 
 
 def _serialize_oversized_run_excerpt(

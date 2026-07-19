@@ -57,6 +57,7 @@ from mindroom.history.storage import (
 from mindroom.history.summary_call import (
     DEFAULT_SUMMARY_RETRY_POLICY,
     CompactionSummaryOutputLimitError,
+    SummaryRetryDecision,
     SummaryRetryPolicy,
     _CompactionSummaryEmptyResultError,
     build_summary_request_messages,
@@ -141,15 +142,21 @@ def _retry_budget_value(
     attempt: int,
     budget: int,
     input_tokens: int,
+    minimum_input_tokens: int = 0,
     error: Exception,
 ) -> int | None:
     decision = policy.retry_budget(
         attempt=attempt,
         budget=budget,
         input_tokens=input_tokens,
+        minimum_input_tokens=minimum_input_tokens,
         error=error,
     )
     return None if decision is None else decision.budget
+
+
+def _chars_per_token_estimator(value: str) -> int:
+    return len(value) // 4
 
 
 def _make_config(
@@ -793,12 +800,40 @@ def test_retry_policy_shrinks_from_actual_serialized_input_size() -> None:
     )
 
 
+def test_retry_policy_clamps_shrink_target_to_minimum_lossless_input() -> None:
+    """A durable summary above half the failed input raises the shrink target instead of cancelling it."""
+    decision = DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(
+        attempt=1,
+        budget=10_000,
+        input_tokens=8_573,
+        minimum_input_tokens=6_230,
+        error=ModelSafeguardRefusalError("provider-specific refusal wording"),
+    )
+
+    assert decision == SummaryRetryDecision(budget=6_230, kind="shrink")
+
+
+def test_retry_policy_declines_shrink_when_no_smaller_lossless_input_exists() -> None:
+    """An input already at the lossless minimum gets no shrink retry (bounded degrade)."""
+    assert (
+        DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(
+            attempt=1,
+            budget=10_000,
+            input_tokens=6_230,
+            minimum_input_tokens=6_230,
+            error=TimeoutError(),
+        )
+        is None
+    )
+
+
 def test_retry_policy_shrink_classification_precedes_transient_status() -> None:
     error = ModelProviderError("Request too large", status_code=429)
     decision = DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(
         attempt=1,
         budget=16_000,
         input_tokens=6_000,
+        minimum_input_tokens=0,
         error=error,
     )
 
@@ -813,6 +848,7 @@ def test_retry_policy_falls_through_to_transient_retry_when_input_cannot_shrink(
         attempt=1,
         budget=16_000,
         input_tokens=1_000,
+        minimum_input_tokens=0,
         error=error,
     )
 
@@ -861,6 +897,7 @@ def test_retry_policy_retries_selected_transient_provider_errors_at_same_budget(
         attempt=1,
         budget=16_000,
         input_tokens=4_000,
+        minimum_input_tokens=0,
         error=error,
     )
 
@@ -1157,6 +1194,98 @@ async def test_retry_helper_honors_transient_fallthrough_for_shrink_message_at_f
         "same-budget rebuilt request",
     ]
     assert build_summary_input.call_args.kwargs["max_input_tokens"] == 4_000
+
+
+@pytest.mark.asyncio
+async def test_retry_helper_shrinks_around_a_large_durable_summary() -> None:
+    """A durable summary above half the failed input still gets a strictly smaller second attempt.
+
+    Regression: the halved shrink target used to fall below the previous-summary
+    block, the rebuild came back run-less, and the original error propagated
+    without any smaller attempt — so the next turn reselected required
+    compaction and resent the identical refusal-prone request.
+    """
+    previous_summary = "s" * 24_000
+    runs = [_completed_run(f"run-{index}", padding=2_000) for index in range(3)]
+    summary_input_budget = 10_000
+    initial_input, initial_runs = _build_summary_input(
+        previous_summary=previous_summary,
+        compacted_runs=runs,
+        history_settings=_HISTORY_SETTINGS,
+        max_input_tokens=summary_input_budget,
+        token_estimator=_chars_per_token_estimator,
+    )
+    initial_tokens = _chars_per_token_estimator(initial_input)
+    assert len(initial_runs) == 3
+    assert initial_tokens > 8_000
+    assert _chars_per_token_estimator(previous_summary) > initial_tokens // 2
+    recovered_summary = SessionSummary(summary="recovered summary", updated_at=datetime.now(UTC))
+    generate_summary = AsyncMock(
+        side_effect=[ModelSafeguardRefusalError("provider-specific refusal wording"), recovered_summary],
+    )
+
+    with patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary):
+        generated = await _generate_compaction_summary_with_retry(
+            model=FakeModel(id="summary-model", provider="fake"),
+            previous_summary=previous_summary,
+            compactable_runs=runs,
+            initial_summary_input=initial_input,
+            initial_included_runs=initial_runs,
+            summary_input_budget=summary_input_budget,
+            session_id="session-1",
+            scope=_SCOPE,
+            history_settings=_HISTORY_SETTINGS,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            token_estimator=_chars_per_token_estimator,
+        )
+
+    assert generated.summary is recovered_summary
+    assert generate_summary.await_count == 2
+    retry_input = generate_summary.await_args_list[1].kwargs["summary_input"]
+    assert _chars_per_token_estimator(retry_input) < initial_tokens
+    assert previous_summary in retry_input
+    assert "<run " in retry_input.split("</previous_summary>")[1]
+    assert [run.run_id for run in generated.included_runs] == ["run-0"]
+
+
+@pytest.mark.asyncio
+async def test_retry_helper_propagates_error_when_no_smaller_lossless_input_exists() -> None:
+    """An input already at the lossless minimum fails after one call without a run-less request."""
+    previous_summary = "s" * 24_000
+    runs = [_completed_run("run-1", padding=2_000)]
+    summary_input_budget = 6_100
+    initial_input, initial_runs = _build_summary_input(
+        previous_summary=previous_summary,
+        compacted_runs=runs,
+        history_settings=_HISTORY_SETTINGS,
+        max_input_tokens=summary_input_budget,
+        token_estimator=_chars_per_token_estimator,
+    )
+    assert [run.run_id for run in initial_runs] == ["run-1"]
+    original_error = ModelSafeguardRefusalError("provider-specific refusal wording")
+    generate_summary = AsyncMock(side_effect=original_error)
+
+    with (
+        patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
+        pytest.raises(ModelSafeguardRefusalError) as raised,
+    ):
+        await _generate_compaction_summary_with_retry(
+            model=FakeModel(id="summary-model", provider="fake"),
+            previous_summary=previous_summary,
+            compactable_runs=runs,
+            initial_summary_input=initial_input,
+            initial_included_runs=initial_runs,
+            summary_input_budget=summary_input_budget,
+            session_id="session-1",
+            scope=_SCOPE,
+            history_settings=_HISTORY_SETTINGS,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            token_estimator=_chars_per_token_estimator,
+        )
+
+    assert raised.value is original_error
+    generate_summary.assert_awaited_once()
+    assert "<run " in generate_summary.await_args.kwargs["summary_input"]
 
 
 @pytest.mark.asyncio
