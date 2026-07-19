@@ -372,7 +372,8 @@ async def write_lookup_index_rows(
             """,
             [(row.edit_event_id, row.room_id, row.original_event_id, row.origin_server_ts) for row in edit_rows],
         )
-    thread_rows = event_thread_rows(room_id, accepted_events, thread_id=thread_id)
+    thread_index_events = serialized_events if thread_id is not None else accepted_events
+    thread_rows = event_thread_rows(room_id, thread_index_events, thread_id=thread_id)
     if thread_rows:
         await db.executemany(
             """

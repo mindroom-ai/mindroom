@@ -1676,6 +1676,34 @@ async def test_thread_replacement_preserves_decrypted_payload(
 
 
 @pytest.mark.asyncio
+async def test_refused_opaque_snapshot_still_records_explicit_thread_membership(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Snapshot membership must be indexed even when its opaque payload is refused."""
+    room_id = "!room:localhost"
+    thread_id = "$root:localhost"
+    await event_cache.store_event(
+        thread_id,
+        room_id,
+        _clear_payload(thread_id, body="decrypted root"),
+    )
+    assert await event_cache.get_thread_id_for_event(room_id, thread_id) is None
+
+    await _replace_thread(
+        event_cache,
+        room_id,
+        thread_id,
+        [_opaque_payload(thread_id)],
+    )
+
+    cached_event = await event_cache.get_event(room_id, thread_id)
+    assert cached_event is not None
+    assert cached_event["type"] == "m.room.message"
+    assert cached_event["content"]["body"] == "decrypted root"
+    assert await event_cache.get_thread_id_for_event(room_id, thread_id) == thread_id
+
+
+@pytest.mark.asyncio
 async def test_refused_opaque_write_keeps_latest_edit_join_readable(
     event_cache: ConversationEventCache,
 ) -> None:
