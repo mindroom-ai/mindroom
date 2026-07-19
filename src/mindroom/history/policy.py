@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.history.types import CompactionAvailabilityReason, CompactionDecision, ResolvedHistoryExecutionPlan
+from mindroom.history.types import (
+    COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
+    CompactionAvailabilityReason,
+    CompactionDecision,
+    ResolvedHistoryExecutionPlan,
+)
 from mindroom.token_budget import compute_compaction_input_budget
 
 if TYPE_CHECKING:
@@ -36,6 +41,7 @@ def resolve_history_execution_plan(
     )
     summary_input_budget_tokens, unavailable_reason = _resolve_summary_input_budget(
         compaction_context_window=compaction_context_window,
+        replay_window_tokens=replay_window_tokens,
         reserve_tokens=compaction_config.reserve_tokens,
     )
 
@@ -176,14 +182,26 @@ def describe_compaction_unavailability(plan: ResolvedHistoryExecutionPlan) -> st
         return "no context_window is configured on the active model"
     if reason == "non_positive_summary_input_budget":
         return "the active compaction model leaves no usable summary input budget after reserve and prompt overhead"
+    if reason == "summary_input_budget_without_retry_headroom":
+        return (
+            "the summary input budget must exceed "
+            f"{2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS:,} tokens to provide meaningful headroom "
+            "for a smaller retry"
+        )
     return None
 
 
 def _resolve_summary_input_budget(
     *,
     compaction_context_window: int | None,
+    replay_window_tokens: int | None,
     reserve_tokens: int,
 ) -> tuple[int | None, CompactionAvailabilityReason | None]:
+    """Resolve a summary budget large enough for the request envelope and one degradation retry.
+
+    Plans require more than twice the shared retry floor so halving leaves a
+    genuinely smaller target with room for the request envelope and run content.
+    """
     if compaction_context_window is None:
         return None, "no_context_window"
 
@@ -195,8 +213,12 @@ def _resolve_summary_input_budget(
         compaction_context_window,
         reserve_tokens=normalized_reserve_tokens,
     )
+    if replay_window_tokens is not None:
+        summary_input_budget_tokens = min(summary_input_budget_tokens, replay_window_tokens)
     if summary_input_budget_tokens <= 0:
         return summary_input_budget_tokens, "non_positive_summary_input_budget"
+    if summary_input_budget_tokens <= 2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS:
+        return summary_input_budget_tokens, "summary_input_budget_without_retry_headroom"
     return summary_input_budget_tokens, None
 
 

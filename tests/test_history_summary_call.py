@@ -554,18 +554,34 @@ def test_build_summary_input_normal_run_omits_only_bulky_metadata() -> None:
     assert "https://example.test/deployment.png" in summary_input
 
 
-def test_build_summary_input_skips_when_previous_summary_cannot_be_preserved() -> None:
+def test_build_summary_input_preserves_complete_near_cap_summary_without_claiming_progress() -> None:
     run = _completed_run("run-1")
+    previous_summary = ("word " * 975) + "TAIL-FACT-MUST-SURVIVE"
 
     summary_input, included_runs = _build_summary_input(
-        previous_summary="existing durable summary " * 50,
+        previous_summary=previous_summary,
         compacted_runs=[run],
-        max_input_tokens=50,
+        max_input_tokens=1_001,
         history_settings=_ALL_HISTORY_SETTINGS,
     )
 
     assert included_runs == []
     assert "<previous_summary>" in summary_input
+    assert previous_summary in summary_input
+    assert "TAIL-FACT-MUST-SURVIVE" in summary_input
+    assert "<new_conversation>" not in summary_input
+
+
+def test_build_summary_input_returns_no_progress_when_run_envelope_cannot_fit() -> None:
+    summary_input, included_runs = _build_summary_input(
+        previous_summary=None,
+        compacted_runs=[_completed_run("run-1")],
+        max_input_tokens=1,
+        history_settings=_ALL_HISTORY_SETTINGS,
+    )
+
+    assert summary_input == ""
+    assert included_runs == []
 
 
 def test_build_summary_input_preserves_previous_summary_text() -> None:

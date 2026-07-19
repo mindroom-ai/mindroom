@@ -244,7 +244,10 @@ class CompactionOverrideConfig(BaseModel):
     replay_window_tokens: int | None = Field(
         default=None,
         ge=1,
-        description="Optional context-window cap used only for persisted replay and compaction planning",
+        description=(
+            "Optional operational cap for persisted replay, required-compaction planning, and summary input chunks; "
+            "destructive compaction requires the resolved summary input budget to exceed 2,000 tokens"
+        ),
     )
     reserve_tokens: int | None = Field(
         default=None,
@@ -290,7 +293,10 @@ class CompactionConfig(BaseModel):
     replay_window_tokens: int | None = Field(
         default=None,
         ge=1,
-        description="Optional context-window cap used only for persisted replay and compaction planning",
+        description=(
+            "Optional operational cap for persisted replay, required-compaction planning, and summary input chunks; "
+            "destructive compaction requires the resolved summary input budget to exceed 2,000 tokens"
+        ),
     )
     reserve_tokens: int = Field(
         default=16384,
