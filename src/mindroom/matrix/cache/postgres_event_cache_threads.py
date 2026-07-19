@@ -273,6 +273,7 @@ async def _replace_thread_locked(
             namespace,
             room_id,
             event_ids=existing_event_ids,
+            affected_thread_ids=[thread_id],
         )
     await _store_thread_events_locked(
         db,
@@ -355,6 +356,7 @@ async def invalidate_thread_locked(
             namespace,
             room_id,
             event_ids=event_ids,
+            affected_thread_ids=[thread_id],
         )
     await db.execute(
         """
@@ -373,6 +375,7 @@ async def invalidate_room_threads_locked(
 ) -> None:
     """Delete every cached thread snapshot and room state for one room."""
     event_ids = await _thread_event_ids_for_room(db, namespace=namespace, room_id=room_id)
+    thread_ids = await _thread_ids_for_room(db, namespace=namespace, room_id=room_id)
     await db.execute(
         """
         DELETE FROM mindroom_event_cache_thread_events
@@ -400,6 +403,7 @@ async def invalidate_room_threads_locked(
             namespace,
             room_id,
             event_ids=event_ids,
+            affected_thread_ids=thread_ids,
         )
     await db.execute(
         """
@@ -677,3 +681,22 @@ async def _thread_event_ids_for_room(
             room_id=room_id,
         ),
     ]
+
+
+async def _thread_ids_for_room(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+) -> list[str]:
+    """Return roots whose room-wide snapshot proof is about to be removed."""
+    rows = await fetchall(
+        db,
+        """
+        SELECT thread_id
+        FROM mindroom_event_cache_thread_state
+        WHERE namespace = %s AND room_id = %s
+        """,
+        (namespace, room_id),
+    )
+    return [str(row[0]) for row in rows]

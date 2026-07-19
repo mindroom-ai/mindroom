@@ -17,6 +17,7 @@ from mindroom.constants import (
 )
 from mindroom.matrix.cache import (
     ConversationEventCache,
+    event_cache_events,
     postgres_event_cache_events,
     postgres_event_cache_threads,
     postgres_streaming_compaction,
@@ -154,7 +155,7 @@ class TestConversationEventCacheContract:
         event_cache: ConversationEventCache,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Ordinary and nonterminal lookup writes avoid the compaction query."""
+        """Only terminal message edits with string senders probe compaction."""
         compaction_calls: list[str] = []
 
         async def record_compaction(*_args: object, **_kwargs: object) -> int:
@@ -179,6 +180,24 @@ class TestConversationEventCacheContract:
         )
         assert compaction_calls == []
 
+        wrong_type = _message_event(
+            "$approval-terminal:localhost",
+            3,
+            edit_of=original_id,
+            stream_status=STREAM_STATUS_COMPLETED,
+        )
+        wrong_type["type"] = "io.mindroom.tool_approval"
+        await event_cache.store_event("$approval-terminal:localhost", room_id, wrong_type)
+        missing_sender = _message_event(
+            "$missing-sender-terminal:localhost",
+            4,
+            edit_of=original_id,
+            stream_status=STREAM_STATUS_COMPLETED,
+        )
+        del missing_sender["sender"]
+        await event_cache.store_event("$missing-sender-terminal:localhost", room_id, missing_sender)
+        assert compaction_calls == []
+
         await event_cache.store_event(
             "$terminal:localhost",
             room_id,
@@ -190,6 +209,8 @@ class TestConversationEventCacheContract:
             ),
         )
         assert compaction_calls == ["called"]
+        assert event_cache_events.TERMINAL_STREAM_STATUSES is sqlite_streaming_compaction.TERMINAL_STREAM_STATUSES
+        assert event_cache_events.TERMINAL_STREAM_STATUSES is postgres_streaming_compaction.TERMINAL_STREAM_STATUSES
 
     @pytest.mark.asyncio
     async def test_thread_writes_only_probe_compaction_for_terminal_streaming_edits(
@@ -1087,6 +1108,33 @@ async def test_last_child_deletion_removes_unproven_thread_root_mapping_immediat
     else:
         await event_cache.invalidate_thread(room_id, thread_id)
 
+    assert await event_cache.get_thread_id_for_event(room_id, thread_id) is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_deletion_does_not_run_startup_orphan_scan(
+    event_cache: ConversationEventCache,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime cleanup targets dependent proof rows without running a room scan."""
+    room_id = "!room:localhost"
+    thread_id = "$unfetched-root:localhost"
+    original_id = "$uncached-original:localhost"
+    edit = _message_event("$edit:localhost", 2, edit_of=original_id)
+    new_content = edit["content"]["m.new_content"]
+    assert isinstance(new_content, dict)
+    new_content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
+    await event_cache.store_event(str(edit["event_id"]), room_id, edit)
+    assert await event_cache.get_thread_id_for_event(room_id, thread_id) == thread_id
+
+    async def fail_startup_scan(*_args: object, **_kwargs: object) -> int:
+        msg = "startup orphan scan ran during a runtime deletion"
+        raise AssertionError(msg)
+
+    module = sqlite_event_cache_events if isinstance(event_cache, SqliteEventCache) else postgres_event_cache_events
+    monkeypatch.setattr(module, "repair_orphan_thread_indexes", fail_startup_scan)
+
+    assert await event_cache.redact_event(room_id, original_id) is True
     assert await event_cache.get_thread_id_for_event(room_id, thread_id) is None
 
 

@@ -288,6 +288,7 @@ async def _replace_thread_locked(
             db,
             room_id,
             event_ids=existing_event_ids,
+            affected_thread_ids=[thread_id],
         )
     await _store_thread_events_locked(
         db,
@@ -353,6 +354,7 @@ async def invalidate_thread_locked(
             db,
             room_id,
             event_ids=event_ids,
+            affected_thread_ids=[thread_id],
         )
     await db.execute(
         """
@@ -370,6 +372,7 @@ async def invalidate_room_threads_locked(
 ) -> None:
     """Delete every cached thread snapshot and room state for one room."""
     event_ids = await _thread_event_ids_for_room(db, room_id=room_id)
+    thread_ids = await _thread_ids_for_room(db, room_id=room_id)
     await db.execute(
         """
         DELETE FROM thread_events
@@ -390,6 +393,7 @@ async def invalidate_room_threads_locked(
             db,
             room_id,
             event_ids=event_ids,
+            affected_thread_ids=thread_ids,
         )
     await db.execute(
         """
@@ -629,3 +633,22 @@ async def _thread_event_ids_for_room(
             room_id=room_id,
         ),
     ]
+
+
+async def _thread_ids_for_room(
+    db: aiosqlite.Connection,
+    *,
+    room_id: str,
+) -> list[str]:
+    """Return roots whose room-wide snapshot proof is about to be removed."""
+    cursor = await db.execute(
+        """
+        SELECT thread_id
+        FROM thread_cache_state
+        WHERE room_id = ?
+        """,
+        (room_id,),
+    )
+    rows = await cursor.fetchall()
+    await cursor.close()
+    return [str(row[0]) for row in rows]

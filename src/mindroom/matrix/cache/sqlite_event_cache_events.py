@@ -331,6 +331,7 @@ async def redact_event_locked(
         original_event_id=event_id,
     )
     removed_event_ids = redaction_removal_event_ids(event_id, [*dependent_edit_ids, *archived_edit_ids])
+    affected_thread_ids = await _thread_ids_for_event_ids(db, room_id=room_id, event_ids=removed_event_ids)
     deleted_thread_rows = await _delete_room_thread_events(db, room_id, event_ids=removed_event_ids)
     deleted_event_rows = await delete_cached_events(db, event_ids=removed_event_ids)
     deleted_edit_rows = await delete_event_edit_rows(
@@ -348,6 +349,7 @@ async def redact_event_locked(
         db,
         room_id,
         event_ids=removed_event_ids,
+        affected_thread_ids=affected_thread_ids,
     )
     await _record_redacted_events(
         db,
@@ -529,8 +531,9 @@ async def delete_event_thread_rows(
     room_id: str,
     *,
     event_ids: list[str],
+    affected_thread_ids: list[str],
 ) -> int:
-    """Delete durable event-to-thread rows for the provided event IDs."""
+    """Delete event mappings and unsupported roots whose proof was removed."""
     if not event_ids:
         return 0
     cursor = await db.executemany(
@@ -541,7 +544,46 @@ async def delete_event_thread_rows(
         [(room_id, event_id) for event_id in event_ids],
     )
     deleted_rows = 0 if cursor.rowcount is None else int(cursor.rowcount)
-    return deleted_rows + await repair_orphan_thread_indexes(db, room_id=room_id)
+    if not affected_thread_ids:
+        return deleted_rows
+    cursor = await db.executemany(
+        f"""
+        DELETE FROM event_threads
+        WHERE room_id = ?
+            AND event_id = ?
+            AND thread_id = ?
+            AND {_ORPHAN_THREAD_INDEX_PREDICATE}
+        """,  # noqa: S608
+        [(room_id, thread_id, thread_id) for thread_id in set(affected_thread_ids)],
+    )
+    return deleted_rows + (0 if cursor.rowcount is None else int(cursor.rowcount))
+
+
+async def _thread_ids_for_event_ids(
+    db: aiosqlite.Connection,
+    *,
+    room_id: str,
+    event_ids: list[str],
+) -> list[str]:
+    """Return roots whose active or archived supporting rows will be removed."""
+    encoded_event_ids = json.dumps(event_ids)
+    cursor = await db.execute(
+        """
+        SELECT thread_id
+        FROM event_threads
+        WHERE room_id = ? AND event_id IN (SELECT value FROM json_each(?))
+        UNION
+        SELECT indexed_thread_id
+        FROM compacted_streaming_edits
+        WHERE room_id = ?
+            AND event_id IN (SELECT value FROM json_each(?))
+            AND indexed_thread_id IS NOT NULL
+        """,
+        (room_id, encoded_event_ids, room_id, encoded_event_ids),
+    )
+    rows = await cursor.fetchall()
+    await cursor.close()
+    return [str(row[0]) for row in rows]
 
 
 async def orphan_thread_index_count(db: aiosqlite.Connection) -> int:
@@ -556,19 +598,13 @@ async def orphan_thread_index_count(db: aiosqlite.Connection) -> int:
 
 async def repair_orphan_thread_indexes(
     db: aiosqlite.Connection,
-    *,
-    room_id: str | None = None,
 ) -> int:
-    """Remove unsupported thread mappings globally at startup or within one mutated room."""
-    room_predicate = "" if room_id is None else "AND event_threads.room_id = ?"
-    parameters = () if room_id is None else (room_id,)
+    """Remove every unsupported thread mapping during startup maintenance."""
     cursor = await db.execute(
         f"""
         DELETE FROM event_threads
         WHERE {_ORPHAN_THREAD_INDEX_PREDICATE}
-            {room_predicate}
         """,  # noqa: S608
-        parameters,
     )
     repaired = 0 if cursor.rowcount is None else int(cursor.rowcount)
     await cursor.close()

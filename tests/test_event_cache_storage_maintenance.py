@@ -848,3 +848,63 @@ async def test_postgres_reconnect_does_not_repeat_startup_maintenance(
         assert cache.runtime_diagnostics()["cache_postgres_reconnect_count"] == 1
     finally:
         await cache.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("metadata_state", ["missing", "changed"])
+async def test_postgres_reconnect_rejects_changed_certification_generation(
+    postgres_event_cache_url: str,
+    metadata_state: str,
+) -> None:
+    """Reconnect must not certify an old sync position against replaced cache state."""
+    namespace = f"reconnect_generation_{uuid.uuid4().hex}"
+    cache = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
+    await cache.initialize()
+    expected_generation = cache.certification_generation
+    assert expected_generation is not None
+    admin = await psycopg.AsyncConnection.connect(postgres_event_cache_url)
+    try:
+        if metadata_state == "missing":
+            await admin.execute(
+                """
+                DELETE FROM mindroom_event_cache_namespace_metadata
+                WHERE namespace = %s AND key = 'certification_generation'
+                """,
+                (namespace,),
+            )
+        else:
+            await admin.execute(
+                """
+                UPDATE mindroom_event_cache_namespace_metadata
+                SET value = %s
+                WHERE namespace = %s AND key = 'certification_generation'
+                """,
+                (uuid.uuid4().hex, namespace),
+            )
+        await admin.commit()
+
+        db = cache._runtime.db
+        assert db is not None
+        await db.close()
+
+        assert await cache.get_event(_ROOM_ID, _MISSING_ID) is None
+        assert cache.certification_generation == expected_generation
+        assert cache.durable_writes_available is False
+        diagnostics = cache.runtime_diagnostics()
+        assert diagnostics["cache_postgres_disabled_reason"] == "certification_generation_changed"
+
+        cursor = await admin.execute(
+            """
+            SELECT value
+            FROM mindroom_event_cache_namespace_metadata
+            WHERE namespace = %s AND key = 'certification_generation'
+            """,
+            (namespace,),
+        )
+        row = await cursor.fetchone()
+        assert (row is None) is (metadata_state == "missing")
+        if row is not None:
+            assert row[0] != expected_generation
+    finally:
+        await admin.close()
+        await cache.close()
