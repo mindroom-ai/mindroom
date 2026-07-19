@@ -1042,6 +1042,50 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
 
     @pytest.mark.asyncio
+    async def test_point_read_barrier_does_not_wait_for_later_room_update(self) -> None:
+        """A point read must wait for predecessors without being extended by later writes."""
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        second_started = asyncio.Event()
+        release_second = asyncio.Event()
+        coordinator = _runtime_write_coordinator()
+
+        async def first_update() -> None:
+            first_started.set()
+            await release_first.wait()
+
+        async def second_update() -> None:
+            second_started.set()
+            await release_second.wait()
+
+        first_task = coordinator.queue_room_update(
+            "!test:localhost",
+            first_update,
+            name="first_room_update",
+        )
+        await first_started.wait()
+        read_barrier = asyncio.create_task(
+            coordinator.wait_for_prior_room_updates("!test:localhost"),
+        )
+        await asyncio.sleep(0)
+        second_task = coordinator.queue_room_update(
+            "!test:localhost",
+            second_update,
+            name="later_room_update",
+        )
+
+        try:
+            release_first.set()
+            await second_started.wait()
+            await asyncio.wait_for(read_barrier, timeout=1.0)
+            assert second_task.done() is False
+        finally:
+            release_first.set()
+            release_second.set()
+            await asyncio.gather(first_task, second_task, return_exceptions=True)
+            await coordinator.close()
+
+    @pytest.mark.asyncio
     async def test_wait_for_thread_idle_ignores_cancelled_room_fence_for_unrelated_thread(self) -> None:
         """Thread reads should ignore cancelled room fences that only preserve write ordering."""
         first_thread_started = asyncio.Event()

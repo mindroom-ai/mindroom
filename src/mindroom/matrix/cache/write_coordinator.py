@@ -548,16 +548,6 @@ class EventCacheWriteCoordinator:
             return False
         return self._thread_update_tasks.get((room_id, thread_id)) is None
 
-    def _room_is_idle(self, room_id: str) -> bool:
-        """Return whether every queued cache update in one room has drained."""
-        self._prune_done_task_maps(room_id)
-        state = self._room_states.get(room_id)
-        if state is not None and state.entries:
-            return False
-        if self._room_update_tasks.get(room_id) is not None:
-            return False
-        return not self._thread_update_tasks_by_room.get(room_id)
-
     def current_task_holds_room_barrier(self, room_id: str) -> bool:
         """Return whether the caller is already executing inside this room's write barrier."""
         current_task = asyncio.current_task()
@@ -708,34 +698,16 @@ class EventCacheWriteCoordinator:
                 self._discard_waiter(room_id, waiter)
                 raise
 
-    async def wait_for_room_idle(self, room_id: str) -> None:
-        """Wait for every room-scoped and thread-scoped cache update in one room to drain."""
-        while True:
-            self._reevaluate_room(room_id)
-            if self._room_is_idle(room_id):
-                return
-
-            state = self._room_states.get(room_id)
-            if state is None or not state.entries:
-                for pending_task in self._fallback_room_tasks(room_id):
-                    await self._await_idle_task(
-                        pending_task,
-                        room_id=room_id,
-                        log_message="Room cache update failed before room became idle",
-                    )
-                continue
-
-            waiter = asyncio.get_running_loop().create_future()
-            state.waiters.append(waiter)
-            self._reevaluate_room(room_id)
-            if self._room_is_idle(room_id):
-                self._discard_waiter(room_id, waiter)
-                return
-            try:
-                await waiter
-            except asyncio.CancelledError:
-                self._discard_waiter(room_id, waiter)
-                raise
+    async def wait_for_prior_room_updates(self, room_id: str) -> None:
+        """Wait only for room writes that were already queued when this read began."""
+        self._reevaluate_room(room_id)
+        pending_tasks = self._fallback_room_tasks(room_id)
+        for pending_task in pending_tasks:
+            await self._await_idle_task(
+                pending_task,
+                room_id=room_id,
+                log_message="Room cache update failed before the point read barrier",
+            )
 
     async def close(self) -> None:
         """Drain any queued cache writes for this coordinator."""
