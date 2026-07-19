@@ -157,14 +157,6 @@ class _RoomMemberJoinSyncHookPlan:
     record_state_seen: bool = False
 
 
-@dataclass(frozen=True, slots=True)
-class _LoadedSyncCheckpoint:
-    """A saved checkpoint plus whether its cache generation is temporarily unavailable."""
-
-    checkpoint: SyncCheckpoint | None = None
-    generation_unavailable: bool = False
-
-
 def _create_task_wrapper(
     callback: Callable[..., Awaitable[None]],
     *,
@@ -315,7 +307,6 @@ class AgentBot:
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
     _local_departures_awaiting_sync: set[str]
-    _checkpoint_waiting_for_cache_generation: bool
 
     def __init__(
         self,
@@ -343,7 +334,6 @@ class AgentBot:
         self._sync_shutting_down = False
         self._sync_trust_state = SyncTrustState.COLD
         self._sync_checkpoint: SyncCheckpoint | None = None
-        self._checkpoint_waiting_for_cache_generation = False
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._room_member_callback_registered = False
         self._room_member_join_hooks_armed = False
@@ -1042,27 +1032,27 @@ class AgentBot:
         """Reset the monotonic watchdog clock for a fresh sync iteration."""
         self._last_sync_monotonic = None
 
-    def _loaded_sync_token_for_certification(self) -> _LoadedSyncCheckpoint:
+    def _loaded_sync_token_for_certification(self) -> SyncCheckpoint | None:
         """Load a saved token record without deciding trust in bot code."""
         try:
             checkpoint = load_sync_checkpoint(self.storage_path, self.agent_name)
         except OSError as exc:
             self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
-            return _LoadedSyncCheckpoint()
+            return None
         if checkpoint is None:
-            return _LoadedSyncCheckpoint()
+            return None
         current_cache_generation = self.event_cache.cache_generation
         if current_cache_generation is None:
             self.logger.warning("matrix_sync_token_cache_generation_unavailable")
-            return _LoadedSyncCheckpoint(generation_unavailable=True)
+            return None
         if checkpoint.cache_generation != current_cache_generation:
             self.logger.warning("matrix_sync_token_cache_generation_mismatch")
-            return _LoadedSyncCheckpoint()
+            return None
         self.logger.info(
             "matrix_sync_token_restored",
             certified=True,
         )
-        return _LoadedSyncCheckpoint(checkpoint=checkpoint)
+        return checkpoint
 
     def _restore_loaded_sync_token(self, loaded_token: SyncCheckpoint | None) -> None:
         """Apply one already-validated saved token to the client and certifier."""
@@ -1080,12 +1070,7 @@ class AgentBot:
     async def _prepare_cache_and_restore_saved_sync_token(self) -> None:
         """Restore a trusted checkpoint or clear untrusted principal-owned rows first."""
         loaded_token = self._loaded_sync_token_for_certification()
-        if loaded_token.generation_unavailable:
-            self._checkpoint_waiting_for_cache_generation = True
-            self._restore_loaded_sync_token(None)
-            return
-        self._checkpoint_waiting_for_cache_generation = False
-        if loaded_token.checkpoint is None and self._invalidate_sync_checkpoint_for_cache_scope_cleanup():
+        if loaded_token is None and self._invalidate_sync_checkpoint_for_cache_scope_cleanup():
             try:
                 await clear_untrusted_principal_cache(self.event_cache)
             except Exception as exc:
@@ -1093,7 +1078,7 @@ class AgentBot:
                     "matrix_untrusted_principal_cache_disabled",
                     error=str(exc),
                 )
-        self._restore_loaded_sync_token(loaded_token.checkpoint)
+        self._restore_loaded_sync_token(loaded_token)
 
     async def _initialize_event_cache_for_sync_restore(self) -> None:
         """Load this principal's durable generation before trusting a sync checkpoint."""
@@ -1110,10 +1095,8 @@ class AgentBot:
         cache_generation = self.event_cache.cache_generation
         if cache_generation is None:
             self.logger.warning("matrix_sync_checkpoint_skipped_without_cache_generation")
-            if not self._checkpoint_waiting_for_cache_generation:
-                self._clear_saved_sync_token()
+            self._clear_saved_sync_token()
             return
-        self._checkpoint_waiting_for_cache_generation = False
         try:
             save_sync_token(
                 self.storage_path,
@@ -1126,7 +1109,6 @@ class AgentBot:
 
     def _clear_saved_sync_token(self) -> bool:
         """Clear the saved sync token file."""
-        self._checkpoint_waiting_for_cache_generation = False
         try:
             clear_sync_token(self.storage_path, self.agent_name)
         except OSError as exc:
@@ -1175,12 +1157,7 @@ class AgentBot:
         if decision.reset_client_token and self.client is not None:
             client = cast("Any", self.client)
             client.next_batch = None
-        preserve_unverified_checkpoint = (
-            self._checkpoint_waiting_for_cache_generation
-            and self.event_cache.cache_generation is None
-            and decision.reason in {"cache_write_failed", "cache_write_incomplete"}
-        )
-        if decision.clear_saved_token and not preserve_unverified_checkpoint:
+        if decision.clear_saved_token:
             self._clear_saved_sync_token()
         if decision.checkpoint_to_save is not None:
             self._save_sync_checkpoint(decision.checkpoint_to_save)

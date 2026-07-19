@@ -164,7 +164,8 @@ async def _initialize_postgres_event_cache_db(
         current_schema_version = await _postgres_schema_version(db)
         if current_schema_version == 1:
             await _migrate_postgres_event_cache_v1_to_v2(db)
-        elif current_schema_version not in (None, _POSTGRES_EVENT_CACHE_SCHEMA_VERSION):
+            current_schema_version = 2
+        if current_schema_version not in (None, _POSTGRES_EVENT_CACHE_SCHEMA_VERSION):
             msg = (
                 "PostgreSQL Matrix event cache schema version "
                 f"{current_schema_version} is not compatible with expected version "
@@ -332,6 +333,8 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
             room_id TEXT NOT NULL,
             invalidated_at DOUBLE PRECISION,
             invalidation_reason TEXT,
+            membership_state TEXT NOT NULL DEFAULT 'joined',
+            membership_epoch BIGINT NOT NULL DEFAULT 0,
             PRIMARY KEY (namespace, room_id)
         )
         """,
@@ -362,6 +365,13 @@ async def _migrate_postgres_event_cache_v1_to_v2(db: AsyncConnection) -> None:
     )
     await db.execute(
         """
+        ALTER TABLE mindroom_event_cache_room_state
+            ADD COLUMN membership_state TEXT NOT NULL DEFAULT 'joined',
+            ADD COLUMN membership_epoch BIGINT NOT NULL DEFAULT 0
+        """,
+    )
+    await db.execute(
+        """
         DELETE FROM mindroom_event_cache_mxc_text
         """,
     )
@@ -379,7 +389,7 @@ async def _migrate_postgres_event_cache_v1_to_v2(db: AsyncConnection) -> None:
         SET value = %s
         WHERE key = 'schema_version'
         """,
-        (str(_POSTGRES_EVENT_CACHE_SCHEMA_VERSION),),
+        ("2",),
     )
 
 
@@ -878,11 +888,11 @@ class PostgresEventCache:
 
     async def flush_pending_durable_writes(self, room_id: str) -> None:
         """Persist runtime-only writes for one room before certifying a sync token."""
-        await self._write_operation(
+        await self._operation(
             room_id,
             operation="flush_pending_durable_writes",
             disabled_result=None,
-            writer=_noop_write,
+            callback=_noop_write,
             allow_departed=True,
         )
 
@@ -898,38 +908,6 @@ class PostgresEventCache:
         if self._owns_registry:
             await self._registry.close()
 
-    async def _read_operation(
-        self,
-        room_id: str,
-        *,
-        operation: str,
-        disabled_result: _T,
-        reader: Callable[[psycopg.AsyncConnection], Awaitable[_T]],
-    ) -> _T:
-        return await self._operation(
-            room_id,
-            operation=operation,
-            disabled_result=disabled_result,
-            callback=reader,
-        )
-
-    async def _write_operation(
-        self,
-        room_id: str,
-        *,
-        operation: str,
-        disabled_result: _T,
-        writer: Callable[[psycopg.AsyncConnection], Awaitable[_T]],
-        allow_departed: bool = False,
-    ) -> _T:
-        return await self._operation(
-            room_id,
-            operation=operation,
-            disabled_result=disabled_result,
-            callback=writer,
-            allow_departed=allow_departed,
-        )
-
     async def _operation(
         self,
         room_id: str,
@@ -938,6 +916,7 @@ class PostgresEventCache:
         disabled_result: _T,
         callback: Callable[[psycopg.AsyncConnection], Awaitable[_T]],
         allow_departed: bool = False,
+        expected_membership_epoch: int | None = None,
     ) -> _T:
         """Run one cache operation, flushing pending stale markers first even for reads."""
         if not self._can_expose_operation_result(room_id, allow_departed=allow_departed):
@@ -952,6 +931,7 @@ class PostgresEventCache:
                     disabled_result=disabled_result,
                     callback=callback,
                     allow_departed=allow_departed,
+                    expected_membership_epoch=expected_membership_epoch,
                 )
             except EventCacheBackendUnavailableError:
                 transient_attempt += 1
@@ -982,6 +962,7 @@ class PostgresEventCache:
         disabled_result: _T,
         callback: Callable[[psycopg.AsyncConnection], Awaitable[_T]],
         allow_departed: bool,
+        expected_membership_epoch: int | None,
     ) -> tuple[_T, _FlushedPendingWrites]:
         """Run one transaction attempt under the principal namespace lock."""
         async with self._runtime.acquire_db_operation(
@@ -994,6 +975,7 @@ class PostgresEventCache:
                     disabled_result=disabled_result,
                     callback=callback,
                     allow_departed=allow_departed,
+                    expected_membership_epoch=expected_membership_epoch,
                 )
             except BaseException:
                 await _rollback_postgres_connection_best_effort(
@@ -1015,6 +997,7 @@ class PostgresEventCache:
         disabled_result: _T,
         callback: Callable[[psycopg.AsyncConnection], Awaitable[_T]],
         allow_departed: bool,
+        expected_membership_epoch: int | None,
     ) -> tuple[_T, _FlushedPendingWrites]:
         """Commit one callback unless the transaction first removed its security scope."""
         if self._runtime.is_disabled or (not allow_departed and self._runtime.is_room_departed(room_id)):
@@ -1023,6 +1006,18 @@ class PostgresEventCache:
         flushed_pending = await self._flush_pending_writes(db, room_id)
         if flushed_pending.room_purge or flushed_pending.principal_purge:
             result = disabled_result
+        elif not allow_departed:
+            membership_state, membership_epoch = await postgres_event_cache_threads.load_room_membership_locked(
+                db,
+                namespace=self._runtime.namespace,
+                room_id=room_id,
+            )
+            if membership_state != "joined" or (
+                expected_membership_epoch is not None and membership_epoch != expected_membership_epoch
+            ):
+                result = disabled_result
+            else:
+                result = await callback(db)
         else:
             result = await callback(db)
         await db.commit()
@@ -1045,10 +1040,11 @@ class PostgresEventCache:
                 namespace=self._runtime.namespace,
                 room_id=room_id,
             )
-            await postgres_event_cache_threads.mark_room_stale_locked(
+            await postgres_event_cache_threads.set_room_membership_locked(
                 db,
                 namespace=self._runtime.namespace,
                 room_id=room_id,
+                membership_state="departed",
                 reason="room_departed",
             )
             return _FlushedPendingWrites(room_purge=True)
@@ -1100,11 +1096,11 @@ class PostgresEventCache:
 
     async def get_thread_events(self, room_id: str, thread_id: str) -> list[dict[str, Any]] | None:
         """Return cached events for one thread sorted by timestamp."""
-        return await self._read_operation(
+        return await self._operation(
             room_id,
             operation="get_thread_events",
             disabled_result=None,
-            reader=lambda db: postgres_event_cache_threads.load_thread_events(
+            callback=lambda db: postgres_event_cache_threads.load_thread_events(
                 db,
                 namespace=self._runtime.namespace,
                 room_id=room_id,
@@ -1114,11 +1110,11 @@ class PostgresEventCache:
 
     async def get_recent_room_thread_ids(self, room_id: str, *, limit: int) -> list[str]:
         """Return locally known thread IDs for one room ordered by newest cached activity."""
-        return await self._read_operation(
+        return await self._operation(
             room_id,
             operation="get_recent_room_thread_ids",
             disabled_result=[],
-            reader=lambda db: postgres_event_cache_threads.load_recent_room_thread_ids(
+            callback=lambda db: postgres_event_cache_threads.load_recent_room_thread_ids(
                 db,
                 namespace=self._runtime.namespace,
                 room_id=room_id,
@@ -1128,11 +1124,11 @@ class PostgresEventCache:
 
     async def get_thread_cache_state(self, room_id: str, thread_id: str) -> ThreadCacheState | None:
         """Return durable freshness metadata for one cached thread."""
-        return await self._read_operation(
+        return await self._operation(
             room_id,
             operation="get_thread_cache_state",
             disabled_result=None,
-            reader=lambda db: postgres_event_cache_threads.load_thread_cache_state(
+            callback=lambda db: postgres_event_cache_threads.load_thread_cache_state(
                 db,
                 namespace=self._runtime.namespace,
                 room_id=room_id,
@@ -1142,11 +1138,11 @@ class PostgresEventCache:
 
     async def get_event(self, room_id: str, event_id: str) -> dict[str, Any] | None:
         """Return one cached event payload by event ID."""
-        return await self._read_operation(
+        return await self._operation(
             room_id,
             operation="get_event",
             disabled_result=None,
-            reader=lambda db: postgres_event_cache_events.load_event(
+            callback=lambda db: postgres_event_cache_events.load_event(
                 db,
                 namespace=self._runtime.namespace,
                 room_id=room_id,
@@ -1163,11 +1159,11 @@ class PostgresEventCache:
         limit: int = 500,
     ) -> list[dict[str, Any]]:
         """Return recent cached room events of `event_type` since `since_ts_ms`, newest first."""
-        return await self._read_operation(
+        return await self._operation(
             room_id,
             operation="get_recent_room_events",
             disabled_result=[],
-            reader=lambda db: postgres_event_cache_events.load_recent_room_events(
+            callback=lambda db: postgres_event_cache_events.load_recent_room_events(
                 db,
                 namespace=self._runtime.namespace,
                 room_id=room_id,
@@ -1185,11 +1181,11 @@ class PostgresEventCache:
         sender: str | None = None,
     ) -> dict[str, Any] | None:
         """Return the latest cached edit event for one original event."""
-        return await self._read_operation(
+        return await self._operation(
             room_id,
             operation="get_latest_edit",
             disabled_result=None,
-            reader=lambda db: postgres_event_cache_events.load_latest_edit(
+            callback=lambda db: postgres_event_cache_events.load_latest_edit(
                 db,
                 namespace=self._runtime.namespace,
                 room_id=room_id,
@@ -1207,11 +1203,11 @@ class PostgresEventCache:
         runtime_started_at: float | None,
     ) -> AgentMessageSnapshot | None:
         """Return the latest visible cached message from one sender in the given scope."""
-        return await self._read_operation(
+        return await self._operation(
             room_id,
             operation="get_latest_agent_message_snapshot",
             disabled_result=None,
-            reader=lambda db: load_postgres_agent_message_snapshot(
+            callback=lambda db: load_postgres_agent_message_snapshot(
                 db,
                 namespace=self._runtime.namespace,
                 room_id=room_id,
@@ -1223,11 +1219,11 @@ class PostgresEventCache:
 
     async def get_mxc_text(self, room_id: str, event_id: str, mxc_url: str) -> str | None:
         """Return plaintext only through a surviving event reference."""
-        return await self._read_operation(
+        return await self._operation(
             room_id,
             operation="get_mxc_text",
             disabled_result=None,
-            reader=lambda db: postgres_event_cache_events.load_mxc_text(
+            callback=lambda db: postgres_event_cache_events.load_mxc_text(
                 db,
                 namespace=self._runtime.namespace,
                 room_id=room_id,
@@ -1236,22 +1232,37 @@ class PostgresEventCache:
             ),
         )
 
-    async def store_event(self, event_id: str, room_id: str, event_data: dict[str, Any]) -> None:
+    async def store_event(
+        self,
+        event_id: str,
+        room_id: str,
+        event_data: dict[str, Any],
+        *,
+        expected_membership_epoch: int | None = None,
+    ) -> None:
         """Insert or replace one individually cached Matrix event."""
-        await self.store_events_batch([(event_id, room_id, event_data)])
+        await self.store_events_batch(
+            [(event_id, room_id, event_data)],
+            expected_membership_epoch=expected_membership_epoch,
+        )
 
-    async def store_events_batch(self, events: list[tuple[str, str, dict[str, Any]]]) -> None:
+    async def store_events_batch(
+        self,
+        events: list[tuple[str, str, dict[str, Any]]],
+        *,
+        expected_membership_epoch: int | None = None,
+    ) -> None:
         """Insert or replace one batch of individually cached Matrix events."""
         if self._runtime.is_disabled or not events:
             return
 
         cached_at = time.time()
         for room_id, room_events in group_lookup_events_by_room(events).items():
-            await self._write_operation(
+            await self._operation(
                 room_id,
                 operation="store_events_batch",
                 disabled_result=None,
-                writer=lambda db, room_id=room_id, room_events=room_events, cached_at=cached_at: (
+                callback=lambda db, room_id=room_id, room_events=room_events, cached_at=cached_at: (
                     postgres_event_cache_events.persist_lookup_events(
                         db,
                         namespace=self._runtime.namespace,
@@ -1260,16 +1271,25 @@ class PostgresEventCache:
                         cached_at=cached_at,
                     )
                 ),
+                expected_membership_epoch=expected_membership_epoch,
             )
 
-    async def store_mxc_text(self, room_id: str, event_id: str, mxc_url: str, text: str) -> bool:
+    async def store_mxc_text(
+        self,
+        room_id: str,
+        event_id: str,
+        mxc_url: str,
+        text: str,
+        *,
+        expected_membership_epoch: int | None = None,
+    ) -> bool:
         """Persist plaintext only through a surviving event reference."""
         return bool(
-            await self._write_operation(
+            await self._operation(
                 room_id,
                 operation="store_mxc_text",
                 disabled_result=False,
-                writer=lambda db: postgres_event_cache_events.persist_mxc_text(
+                callback=lambda db: postgres_event_cache_events.persist_mxc_text(
                     db,
                     namespace=self._runtime.namespace,
                     room_id=room_id,
@@ -1278,6 +1298,7 @@ class PostgresEventCache:
                     text=text,
                     cached_at=time.time(),
                 ),
+                expected_membership_epoch=expected_membership_epoch,
             ),
         )
 
@@ -1287,7 +1308,7 @@ class PostgresEventCache:
         thread_id: str,
         events: list[dict[str, Any]],
         *,
-        expected_departure_epoch: int,
+        expected_membership_epoch: int,
         fetch_started_at: float,
         validated_at: float | None = None,
     ) -> bool:
@@ -1297,35 +1318,31 @@ class PostgresEventCache:
             validated_at=validated_at,
         )
 
-        async def replace_if_still_safe(db: psycopg.AsyncConnection) -> bool:
-            if self.room_departure_epoch(room_id) != expected_departure_epoch:
-                return False
-            return await postgres_event_cache_threads.replace_thread_locked_if_not_newer(
-                db,
-                namespace=self._runtime.namespace,
-                room_id=room_id,
-                thread_id=thread_id,
-                events=events,
-                fetch_started_at=fetch_started_at,
-                validated_at=replacement_timestamp,
-            )
-
         return bool(
-            await self._write_operation(
+            await self._operation(
                 room_id,
                 operation="replace_thread_if_not_newer",
                 disabled_result=False,
-                writer=replace_if_still_safe,
+                callback=lambda db: postgres_event_cache_threads.replace_thread_locked_if_not_newer(
+                    db,
+                    namespace=self._runtime.namespace,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    events=events,
+                    fetch_started_at=fetch_started_at,
+                    validated_at=replacement_timestamp,
+                ),
+                expected_membership_epoch=expected_membership_epoch,
             ),
         )
 
     async def invalidate_thread(self, room_id: str, thread_id: str) -> None:
         """Delete cached events for one thread."""
-        await self._write_operation(
+        await self._operation(
             room_id,
             operation="invalidate_thread",
             disabled_result=None,
-            writer=lambda db: postgres_event_cache_threads.invalidate_thread_locked(
+            callback=lambda db: postgres_event_cache_threads.invalidate_thread_locked(
                 db,
                 namespace=self._runtime.namespace,
                 room_id=room_id,
@@ -1335,11 +1352,11 @@ class PostgresEventCache:
 
     async def invalidate_room_threads(self, room_id: str) -> None:
         """Delete every cached thread snapshot for one room."""
-        await self._write_operation(
+        await self._operation(
             room_id,
             operation="invalidate_room_threads",
             disabled_result=None,
-            writer=lambda db: postgres_event_cache_threads.invalidate_room_threads_locked(
+            callback=lambda db: postgres_event_cache_threads.invalidate_room_threads_locked(
                 db,
                 namespace=self._runtime.namespace,
                 room_id=room_id,
@@ -1350,11 +1367,11 @@ class PostgresEventCache:
         """Persist one durable thread invalidation marker."""
         invalidated_at = time.time()
         try:
-            await self._write_operation(
+            await self._operation(
                 room_id,
                 operation="mark_thread_stale",
                 disabled_result=None,
-                writer=lambda db: postgres_event_cache_threads.mark_thread_stale_locked(
+                callback=lambda db: postgres_event_cache_threads.mark_thread_stale_locked(
                     db,
                     namespace=self._runtime.namespace,
                     room_id=room_id,
@@ -1376,11 +1393,11 @@ class PostgresEventCache:
         """Persist a durable invalidate-and-refetch marker for every cached thread in one room."""
         invalidated_at = time.time()
         try:
-            await self._write_operation(
+            await self._operation(
                 room_id,
                 operation="mark_room_threads_stale",
                 disabled_result=None,
-                writer=lambda db: postgres_event_cache_threads.mark_room_stale_locked(
+                callback=lambda db: postgres_event_cache_threads.mark_room_stale_locked(
                     db,
                     namespace=self._runtime.namespace,
                     room_id=room_id,
@@ -1400,11 +1417,11 @@ class PostgresEventCache:
         """Append one event when the thread already has cached data."""
         normalized_event = normalize_event_source_for_cache(event)
         return bool(
-            await self._write_operation(
+            await self._operation(
                 room_id,
                 operation="append_event",
                 disabled_result=False,
-                writer=lambda db: postgres_event_cache_threads.append_existing_thread_event(
+                callback=lambda db: postgres_event_cache_threads.append_existing_thread_event(
                     db,
                     namespace=self._runtime.namespace,
                     room_id=room_id,
@@ -1421,11 +1438,11 @@ class PostgresEventCache:
     ) -> bool:
         """Refresh one thread's validated timestamp after a safe incremental update."""
         return bool(
-            await self._write_operation(
+            await self._operation(
                 room_id,
                 operation="revalidate_thread_after_incremental_update",
                 disabled_result=False,
-                writer=lambda db: postgres_event_cache_threads.revalidate_thread_after_incremental_update_locked(
+                callback=lambda db: postgres_event_cache_threads.revalidate_thread_after_incremental_update_locked(
                     db,
                     namespace=self._runtime.namespace,
                     room_id=room_id,
@@ -1436,11 +1453,11 @@ class PostgresEventCache:
 
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Return the cached thread ID for one event."""
-        return await self._read_operation(
+        return await self._operation(
             room_id,
             operation="get_thread_id_for_event",
             disabled_result=None,
-            reader=lambda db: postgres_event_cache_events.load_thread_id_for_event(
+            callback=lambda db: postgres_event_cache_events.load_thread_id_for_event(
                 db,
                 namespace=self._runtime.namespace,
                 room_id=room_id,
@@ -1455,11 +1472,11 @@ class PostgresEventCache:
     ) -> bool:
         """Delete one cached event after a redaction."""
         return bool(
-            await self._write_operation(
+            await self._operation(
                 room_id,
                 operation="redact_event",
                 disabled_result=False,
-                writer=lambda db: postgres_event_cache_events.redact_event_locked(
+                callback=lambda db: postgres_event_cache_events.redact_event_locked(
                     db,
                     namespace=self._runtime.namespace,
                     room_id=room_id,
@@ -1473,11 +1490,11 @@ class PostgresEventCache:
         if not self._runtime.is_room_departed(room_id):
             self.mark_room_departed(room_id)
 
-        await self._write_operation(
+        await self._operation(
             room_id,
             operation="purge_room",
             disabled_result=None,
-            writer=_noop_write,
+            callback=_noop_write,
             allow_departed=True,
         )
 
@@ -1489,6 +1506,20 @@ class PostgresEventCache:
         """Return the current room-fence epoch."""
         return self._runtime.room_departure_epoch(room_id)
 
+    async def room_membership_epoch(self, room_id: str) -> int | None:
+        """Certify and return the durable room-membership transition epoch."""
+        return await self._operation(
+            room_id,
+            operation="room_membership_epoch",
+            disabled_result=None,
+            callback=lambda db: postgres_event_cache_threads.certify_room_membership_locked(
+                db,
+                namespace=self._runtime.namespace,
+                room_id=room_id,
+            ),
+            allow_departed=True,
+        )
+
     async def mark_room_joined(
         self,
         room_id: str,
@@ -1496,33 +1527,74 @@ class PostgresEventCache:
         expected_departure_epoch: int,
     ) -> None:
         """Remove a departure fence only after any pending purge commits."""
-        if not self._runtime.is_room_departed(room_id):
-            return
         if self.room_departure_epoch(room_id) != expected_departure_epoch:
             return
         if not self.durable_writes_available:
             return
 
-        await self._write_operation(
+        if self._runtime.has_pending_room_purge(room_id):
+            await self._operation(
+                room_id,
+                operation="mark_room_joined_flush",
+                disabled_result=None,
+                callback=_noop_write,
+                allow_departed=True,
+            )
+        if self._runtime.has_pending_room_purge(room_id):
+            return
+
+        async def join_if_current(db: psycopg.AsyncConnection) -> bool:
+            if self.room_departure_epoch(room_id) != expected_departure_epoch:
+                return False
+            membership_state, _membership_epoch = await postgres_event_cache_threads.load_room_membership_locked(
+                db,
+                namespace=self._runtime.namespace,
+                room_id=room_id,
+            )
+            if membership_state != "joined":
+                await postgres_event_cache_threads.set_room_membership_locked(
+                    db,
+                    namespace=self._runtime.namespace,
+                    room_id=room_id,
+                    membership_state="joined",
+                    reason="room_rejoined",
+                )
+            if self.room_departure_epoch(room_id) == expected_departure_epoch:
+                return True
+            await postgres_event_cache_events.purge_room_locked(
+                db,
+                namespace=self._runtime.namespace,
+                room_id=room_id,
+            )
+            await postgres_event_cache_threads.set_room_membership_locked(
+                db,
+                namespace=self._runtime.namespace,
+                room_id=room_id,
+                membership_state="departed",
+                reason="room_departed",
+            )
+            return False
+
+        joined = await self._operation(
             room_id,
             operation="mark_room_joined",
-            disabled_result=None,
-            writer=_noop_write,
+            disabled_result=False,
+            callback=join_if_current,
             allow_departed=True,
         )
-        if not self._runtime.has_pending_room_purge(room_id):
+        if joined:
             self._runtime.mark_room_joined(
                 room_id,
                 expected_departure_epoch=expected_departure_epoch,
             )
 
     async def purge_principal(self) -> None:
-        """Delete every row in this principal namespace."""
+        """Delete principal content while preserving durable refill generations."""
         self._runtime.record_pending_principal_purge()
 
-        await self._write_operation(
+        await self._operation(
             _PRINCIPAL_PURGE_LOCK_SCOPE,
             operation="purge_principal",
             disabled_result=None,
-            writer=_noop_write,
+            callback=_noop_write,
         )

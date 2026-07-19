@@ -6,15 +6,20 @@ import asyncio
 import uuid
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import AsyncMock, MagicMock
 
+import nio
 import pytest
 
+from mindroom.matrix import client_thread_history
 from mindroom.matrix.cache import (
     ConversationEventCache,
     SharedConversationEventCache,
     clear_untrusted_principal_cache,
     postgres_event_cache_events,
+    postgres_event_cache_threads,
     sqlite_event_cache_events,
+    sqlite_event_cache_threads,
 )
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
@@ -838,7 +843,7 @@ async def test_pre_departure_thread_refill_cannot_resurrect_after_rejoin(
             [root_event, redacted_event],
             validated_at=50.0,
         )
-        fetch_departure_epoch = cache.room_departure_epoch(room_id)
+        fetch_membership_epoch = await cache.room_membership_epoch(room_id)
         assert await cache.redact_event(room_id, "$redacted")
 
         departure_epoch = cache.mark_room_departed(room_id)
@@ -849,7 +854,7 @@ async def test_pre_departure_thread_refill_cannot_resurrect_after_rejoin(
             room_id,
             thread_id,
             [root_event, redacted_event],
-            expected_departure_epoch=fetch_departure_epoch,
+            expected_membership_epoch=fetch_membership_epoch,
             fetch_started_at=100.0,
         )
 
@@ -883,7 +888,7 @@ async def test_pre_departure_thread_refill_from_another_runtime_cannot_resurrect
             events,
             validated_at=50.0,
         )
-        stale_fetch_epoch = stale_cache.room_departure_epoch(room_id)
+        stale_membership_epoch = await stale_cache.room_membership_epoch(room_id)
 
         departure_epoch = departing_cache.mark_room_departed(room_id)
         await departing_cache.purge_room(room_id)
@@ -895,13 +900,13 @@ async def test_pre_departure_thread_refill_from_another_runtime_cannot_resurrect
         state = await departing_cache.get_thread_cache_state(room_id, thread_id)
         assert state is not None
         assert state.room_invalidated_at is not None
-        assert state.room_invalidation_reason == "room_departed"
+        assert state.room_invalidation_reason == "room_rejoined"
 
         replaced = await stale_cache.replace_thread_if_not_newer(
             room_id,
             thread_id,
             events,
-            expected_departure_epoch=stale_fetch_epoch,
+            expected_membership_epoch=stale_membership_epoch,
             fetch_started_at=state.room_invalidated_at - 1.0,
         )
 
@@ -913,12 +918,302 @@ async def test_pre_departure_thread_refill_from_another_runtime_cannot_resurrect
             room_id,
             thread_id,
             events,
-            expected_departure_epoch=stale_fetch_epoch,
+            expected_membership_epoch=await stale_cache.room_membership_epoch(room_id),
             fetch_started_at=state.room_invalidated_at + 1.0,
         )
     finally:
         await stale_root.close()
         await departing_root.close()
+
+
+@pytest.mark.asyncio
+async def test_departed_refill_guard_blocks_point_plaintext_and_thread_writes_after_rejoin(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """A refill begun while departed cannot write through another runtime after rejoin."""
+    membership_root = _shared_cache(event_cache_factory)
+    refill_root = _shared_cache(event_cache_factory)
+    await membership_root.initialize()
+    await refill_root.initialize()
+    principal_id = "@alice:localhost"
+    membership_cache = membership_root.for_principal(principal_id)
+    refill_cache = refill_root.for_principal(principal_id)
+    room_id = "!room:localhost"
+    thread_id = "$thread"
+    event_id = "$sidecar"
+    mxc_url = "mxc://server/departed-refill"
+    events = [
+        _event(thread_id, 1, body="root"),
+        _event(event_id, 2, sidecar_url=mxc_url, encrypted=True),
+    ]
+    try:
+        departure_epoch = membership_cache.mark_room_departed(room_id)
+        await membership_cache.purge_room(room_id)
+        departed_membership_epoch = await refill_cache.room_membership_epoch(room_id)
+
+        await refill_cache.store_event(event_id, room_id, events[1])
+        assert await refill_cache.get_event(room_id, event_id) is None
+        assert not await refill_cache.store_mxc_text(
+            room_id,
+            event_id,
+            mxc_url,
+            "departed plaintext",
+            expected_membership_epoch=departed_membership_epoch,
+        )
+
+        await membership_cache.mark_room_joined(
+            room_id,
+            expected_departure_epoch=departure_epoch,
+        )
+        joined_membership_epoch = await refill_cache.room_membership_epoch(room_id)
+        assert joined_membership_epoch > departed_membership_epoch
+
+        await refill_cache.invalidate_room_threads(room_id)
+        assert await refill_cache.room_membership_epoch(room_id) == joined_membership_epoch
+
+        await refill_cache.store_event(
+            event_id,
+            room_id,
+            events[1],
+            expected_membership_epoch=departed_membership_epoch,
+        )
+        assert await refill_cache.get_event(room_id, event_id) is None
+        assert not await refill_cache.store_mxc_text(
+            room_id,
+            event_id,
+            mxc_url,
+            "stale plaintext",
+            expected_membership_epoch=departed_membership_epoch,
+        )
+        assert not await refill_cache.replace_thread_if_not_newer(
+            room_id,
+            thread_id,
+            events,
+            expected_membership_epoch=departed_membership_epoch,
+            fetch_started_at=float("inf"),
+        )
+        assert await _raw_mxc_text_count(refill_cache, room_id, mxc_url) == 0
+
+        assert await refill_cache.replace_thread_if_not_newer(
+            room_id,
+            thread_id,
+            events,
+            expected_membership_epoch=joined_membership_epoch,
+            fetch_started_at=float("inf"),
+        )
+        assert await refill_cache.store_mxc_text(
+            room_id,
+            event_id,
+            mxc_url,
+            "fresh plaintext",
+            expected_membership_epoch=joined_membership_epoch,
+        )
+    finally:
+        await refill_root.close()
+        await membership_root.close()
+
+
+@pytest.mark.asyncio
+async def test_durable_departure_can_rejoin_after_cache_runtime_restart(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """An authoritative join must recover a durable departed row after process restart."""
+    first_root = _shared_cache(event_cache_factory)
+    await first_root.initialize()
+    principal_id = "@alice:localhost"
+    room_id = "!room:localhost"
+    first = first_root.for_principal(principal_id)
+    first.mark_room_departed(room_id)
+    await first.purge_room(room_id)
+    departed_membership_epoch = await first.room_membership_epoch(room_id)
+    await first_root.close()
+
+    second_root = _shared_cache(event_cache_factory)
+    await second_root.initialize()
+    second = second_root.for_principal(principal_id)
+    try:
+        await second.mark_room_joined(
+            room_id,
+            expected_departure_epoch=second.room_departure_epoch(room_id),
+        )
+        joined_membership_epoch = await second.room_membership_epoch(room_id)
+        assert departed_membership_epoch is not None
+        assert joined_membership_epoch is not None
+        assert joined_membership_epoch > departed_membership_epoch
+
+        event = _event("$joined", 1)
+        await second.store_event("$joined", room_id, event)
+        assert await second.get_event(room_id, "$joined") == event
+    finally:
+        await second_root.close()
+
+
+@pytest.mark.asyncio
+async def test_newer_departure_during_rejoin_closes_durable_room(
+    event_cache_factory: Callable[[], ConversationEventCache],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A newer departure observed inside a rejoin transaction purges before commit."""
+    root = _shared_cache(event_cache_factory)
+    observer_root = _shared_cache(event_cache_factory)
+    await root.initialize()
+    await observer_root.initialize()
+    principal_id = "@alice:localhost"
+    room_id = "!room:localhost"
+    event_id = "$pre-departure"
+    cache = root.for_principal(principal_id)
+    observer = observer_root.for_principal(principal_id)
+    await cache.store_event(event_id, room_id, _event(event_id, 1))
+    expected_departure_epoch = cache.room_departure_epoch(room_id)
+    load_started = asyncio.Event()
+    release_load = asyncio.Event()
+    if isinstance(cache, SqliteEventCache):
+        original_load = sqlite_event_cache_threads.load_room_membership_locked
+        module = sqlite_event_cache_threads
+    else:
+        assert isinstance(cache, PostgresEventCache)
+        original_load = postgres_event_cache_threads.load_room_membership_locked
+        module = postgres_event_cache_threads
+
+    async def pause_membership_load(*args: object, **kwargs: object) -> tuple[str, int]:
+        result = await original_load(*args, **kwargs)
+        load_started.set()
+        await release_load.wait()
+        return result
+
+    monkeypatch.setattr(module, "load_room_membership_locked", pause_membership_load)
+    join_task = asyncio.create_task(
+        cache.mark_room_joined(
+            room_id,
+            expected_departure_epoch=expected_departure_epoch,
+        ),
+    )
+    try:
+        await load_started.wait()
+        cache.mark_room_departed(room_id)
+        release_load.set()
+        await join_task
+
+        assert await observer.get_event(room_id, event_id) is None
+        await observer.store_event("$stale", room_id, _event("$stale", 2))
+        assert await observer.get_event(room_id, "$stale") is None
+    finally:
+        release_load.set()
+        if not join_task.done():
+            await join_task
+        await observer_root.close()
+        await root.close()
+
+
+@pytest.mark.asyncio
+async def test_principal_purge_advances_certified_room_refill_epoch(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """A cold-start principal purge rejects source writes certified before cleanup."""
+    purge_root = _shared_cache(event_cache_factory)
+    stale_root = _shared_cache(event_cache_factory)
+    await purge_root.initialize()
+    await stale_root.initialize()
+    principal_id = "@alice:localhost"
+    room_id = "!room:localhost"
+    purge_cache = purge_root.for_principal(principal_id)
+    stale_cache = stale_root.for_principal(principal_id)
+    stale_epoch = await stale_cache.room_membership_epoch(room_id)
+    assert stale_epoch is not None
+    try:
+        await purge_cache.purge_principal()
+        current_epoch = await purge_cache.room_membership_epoch(room_id)
+        assert current_epoch is not None
+        assert current_epoch > stale_epoch
+
+        await stale_cache.store_event(
+            "$stale",
+            room_id,
+            _event("$stale", 1),
+            expected_membership_epoch=stale_epoch,
+        )
+        assert await stale_cache.get_event(room_id, "$stale") is None
+
+        event = _event("$fresh", 2)
+        await stale_cache.store_event(
+            "$fresh",
+            room_id,
+            event,
+            expected_membership_epoch=current_epoch,
+        )
+        assert await stale_cache.get_event(room_id, "$fresh") == event
+    finally:
+        await stale_root.close()
+        await purge_root.close()
+
+
+@pytest.mark.asyncio
+async def test_cached_sidecar_hydration_cannot_cross_principal_purge(
+    event_cache_factory: Callable[[], ConversationEventCache],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A held cached snapshot must keep its pre-purge epoch through hydration."""
+    purge_root = _shared_cache(event_cache_factory)
+    reader_root = _shared_cache(event_cache_factory)
+    await purge_root.initialize()
+    await reader_root.initialize()
+    principal_id = "@alice:localhost"
+    room_id = "!room:localhost"
+    thread_id = "$thread"
+    sidecar_event_id = "$sidecar"
+    mxc_url = "mxc://server/held-before-purge"
+    purge_cache = purge_root.for_principal(principal_id)
+    reader_cache = reader_root.for_principal(principal_id)
+    sidecar_event = _event(sidecar_event_id, 2, sidecar_url=mxc_url)
+    sidecar_event["content"]["m.relates_to"] = {
+        "rel_type": "m.thread",
+        "event_id": thread_id,
+    }
+    await replace_thread_unconditionally(
+        reader_cache,
+        room_id,
+        thread_id,
+        [_event(thread_id, 1, body="root"), sidecar_event],
+    )
+    rows_loaded = asyncio.Event()
+    release_rows = asyncio.Event()
+    original_get_thread_events = reader_cache.get_thread_events
+
+    async def pause_after_read(read_room_id: str, read_thread_id: str) -> list[dict[str, Any]] | None:
+        rows = await original_get_thread_events(read_room_id, read_thread_id)
+        rows_loaded.set()
+        await release_rows.wait()
+        return rows
+
+    monkeypatch.setattr(reader_cache, "get_thread_events", pause_after_read)
+    download_response = MagicMock(spec=nio.DownloadResponse)
+    download_response.body = b'{"msgtype":"m.text","body":"secret plaintext"}'
+    client = MagicMock(spec=nio.AsyncClient)
+    client.download = AsyncMock(return_value=download_response)
+    read_task = asyncio.create_task(
+        client_thread_history._load_cached_thread_history_if_usable(
+            client,
+            room_id=room_id,
+            thread_id=thread_id,
+            event_cache=reader_cache,
+            hydrate_sidecars=True,
+        ),
+    )
+    try:
+        await rows_loaded.wait()
+        await purge_cache.purge_principal()
+        release_rows.set()
+        cached_history, _diagnostics = await read_task
+
+        assert cached_history is not None
+        assert await reader_cache.get_event(room_id, sidecar_event_id) is None
+        assert await _raw_mxc_text_count(reader_cache, room_id, mxc_url) == 0
+    finally:
+        release_rows.set()
+        if not read_task.done():
+            await read_task
+        await reader_root.close()
+        await purge_root.close()
 
 
 @pytest.mark.asyncio

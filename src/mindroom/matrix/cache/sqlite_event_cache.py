@@ -232,6 +232,8 @@ async def _create_event_cache_schema(db: aiosqlite.Connection) -> None:
             room_id TEXT NOT NULL,
             invalidated_at REAL,
             invalidation_reason TEXT,
+            membership_state TEXT NOT NULL DEFAULT 'joined',
+            membership_epoch INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (principal_id, room_id)
         )
         """,
@@ -605,6 +607,13 @@ class SqliteEventCache:
                     await _rollback_sqlite_connection_best_effort(db, operation=operation)
                     raise
                 self._runtime.forget_pending_principal_purge(self.principal_id)
+            membership_state, _membership_epoch = await sqlite_event_cache_threads.load_room_membership_locked(
+                db,
+                principal_id=self.principal_id,
+                room_id=room_id,
+            )
+            if membership_state != "joined":
+                return disabled_result
             result = await reader(db)
             if (
                 self._runtime.is_disabled
@@ -614,7 +623,7 @@ class SqliteEventCache:
                 return disabled_result
             return result
 
-    async def _write_operation(
+    async def _write_operation(  # noqa: C901, PLR0912
         self,
         room_id: str,
         *,
@@ -622,6 +631,7 @@ class SqliteEventCache:
         disabled_result: _T,
         writer: Callable[[aiosqlite.Connection], Awaitable[_T]],
         allow_departed: bool = False,
+        expected_membership_epoch: int | None = None,
     ) -> _T:
         if not self._can_expose_write_result(room_id, allow_departed=allow_departed):
             return disabled_result
@@ -643,16 +653,29 @@ class SqliteEventCache:
                         principal_id=self.principal_id,
                         room_id=room_id,
                     )
-                    await sqlite_event_cache_threads.mark_room_stale_locked(
+                    await sqlite_event_cache_threads.set_room_membership_locked(
                         db,
                         principal_id=self.principal_id,
                         room_id=room_id,
+                        membership_state="departed",
                         reason="room_departed",
                     )
                 if pending_principal_purge or pending_room_purge:
                     result = disabled_result
-                else:
+                elif allow_departed:
                     result = await writer(db)
+                else:
+                    membership_state, membership_epoch = await sqlite_event_cache_threads.load_room_membership_locked(
+                        db,
+                        principal_id=self.principal_id,
+                        room_id=room_id,
+                    )
+                    if membership_state != "joined" or (
+                        expected_membership_epoch is not None and membership_epoch != expected_membership_epoch
+                    ):
+                        result = disabled_result
+                    else:
+                        result = await writer(db)
                 await db.commit()
             except BaseException:
                 await _rollback_sqlite_connection_best_effort(db, operation=operation)
@@ -811,11 +834,26 @@ class SqliteEventCache:
             ),
         )
 
-    async def store_event(self, event_id: str, room_id: str, event_data: dict[str, Any]) -> None:
+    async def store_event(
+        self,
+        event_id: str,
+        room_id: str,
+        event_data: dict[str, Any],
+        *,
+        expected_membership_epoch: int | None = None,
+    ) -> None:
         """Insert or replace one individually cached Matrix event."""
-        await self.store_events_batch([(event_id, room_id, event_data)])
+        await self.store_events_batch(
+            [(event_id, room_id, event_data)],
+            expected_membership_epoch=expected_membership_epoch,
+        )
 
-    async def store_events_batch(self, events: list[tuple[str, str, dict[str, Any]]]) -> None:
+    async def store_events_batch(
+        self,
+        events: list[tuple[str, str, dict[str, Any]]],
+        *,
+        expected_membership_epoch: int | None = None,
+    ) -> None:
         """Insert or replace one batch of individually cached Matrix events."""
         if self._runtime.is_disabled or not events:
             return
@@ -835,9 +873,18 @@ class SqliteEventCache:
                         cached_at=cached_at,
                     )
                 ),
+                expected_membership_epoch=expected_membership_epoch,
             )
 
-    async def store_mxc_text(self, room_id: str, event_id: str, mxc_url: str, text: str) -> bool:
+    async def store_mxc_text(
+        self,
+        room_id: str,
+        event_id: str,
+        mxc_url: str,
+        text: str,
+        *,
+        expected_membership_epoch: int | None = None,
+    ) -> bool:
         """Cache MXC plaintext only for a visible, non-tombstoned owning event."""
         return bool(
             await self._write_operation(
@@ -853,6 +900,7 @@ class SqliteEventCache:
                     text=text,
                     cached_at=time.time(),
                 ),
+                expected_membership_epoch=expected_membership_epoch,
             ),
         )
 
@@ -862,7 +910,7 @@ class SqliteEventCache:
         thread_id: str,
         events: list[dict[str, Any]],
         *,
-        expected_departure_epoch: int,
+        expected_membership_epoch: int,
         fetch_started_at: float,
         validated_at: float | None = None,
     ) -> bool:
@@ -872,25 +920,21 @@ class SqliteEventCache:
             validated_at=validated_at,
         )
 
-        async def replace_if_still_safe(db: aiosqlite.Connection) -> bool:
-            if self.room_departure_epoch(room_id) != expected_departure_epoch:
-                return False
-            return await sqlite_event_cache_threads.replace_thread_locked_if_not_newer(
-                db,
-                principal_id=self.principal_id,
-                room_id=room_id,
-                thread_id=thread_id,
-                events=events,
-                fetch_started_at=fetch_started_at,
-                validated_at=replacement_timestamp,
-            )
-
         return bool(
             await self._write_operation(
                 room_id,
                 operation="replace_thread_if_not_newer",
                 disabled_result=False,
-                writer=replace_if_still_safe,
+                writer=lambda db: sqlite_event_cache_threads.replace_thread_locked_if_not_newer(
+                    db,
+                    principal_id=self.principal_id,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    events=events,
+                    fetch_started_at=fetch_started_at,
+                    validated_at=replacement_timestamp,
+                ),
+                expected_membership_epoch=expected_membership_epoch,
             ),
         )
 
@@ -1043,6 +1087,20 @@ class SqliteEventCache:
         """Return the current room-fence epoch."""
         return self._runtime.room_departure_epoch(self.principal_id, room_id)
 
+    async def room_membership_epoch(self, room_id: str) -> int | None:
+        """Certify and return the durable room-membership transition epoch."""
+        return await self._write_operation(
+            room_id,
+            operation="room_membership_epoch",
+            disabled_result=None,
+            writer=lambda db: sqlite_event_cache_threads.certify_room_membership_locked(
+                db,
+                principal_id=self.principal_id,
+                room_id=room_id,
+            ),
+            allow_departed=True,
+        )
+
     async def mark_room_joined(
         self,
         room_id: str,
@@ -1050,21 +1108,62 @@ class SqliteEventCache:
         expected_departure_epoch: int,
     ) -> None:
         """Remove a departure fence only after any pending purge commits."""
-        if not self._runtime.is_room_departed(self.principal_id, room_id):
-            return
         if self.room_departure_epoch(room_id) != expected_departure_epoch:
             return
         if not self.durable_writes_available:
             return
 
-        await self._write_operation(
+        if self._runtime.has_pending_room_purge(self.principal_id, room_id):
+            await self._write_operation(
+                room_id,
+                operation="mark_room_joined_flush",
+                disabled_result=None,
+                writer=_noop_write,
+                allow_departed=True,
+            )
+        if self._runtime.has_pending_room_purge(self.principal_id, room_id):
+            return
+
+        async def join_if_current(db: aiosqlite.Connection) -> bool:
+            if self.room_departure_epoch(room_id) != expected_departure_epoch:
+                return False
+            membership_state, _membership_epoch = await sqlite_event_cache_threads.load_room_membership_locked(
+                db,
+                principal_id=self.principal_id,
+                room_id=room_id,
+            )
+            if membership_state != "joined":
+                await sqlite_event_cache_threads.set_room_membership_locked(
+                    db,
+                    principal_id=self.principal_id,
+                    room_id=room_id,
+                    membership_state="joined",
+                    reason="room_rejoined",
+                )
+            if self.room_departure_epoch(room_id) == expected_departure_epoch:
+                return True
+            await sqlite_event_cache_events.purge_room_locked(
+                db,
+                principal_id=self.principal_id,
+                room_id=room_id,
+            )
+            await sqlite_event_cache_threads.set_room_membership_locked(
+                db,
+                principal_id=self.principal_id,
+                room_id=room_id,
+                membership_state="departed",
+                reason="room_departed",
+            )
+            return False
+
+        joined = await self._write_operation(
             room_id,
             operation="mark_room_joined",
-            disabled_result=None,
-            writer=_noop_write,
+            disabled_result=False,
+            writer=join_if_current,
             allow_departed=True,
         )
-        if not self._runtime.has_pending_room_purge(self.principal_id, room_id):
+        if joined:
             self._runtime.mark_room_joined(
                 self.principal_id,
                 room_id,
@@ -1072,7 +1171,7 @@ class SqliteEventCache:
             )
 
     async def purge_principal(self) -> None:
-        """Delete every cache row owned by this principal."""
+        """Delete principal content while preserving durable refill generations."""
         self._runtime.record_pending_principal_purge(self.principal_id)
 
         await self._write_operation(

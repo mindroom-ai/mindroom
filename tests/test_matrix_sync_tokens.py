@@ -78,10 +78,6 @@ def _token_path(tmp_path: Path, *, agent_name: str = "code") -> Path:
     return tmp_path / "sync_tokens" / f"{agent_name}.token"
 
 
-def _certification_path(tmp_path: Path, *, agent_name: str = "code") -> Path:
-    return tmp_path / "sync_tokens" / f"{agent_name}.token.certified"
-
-
 def _load_sync_token_value(tmp_path: Path, agent_name: str) -> str | None:
     checkpoint = load_sync_checkpoint(tmp_path, agent_name)
     if checkpoint is None:
@@ -150,7 +146,6 @@ def test_save_sync_token_round_trip(tmp_path: Path) -> None:
         "token": "s12345",
         "version": "mindroom-sync-token-v2",
     }
-    assert not _certification_path(tmp_path).exists()
     assert _load_sync_token_value(tmp_path, "code") == "s12345"
     checkpoint = load_sync_checkpoint(tmp_path, "code")
     assert checkpoint is not None
@@ -170,20 +165,6 @@ def test_v1_certified_record_is_invalidated_by_principal_owned_cache_schema(tmp_
     assert load_sync_checkpoint(tmp_path, "code") is None
 
 
-def test_legacy_marker_file_does_not_certify_plaintext_token(tmp_path: Path) -> None:
-    """Older marker-only tokens cannot restore without a cache generation."""
-    saved_batch = "s_marker_only"
-    token_path = _token_path(tmp_path)
-    certification_path = _certification_path(tmp_path)
-    token_path.parent.mkdir(parents=True, exist_ok=True)
-    token_path.write_text(saved_batch, encoding="utf-8")
-    certification_path.write_text("legacy-marker\n", encoding="utf-8")
-
-    token_record = load_sync_checkpoint(tmp_path, "code")
-
-    assert token_record is None
-
-
 def test_clear_sync_token_removes_saved_token(tmp_path: Path) -> None:
     """Clearing should remove an existing persisted token."""
     save_sync_token(tmp_path, "code", "s12345", cache_generation=_CACHE_GENERATION)
@@ -192,7 +173,6 @@ def test_clear_sync_token_removes_saved_token(tmp_path: Path) -> None:
 
     assert _load_sync_token_value(tmp_path, "code") is None
     assert not _token_path(tmp_path).exists()
-    assert not _certification_path(tmp_path).exists()
 
 
 def test_clear_sync_token_is_idempotent(tmp_path: Path) -> None:
@@ -553,11 +533,11 @@ async def test_bot_start_initializes_postgres_principal_before_restoring_checkpo
 
 
 @pytest.mark.asyncio
-async def test_postgres_outage_preserves_unverified_checkpoint_until_generation_recovers(
+async def test_postgres_outage_clears_unverifiable_checkpoint_and_recovers_cold(
     tmp_path: Path,
     postgres_event_cache_url: str,
 ) -> None:
-    """A transient outage must leave a valid cache/checkpoint pair available for a later restart."""
+    """An unavailable cache generation must force a later cold restart."""
     namespace = f"sync_restore_outage_{uuid.uuid4().hex}"
     principal_id = "@mindroom_code:localhost"
     room_id = "!room:localhost"
@@ -616,7 +596,7 @@ async def test_postgres_outage_preserves_unverified_checkpoint_until_generation_
             await unavailable_bot._on_sync_response(event_response)
 
         assert unavailable_client.next_batch is None
-        assert _load_sync_token_value(tmp_path, unavailable_bot.agent_name) == "s_before_outage"
+        assert load_sync_checkpoint(tmp_path, unavailable_bot.agent_name) is None
     finally:
         await unavailable_root.close()
 
@@ -636,8 +616,8 @@ async def test_postgres_outage_preserves_unverified_checkpoint_until_generation_
         ):
             await recovered_bot.start()
 
-        assert recovered_client.next_batch == "s_before_outage"
-        assert await recovered_view.get_event(room_id, event_id) == event
+        assert recovered_client.next_batch is None
+        assert await recovered_view.get_event(room_id, event_id) is None
     finally:
         await recovered_root.close()
 
@@ -699,8 +679,8 @@ async def test_bot_start_rejects_checkpoint_from_reset_cache_generation(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_bot_start_preserves_checkpoint_when_cache_generation_is_unavailable(tmp_path: Path) -> None:
-    """An unavailable generation starts cold without destroying an unverified checkpoint."""
+async def test_bot_start_clears_checkpoint_when_cache_generation_is_unavailable(tmp_path: Path) -> None:
+    """An unavailable generation cannot prove a saved checkpoint."""
     bot = _agent_bot(tmp_path)
     bot.event_cache.cache_generation = None
     save_sync_token(
@@ -722,7 +702,8 @@ async def test_bot_start_preserves_checkpoint_when_cache_generation_is_unavailab
         await bot.start()
 
     assert client.next_batch is None
-    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_stale"
+    assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
+    bot.event_cache.purge_principal.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -792,7 +773,7 @@ def test_restore_saved_sync_token_ignores_invalid_utf8(tmp_path: Path) -> None:
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_bytes(b"\xff\xfe\xfd")
 
-    bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification().checkpoint)
+    bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification())
 
     assert bot.client.next_batch is None
 
@@ -1122,7 +1103,7 @@ async def test_prepare_for_sync_shutdown_skips_precallback_uncertified_token(tmp
         cache_generation=bot.event_cache.cache_generation,
     )
     bot._runtime_view.mark_runtime_started()
-    bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification().checkpoint)
+    bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification())
 
     bot.client.next_batch = "s_after_precallback"
 

@@ -22,7 +22,7 @@ from .event_cache_events import (
 if TYPE_CHECKING:
     import aiosqlite
 
-_PRINCIPAL_ROW_TABLES = (
+_ROOM_CONTENT_TABLES = (
     "thread_events",
     "events",
     "event_edits",
@@ -31,7 +31,6 @@ _PRINCIPAL_ROW_TABLES = (
     "event_mxc_references",
     "mxc_text_cache",
     "thread_cache_state",
-    "room_cache_state",
 )
 
 
@@ -305,11 +304,13 @@ async def redact_event_locked(
         original_event_id=event_id,
     )
     removed_event_ids = redaction_removal_event_ids(event_id, dependent_edit_ids)
-    deleted_thread_rows = await _delete_room_thread_events(
+    deleted_thread_rows = await _delete_scoped_event_rows(
         db,
+        "thread_events",
+        "event_id",
         principal_id,
         room_id,
-        event_ids=removed_event_ids,
+        removed_event_ids,
     )
     deleted_event_rows = await delete_cached_events(
         db,
@@ -648,7 +649,7 @@ async def purge_room_locked(
     room_id: str,
 ) -> None:
     """Remove every row owned by one principal in one departed room."""
-    for table_name in _PRINCIPAL_ROW_TABLES:
+    for table_name in _ROOM_CONTENT_TABLES:
         await db.execute(
             f"DELETE FROM {table_name} WHERE principal_id = ? AND room_id = ?",  # noqa: S608
             (principal_id, room_id),
@@ -660,12 +661,20 @@ async def purge_principal_locked(
     *,
     principal_id: str,
 ) -> None:
-    """Delete all cache rows owned by one Matrix principal."""
-    for table_name in _PRINCIPAL_ROW_TABLES:
+    """Delete principal content and invalidate every certified in-flight refill."""
+    for table_name in _ROOM_CONTENT_TABLES:
         await db.execute(
             f"DELETE FROM {table_name} WHERE principal_id = ?",  # noqa: S608
             (principal_id,),
         )
+    await db.execute(
+        """
+        UPDATE room_cache_state
+        SET membership_epoch = membership_epoch + 1
+        WHERE principal_id = ?
+        """,
+        (principal_id,),
+    )
 
 
 async def _dependent_edit_event_ids(
@@ -686,23 +695,6 @@ async def _dependent_edit_event_ids(
     rows = await cursor.fetchall()
     await cursor.close()
     return [str(row[0]) for row in rows]
-
-
-async def _delete_room_thread_events(
-    db: aiosqlite.Connection,
-    principal_id: str,
-    room_id: str,
-    *,
-    event_ids: list[str],
-) -> int:
-    return await _delete_scoped_event_rows(
-        db,
-        "thread_events",
-        "event_id",
-        principal_id,
-        room_id,
-        event_ids,
-    )
 
 
 async def _delete_scoped_event_rows(

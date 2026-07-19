@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from .event_cache_events import event_id_for_cache, serialize_cacheable_events, serialize_cached_event
 from .event_normalization import normalize_event_source_for_cache
@@ -148,6 +148,78 @@ async def load_thread_cache_state(
     if row is None:
         return None
     return row.as_public_state()
+
+
+async def load_room_membership_locked(
+    db: aiosqlite.Connection,
+    *,
+    principal_id: str,
+    room_id: str,
+) -> tuple[str, int]:
+    """Return the durable membership state and transition epoch for one principal-room."""
+    cursor = await db.execute(
+        """
+        SELECT membership_state, membership_epoch
+        FROM room_cache_state
+        WHERE principal_id = ? AND room_id = ?
+        """,
+        (principal_id, room_id),
+    )
+    row = await cursor.fetchone()
+    await cursor.close()
+    return ("joined", 0) if row is None else (str(row[0]), int(row[1]))
+
+
+async def certify_room_membership_locked(
+    db: aiosqlite.Connection,
+    *,
+    principal_id: str,
+    room_id: str,
+) -> int:
+    """Create a durable generation row and return its current epoch."""
+    await db.execute(
+        """
+        INSERT OR IGNORE INTO room_cache_state(
+            principal_id,
+            room_id,
+            membership_state,
+            membership_epoch
+        )
+        VALUES (?, ?, 'joined', 0)
+        """,
+        (principal_id, room_id),
+    )
+    _membership_state, membership_epoch = await load_room_membership_locked(
+        db,
+        principal_id=principal_id,
+        room_id=room_id,
+    )
+    return membership_epoch
+
+
+async def set_room_membership_locked(
+    db: aiosqlite.Connection,
+    *,
+    principal_id: str,
+    room_id: str,
+    membership_state: Literal["joined", "departed"],
+    reason: str,
+) -> None:
+    """Advance one durable room-membership transition and invalidate prior refills."""
+    await mark_room_stale_locked(
+        db,
+        principal_id=principal_id,
+        room_id=room_id,
+        reason=reason,
+    )
+    await db.execute(
+        """
+        UPDATE room_cache_state
+        SET membership_state = ?, membership_epoch = membership_epoch + 1
+        WHERE principal_id = ? AND room_id = ?
+        """,
+        (membership_state, principal_id, room_id),
+    )
 
 
 async def _store_thread_events_locked(
@@ -357,7 +429,7 @@ async def invalidate_room_threads_locked(
     principal_id: str,
     room_id: str,
 ) -> None:
-    """Delete every cached thread snapshot and room state for one room."""
+    """Delete every cached thread snapshot while preserving durable room membership."""
     event_ids = await _thread_event_ids_for_room(db, principal_id=principal_id, room_id=room_id)
     await db.execute(
         """
@@ -389,13 +461,6 @@ async def invalidate_room_threads_locked(
     await db.execute(
         """
         DELETE FROM thread_cache_state
-        WHERE principal_id = ? AND room_id = ?
-        """,
-        (principal_id, room_id),
-    )
-    await db.execute(
-        """
-        DELETE FROM room_cache_state
         WHERE principal_id = ? AND room_id = ?
         """,
         (principal_id, room_id),

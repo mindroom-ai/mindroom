@@ -31,6 +31,7 @@ from mindroom.matrix.client_thread_history import (
     _resolve_thread_history_from_event_sources_timed,
 )
 from mindroom.matrix.conversation_cache import MatrixConversationCache
+from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
@@ -266,6 +267,7 @@ class TestThreadHistory:
             "$thread_root",
             hydrate_sidecars=True,
             event_cache=event_cache,
+            expected_membership_epoch=0,
             trusted_sender_ids=(),
         )
         mock_store.assert_awaited_once_with(
@@ -273,7 +275,7 @@ class TestThreadHistory:
             room_id="!room:localhost",
             thread_id="$thread_root",
             event_sources=[{"event_id": "$thread_root"}],
-            expected_departure_epoch=0,
+            expected_membership_epoch=0,
             fetch_started_at=ANY,
         )
 
@@ -1137,6 +1139,7 @@ class TestThreadHistory:
                 "$thread_root",
                 hydrate_sidecars=True,
                 event_cache=_event_cache(),
+                expected_membership_epoch=0,
             )
         ).history
         serialized = [message.to_dict() for message in history]
@@ -1196,6 +1199,7 @@ class TestThreadHistory:
                 "$thread_root",
                 hydrate_sidecars=True,
                 event_cache=_event_cache(),
+                expected_membership_epoch=0,
             )
         ).history
         serialized = [message.to_dict() for message in history]
@@ -1252,6 +1256,7 @@ class TestThreadHistory:
                 "$thread_root",
                 hydrate_sidecars=True,
                 event_cache=_event_cache(),
+                expected_membership_epoch=0,
             )
         ).history
 
@@ -1448,6 +1453,7 @@ class TestThreadHistory:
                 "$root",
                 hydrate_sidecars=True,
                 event_cache=_event_cache(),
+                expected_membership_epoch=0,
             )
         ).history
 
@@ -1947,6 +1953,7 @@ class TestThreadHistory:
                 "$thread_root",
                 hydrate_sidecars=True,
                 event_cache=_event_cache(),
+                expected_membership_epoch=0,
             )
 
     @pytest.mark.asyncio
@@ -1975,6 +1982,7 @@ class TestThreadHistory:
                 "$thread_root",
                 hydrate_sidecars=True,
                 event_cache=_event_cache(),
+                expected_membership_epoch=0,
             )
 
 
@@ -3421,3 +3429,45 @@ class TestThreadHistoryCache:
         assert refreshed_log.kwargs["thread_read_source"] == THREAD_HISTORY_SOURCE_STALE_CACHE
         assert refreshed_log.kwargs["thread_read_degraded"] is True
         assert refreshed_log.kwargs["thread_read_error"] == "homeserver unavailable"
+
+    @pytest.mark.asyncio
+    async def test_source_refresh_survives_membership_epoch_cache_failure(self) -> None:
+        """Authoritative history remains available while every derived cache write is rejected."""
+        event_cache = _event_cache()
+        event_cache.room_membership_epoch.side_effect = RuntimeError("cache unavailable")
+        event_cache.replace_thread_if_not_newer.return_value = False
+        fetch_result = matrix_client_module._ThreadHistoryFetchResult(
+            history=[
+                ResolvedVisibleMessage.synthetic(
+                    sender="@user:localhost",
+                    body="fresh",
+                    event_id="$thread_root",
+                    content={"body": "fresh"},
+                ),
+            ],
+            event_sources=[{"event_id": "$thread_root"}],
+            fetch_ms=1.0,
+            room_scan_pages=1,
+            scanned_event_count=1,
+            resolution_ms=1.0,
+            sidecar_hydration_ms=0.0,
+        )
+
+        with patch(
+            "mindroom.matrix.client_thread_history._fetch_thread_history_with_events",
+            new=AsyncMock(return_value=fetch_result),
+        ) as fetch:
+            history = await matrix_client_module.refresh_thread_history_from_source(
+                AsyncMock(),
+                "!room:localhost",
+                "$thread_root",
+                event_cache=event_cache,
+                allow_stale_fallback=False,
+            )
+
+        assert [message.event_id for message in history] == ["$thread_root"]
+        assert fetch.await_args.kwargs["expected_membership_epoch"] == UNCERTIFIED_MEMBERSHIP_EPOCH
+        assert (
+            event_cache.replace_thread_if_not_newer.await_args.kwargs["expected_membership_epoch"]
+            == UNCERTIFIED_MEMBERSHIP_EPOCH
+        )

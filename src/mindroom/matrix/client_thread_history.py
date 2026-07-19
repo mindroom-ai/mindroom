@@ -11,9 +11,9 @@ Cache-trust rules (each encodes a shipped regression fix; do not weaken them):
    and the stale-fallback path refuse such rows and invalidate the entry, and a fresh homeserver fetch
    missing the root is never stored (PR #741).
 
-3. Cache repopulation is guarded against write races: every store passes the fetch start time and room
-   departure epoch to ``replace_thread_if_not_newer``, so a fetch cannot bury a newer stale marker
-   (PR #716) or cross a leave/rejoin boundary.
+3. Cache repopulation is guarded against write races: every store passes the fetch start time plus the
+   durable room-membership epoch to ``replace_thread_if_not_newer``, so a fetch cannot bury a newer
+   stale marker (PR #716) or cross a leave/rejoin boundary in this or another process.
 
 4. Stale fallback exists only on the advisory path: ``fetch_thread_history`` may serve stale cached rows
    when a refetch fails, labelled ``stale_cache`` source with the degraded flag set.
@@ -57,6 +57,7 @@ from mindroom.matrix.client_visible_messages import (
     record_latest_thread_edit,
 )
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_content import extract_and_resolve_message, resolve_event_source_content
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
@@ -86,6 +87,21 @@ _ROOM_HISTORY_MESSAGE_TYPES = ("m.room.message", "m.room.encrypted")
 _MAX_ENUMERATED_THREAD_ROOTS = 2000
 _MAX_THREAD_ENUMERATION_PAGES = 100
 type _ThreadHistoryDiagnosticValue = str | int | float | bool | None
+
+
+async def _capture_membership_epoch(event_cache: ConversationEventCache, room_id: str) -> int:
+    """Return a durable refill generation or a value that rejects every cache write."""
+    try:
+        membership_epoch = await event_cache.room_membership_epoch(room_id)
+    except Exception as exc:
+        logger.warning(
+            "Failed to certify Matrix cache refill generation; continuing without cache writes",
+            room_id=room_id,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return UNCERTIFIED_MEMBERSHIP_EPOCH
+    return UNCERTIFIED_MEMBERSHIP_EPOCH if membership_epoch is None else membership_epoch
 
 
 @dataclass(slots=True)
@@ -298,6 +314,7 @@ async def _resolve_thread_history_from_event_sources_timed(
     event_sources: Sequence[dict[str, Any]],
     hydrate_sidecars: bool = True,
     event_cache: ConversationEventCache,
+    expected_membership_epoch: int | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> tuple[list[ResolvedVisibleMessage], float]:
     """Resolve visible thread history and return approximate sidecar hydration time."""
@@ -343,6 +360,7 @@ async def _resolve_thread_history_from_event_sources_timed(
                 client,
                 event_cache=event_cache,
                 room_id=room_id,
+                expected_membership_epoch=expected_membership_epoch,
                 trusted_sender_ids=trusted_sender_ids,
             )
             if hydrate_sidecars
@@ -356,6 +374,7 @@ async def _resolve_thread_history_from_event_sources_timed(
         required_thread_id=thread_id,
         event_cache=event_cache,
         room_id=room_id,
+        expected_membership_epoch=expected_membership_epoch,
         trusted_sender_ids=trusted_sender_ids,
     )
     messages = list(messages_by_event_id.values())
@@ -381,6 +400,7 @@ async def _load_stale_cached_thread_history(
 ) -> ThreadHistoryResult | None:
     """Return stale cached thread history when a refetch fails but durable rows still exist."""
     cache_read_started = time.perf_counter()
+    cached_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
     try:
         cached_event_sources = await event_cache.get_thread_events(room_id, thread_id)
     except Exception as exc:
@@ -412,6 +432,7 @@ async def _load_stale_cached_thread_history(
         event_cache=event_cache,
         cached_event_sources=cached_event_sources,
         hydrate_sidecars=hydrate_sidecars,
+        expected_membership_epoch=cached_membership_epoch,
         trusted_sender_ids=trusted_sender_ids,
     )
     if resolved_history is None:
@@ -448,6 +469,7 @@ async def _resolve_cached_thread_history(
     event_cache: ConversationEventCache,
     cached_event_sources: Sequence[dict[str, Any]],
     hydrate_sidecars: bool = True,
+    expected_membership_epoch: int,
     trusted_sender_ids: Collection[str] = (),
 ) -> tuple[list[ResolvedVisibleMessage] | None, float]:
     """Resolve cached thread history or invalidate the cache entry on corruption."""
@@ -459,6 +481,7 @@ async def _resolve_cached_thread_history(
             event_sources=cached_event_sources,
             hydrate_sidecars=hydrate_sidecars,
             event_cache=event_cache,
+            expected_membership_epoch=expected_membership_epoch,
             trusted_sender_ids=trusted_sender_ids,
         )
     except Exception as exc:
@@ -506,6 +529,7 @@ async def _load_cached_thread_history_if_usable(
     trusted_sender_ids: Collection[str] = (),
 ) -> tuple[ThreadHistoryResult | None, dict[str, str | int | float | bool] | None]:
     """Return a durable thread snapshot when the current runtime may safely trust it."""
+    cached_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
     cache_state = await event_cache.get_thread_cache_state(room_id, thread_id)
     rejection_reason = thread_cache_rejection_reason(cache_state)
     if rejection_reason is not None:
@@ -549,6 +573,7 @@ async def _load_cached_thread_history_if_usable(
         event_cache=event_cache,
         cached_event_sources=cached_event_sources,
         hydrate_sidecars=hydrate_sidecars,
+        expected_membership_epoch=cached_membership_epoch,
         trusted_sender_ids=trusted_sender_ids,
     )
     if resolved_history is None:
@@ -592,6 +617,7 @@ async def _fetch_thread_history_with_events(
     *,
     hydrate_sidecars: bool,
     event_cache: ConversationEventCache,
+    expected_membership_epoch: int,
     trusted_sender_ids: Collection[str] = (),
 ) -> _ThreadHistoryFetchResult:
     """Fetch thread history and raw event sources from the homeserver."""
@@ -601,6 +627,7 @@ async def _fetch_thread_history_with_events(
         thread_id,
         hydrate_sidecars=hydrate_sidecars,
         event_cache=event_cache,
+        expected_membership_epoch=expected_membership_epoch,
         trusted_sender_ids=trusted_sender_ids,
     )
 
@@ -621,7 +648,7 @@ async def refresh_thread_history_from_source(
 ) -> ThreadHistoryResult:
     """Fetch fresh thread history from Matrix and repopulate the advisory cache."""
     fetch_started_at = time.time() if cache_write_guard_started_at is None else cache_write_guard_started_at
-    fetch_departure_epoch = event_cache.room_departure_epoch(room_id)
+    fetch_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
     try:
         fetch_result = await _fetch_thread_history_with_events(
             client,
@@ -629,6 +656,7 @@ async def refresh_thread_history_from_source(
             thread_id,
             hydrate_sidecars=hydrate_sidecars,
             event_cache=event_cache,
+            expected_membership_epoch=fetch_membership_epoch,
             trusted_sender_ids=trusted_sender_ids,
         )
     except Exception as exc:
@@ -660,7 +688,7 @@ async def refresh_thread_history_from_source(
             room_id=room_id,
             thread_id=thread_id,
             event_sources=fetch_result.event_sources,
-            expected_departure_epoch=fetch_departure_epoch,
+            expected_membership_epoch=fetch_membership_epoch,
             fetch_started_at=fetch_started_at,
         )
         logger.info(
@@ -721,7 +749,7 @@ async def _store_thread_history_cache(
     room_id: str,
     thread_id: str,
     event_sources: Sequence[dict[str, Any]],
-    expected_departure_epoch: int,
+    expected_membership_epoch: int,
     fetch_started_at: float,
 ) -> bool:
     """Best-effort replacement of one cached thread snapshot."""
@@ -730,7 +758,7 @@ async def _store_thread_history_cache(
             room_id,
             thread_id,
             list(event_sources),
-            expected_departure_epoch=expected_departure_epoch,
+            expected_membership_epoch=expected_membership_epoch,
             fetch_started_at=fetch_started_at,
         )
     except Exception as exc:
@@ -761,6 +789,7 @@ async def _resolve_thread_history_message(
     *,
     event_cache: ConversationEventCache,
     room_id: str,
+    expected_membership_epoch: int | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> ResolvedVisibleMessage:
     """Resolve one room-message event into the normalized thread-history shape."""
@@ -770,6 +799,7 @@ async def _resolve_thread_history_message(
             client,
             event_cache=event_cache,
             room_id=room_id,
+            expected_membership_epoch=expected_membership_epoch,
             trusted_sender_ids=trusted_sender_ids,
         )
         return ResolvedVisibleMessage.from_message_data(
@@ -783,6 +813,7 @@ async def _resolve_thread_history_message(
         client,
         event_cache=event_cache,
         room_id=room_id,
+        expected_membership_epoch=expected_membership_epoch,
     )
     content = resolved_event_source.get("content", {})
     normalized_content = content if isinstance(content, dict) else {}
@@ -974,6 +1005,7 @@ async def _fetch_thread_history_via_room_messages_with_events(
     *,
     hydrate_sidecars: bool,
     event_cache: ConversationEventCache,
+    expected_membership_epoch: int,
     trusted_sender_ids: Collection[str] = (),
 ) -> _ThreadHistoryFetchResult:
     """Fetch all thread messages by scanning room history pages."""
@@ -987,6 +1019,7 @@ async def _fetch_thread_history_via_room_messages_with_events(
         event_sources=scan_result.event_sources,
         hydrate_sidecars=hydrate_sidecars,
         event_cache=event_cache,
+        expected_membership_epoch=expected_membership_epoch,
         trusted_sender_ids=trusted_sender_ids,
     )
     return _ThreadHistoryFetchResult(
@@ -1197,7 +1230,7 @@ async def bulk_refresh_room_thread_histories(
     reported in ``missing_root_ids`` and never stored.
     """
     fetch_started_at = time.time()
-    fetch_departure_epoch = event_cache.room_departure_epoch(room_id)
+    fetch_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
     scan_result = await _bulk_scan_thread_event_sources(client, room_id, thread_root_ids=thread_root_ids)
     stored_threads = 0
     for thread_id, event_sources in scan_result.thread_event_sources.items():
@@ -1208,7 +1241,7 @@ async def bulk_refresh_room_thread_histories(
             room_id=room_id,
             thread_id=thread_id,
             event_sources=event_sources,
-            expected_departure_epoch=fetch_departure_epoch,
+            expected_membership_epoch=fetch_membership_epoch,
             fetch_started_at=fetch_started_at,
         ):
             stored_threads += 1

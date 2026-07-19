@@ -392,6 +392,7 @@ async def apply_latest_edits_to_messages(
     required_thread_id: str | None = None,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
+    expected_membership_epoch: int | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> None:
     """Apply latest edits to message records and synthesize missing originals when allowed."""
@@ -408,6 +409,7 @@ async def apply_latest_edits_to_messages(
             client,
             event_cache=event_cache,
             room_id=room_id,
+            expected_membership_epoch=expected_membership_epoch,
             trusted_sender_ids=trusted_sender_ids,
         )
         if edited_body is None:

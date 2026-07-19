@@ -199,7 +199,7 @@ class ThreadMutationCacheOps:
     ) -> bool:
         """Apply one cached redaction fail-open and report whether a row changed."""
         try:
-            redacted = bool(await self.runtime.event_cache.redact_event(room_id, redacted_event_id))
+            return bool(await self.runtime.event_cache.redact_event(room_id, redacted_event_id))
         except Exception as exc:
             self.logger.warning(
                 failure_message,
@@ -211,7 +211,6 @@ class ThreadMutationCacheOps:
             if raise_on_failure:
                 raise
             return False
-        return redacted
 
     async def invalidate_after_redaction(
         self,

@@ -9,6 +9,7 @@ import nio
 from nio import crypto
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.sidecar_content import sidecar_mxc_url
 from mindroom.matrix.visible_body import has_trusted_stream_body_metadata, visible_body_from_content
 
@@ -67,6 +68,7 @@ async def _register_sidecar_owner(
     event_cache: ConversationEventCache | None,
     room_id: str | None,
     fallback_event_id: str | None = None,
+    expected_membership_epoch: int | None = None,
 ) -> str | None:
     """Persist the visible event/reference before plaintext hydration begins."""
     content = _normalized_content_dict(event_source.get("content"))
@@ -80,10 +82,17 @@ async def _register_sidecar_owner(
         return event_id
     if room_id is None or event_id is None:
         return None
+    if expected_membership_epoch == UNCERTIFIED_MEMBERSHIP_EPOCH:
+        return event_id
     owned_event = dict(event_source)
     owned_event["event_id"] = event_id
     try:
-        await event_cache.store_event(event_id, room_id, owned_event)
+        await event_cache.store_event(
+            event_id,
+            room_id,
+            owned_event,
+            expected_membership_epoch=expected_membership_epoch,
+        )
     except Exception:
         logger.exception(
             "Failed to register long-text sidecar ownership",
@@ -101,6 +110,7 @@ async def _resolve_event_content(
     event_cache: ConversationEventCache | None,
     room_id: str | None,
     fallback_event_id: str | None = None,
+    expected_membership_epoch: int | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Register valid sidecar ownership and return canonical content plus whether it changed."""
     preview_content = _normalized_content_dict(event_source.get("content", {}))
@@ -109,6 +119,7 @@ async def _resolve_event_content(
         event_cache=event_cache,
         room_id=room_id,
         fallback_event_id=fallback_event_id,
+        expected_membership_epoch=expected_membership_epoch,
     )
     resolved_content = await _resolve_canonical_content(
         preview_content,
@@ -116,16 +127,13 @@ async def _resolve_event_content(
         event_cache=event_cache,
         room_id=room_id,
         event_id=event_id,
+        expected_membership_epoch=expected_membership_epoch,
     )
     return resolved_content, resolved_content is not preview_content
 
 
 def _text_size_bytes(text: str) -> int:
     return len(text.encode("utf-8", errors="replace"))
-
-
-def _mxc_text_exceeds_limit(text: str) -> bool:
-    return _text_size_bytes(text) > _MXC_TEXT_MAX_BYTES
 
 
 def _mxc_bytes_exceed_limit(mxc_url: str, payload: bytes, *, stage: str) -> bool:
@@ -149,6 +157,7 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
     event_id: str | None = None,
+    expected_membership_epoch: int | None = None,
 ) -> str | None:
     """Download text content from an MXC URL with caching.
 
@@ -159,41 +168,26 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
         event_cache: Optional durable event cache used for restart-safe MXC text reuse
         room_id: Room scope for event-cache locking when a durable MXC cache is available
         event_id: Visible event that owns the room-scoped MXC reference
+        expected_membership_epoch: Durable room transition expected by fetch-derived writes
     Returns:
         The downloaded text content, or None if download failed
 
     """
-    if event_cache is not None and room_id is not None and event_id is not None:
+    cache_writes_certified = expected_membership_epoch != UNCERTIFIED_MEMBERSHIP_EPOCH
+    if cache_writes_certified and event_cache is not None and room_id is not None and event_id is not None:
         try:
             cached_text = await event_cache.get_mxc_text(room_id, event_id, mxc_url)
         except Exception:
             logger.exception("Failed to read durable MXC text cache")
         else:
             if cached_text is not None:
-                if _mxc_text_exceeds_limit(cached_text):
+                if _text_size_bytes(cached_text) > _MXC_TEXT_MAX_BYTES:
                     logger.warning(
                         "durable_mxc_text_cache_entry_exceeds_byte_limit",
                         mxc_url=mxc_url,
                         room_id=room_id,
                         size_bytes=_text_size_bytes(cached_text),
                         limit_bytes=_MXC_TEXT_MAX_BYTES,
-                    )
-                    return None
-                try:
-                    ownership_persisted = await event_cache.store_mxc_text(
-                        room_id,
-                        event_id,
-                        mxc_url,
-                        cached_text,
-                    )
-                except Exception:
-                    logger.exception("Failed to revalidate durable MXC plaintext ownership")
-                    return None
-                if not ownership_persisted:
-                    logger.info(
-                        "mxc_plaintext_rejected_without_visible_owner",
-                        room_id=room_id,
-                        event_id=event_id,
                     )
                     return None
                 logger.debug("mxc_text_cache_hit", mxc_url=mxc_url, room_id=room_id)
@@ -250,13 +244,14 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
         except UnicodeDecodeError:
             logger.exception("Downloaded content is not valid UTF-8 text")
             return None
-        if event_cache is not None and room_id is not None and event_id is not None:
+        if cache_writes_certified and event_cache is not None and room_id is not None and event_id is not None:
             try:
                 ownership_persisted = await event_cache.store_mxc_text(
                     room_id,
                     event_id,
                     mxc_url,
                     decoded_text,
+                    expected_membership_epoch=expected_membership_epoch,
                 )
             except Exception:
                 logger.exception("Failed to persist durable MXC text cache")
@@ -289,6 +284,7 @@ async def extract_and_resolve_message(
     *,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
+    expected_membership_epoch: int | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> dict[str, Any]:
     """Extract message data and resolve large message content if needed.
@@ -301,6 +297,7 @@ async def extract_and_resolve_message(
         client: Optional Matrix client for downloading attachments
         event_cache: Optional durable event cache used for restart-safe sidecar reuse
         room_id: Room scope for durable sidecar cache reads and writes
+        expected_membership_epoch: Durable room transition expected by fetch-derived writes
         trusted_sender_ids: Exact trusted internal sender IDs allowed to override visible body
 
     Returns:
@@ -315,6 +312,7 @@ async def extract_and_resolve_message(
         event_cache=event_cache,
         room_id=room_id,
         fallback_event_id=event.event_id,
+        expected_membership_epoch=expected_membership_epoch,
     )
     resolved_body = visible_body_from_content(
         resolved_content,
@@ -351,6 +349,7 @@ async def extract_edit_body(
     *,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
+    expected_membership_epoch: int | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Extract body/content from an edit event's ``m.new_content`` payload."""
@@ -359,6 +358,7 @@ async def extract_edit_body(
         client,
         event_cache=event_cache,
         room_id=room_id,
+        expected_membership_epoch=expected_membership_epoch,
     )
     new_content = _normalized_content_dict(resolved_content.get("m.new_content"))
     body = visible_body_from_content(
@@ -380,6 +380,7 @@ async def resolve_event_source_content(
     *,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
+    expected_membership_epoch: int | None = None,
 ) -> dict[str, Any]:
     """Return an event source with canonical v2 sidecar content hydrated when available."""
     resolved_content, content_changed = await _resolve_event_content(
@@ -387,6 +388,7 @@ async def resolve_event_source_content(
         client,
         event_cache=event_cache,
         room_id=room_id,
+        expected_membership_epoch=expected_membership_epoch,
     )
     if not content_changed:
         return event_source
@@ -403,6 +405,7 @@ async def _resolve_canonical_content(
     event_cache: ConversationEventCache | None,
     room_id: str | None,
     event_id: str | None,
+    expected_membership_epoch: int | None,
 ) -> dict[str, Any]:
     """Hydrate canonical event content from a v2 JSON sidecar when available."""
     sidecar_content = _sidecar_content_for_resolution(content)
@@ -420,6 +423,7 @@ async def _resolve_canonical_content(
         event_cache=event_cache,
         room_id=room_id,
         event_id=event_id,
+        expected_membership_epoch=expected_membership_epoch,
     )
     if full_text is None:
         return content

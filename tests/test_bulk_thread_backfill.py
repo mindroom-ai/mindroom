@@ -96,7 +96,7 @@ async def test_bulk_refresh_scans_room_once_and_stores_each_thread() -> None:
         ],
     )
     event_cache = AsyncMock()
-    event_cache.room_departure_epoch = Mock(return_value=3)
+    event_cache.room_membership_epoch = AsyncMock(return_value=7)
     event_cache.replace_thread_if_not_newer = AsyncMock(return_value=True)
 
     stats = await bulk_refresh_room_thread_histories(
@@ -122,7 +122,8 @@ async def test_bulk_refresh_scans_room_once_and_stores_each_thread() -> None:
         "$b:localhost": ["$b:localhost", "$b1:localhost"],
     }
     assert all(
-        call.kwargs["expected_departure_epoch"] == 3 for call in event_cache.replace_thread_if_not_newer.await_args_list
+        call.kwargs["expected_membership_epoch"] == 7
+        for call in event_cache.replace_thread_if_not_newer.await_args_list
     )
 
 

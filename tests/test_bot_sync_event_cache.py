@@ -481,7 +481,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """Successful restored-token catch-up should save the new checkpoint token."""
         _save_certified_sync_token(bot, "s_before_complete")
         bot._runtime_view.mark_runtime_started()
-        bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification().checkpoint)
+        bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification())
         bot.client.next_batch = "s_after_complete"
 
         await self._run_sync_response_without_startup_side_effects(bot, self._sync_response({}))
@@ -495,7 +495,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """Limited restored-token catch-up must fail closed and force a cold retry token."""
         _save_certified_sync_token(bot, "s_before_limited")
         bot._runtime_view.mark_runtime_started()
-        bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification().checkpoint)
+        bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification())
         bot.client.next_batch = "s_after_limited"
         sync_response = self._sync_response(
             {"!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=True))},
@@ -514,7 +514,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """After cache uncertainty, later successful sync responses can save a checkpoint."""
         _save_certified_sync_token(bot, "s_before_failure")
         bot._runtime_view.mark_runtime_started()
-        bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification().checkpoint)
+        bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification())
         bot._first_sync_done = True
         bot.client.next_batch = "s_after_failure"
         failed_result = SyncCacheWriteResult(complete=True, errors=(RuntimeError("cache failed"),))
@@ -545,7 +545,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """A non-limited empty sync response can certify that there were no room deltas."""
         _save_certified_sync_token(bot, "s_before_empty")
         bot._runtime_view.mark_runtime_started()
-        bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification().checkpoint)
+        bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification())
         bot.client.next_batch = "s_after_empty"
 
         await self._run_sync_response_without_startup_side_effects(bot, self._sync_response({}))

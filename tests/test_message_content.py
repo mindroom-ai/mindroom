@@ -20,6 +20,7 @@ from mindroom.matrix.client_visible_messages import (
     resolve_visible_event_source,
     thread_root_body_preview,
 )
+from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_content import (
     _download_mxc_text,
     extract_and_resolve_message,
@@ -878,6 +879,31 @@ class TestDownloadMxcText:
         )
 
     @pytest.mark.asyncio
+    async def test_uncertified_refill_bypasses_durable_plaintext_cache(self) -> None:
+        """Missing durable membership proof must use fresh plaintext without caching it."""
+        client = AsyncMock()
+        response = MagicMock(spec=nio.DownloadResponse)
+        response.body = b"fresh plaintext"
+        client.download.return_value = response
+        event_cache = AsyncMock()
+        event_cache.get_mxc_text.return_value = "stale plaintext"
+
+        assert (
+            await _download_mxc_text(
+                client,
+                "mxc://server/uncertified",
+                event_cache=event_cache,
+                room_id="!room:localhost",
+                event_id="$event",
+                expected_membership_epoch=UNCERTIFIED_MEMBERSHIP_EPOCH,
+            )
+            == "fresh plaintext"
+        )
+        event_cache.get_mxc_text.assert_not_awaited()
+        event_cache.store_mxc_text.assert_not_awaited()
+        client.download.assert_awaited_once_with(mxc="mxc://server/uncertified")
+
+    @pytest.mark.asyncio
     async def test_departed_room_fence_rejects_late_sidecar_until_rejoin(self, tmp_path: Path) -> None:
         """Late hydration cannot repopulate plaintext after leave, while a real rejoin can."""
         principal_id = "@alice:localhost"
@@ -941,8 +967,8 @@ class TestDownloadMxcText:
             await root.close()
 
     @pytest.mark.asyncio
-    async def test_durable_hit_revalidates_after_concurrent_redaction(self) -> None:
-        """A durable read racing a tombstone must not release stale plaintext."""
+    async def test_durable_hit_returns_authorized_plaintext_without_rewriting(self) -> None:
+        """A durable ownership-joined cache hit needs no second authorization write."""
         principal_id = "@alice:localhost"
         room_id = "!room:localhost"
         event_id = "$event"
@@ -952,8 +978,7 @@ class TestDownloadMxcText:
         event_cache = AsyncMock()
         event_cache.principal_id = principal_id
 
-        event_cache.get_mxc_text.return_value = "stale plaintext"
-        event_cache.store_mxc_text.return_value = False
+        event_cache.get_mxc_text.return_value = "cached plaintext"
 
         assert (
             await _download_mxc_text(
@@ -962,35 +987,11 @@ class TestDownloadMxcText:
                 event_cache=event_cache,
                 room_id=room_id,
                 event_id=event_id,
+                expected_membership_epoch=7,
             )
-            is None
+            == "cached plaintext"
         )
-        client.download.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_durable_hit_fails_closed_when_ownership_revalidation_errors(self) -> None:
-        """A backend outage during final ownership validation must not release stale plaintext."""
-        principal_id = "@alice:localhost"
-        room_id = "!room:localhost"
-        event_id = "$event"
-        mxc_url = "mxc://server/revalidation-outage"
-        client = AsyncMock()
-        client.user_id = principal_id
-        event_cache = AsyncMock()
-        event_cache.principal_id = principal_id
-        event_cache.get_mxc_text.return_value = "possibly redacted plaintext"
-        event_cache.store_mxc_text.side_effect = RuntimeError("cache unavailable")
-
-        assert (
-            await _download_mxc_text(
-                client,
-                mxc_url,
-                event_cache=event_cache,
-                room_id=room_id,
-                event_id=event_id,
-            )
-            is None
-        )
+        event_cache.store_mxc_text.assert_not_awaited()
         client.download.assert_not_awaited()
 
     @pytest.mark.asyncio

@@ -57,10 +57,16 @@ Raising a room fence also records the durable purge synchronously, so cancellati
 Reads recheck the fence after the backend callback and PostgreSQL transaction completes, so a result obtained before a leave cannot be returned after that leave is observed.
 
 Each room fence has a monotonic runtime epoch, and queued rejoin work may clear the fence only when no newer departure changed that epoch.
-Thread snapshot refills capture that epoch before the homeserver fetch, and durable replacement rejects results from an earlier membership epoch.
-The purge transaction retains a durable room invalidation timestamp, so a pre-departure refill from another process cannot land after cleanup.
+The room-state row also stores a durable joined/departed state and transition epoch that every backend operation checks, with writes checking inside their transaction.
+Thread snapshot and point-lookup refills certify the durable epoch before homeserver I/O, and replacement plus fetch-derived event, sidecar-ownership, and plaintext writes require the same still-joined transition.
+Cached and stale thread reads also certify before loading rows and carry that epoch through sidecar hydration, so a held pre-purge snapshot cannot recreate ownership or plaintext after purge or rejoin.
+If storage cannot certify an epoch, the authoritative homeserver read continues but uses an impossible epoch that suppresses fetch-derived writes and durable sidecar plaintext reuse.
+Departure atomically purges room content and advances the durable state to departed, while an authoritative rejoin advances it to joined only after pending cleanup commits.
+An authoritative rejoin also recovers a durable departed row after process restart.
+If it observes a newer local departure inside the rejoin transaction, it purges the room and restores durable departed state before commit.
+Generic thread invalidation preserves the room-state row, so it cannot erase the cross-process membership fence.
 
-Per-turn event and thread memoization includes that epoch in every key, so active turns cannot replay pre-leave cached content.
+Per-turn event and thread memoization includes the runtime departure epoch in every key, so active turns cannot replay pre-leave cached content.
 
 Principal-scoped safety disables affect only that bot's SQLite or PostgreSQL view, while root-owned shared-service disables still stop every current and future principal.
 
@@ -72,7 +78,8 @@ Sync-response leave cleanup commits before unrelated call reconciliation can sus
 
 Thread lookup indexes are rebuilt on event replacement, while root self-mappings survive only when a current batch or a surviving child still proves them.
 
-If the process stops before cleanup commits, the next startup has no certified checkpoint and transactionally purges every row for that principal before restoring sync continuity or allowing cache reads.
+If the process stops before cleanup commits, the next startup has no certified checkpoint and transactionally purges every content row for that principal before restoring sync continuity or allowing cache reads.
+Cold-start principal cleanup preserves certified room-state rows and advances their epochs, so another process cannot finish a refill certified before the cleanup.
 
 That cold-start principal purge preserves rows owned by every other principal.
 
@@ -85,7 +92,7 @@ SQLite write results are reauthorized after commit while the operation lock is s
 SQLite schema version 11 resets older advisory cache contents inside one rollback-safe transaction and creates a durable database-generation identifier.
 Each SQLite principal view derives a stable checkpoint generation from that database generation and the full Matrix principal ID, so a retained agent token cannot cross an account or homeserver rebind.
 
-PostgreSQL schema version 2 migrates under a global transaction-scoped advisory lock, preserves scoped rows from every namespace, expands event and plaintext keys with room scope, and deletes legacy plaintext whose room and event ownership cannot be proven.
+PostgreSQL schema version 2 migrates under a global transaction-scoped advisory lock, preserves scoped rows from every namespace, expands event and plaintext keys with room scope, adds durable membership generations, and deletes legacy plaintext whose room and event ownership cannot be proven.
 
 Every PostgreSQL operation holds the same exclusive transaction-scoped advisory lock for its principal namespace.
 

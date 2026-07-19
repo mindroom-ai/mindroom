@@ -17,7 +17,7 @@ import pytest
 from mindroom.config.matrix import CacheConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.logging_config import get_logger
-from mindroom.matrix.cache import postgres_event_cache_threads, sqlite_event_cache
+from mindroom.matrix.cache import postgres_event_cache_threads, sqlite_event_cache, sqlite_event_cache_threads
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import (
     PostgresEventCache,
@@ -158,6 +158,17 @@ async def _seed_postgres_v1_schema(database_url: str, schema_name: str) -> str:
         CREATE TABLE mindroom_event_cache_metadata (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        )
+        """,
+    )
+    await db.execute(
+        """
+        CREATE TABLE mindroom_event_cache_room_state (
+            namespace TEXT NOT NULL,
+            room_id TEXT NOT NULL,
+            invalidated_at DOUBLE PRECISION,
+            invalidation_reason TEXT,
+            PRIMARY KEY (namespace, room_id)
         )
         """,
     )
@@ -390,6 +401,11 @@ async def test_sqlite_event_cache_write_operation_rolls_back_cancelled_writer(
     async def cancelled_writer(_db: object) -> None:
         raise asyncio.CancelledError(cancel_reason)
 
+    monkeypatch.setattr(
+        sqlite_event_cache_threads,
+        "load_room_membership_locked",
+        AsyncMock(return_value=("joined", 0)),
+    )
     with pytest.raises(asyncio.CancelledError, match=cancel_reason):
         await cache._write_operation(
             "!room:example.test",
@@ -432,7 +448,7 @@ async def test_sqlite_event_cache_initialize_closes_db_after_cancellation(
 
 @pytest.mark.asyncio
 async def test_sqlite_v10_reset_is_atomic_and_creates_new_generation(tmp_path: Path) -> None:
-    """SQLite v10 contents reset transactionally into the principal-owned v11 schema."""
+    """SQLite v10 contents reset transactionally into the current principal-owned schema."""
     db_path = tmp_path / "event_cache.db"
     legacy = sqlite3.connect(db_path)
     legacy.execute("CREATE TABLE events(event_id TEXT PRIMARY KEY, event_json TEXT)")
@@ -541,7 +557,7 @@ async def test_postgres_event_cache_initialize_attempts_cleanup_without_masking_
 async def test_postgres_v1_migration_is_concurrent_and_namespace_preserving(
     postgres_event_cache_url: str,
 ) -> None:
-    """The advisory-locked v2 migration preserves namespaces but drops ownerless plaintext."""
+    """Advisory-locked migrations preserve namespaces but drop ownerless plaintext."""
     schema_name = f"cache_migration_{uuid.uuid4().hex}"
     isolated_url = await _seed_postgres_v1_schema(postgres_event_cache_url, schema_name)
     cache_a = PostgresEventCache(database_url=isolated_url, namespace="runtime_a")
@@ -568,10 +584,23 @@ async def test_postgres_v1_migration_is_concurrent_and_namespace_preserving(
             """,
             )
         ).fetchall()
+        membership_columns = await (
+            await db.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'mindroom_event_cache_room_state'
+                  AND column_name IN ('membership_state', 'membership_epoch')
+                ORDER BY column_name
+                """,
+            )
+        ).fetchall()
         await db.close()
         assert version == ("2",)
         assert namespaces == [("legacy_a",), ("legacy_b",)]
         assert legacy_plaintext == []
+        assert membership_columns == [("membership_epoch",), ("membership_state",)]
     finally:
         await asyncio.gather(cache_a.close(), cache_b.close())
 
@@ -719,6 +748,11 @@ async def test_postgres_event_cache_operation_rolls_back_cancelled_callback(
         ),
     )
     monkeypatch.setattr(cache, "_flush_pending_writes", AsyncMock(return_value=_FlushedPendingWrites()))
+    monkeypatch.setattr(
+        postgres_event_cache_threads,
+        "load_room_membership_locked",
+        AsyncMock(return_value=("joined", 0)),
+    )
 
     async def cancelled_callback(_db: object) -> None:
         raise asyncio.CancelledError(cancel_reason)
@@ -959,7 +993,7 @@ async def test_postgres_event_cache_flushes_pending_invalidations_before_guarded
             room_id,
             thread_id,
             [replacement_event],
-            expected_departure_epoch=cache.room_departure_epoch(room_id),
+            expected_membership_epoch=await cache.room_membership_epoch(room_id),
             fetch_started_at=150.0,
         )
 
@@ -1014,7 +1048,7 @@ async def test_postgres_event_cache_flushes_newer_thread_marker_with_pending_roo
             room_id,
             thread_id,
             [replacement_event],
-            expected_departure_epoch=cache.room_departure_epoch(room_id),
+            expected_membership_epoch=await cache.room_membership_epoch(room_id),
             fetch_started_at=150.0,
         )
 
@@ -1077,6 +1111,7 @@ async def test_postgres_event_cache_preserves_pending_marker_recorded_during_flu
     await cache.initialize()
     try:
         await _replace_thread(cache, room_id, thread_id, [root_event], validated_at=50.0)
+        membership_epoch = await cache.room_membership_epoch(room_id)
         cache._runtime.record_pending_thread_invalidation(
             room_id,
             thread_id,
@@ -1088,7 +1123,7 @@ async def test_postgres_event_cache_preserves_pending_marker_recorded_during_flu
             room_id,
             thread_id,
             [replacement_event],
-            expected_departure_epoch=cache.room_departure_epoch(room_id),
+            expected_membership_epoch=membership_epoch,
             fetch_started_at=150.0,
         )
 

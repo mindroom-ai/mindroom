@@ -117,13 +117,33 @@ class ConversationEventCache(Protocol):
     async def get_mxc_text(self, room_id: str, event_id: str, mxc_url: str) -> str | None:
         """Return MXC plaintext only while a visible owning event still references it."""
 
-    async def store_event(self, event_id: str, room_id: str, event_data: dict[str, Any]) -> None:
+    async def store_event(
+        self,
+        event_id: str,
+        room_id: str,
+        event_data: dict[str, Any],
+        *,
+        expected_membership_epoch: int | None = None,
+    ) -> None:
         """Insert or replace one individually cached Matrix event."""
 
-    async def store_events_batch(self, events: list[tuple[str, str, dict[str, Any]]]) -> None:
+    async def store_events_batch(
+        self,
+        events: list[tuple[str, str, dict[str, Any]]],
+        *,
+        expected_membership_epoch: int | None = None,
+    ) -> None:
         """Insert or replace a batch of individually cached Matrix events."""
 
-    async def store_mxc_text(self, room_id: str, event_id: str, mxc_url: str, text: str) -> bool:
+    async def store_mxc_text(
+        self,
+        room_id: str,
+        event_id: str,
+        mxc_url: str,
+        text: str,
+        *,
+        expected_membership_epoch: int | None = None,
+    ) -> bool:
         """Cache MXC plaintext only for a visible, non-tombstoned owning event."""
 
     async def replace_thread_if_not_newer(
@@ -132,7 +152,7 @@ class ConversationEventCache(Protocol):
         thread_id: str,
         events: list[dict[str, Any]],
         *,
-        expected_departure_epoch: int,
+        expected_membership_epoch: int,
         fetch_started_at: float,
         validated_at: float | None = None,
     ) -> bool:
@@ -178,6 +198,9 @@ class ConversationEventCache(Protocol):
 
     def room_departure_epoch(self, room_id: str) -> int:
         """Return the current room-fence epoch for ordering queued membership work."""
+
+    async def room_membership_epoch(self, room_id: str) -> int | None:
+        """Certify and return the durable room-membership transition epoch."""
 
     async def mark_room_joined(
         self,

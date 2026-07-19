@@ -19,11 +19,6 @@ def _sync_token_path(storage_path: Path, agent_name: str) -> Path:
     return storage_path / "sync_tokens" / f"{agent_name}.token"
 
 
-def _sync_token_certification_path(storage_path: Path, agent_name: str) -> Path:
-    """Return the legacy marker path removed during cleanup."""
-    return storage_path / "sync_tokens" / f"{agent_name}.token.certified"
-
-
 def _checkpoint_from_json(text: str) -> SyncCheckpoint | None:
     """Return a checkpoint from the durable JSON format."""
     try:
@@ -72,15 +67,12 @@ def save_sync_token(
     checkpoint = SyncCheckpoint(token=token_value, cache_generation=generation_value)
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_text(_record_json(checkpoint), encoding="utf-8")
-    _sync_token_certification_path(storage_path, agent_name).unlink(missing_ok=True)
 
 
 def clear_sync_token(storage_path: Path, agent_name: str) -> None:
     """Remove one persisted sync token when present."""
     token_path = _sync_token_path(storage_path, agent_name)
-    certification_path = _sync_token_certification_path(storage_path, agent_name)
     token_path.unlink(missing_ok=True)
-    certification_path.unlink(missing_ok=True)
 
 
 def load_sync_checkpoint(storage_path: Path, agent_name: str) -> SyncCheckpoint | None:

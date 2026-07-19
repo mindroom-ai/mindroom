@@ -1069,7 +1069,7 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_invalidation(
             "!room:localhost",
             "$thread_root",
             [root_source],
-            expected_departure_epoch=cache.room_departure_epoch("!room:localhost"),
+            expected_membership_epoch=await cache.room_membership_epoch("!room:localhost"),
             fetch_started_at=150.0,
             validated_at=300.0,
         )
@@ -1079,7 +1079,7 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_invalidation(
             "!room:localhost",
             "$thread_root",
             [root_source],
-            expected_departure_epoch=cache.room_departure_epoch("!room:localhost"),
+            expected_membership_epoch=await cache.room_membership_epoch("!room:localhost"),
             fetch_started_at=250.0,
             validated_at=300.0,
         )
@@ -1123,7 +1123,7 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_room_invalida
             "!room:localhost",
             "$thread_root",
             [root_source],
-            expected_departure_epoch=cache.room_departure_epoch("!room:localhost"),
+            expected_membership_epoch=await cache.room_membership_epoch("!room:localhost"),
             fetch_started_at=150.0,
             validated_at=300.0,
         )
@@ -1679,6 +1679,63 @@ async def test_cached_room_get_event_cache_hit_avoids_network_call(event_cache: 
     assert response.event.event_id == "$reply"
     assert response.event.body == "Cached reply"
     client.room_get_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_matrix_conversation_lookup_fill_cannot_cross_leave_and_rejoin(tmp_path: Path) -> None:
+    """A point fetch begun before departure must not repopulate the rejoined cache."""
+    db_path = tmp_path / "event_cache.db"
+    principal_id = "@alice:localhost"
+    room_id = "!room:localhost"
+    event_id = "$lookup"
+    lookup_root = SqliteEventCache(db_path)
+    membership_root = SqliteEventCache(db_path)
+    await lookup_root.initialize()
+    await membership_root.initialize()
+    lookup_cache = lookup_root.for_principal(principal_id)
+    membership_cache = membership_root.for_principal(principal_id)
+    event = _make_text_event(
+        event_id=event_id,
+        sender="@agent:localhost",
+        body="Fetched",
+        server_timestamp=1,
+        source_content={"body": "Fetched"},
+    )
+    fetch_started = asyncio.Event()
+    release_fetch = asyncio.Event()
+
+    async def room_get_event(_room_id: str, _event_id: str) -> MagicMock:
+        fetch_started.set()
+        await release_fetch.wait()
+        return _make_room_get_event_response(event)
+
+    client = MagicMock()
+    client.room_get_event = AsyncMock(side_effect=room_get_event)
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, lookup_cache, client=client)
+    conversation_cache.runtime.event_cache_write_coordinator = EventCacheWriteCoordinator(
+        logger=MagicMock(),
+        background_task_owner=conversation_cache.runtime,
+    )
+    lookup_task = asyncio.create_task(conversation_cache.get_event(room_id, event_id))
+    try:
+        await fetch_started.wait()
+        departure_epoch = membership_cache.mark_room_departed(room_id)
+        await membership_cache.purge_room(room_id)
+        await membership_cache.mark_room_joined(
+            room_id,
+            expected_departure_epoch=departure_epoch,
+        )
+        release_fetch.set()
+
+        response = await lookup_task
+        assert isinstance(response, nio.RoomGetEventResponse)
+        assert await lookup_cache.get_event(room_id, event_id) is None
+    finally:
+        release_fetch.set()
+        if not lookup_task.done():
+            await lookup_task
+        await membership_root.close()
+        await lookup_root.close()
 
 
 @pytest.mark.asyncio

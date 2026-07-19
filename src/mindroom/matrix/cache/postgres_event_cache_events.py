@@ -23,7 +23,7 @@ from .postgres_cursor import fetchall, fetchone, rowcount
 if TYPE_CHECKING:
     from psycopg import AsyncConnection
 
-_PRINCIPAL_ROW_TABLES = (
+_ROOM_CONTENT_TABLES = (
     "mindroom_event_cache_thread_events",
     "mindroom_event_cache_events",
     "mindroom_event_cache_event_edits",
@@ -32,7 +32,6 @@ _PRINCIPAL_ROW_TABLES = (
     "mindroom_event_cache_event_mxc_references",
     "mindroom_event_cache_mxc_text",
     "mindroom_event_cache_thread_state",
-    "mindroom_event_cache_room_state",
 )
 
 
@@ -300,11 +299,13 @@ async def redact_event_locked(
         original_event_id=event_id,
     )
     removed_event_ids = redaction_removal_event_ids(event_id, dependent_edit_ids)
-    deleted_thread_rows = await _delete_room_thread_events(
+    deleted_thread_rows = await rowcount(
         db,
-        namespace,
-        room_id,
-        event_ids=removed_event_ids,
+        """
+        DELETE FROM mindroom_event_cache_thread_events
+        WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
+        """,
+        (namespace, room_id, removed_event_ids),
     )
     deleted_event_rows = await delete_cached_events(
         db,
@@ -663,26 +664,6 @@ async def delete_event_edit_rows(
     return deleted_rows
 
 
-async def _delete_room_thread_events(
-    db: AsyncConnection,
-    namespace: str,
-    room_id: str,
-    *,
-    event_ids: list[str],
-) -> int:
-    """Delete cached thread rows for the provided event IDs within one room."""
-    if not event_ids:
-        return 0
-    return await rowcount(
-        db,
-        """
-        DELETE FROM mindroom_event_cache_thread_events
-        WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
-        """,
-        (namespace, room_id, event_ids),
-    )
-
-
 async def _record_redacted_events(
     db: AsyncConnection,
     namespace: str,
@@ -731,7 +712,7 @@ async def purge_room_locked(
     room_id: str,
 ) -> None:
     """Delete all cache rows in one departed principal namespace and room."""
-    for table_name in _PRINCIPAL_ROW_TABLES:
+    for table_name in _ROOM_CONTENT_TABLES:
         await db.execute(
             f"DELETE FROM {table_name} WHERE namespace = %s AND room_id = %s",  # noqa: S608
             (namespace, room_id),
@@ -743,12 +724,20 @@ async def purge_principal_locked(
     *,
     namespace: str,
 ) -> None:
-    """Delete all cache rows owned by one principal namespace."""
-    for table_name in _PRINCIPAL_ROW_TABLES:
+    """Delete principal content and invalidate every certified in-flight refill."""
+    for table_name in _ROOM_CONTENT_TABLES:
         await db.execute(
             f"DELETE FROM {table_name} WHERE namespace = %s",  # noqa: S608
             (namespace,),
         )
+    await db.execute(
+        """
+        UPDATE mindroom_event_cache_room_state
+        SET membership_epoch = membership_epoch + 1
+        WHERE namespace = %s
+        """,
+        (namespace,),
+    )
 
 
 async def _mxc_urls_for_events(
