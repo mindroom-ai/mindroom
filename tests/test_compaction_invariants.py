@@ -41,7 +41,11 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.error_handling import ModelSafeguardRefusalError
-from mindroom.history.compaction import _build_summary_input, compact_scope_history
+from mindroom.history.compaction import (
+    _build_summary_input,
+    _generate_compaction_summary_with_retry,
+    compact_scope_history,
+)
 from mindroom.history.storage import (
     compacted_run_ids_with,
     prune_reintroduced_runs,
@@ -771,6 +775,50 @@ def test_retry_policy_shrink_classification_precedes_transient_status() -> None:
     )
 
 
+def test_retry_policy_falls_through_to_transient_retry_when_input_cannot_shrink() -> None:
+    error = ModelProviderError("upstream connection timed out", status_code=503)
+
+    assert (
+        DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(
+            attempt=1,
+            budget=16_000,
+            input_tokens=1_000,
+            error=error,
+        )
+        == 16_000
+    )
+    assert (
+        DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(
+            attempt=2,
+            budget=16_000,
+            input_tokens=1_000,
+            error=error,
+        )
+        is None
+    )
+
+
+def test_retry_policy_does_not_resend_non_transient_shrink_errors_at_floor() -> None:
+    assert (
+        DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(
+            attempt=1,
+            budget=16_000,
+            input_tokens=1_000,
+            error=ModelSafeguardRefusalError("provider-specific refusal wording"),
+        )
+        is None
+    )
+    assert (
+        DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(
+            attempt=1,
+            budget=16_000,
+            input_tokens=1_000,
+            error=TimeoutError(),
+        )
+        is None
+    )
+
+
 @pytest.mark.parametrize("status_code", [429, 503, 529])
 def test_retry_policy_retries_selected_transient_provider_errors_at_same_budget(status_code: int) -> None:
     error = ModelProviderError("temporary provider failure", status_code=status_code)
@@ -981,6 +1029,42 @@ def test_retry_schedule_halves_deterministically() -> None:
         attempt += 1
 
     assert budgets == [8_000, 4_000, 2_000, 1_000]
+
+
+@pytest.mark.asyncio
+async def test_retry_helper_propagates_original_error_when_rebuilt_input_is_not_smaller() -> None:
+    """A defensive estimate guard prevents a shrink retry from resending equal-size input."""
+    run = _completed_run("run-1")
+    original_error = ModelSafeguardRefusalError("provider-specific refusal wording")
+    generate_summary = AsyncMock(side_effect=original_error)
+
+    with (
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=generate_summary,
+        ),
+        patch(
+            "mindroom.history.compaction._build_summary_input",
+            return_value=("rebuilt request with the same estimate", [run]),
+        ),
+        pytest.raises(ModelSafeguardRefusalError) as raised,
+    ):
+        await _generate_compaction_summary_with_retry(
+            model=FakeModel(id="summary-model", provider="fake"),
+            previous_summary=None,
+            compactable_runs=[run],
+            initial_summary_input="original request",
+            initial_included_runs=[run],
+            summary_input_budget=4_000,
+            session_id="session-1",
+            scope=_SCOPE,
+            history_settings=_HISTORY_SETTINGS,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            token_estimator=lambda _value: 2_000,
+        )
+
+    assert raised.value is original_error
+    generate_summary.assert_awaited_once()
 
 
 @pytest.mark.asyncio

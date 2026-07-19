@@ -154,9 +154,8 @@ class SummaryRetryPolicy:
                 budget,
                 max(COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS, input_tokens // self.shrink_divisor),
             )
-            if smaller_budget >= input_tokens:
-                return None
-            return smaller_budget
+            if smaller_budget < input_tokens:
+                return smaller_budget
         if isinstance(error, ModelProviderError):
             if error.status_code in _TRANSIENT_SUMMARY_STATUS_CODES:
                 return budget

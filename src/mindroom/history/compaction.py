@@ -571,9 +571,7 @@ async def _generate_compaction_summary_with_retry(
                 )
                 if rebuilt_runs:
                     rebuilt_input_tokens = token_estimator(rebuilt_input)
-                    if shrink_retry and (
-                        rebuilt_input == summary_input or rebuilt_input_tokens >= estimated_input_tokens
-                    ):
+                    if shrink_retry and rebuilt_input_tokens >= estimated_input_tokens:
                         raise
                     summary_input = rebuilt_input
                     included_runs = rebuilt_runs
