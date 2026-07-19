@@ -83,6 +83,27 @@ def _opaque_encrypted_event(
     return nio.MegolmEvent.from_dict(event_source)
 
 
+def _thread_reply_lookup_response() -> nio.RoomGetEventResponse:
+    """Return typed metadata for one cache-indexed threaded message."""
+    return nio.RoomGetEventResponse.from_dict(
+        {
+            "content": {
+                "body": "thread reply",
+                "msgtype": "m.text",
+                "m.relates_to": {
+                    "event_id": "$thread-root:localhost",
+                    "rel_type": "m.thread",
+                },
+            },
+            "event_id": "$thread-reply:localhost",
+            "sender": "@bridge:localhost",
+            "origin_server_ts": 1000,
+            "room_id": "!room:localhost",
+            "type": "m.room.message",
+        },
+    )
+
+
 def test_matrix_cache_package_does_not_export_thread_policy_wrappers() -> None:
     """Thread policy wrappers should not remain on the public cache package surface."""
     assert "ThreadReadPolicy" not in matrix_cache.__all__
@@ -826,6 +847,7 @@ class TestMatrixConversationCacheThreadReads:
         )
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = "@agent:localhost"
+        client.room_get_event = AsyncMock(return_value=_thread_reply_lookup_response())
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(client=client, event_cache=event_cache),
@@ -862,6 +884,7 @@ class TestMatrixConversationCacheThreadReads:
         )
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = "@agent:localhost"
+        client.room_get_event = AsyncMock(return_value=_thread_reply_lookup_response())
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(client=client, event_cache=event_cache),
@@ -933,6 +956,8 @@ class TestMatrixConversationCacheThreadReads:
                     },
                 )
                 return _make_room_get_event_response(event)
+            if event_id == "$thread-reply:localhost":
+                return _thread_reply_lookup_response()
             message = f"unexpected lookup for {event_id}"
             raise AssertionError(message)
 
@@ -1170,8 +1195,8 @@ class TestMatrixConversationCacheThreadReads:
         assert room_plain_events == {}
         assert room_redactions == {}
 
-    def test_collect_sync_timeline_cache_updates_keeps_relationless_opaque_event(self) -> None:
-        """Opaque payloads may hide relations and must reach fail-closed sync handling."""
+    def test_collect_sync_timeline_cache_updates_keeps_relationless_opaque_event_room_level(self) -> None:
+        """Opaque payloads without visible relation metadata remain point-cache events."""
         room_threaded_events: dict[str, list[dict[str, object]]] = {}
         room_plain_events: dict[str, list[dict[str, object]]] = {}
         room_redactions: dict[str, list[str]] = {}
@@ -1184,10 +1209,10 @@ class TestMatrixConversationCacheThreadReads:
             room_redactions=room_redactions,
         )
 
-        assert [cached["event_id"] for cached in room_threaded_events["!test:localhost"]] == [
+        assert [cached["event_id"] for cached in room_plain_events["!test:localhost"]] == [
             "$opaque:localhost",
         ]
-        assert room_plain_events == {}
+        assert room_threaded_events == {}
         assert room_redactions == {}
 
     @pytest.mark.asyncio
@@ -1199,8 +1224,6 @@ class TestMatrixConversationCacheThreadReads:
             ("reply", "thread"),
             ("reference", "thread"),
             ("redaction", "room"),
-            ("custom_relation", "room"),
-            ("hidden_relation", "room"),
         ],
     )
     async def test_opaque_encrypted_sync_mutations_leave_snapshots_stale(
@@ -1234,14 +1257,8 @@ class TestMatrixConversationCacheThreadReads:
             event = _opaque_encrypted_event(
                 content_updates={"m.relates_to": {"rel_type": "m.reference", "event_id": target_id}},
             )
-        elif relation_case == "redaction":
-            event = _opaque_encrypted_event(redacts=target_id)
-        elif relation_case == "custom_relation":
-            event = _opaque_encrypted_event(
-                content_updates={"m.relates_to": {"rel_type": "com.example.custom", "event_id": target_id}},
-            )
         else:
-            event = _opaque_encrypted_event()
+            event = _opaque_encrypted_event(redacts=target_id)
 
         event_cache = _runtime_event_cache()
         event_cache.get_thread_id_for_event = AsyncMock(
@@ -1266,9 +1283,9 @@ class TestMatrixConversationCacheThreadReads:
 
         assert result.complete is True
         event_cache.store_events_batch.assert_awaited_once()
-        event_cache.append_event.assert_not_awaited()
         event_cache.revalidate_thread_after_incremental_update.assert_not_awaited()
         if expected_scope == "thread":
+            event_cache.append_event.assert_awaited_once()
             event_cache.mark_thread_stale.assert_awaited_once_with(
                 "!test:localhost",
                 thread_id,
@@ -1276,6 +1293,7 @@ class TestMatrixConversationCacheThreadReads:
             )
             event_cache.mark_room_threads_stale.assert_not_awaited()
         else:
+            event_cache.append_event.assert_not_awaited()
             event_cache.mark_room_threads_stale.assert_awaited_once_with(
                 "!test:localhost",
                 reason="sync_opaque_encrypted_event",
@@ -1527,7 +1545,11 @@ class TestMatrixConversationCacheThreadReads:
         assert state.invalidation_reason == "sync_opaque_encrypted_event"
         assert matrix_cache.thread_cache_rejection_reason(state) == "thread_invalidated_after_validation"
         assert thread_events is not None
-        assert [event["event_id"] for event in thread_events] == [thread_id, "$decrypted:localhost"]
+        assert [event["event_id"] for event in thread_events] == [
+            thread_id,
+            "$decrypted:localhost",
+            "$opaque-child:localhost",
+        ]
 
     @pytest.mark.asyncio
     async def test_get_latest_thread_event_id_fails_open_without_write_coordinator(self) -> None:

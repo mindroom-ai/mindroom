@@ -105,6 +105,19 @@ def test_page_event_info_counts_as_thread_child_proof_preserves_thread_semantics
             },
         },
     )
+    sticker_child = EventInfo.from_event(
+        {
+            "type": "m.sticker",
+            "content": {
+                "body": "sticker",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": thread_root_id,
+                },
+                "url": "mxc://localhost/sticker",
+            },
+        },
+    )
 
     assert page_event_info_counts_as_thread_child_proof(
         thread_root_id,
@@ -125,6 +138,11 @@ def test_page_event_info_counts_as_thread_child_proof_preserves_thread_semantics
         thread_root_id,
         event_id="$other-reply:localhost",
         event_info=unrelated,
+    )
+    assert not page_event_info_counts_as_thread_child_proof(
+        thread_root_id,
+        event_id="$sticker:localhost",
+        event_info=sticker_child,
     )
 
 
@@ -406,6 +424,23 @@ async def test_resolve_event_thread_impact_for_client_returns_threaded_impact() 
     conversation_cache.get_thread_id_for_event.side_effect = lambda room_id, event_id: (
         "$thread-root:localhost" if (room_id, event_id) == ("!room:localhost", "$thread-reply:localhost") else None
     )
+    conversation_cache.get_event.return_value = nio.RoomGetEventResponse.from_dict(
+        {
+            "event_id": "$thread-reply:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "room_id": "!room:localhost",
+            "type": "m.room.message",
+            "content": {
+                "body": "thread reply",
+                "msgtype": "m.text",
+                "m.relates_to": {
+                    "event_id": "$thread-root:localhost",
+                    "rel_type": "m.thread",
+                },
+            },
+        },
+    )
 
     impact = await resolve_event_thread_impact_for_client(
         client,
@@ -420,6 +455,55 @@ async def test_resolve_event_thread_impact_for_client_returns_threaded_impact() 
     )
 
     assert impact == MutationThreadImpact.threaded("$thread-root:localhost")
+
+
+@pytest.mark.parametrize(
+    "relation",
+    [
+        {"m.in_reply_to": {"event_id": "$sticker:localhost"}},
+        {"event_id": "$sticker:localhost", "rel_type": "m.reference"},
+    ],
+)
+@pytest.mark.asyncio
+async def test_resolve_event_thread_impact_for_client_rejects_non_message_ancestors(
+    relation: dict[str, object],
+) -> None:
+    """Client-side reply and reference walks must enforce the conversation-family boundary."""
+    client = AsyncMock()
+    conversation_cache = AsyncMock()
+    conversation_cache.get_thread_id_for_event.return_value = None
+    conversation_cache.get_event.return_value = nio.RoomGetEventResponse.from_dict(
+        {
+            "event_id": "$sticker:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "room_id": "!room:localhost",
+            "type": "m.sticker",
+            "content": {
+                "body": "sticker",
+                "m.relates_to": {
+                    "event_id": "$thread-root:localhost",
+                    "rel_type": "m.thread",
+                },
+                "url": "mxc://localhost/sticker",
+            },
+        },
+    )
+
+    impact = await resolve_event_thread_impact_for_client(
+        client,
+        "!room:localhost",
+        event_type="m.room.message",
+        content={
+            "body": "bridged relation",
+            "msgtype": "m.text",
+            "m.relates_to": relation,
+        },
+        conversation_cache=conversation_cache,
+    )
+
+    assert impact.state is MutationThreadImpactState.UNKNOWN
+    assert impact.thread_id is None
 
 
 @pytest.mark.asyncio

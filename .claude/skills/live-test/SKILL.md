@@ -9,7 +9,7 @@ Run the real product and collect runtime evidence.
 
 ## ⚠️ NixOS Environment
 
-On NixOS hosts, run commands inside the repo dev shell so `libstdc++.so.6` is available.
+On NixOS hosts, run commands inside the repo Node.js 24 dev shell so `libstdc++.so.6` is available.
 Without it, numpy fails to import and you get `AttributeError: module 'mindroom' has no attribute 'bot'`.
 
 ```bash
@@ -26,6 +26,8 @@ nix-shell -I nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos shell.ni
 ```
 
 See `references/core-mindroom.md` for details.
+
+The root shell includes Linux Chromium only on Linux so the backend and Node.js tools also work on macOS.
 
 ## Workflow
 

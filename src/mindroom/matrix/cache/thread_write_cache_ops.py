@@ -257,6 +257,7 @@ class ThreadMutationCacheOps:
         event_source: dict[str, Any],
         *,
         context: str,
+        revalidate_after_append: bool = True,
         raise_on_failure: bool = False,
     ) -> bool:
         """Append one event into a cached thread fail-open and report whether a row changed."""
@@ -284,6 +285,8 @@ class ThreadMutationCacheOps:
                 context=context,
             )
             return False
+        if not revalidate_after_append:
+            return True
         try:
             await self.runtime.event_cache.revalidate_thread_after_incremental_update(
                 room_id,

@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_info import EventInfo, event_type_supports_thread_relations
 
 _EDITABLE_EVENT_TYPES = frozenset({"m.room.message", "io.mindroom.tool_approval"})
 
@@ -119,13 +119,12 @@ def filter_redacted_events(
     *,
     redacted_event_ids: frozenset[str],
 ) -> list[_CachedEventValue]:
-    """Drop events that are tombstoned or edit a tombstoned original."""
-    if not redacted_event_ids:
-        return events
+    """Drop redaction envelopes, tombstoned events, and edits of tombstoned originals."""
     return [
         (event_id, event)
         for event_id, event in events
-        if event_redaction_candidate_ids(event_id, event).isdisjoint(redacted_event_ids)
+        if event.get("type") != "m.room.redaction"
+        and event_redaction_candidate_ids(event_id, event).isdisjoint(redacted_event_ids)
     ]
 
 
@@ -142,7 +141,7 @@ def cache_rows_were_deleted(*row_counts: int) -> bool:
 def _event_thread_row(room_id: str, event: dict[str, Any]) -> _EventThreadRow | None:
     """Return an event-to-thread row when thread membership is explicit."""
     event_id = event.get("event_id")
-    if not isinstance(event_id, str) or not event_id:
+    if not isinstance(event_id, str) or not event_id or not event_type_supports_thread_relations(event.get("type")):
         return None
     event_info = EventInfo.from_event(event)
     thread_id = event_info.thread_id
@@ -196,7 +195,11 @@ def event_thread_rows(
 ) -> list[_EventThreadRow]:
     """Return root-complete event-to-thread rows derived from serialized events."""
     rows = (
-        [_EventThreadRow(room_id=room_id, event_id=event.event_id, thread_id=thread_id) for event in events]
+        [
+            _EventThreadRow(room_id=room_id, event_id=event.event_id, thread_id=thread_id)
+            for event in events
+            if event_type_supports_thread_relations(event.event.get("type"))
+        ]
         if thread_id is not None
         else [row for event in events if (row := _event_thread_row(room_id, event.event)) is not None]
     )
