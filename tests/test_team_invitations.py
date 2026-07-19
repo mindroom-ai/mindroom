@@ -17,7 +17,13 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    install_runtime_cache_support,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
@@ -72,6 +78,7 @@ class TestTeamRoomMembership:
             team_model=None,
             enable_streaming=False,
         )
+        install_runtime_cache_support(bot)
 
         # Mock the client
         mock_client = AsyncMock()
@@ -128,6 +135,7 @@ class TestTeamRoomMembership:
             team_model=None,
             enable_streaming=False,
         )
+        install_runtime_cache_support(bot)
 
         # Mock the client
         mock_client = AsyncMock()
@@ -198,6 +206,7 @@ class TestTeamRoomMembership:
             team_model=None,
             enable_streaming=False,
         )
+        install_runtime_cache_support(bot)
         bot.client = AsyncMock()
 
         join_room = AsyncMock(return_value=True)

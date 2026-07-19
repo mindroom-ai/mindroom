@@ -27,6 +27,7 @@ from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_runtime_cache_support,
     orchestrator_runtime_paths,
     runtime_paths_for,
     test_runtime_paths,
@@ -34,6 +35,7 @@ from tests.conftest import (
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
 
@@ -305,11 +307,20 @@ async def test_hook_matrix_admin_created_room_survives_lifecycle_cleanup(
         runtime_paths=runtime_paths,
         rooms=[],
     )
+    install_runtime_cache_support(bot)
     bot.client = AsyncMock()
     left_room_ids: list[str] = []
 
-    async def mock_leave_non_dm_rooms(_client: AsyncMock, room_ids: list[str]) -> None:
+    async def mock_leave_non_dm_rooms(
+        _client: AsyncMock,
+        room_ids: list[str],
+        *,
+        on_room_left: Callable[[str], Awaitable[None]],
+    ) -> list[str]:
         left_room_ids.extend(room_ids)
+        for room_id in room_ids:
+            await on_room_left(room_id)
+        return room_ids
 
     monkeypatch.setattr(
         "mindroom.bot_room_lifecycle.get_joined_rooms",

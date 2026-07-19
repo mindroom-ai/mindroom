@@ -14,7 +14,7 @@ Visible thread history projects supported `m.room.message` events, collapses edi
 
 Durable conversation history is distinct from ephemeral sync state.
 
-Membership loss is a separate lifecycle boundary and does not currently purge previously retained joined-room history.
+Membership loss is a separate lifecycle boundary that fences access and purges previously retained history only for the departed principal.
 
 ## Admitted joined-room timeline families
 
@@ -89,7 +89,9 @@ To-device events and device-list changes are excluded because they belong to enc
 
 The exclusion tests prove that these categories cannot create point rows, thread rows, edit rows, or invalidation markers.
 
-The exclusion tests also prove that a leave sync does not silently purge previously retained history.
+The exclusion tests prove that the leave timeline payload cannot create cache rows.
+
+Authoritative membership handling separately fences and purges retained history for rooms in the sync leave section before timeline caching begins.
 
 ## Thread snapshot reads
 

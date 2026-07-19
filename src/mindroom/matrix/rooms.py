@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -37,7 +38,7 @@ from mindroom.matrix_identifiers import (
 from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_ai
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -711,17 +712,55 @@ async def filter_non_dm_rooms(client: nio.AsyncClient, room_ids: list[str]) -> l
     return [room_id for room_id in room_ids if not await is_dm_room(client, room_id)]
 
 
+async def _leave_room_and_cleanup(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    on_room_left: Callable[[str], Awaitable[None]],
+) -> None:
+    """Finish one leave outcome and its confirmed cleanup as one operation."""
+    success = await leave_room(client, room_id)
+    if success:
+        logger.info("room_left", room_id=room_id)
+        await on_room_left(room_id)
+    else:
+        logger.error("room_leave_failed", room_id=room_id)
+
+
+async def _await_leave_operation(task: asyncio.Task[None]) -> asyncio.CancelledError | None:
+    """Await a leave operation to completion without letting caller cancellation abort cleanup."""
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if task.done():
+                task.result()
+                return cancellation or exc
+            cancellation = cancellation or exc
+        else:
+            return cancellation
+
+
 async def leave_non_dm_rooms(
     client: nio.AsyncClient,
     room_ids: list[str],
+    *,
+    on_room_left: Callable[[str], Awaitable[None]],
 ) -> None:
-    """Leave all rooms in *room_ids* that are not DM rooms."""
+    """Leave non-DM rooms and clean each confirmed departure before continuing."""
     for room_id in room_ids:
         if await is_dm_room(client, room_id):
             logger.debug("dm_room_preserved", room_id=room_id)
             continue
-        success = await leave_room(client, room_id)
-        if success:
-            logger.info("room_left", room_id=room_id)
-        else:
-            logger.error("room_leave_failed", room_id=room_id)
+        operation = asyncio.create_task(
+            _leave_room_and_cleanup(
+                client,
+                room_id,
+                on_room_left=on_room_left,
+            ),
+            name="matrix_leave_room_and_cleanup",
+        )
+        cancellation = await _await_leave_operation(operation)
+        if cancellation is not None:
+            raise cancellation

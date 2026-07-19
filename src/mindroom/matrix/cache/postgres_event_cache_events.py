@@ -11,6 +11,7 @@ from .event_cache_events import (
     batch_redaction_candidate_ids,
     cache_rows_were_deleted,
     event_edit_rows,
+    event_mxc_urls,
     event_redaction_candidate_ids,
     event_thread_rows,
     filter_redacted_events,
@@ -21,6 +22,17 @@ from .postgres_cursor import fetchall, fetchone, rowcount
 
 if TYPE_CHECKING:
     from psycopg import AsyncConnection
+
+_ROOM_CONTENT_TABLES = (
+    "mindroom_event_cache_thread_events",
+    "mindroom_event_cache_events",
+    "mindroom_event_cache_event_edits",
+    "mindroom_event_cache_event_threads",
+    "mindroom_event_cache_redacted_events",
+    "mindroom_event_cache_event_mxc_references",
+    "mindroom_event_cache_mxc_text",
+    "mindroom_event_cache_thread_state",
+)
 
 _ORPHAN_THREAD_INDEX_PREDICATE = """
     NOT EXISTS (
@@ -72,6 +84,7 @@ async def load_event(
     db: AsyncConnection,
     *,
     namespace: str,
+    room_id: str,
     event_id: str,
 ) -> dict[str, Any] | None:
     """Return one cached event payload by event ID."""
@@ -80,9 +93,9 @@ async def load_event(
         """
         SELECT event_json
         FROM mindroom_event_cache_events
-        WHERE namespace = %s AND event_id = %s
+        WHERE namespace = %s AND room_id = %s AND event_id = %s
         """,
-        (namespace, event_id),
+        (namespace, room_id, event_id),
     )
     return None if row is None else json.loads(row[0])
 
@@ -170,6 +183,7 @@ async def _load_latest_edit_row(
         FROM mindroom_event_cache_event_edits AS edits
         JOIN mindroom_event_cache_events AS events
             ON events.namespace = edits.namespace
+            AND events.room_id = edits.room_id
             AND events.event_id = edits.edit_event_id
         WHERE edits.namespace = %s
             AND edits.room_id = %s
@@ -192,17 +206,30 @@ async def load_mxc_text(
     db: AsyncConnection,
     *,
     namespace: str,
+    room_id: str,
+    event_id: str,
     mxc_url: str,
 ) -> str | None:
     """Return one durably cached MXC text payload when present."""
     row = await fetchone(
         db,
         """
-        SELECT text_content
-        FROM mindroom_event_cache_mxc_text
-        WHERE namespace = %s AND mxc_url = %s
+        SELECT plaintext.text_content
+        FROM mindroom_event_cache_mxc_text AS plaintext
+        JOIN mindroom_event_cache_event_mxc_references AS reference
+          ON reference.namespace = plaintext.namespace
+         AND reference.room_id = plaintext.room_id
+         AND reference.mxc_url = plaintext.mxc_url
+        JOIN mindroom_event_cache_events AS events
+          ON events.namespace = reference.namespace
+         AND events.room_id = reference.room_id
+         AND events.event_id = reference.event_id
+        WHERE plaintext.namespace = %s
+          AND plaintext.room_id = %s
+          AND reference.event_id = %s
+          AND plaintext.mxc_url = %s
         """,
-        (namespace, mxc_url),
+        (namespace, room_id, event_id, mxc_url),
     )
     return None if row is None else str(row[0])
 
@@ -211,21 +238,42 @@ async def persist_mxc_text(
     db: AsyncConnection,
     *,
     namespace: str,
+    room_id: str,
+    event_id: str,
     mxc_url: str,
     text: str,
     cached_at: float,
-) -> None:
-    """Insert or replace one durably cached MXC text payload."""
+) -> bool:
+    """Persist plaintext only while the visible event reference survives."""
+    owns_plaintext = await fetchone(
+        db,
+        """
+        SELECT 1
+        FROM mindroom_event_cache_events AS events
+        JOIN mindroom_event_cache_event_mxc_references AS reference
+          ON reference.namespace = events.namespace
+         AND reference.room_id = events.room_id
+         AND reference.event_id = events.event_id
+        WHERE events.namespace = %s
+          AND events.room_id = %s
+          AND events.event_id = %s
+          AND reference.mxc_url = %s
+        """,
+        (namespace, room_id, event_id, mxc_url),
+    )
+    if owns_plaintext is None:
+        return False
     await db.execute(
         """
-        INSERT INTO mindroom_event_cache_mxc_text(namespace, mxc_url, text_content, cached_at)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT(namespace, mxc_url) DO UPDATE SET
+        INSERT INTO mindroom_event_cache_mxc_text(namespace, room_id, mxc_url, text_content, cached_at)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT(namespace, room_id, mxc_url) DO UPDATE SET
             text_content = excluded.text_content,
             cached_at = excluded.cached_at
         """,
-        (namespace, mxc_url, text, cached_at),
+        (namespace, room_id, mxc_url, text, cached_at),
     )
+    return True
 
 
 async def persist_lookup_events(
@@ -284,19 +332,20 @@ async def redact_event_locked(
         original_event_id=event_id,
     )
     removed_event_ids = redaction_removal_event_ids(event_id, dependent_edit_ids)
-    affected_thread_ids = await _thread_ids_for_event_ids(
+    deleted_thread_rows = await rowcount(
+        db,
+        """
+        DELETE FROM mindroom_event_cache_thread_events
+        WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
+        """,
+        (namespace, room_id, removed_event_ids),
+    )
+    deleted_event_rows = await delete_cached_events(
         db,
         namespace=namespace,
         room_id=room_id,
         event_ids=removed_event_ids,
     )
-    deleted_thread_rows = await _delete_room_thread_events(
-        db,
-        namespace,
-        room_id,
-        event_ids=removed_event_ids,
-    )
-    deleted_event_rows = await delete_cached_events(db, namespace=namespace, event_ids=removed_event_ids)
     deleted_edit_rows = await delete_event_edit_rows(
         db,
         namespace,
@@ -309,7 +358,6 @@ async def redact_event_locked(
         namespace,
         room_id,
         event_ids=removed_event_ids,
-        affected_thread_ids=affected_thread_ids,
     )
     await _record_redacted_events(
         db,
@@ -360,6 +408,65 @@ async def filter_cacheable_events(
     return filter_redacted_events(room_events, redacted_event_ids=redacted_event_ids)
 
 
+async def _thread_ids_for_events(
+    db: AsyncConnection,
+    namespace: str,
+    room_id: str,
+    *,
+    event_ids: list[str],
+) -> set[str]:
+    """Return thread IDs currently mapped from one event set."""
+    rows = await fetchall(
+        db,
+        """
+        SELECT DISTINCT thread_id
+        FROM mindroom_event_cache_event_threads
+        WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
+        """,
+        (namespace, room_id, event_ids),
+    )
+    return {str(row[0]) for row in rows}
+
+
+async def _reconcile_thread_root_self_rows(
+    db: AsyncConnection,
+    namespace: str,
+    room_id: str,
+    *,
+    candidate_root_ids: set[str],
+    current_self_root_ids: set[str],
+) -> None:
+    """Keep root self-mappings exactly while a current row still proves them."""
+    for root_id in candidate_root_ids:
+        surviving_child = await fetchone(
+            db,
+            """
+            SELECT 1
+            FROM mindroom_event_cache_event_threads
+            WHERE namespace = %s AND room_id = %s AND thread_id = %s AND event_id <> %s
+            LIMIT 1
+            """,
+            (namespace, room_id, root_id, root_id),
+        )
+        if surviving_child is not None or root_id in current_self_root_ids:
+            await db.execute(
+                """
+                INSERT INTO mindroom_event_cache_event_threads(namespace, room_id, event_id, thread_id)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT(namespace, room_id, event_id) DO NOTHING
+                """,
+                (namespace, room_id, root_id, root_id),
+            )
+            continue
+        await db.execute(
+            """
+            DELETE FROM mindroom_event_cache_event_threads
+            WHERE namespace = %s AND room_id = %s AND event_id = %s AND thread_id = %s
+            """,
+            (namespace, room_id, root_id, root_id),
+        )
+
+
 async def write_lookup_index_rows(
     db: AsyncConnection,
     *,
@@ -376,6 +483,8 @@ async def write_lookup_index_rows(
     Payload-derived indexes use only accepted payloads; explicit snapshots always record their
     authoritative event-to-thread membership.
     """
+    if not serialized_events:
+        return
     accepted_events: list[SerializedCachedEvent] = []
     for event in serialized_events:
         accepted_row = await fetchone(
@@ -383,8 +492,7 @@ async def write_lookup_index_rows(
             """
             INSERT INTO mindroom_event_cache_events(namespace, event_id, room_id, origin_server_ts, event_json, cached_at)
             VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT(namespace, event_id) DO UPDATE SET
-                room_id = excluded.room_id,
+            ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
                 origin_server_ts = excluded.origin_server_ts,
                 event_json = excluded.event_json,
                 cached_at = excluded.cached_at,
@@ -405,14 +513,48 @@ async def write_lookup_index_rows(
         if accepted_row is not None:
             accepted_events.append(event)
 
+    accepted_event_ids = [event.event_id for event in accepted_events]
+    previous_mxc_urls = await _mxc_urls_for_events(
+        db,
+        namespace,
+        room_id,
+        event_ids=accepted_event_ids,
+    )
+    await db.execute(
+        """
+        DELETE FROM mindroom_event_cache_event_mxc_references
+        WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
+        """,
+        (namespace, room_id, accepted_event_ids),
+    )
+    for event in accepted_events:
+        for mxc_url in event_mxc_urls(event.event):
+            await db.execute(
+                """
+                INSERT INTO mindroom_event_cache_event_mxc_references(
+                    namespace, room_id, event_id, mxc_url
+                )
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT(namespace, room_id, event_id, mxc_url) DO NOTHING
+                """,
+                (namespace, room_id, event.event_id, mxc_url),
+            )
+    await _delete_orphaned_mxc_text(db, namespace, room_id, mxc_urls=previous_mxc_urls)
+
+    await db.execute(
+        """
+        DELETE FROM mindroom_event_cache_event_edits
+        WHERE namespace = %s AND room_id = %s AND edit_event_id = ANY(%s)
+        """,
+        (namespace, room_id, accepted_event_ids),
+    )
     edit_rows = event_edit_rows(room_id, accepted_events)
     for row in edit_rows:
         await db.execute(
             """
             INSERT INTO mindroom_event_cache_event_edits(namespace, edit_event_id, room_id, original_event_id, origin_server_ts)
             VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT(namespace, edit_event_id) DO UPDATE SET
-                room_id = excluded.room_id,
+            ON CONFLICT(namespace, room_id, edit_event_id) DO UPDATE SET
                 original_event_id = excluded.original_event_id,
                 origin_server_ts = excluded.origin_server_ts
             """,
@@ -420,7 +562,21 @@ async def write_lookup_index_rows(
         )
 
     thread_index_events = serialized_events if thread_id is not None else accepted_events
+    thread_index_event_ids = [event.event_id for event in thread_index_events]
+    previous_thread_ids = await _thread_ids_for_events(
+        db,
+        namespace,
+        room_id,
+        event_ids=thread_index_event_ids,
+    )
     thread_rows = event_thread_rows(room_id, thread_index_events, thread_id=thread_id)
+    await db.execute(
+        """
+        DELETE FROM mindroom_event_cache_event_threads
+        WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
+        """,
+        (namespace, room_id, thread_index_event_ids),
+    )
     if thread_rows:
         for row in thread_rows:
             await db.execute(
@@ -432,6 +588,13 @@ async def write_lookup_index_rows(
                 """,
                 (namespace, row.room_id, row.event_id, row.thread_id),
             )
+    await _reconcile_thread_root_self_rows(
+        db,
+        namespace,
+        room_id,
+        candidate_root_ids=previous_thread_ids | {row.thread_id for row in thread_rows},
+        current_self_root_ids={row.thread_id for row in thread_rows if row.event_id == row.thread_id},
+    )
 
 
 async def _dependent_edit_event_ids(
@@ -458,19 +621,30 @@ async def delete_cached_events(
     db: AsyncConnection,
     *,
     namespace: str,
+    room_id: str,
     event_ids: list[str],
 ) -> int:
     """Delete point-lookup cache rows for the provided event IDs."""
     if not event_ids:
         return 0
-    return await rowcount(
+    mxc_urls = await _mxc_urls_for_events(db, namespace, room_id, event_ids=event_ids)
+    await db.execute(
+        """
+        DELETE FROM mindroom_event_cache_event_mxc_references
+        WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
+        """,
+        (namespace, room_id, event_ids),
+    )
+    deleted_rows = await rowcount(
         db,
         """
         DELETE FROM mindroom_event_cache_events
-        WHERE namespace = %s AND event_id = ANY(%s)
+        WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
         """,
-        (namespace, event_ids),
+        (namespace, room_id, event_ids),
     )
+    await _delete_orphaned_mxc_text(db, namespace, room_id, mxc_urls=mxc_urls)
+    return deleted_rows
 
 
 async def delete_event_thread_rows(
@@ -479,11 +653,16 @@ async def delete_event_thread_rows(
     room_id: str,
     *,
     event_ids: list[str],
-    affected_thread_ids: list[str],
 ) -> int:
     """Delete event mappings and unsupported roots whose proof was removed."""
     if not event_ids:
         return 0
+    affected_thread_ids = await _thread_ids_for_events(
+        db,
+        namespace,
+        room_id,
+        event_ids=event_ids,
+    )
     deleted_rows = await rowcount(
         db,
         """
@@ -492,41 +671,14 @@ async def delete_event_thread_rows(
         """,
         (namespace, room_id, event_ids),
     )
-    if not affected_thread_ids:
-        return deleted_rows
-    deleted_rows += await rowcount(
+    await _reconcile_thread_root_self_rows(
         db,
-        f"""
-        DELETE FROM mindroom_event_cache_event_threads AS event_threads
-        WHERE event_threads.namespace = %s
-            AND event_threads.room_id = %s
-            AND event_threads.event_id = ANY(%s)
-            AND event_threads.thread_id = event_threads.event_id
-            AND {_ORPHAN_THREAD_INDEX_PREDICATE}
-        """,  # noqa: S608
-        (namespace, room_id, list(set(affected_thread_ids))),
+        namespace,
+        room_id,
+        candidate_root_ids=affected_thread_ids,
+        current_self_root_ids=set(),
     )
     return deleted_rows
-
-
-async def _thread_ids_for_event_ids(
-    db: AsyncConnection,
-    *,
-    namespace: str,
-    room_id: str,
-    event_ids: list[str],
-) -> list[str]:
-    """Return roots whose supporting rows will be removed."""
-    rows = await fetchall(
-        db,
-        """
-        SELECT thread_id
-        FROM mindroom_event_cache_event_threads
-        WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
-        """,
-        (namespace, room_id, event_ids),
-    )
-    return [str(row[0]) for row in rows]
 
 
 async def orphan_thread_index_count(
@@ -596,26 +748,6 @@ async def delete_event_edit_rows(
     return deleted_rows
 
 
-async def _delete_room_thread_events(
-    db: AsyncConnection,
-    namespace: str,
-    room_id: str,
-    *,
-    event_ids: list[str],
-) -> int:
-    """Delete cached thread rows for the provided event IDs within one room."""
-    if not event_ids:
-        return 0
-    return await rowcount(
-        db,
-        """
-        DELETE FROM mindroom_event_cache_thread_events
-        WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
-        """,
-        (namespace, room_id, event_ids),
-    )
-
-
 async def _record_redacted_events(
     db: AsyncConnection,
     namespace: str,
@@ -655,3 +787,86 @@ async def _redacted_event_ids_for_candidates(
         (namespace, room_id, sorted(event_ids)),
     )
     return frozenset(str(row[0]) for row in rows)
+
+
+async def purge_room_locked(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+) -> None:
+    """Delete all cache rows in one departed principal namespace and room."""
+    for table_name in _ROOM_CONTENT_TABLES:
+        await db.execute(
+            f"DELETE FROM {table_name} WHERE namespace = %s AND room_id = %s",  # noqa: S608
+            (namespace, room_id),
+        )
+
+
+async def purge_principal_locked(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+) -> None:
+    """Delete principal content and invalidate every certified in-flight refill."""
+    for table_name in _ROOM_CONTENT_TABLES:
+        await db.execute(
+            f"DELETE FROM {table_name} WHERE namespace = %s",  # noqa: S608
+            (namespace,),
+        )
+    await db.execute(
+        """
+        UPDATE mindroom_event_cache_room_state
+        SET membership_epoch = membership_epoch + 1
+        WHERE namespace = %s
+        """,
+        (namespace,),
+    )
+
+
+async def _mxc_urls_for_events(
+    db: AsyncConnection,
+    namespace: str,
+    room_id: str,
+    *,
+    event_ids: list[str],
+) -> frozenset[str]:
+    """Return candidate plaintext keys referenced by a visible event set."""
+    rows = await fetchall(
+        db,
+        """
+        SELECT DISTINCT mxc_url
+        FROM mindroom_event_cache_event_mxc_references
+        WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
+        """,
+        (namespace, room_id, event_ids),
+    )
+    return frozenset(str(row[0]) for row in rows)
+
+
+async def _delete_orphaned_mxc_text(
+    db: AsyncConnection,
+    namespace: str,
+    room_id: str,
+    *,
+    mxc_urls: frozenset[str],
+) -> None:
+    """Delete plaintext candidates that no surviving visible event references."""
+    if not mxc_urls:
+        return
+    await db.execute(
+        """
+        DELETE FROM mindroom_event_cache_mxc_text AS plaintext
+        WHERE plaintext.namespace = %s
+          AND plaintext.room_id = %s
+          AND plaintext.mxc_url = ANY(%s)
+          AND NOT EXISTS (
+              SELECT 1
+              FROM mindroom_event_cache_event_mxc_references AS reference
+              WHERE reference.namespace = plaintext.namespace
+                AND reference.room_id = plaintext.room_id
+                AND reference.mxc_url = plaintext.mxc_url
+          )
+        """,
+        (namespace, room_id, sorted(mxc_urls)),
+    )
