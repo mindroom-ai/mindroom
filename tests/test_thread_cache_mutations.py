@@ -1518,6 +1518,48 @@ class TestMatrixConversationCacheThreadReads:
         assert fetch_args.kwargs["coordinator_queue_wait_ms"] >= 0.0
 
     @pytest.mark.asyncio
+    async def test_get_event_persists_inline_without_write_coordinator(self) -> None:
+        """Point lookup fills should persist inline when runtime support omitted the coordinator."""
+        room_id = "!room:localhost"
+        event_id = "$event:localhost"
+        event_source = {
+            "content": {"body": "message", "msgtype": "m.text"},
+            "event_id": event_id,
+            "origin_server_ts": 1,
+            "room_id": room_id,
+            "sender": "@user:localhost",
+            "type": "m.room.message",
+        }
+        response = _make_room_get_event_response(nio.RoomMessageText.from_dict(event_source))
+        event_cache = _runtime_event_cache()
+        config = _conversation_runtime_config()
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=BotRuntimeState(
+                client=_make_client_mock(),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                enable_streaming=True,
+                orchestrator=None,
+                event_cache=event_cache,
+                event_cache_write_coordinator=None,
+            ),
+        )
+
+        with patch(
+            "mindroom.matrix.conversation_cache._cached_room_get_event",
+            new=AsyncMock(return_value=(response, event_source)),
+        ):
+            assert await access.get_event(room_id, event_id) is response
+
+        event_cache.store_event.assert_awaited_once_with(
+            event_id,
+            room_id,
+            event_source,
+            expected_membership_epoch=0,
+        )
+
+    @pytest.mark.asyncio
     async def test_invalidate_known_thread_fails_closed_when_stale_marker_write_fails(self) -> None:
         """Thread invalidation must delete cached rows when the stale marker cannot be persisted."""
         event_cache = _runtime_event_cache()

@@ -541,7 +541,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 event_id=normalized_event_id,
                 fetched_event_source=fetched_event_source,
                 expected_membership_epoch=membership_epoch,
-                queue_write=not holds_room_barrier,
+                queue_write=coordinator is not None and not holds_room_barrier,
             )
         if turn_cache is not None:
             turn_cache[cache_key] = response
