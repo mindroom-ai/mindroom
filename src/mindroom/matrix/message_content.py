@@ -82,7 +82,7 @@ async def _register_sidecar_owner(
         return event_id
     if room_id is None or event_id is None:
         return None
-    if expected_membership_epoch == UNCERTIFIED_MEMBERSHIP_EPOCH:
+    if expected_membership_epoch is None or expected_membership_epoch == UNCERTIFIED_MEMBERSHIP_EPOCH:
         return event_id
     owned_event = dict(event_source)
     owned_event["event_id"] = event_id
@@ -173,7 +173,9 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
         The downloaded text content, or None if download failed
 
     """
-    cache_writes_certified = expected_membership_epoch != UNCERTIFIED_MEMBERSHIP_EPOCH
+    cache_writes_certified = (
+        expected_membership_epoch is not None and expected_membership_epoch != UNCERTIFIED_MEMBERSHIP_EPOCH
+    )
     if cache_writes_certified and event_cache is not None and room_id is not None and event_id is not None:
         try:
             cached_text = await event_cache.get_mxc_text(room_id, event_id, mxc_url)

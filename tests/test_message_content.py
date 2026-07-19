@@ -141,11 +141,20 @@ class TestResolvedMessageExtraction:
                 body=json.dumps(original_content).encode("utf-8"),
             ),
         )
+        event_cache = AsyncMock()
 
-        resolved = await extract_and_resolve_message(event, client)
+        resolved = await extract_and_resolve_message(
+            event,
+            client,
+            event_cache=event_cache,
+            room_id="!room:localhost",
+        )
 
         assert resolved["body"] == "Full response body"
         assert resolved["content"] == original_content
+        event_cache.store_event.assert_not_awaited()
+        event_cache.get_mxc_text.assert_not_awaited()
+        event_cache.store_mxc_text.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_extract_and_resolve_message_hydrates_v2_edit_wrapper(self) -> None:
@@ -892,7 +901,8 @@ class TestDownloadMxcText:
         )
 
     @pytest.mark.asyncio
-    async def test_uncertified_refill_bypasses_durable_plaintext_cache(self) -> None:
+    @pytest.mark.parametrize("membership_epoch", [None, UNCERTIFIED_MEMBERSHIP_EPOCH])
+    async def test_uncertified_refill_bypasses_durable_plaintext_cache(self, membership_epoch: int | None) -> None:
         """Missing durable membership proof must use fresh plaintext without caching it."""
         client = AsyncMock()
         response = MagicMock(spec=nio.DownloadResponse)
@@ -908,7 +918,7 @@ class TestDownloadMxcText:
                 event_cache=event_cache,
                 room_id="!room:localhost",
                 event_id="$event",
-                expected_membership_epoch=UNCERTIFIED_MEMBERSHIP_EPOCH,
+                expected_membership_epoch=membership_epoch,
             )
             == "fresh plaintext"
         )
@@ -942,6 +952,8 @@ class TestDownloadMxcText:
         await root.initialize()
         cache = root.for_principal(principal_id)
         await cache.store_event(event_id, room_id, event)
+        initial_membership_epoch = await cache.room_membership_epoch(room_id)
+        assert initial_membership_epoch is not None
         await cache.purge_room(room_id)
         client = AsyncMock()
         response = MagicMock(spec=nio.DownloadResponse)
@@ -955,6 +967,7 @@ class TestDownloadMxcText:
                     event_cache=cache,
                     room_id=room_id,
                     event_id=event_id,
+                    expected_membership_epoch=initial_membership_epoch,
                 )
                 is None
             )
@@ -965,6 +978,8 @@ class TestDownloadMxcText:
                 expected_departure_epoch=cache.room_departure_epoch(room_id),
             )
             await cache.store_event(event_id, room_id, event)
+            rejoined_membership_epoch = await cache.room_membership_epoch(room_id)
+            assert rejoined_membership_epoch is not None
 
             assert (
                 await _download_mxc_text(
@@ -973,6 +988,7 @@ class TestDownloadMxcText:
                     event_cache=cache,
                     room_id=room_id,
                     event_id=event_id,
+                    expected_membership_epoch=rejoined_membership_epoch,
                 )
                 == "departed plaintext"
             )
