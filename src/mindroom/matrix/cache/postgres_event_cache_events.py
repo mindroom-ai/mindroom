@@ -332,12 +332,6 @@ async def redact_event_locked(
         original_event_id=event_id,
     )
     removed_event_ids = redaction_removal_event_ids(event_id, dependent_edit_ids)
-    affected_thread_ids = await _thread_ids_for_event_ids(
-        db,
-        namespace=namespace,
-        room_id=room_id,
-        event_ids=removed_event_ids,
-    )
     deleted_thread_rows = await rowcount(
         db,
         """
@@ -364,7 +358,6 @@ async def redact_event_locked(
         namespace,
         room_id,
         event_ids=removed_event_ids,
-        affected_thread_ids=affected_thread_ids,
     )
     await _record_redacted_events(
         db,
@@ -645,11 +638,16 @@ async def delete_event_thread_rows(
     room_id: str,
     *,
     event_ids: list[str],
-    affected_thread_ids: list[str],
 ) -> int:
     """Delete event mappings and unsupported roots whose proof was removed."""
     if not event_ids:
         return 0
+    affected_thread_ids = await _thread_ids_for_events(
+        db,
+        namespace,
+        room_id,
+        event_ids=event_ids,
+    )
     deleted_rows = await rowcount(
         db,
         """
@@ -658,41 +656,14 @@ async def delete_event_thread_rows(
         """,
         (namespace, room_id, event_ids),
     )
-    if not affected_thread_ids:
-        return deleted_rows
-    deleted_rows += await rowcount(
+    await _reconcile_thread_root_self_rows(
         db,
-        f"""
-        DELETE FROM mindroom_event_cache_event_threads AS event_threads
-        WHERE event_threads.namespace = %s
-            AND event_threads.room_id = %s
-            AND event_threads.event_id = ANY(%s)
-            AND event_threads.thread_id = event_threads.event_id
-            AND {_ORPHAN_THREAD_INDEX_PREDICATE}
-        """,  # noqa: S608
-        (namespace, room_id, sorted(set(affected_thread_ids))),
+        namespace,
+        room_id,
+        candidate_root_ids=affected_thread_ids,
+        current_self_root_ids=set(),
     )
     return deleted_rows
-
-
-async def _thread_ids_for_event_ids(
-    db: AsyncConnection,
-    *,
-    namespace: str,
-    room_id: str,
-    event_ids: list[str],
-) -> list[str]:
-    """Return roots whose supporting rows will be removed."""
-    rows = await fetchall(
-        db,
-        """
-        SELECT thread_id
-        FROM mindroom_event_cache_event_threads
-        WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
-        """,
-        (namespace, room_id, event_ids),
-    )
-    return [str(row[0]) for row in rows]
 
 
 async def orphan_thread_index_count(

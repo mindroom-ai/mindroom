@@ -230,6 +230,8 @@ async def test_last_child_deletion_removes_unproven_thread_root_mapping_immediat
         await event_cache.store_event(str(child["event_id"]), room_id, child)
     else:
         await replace_thread_unconditionally(event_cache, room_id, thread_id, [child])
+    root = _message_event(thread_id, 1)
+    await event_cache.store_event(thread_id, room_id, root)
     assert await event_cache.get_thread_id_for_event(room_id, thread_id) == thread_id
 
     if deletion == "redaction":
@@ -240,6 +242,7 @@ async def test_last_child_deletion_removes_unproven_thread_root_mapping_immediat
         await event_cache.invalidate_thread(room_id, thread_id)
 
     assert await event_cache.get_thread_id_for_event(room_id, thread_id) is None
+    assert await event_cache.get_event(room_id, thread_id) == root
 
 
 @pytest.mark.asyncio
