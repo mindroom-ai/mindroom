@@ -522,7 +522,7 @@ async def test_postgres_reconnect_rejects_changed_certification_generation(
         await db.close()
 
         assert await cache.get_event(_ROOM_ID, _MISSING_ID) is None
-        assert cache.cache_generation == expected_generation
+        assert cache.cache_generation is None
         assert cache.durable_writes_available is False
         diagnostics = cache.runtime_diagnostics()
         assert diagnostics["cache_postgres_disabled_reason"] == "certification_generation_changed"
