@@ -125,7 +125,7 @@ A reconstructed thread containing opaque encrypted evidence cannot replace the p
 
 A second unchanged read is served from cache and performs no homeserver scan.
 
-The advisory read path may use a labelled stale-cache fallback when a required refill fails.
+The advisory read path may use a labeled stale-cache fallback when a required refill fails.
 
 Dispatch reads reject stale fallback and propagate the refill failure.
 
