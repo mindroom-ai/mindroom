@@ -170,17 +170,6 @@ class ThreadRoomScanRootNotFoundError(RuntimeError):
     """Raised when a room scan finishes without ever seeing the requested root event."""
 
 
-def _next_related_event_target(
-    event_info: EventInfo,
-    *,
-    current_event_id: str,
-) -> str | None:
-    """Return the next related event to inspect."""
-    if event_info.next_related_event_id("") == current_event_id:
-        return current_event_id
-    return event_info.next_related_event_id(current_event_id)
-
-
 @dataclass(frozen=True)
 class ThreadMembershipAccess:
     """Repository-wide accessors used to resolve one event's thread membership."""
@@ -307,10 +296,7 @@ async def resolve_related_event_thread_membership(
             resolution = ThreadResolution.threaded(thread_id)
             break
 
-        next_target = _next_related_event_target(
-            related_event_info,
-            current_event_id=current_event_id,
-        )
+        next_target = related_event_info.next_related_event_id("")
         if next_target is not None:
             current_event_id = next_target
             continue
