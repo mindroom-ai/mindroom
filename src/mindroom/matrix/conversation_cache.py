@@ -529,6 +529,11 @@ class MatrixConversationCache(ConversationCacheProtocol):
             normalized_event_id,
             self._write_cache_ops.room_departure_epoch(room_id),
         )
+        coordinator = self.runtime.event_cache_write_coordinator
+        holds_room_barrier = coordinator is not None and coordinator.current_task_holds_room_barrier(room_id)
+        if coordinator is not None and not holds_room_barrier:
+            await coordinator.wait_for_prior_room_updates(room_id)
+
         turn_cache = self._turn_event_cache.get()
         if turn_cache is not None and cache_key in turn_cache:
             cached_lookup = turn_cache[cache_key]
@@ -567,7 +572,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 event_id=normalized_event_id,
                 fetched_event_source=fetched_event_source,
                 expected_membership_epoch=membership_epoch,
-                queue_write=True,
+                queue_write=not holds_room_barrier,
             )
         if turn_cache is not None:
             turn_cache[cache_key] = _TurnEventLookup(
@@ -632,8 +637,16 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         event_id: str,
     ) -> EventInfo | None:
-        """Resolve one related event through the shared conversation-cache lookup path."""
-        response = await self.get_event(room_id, event_id, persist_lookup_fill=False)
+        """Resolve one related event without memoizing pre-mutation state in the active turn."""
+        membership_epoch = await self._capture_membership_epoch(room_id)
+        response, _fetched_event_source = await _cached_room_get_event(
+            self._require_client(),
+            self.runtime.event_cache,
+            room_id,
+            event_id,
+            expected_membership_epoch=membership_epoch,
+            trusted_sender_ids=self._trusted_sender_ids(),
+        )
         if not isinstance(response, nio.RoomGetEventResponse):
             return None
         return EventInfo.from_event(response.event.source)
@@ -963,7 +976,12 @@ class MatrixConversationCache(ConversationCacheProtocol):
         event_id: str | None,
         content: dict[str, Any],
     ) -> None:
-        """Schedule one locally sent threaded message or edit for advisory cache bookkeeping."""
+        """Schedule one locally sent message or edit for advisory cache bookkeeping."""
+        self._evict_turn_event_lookups_for_outbound_event(
+            room_id,
+            event_id=event_id,
+            event_info=EventInfo.from_event({"type": "m.room.message", "content": content}),
+        )
         self._outbound.notify_outbound_message(room_id, event_id, content)
 
     def notify_outbound_event(
@@ -972,11 +990,49 @@ class MatrixConversationCache(ConversationCacheProtocol):
         event_source: dict[str, Any],
     ) -> None:
         """Schedule one locally sent outbound event for advisory cache bookkeeping."""
+        event_id = event_source.get("event_id")
+        self._evict_turn_event_lookups_for_outbound_event(
+            room_id,
+            event_id=event_id if isinstance(event_id, str) else None,
+            event_info=EventInfo.from_event(event_source),
+        )
         self._outbound.notify_outbound_event(room_id, event_source)
 
     def notify_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
-        """Schedule one locally redacted threaded message for advisory cache bookkeeping."""
+        """Schedule one locally redacted message for advisory cache bookkeeping."""
+        self._evict_turn_event_lookups_for_room(room_id)
         self._outbound.notify_outbound_redaction(room_id, redacted_event_id)
+
+    def _evict_turn_event_lookup(self, room_id: str, event_id: str) -> None:
+        """Discard point-read memoization invalidated by one successful outbound mutation."""
+        turn_cache = self._turn_event_cache.get()
+        if turn_cache is None:
+            return
+        normalized_event_id = event_id.strip()
+        for cache_key in tuple(turn_cache):
+            if cache_key[:2] == (room_id, normalized_event_id):
+                turn_cache.pop(cache_key)
+
+    def _evict_turn_event_lookups_for_room(self, room_id: str) -> None:
+        """Discard point reads that one outbound redaction could change indirectly."""
+        turn_cache = self._turn_event_cache.get()
+        if turn_cache is None:
+            return
+        for cache_key in tuple(turn_cache):
+            if cache_key[0] == room_id:
+                turn_cache.pop(cache_key)
+
+    def _evict_turn_event_lookups_for_outbound_event(
+        self,
+        room_id: str,
+        *,
+        event_id: str | None,
+        event_info: EventInfo,
+    ) -> None:
+        """Discard point reads changed by one outbound event or edit."""
+        for changed_event_id in (event_id, event_info.original_event_id):
+            if isinstance(changed_event_id, str):
+                self._evict_turn_event_lookup(room_id, changed_event_id)
 
     async def append_live_event(
         self,
