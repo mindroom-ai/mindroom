@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from nio import crypto
 
 import mindroom.matrix.message_content as message_content_module
 from mindroom.config.agent import AgentConfig
@@ -809,6 +810,18 @@ class TestDownloadMxcText:
             == "Downloaded text content"
         )
         assert client.download.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_successful_encrypted_download(self) -> None:
+        """Encrypted sidecars should use the JWK key value emitted by nio."""
+        plaintext = b"Downloaded encrypted text content"
+        encrypted, file_info = crypto.attachments.encrypt_attachment(plaintext)
+        client = AsyncMock()
+        response = MagicMock(spec=nio.DownloadResponse)
+        response.body = encrypted
+        client.download.return_value = response
+
+        assert await _download_mxc_text(client, "mxc://server/encrypted", file_info) == plaintext.decode()
 
     @pytest.mark.asyncio
     async def test_hydration_without_durable_cache_does_not_reuse_plaintext(self) -> None:

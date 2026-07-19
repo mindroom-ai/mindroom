@@ -222,7 +222,7 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
             try:
                 decrypted = crypto.attachments.decrypt_attachment(
                     response.body,
-                    file_info["key"],
+                    file_info["key"]["k"],
                     file_info["hashes"]["sha256"],
                     file_info["iv"],
                 )
