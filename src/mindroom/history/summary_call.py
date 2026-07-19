@@ -49,7 +49,7 @@ from agno.session.summary import SessionSummary
 from mindroom.cancellation import request_task_cancel
 from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
-from mindroom.error_handling import TRANSIENT_PROVIDER_STATUS_CODES, ModelSafeguardRefusalError
+from mindroom.error_handling import TRANSIENT_PROVIDER_STATUS_CODES, is_model_safeguard_refusal
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 
@@ -112,7 +112,7 @@ class SummaryRetryPolicy:
 
     def should_shrink(self, error: Exception) -> bool:
         """Return whether a smaller summary input may resolve this provider failure."""
-        if isinstance(error, ModelSafeguardRefusalError):
+        if is_model_safeguard_refusal(error):
             return False
         if isinstance(error, _TYPED_SHRINKABLE_ERRORS):
             return True
@@ -124,7 +124,7 @@ class SummaryRetryPolicy:
     def should_retry_same_input(self, error: Exception) -> bool:
         """Return whether a transient provider failure warrants one unchanged retry."""
         return (
-            not isinstance(error, ModelSafeguardRefusalError)
+            not is_model_safeguard_refusal(error)
             and isinstance(error, ModelProviderError)
             and error.status_code in TRANSIENT_PROVIDER_STATUS_CODES
         )

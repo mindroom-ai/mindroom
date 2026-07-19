@@ -638,12 +638,20 @@ def test_retry_policy_halves_budget_for_typed_context_window_error() -> None:
     assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) == 8_000
 
 
-def test_retry_policy_never_retries_typed_safeguard_refusal() -> None:
-    error = ModelSafeguardRefusalError(
-        message="input too long; provider-specific wording does not matter",
-        status_code=503,
-    )
-
+@pytest.mark.parametrize(
+    "error",
+    [
+        ModelSafeguardRefusalError(
+            message="input too long; provider-specific wording does not matter",
+            status_code=503,
+        ),
+        ModelProviderError(
+            message="Vertex Claude returned stop_reason=refusal",
+            status_code=503,
+        ),
+    ],
+)
+def test_retry_policy_never_retries_safeguard_refusal(error: ModelProviderError) -> None:
     assert DEFAULT_SUMMARY_RETRY_POLICY.should_shrink(error) is False
     assert DEFAULT_SUMMARY_RETRY_POLICY.should_retry_same_input(error) is False
     assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) is None
