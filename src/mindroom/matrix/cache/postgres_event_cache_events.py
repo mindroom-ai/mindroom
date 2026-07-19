@@ -214,13 +214,6 @@ async def persist_mxc_text(
           AND events.room_id = %s
           AND events.event_id = %s
           AND reference.mxc_url = %s
-          AND NOT EXISTS (
-              SELECT 1
-              FROM mindroom_event_cache_redacted_events AS redacted
-              WHERE redacted.namespace = events.namespace
-                AND redacted.room_id = events.room_id
-                AND redacted.event_id = events.event_id
-          )
         """,
         (namespace, room_id, event_id, mxc_url),
     )

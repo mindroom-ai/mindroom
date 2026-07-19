@@ -5,16 +5,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
-from collections import OrderedDict
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
 from uuid import uuid4
 
 import psycopg
 
 from mindroom.logging_config import get_logger
-from mindroom.timing import milliseconds
 
 from . import postgres_event_cache_events, postgres_event_cache_threads
 from .event_batching import group_lookup_events_by_room
@@ -36,8 +34,6 @@ if TYPE_CHECKING:
 _POSTGRES_EVENT_CACHE_SCHEMA_VERSION = 2
 _DEFAULT_PRINCIPAL_ID = "__mindroom_default_principal__"
 _POSTGRES_SCHEMA_LOCK_NAME = "mindroom_event_cache_schema"
-_LOCK_WAIT_LOG_THRESHOLD_SECONDS = 0.1
-_MAX_CACHED_ROOM_LOCKS = 256
 _MAX_TRANSIENT_OPERATION_ATTEMPTS = 2
 _PRINCIPAL_PURGE_LOCK_SCOPE = "__mindroom_principal_purge__"
 _PRINCIPAL_NAMESPACE_LOCK_SCOPE = "__mindroom_principal_namespace__"
@@ -103,18 +99,6 @@ def _cache_backend_unavailable(operation: str, exc: BaseException) -> EventCache
     return EventCacheBackendUnavailableError(f"Postgres event cache unavailable during {operation}: {detail}")
 
 
-def _require_compatible_postgres_schema_version(current_schema_version: int | None) -> None:
-    """Reject an initialized cache schema from an unsupported future version."""
-    if current_schema_version in (None, _POSTGRES_EVENT_CACHE_SCHEMA_VERSION):
-        return
-    msg = (
-        "PostgreSQL Matrix event cache schema version "
-        f"{current_schema_version} is not compatible with expected version "
-        f"{_POSTGRES_EVENT_CACHE_SCHEMA_VERSION}"
-    )
-    raise RuntimeError(msg)
-
-
 async def _rollback_postgres_connection_best_effort(
     db: psycopg.AsyncConnection,
     *,
@@ -176,10 +160,22 @@ async def _initialize_postgres_event_cache_db(
         current_schema_version = await _postgres_schema_version(db)
         if current_schema_version == 1:
             await _migrate_postgres_event_cache_v1_to_v2(db)
-        else:
-            _require_compatible_postgres_schema_version(current_schema_version)
+        elif current_schema_version not in (None, _POSTGRES_EVENT_CACHE_SCHEMA_VERSION):
+            msg = (
+                "PostgreSQL Matrix event cache schema version "
+                f"{current_schema_version} is not compatible with expected version "
+                f"{_POSTGRES_EVENT_CACHE_SCHEMA_VERSION}"
+            )
+            raise RuntimeError(msg)  # noqa: TRY301
         await _create_postgres_event_cache_schema(db)
-        await _validate_postgres_event_cache_schema(db)
+        if current_schema_version is None:
+            await db.execute(
+                """
+                INSERT INTO mindroom_event_cache_metadata(key, value)
+                VALUES ('schema_version', %s)
+                """,
+                (str(_POSTGRES_EVENT_CACHE_SCHEMA_VERSION),),
+            )
         cache_generation = await _postgres_cache_generation(db, namespace=namespace)
         await db.commit()
     except BaseException:
@@ -428,40 +424,6 @@ async def _postgres_cache_generation(db: AsyncConnection, *, namespace: str) -> 
     return str(row[0])
 
 
-async def _validate_postgres_event_cache_schema(db: AsyncConnection) -> None:
-    """Store or validate the PostgreSQL cache schema version."""
-    current_schema_version = await _postgres_schema_version(db)
-    if current_schema_version is None:
-        await db.execute(
-            """
-            INSERT INTO mindroom_event_cache_metadata(key, value)
-            VALUES ('schema_version', %s)
-            ON CONFLICT(key) DO NOTHING
-            """,
-            (str(_POSTGRES_EVENT_CACHE_SCHEMA_VERSION),),
-        )
-        current_schema_version = await _postgres_schema_version(db)
-        if current_schema_version is None:
-            msg = "PostgreSQL Matrix event cache schema version was not initialized"
-            raise RuntimeError(msg)
-    if current_schema_version == _POSTGRES_EVENT_CACHE_SCHEMA_VERSION:
-        return
-    msg = (
-        "PostgreSQL Matrix event cache schema version "
-        f"{current_schema_version} is not compatible with expected version "
-        f"{_POSTGRES_EVENT_CACHE_SCHEMA_VERSION}"
-    )
-    raise RuntimeError(msg)
-
-
-@dataclass
-class _RoomLockEntry:
-    """Track one room lock plus queued users that still rely on it."""
-
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    active_users: int = 0
-
-
 @dataclass(frozen=True)
 class _PendingInvalidation:
     """Stale marker that must be persisted before cache rows can be trusted again."""
@@ -479,10 +441,6 @@ class _FlushedPendingWrites:
     invalidations: tuple[tuple[str, str | None, _PendingInvalidation], ...] = ()
 
 
-class _PrincipalPurgeLockRestartError(RuntimeError):
-    """Signal that an operation must restart before taking an exclusive namespace lock."""
-
-
 class _PostgresEventCacheRuntime:
     """Own runtime-only lifecycle, locking, and disable state for one cache instance."""
 
@@ -498,7 +456,6 @@ class _PostgresEventCacheRuntime:
         self._reconnect_after_transient = False
         self._explicitly_closed = False
         self._db_lock = asyncio.Lock()
-        self._room_locks: OrderedDict[str, _RoomLockEntry] = OrderedDict()
         self._pending_thread_invalidations: dict[tuple[str, str], _PendingInvalidation] = {}
         self._pending_room_invalidations: dict[str, _PendingInvalidation] = {}
         self._pending_room_purges: set[str] = set()
@@ -613,7 +570,6 @@ class _PostgresEventCacheRuntime:
             self._reconnect_after_transient = False
             await self._close_db_locked(operation="close")
             self._generation = None
-            self._room_locks.clear()
 
     async def handle_transient_failure(self, exc: BaseException, *, operation: str) -> None:
         """Drop a dead connection and leave the runtime eligible for later reconnect."""
@@ -773,84 +729,26 @@ class _PostgresEventCacheRuntime:
             return type(exc).__name__
         return f"{type(exc).__name__}: {message[:200]}"
 
-    def room_lock_entry(self, room_id: str, *, active_user_increment: int = 0) -> _RoomLockEntry:
-        """Return the cached room lock entry, creating it on demand."""
-        entry = self._room_locks.get(room_id)
-        if entry is None:
-            entry = _RoomLockEntry(active_users=active_user_increment)
-        else:
-            entry.active_users += active_user_increment
-        self._room_locks[room_id] = entry
-        self._room_locks.move_to_end(room_id)
-        self._prune_room_locks()
-        return entry
-
-    @asynccontextmanager
-    async def acquire_room_lock(self, room_id: str, *, operation: str) -> AsyncIterator[None]:
-        """Serialize runtime-visible work for one room."""
-        entry = self.room_lock_entry(room_id, active_user_increment=1)
-        wait_started = time.perf_counter()
-        acquired = False
-        try:
-            await entry.lock.acquire()
-            acquired = True
-            wait_time = time.perf_counter() - wait_started
-            if wait_time > _LOCK_WAIT_LOG_THRESHOLD_SECONDS:
-                logger.debug(
-                    "Waited for PostgresEventCache room lock",
-                    room_id=room_id,
-                    namespace=self._namespace,
-                    operation=operation,
-                    wait_time_ms=milliseconds(wait_time, ndigits=2),
-                )
-            yield
-        finally:
-            if acquired:
-                entry.lock.release()
-            entry.active_users -= 1
-            if entry.active_users == 0:
-                self._prune_room_locks()
-
     @asynccontextmanager
     async def acquire_db_operation(
         self,
-        room_id: str,
         *,
         operation: str,
-        ensure_namespace_exclusive: bool = False,
     ) -> AsyncIterator[psycopg.AsyncConnection]:
-        """Serialize one DB operation with lifecycle changes and room ordering."""
+        """Serialize one transaction locally and across this principal namespace."""
         if self._db is None or self.connection_is_closed(self._db):
             await self.initialize()
-        async with self._db_lock, self.acquire_room_lock(room_id, operation=operation):
+        async with self._db_lock:
             db = self.require_db()
             try:
-                if (
-                    ensure_namespace_exclusive
-                    or room_id == _PRINCIPAL_PURGE_LOCK_SCOPE
-                    or self._pending_principal_purge
-                ):
-                    await self.acquire_namespace_exclusive_lock(db)
-                else:
-                    await db.execute(
-                        "SELECT pg_advisory_xact_lock_shared(hashtext(%s), hashtext(%s))",
-                        (self._namespace, _PRINCIPAL_NAMESPACE_LOCK_SCOPE),
-                    )
-                    await db.execute(
-                        "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
-                        (self._namespace, room_id),
-                    )
+                await db.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
+                    (self._namespace, _PRINCIPAL_NAMESPACE_LOCK_SCOPE),
+                )
             except BaseException:
                 await _rollback_postgres_connection_best_effort(db, namespace=self._namespace, operation=operation)
                 raise
             yield db
-
-    async def acquire_namespace_exclusive_lock(self, db: psycopg.AsyncConnection) -> None:
-        """Exclude every operation in this principal namespace for the current transaction."""
-        await db.execute(
-            "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
-            (self._namespace, _PRINCIPAL_NAMESPACE_LOCK_SCOPE),
-        )
 
     def require_db(self) -> psycopg.AsyncConnection:
         """Return the active PostgreSQL connection or raise if uninitialized."""
@@ -858,18 +756,6 @@ class _PostgresEventCacheRuntime:
             msg = "PostgresEventCache has not been initialized"
             raise RuntimeError(msg)
         return self._db
-
-    def _prune_room_locks(self) -> None:
-        while len(self._room_locks) > _MAX_CACHED_ROOM_LOCKS:
-            evicted_room_id: str | None = None
-            for cached_room_id, cached_entry in self._room_locks.items():
-                if cached_entry.active_users > 0:
-                    continue
-                evicted_room_id = cached_room_id
-                break
-            if evicted_room_id is None:
-                return
-            self._room_locks.pop(evicted_room_id, None)
 
 
 class _PostgresRuntimeRegistry:
@@ -1058,9 +944,7 @@ class PostgresEventCache:
             return disabled_result
         transient_error: BaseException | None = None
         transient_attempt = 0
-        ensure_namespace_exclusive = room_id == _PRINCIPAL_PURGE_LOCK_SCOPE
         while transient_attempt < _MAX_TRANSIENT_OPERATION_ATTEMPTS:
-            ensure_namespace_exclusive = ensure_namespace_exclusive or self._runtime.has_pending_principal_purge
             flushed_pending = _FlushedPendingWrites()
             try:
                 result, flushed_pending = await self._run_operation_attempt(
@@ -1069,11 +953,7 @@ class PostgresEventCache:
                     disabled_result=disabled_result,
                     callback=callback,
                     allow_departed=allow_departed,
-                    ensure_namespace_exclusive=ensure_namespace_exclusive,
                 )
-            except _PrincipalPurgeLockRestartError:
-                ensure_namespace_exclusive = True
-                continue
             except EventCacheBackendUnavailableError as exc:
                 transient_error = exc
                 transient_attempt += 1
@@ -1091,11 +971,10 @@ class PostgresEventCache:
                 raise _cache_backend_unavailable(operation, exc) from exc
             else:
                 self._forget_flushed_pending_writes(room_id, flushed_pending)
-                return self._authorized_operation_result(
-                    room_id,
-                    result=result,
-                    disabled_result=disabled_result,
-                    allow_departed=allow_departed,
+                return (
+                    result
+                    if self._can_expose_operation_result(room_id, allow_departed=allow_departed)
+                    else disabled_result
                 )
         raise _cache_backend_unavailable(operation, transient_error or RuntimeError("operation did not run"))
 
@@ -1107,13 +986,10 @@ class PostgresEventCache:
         disabled_result: _T,
         callback: Callable[[psycopg.AsyncConnection], Awaitable[_T]],
         allow_departed: bool,
-        ensure_namespace_exclusive: bool,
     ) -> tuple[_T, _FlushedPendingWrites]:
-        """Run one transaction attempt with the requested namespace lock strength."""
+        """Run one transaction attempt under the principal namespace lock."""
         async with self._runtime.acquire_db_operation(
-            room_id,
             operation=operation,
-            ensure_namespace_exclusive=ensure_namespace_exclusive,
         ) as db:
             try:
                 return await self._run_operation_transaction(
@@ -1122,7 +998,6 @@ class PostgresEventCache:
                     disabled_result=disabled_result,
                     callback=callback,
                     allow_departed=allow_departed,
-                    namespace_exclusive=ensure_namespace_exclusive,
                 )
             except BaseException:
                 await _rollback_postgres_connection_best_effort(
@@ -1136,19 +1011,6 @@ class PostgresEventCache:
         """Return whether current runtime state still authorizes one operation result."""
         return not self._runtime.is_disabled and (allow_departed or not self._runtime.is_room_departed(room_id))
 
-    def _authorized_operation_result(
-        self,
-        room_id: str,
-        *,
-        result: _T,
-        disabled_result: _T,
-        allow_departed: bool,
-    ) -> _T:
-        """Discard a completed result when a concurrent fence now denies it."""
-        if self._can_expose_operation_result(room_id, allow_departed=allow_departed):
-            return result
-        return disabled_result
-
     async def _run_operation_transaction(
         self,
         db: psycopg.AsyncConnection,
@@ -1157,17 +1019,12 @@ class PostgresEventCache:
         disabled_result: _T,
         callback: Callable[[psycopg.AsyncConnection], Awaitable[_T]],
         allow_departed: bool,
-        namespace_exclusive: bool,
     ) -> tuple[_T, _FlushedPendingWrites]:
         """Commit one callback unless the transaction first removed its security scope."""
         if self._runtime.is_disabled or (not allow_departed and self._runtime.is_room_departed(room_id)):
             await db.commit()
             return disabled_result, _FlushedPendingWrites()
-        flushed_pending = await self._flush_pending_writes(
-            db,
-            room_id,
-            namespace_exclusive=namespace_exclusive,
-        )
+        flushed_pending = await self._flush_pending_writes(db, room_id)
         if flushed_pending.room_purge or flushed_pending.principal_purge:
             result = disabled_result
         else:
@@ -1179,12 +1036,8 @@ class PostgresEventCache:
         self,
         db: psycopg.AsyncConnection,
         room_id: str,
-        *,
-        namespace_exclusive: bool,
     ) -> _FlushedPendingWrites:
         if self._runtime.has_pending_principal_purge:
-            if not namespace_exclusive:
-                raise _PrincipalPurgeLockRestartError
             await postgres_event_cache_events.purge_principal_locked(
                 db,
                 namespace=self._runtime.namespace,

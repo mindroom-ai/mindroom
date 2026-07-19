@@ -1181,7 +1181,7 @@ def _excluded_sync_response(excluded_events: dict[str, nio.Event]) -> _SyncEnvel
 async def test_sync_categories_outside_joined_timeline_are_deliberately_excluded(
     event_cache: ConversationEventCache,
 ) -> None:
-    """Excluded sync families are not ingested, while leave membership still purges its room."""
+    """Timeline caching excludes sync families owned by other lifecycle collaborators."""
     await _seed_thread(event_cache)
     leave_room_id = "!leave:localhost"
     departed_room_event = _event_source(
@@ -1262,8 +1262,8 @@ async def test_sync_categories_outside_joined_timeline_are_deliberately_excluded
     assert await event_cache.get_latest_edit(leave_room_id, "$leave-original") is None
     assert await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID) == before_events
     assert await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID) == before_state
-    assert event_cache.room_departure_epoch(leave_room_id) > 0
-    assert await event_cache.get_event(leave_room_id, "$departed-room-event") is None
+    assert event_cache.room_departure_epoch(leave_room_id) == 0
+    assert await event_cache.get_event(leave_room_id, "$departed-room-event") == departed_room_event
 
 
 @pytest.mark.asyncio

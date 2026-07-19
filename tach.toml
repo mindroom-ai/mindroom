@@ -1787,7 +1787,6 @@ depends_on = []
 path = "mindroom.matrix.cache.thread_write_cache_ops"
 depends_on = [
     "mindroom.matrix.cache.event_cache",
-    "mindroom.matrix.mxc_plaintext_cache",
     "mindroom.matrix.thread_bookkeeping",
 ]
 
@@ -2189,14 +2188,9 @@ visibility = [
 [[modules]]
 path = "mindroom.matrix.message_content"
 depends_on = [
-    "mindroom.matrix.mxc_plaintext_cache",
     "mindroom.matrix.sidecar_content",
     "mindroom.matrix.visible_body",
 ]
-
-[[modules]]
-path = "mindroom.matrix.mxc_plaintext_cache"
-depends_on = ["mindroom.logging_config"]
 
 [[modules]]
 path = "mindroom.matrix.sidecar_content"
@@ -3619,24 +3613,6 @@ exclusive = true
 expose = ["ThreadMutationCacheOps"]
 from = ["mindroom.matrix.cache.thread_write_cache_ops"]
 visibility = ["mindroom.matrix.conversation_cache"]
-exclusive = true
-
-[[interfaces]]
-expose = [
-    "MXC_CACHE_TTL_SECONDS",
-    "MXC_TEXT_MAX_BYTES",
-    "MxcPlaintextCacheKey",
-    "cache_mxc_plaintext",
-    "get_cached_mxc_plaintext",
-    "purge_principal_room_mxc_plaintext",
-    "remove_cached_mxc_plaintext",
-    "touch_cached_mxc_plaintext",
-]
-from = ["mindroom.matrix.mxc_plaintext_cache"]
-visibility = [
-    "mindroom.matrix.cache.thread_write_cache_ops",
-    "mindroom.matrix.message_content",
-]
 exclusive = true
 
 [[interfaces]]

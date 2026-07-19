@@ -87,11 +87,7 @@ async def _raw_mxc_text_count(
 ) -> int:
     """Count physical plaintext rows without relying on ownership-filtered public reads."""
     if isinstance(cache, SqliteEventCache):
-        async with cache._runtime.acquire_db_operation(
-            cache.principal_id,
-            room_id,
-            operation="test_raw_mxc_text_count",
-        ) as db:
+        async with cache._runtime.acquire_db_operation() as db:
             cursor = await db.execute(
                 """
                 SELECT COUNT(*)
@@ -104,7 +100,7 @@ async def _raw_mxc_text_count(
             await cursor.close()
     else:
         assert isinstance(cache, PostgresEventCache)
-        async with cache._runtime.acquire_db_operation(room_id, operation="test_raw_mxc_text_count") as db:
+        async with cache._runtime.acquire_db_operation(operation="test_raw_mxc_text_count") as db:
             cursor = await db.execute(
                 """
                 SELECT COUNT(*)
@@ -980,17 +976,11 @@ async def test_postgres_principal_purge_excludes_other_runtime_operations(
 
     @asynccontextmanager
     async def signal_store_lock_attempt(
-        acquired_room_id: str,
         *,
         operation: str,
-        ensure_namespace_exclusive: bool = False,
     ) -> AsyncIterator[Any]:
         store_lock_attempted.set()
-        async with original_acquire(
-            acquired_room_id,
-            operation=operation,
-            ensure_namespace_exclusive=ensure_namespace_exclusive,
-        ) as db:
+        async with original_acquire(operation=operation) as db:
             yield db
 
     await first.initialize()
@@ -1021,7 +1011,7 @@ async def test_postgres_principal_purge_excludes_other_runtime_operations(
 
 
 @pytest.mark.asyncio
-async def test_postgres_resumed_principal_purge_upgrades_to_exclusive_namespace_lock(
+async def test_postgres_resumed_principal_purge_uses_namespace_lock(
     postgres_event_cache_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1050,17 +1040,11 @@ async def test_postgres_resumed_principal_purge_upgrades_to_exclusive_namespace_
 
     @asynccontextmanager
     async def signal_store_lock_attempt(
-        acquired_room_id: str,
         *,
         operation: str,
-        ensure_namespace_exclusive: bool = False,
     ) -> AsyncIterator[Any]:
         store_lock_attempted.set()
-        async with original_acquire(
-            acquired_room_id,
-            operation=operation,
-            ensure_namespace_exclusive=ensure_namespace_exclusive,
-        ) as db:
+        async with original_acquire(operation=operation) as db:
             yield db
 
     await first.initialize()
@@ -1085,75 +1069,6 @@ async def test_postgres_resumed_principal_purge_upgrades_to_exclusive_namespace_
         assert await second.get_event(second_room_id, event_id) == event
     finally:
         release_purge.set()
-        await first.close()
-        await second.close()
-
-
-@pytest.mark.asyncio
-async def test_postgres_late_principal_purges_restart_before_exclusive_lock(
-    postgres_event_cache_url: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Two late purge fences must restart instead of deadlocking shared-lock holders."""
-    namespace = f"late_purge_lock_{uuid.uuid4().hex}"
-    first = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
-    second = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
-    shared_lock_acquired = [asyncio.Event(), asyncio.Event()]
-    release_shared_lock_holders = asyncio.Event()
-
-    def pause_first_shared_lock(
-        cache: PostgresEventCache,
-        acquired: asyncio.Event,
-    ) -> Callable[..., Any]:
-        original_acquire = cache._runtime.acquire_db_operation
-        pause_next = True
-
-        @asynccontextmanager
-        async def paused_acquire(
-            room_id: str,
-            *,
-            operation: str,
-            ensure_namespace_exclusive: bool = False,
-        ) -> AsyncIterator[Any]:
-            nonlocal pause_next
-            async with original_acquire(
-                room_id,
-                operation=operation,
-                ensure_namespace_exclusive=ensure_namespace_exclusive,
-            ) as db:
-                if pause_next and not ensure_namespace_exclusive:
-                    pause_next = False
-                    acquired.set()
-                    await release_shared_lock_holders.wait()
-                yield db
-
-        return paused_acquire
-
-    await first.initialize()
-    await second.initialize()
-    monkeypatch.setattr(first._runtime, "acquire_db_operation", pause_first_shared_lock(first, shared_lock_acquired[0]))
-    monkeypatch.setattr(
-        second._runtime,
-        "acquire_db_operation",
-        pause_first_shared_lock(second, shared_lock_acquired[1]),
-    )
-    first_store = asyncio.create_task(first.store_event("$first", "!first:localhost", _event("$first", 1)))
-    second_store = asyncio.create_task(second.store_event("$second", "!second:localhost", _event("$second", 2)))
-    try:
-        await asyncio.gather(*(event.wait() for event in shared_lock_acquired))
-        first._runtime.record_pending_principal_purge()
-        second._runtime.record_pending_principal_purge()
-        release_shared_lock_holders.set()
-
-        await asyncio.wait_for(asyncio.gather(first_store, second_store), timeout=2)
-
-        assert first._runtime.has_pending_principal_purge is False
-        assert second._runtime.has_pending_principal_purge is False
-        assert await first.get_event("!first:localhost", "$first") is None
-        assert await second.get_event("!second:localhost", "$second") is None
-    finally:
-        release_shared_lock_holders.set()
-        await asyncio.gather(first_store, second_store, return_exceptions=True)
         await first.close()
         await second.close()
 

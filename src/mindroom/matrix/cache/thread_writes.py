@@ -528,17 +528,7 @@ class ThreadOutboundWritePolicy:
     ) -> None:
         """Schedule advisory bookkeeping for one locally redacted threaded message."""
         try:
-            if not redacted_event_id:
-                return
-            if not self._cache_ops.cache_runtime_available():
-                self._schedule_fail_open_room_update(
-                    room_id,
-                    lambda: self._cache_ops.purge_room(room_id),
-                    name="matrix_cache_purge_room_after_unavailable_outbound_redaction",
-                    cancelled_message="Ignoring cancelled room purge after outbound Matrix redaction",
-                    failure_message="Ignoring room purge failure after outbound Matrix redaction",
-                    log_context={"redacted_event_id": redacted_event_id},
-                )
+            if not redacted_event_id or not self._cache_ops.cache_runtime_available():
                 return
 
             # Lookup-dependent outbound mutations stay on the room barrier because earlier outbound writes can create the lookup rows needed to resolve thread impact. Safe parallelization would require reservation-based routing (see ISSUE-189).
@@ -936,7 +926,6 @@ class ThreadLiveWritePolicy:
     async def apply_redaction(self, room_id: str, event: nio.RedactionEvent) -> None:
         """Apply one redaction to the advisory cache when the affected thread is known."""
         if not self._cache_ops.cache_runtime_available():
-            await self._cache_ops.purge_room(room_id)
             return
 
         impact = await _resolve_thread_redaction_mutation_impact(
@@ -1142,27 +1131,10 @@ class ThreadSyncWritePolicy:
         raise_on_cache_write_failure: bool = False,
     ) -> list[asyncio.Task[object]]:
         """Queue sync timeline persistence through the room-ordered cache barrier."""
-        room_plain_events, room_threaded_events, room_redactions = self._group_sync_timeline_updates(response)
-        left_rooms = response.rooms.leave if isinstance(response.rooms.leave, dict) else {}
         if not self._cache_ops.cache_runtime_available():
-            return [
-                self._cache_ops.queue_room_cache_update(
-                    room_id,
-                    lambda room_id=room_id: self._cache_ops.purge_room(room_id),
-                    name="matrix_cache_purge_room_while_unavailable",
-                )
-                for room_id in set(left_rooms) | set(room_redactions)
-            ]
-        tasks: list[asyncio.Task[object]] = [
-            (
-                self._cache_ops.queue_room_cache_update(
-                    room_id,
-                    lambda room_id=room_id: self._cache_ops.purge_room(room_id),
-                    name="matrix_cache_purge_left_room",
-                )
-            )
-            for room_id in left_rooms
-        ]
+            return []
+        room_plain_events, room_threaded_events, room_redactions = self._group_sync_timeline_updates(response)
+        tasks: list[asyncio.Task[object]] = []
         for room_id in set(room_plain_events) | set(room_threaded_events) | set(room_redactions):
             plain_events = room_plain_events.get(room_id, ())
             threaded_events = room_threaded_events.get(room_id, ())
@@ -1235,13 +1207,10 @@ class ThreadSyncWritePolicy:
     ) -> SyncCacheWriteResult:
         """Persist sync timeline data and report whether it certifies the sync token."""
         if not self._cache_ops.cache_runtime_available():
-            tasks = self.cache_sync_timeline(response)
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
             return SyncCacheWriteResult(
                 complete=False,
                 runtime_available=False,
-                task_count=len(tasks),
+                task_count=0,
                 runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
             )
 

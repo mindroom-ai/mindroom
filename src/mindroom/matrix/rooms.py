@@ -717,7 +717,7 @@ async def _leave_room_and_cleanup(
     room_id: str,
     *,
     on_room_left: Callable[[str], Awaitable[None]],
-) -> bool:
+) -> None:
     """Finish one leave outcome and its confirmed cleanup as one operation."""
     success = await leave_room(client, room_id)
     if success:
@@ -725,19 +725,21 @@ async def _leave_room_and_cleanup(
         await on_room_left(room_id)
     else:
         logger.error("room_leave_failed", room_id=room_id)
-    return success
 
 
-async def _await_leave_operation(task: asyncio.Task[bool]) -> tuple[bool, asyncio.CancelledError | None]:
+async def _await_leave_operation(task: asyncio.Task[None]) -> asyncio.CancelledError | None:
     """Await a leave operation to completion without letting caller cancellation abort cleanup."""
     cancellation: asyncio.CancelledError | None = None
     while True:
         try:
-            return await asyncio.shield(task), cancellation
+            await asyncio.shield(task)
         except asyncio.CancelledError as exc:
             if task.done():
-                return task.result(), cancellation or exc
+                task.result()
+                return cancellation or exc
             cancellation = cancellation or exc
+        else:
+            return cancellation
 
 
 async def leave_non_dm_rooms(
@@ -745,9 +747,8 @@ async def leave_non_dm_rooms(
     room_ids: list[str],
     *,
     on_room_left: Callable[[str], Awaitable[None]],
-) -> list[str]:
+) -> None:
     """Leave non-DM rooms and clean each confirmed departure before continuing."""
-    left_room_ids: list[str] = []
     for room_id in room_ids:
         if await is_dm_room(client, room_id):
             logger.debug("dm_room_preserved", room_id=room_id)
@@ -760,9 +761,6 @@ async def leave_non_dm_rooms(
             ),
             name="matrix_leave_room_and_cleanup",
         )
-        success, cancellation = await _await_leave_operation(operation)
-        if success:
-            left_room_ids.append(room_id)
+        cancellation = await _await_leave_operation(operation)
         if cancellation is not None:
             raise cancellation
-    return left_room_ids

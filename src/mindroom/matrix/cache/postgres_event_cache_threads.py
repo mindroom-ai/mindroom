@@ -136,16 +136,6 @@ async def _store_thread_events_locked(
     validated_at: float,
 ) -> frozenset[str]:
     """Persist one authoritative thread snapshot within an existing DB transaction."""
-    if not events:
-        await _upsert_thread_cache_state(
-            db,
-            namespace=namespace,
-            room_id=room_id,
-            thread_id=thread_id,
-            validated_at=validated_at,
-        )
-        return frozenset()
-
     normalized_events = [normalize_event_source_for_cache(event) for event in events]
     cacheable_events = await filter_cacheable_events(
         db,

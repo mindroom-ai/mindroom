@@ -946,10 +946,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         """Apply one redaction to the advisory cache when the affected thread is known."""
         await self._live.apply_redaction(room_id, event)
 
-    async def purge_room(self, room_id: str) -> None:
-        """Purge this bot principal's rows after a confirmed leave or ban."""
-        await self.purge_rooms((room_id,))
-
     async def purge_rooms(self, room_ids: Collection[str]) -> None:
         """Fence an entire authoritative leave batch before awaiting any purge."""
         departed_room_ids = tuple(dict.fromkeys(room_ids))

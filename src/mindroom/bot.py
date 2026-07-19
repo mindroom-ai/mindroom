@@ -1024,7 +1024,7 @@ class AgentBot:
         """Reset the monotonic watchdog clock for a fresh sync iteration."""
         self._last_sync_monotonic = None
 
-    def _loaded_sync_token_for_certification(self) -> SyncCheckpoint | str | None:
+    def _loaded_sync_token_for_certification(self) -> SyncCheckpoint | None:
         """Load a saved token record without deciding trust in bot code."""
         try:
             token_record = load_sync_token_record(self.storage_path, self.agent_name)
@@ -1034,19 +1034,17 @@ class AgentBot:
         if token_record is None:
             return None
         current_cache_generation = self.event_cache.cache_generation
-        if token_record.checkpoint is not None and (
-            current_cache_generation is None or token_record.checkpoint.cache_generation != current_cache_generation
-        ):
+        if current_cache_generation is None or token_record.checkpoint.cache_generation != current_cache_generation:
             self.logger.warning("matrix_sync_token_cache_generation_mismatch")
             self._clear_saved_sync_token()
             return None
         self.logger.info(
             "matrix_sync_token_restored",
-            certified=token_record.certified,
+            certified=True,
         )
-        return token_record.checkpoint if token_record.checkpoint is not None else token_record.token
+        return token_record.checkpoint
 
-    def _restore_loaded_sync_token(self, loaded_token: SyncCheckpoint | str | None) -> None:
+    def _restore_loaded_sync_token(self, loaded_token: SyncCheckpoint | None) -> None:
         """Apply one already-validated saved token to the client and certifier."""
         assert self.client is not None
         startup = start_from_loaded_token(loaded_token)
@@ -1058,8 +1056,6 @@ class AgentBot:
             # Without sync continuity the initial sync replays recent history an
             # earlier device may already have handled; don't re-notify on it.
             raise_notice_floor(self.client.user_id)
-        if startup.legacy_token:
-            self.logger.warning("matrix_sync_token_uncertified_legacy")
 
     async def _purge_untrusted_principal_cache(self) -> None:
         """Drop untrusted rows or leave this principal's cache disabled until restart."""
@@ -1474,7 +1470,7 @@ class AgentBot:
         if event.state_key == self.agent_user.user_id and event.membership in {"leave", "ban"}:
             self._invalidate_sync_checkpoint_for_cache_scope_cleanup()
             self._room_lifecycle.forget_invited_room(room.room_id)
-            await self._conversation_cache.purge_room(room.room_id)
+            await self._conversation_cache.purge_rooms((room.room_id,))
         call_manager = self._call_manager
         if call_manager is not None:
             await call_manager.on_room_membership_event(room, event)
@@ -1628,7 +1624,7 @@ class AgentBot:
     async def _purge_left_room(self, room_id: str) -> None:
         """Fence and purge one principal-owned room immediately after departure."""
         self._invalidate_sync_checkpoint_for_cache_scope_cleanup()
-        await self._conversation_cache.purge_room(room_id)
+        await self._conversation_cache.purge_rooms((room_id,))
 
     async def stop(
         self,

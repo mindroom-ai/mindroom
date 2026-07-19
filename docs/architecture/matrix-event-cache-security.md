@@ -22,9 +22,11 @@ Both unencrypted `url` and encrypted `file.url` MXC representations are tracked.
 
 Plaintext persistence succeeds only while the owning event and its reference are visible and not tombstoned.
 
-Process-local plaintext entries include principal, room, event, and MXC identity, and durable-cache use revalidates ownership before every hit.
+Decrypted plaintext exists only in the durable principal-owned cache; there is no runtime-wide process-local plaintext cache.
 
-Hydration without that complete identity may return freshly downloaded content to the current call, but it cannot read or populate the process cache.
+Hydration without complete principal, room, event, and MXC identity may return freshly downloaded content to the current call, but it cannot read or populate the durable cache.
+
+Every durable plaintext hit revalidates the requesting event's surviving room-scoped MXC reference.
 
 Redaction runs in the same database transaction as event, dependent-edit, thread-index, edit-index, and reference removal.
 
@@ -44,7 +46,7 @@ If durable leave or ban cleanup fails, the principal-room purge remains pending 
 
 The operation that commits a pending room or principal purge is discarded, so its queued callback cannot recreate deleted rows in the same transaction.
 
-Each principal keeps a runtime departed-room fence after purge commit, and every backend read or write rechecks that fence under the room lock until an authoritative rejoin finishes any pending cleanup.
+Each principal keeps a runtime departed-room fence after purge commit, and every backend read or write rechecks that fence while the backend operation is serialized until an authoritative rejoin finishes any pending cleanup.
 
 A proactive multi-room leave fences and durably purges each room immediately after its leave succeeds and before processing the next room.
 
@@ -74,21 +76,19 @@ That cold-start principal purge preserves rows owned by every other principal.
 
 If cold-start cleanup is unavailable or fails, only that principal view is disabled for the rest of the runtime, no later sync checkpoint can certify the missing cache writes, and the next process retries cleanup before using cache continuity.
 
-Process-local plaintext for the departed principal and room is removed immediately even when the durable backend is unavailable.
-
 SQLite write operations begin with `BEGIN IMMEDIATE`, so tombstone and MXC-ownership authorization reads cannot race a second connection's redaction commit.
 
-SQLite write results are reauthorized after commit while the operation lock is still held, so a concurrent leave cannot publish or process-cache plaintext written before the fence.
+SQLite write results are reauthorized after commit while the operation lock is still held, so a concurrent leave cannot expose plaintext written before the fence.
 
 SQLite schema version 11 resets older advisory cache contents inside one rollback-safe transaction and creates a durable database-generation identifier.
 Each SQLite principal view derives a stable checkpoint generation from that database generation and the full Matrix principal ID, so a retained agent token cannot cross an account or homeserver rebind.
 
 PostgreSQL schema version 2 migrates under a global transaction-scoped advisory lock, preserves scoped rows from every namespace, expands event and plaintext keys with room scope, and deletes legacy plaintext whose room and event ownership cannot be proven.
 
-PostgreSQL room operations hold a shared principal-namespace advisory lock, while initial and resumed principal purges acquire the matching exclusive lock before deleting rows.
+Every PostgreSQL operation holds the same exclusive transaction-scoped advisory lock for its principal namespace.
 
-An operation that discovers a principal purge after taking the shared lock rolls back and restarts with the exclusive lock instead of attempting a deadlock-prone in-transaction upgrade.
+Different principals use different namespaces and locks, while all operations for one principal serialize with principal purge and leave cleanup across processes.
 
 Each PostgreSQL principal namespace stores a durable random cache-generation identifier that changes when that namespace metadata is recreated.
 
-Certified sync-token records use version 2 and include the cache generation, so an old schema or a reset cache cannot skip the history required to rebuild ownership rows.
+Certified sync-token records must use version 2 and include the cache generation, so a legacy plaintext token, old schema, principal change, or reset cache starts cold instead of skipping the history required to rebuild ownership rows.

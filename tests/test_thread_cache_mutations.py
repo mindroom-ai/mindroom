@@ -24,7 +24,6 @@ from mindroom.matrix.cache.thread_writes import (
     _collect_sync_timeline_cache_updates,
 )
 from mindroom.matrix.conversation_cache import MatrixConversationCache
-from mindroom.matrix.mxc_plaintext_cache import cache_mxc_plaintext, get_cached_mxc_plaintext
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
@@ -104,31 +103,6 @@ class TestThreadMutationHelpers:
     """Direct mutation-helper coverage for outbound/live/sync message and redaction paths."""
 
     @pytest.mark.asyncio
-    async def test_room_purge_evicts_process_plaintext_when_durable_backend_fails(self) -> None:
-        """A leave must drop this principal's RAM plaintext even during a cache outage."""
-        cache_ops, logger, event_cache = _thread_mutation_cache_ops()
-        room_id = "!left:localhost"
-        cache_key = (
-            "@alice:localhost",
-            room_id,
-            "$event",
-            "mxc://server/plaintext",
-        )
-        event_cache.principal_id = "@alice:localhost"
-        event_cache.purge_room = AsyncMock(side_effect=EventCacheBackendUnavailableError("offline"))
-        cache_mxc_plaintext(
-            "mxc://server/plaintext",
-            "secret",
-            time.time(),
-            cache_key=cache_key,
-        )
-
-        await cache_ops.purge_room(room_id)
-
-        assert get_cached_mxc_plaintext(cache_key) is None
-        logger.warning.assert_called_once()
-
-    @pytest.mark.asyncio
     async def test_departure_fences_reads_before_ordered_purge_can_start(self, tmp_path: Path) -> None:
         """A queued predecessor must not extend plaintext visibility after a confirmed leave."""
         root = SqliteEventCache(tmp_path / "event_cache.db")
@@ -154,7 +128,6 @@ class TestThreadMutationHelpers:
                 "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
             },
         }
-        cache_key = (cache.principal_id, room_id, event_id, mxc_url)
         predecessor_started = asyncio.Event()
         release_predecessor = asyncio.Event()
 
@@ -165,7 +138,6 @@ class TestThreadMutationHelpers:
         try:
             await cache.store_event(event_id, room_id, event)
             assert await cache.store_mxc_text(room_id, event_id, mxc_url, "durable plaintext")
-            cache_mxc_plaintext(mxc_url, "process plaintext", time.time(), cache_key=cache_key)
             predecessor = coordinator.queue_room_update(
                 room_id,
                 block_predecessor,
@@ -173,13 +145,12 @@ class TestThreadMutationHelpers:
             )
             await predecessor_started.wait()
 
-            purge = asyncio.create_task(access.purge_room(room_id))
+            purge = asyncio.create_task(access.purge_rooms((room_id,)))
             await asyncio.sleep(0)
 
             assert not purge.done()
             assert await cache.get_event(room_id, event_id) is None
             assert await cache.get_mxc_text(room_id, event_id, mxc_url) is None
-            assert get_cached_mxc_plaintext(cache_key) is None
 
             release_predecessor.set()
             await predecessor
@@ -294,7 +265,7 @@ class TestThreadMutationHelpers:
             await asyncio.sleep(0)
 
             monkeypatch.setattr(cache, "purge_room", delay_newer_purge)
-            newer_leave = asyncio.create_task(access.purge_room(room_id))
+            newer_leave = asyncio.create_task(access.purge_rooms((room_id,)))
             await asyncio.sleep(0)
             release_predecessor.set()
             await predecessor
@@ -333,7 +304,6 @@ class TestThreadMutationHelpers:
             name="unbound_thread_cache_update",
         )
         await cache_ops.purge_room("!room:localhost")
-        cache_ops.purge_process_plaintext("!room:localhost")
 
         assert completed == ["room", "thread"]
 
@@ -1188,7 +1158,7 @@ class TestMatrixConversationCacheThreadReads:
                 assert await access.get_event(room_id, event_id) is visible_event
                 assert await access.get_dispatch_thread_history(room_id, thread_id)
 
-                await access.purge_room(room_id)
+                await access.purge_rooms((room_id,))
 
                 assert await access.get_event(room_id, event_id) is departed_event
                 assert not await access.get_dispatch_thread_history(room_id, thread_id)

@@ -3,22 +3,12 @@
 from __future__ import annotations
 
 import json
-import time
 from typing import TYPE_CHECKING, Any
 
 import nio
 from nio import crypto
 
 from mindroom.logging_config import get_logger
-from mindroom.matrix.mxc_plaintext_cache import (
-    MXC_CACHE_TTL_SECONDS,
-    MXC_TEXT_MAX_BYTES,
-    MxcPlaintextCacheKey,
-    cache_mxc_plaintext,
-    get_cached_mxc_plaintext,
-    remove_cached_mxc_plaintext,
-    touch_cached_mxc_plaintext,
-)
 from mindroom.matrix.sidecar_content import sidecar_mxc_url
 from mindroom.matrix.visible_body import has_trusted_stream_body_metadata, visible_body_from_content
 
@@ -28,6 +18,8 @@ if TYPE_CHECKING:
     from mindroom.matrix.cache import ConversationEventCache
 
 logger = get_logger(__name__)
+
+_MXC_TEXT_MAX_BYTES = 2 * 1024 * 1024
 
 
 def _extract_large_message_v2_content(payload_json: str) -> dict[str, Any] | None:
@@ -78,7 +70,8 @@ async def _register_sidecar_owner(
 ) -> str | None:
     """Persist the visible event/reference before plaintext hydration begins."""
     content = _normalized_content_dict(event_source.get("content"))
-    if _sidecar_content_for_resolution(content) is None:
+    sidecar_content = _sidecar_content_for_resolution(content)
+    if sidecar_content is None or sidecar_mxc_url(sidecar_content) is None:
         event_id = event_source.get("event_id")
         return event_id if isinstance(event_id, str) else fallback_event_id
     event_id_value = event_source.get("event_id")
@@ -101,35 +94,51 @@ async def _register_sidecar_owner(
     return event_id
 
 
+async def _resolve_event_content(
+    event_source: dict[str, Any],
+    client: nio.AsyncClient | None,
+    *,
+    event_cache: ConversationEventCache | None,
+    room_id: str | None,
+    fallback_event_id: str | None = None,
+) -> tuple[dict[str, Any], bool]:
+    """Register valid sidecar ownership and return canonical content plus whether it changed."""
+    preview_content = _normalized_content_dict(event_source.get("content", {}))
+    event_id = await _register_sidecar_owner(
+        event_source,
+        event_cache=event_cache,
+        room_id=room_id,
+        fallback_event_id=fallback_event_id,
+    )
+    resolved_content = await _resolve_canonical_content(
+        preview_content,
+        client,
+        event_cache=event_cache,
+        room_id=room_id,
+        event_id=event_id,
+    )
+    return resolved_content, resolved_content is not preview_content
+
+
 def _text_size_bytes(text: str) -> int:
     return len(text.encode("utf-8", errors="replace"))
 
 
 def _mxc_text_exceeds_limit(text: str) -> bool:
-    return _text_size_bytes(text) > MXC_TEXT_MAX_BYTES
+    return _text_size_bytes(text) > _MXC_TEXT_MAX_BYTES
 
 
 def _mxc_bytes_exceed_limit(mxc_url: str, payload: bytes, *, stage: str) -> bool:
-    if len(payload) <= MXC_TEXT_MAX_BYTES:
+    if len(payload) <= _MXC_TEXT_MAX_BYTES:
         return False
     logger.warning(
         "mxc_text_payload_exceeds_byte_limit",
         mxc_url=mxc_url,
         stage=stage,
         size_bytes=len(payload),
-        limit_bytes=MXC_TEXT_MAX_BYTES,
+        limit_bytes=_MXC_TEXT_MAX_BYTES,
     )
     return True
-
-
-def _cache_mxc_text(
-    mxc_url: str,
-    text: str,
-    timestamp: float,
-    *,
-    cache_key: MxcPlaintextCacheKey,
-) -> None:
-    cache_mxc_plaintext(mxc_url, text, timestamp, cache_key=cache_key)
 
 
 async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
@@ -154,15 +163,6 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
         The downloaded text content, or None if download failed
 
     """
-    current_time = time.time()
-    client_user_id = client.user_id if isinstance(client.user_id, str) and client.user_id else None
-    principal_id = event_cache.principal_id if event_cache is not None else client_user_id
-    cache_key: MxcPlaintextCacheKey | None = (
-        (principal_id, room_id, event_id, mxc_url)
-        if principal_id is not None and room_id is not None and event_id is not None
-        else None
-    )
-
     if event_cache is not None and room_id is not None and event_id is not None:
         try:
             cached_text = await event_cache.get_mxc_text(room_id, event_id, mxc_url)
@@ -176,11 +176,9 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
                         mxc_url=mxc_url,
                         room_id=room_id,
                         size_bytes=_text_size_bytes(cached_text),
-                        limit_bytes=MXC_TEXT_MAX_BYTES,
+                        limit_bytes=_MXC_TEXT_MAX_BYTES,
                     )
                     return None
-                assert cache_key is not None
-                _cache_mxc_text(mxc_url, cached_text, current_time, cache_key=cache_key)
                 try:
                     ownership_persisted = await event_cache.store_mxc_text(
                         room_id,
@@ -189,45 +187,17 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
                         cached_text,
                     )
                 except Exception:
-                    remove_cached_mxc_plaintext(cache_key)
                     logger.exception("Failed to revalidate durable MXC plaintext ownership")
                     return None
-                else:
-                    if not ownership_persisted:
-                        remove_cached_mxc_plaintext(cache_key)
-                        logger.info(
-                            "mxc_plaintext_rejected_without_visible_owner",
-                            room_id=room_id,
-                            event_id=event_id,
-                        )
-                        return None
+                if not ownership_persisted:
+                    logger.info(
+                        "mxc_plaintext_rejected_without_visible_owner",
+                        room_id=room_id,
+                        event_id=event_id,
+                    )
+                    return None
                 logger.debug("mxc_text_cache_hit", mxc_url=mxc_url, room_id=room_id)
                 return cached_text
-
-    cached_entry = get_cached_mxc_plaintext(cache_key) if cache_key is not None else None
-    if cached_entry is not None:
-        assert cache_key is not None
-        content, timestamp = cached_entry
-        if current_time - timestamp < MXC_CACHE_TTL_SECONDS and not _mxc_text_exceeds_limit(content):
-            if event_cache is None:
-                touch_cached_mxc_plaintext(cache_key)
-                logger.debug("mxc_cache_hit", mxc_url=mxc_url)
-                return content
-            if room_id is not None and event_id is not None:
-                try:
-                    ownership_persisted = await event_cache.store_mxc_text(
-                        room_id,
-                        event_id,
-                        mxc_url,
-                        content,
-                    )
-                except Exception:
-                    logger.exception("Failed to validate process-local MXC plaintext ownership")
-                else:
-                    if ownership_persisted:
-                        touch_cached_mxc_plaintext(cache_key)
-                        return content
-        remove_cached_mxc_plaintext(cache_key)
 
     try:
         # Parse MXC URL
@@ -280,8 +250,6 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
         except UnicodeDecodeError:
             logger.exception("Downloaded content is not valid UTF-8 text")
             return None
-        if cache_key is not None:
-            _cache_mxc_text(mxc_url, decoded_text, time.time(), cache_key=cache_key)
         if event_cache is not None and room_id is not None and event_id is not None:
             try:
                 ownership_persisted = await event_cache.store_mxc_text(
@@ -291,13 +259,9 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
                     decoded_text,
                 )
             except Exception:
-                assert cache_key is not None
-                remove_cached_mxc_plaintext(cache_key)
                 logger.exception("Failed to persist durable MXC text cache")
             else:
                 if not ownership_persisted:
-                    assert cache_key is not None
-                    remove_cached_mxc_plaintext(cache_key)
                     if not event_cache.durable_writes_available:
                         logger.info(
                             "mxc_plaintext_returned_without_disabled_cache",
@@ -311,8 +275,6 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
                         event_id=event_id,
                     )
                     return None
-        if cache_key is not None:
-            logger.debug("mxc_content_cached", mxc_url=mxc_url)
 
     except Exception:
         logger.exception("Error downloading MXC content")
@@ -347,20 +309,12 @@ async def extract_and_resolve_message(
         the full text from the attachment.
 
     """
-    # Extract basic message data
-    preview_content = _normalized_content_dict(event.source.get("content", {}))
-    event_id = await _register_sidecar_owner(
+    resolved_content, _ = await _resolve_event_content(
         event.source,
-        event_cache=event_cache,
-        room_id=room_id,
-        fallback_event_id=event.event_id,
-    )
-    resolved_content = await _resolve_canonical_content(
-        preview_content,
         client,
         event_cache=event_cache,
         room_id=room_id,
-        event_id=event_id,
+        fallback_event_id=event.event_id,
     )
     resolved_body = visible_body_from_content(
         resolved_content,
@@ -400,18 +354,11 @@ async def extract_edit_body(
     trusted_sender_ids: Collection[str] = (),
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Extract body/content from an edit event's ``m.new_content`` payload."""
-    content = _normalized_content_dict(event_source.get("content", {}))
-    event_id = await _register_sidecar_owner(
+    resolved_content, _ = await _resolve_event_content(
         event_source,
-        event_cache=event_cache,
-        room_id=room_id,
-    )
-    resolved_content = await _resolve_canonical_content(
-        content,
         client,
         event_cache=event_cache,
         room_id=room_id,
-        event_id=event_id,
     )
     new_content = _normalized_content_dict(resolved_content.get("m.new_content"))
     body = visible_body_from_content(
@@ -435,20 +382,13 @@ async def resolve_event_source_content(
     room_id: str | None = None,
 ) -> dict[str, Any]:
     """Return an event source with canonical v2 sidecar content hydrated when available."""
-    preview_content = _normalized_content_dict(event_source.get("content", {}))
-    event_id = await _register_sidecar_owner(
+    resolved_content, content_changed = await _resolve_event_content(
         event_source,
-        event_cache=event_cache,
-        room_id=room_id,
-    )
-    resolved_content = await _resolve_canonical_content(
-        preview_content,
         client,
         event_cache=event_cache,
         room_id=room_id,
-        event_id=event_id,
     )
-    if resolved_content is preview_content:
+    if not content_changed:
         return event_source
 
     resolved_event_source = {key: value for key, value in event_source.items() if isinstance(key, str)}

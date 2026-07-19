@@ -22,7 +22,6 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
-from mindroom.matrix.mxc_plaintext_cache import purge_principal_room_mxc_plaintext
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact, MutationThreadImpactState
 
 from .event_cache import EventCacheBackendUnavailableError
@@ -180,15 +179,11 @@ class ThreadMutationCacheOps:
                 room_id=room_id,
                 error=str(exc),
             )
-        finally:
-            self.purge_process_plaintext(room_id)
 
     def mark_room_departed(self, room_id: str) -> int:
-        """Fence reads, queue durable cleanup, purge process plaintext, and return the new room epoch."""
+        """Fence reads, queue durable cleanup, and return the new room epoch."""
         event_cache = self.runtime.event_cache
-        departure_epoch = 0 if event_cache is None else event_cache.mark_room_departed(room_id)
-        self.purge_process_plaintext(room_id)
-        return departure_epoch
+        return 0 if event_cache is None else event_cache.mark_room_departed(room_id)
 
     def room_departure_epoch(self, room_id: str) -> int:
         """Return the durable cache's current room-fence epoch."""
@@ -204,12 +199,6 @@ class ThreadMutationCacheOps:
                 expected_departure_epoch=expected_departure_epoch,
             )
 
-    def purge_process_plaintext(self, room_id: str) -> None:
-        """Evict heavyweight process-local plaintext for this principal and room."""
-        event_cache = self.runtime.event_cache
-        if event_cache is not None:
-            purge_principal_room_mxc_plaintext(event_cache.principal_id, room_id)
-
     async def redact_cached_event(
         self,
         room_id: str,
@@ -223,7 +212,6 @@ class ThreadMutationCacheOps:
         try:
             redacted = bool(await self.runtime.event_cache.redact_event(room_id, redacted_event_id))
         except Exception as exc:
-            self.purge_process_plaintext(room_id)
             self.logger.warning(
                 failure_message,
                 room_id=room_id,
@@ -234,7 +222,6 @@ class ThreadMutationCacheOps:
             if raise_on_failure:
                 raise
             return False
-        self.purge_process_plaintext(room_id)
         return redacted
 
     async def invalidate_after_redaction(

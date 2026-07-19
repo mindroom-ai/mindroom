@@ -6,15 +6,12 @@ import asyncio
 import hashlib
 import time
 import uuid
-from collections import OrderedDict
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import aiosqlite
 
 from mindroom.logging_config import get_logger
-from mindroom.timing import milliseconds
 
 from . import sqlite_event_cache_events, sqlite_event_cache_threads
 from .event_batching import group_lookup_events_by_room
@@ -43,8 +40,6 @@ _EVENT_CACHE_TABLES = (
     "event_cache_metadata",
 )
 _REQUIRED_EVENT_CACHE_TABLES = frozenset(_EVENT_CACHE_TABLES)
-_LOCK_WAIT_LOG_THRESHOLD_SECONDS = 0.1
-_MAX_CACHED_ROOM_LOCKS = 256
 _DEFAULT_PRINCIPAL_ID = "__mindroom_default_principal__"
 _PRINCIPAL_PURGE_LOCK_SCOPE = "__mindroom_principal_purge__"
 _T = TypeVar("_T")
@@ -215,12 +210,6 @@ async def _create_event_cache_schema(db: aiosqlite.Connection) -> None:
     )
     await db.execute(
         """
-        CREATE INDEX IF NOT EXISTS idx_event_mxc_references_event
-        ON event_mxc_references(principal_id, room_id, event_id, mxc_url)
-        """,
-    )
-    await db.execute(
-        """
         CREATE TABLE IF NOT EXISTS thread_cache_state (
             principal_id TEXT NOT NULL,
             room_id TEXT NOT NULL,
@@ -309,14 +298,6 @@ async def _reset_stale_cache_if_needed(
     await db.execute("PRAGMA user_version = 0")
 
 
-@dataclass
-class _RoomLockEntry:
-    """Track one room lock plus queued users that still rely on it."""
-
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    active_users: int = 0
-
-
 class _SqliteEventCacheRuntime:
     """Own runtime-only lifecycle, locking, and disable state for one cache instance."""
 
@@ -326,7 +307,6 @@ class _SqliteEventCacheRuntime:
         self._disabled_reason: str | None = None
         self._disabled_principal_reasons: dict[str, str] = {}
         self._db_lock = asyncio.Lock()
-        self._room_locks: OrderedDict[tuple[str, str], _RoomLockEntry] = OrderedDict()
         self._generation: str | None = None
         self._pending_room_purges: set[tuple[str, str]] = set()
         self._pending_principal_purges: set[str] = set()
@@ -463,71 +443,13 @@ class _SqliteEventCacheRuntime:
             await self._db.close()
             self._db = None
             self._generation = None
-            self._room_locks.clear()
-
-    def room_lock_entry(
-        self,
-        principal_id: str,
-        room_id: str,
-        *,
-        active_user_increment: int = 0,
-    ) -> _RoomLockEntry:
-        """Return the cached room lock entry, creating it on demand."""
-        key = (principal_id, room_id)
-        entry = self._room_locks.get(key)
-        if entry is None:
-            entry = _RoomLockEntry(active_users=active_user_increment)
-        else:
-            entry.active_users += active_user_increment
-        self._room_locks[key] = entry
-        self._room_locks.move_to_end(key)
-        self._prune_room_locks()
-        return entry
 
     @asynccontextmanager
-    async def acquire_room_lock(
-        self,
-        principal_id: str,
-        room_id: str,
-        *,
-        operation: str,
-    ) -> AsyncIterator[None]:
-        """Serialize runtime-visible work for one room."""
-        entry = self.room_lock_entry(principal_id, room_id, active_user_increment=1)
-        wait_started = time.perf_counter()
-        acquired = False
-        try:
-            await entry.lock.acquire()
-            acquired = True
-            wait_time = time.perf_counter() - wait_started
-            if wait_time > _LOCK_WAIT_LOG_THRESHOLD_SECONDS:
-                logger.debug(
-                    "Waited for SqliteEventCache room lock",
-                    principal_id=principal_id,
-                    room_id=room_id,
-                    operation=operation,
-                    wait_time_ms=milliseconds(wait_time, ndigits=2),
-                )
-            yield
-        finally:
-            if acquired:
-                entry.lock.release()
-            entry.active_users -= 1
-            if entry.active_users == 0:
-                self._prune_room_locks()
-
-    @asynccontextmanager
-    async def acquire_db_operation(
-        self,
-        principal_id: str,
-        room_id: str,
-        *,
-        operation: str,
-    ) -> AsyncIterator[aiosqlite.Connection]:
-        """Serialize one DB operation with lifecycle changes and room ordering."""
+    async def acquire_db_operation(self) -> AsyncIterator[aiosqlite.Connection]:
+        """Serialize one operation on the runtime's single SQLite connection."""
         if self._db is None:
             await self.initialize()
-        async with self._db_lock, self.acquire_room_lock(principal_id, room_id, operation=operation):
+        async with self._db_lock:
             yield self.require_db()
 
     def require_db(self) -> aiosqlite.Connection:
@@ -536,18 +458,6 @@ class _SqliteEventCacheRuntime:
             msg = "SqliteEventCache has not been initialized"
             raise RuntimeError(msg)
         return self._db
-
-    def _prune_room_locks(self) -> None:
-        while len(self._room_locks) > _MAX_CACHED_ROOM_LOCKS:
-            evicted_room_key: tuple[str, str] | None = None
-            for cached_room_key, cached_entry in self._room_locks.items():
-                if cached_entry.active_users > 0:
-                    continue
-                evicted_room_key = cached_room_key
-                break
-            if evicted_room_key is None:
-                return
-            self._room_locks.pop(evicted_room_key, None)
 
 
 class SqliteEventCache:
@@ -678,7 +588,7 @@ class SqliteEventCache:
             or self._runtime.is_room_departed(self.principal_id, room_id)
         ):
             return disabled_result
-        async with self._runtime.acquire_db_operation(self.principal_id, room_id, operation=operation) as db:
+        async with self._runtime.acquire_db_operation() as db:
             if self._runtime.is_principal_disabled(self.principal_id) or self._runtime.is_room_departed(
                 self.principal_id,
                 room_id,
@@ -695,18 +605,6 @@ class SqliteEventCache:
                     await _rollback_sqlite_connection_best_effort(db, operation=operation)
                     raise
                 self._runtime.forget_pending_principal_purge(self.principal_id)
-            if self._runtime.has_pending_room_purge(self.principal_id, room_id):
-                try:
-                    await sqlite_event_cache_events.purge_room_locked(
-                        db,
-                        principal_id=self.principal_id,
-                        room_id=room_id,
-                    )
-                    await db.commit()
-                except BaseException:
-                    await _rollback_sqlite_connection_best_effort(db, operation=operation)
-                    raise
-                self._runtime.forget_pending_room_purge(self.principal_id, room_id)
             result = await reader(db)
             if (
                 self._runtime.is_disabled
@@ -727,7 +625,7 @@ class SqliteEventCache:
     ) -> _T:
         if not self._can_expose_write_result(room_id, allow_departed=allow_departed):
             return disabled_result
-        async with self._runtime.acquire_db_operation(self.principal_id, room_id, operation=operation) as db:
+        async with self._runtime.acquire_db_operation() as db:
             if not self._can_expose_write_result(room_id, allow_departed=allow_departed):
                 return disabled_result
             pending_principal_purge = self._runtime.has_pending_principal_purge(self.principal_id)

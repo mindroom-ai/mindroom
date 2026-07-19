@@ -196,13 +196,6 @@ async def _event_owns_mxc_text(
           AND events.room_id = ?
           AND events.event_id = ?
           AND reference.mxc_url = ?
-          AND NOT EXISTS (
-              SELECT 1
-              FROM redacted_events
-              WHERE principal_id = events.principal_id
-                AND room_id = events.room_id
-                AND event_id = events.event_id
-          )
         """,
         (principal_id, room_id, event_id, mxc_url),
     )

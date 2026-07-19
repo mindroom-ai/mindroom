@@ -160,27 +160,6 @@ async def _store_thread_events_locked(
     validated_at: float,
 ) -> frozenset[str]:
     """Persist one authoritative thread snapshot within an existing DB transaction."""
-    if not events:
-        await db.execute(
-            """
-            INSERT INTO thread_cache_state(
-                principal_id,
-                room_id,
-                thread_id,
-                validated_at,
-                invalidated_at,
-                invalidation_reason
-            )
-            VALUES (?, ?, ?, ?, NULL, NULL)
-            ON CONFLICT(principal_id, room_id, thread_id) DO UPDATE SET
-                validated_at = excluded.validated_at,
-                invalidated_at = NULL,
-                invalidation_reason = NULL
-            """,
-            (principal_id, room_id, thread_id, validated_at),
-        )
-        return frozenset()
-
     normalized_events = [normalize_event_source_for_cache(event) for event in events]
     cacheable_events = await filter_cacheable_events(
         db,

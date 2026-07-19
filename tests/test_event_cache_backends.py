@@ -371,15 +371,7 @@ async def test_sqlite_event_cache_write_operation_rolls_back_cancelled_writer(
     )
 
     @asynccontextmanager
-    async def acquire_db_operation(
-        principal_id: str,
-        room_id: str,
-        *,
-        operation: str,
-    ) -> AsyncIterator[object]:
-        assert principal_id == "__mindroom_default_principal__"
-        assert room_id == "!room:example.test"
-        assert operation == "cancelled_writer"
+    async def acquire_db_operation() -> AsyncIterator[object]:
         yield db
 
     monkeypatch.setattr(
@@ -709,14 +701,10 @@ async def test_postgres_event_cache_operation_rolls_back_cancelled_callback(
 
     @asynccontextmanager
     async def acquire_db_operation(
-        room_id: str,
         *,
         operation: str,
-        ensure_namespace_exclusive: bool = False,
     ) -> AsyncIterator[object]:
-        assert room_id == "!room:example.test"
         assert operation == "cancelled_callback"
-        assert ensure_namespace_exclusive is False
         yield db
 
     monkeypatch.setattr(
@@ -763,7 +751,7 @@ async def test_postgres_runtime_rolls_back_cancelled_advisory_lock() -> None:
     runtime._db = db
 
     with pytest.raises(asyncio.CancelledError, match=cancel_reason):
-        async with runtime.acquire_db_operation("!room:example.test", operation="advisory_lock"):
+        async with runtime.acquire_db_operation(operation="advisory_lock"):
             pytest.fail("acquire_db_operation should not yield when advisory lock acquisition is cancelled")
 
     db.rollback.assert_awaited_once()
@@ -1135,7 +1123,7 @@ async def test_postgres_event_cache_pending_thread_flush_does_not_downgrade_newe
             invalidated_at=100.0,
             reason="older_pending_marker",
         )
-        async with cache._runtime.acquire_db_operation(room_id, operation="test_newer_thread_marker") as db:
+        async with cache._runtime.acquire_db_operation(operation="test_newer_thread_marker") as db:
             await postgres_event_cache_threads.mark_thread_stale_locked(
                 db,
                 namespace=namespace,
@@ -1174,7 +1162,7 @@ async def test_postgres_event_cache_pending_room_flush_does_not_downgrade_newer_
             invalidated_at=100.0,
             reason="older_pending_room_marker",
         )
-        async with cache._runtime.acquire_db_operation(room_id, operation="test_newer_room_marker") as db:
+        async with cache._runtime.acquire_db_operation(operation="test_newer_room_marker") as db:
             await postgres_event_cache_threads.mark_room_stale_locked(
                 db,
                 namespace=namespace,
