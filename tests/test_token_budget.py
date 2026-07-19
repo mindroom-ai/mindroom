@@ -36,21 +36,24 @@ def test_kind_resolves_known_tiktoken_models() -> None:
 
 @pytest.mark.parametrize(
     "model_id",
-    ["claude-sonnet-5", "claude-haiku-4-5@20251001", "us.anthropic.claude-sonnet-5-v1:0"],
+    [
+        "claude-sonnet-5",
+        "claude-haiku-4-5@20251001",
+        "us.anthropic.claude-sonnet-5-v1:0",
+        "gemini-3.5-flash",
+        "local-test-model",
+        None,
+    ],
 )
-def test_kind_resolves_claude_models_to_the_byte_bound(model_id: str) -> None:
+def test_kind_resolves_models_without_a_local_tokenizer_to_the_byte_bound(model_id: str | None) -> None:
     assert compaction_estimate_kind(model_id) == "utf8_bytes_token_upper_bound"
 
 
-@pytest.mark.parametrize("model_id", ["gemini-3.5-flash", "local-test-model", None])
-def test_kind_resolves_unknown_models_to_the_o200k_surrogate(model_id: str | None) -> None:
-    assert compaction_estimate_kind(model_id) == "o200k_base_tokens"
-
-
+@pytest.mark.parametrize("model_id", ["claude-sonnet-5", "gemini-3.5-flash", None])
 @pytest.mark.parametrize("payload", _BOUND_PAYLOADS)
-def test_byte_bound_branch_is_exactly_the_utf8_byte_count(payload: str) -> None:
+def test_byte_bound_branch_is_exactly_the_utf8_byte_count(payload: str, model_id: str | None) -> None:
     """Any divisor heuristic here would undercount dense CJK/emoji payloads."""
-    assert compaction_payload_token_upper_bound(payload, model_id="claude-sonnet-5") == len(payload.encode("utf-8"))
+    assert compaction_payload_token_upper_bound(payload, model_id=model_id) == len(payload.encode("utf-8"))
 
 
 @pytest.mark.parametrize("payload", _BOUND_PAYLOADS)
@@ -63,12 +66,6 @@ def test_known_model_branch_counts_with_the_model_encoding(payload: str) -> None
 def test_approximate_o200k_tokens_matches_the_o200k_encoding(payload: str) -> None:
     expected = len(tiktoken.get_encoding("o200k_base").encode(payload, disallowed_special=()))
     assert approximate_o200k_tokens(payload) == expected
-
-
-def test_unknown_model_keeps_the_o200k_surrogate_count() -> None:
-    payload = "hello 世界 🎉"
-    expected = approximate_o200k_tokens(payload)
-    assert compaction_payload_token_upper_bound(payload, model_id="gemini-3.5-flash") == expected
 
 
 @pytest.mark.parametrize("payload_char", ["汉", "🎉"])

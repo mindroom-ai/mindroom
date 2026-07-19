@@ -14,6 +14,8 @@ import tiktoken
 
 _CompactionEstimateKind = Literal[
     "model_tiktoken_tokens",
+    # Surrogate encoding; produced only by approximate_o200k_tokens callers
+    # (the Vertex request guard), never by compaction_estimate_kind.
     "o200k_base_tokens",
     "utf8_bytes_token_upper_bound",
 ]
@@ -45,29 +47,23 @@ def compaction_estimate_kind(model_id: str | None) -> _CompactionEstimateKind:
 
     Single source of truth for the sizing branch: the bound function and the
     structured sizing logs both derive their branch from this resolver.
+    Encoding absence is the fallback criterion, so every model without a local
+    tokenizer gets the safe byte bound without provider-specific gating.
     """
     if _compaction_encoding(model_id) is not None:
         return "model_tiktoken_tokens"
-    # Mirrors the previous instance-based Claude gate: anthropic, vertexai_claude,
-    # and bedrock_claude model IDs all contain "claude".
-    if model_id is not None and "claude" in model_id.lower():
-        return "utf8_bytes_token_upper_bound"
-    return "o200k_base_tokens"
+    return "utf8_bytes_token_upper_bound"
 
 
 def compaction_payload_token_upper_bound(value: str, *, model_id: str | None) -> int:
     """Size one serialized compaction payload for the summary model.
 
-    Known tiktoken encodings count exactly. Claude models have no local
-    tokenizer, so their payloads use the UTF-8 byte count, a true token upper
-    bound. Other unknown models keep the o200k_base surrogate count.
+    Known tiktoken encodings count exactly. Every other model is sized by
+    UTF-8 byte count, a true token upper bound for any tokenizer.
     """
-    kind = compaction_estimate_kind(model_id)
-    encoding = _compaction_encoding(model_id)
-    if kind == "model_tiktoken_tokens" and encoding is not None:
+    encoding = _compaction_encoding(model_id) if compaction_estimate_kind(model_id) == "model_tiktoken_tokens" else None
+    if encoding is not None:
         return len(encoding.encode(value, disallowed_special=()))
-    if kind == "o200k_base_tokens":
-        return approximate_o200k_tokens(value)
     return len(value.encode("utf-8"))
 
 

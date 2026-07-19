@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -49,6 +50,7 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.session_ids import create_session_id
+from mindroom.token_budget import compaction_payload_token_upper_bound
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,
@@ -64,6 +66,10 @@ from tests.history_helpers import (  # noqa: F401
     _session,
     _team_session,
 )
+
+# The budget finders below must size runs exactly like the production
+# compaction path for the configured "summary-model" summary model.
+_SUMMARY_MODEL_BOUND = partial(compaction_payload_token_upper_bound, model_id="summary-model")
 
 
 def test_prepare_scope_history_boundary_does_not_accept_execution_identity() -> None:
@@ -548,6 +554,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
                 compacted_runs=compacted_runs,
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=_SUMMARY_MODEL_BOUND,
             )[1],
         )
 
@@ -691,6 +698,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
                 compacted_runs=compacted_runs,
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=_SUMMARY_MODEL_BOUND,
             )[1],
         )
 
@@ -801,6 +809,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
                 compacted_runs=visible_runs,
                 history_settings=history_settings,
                 max_input_tokens=budget,
+                token_estimator=_SUMMARY_MODEL_BOUND,
             )[1],
         )
         == 9
@@ -977,6 +986,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
                 compacted_runs=compacted_runs,
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=_SUMMARY_MODEL_BOUND,
             )[1],
         )
 

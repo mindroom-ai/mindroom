@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -55,7 +56,7 @@ from mindroom.hooks import (
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.message_target import MessageTarget
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
-from mindroom.token_budget import approximate_o200k_tokens, estimate_text_tokens
+from mindroom.token_budget import approximate_o200k_tokens, compaction_payload_token_upper_bound, estimate_text_tokens
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
     FakeModel,
@@ -83,6 +84,10 @@ if TYPE_CHECKING:
     from agno.session.agent import AgentSession
 
     from mindroom.history.compaction import _CompactionRewriteResult
+
+# The budget finders below must size runs exactly like the production
+# compaction path for the "summary-model" summary model used by these tests.
+_SUMMARY_MODEL_BOUND = partial(compaction_payload_token_upper_bound, model_id="summary-model")
 
 
 async def _rewrite_single_run(
@@ -161,13 +166,13 @@ async def test_rewrite_passes_full_summary_input_budget_into_chunk_construction(
             storage=storage,
             working_session=working_session,
             selected_run_ids=tuple(f"run-{index}" for index in range(1, 6)),
-            summary_input_budget=110_000,
+            summary_input_budget=300_000,
         )
 
     assert rewrite_result is not None
     assert len(summary_inputs) == 1
     assert build_summary_input_spy.call_count == 1
-    assert build_summary_input_spy.call_args.kwargs["max_input_tokens"] == 110_000
+    assert build_summary_input_spy.call_args.kwargs["max_input_tokens"] == 300_000
     assert "run-1 user" in summary_inputs[0]
     assert "run-5 user" in summary_inputs[0]
     assert rewrite_result.compacted_run_count == 5
@@ -738,6 +743,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
                 compacted_runs=[first_run, second_run],
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=_SUMMARY_MODEL_BOUND,
             )[1],
         )
         == 1
@@ -747,6 +753,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
                 compacted_runs=[second_run],
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=_SUMMARY_MODEL_BOUND,
             )[1],
         )
         == 1
@@ -1382,6 +1389,7 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
                 compacted_runs=list(working_session.runs or []),
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=_SUMMARY_MODEL_BOUND,
             )[1],
         )
         == 1
@@ -1390,6 +1398,7 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
             compacted_runs=[remaining_run],
             max_input_tokens=budget,
             history_settings=_ALL_HISTORY_SETTINGS,
+            token_estimator=_SUMMARY_MODEL_BOUND,
         )[1]
         == []
     )
@@ -1534,6 +1543,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
                 compacted_runs=list(session.runs or []),
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=_SUMMARY_MODEL_BOUND,
             )[1],
         )
         == 1
@@ -1542,6 +1552,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
             compacted_runs=[remaining_run],
             max_input_tokens=budget,
             history_settings=_ALL_HISTORY_SETTINGS,
+            token_estimator=_SUMMARY_MODEL_BOUND,
         )[1]
         == []
     )
@@ -1621,6 +1632,7 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
                 compacted_runs=[first_run, second_run],
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=_SUMMARY_MODEL_BOUND,
             )[1],
         )
         == 1
@@ -1630,6 +1642,7 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
                 compacted_runs=[second_run],
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=_SUMMARY_MODEL_BOUND,
             )[1],
         )
         == 1
