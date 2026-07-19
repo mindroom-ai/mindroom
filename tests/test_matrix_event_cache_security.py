@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, cast
@@ -23,6 +24,7 @@ from mindroom.matrix.cache import (
 )
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
+from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.rooms import leave_non_dm_rooms
 from tests.event_cache_test_support import replace_thread_unconditionally
 
@@ -1293,6 +1295,53 @@ async def test_cached_sidecar_hydration_cannot_cross_principal_purge(
             await read_task
         await reader_root.close()
         await purge_root.close()
+
+
+@pytest.mark.asyncio
+async def test_cached_sidecar_hydration_after_restart_preserves_event_age(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """Hydrating persisted plaintext must not make an old room-level event look new."""
+    principal_id = "@agent:localhost"
+    room_id = "!room:localhost"
+    event_id = "$sidecar"
+    mxc_url = "mxc://server/persisted-sidecar"
+    event = _event(event_id, 1, sidecar_url=mxc_url)
+    initial_root = _shared_cache(event_cache_factory)
+    await initial_root.initialize()
+    initial_cache = initial_root.for_principal(principal_id)
+    await initial_cache.store_event(event_id, room_id, event)
+    assert await initial_cache.store_mxc_text(room_id, event_id, mxc_url, '{"body":"persisted"}')
+    await initial_root.close()
+
+    restarted_root = _shared_cache(event_cache_factory)
+    await restarted_root.initialize()
+    restarted_cache = restarted_root.for_principal(principal_id)
+    runtime_started_at = time.time()
+    membership_epoch = await restarted_cache.room_membership_epoch(room_id)
+    assert membership_epoch is not None
+    client = MagicMock(spec=nio.AsyncClient)
+    client.download = AsyncMock(side_effect=AssertionError("persisted plaintext should be reused"))
+    try:
+        resolved_event = await resolve_event_source_content(
+            event,
+            client,
+            event_cache=restarted_cache,
+            room_id=room_id,
+            expected_membership_epoch=membership_epoch,
+        )
+        snapshot = await restarted_cache.get_latest_agent_message_snapshot(
+            room_id,
+            thread_id=None,
+            sender=principal_id,
+            runtime_started_at=runtime_started_at,
+        )
+    finally:
+        await restarted_root.close()
+
+    assert resolved_event["content"]["body"] == "persisted"
+    assert snapshot is None
+    client.download.assert_not_awaited()
 
 
 @pytest.mark.asyncio

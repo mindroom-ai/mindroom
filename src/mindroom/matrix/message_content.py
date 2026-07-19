@@ -87,12 +87,13 @@ async def _register_sidecar_owner(
     owned_event = dict(event_source)
     owned_event["event_id"] = event_id
     try:
-        await event_cache.store_event(
-            event_id,
-            room_id,
-            owned_event,
-            expected_membership_epoch=expected_membership_epoch,
-        )
+        if await event_cache.get_event(room_id, event_id) is None:
+            await event_cache.store_event(
+                event_id,
+                room_id,
+                owned_event,
+                expected_membership_epoch=expected_membership_epoch,
+            )
     except Exception:
         logger.exception(
             "Failed to register long-text sidecar ownership",
