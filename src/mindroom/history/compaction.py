@@ -44,6 +44,7 @@ from mindroom.logging_config import get_logger
 from mindroom.model_instance_checks import is_genuine_openai_endpoint
 from mindroom.timing import timed
 from mindroom.token_budget import (
+    approximate_o200k_tokens,
     compaction_estimate_kind,
     compaction_payload_token_upper_bound,
     estimate_text_tokens,
@@ -65,6 +66,12 @@ logger = get_logger(__name__)
 
 _WRAPPER_OVERHEAD_TOKENS = 200
 _OVERSIZED_RUN_NOTE = "Run truncated to fit compaction budget."
+_CONDENSE_SUMMARY_NOTE = (
+    "<note>The previous summary alone exceeds the compaction input budget, "
+    "so there are no new runs in this pass. Rewrite the previous summary "
+    "more concisely in the required structure, preserving every "
+    "still-relevant fact, especially Next Steps and Critical Context.</note>"
+)
 _SUMMARY_METADATA_OMIT_KEYS = frozenset(
     {
         "model_params",
@@ -342,7 +349,7 @@ async def compact_scope_history(
 
 
 @timed("system_prompt_assembly.history_prepare.compaction.rewrite_working_session")
-async def _rewrite_working_session_for_compaction(  # noqa: C901
+async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
     *,
     storage: BaseDb,
     persisted_session: AgentSession | TeamSession,
@@ -398,27 +405,35 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
             and previous_summary is not None
             and summary_input_budget > 2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS
         ):
-            # A carried summary near a healthy input budget must not stall
-            # compaction: without this, no run ever fits beside it, the loop
-            # breaks, and every later pass returns None on the same summary.
-            # Truncate this request's copy (the stored summary is untouched
-            # until the chunk's merged summary replaces it) so at least one
-            # run fits beside it. Degenerate budgets at or below the planner's
-            # availability floor keep the no-op contract instead: there the
-            # plan is already unavailable and a destructive rewrite would only
-            # lose summary facts.
-            previous_summary = _truncated_summary_for_budget(
-                previous_summary,
-                max_tokens=summary_input_budget // 2,
-                token_estimator=token_estimator,
-            )
-            summary_input, included_runs = _build_summary_input(
+            # A carried summary that leaves no room for any run must not stall
+            # compaction, and truncating it is never acceptable: the merge
+            # would be persisted and the dropped tail (Next Steps, Critical
+            # Context) lost for good. Condense the COMPLETE summary in its own
+            # loss-aware request instead, then keep chunking against the
+            # condensed text; when even that request cannot fit, summary and
+            # runs stay untouched. Degenerate budgets at or below the
+            # planner's availability floor keep the no-op contract outright.
+            condensed_summary = await _condense_carried_summary(
+                model=summary_model,
                 previous_summary=previous_summary,
-                compacted_runs=compactable_runs,
-                history_settings=history_settings,
-                max_input_tokens=summary_input_budget,
+                summary_input_budget=summary_input_budget,
+                session_id=session_id,
+                scope=scope,
+                summary_prompt=summary_prompt,
                 token_estimator=token_estimator,
+                estimate_kind=estimate_kind,
             )
+            if condensed_summary is not None:
+                previous_summary = condensed_summary
+                final_summary_text = condensed_summary
+                working_session.summary = SessionSummary(summary=condensed_summary, updated_at=datetime.now(UTC))
+                summary_input, included_runs = _build_summary_input(
+                    previous_summary=previous_summary,
+                    compacted_runs=compactable_runs,
+                    history_settings=history_settings,
+                    max_input_tokens=summary_input_budget,
+                    token_estimator=token_estimator,
+                )
         if not included_runs:
             logger.warning(
                 "Compaction skipped because no run fit the single-pass summary budget",
@@ -949,25 +964,57 @@ def _compose_summary_input(summary_block: str, serialized_runs: str) -> str:
     return "\n\n".join(parts)
 
 
-def _truncated_summary_for_budget(
-    summary: str,
+async def _condense_carried_summary(
     *,
-    max_tokens: int,
+    model: Model,
+    previous_summary: str,
+    summary_input_budget: int,
+    session_id: str,
+    scope: HistoryScope,
+    summary_prompt: str,
     token_estimator: Callable[[str], int],
-) -> str:
-    """Truncate a carried summary so its block fits ``max_tokens`` in estimator space.
+    estimate_kind: CompactionEstimateKind,
+) -> str | None:
+    """Condense a complete carried summary that left no room for any run.
 
-    Used only when the full summary left no room for any run in a chunk
-    input; trading summary-tail fidelity for liveness beats never advancing
-    past the same summary.
+    Returns the condensed summary text, or None when even the bare complete
+    summary cannot fit one request, in which case the caller leaves the
+    existing summary and runs untouched. The model always receives the
+    COMPLETE previous summary; nothing derived from a truncated copy is ever
+    persisted.
     """
-    budget_chars = max(max_tokens, 1) * 4
-    while budget_chars > 1:
-        candidate = _truncate_excerpt(summary, budget_chars)
-        if token_estimator(_previous_summary_block(candidate)) <= max_tokens:
-            return candidate
-        budget_chars //= 2
-    return _truncate_excerpt(summary, 1)
+    condensation_input = _compose_summary_input(_previous_summary_block(previous_summary), _CONDENSE_SUMMARY_NOTE)
+    # Send/no-send is all-or-nothing: either the complete summary is condensed
+    # or compaction stays a no-op, so the conservative sizing bound is the
+    # wrong gate here — its headroom would turn into a permanent stall, while
+    # an oversized request merely fails this attempt recoverably with nothing
+    # persisted. Gate on the o200k approximation instead; a genuine prior
+    # summary output comfortably fits its own model's request budget in real
+    # tokens.
+    if approximate_o200k_tokens(condensation_input) > summary_input_budget:
+        logger.warning(
+            "Compaction skipped because the carried summary alone exceeds the summary budget",
+            session_id=session_id,
+            scope=scope.key,
+            summary_input_budget_tokens=summary_input_budget,
+        )
+        return None
+    logger.info(
+        "Compaction condensing carried summary",
+        session_id=session_id,
+        scope=scope.key,
+        **_sizing_log_fields(
+            kind=estimate_kind,
+            estimate=token_estimator(condensation_input),
+            budget_tokens=summary_input_budget,
+        ),
+    )
+    condensed = await generate_compaction_summary(
+        model=model,
+        summary_input=condensation_input,
+        summary_prompt=summary_prompt,
+    )
+    return condensed.summary
 
 
 def _previous_summary_block(summary: str) -> str:

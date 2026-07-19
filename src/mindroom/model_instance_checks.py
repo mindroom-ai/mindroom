@@ -58,10 +58,12 @@ def is_genuine_openai_endpoint(model: object) -> bool:
     if isinstance_of_loaded(model, _OPENAI_LIKE_CLASS, _OPEN_RESPONSES_CLASS):
         return False
     openai_model = cast("OpenAIChat | OpenAIResponses", model)
-    if openai_model.base_url or openai_model.client_params:
+    if openai_model.base_url is not None or openai_model.client_params:
         return False
     if openai_model.client is not None or openai_model.async_client is not None:
         return False
     if openai_model.http_client is not None:
         return False
-    return not os.environ.get("OPENAI_BASE_URL")
+    # Presence beats truthiness: an empty-string override still means someone
+    # tried to redirect the endpoint, so fail closed on it.
+    return "OPENAI_BASE_URL" not in os.environ

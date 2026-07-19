@@ -39,18 +39,24 @@ def _compaction_encoding(model_id: str | None) -> tiktoken.Encoding | None:
     return None
 
 
-def compaction_estimate_kind(model_id: str | None, *, genuine_openai_endpoint: bool) -> CompactionEstimateKind:
-    """Resolve how compaction sizes summary payloads for one summary model.
+def _resolved_compaction_encoding(model_id: str | None, *, genuine_openai_endpoint: bool) -> tiktoken.Encoding | None:
+    """Return the exact-count encoding, or None when sizing must use the byte bound.
 
-    Single source of truth for the sizing branch:
-    ``compaction_payload_token_upper_bound`` dispatches on this result and the
-    structured sizing logs record it, so arithmetic and labels cannot diverge.
-    The tiktoken branch additionally requires the genuine OpenAI endpoint
-    because a model id alone does not identify the serving tokenizer — custom
-    OpenAI-compatible endpoints can serve arbitrary models under
-    tiktoken-recognized ids, so those fall to the byte bound.
+    Single source of truth for the sizing branch: both the kind resolver and
+    the bound function dispatch on this one predicate, so the logged kind and
+    the arithmetic are structurally incapable of diverging. The tiktoken
+    branch requires the genuine OpenAI endpoint because a model id alone does
+    not identify the serving tokenizer — custom OpenAI-compatible endpoints
+    can serve arbitrary models under tiktoken-recognized ids.
     """
-    if genuine_openai_endpoint and _compaction_encoding(model_id) is not None:
+    if not genuine_openai_endpoint:
+        return None
+    return _compaction_encoding(model_id)
+
+
+def compaction_estimate_kind(model_id: str | None, *, genuine_openai_endpoint: bool) -> CompactionEstimateKind:
+    """Resolve how compaction sizes summary payloads for one summary model."""
+    if _resolved_compaction_encoding(model_id, genuine_openai_endpoint=genuine_openai_endpoint) is not None:
         return "model_tiktoken_tokens"
     return "utf8_bytes_token_upper_bound"
 
@@ -74,11 +80,9 @@ def compaction_payload_token_upper_bound(value: str, *, model_id: str | None, ge
     pockets, and an oversized request recovers through the existing
     shrink-retry path.
     """
-    kind = compaction_estimate_kind(model_id, genuine_openai_endpoint=genuine_openai_endpoint)
-    if kind == "model_tiktoken_tokens":
-        encoding = _compaction_encoding(model_id)
-        if encoding is not None:
-            return len(encoding.encode(value, disallowed_special=()))
+    encoding = _resolved_compaction_encoding(model_id, genuine_openai_endpoint=genuine_openai_endpoint)
+    if encoding is not None:
+        return len(encoding.encode(value, disallowed_special=()))
     return len(value.encode("utf-8", errors="surrogatepass"))
 
 
