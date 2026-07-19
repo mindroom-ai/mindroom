@@ -183,11 +183,8 @@ async def _store_thread_events_locked(
             thread_id = excluded.thread_id,
             origin_server_ts = excluded.origin_server_ts,
             event_json = excluded.event_json
-        WHERE json_extract(excluded.event_json, '$.type') IS NOT NULL
-            AND (
-                json_extract(thread_events.event_json, '$.type') = 'm.room.encrypted'
-                OR json_extract(excluded.event_json, '$.type') <> 'm.room.encrypted'
-            )
+        WHERE json_extract(thread_events.event_json, '$.type') = 'm.room.encrypted'
+            OR json_extract(excluded.event_json, '$.type') <> 'm.room.encrypted'
         """,
         [
             (
@@ -522,11 +519,8 @@ async def append_existing_thread_event(
             thread_id = excluded.thread_id,
             origin_server_ts = excluded.origin_server_ts,
             event_json = excluded.event_json
-        WHERE json_extract(excluded.event_json, '$.type') IS NOT NULL
-            AND (
-                json_extract(thread_events.event_json, '$.type') = 'm.room.encrypted'
-                OR json_extract(excluded.event_json, '$.type') <> 'm.room.encrypted'
-            )
+        WHERE json_extract(thread_events.event_json, '$.type') = 'm.room.encrypted'
+            OR json_extract(excluded.event_json, '$.type') <> 'm.room.encrypted'
         """,
         (
             room_id,
