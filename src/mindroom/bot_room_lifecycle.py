@@ -61,6 +61,7 @@ class BotRoomLifecycleDeps:
     get_logger: Callable[[], structlog.stdlib.BoundLogger]
     get_configured_rooms: Callable[[], Sequence[str]]
     send_response: _SendRoomResponse
+    on_room_joined: Callable[[str], Awaitable[None]]
     on_configured_room_joined: Callable[[str], Awaitable[None]]
     on_room_left: Callable[[str], Awaitable[None]]
 
@@ -122,6 +123,11 @@ class BotRoomLifecycle:
         """Return whether this entity persists invited room IDs across restarts."""
         return should_persist_invited_rooms(self._config(), self.deps.agent_name)
 
+    async def _on_configured_room_joined(self, room_id: str) -> None:
+        """Apply common join state before configured-room setup."""
+        await self.deps.on_room_joined(room_id)
+        await self.deps.on_configured_room_joined(room_id)
+
     def invited_rooms_file_path(self) -> Path:
         """Return the durable path for invited room IDs for this entity."""
         return invited_rooms_path(self.deps.runtime_paths.storage_root, self.deps.agent_name)
@@ -158,7 +164,6 @@ class BotRoomLifecycle:
         client = self._client()
         joined_rooms = await get_joined_rooms(client)
         current_rooms = set(joined_rooms or [])
-        current_rooms.update(client.rooms)
         desired_rooms = set(self.deps.get_configured_rooms())
         if self.should_persist_invited_rooms():
             desired_rooms.update(self.invited_rooms)
@@ -166,7 +171,7 @@ class BotRoomLifecycle:
         for room_id in desired_rooms:
             if room_id in current_rooms:
                 self._logger().debug("Already joined room", room_id=room_id)
-                await self.deps.on_configured_room_joined(room_id)
+                await self._on_configured_room_joined(room_id)
                 continue
 
             if await join_room(client, room_id):
@@ -176,7 +181,7 @@ class BotRoomLifecycle:
                     # Pre-join encrypted history can never decrypt on this device;
                     # don't post decrypt-failure notices for it.
                     raise_notice_floor(client.user_id, room_id)
-                await self.deps.on_configured_room_joined(room_id)
+                await self._on_configured_room_joined(room_id)
             else:
                 self._logger().warning("Failed to join room", room_id=room_id)
 
@@ -298,6 +303,7 @@ class BotRoomLifecycle:
 
             self._handled_invite_room_ids.add(room.room_id)
             self._logger().info("Joined room", room_id=room.room_id)
+            await self.deps.on_room_joined(room.room_id)
             if client.user_id:
                 # Pre-join encrypted history can never decrypt on this device;
                 # don't post decrypt-failure notices for it.

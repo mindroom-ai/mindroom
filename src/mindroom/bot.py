@@ -306,6 +306,7 @@ class AgentBot:
     _room_member_join_hooks_armed: bool
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
+    _local_departures_awaiting_sync: set[str]
 
     def __init__(
         self,
@@ -350,6 +351,7 @@ class AgentBot:
         self._startup_thread_prewarm_task = None
         self._call_manager: CallManager | None = None
         self._calls_reconcile_pending = False
+        self._local_departures_awaiting_sync = set()
 
         async def send_room_lifecycle_response(
             *,
@@ -374,7 +376,8 @@ class AgentBot:
                 get_logger=lambda: self.logger,
                 get_configured_rooms=lambda: self.rooms,
                 send_response=send_room_lifecycle_response,
-                on_configured_room_joined=lambda room_id: self._post_join_room_setup(room_id),
+                on_room_joined=self._on_room_joined,
+                on_configured_room_joined=self._post_join_room_setup,
                 on_room_left=self._purge_left_room,
             ),
         )
@@ -968,6 +971,11 @@ class AgentBot:
         if self._first_sync_done:
             self._maybe_start_deferred_overdue_task_drain()
 
+    async def _on_room_joined(self, room_id: str) -> None:
+        """Reopen cache access after an explicit homeserver-confirmed join."""
+        self._local_departures_awaiting_sync.discard(room_id)
+        await self._conversation_cache.mark_room_joined(room_id)
+
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""
         await self._room_lifecycle.leave_unconfigured_rooms()
@@ -1437,12 +1445,14 @@ class AgentBot:
         for room_id in left_room_ids:
             self._room_lifecycle.forget_invited_room(room_id)
         await self._conversation_cache.purge_rooms(left_room_ids)
-        for room_id in joined_room_ids - left_room_ids:
+        self._local_departures_awaiting_sync.difference_update(left_room_ids)
+        current_joined_room_ids = joined_room_ids - left_room_ids - self._local_departures_awaiting_sync
+        for room_id in current_joined_room_ids:
             await self._conversation_cache.mark_room_joined(room_id)
         call_manager = self._call_manager
         if call_manager is not None:
             await call_manager.on_sync_room_membership(
-                joined_room_ids=joined_room_ids,
+                joined_room_ids=current_joined_room_ids,
                 left_room_ids=left_room_ids,
             )
 
@@ -1623,6 +1633,7 @@ class AgentBot:
 
     async def _purge_left_room(self, room_id: str) -> None:
         """Fence and purge one principal-owned room immediately after departure."""
+        self._local_departures_awaiting_sync.add(room_id)
         self._invalidate_sync_checkpoint_for_cache_scope_cleanup()
         await self._conversation_cache.purge_rooms((room_id,))
 

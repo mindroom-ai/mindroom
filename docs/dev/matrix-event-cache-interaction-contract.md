@@ -83,7 +83,9 @@ To-device events and device-list changes are excluded because they belong to enc
 
 The exclusion tests prove that these categories cannot create point rows, thread rows, edit rows, or invalidation markers.
 
-The exclusion tests also prove that a leave sync does not silently purge previously retained history.
+The exclusion tests prove that the leave timeline payload cannot create cache rows.
+
+Authoritative membership handling separately fences and purges retained history for rooms in the sync leave section before timeline caching begins.
 
 ## Thread snapshot reads
 

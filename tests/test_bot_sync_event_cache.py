@@ -281,6 +281,56 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert cached_event["content"]["body"] == "Thread reply"
 
     @pytest.mark.asyncio
+    async def test_pre_leave_join_sync_cannot_reopen_departed_room(self, bot: AgentBot) -> None:
+        """A joined response obtained before proactive leave cannot clear the later departure fence."""
+        support = await _bind_owned_runtime_support(bot)
+        room_id = "!test:localhost"
+        stale_event_id = "$stale-before-leave:localhost"
+        fresh_event_id = "$fresh-after-rejoin:localhost"
+
+        def joined_response(event_id: str, body: str, next_batch: str) -> MagicMock:
+            event = nio.RoomMessageText.from_dict(
+                {
+                    "content": {"body": body, "msgtype": "m.text"},
+                    "event_id": event_id,
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567890,
+                    "room_id": room_id,
+                    "type": "m.room.message",
+                },
+            )
+            response = self._sync_response(
+                {room_id: MagicMock(timeline=MagicMock(events=[event], limited=False))},
+            )
+            response.rooms.leave = {}
+            response.next_batch = next_batch
+            return response
+
+        stale_response = joined_response(stale_event_id, "stale", "s_stale")
+        leave_response = self._sync_response({})
+        leave_response.rooms.leave = {room_id: MagicMock()}
+        leave_response.next_batch = "s_leave"
+        fresh_response = joined_response(fresh_event_id, "fresh", "s_fresh")
+        bot._first_sync_done = True
+
+        try:
+            await bot._purge_left_room(room_id)
+            departure_epoch = bot.event_cache.room_departure_epoch(room_id)
+
+            await self._run_sync_response_without_startup_side_effects(bot, stale_response)
+
+            assert bot.event_cache.room_departure_epoch(room_id) == departure_epoch
+            assert await bot.event_cache.get_event(room_id, stale_event_id) is None
+
+            await self._run_sync_response_without_startup_side_effects(bot, leave_response)
+            await self._run_sync_response_without_startup_side_effects(bot, fresh_response)
+
+            assert await bot.event_cache.get_event(room_id, stale_event_id) is None
+            assert await bot.event_cache.get_event(room_id, fresh_event_id) is not None
+        finally:
+            await _close_bound_runtime_support(bot, support)
+
+    @pytest.mark.asyncio
     async def test_failed_untrusted_cleanup_keeps_cold_sync_network_only(self, bot: AgentBot) -> None:
         """A failed startup purge must prevent this runtime from certifying later sync tokens."""
         support = await _bind_owned_runtime_support(bot)
