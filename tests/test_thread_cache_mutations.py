@@ -282,32 +282,6 @@ class TestThreadMutationHelpers:
             await root.close()
 
     @pytest.mark.asyncio
-    async def test_unbound_cache_runtime_falls_back_without_attribute_errors(self) -> None:
-        """Early cache-only operations must remain harmless before runtime support is bound."""
-        cache_ops, _logger, _event_cache = _thread_mutation_cache_ops()
-        cache_ops.runtime.event_cache = None
-        cache_ops.runtime.event_cache_write_coordinator = None
-        completed: list[str] = []
-
-        async def record(name: str) -> None:
-            completed.append(name)
-
-        await cache_ops.queue_room_cache_update(
-            "!room:localhost",
-            lambda: record("room"),
-            name="unbound_room_cache_update",
-        )
-        await cache_ops.queue_thread_cache_update(
-            "!room:localhost",
-            "$thread:localhost",
-            lambda: record("thread"),
-            name="unbound_thread_cache_update",
-        )
-        await cache_ops.purge_room("!room:localhost")
-
-        assert completed == ["room", "thread"]
-
-    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("context", "invalidate_on_append_failure"),
         [

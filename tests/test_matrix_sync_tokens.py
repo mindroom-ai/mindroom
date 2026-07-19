@@ -25,7 +25,7 @@ from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.sync_certification import SyncCertificationDecision, SyncCheckpoint, SyncTrustState
-from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token_record, save_sync_token
+from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_checkpoint, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, SYNC_RESTART_SHUTDOWN
 from tests.conftest import (
@@ -83,10 +83,10 @@ def _certification_path(tmp_path: Path, *, agent_name: str = "code") -> Path:
 
 
 def _load_sync_token_value(tmp_path: Path, agent_name: str) -> str | None:
-    token_record = load_sync_token_record(tmp_path, agent_name)
-    if token_record is None:
+    checkpoint = load_sync_checkpoint(tmp_path, agent_name)
+    if checkpoint is None:
         return None
-    return token_record.token
+    return checkpoint.token
 
 
 def _text_event(event_id: str, body: str, origin_server_ts: int) -> nio.RoomMessageText:
@@ -152,9 +152,10 @@ def test_save_sync_token_round_trip(tmp_path: Path) -> None:
     }
     assert not _certification_path(tmp_path).exists()
     assert _load_sync_token_value(tmp_path, "code") == "s12345"
-    token_record = load_sync_token_record(tmp_path, "code")
-    assert token_record is not None
-    assert token_record.checkpoint == SyncCheckpoint("s12345", cache_generation=_CACHE_GENERATION)
+    checkpoint = load_sync_checkpoint(tmp_path, "code")
+    assert checkpoint is not None
+    assert checkpoint.token == "s12345"  # noqa: S105
+    assert checkpoint.cache_generation == _CACHE_GENERATION
 
 
 def test_v1_certified_record_is_invalidated_by_principal_owned_cache_schema(tmp_path: Path) -> None:
@@ -166,7 +167,7 @@ def test_v1_certified_record_is_invalidated_by_principal_owned_cache_schema(tmp_
         encoding="utf-8",
     )
 
-    assert load_sync_token_record(tmp_path, "code") is None
+    assert load_sync_checkpoint(tmp_path, "code") is None
 
 
 def test_legacy_marker_file_does_not_certify_plaintext_token(tmp_path: Path) -> None:
@@ -178,7 +179,7 @@ def test_legacy_marker_file_does_not_certify_plaintext_token(tmp_path: Path) -> 
     token_path.write_text(saved_batch, encoding="utf-8")
     certification_path.write_text("legacy-marker\n", encoding="utf-8")
 
-    token_record = load_sync_token_record(tmp_path, "code")
+    token_record = load_sync_checkpoint(tmp_path, "code")
 
     assert token_record is None
 
@@ -265,7 +266,7 @@ async def test_leave_cleanup_restart_purges_only_current_sqlite_principal(tmp_pa
         pytest.raises(asyncio.CancelledError, match="process stopped"),
     ):
         await bot._apply_own_room_membership_from_sync(leave_response)
-    assert load_sync_token_record(tmp_path, bot.agent_name) is None
+    assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
     assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
     assert bot._sync_checkpoint is None
     await root.close()
@@ -344,7 +345,7 @@ async def test_authoritative_leave_clears_checkpoint_before_cache_cleanup(tmp_pa
 
     await bot._apply_own_room_membership_from_sync(response)
 
-    assert load_sync_token_record(tmp_path, bot.agent_name) is None
+    assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
     assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
     assert bot._sync_checkpoint is None
 
@@ -443,7 +444,7 @@ async def test_leave_purges_before_failing_call_reconciliation(
     assert operation_order == ["purge", "call"]
     assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
     assert bot._sync_checkpoint is None
-    assert load_sync_token_record(tmp_path, bot.agent_name) is None
+    assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
 
 
 @pytest.mark.asyncio
@@ -501,7 +502,7 @@ async def test_checkpoint_clear_failure_defers_durable_leave_cleanup_for_replay(
 
         await bot._apply_own_room_membership_from_sync(response)
 
-        assert load_sync_token_record(tmp_path, bot.agent_name) is None
+        assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
         assert await reopened_cache.get_event(room_id, event_id) is None
     finally:
         await reopened_root.close()
@@ -666,7 +667,7 @@ async def test_sqlite_checkpoint_generation_rejects_matrix_principal_rebind(tmp_
         await bot._prepare_cache_and_restore_saved_sync_token()
 
         assert bot.client.next_batch is None
-        assert load_sync_token_record(tmp_path, bot.agent_name) is None
+        assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
     finally:
         await root.close()
 
@@ -694,7 +695,7 @@ async def test_bot_start_rejects_checkpoint_from_reset_cache_generation(tmp_path
         await bot.start()
 
     assert client.next_batch is None
-    assert load_sync_token_record(tmp_path, bot.agent_name) is None
+    assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
 
 
 @pytest.mark.asyncio
@@ -776,10 +777,9 @@ async def test_legacy_plaintext_sync_token_starts_cold(tmp_path: Path) -> None:
 
     await bot._on_sync_response(response)
 
-    token_record = load_sync_token_record(tmp_path, bot.agent_name)
-    assert token_record is not None
-    assert token_record.token == "s_after_legacy"  # noqa: S105
-    assert token_record.checkpoint == SyncCheckpoint("s_after_legacy")
+    checkpoint = load_sync_checkpoint(tmp_path, bot.agent_name)
+    assert checkpoint is not None
+    assert checkpoint.token == "s_after_legacy"  # noqa: S105
 
 
 def test_restore_saved_sync_token_ignores_invalid_utf8(tmp_path: Path) -> None:
@@ -834,10 +834,9 @@ async def test_unknown_pos_restored_first_sync_saves_later_checkpoint(tmp_path: 
     response.rooms = MagicMock(join={})
     await bot._on_sync_response(response)
 
-    token_record = load_sync_token_record(tmp_path, bot.agent_name)
-    assert token_record is not None
-    assert token_record.token == "s_later"  # noqa: S105
-    assert token_record.checkpoint == SyncCheckpoint("s_later")
+    checkpoint = load_sync_checkpoint(tmp_path, bot.agent_name)
+    assert checkpoint is not None
+    assert checkpoint.token == "s_later"  # noqa: S105
 
 
 @pytest.mark.asyncio
@@ -883,10 +882,9 @@ async def test_unknown_pos_non_restored_runtime_allows_later_checkpoint(tmp_path
     response.rooms = MagicMock(join={"!room:localhost": MagicMock(timeline=MagicMock(events=[], limited=False))})
     await bot._on_sync_response(response)
 
-    token_record = load_sync_token_record(tmp_path, bot.agent_name)
-    assert token_record is not None
-    assert token_record.token == "s_later_after_unknown_pos"  # noqa: S105
-    assert token_record.checkpoint == SyncCheckpoint("s_later_after_unknown_pos")
+    checkpoint = load_sync_checkpoint(tmp_path, bot.agent_name)
+    assert checkpoint is not None
+    assert checkpoint.token == "s_later_after_unknown_pos"  # noqa: S105
 
 
 @pytest.mark.asyncio
@@ -903,9 +901,9 @@ async def test_on_sync_response_persists_latest_sync_token(tmp_path: Path) -> No
         await bot._on_sync_response(response)
 
     assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_latest"
-    token_record = load_sync_token_record(tmp_path, bot.agent_name)
-    assert token_record is not None
-    assert token_record.checkpoint == SyncCheckpoint("s_latest")
+    checkpoint = load_sync_checkpoint(tmp_path, bot.agent_name)
+    assert checkpoint is not None
+    assert checkpoint.token == "s_latest"  # noqa: S105
 
 
 @pytest.mark.asyncio
@@ -944,9 +942,9 @@ async def test_prepare_for_sync_shutdown_flushes_latest_sync_token(tmp_path: Pat
     await bot.prepare_for_sync_shutdown()
 
     assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_shutdown"
-    token_record = load_sync_token_record(tmp_path, bot.agent_name)
-    assert token_record is not None
-    assert token_record.checkpoint == SyncCheckpoint("s_shutdown")
+    checkpoint = load_sync_checkpoint(tmp_path, bot.agent_name)
+    assert checkpoint is not None
+    assert checkpoint.token == "s_shutdown"  # noqa: S105
 
 
 @pytest.mark.asyncio

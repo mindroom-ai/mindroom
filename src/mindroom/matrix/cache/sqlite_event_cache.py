@@ -47,6 +47,10 @@ _T = TypeVar("_T")
 logger = get_logger(__name__)
 
 
+async def _noop_write(_db: aiosqlite.Connection) -> None:
+    """Complete an operation after its pending runtime writes are flushed."""
+
+
 async def _close_sqlite_connection_best_effort(db: aiosqlite.Connection, *, operation: str) -> None:
     """Close one SQLite connection without masking the original failure."""
     try:
@@ -546,15 +550,11 @@ class SqliteEventCache:
     async def flush_pending_durable_writes(self, room_id: str) -> None:
         """Persist runtime-only writes for one room before certifying a sync token."""
         if self._runtime.has_pending_room_purge(self.principal_id, room_id):
-
-            async def flush_only(_db: aiosqlite.Connection) -> None:
-                return None
-
             await self._write_operation(
                 room_id,
                 operation="flush_pending_durable_writes",
                 disabled_result=None,
-                writer=flush_only,
+                writer=_noop_write,
                 allow_departed=True,
             )
 
@@ -1018,14 +1018,11 @@ class SqliteEventCache:
         if not self._runtime.is_room_departed(self.principal_id, room_id):
             self.mark_room_departed(room_id)
 
-        async def purge_only(_db: aiosqlite.Connection) -> None:
-            return None
-
         await self._write_operation(
             room_id,
             operation="purge_room",
             disabled_result=None,
-            writer=purge_only,
+            writer=_noop_write,
             allow_departed=True,
         )
 
@@ -1054,14 +1051,11 @@ class SqliteEventCache:
         if not self.durable_writes_available:
             return
 
-        async def join_only(_db: aiosqlite.Connection) -> None:
-            return None
-
         await self._write_operation(
             room_id,
             operation="mark_room_joined",
             disabled_result=None,
-            writer=join_only,
+            writer=_noop_write,
             allow_departed=True,
         )
         if not self._runtime.has_pending_room_purge(self.principal_id, room_id):
@@ -1075,12 +1069,9 @@ class SqliteEventCache:
         """Delete every cache row owned by this principal."""
         self._runtime.record_pending_principal_purge(self.principal_id)
 
-        async def purge_only(_db: aiosqlite.Connection) -> None:
-            return None
-
         await self._write_operation(
             _PRINCIPAL_PURGE_LOCK_SCOPE,
             operation="purge_principal",
             disabled_result=None,
-            writer=purge_only,
+            writer=_noop_write,
         )

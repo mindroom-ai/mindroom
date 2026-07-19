@@ -324,29 +324,58 @@ async def test_sync_leave_section_forgets_invited_room_before_call_teardown(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("membership", ["leave", "ban"])
-async def test_live_own_departure_purges_principal_room(
+async def test_joined_sync_timeline_departure_purges_before_reopening_room(
     tmp_path: Path,
     membership: str,
 ) -> None:
-    """A live own leave or ban purges only the callback bot's bound cache view."""
+    """A leave and rejoin compressed into one sync must purge before restoring access."""
     bot = _agent_bot(tmp_path)
     room_id = "!departed:localhost"
-    room = nio.MatrixRoom(room_id, bot.agent_user.user_id)
-    event = nio.RoomMemberEvent.from_dict(
+    response = nio.SyncResponse.from_dict(
         {
-            "type": "m.room.member",
-            "event_id": "$departure",
-            "sender": "@admin:localhost",
-            "state_key": bot.agent_user.user_id,
-            "origin_server_ts": 1,
-            "content": {"membership": membership},
+            "next_batch": "s-after-rejoin",
+            "rooms": {
+                "invite": {},
+                "join": {
+                    room_id: {
+                        "state": {"events": []},
+                        "timeline": {
+                            "events": [
+                                {
+                                    "content": {"membership": membership},
+                                    "event_id": "$departure",
+                                    "origin_server_ts": 1,
+                                    "sender": "@admin:localhost",
+                                    "state_key": bot.agent_user.user_id,
+                                    "type": "m.room.member",
+                                },
+                                {
+                                    "content": {"membership": "join"},
+                                    "event_id": "$rejoin",
+                                    "origin_server_ts": 2,
+                                    "sender": bot.agent_user.user_id,
+                                    "state_key": bot.agent_user.user_id,
+                                    "type": "m.room.member",
+                                },
+                            ],
+                            "limited": False,
+                            "prev_batch": "s-before-rejoin",
+                        },
+                    },
+                },
+                "leave": {},
+            },
         },
     )
-    assert isinstance(event, nio.RoomMemberEvent)
+    operation_order: list[str] = []
+    bot._conversation_cache.purge_rooms = AsyncMock(side_effect=lambda _rooms: operation_order.append("purge"))
+    bot._conversation_cache.mark_room_joined = AsyncMock(side_effect=lambda _room: operation_order.append("join"))
 
-    await bot._on_room_membership_event(room, event)
+    await bot._apply_own_room_membership_from_sync(response)
 
-    bot.event_cache.purge_room.assert_awaited_once_with(room_id)
+    assert operation_order == ["purge", "join"]
+    bot._conversation_cache.purge_rooms.assert_awaited_once_with({room_id})
+    bot._conversation_cache.mark_room_joined.assert_awaited_once_with(room_id)
 
 
 @pytest.mark.asyncio

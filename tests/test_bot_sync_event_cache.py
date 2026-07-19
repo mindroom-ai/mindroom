@@ -18,7 +18,7 @@ from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint
-from mindroom.matrix.sync_tokens import load_sync_token_record
+from mindroom.matrix.sync_tokens import load_sync_checkpoint
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.runtime_support import (
@@ -363,7 +363,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             bot.client.next_batch = "s_after_failed_cleanup"
             await self._run_sync_response_without_startup_side_effects(bot, first_response)
 
-            assert load_sync_token_record(bot.storage_path, bot.agent_name) is None
+            assert load_sync_checkpoint(bot.storage_path, bot.agent_name) is None
             assert await bot.event_cache.get_event(room_id, event_id) is None
 
             bot.client.next_batch = "s_later_still_network_only"
@@ -371,7 +371,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             later_response.rooms.leave = {}
             await self._run_sync_response_without_startup_side_effects(bot, later_response)
 
-            assert load_sync_token_record(bot.storage_path, bot.agent_name) is None
+            assert load_sync_checkpoint(bot.storage_path, bot.agent_name) is None
         finally:
             await _close_bound_runtime_support(bot, support)
 
@@ -394,12 +394,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         try:
             with patch(
-                "mindroom.bot.load_sync_token_record",
+                "mindroom.bot.load_sync_checkpoint",
                 side_effect=OSError("checkpoint temporarily unreadable"),
             ):
                 await bot._prepare_cache_and_restore_saved_sync_token()
 
-            assert load_sync_token_record(bot.storage_path, bot.agent_name) is None
+            assert load_sync_checkpoint(bot.storage_path, bot.agent_name) is None
             assert await bot.event_cache.get_event(room_id, event_id) is None
             assert bot.client.next_batch is None
         finally:
@@ -415,7 +415,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         try:
             with (
                 patch(
-                    "mindroom.bot.load_sync_token_record",
+                    "mindroom.bot.load_sync_checkpoint",
                     side_effect=OSError("checkpoint temporarily unreadable"),
                 ),
                 patch(
@@ -486,10 +486,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         await self._run_sync_response_without_startup_side_effects(bot, self._sync_response({}))
 
-        token_record = load_sync_token_record(bot.storage_path, bot.agent_name)
-        assert token_record is not None
-        assert token_record.token == "s_after_complete"  # noqa: S105
-        assert token_record.checkpoint == SyncCheckpoint("s_after_complete")
+        checkpoint = load_sync_checkpoint(bot.storage_path, bot.agent_name)
+        assert checkpoint is not None
+        assert checkpoint.token == "s_after_complete"  # noqa: S105
 
     @pytest.mark.asyncio
     async def test_limited_restored_first_sync_clears_token(self, bot: AgentBot) -> None:
@@ -537,10 +536,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         ):
             await self._run_sync_response_without_startup_side_effects(bot, self._sync_response({}))
 
-        token_record = load_sync_token_record(bot.storage_path, bot.agent_name)
-        assert token_record is not None
-        assert token_record.token == "s_after_recovery"  # noqa: S105
-        assert token_record.checkpoint == SyncCheckpoint("s_after_recovery")
+        checkpoint = load_sync_checkpoint(bot.storage_path, bot.agent_name)
+        assert checkpoint is not None
+        assert checkpoint.token == "s_after_recovery"  # noqa: S105
 
     @pytest.mark.asyncio
     async def test_empty_joined_rooms_first_sync_certifies_checkpoint(self, bot: AgentBot) -> None:
@@ -552,10 +550,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         await self._run_sync_response_without_startup_side_effects(bot, self._sync_response({}))
 
-        token_record = load_sync_token_record(bot.storage_path, bot.agent_name)
-        assert token_record is not None
-        assert token_record.token == "s_after_empty"  # noqa: S105
-        assert token_record.checkpoint == SyncCheckpoint("s_after_empty")
+        checkpoint = load_sync_checkpoint(bot.storage_path, bot.agent_name)
+        assert checkpoint is not None
+        assert checkpoint.token == "s_after_empty"  # noqa: S105
 
     @pytest.mark.asyncio
     async def test_empty_sync_flushes_pending_cache_writes_before_certifying(self, bot: AgentBot) -> None:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.matrix.sync_certification import SyncCheckpoint
@@ -13,14 +12,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _SYNC_TOKEN_RECORD_VERSION = "mindroom-sync-token-v2"  # noqa: S105
-
-
-@dataclass(frozen=True)
-class _SyncTokenRecord:
-    """Loaded cache-certified sync token checkpoint."""
-
-    token: str
-    checkpoint: SyncCheckpoint
 
 
 def _sync_token_path(storage_path: Path, agent_name: str) -> Path:
@@ -33,8 +24,8 @@ def _sync_token_certification_path(storage_path: Path, agent_name: str) -> Path:
     return storage_path / "sync_tokens" / f"{agent_name}.token.certified"
 
 
-def _record_from_json(text: str) -> _SyncTokenRecord | None:
-    """Return a token record from the JSON checkpoint format."""
+def _checkpoint_from_json(text: str) -> SyncCheckpoint | None:
+    """Return a checkpoint from the durable JSON format."""
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
@@ -48,8 +39,7 @@ def _record_from_json(text: str) -> _SyncTokenRecord | None:
     cache_generation = normalize_sync_token(cache_generation_value)
     if cache_generation is None:
         return None
-    checkpoint = SyncCheckpoint(token=token, cache_generation=cache_generation)
-    return _SyncTokenRecord(token=token, checkpoint=checkpoint)
+    return SyncCheckpoint(token=token, cache_generation=cache_generation)
 
 
 def _record_json(checkpoint: SyncCheckpoint) -> str:
@@ -93,8 +83,8 @@ def clear_sync_token(storage_path: Path, agent_name: str) -> None:
     certification_path.unlink(missing_ok=True)
 
 
-def load_sync_token_record(storage_path: Path, agent_name: str) -> _SyncTokenRecord | None:
-    """Load one persisted sync token with its certification provenance."""
+def load_sync_checkpoint(storage_path: Path, agent_name: str) -> SyncCheckpoint | None:
+    """Load one persisted cache-certified sync checkpoint."""
     token_path = _sync_token_path(storage_path, agent_name)
     if not token_path.is_file():
         return None
@@ -105,4 +95,4 @@ def load_sync_token_record(storage_path: Path, agent_name: str) -> _SyncTokenRec
     if not token_text:
         return None
 
-    return _record_from_json(token_text)
+    return _checkpoint_from_json(token_text)

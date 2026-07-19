@@ -65,6 +65,10 @@ _TRANSIENT_ERROR_TEXT: tuple[str, ...] = (
 )
 
 
+async def _noop_write(_db: psycopg.AsyncConnection) -> None:
+    """Complete an operation after its pending runtime writes are flushed."""
+
+
 def _postgres_error_sqlstate(exc: BaseException) -> str | None:
     """Return the SQLSTATE attached to a psycopg error when available."""
     if not isinstance(exc, psycopg.Error):
@@ -874,15 +878,11 @@ class PostgresEventCache:
 
     async def flush_pending_durable_writes(self, room_id: str) -> None:
         """Persist runtime-only writes for one room before certifying a sync token."""
-
-        async def flush_only(_db: psycopg.AsyncConnection) -> None:
-            return None
-
         await self._write_operation(
             room_id,
             operation="flush_pending_durable_writes",
             disabled_result=None,
-            writer=flush_only,
+            writer=_noop_write,
             allow_departed=True,
         )
 
@@ -942,9 +942,8 @@ class PostgresEventCache:
         """Run one cache operation, flushing pending stale markers first even for reads."""
         if not self._can_expose_operation_result(room_id, allow_departed=allow_departed):
             return disabled_result
-        transient_error: BaseException | None = None
         transient_attempt = 0
-        while transient_attempt < _MAX_TRANSIENT_OPERATION_ATTEMPTS:
+        while True:
             flushed_pending = _FlushedPendingWrites()
             try:
                 result, flushed_pending = await self._run_operation_attempt(
@@ -954,8 +953,7 @@ class PostgresEventCache:
                     callback=callback,
                     allow_departed=allow_departed,
                 )
-            except EventCacheBackendUnavailableError as exc:
-                transient_error = exc
+            except EventCacheBackendUnavailableError:
                 transient_attempt += 1
                 if transient_attempt < _MAX_TRANSIENT_OPERATION_ATTEMPTS:
                     continue
@@ -963,7 +961,6 @@ class PostgresEventCache:
             except Exception as exc:
                 if not _is_transient_postgres_failure(exc):
                     raise
-                transient_error = exc
                 await self._runtime.handle_transient_failure(exc, operation=operation)
                 transient_attempt += 1
                 if transient_attempt < _MAX_TRANSIENT_OPERATION_ATTEMPTS:
@@ -976,7 +973,6 @@ class PostgresEventCache:
                     if self._can_expose_operation_result(room_id, allow_departed=allow_departed)
                     else disabled_result
                 )
-        raise _cache_backend_unavailable(operation, transient_error or RuntimeError("operation did not run"))
 
     async def _run_operation_attempt(
         self,
@@ -1468,14 +1464,11 @@ class PostgresEventCache:
         if not self._runtime.is_room_departed(room_id):
             self.mark_room_departed(room_id)
 
-        async def purge_only(_db: psycopg.AsyncConnection) -> None:
-            return None
-
         await self._write_operation(
             room_id,
             operation="purge_room",
             disabled_result=None,
-            writer=purge_only,
+            writer=_noop_write,
             allow_departed=True,
         )
 
@@ -1504,14 +1497,11 @@ class PostgresEventCache:
         if not self.durable_writes_available:
             return
 
-        async def join_only(_db: psycopg.AsyncConnection) -> None:
-            return None
-
         await self._write_operation(
             room_id,
             operation="mark_room_joined",
             disabled_result=None,
-            writer=join_only,
+            writer=_noop_write,
             allow_departed=True,
         )
         if not self._runtime.has_pending_room_purge(room_id):
@@ -1524,12 +1514,9 @@ class PostgresEventCache:
         """Delete every row in this principal namespace."""
         self._runtime.record_pending_principal_purge()
 
-        async def purge_only(_db: psycopg.AsyncConnection) -> None:
-            return None
-
         await self._write_operation(
             _PRINCIPAL_PURGE_LOCK_SCOPE,
             operation="purge_principal",
             disabled_result=None,
-            writer=purge_only,
+            writer=_noop_write,
         )

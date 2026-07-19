@@ -27,6 +27,4 @@ def sidecar_mxc_url(content: dict[str, Any]) -> str | None:
     encrypted_file = content.get("file")
     if not isinstance(encrypted_file, dict):
         return None
-    if (encrypted_url := _validated_mxc_url(encrypted_file.get("url"))) is not None:
-        return encrypted_url
-    return None
+    return _validated_mxc_url(encrypted_file.get("url"))

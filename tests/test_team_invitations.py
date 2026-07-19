@@ -78,6 +78,7 @@ class TestTeamRoomMembership:
             team_model=None,
             enable_streaming=False,
         )
+        install_runtime_cache_support(bot)
 
         # Mock the client
         mock_client = AsyncMock()
@@ -205,6 +206,7 @@ class TestTeamRoomMembership:
             team_model=None,
             enable_streaming=False,
         )
+        install_runtime_cache_support(bot)
         bot.client = AsyncMock()
 
         join_room = AsyncMock(return_value=True)

@@ -19,7 +19,6 @@ This is the application layer below the write policies in ``thread_writes``; it 
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING, Any
 
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact, MutationThreadImpactState
@@ -27,6 +26,7 @@ from mindroom.matrix.thread_bookkeeping import MutationThreadImpact, MutationThr
 from .event_cache import EventCacheBackendUnavailableError
 
 if TYPE_CHECKING:
+    import asyncio
     from collections.abc import Callable, Coroutine, Sequence
 
     import structlog
@@ -100,8 +100,6 @@ class ThreadMutationCacheOps:
         """Run one cache mutation under the room-ordered write barrier."""
         event_cache = self.runtime.event_cache
         coordinator = self.runtime.event_cache_write_coordinator
-        if event_cache is None or coordinator is None:
-            return asyncio.create_task(update_coro_factory(), name=name)
         scoped_coalesce_key = (
             None if coalesce_key is None else (f"{event_cache.principal_id}:{coalesce_key[0]}", coalesce_key[1])
         )
@@ -128,8 +126,6 @@ class ThreadMutationCacheOps:
         """Run one thread-specific cache mutation under the same-thread write barrier."""
         event_cache = self.runtime.event_cache
         coordinator = self.runtime.event_cache_write_coordinator
-        if event_cache is None or coordinator is None:
-            return asyncio.create_task(update_coro_factory(), name=name)
         scoped_coalesce_key = (
             None if coalesce_key is None else (f"{event_cache.principal_id}:{coalesce_key[0]}", coalesce_key[1])
         )
@@ -168,11 +164,8 @@ class ThreadMutationCacheOps:
 
     async def purge_room(self, room_id: str) -> None:
         """Delete this bot principal's cache rows after an authoritative departure."""
-        event_cache = self.runtime.event_cache
-        if event_cache is None:
-            return
         try:
-            await event_cache.purge_room(room_id)
+            await self.runtime.event_cache.purge_room(room_id)
         except Exception as exc:
             self.logger.warning(
                 "Failed to purge principal-owned Matrix event cache room; deletion remains pending",
@@ -182,22 +175,18 @@ class ThreadMutationCacheOps:
 
     def mark_room_departed(self, room_id: str) -> int:
         """Fence reads, queue durable cleanup, and return the new room epoch."""
-        event_cache = self.runtime.event_cache
-        return 0 if event_cache is None else event_cache.mark_room_departed(room_id)
+        return self.runtime.event_cache.mark_room_departed(room_id)
 
     def room_departure_epoch(self, room_id: str) -> int:
         """Return the durable cache's current room-fence epoch."""
-        event_cache = self.runtime.event_cache
-        return 0 if event_cache is None else event_cache.room_departure_epoch(room_id)
+        return self.runtime.event_cache.room_departure_epoch(room_id)
 
     async def mark_room_joined(self, room_id: str, *, expected_departure_epoch: int) -> None:
         """Lift one departed-room fence after an authoritative rejoin."""
-        event_cache = self.runtime.event_cache
-        if event_cache is not None:
-            await event_cache.mark_room_joined(
-                room_id,
-                expected_departure_epoch=expected_departure_epoch,
-            )
+        await self.runtime.event_cache.mark_room_joined(
+            room_id,
+            expected_departure_epoch=expected_departure_epoch,
+        )
 
     async def redact_cached_event(
         self,

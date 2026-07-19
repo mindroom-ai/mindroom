@@ -23,6 +23,18 @@ from .postgres_cursor import fetchall, fetchone, rowcount
 if TYPE_CHECKING:
     from psycopg import AsyncConnection
 
+_PRINCIPAL_ROW_TABLES = (
+    "mindroom_event_cache_thread_events",
+    "mindroom_event_cache_events",
+    "mindroom_event_cache_event_edits",
+    "mindroom_event_cache_event_threads",
+    "mindroom_event_cache_redacted_events",
+    "mindroom_event_cache_event_mxc_references",
+    "mindroom_event_cache_mxc_text",
+    "mindroom_event_cache_thread_state",
+    "mindroom_event_cache_room_state",
+)
+
 
 async def load_event(
     db: AsyncConnection,
@@ -719,17 +731,7 @@ async def purge_room_locked(
     room_id: str,
 ) -> None:
     """Delete all cache rows in one departed principal namespace and room."""
-    for table_name in (
-        "mindroom_event_cache_thread_events",
-        "mindroom_event_cache_events",
-        "mindroom_event_cache_event_edits",
-        "mindroom_event_cache_event_threads",
-        "mindroom_event_cache_redacted_events",
-        "mindroom_event_cache_event_mxc_references",
-        "mindroom_event_cache_mxc_text",
-        "mindroom_event_cache_thread_state",
-        "mindroom_event_cache_room_state",
-    ):
+    for table_name in _PRINCIPAL_ROW_TABLES:
         await db.execute(
             f"DELETE FROM {table_name} WHERE namespace = %s AND room_id = %s",  # noqa: S608
             (namespace, room_id),
@@ -742,17 +744,7 @@ async def purge_principal_locked(
     namespace: str,
 ) -> None:
     """Delete all cache rows owned by one principal namespace."""
-    for table_name in (
-        "mindroom_event_cache_thread_events",
-        "mindroom_event_cache_events",
-        "mindroom_event_cache_event_edits",
-        "mindroom_event_cache_event_threads",
-        "mindroom_event_cache_redacted_events",
-        "mindroom_event_cache_event_mxc_references",
-        "mindroom_event_cache_mxc_text",
-        "mindroom_event_cache_thread_state",
-        "mindroom_event_cache_room_state",
-    ):
+    for table_name in _PRINCIPAL_ROW_TABLES:
         await db.execute(
             f"DELETE FROM {table_name} WHERE namespace = %s",  # noqa: S608
             (namespace,),
@@ -767,8 +759,6 @@ async def _mxc_urls_for_events(
     event_ids: list[str],
 ) -> frozenset[str]:
     """Return candidate plaintext keys referenced by a visible event set."""
-    if not event_ids:
-        return frozenset()
     rows = await fetchall(
         db,
         """

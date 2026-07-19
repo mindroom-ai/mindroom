@@ -2039,6 +2039,7 @@ class TestMultiAgentOrchestrator:
         """Recovered background starts should not retry permanent room setup failures forever."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = MagicMock()
+        orchestrator._router_principal_id = "@mindroom_router:localhost"
 
         bot = MagicMock()
         bot.agent_name = "general"

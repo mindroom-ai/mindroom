@@ -419,8 +419,6 @@ class _MultiAgentOrchestrator:
 
     def _configure_approval_store_transport(self) -> None:
         """Bind approval transport hooks to the current shared runtime services."""
-        if self._router_principal_id is None and ROUTER_AGENT_NAME not in self.agent_bots:
-            return
         self._approval_transport.bind_approval_runtime()
 
     async def _close_runtime_support_services(self) -> None:

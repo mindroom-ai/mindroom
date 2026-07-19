@@ -22,6 +22,18 @@ from .event_cache_events import (
 if TYPE_CHECKING:
     import aiosqlite
 
+_PRINCIPAL_ROW_TABLES = (
+    "thread_events",
+    "events",
+    "event_edits",
+    "event_threads",
+    "redacted_events",
+    "event_mxc_references",
+    "mxc_text_cache",
+    "thread_cache_state",
+    "room_cache_state",
+)
+
 
 async def load_event(
     db: aiosqlite.Connection,
@@ -370,8 +382,6 @@ async def _thread_ids_for_events(
     event_ids: list[str],
 ) -> set[str]:
     """Return thread IDs currently mapped from one event set."""
-    if not event_ids:
-        return set()
     placeholders = ",".join("?" for _ in event_ids)
     cursor = await db.execute(
         f"""
@@ -638,17 +648,7 @@ async def purge_room_locked(
     room_id: str,
 ) -> None:
     """Remove every row owned by one principal in one departed room."""
-    for table_name in (
-        "thread_events",
-        "events",
-        "event_edits",
-        "event_threads",
-        "redacted_events",
-        "event_mxc_references",
-        "mxc_text_cache",
-        "thread_cache_state",
-        "room_cache_state",
-    ):
+    for table_name in _PRINCIPAL_ROW_TABLES:
         await db.execute(
             f"DELETE FROM {table_name} WHERE principal_id = ? AND room_id = ?",  # noqa: S608
             (principal_id, room_id),
@@ -661,17 +661,7 @@ async def purge_principal_locked(
     principal_id: str,
 ) -> None:
     """Delete all cache rows owned by one Matrix principal."""
-    for table_name in (
-        "thread_events",
-        "events",
-        "event_edits",
-        "event_threads",
-        "redacted_events",
-        "event_mxc_references",
-        "mxc_text_cache",
-        "thread_cache_state",
-        "room_cache_state",
-    ):
+    for table_name in _PRINCIPAL_ROW_TABLES:
         await db.execute(
             f"DELETE FROM {table_name} WHERE principal_id = ?",  # noqa: S608
             (principal_id,),
@@ -786,8 +776,6 @@ async def _mxc_urls_for_events(
     *,
     event_ids: list[str],
 ) -> frozenset[str]:
-    if not event_ids:
-        return frozenset()
     placeholders = ",".join("?" for _ in event_ids)
     cursor = await db.execute(
         f"""
