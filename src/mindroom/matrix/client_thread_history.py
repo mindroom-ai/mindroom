@@ -59,7 +59,10 @@ from mindroom.matrix.cache import (
     thread_cache_rejection_reason,
     thread_history_result,
 )
-from mindroom.matrix.cache.thread_cache_invalidation import mark_thread_stale_fail_closed
+from mindroom.matrix.cache.thread_cache_invalidation import (
+    mark_room_threads_stale_fail_closed,
+    mark_thread_stale_fail_closed,
+)
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     apply_latest_edits_to_messages,
@@ -112,6 +115,10 @@ type _ThreadHistoryDiagnosticValue = str | int | float | bool | None
 
 class OpaqueEncryptedThreadHistoryError(RuntimeError):
     """Raised when a thread reconstruction depends on still-undecryptable encrypted events."""
+
+
+class _UnresolvedOpaqueRoomHistoryError(OpaqueEncryptedThreadHistoryError):
+    """Raised when opaque room history cannot be assigned to a specific thread."""
 
 
 async def _capture_membership_epoch(event_cache: ConversationEventCache, room_id: str) -> int:
@@ -694,6 +701,9 @@ async def refresh_thread_history_from_source(
             expected_membership_epoch=fetch_membership_epoch,
             trusted_sender_ids=trusted_sender_ids,
         )
+    except _UnresolvedOpaqueRoomHistoryError:
+        await _mark_room_stale_for_opaque_history(event_cache, room_id=room_id)
+        raise
     except OpaqueEncryptedThreadHistoryError:
         await _mark_thread_stale_for_opaque_history(event_cache, room_id=room_id, thread_id=thread_id)
         raise
@@ -844,6 +854,20 @@ async def _mark_thread_stale_for_opaque_history(
         event_cache,
         room_id=room_id,
         thread_id=thread_id,
+        reason=_OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON,
+        logger=logger,
+    )
+
+
+async def _mark_room_stale_for_opaque_history(
+    event_cache: ConversationEventCache,
+    *,
+    room_id: str,
+) -> None:
+    """Keep every thread stale when opaque relation impact cannot be scoped within the room."""
+    await mark_room_threads_stale_fail_closed(
+        event_cache,
+        room_id=room_id,
         reason=_OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON,
         logger=logger,
     )
@@ -1162,7 +1186,7 @@ async def fetch_thread_event_sources_via_room_messages(
             unresolved_opaque_event_ids=sorted(scan_result.unresolved_opaque_event_ids),
         )
         msg = f"thread history scan for {thread_id} contains undecryptable events with unresolved thread impact"
-        raise OpaqueEncryptedThreadHistoryError(msg)
+        raise _UnresolvedOpaqueRoomHistoryError(msg)
     return _ThreadEventSourceScanResult(
         event_sources=scan_result.thread_event_sources[thread_id],
         page_count=scan_result.page_count,
@@ -1368,9 +1392,8 @@ async def bulk_refresh_room_thread_histories(
             caller_label=caller_label,
             unresolved_opaque_event_ids=sorted(scan_result.unresolved_opaque_event_ids),
         )
-        for thread_id in set(thread_root_ids):
-            await _mark_thread_stale_for_opaque_history(event_cache, room_id=room_id, thread_id=thread_id)
-            opaque_stale_threads += 1
+        await _mark_room_stale_for_opaque_history(event_cache, room_id=room_id)
+        opaque_stale_threads = len(set(thread_root_ids))
     else:
         for thread_id, event_sources in scan_result.thread_event_sources.items():
             rejection_reason = _thread_history_cache_rejection_reason(event_sources, thread_id=thread_id)

@@ -23,8 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact, MutationThreadImpactState
 
-from .event_cache import EventCacheBackendUnavailableError
-from .thread_cache_invalidation import mark_thread_stale_fail_closed
+from .thread_cache_invalidation import mark_room_threads_stale_fail_closed, mark_thread_stale_fail_closed
 
 if TYPE_CHECKING:
     import asyncio
@@ -267,22 +266,13 @@ class ThreadMutationCacheOps:
         raise_on_failure: bool = False,
     ) -> None:
         """Mark one room's cached threads stale and fail closed if the marker cannot be written."""
-        try:
-            await self.runtime.event_cache.mark_room_threads_stale(room_id, reason=reason)
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to mark cached room threads stale",
-                room_id=room_id,
-                reason=reason,
-                error=str(exc),
-            )
-            await self._fail_closed_room_invalidation(
-                room_id,
-                reason=reason,
-                stale_marker_error=exc,
-            )
-            if raise_on_failure:
-                raise
+        await mark_room_threads_stale_fail_closed(
+            self.runtime.event_cache,
+            room_id=room_id,
+            reason=reason,
+            logger=self.logger,
+            raise_on_failure=raise_on_failure,
+        )
 
     async def append_event_to_cache(
         self,
@@ -335,46 +325,3 @@ class ThreadMutationCacheOps:
             if raise_on_failure:
                 raise
         return True
-
-    def _disable_cache_after_fail_closed_invalidation(
-        self,
-        *,
-        room_id: str,
-        reason: str,
-        scope: str,
-    ) -> None:
-        self.runtime.event_cache.disable(f"stale_marker_failed:{scope}:{room_id}:{reason}")
-
-    async def _fail_closed_room_invalidation(
-        self,
-        room_id: str,
-        *,
-        reason: str,
-        stale_marker_error: Exception,
-    ) -> None:
-        try:
-            await self.runtime.event_cache.invalidate_room_threads(room_id)
-        except Exception as invalidate_exc:
-            if isinstance(stale_marker_error, EventCacheBackendUnavailableError):
-                self.logger.warning(
-                    "Cached room stale marker is pending because cache backend is temporarily unavailable",
-                    room_id=room_id,
-                    reason=reason,
-                    stale_marker_error=str(stale_marker_error),
-                    error=str(invalidate_exc),
-                )
-                return
-            self.logger.warning(
-                "Failed to delete cached room thread rows after stale-marker failure; disabling cache",
-                room_id=room_id,
-                reason=reason,
-                stale_marker_error=str(stale_marker_error),
-                error=str(invalidate_exc),
-            )
-        else:
-            return
-        self._disable_cache_after_fail_closed_invalidation(
-            room_id=room_id,
-            reason=reason,
-            scope="room",
-        )
