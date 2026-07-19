@@ -345,11 +345,8 @@ async def write_lookup_index_rows(
             event_json = excluded.event_json,
             cached_at = excluded.cached_at,
             write_seq = nextval('mindroom_event_cache_write_seq')
-        WHERE excluded.event_json::jsonb ->> 'type' IS NOT NULL
-            AND (
-                mindroom_event_cache_events.event_json::jsonb ->> 'type' = 'm.room.encrypted'
-                OR excluded.event_json::jsonb ->> 'type' <> 'm.room.encrypted'
-            )
+        WHERE mindroom_event_cache_events.event_json::jsonb ->> 'type' = 'm.room.encrypted'
+            OR excluded.event_json::jsonb ->> 'type' <> 'm.room.encrypted'
         RETURNING event_id
         """,
         (

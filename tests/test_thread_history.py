@@ -1263,7 +1263,7 @@ class TestThreadHistory:
     @pytest.mark.asyncio
     async def test_room_scan_does_not_promote_plain_reply_to_non_thread_root(self) -> None:
         """Cold room scans must not treat arbitrary room replies as threaded."""
-        grouped = await _group_scanned_sources_by_thread(
+        grouped, has_unresolved_opaque_relations = await _group_scanned_sources_by_thread(
             room_id="!room:localhost",
             thread_root_ids=("$room_root",),
             latest_edits_by_original_event_id={},
@@ -1287,12 +1287,13 @@ class TestThreadHistory:
             },
         )
 
+        assert has_unresolved_opaque_relations is False
         assert [source["event_id"] for source in grouped["$room_root"]] == ["$room_root"]
 
     @pytest.mark.asyncio
     async def test_room_scan_revisits_inherited_replies_until_fixpoint(self) -> None:
         """Cold room scans should retain descendants even when they sort before their threaded parent."""
-        grouped = await _group_scanned_sources_by_thread(
+        grouped, has_unresolved_opaque_relations = await _group_scanned_sources_by_thread(
             room_id="!room:localhost",
             thread_root_ids=("$root",),
             latest_edits_by_original_event_id={},
@@ -1326,12 +1327,13 @@ class TestThreadHistory:
             },
         )
 
+        assert has_unresolved_opaque_relations is False
         assert {source["event_id"] for source in grouped["$root"]} == {"$root", "$z-parent", "$a-child"}
 
     @pytest.mark.asyncio
     async def test_room_scan_promotes_transitive_plain_reply_chain(self) -> None:
         """Cold room scans should keep a plain-reply chain inside the same thread transitively."""
-        grouped = await _group_scanned_sources_by_thread(
+        grouped, has_unresolved_opaque_relations = await _group_scanned_sources_by_thread(
             room_id="!room:localhost",
             thread_root_ids=("$root",),
             latest_edits_by_original_event_id={},
@@ -1375,7 +1377,61 @@ class TestThreadHistory:
             },
         )
 
+        assert has_unresolved_opaque_relations is False
         assert [source["event_id"] for source in grouped["$root"]] == ["$root", "$thread_reply", "$plain1", "$plain2"]
+
+    @pytest.mark.asyncio
+    async def test_room_scan_opaque_redaction_of_cyclic_relation_stays_unresolved(self) -> None:
+        """Opaque redactions must preserve indeterminate relation ancestry."""
+        grouped, has_unresolved_opaque_relations = await _group_scanned_sources_by_thread(
+            room_id="!room:localhost",
+            thread_root_ids=("$root",),
+            latest_edits_by_original_event_id={},
+            scanned_message_sources={
+                "$root": {
+                    "event_id": "$root",
+                    "origin_server_ts": 1000,
+                    "type": "m.room.message",
+                    "content": {"msgtype": "m.text", "body": "root"},
+                },
+                "$cycle-a": {
+                    "event_id": "$cycle-a",
+                    "origin_server_ts": 2000,
+                    "type": "m.room.message",
+                    "content": {
+                        "msgtype": "m.text",
+                        "body": "a",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": "$cycle-b"}},
+                    },
+                },
+                "$cycle-b": {
+                    "event_id": "$cycle-b",
+                    "origin_server_ts": 3000,
+                    "type": "m.room.message",
+                    "content": {
+                        "msgtype": "m.text",
+                        "body": "b",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": "$cycle-a"}},
+                    },
+                },
+                "$opaque-redaction": {
+                    "event_id": "$opaque-redaction",
+                    "origin_server_ts": 4000,
+                    "type": "m.room.encrypted",
+                    "redacts": "$cycle-a",
+                    "content": {
+                        "algorithm": "m.megolm.v1.aes-sha2",
+                        "ciphertext": "opaque ciphertext",
+                        "device_id": "DEVICE",
+                        "sender_key": "sender-key",
+                        "session_id": "session",
+                    },
+                },
+            },
+        )
+
+        assert has_unresolved_opaque_relations is True
+        assert [source["event_id"] for source in grouped["$root"]] == ["$root"]
 
     def test_ordered_event_ids_from_scanned_event_sources_preserves_input_order_on_timestamp_ties(self) -> None:
         """Scanned-source ordering should preserve first-seen order before falling back to event IDs."""
@@ -2459,13 +2515,11 @@ class TestThreadHistoryCache:
         client.room_messages.assert_awaited_once()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("relation_visible", [True, False])
     async def test_opaque_matrix_refresh_stays_stale_until_decrypted_recovery(
         self,
         tmp_path: Path,
-        relation_visible: bool,
     ) -> None:
-        """Fresh ciphertext evidence must block replacement, including when its relation is hidden."""
+        """Fresh relation-bearing ciphertext must block replacement until decryption recovers it."""
         room_id = "!room:localhost"
         thread_id = "$thread_root"
         cache = SqliteEventCache(tmp_path / "event_cache.db")
@@ -2503,9 +2557,8 @@ class TestThreadHistoryCache:
             "device_id": "DEVICE",
             "sender_key": "sender-key",
             "session_id": "session",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
         }
-        if relation_visible:
-            opaque_content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
         opaque_reply = nio.MegolmEvent.from_dict(
             {
                 "content": opaque_content,
@@ -2564,6 +2617,57 @@ class TestThreadHistoryCache:
         assert thread_cache_rejection_reason(recovered_state) is None
 
     @pytest.mark.asyncio
+    async def test_relationless_opaque_event_does_not_block_thread_refresh(self, tmp_path: Path) -> None:
+        """Unrelated ciphertext without exposed relation metadata must not poison a thread scan."""
+        room_id = "!room:localhost"
+        thread_id = "$thread_root"
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+        root_event = self._make_text_event(
+            event_id=thread_id,
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        opaque_event = nio.MegolmEvent.from_dict(
+            {
+                "content": {
+                    "algorithm": "m.megolm.v1.aes-sha2",
+                    "ciphertext": "opaque ciphertext",
+                    "device_id": "DEVICE",
+                    "sender_key": "sender-key",
+                    "session_id": "session",
+                },
+                "event_id": "$unrelated",
+                "sender": "@user:localhost",
+                "origin_server_ts": 2000,
+                "room_id": room_id,
+                "type": "m.room.encrypted",
+            },
+        )
+        page = MagicMock(spec=nio.RoomMessagesResponse)
+        page.chunk = [opaque_event, root_event]
+        page.end = None
+        client = MagicMock()
+        client.room_messages = AsyncMock(return_value=page)
+
+        try:
+            history = await matrix_client_module.refresh_thread_history_from_source(
+                client,
+                room_id,
+                thread_id,
+                cache,
+                allow_stale_fallback=False,
+            )
+            cache_state = await cache.get_thread_cache_state(room_id, thread_id)
+        finally:
+            await cache.close()
+
+        assert [message.body for message in history] == ["Root message"]
+        assert thread_cache_rejection_reason(cache_state) is None
+
+    @pytest.mark.asyncio
     async def test_opaque_refresh_double_invalidation_failure_disables_old_snapshot(
         self,
         tmp_path: Path,
@@ -2598,6 +2702,7 @@ class TestThreadHistoryCache:
                     "device_id": "DEVICE",
                     "sender_key": "sender-key",
                     "session_id": "session",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
                 },
                 "event_id": "$opaque",
                 "sender": "@user:localhost",

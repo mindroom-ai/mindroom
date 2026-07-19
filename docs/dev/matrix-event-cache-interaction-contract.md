@@ -49,7 +49,11 @@ Explicit snapshot writes apply the same event-family filter, and relation walks 
 
 Page-local, cached, and homeserver-scan root proof accepts only plaintext or encrypted message children.
 
-An opaque encrypted event without provable thread membership invalidates every cached thread in the room because its ciphertext may hide a thread-affecting relation.
+An opaque encrypted event with exposed thread-affecting relation metadata leaves the resolved thread snapshot stale until a decryption-capable refresh succeeds.
+
+Opaque replies or references whose target cannot be resolved leave every requested snapshot stale because their impact is unknown.
+
+Relationless ciphertext outside a requested thread does not prevent that thread from being reconstructed.
 
 Opaque reactions remain point-only and do not receive event-to-thread index rows.
 
@@ -117,7 +121,7 @@ A snapshot containing any still-opaque encrypted event is rejected and marked st
 
 A rejected or absent snapshot causes an authoritative homeserver room-history scan and guarded cache refill.
 
-A room-history scan containing opaque encrypted evidence cannot replace the prior snapshot and remains stale until a decryption-capable scan reconstructs complete history.
+A reconstructed thread containing opaque encrypted evidence cannot replace the prior snapshot and remains stale until a decryption-capable scan reconstructs complete history.
 
 A second unchanged read is served from cache and performs no homeserver scan.
 

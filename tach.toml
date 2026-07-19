@@ -3626,7 +3626,9 @@ from = ["mindroom.matrix.conversation_cache"]
 [[interfaces]]
 expose = [
     "EventInfo",
+    "event_source_has_thread_affecting_relation",
     "event_type_supports_thread_relations",
+    "is_thread_affecting_relation",
     "origin_server_ts_from_event_source",
     "reply_to_event_id_from_content",
 ]

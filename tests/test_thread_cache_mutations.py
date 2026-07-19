@@ -1195,8 +1195,8 @@ class TestMatrixConversationCacheThreadReads:
         assert room_plain_events == {}
         assert room_redactions == {}
 
-    def test_collect_sync_timeline_cache_updates_keeps_relationless_opaque_event(self) -> None:
-        """Opaque payloads may hide relations and must reach fail-closed sync handling."""
+    def test_collect_sync_timeline_cache_updates_keeps_relationless_opaque_event_room_level(self) -> None:
+        """Opaque payloads without visible relation metadata remain point-cache events."""
         room_threaded_events: dict[str, list[dict[str, object]]] = {}
         room_plain_events: dict[str, list[dict[str, object]]] = {}
         room_redactions: dict[str, list[str]] = {}
@@ -1209,10 +1209,10 @@ class TestMatrixConversationCacheThreadReads:
             room_redactions=room_redactions,
         )
 
-        assert [cached["event_id"] for cached in room_threaded_events["!test:localhost"]] == [
+        assert [cached["event_id"] for cached in room_plain_events["!test:localhost"]] == [
             "$opaque:localhost",
         ]
-        assert room_plain_events == {}
+        assert room_threaded_events == {}
         assert room_redactions == {}
 
     @pytest.mark.asyncio
@@ -1224,8 +1224,6 @@ class TestMatrixConversationCacheThreadReads:
             ("reply", "thread", True),
             ("reference", "thread", True),
             ("redaction", "room", False),
-            ("custom_relation", "room", False),
-            ("hidden_relation", "room", False),
         ],
     )
     async def test_opaque_encrypted_sync_mutations_leave_snapshots_stale(
@@ -1260,14 +1258,8 @@ class TestMatrixConversationCacheThreadReads:
             event = _opaque_encrypted_event(
                 content_updates={"m.relates_to": {"rel_type": "m.reference", "event_id": target_id}},
             )
-        elif relation_case == "redaction":
-            event = _opaque_encrypted_event(redacts=target_id)
-        elif relation_case == "custom_relation":
-            event = _opaque_encrypted_event(
-                content_updates={"m.relates_to": {"rel_type": "com.example.custom", "event_id": target_id}},
-            )
         else:
-            event = _opaque_encrypted_event()
+            event = _opaque_encrypted_event(redacts=target_id)
 
         event_cache = _runtime_event_cache()
         event_cache.get_thread_id_for_event = AsyncMock(
@@ -1309,6 +1301,46 @@ class TestMatrixConversationCacheThreadReads:
                 reason="sync_opaque_encrypted_event",
             )
             event_cache.mark_thread_stale.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_opaque_encrypted_sync_relation_to_room_level_event_preserves_threads(self) -> None:
+        """A visible encrypted relation proven room-level cannot affect cached threads."""
+        target_id = "$room-level-target:localhost"
+        target = nio.RoomMessageText.from_dict(
+            {
+                "content": {"body": "room message", "msgtype": "m.text"},
+                "event_id": target_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567889,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+        opaque_reply = _opaque_encrypted_event(
+            content_updates={"m.relates_to": {"m.in_reply_to": {"event_id": target_id}}},
+        )
+        event_cache = _runtime_event_cache()
+        event_cache.get_thread_events.return_value = []
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(
+                client=_make_client_mock(),
+                event_cache=event_cache,
+            ),
+        )
+        response = MagicMock()
+        response.__class__ = nio.SyncResponse
+        response.rooms = MagicMock(
+            join={"!test:localhost": MagicMock(timeline=MagicMock(events=[target, opaque_reply], limited=False))},
+        )
+
+        result = await access.cache_sync_timeline_for_certification(response)
+
+        assert result.complete is True
+        assert event_cache.store_events_batch.await_count == 2
+        event_cache.append_event.assert_not_awaited()
+        event_cache.mark_thread_stale.assert_not_awaited()
+        event_cache.mark_room_threads_stale.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_cyclic_sync_relation_fails_closed_with_room_invalidation(self) -> None:
