@@ -1102,6 +1102,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
                 compacted_runs=visible_runs,
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=_SUMMARY_MODEL_BOUND,
             )[1],
         )
         == 1
@@ -1111,6 +1112,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
                 compacted_runs=visible_runs[1:],
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
+                token_estimator=_SUMMARY_MODEL_BOUND,
             )[1],
         )
         == 1

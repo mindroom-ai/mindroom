@@ -1515,6 +1515,7 @@ async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             token_estimator=lambda _value: 2_000,
+            estimate_kind="utf8_bytes_token_upper_bound",
             fallback_model=fallback,
             fallback_model_name="fallback-model",
         )
@@ -1586,6 +1587,7 @@ async def test_retry_helper_propagates_fallback_refusal_or_failure(fallback_erro
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             token_estimator=lambda _value: 2_000,
+            estimate_kind="utf8_bytes_token_upper_bound",
             fallback_model=fallback,
             fallback_model_name="fallback-model",
         )
@@ -1628,6 +1630,7 @@ async def test_retry_helper_refusal_after_transient_retry_propagates_within_atte
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             token_estimator=lambda _value: 2_000,
+            estimate_kind="utf8_bytes_token_upper_bound",
             fallback_model=fallback,
             fallback_model_name="fallback-model",
         )
