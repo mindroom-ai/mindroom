@@ -302,7 +302,7 @@ async def test_unknown_pos_first_sync_clears_client_and_saved_token(tmp_path: Pa
 
     assert bot.client.next_batch is None
     assert _load_sync_token_value(tmp_path, bot.agent_name) is None
-    assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
+    assert bot._sync_trust_state is SyncTrustState.RESET_RECOVERY
 
 
 @pytest.mark.asyncio
@@ -351,7 +351,7 @@ async def test_unknown_pos_after_first_sync_clears_client_and_saved_token(tmp_pa
 
     assert bot.client.next_batch is None
     assert _load_sync_token_value(tmp_path, bot.agent_name) is None
-    assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
+    assert bot._sync_trust_state is SyncTrustState.RESET_RECOVERY
 
 
 @pytest.mark.asyncio

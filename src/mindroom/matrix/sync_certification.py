@@ -16,6 +16,9 @@ class SyncTrustState(Enum):
     PENDING = "pending"
     CERTIFIED = "certified"
     UNCERTAIN = "uncertain"
+    # The certifier deliberately reset the sync position; the next response
+    # replays a fresh initial window whose limited timelines are expected.
+    RESET_RECOVERY = "reset_recovery"
 
 
 @dataclass(frozen=True)
@@ -87,7 +90,7 @@ def _uncertain_decision(
 ) -> SyncCertificationDecision:
     """Return a fail-closed uncertainty decision."""
     return SyncCertificationDecision(
-        state=SyncTrustState.UNCERTAIN,
+        state=SyncTrustState.RESET_RECOVERY if reset_client_token else SyncTrustState.UNCERTAIN,
         clear_saved_token=True,
         reset_client_token=reset_client_token,
         reason=reason,
@@ -114,12 +117,19 @@ def certify_sync_response(
     cache_result: SyncCacheWriteResult,
     first_sync: bool,
 ) -> SyncCertificationDecision:
-    """Return the certifier decision for one sync response."""
+    """Return the certifier decision for one sync response.
+
+    A limited joined-room timeline means the homeserver skipped events, so the
+    active and persisted sync positions are reset to replay a complete window.
+    The one limited response expected right after that deliberate reset is
+    consumed without resetting again.
+    """
     reason = _uncertain_reason(cache_result, next_batch=next_batch)
     if reason is not None:
+        newly_limited = bool(cache_result.limited_room_ids) and state is not SyncTrustState.RESET_RECOVERY
         return _uncertain_decision(
             reason=reason,
-            reset_client_token=state is SyncTrustState.PENDING and first_sync,
+            reset_client_token=newly_limited or (state is SyncTrustState.PENDING and first_sync),
         )
 
     token = normalize_sync_token(next_batch)
