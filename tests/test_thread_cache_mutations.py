@@ -669,6 +669,69 @@ class TestMatrixConversationCacheThreadReads:
         client.room_get_event.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_outbound_edit_redaction_refreshes_memoized_original_immediately(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A same-turn read after redacting an edit must restore the original payload."""
+        room_id = "!room:localhost"
+        original_event_id = "$original:localhost"
+        edit_event_id = "$edit:localhost"
+        client = _make_client_mock(user_id="@agent:localhost")
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(client=client, event_cache=event_cache),
+        )
+        await event_cache.store_events_batch(
+            [
+                (
+                    original_event_id,
+                    room_id,
+                    {
+                        "event_id": original_event_id,
+                        "sender": "@agent:localhost",
+                        "origin_server_ts": 1000,
+                        "room_id": room_id,
+                        "type": "m.room.message",
+                        "content": {"body": "original", "msgtype": "m.text"},
+                    },
+                ),
+                (
+                    edit_event_id,
+                    room_id,
+                    {
+                        "event_id": edit_event_id,
+                        "sender": "@agent:localhost",
+                        "origin_server_ts": 2000,
+                        "room_id": room_id,
+                        "type": "m.room.message",
+                        "content": {
+                            "body": "* edited",
+                            "msgtype": "m.text",
+                            "m.new_content": {"body": "edited", "msgtype": "m.text"},
+                            "m.relates_to": {
+                                "rel_type": "m.replace",
+                                "event_id": original_event_id,
+                            },
+                        },
+                    },
+                ),
+            ],
+        )
+
+        async with access.turn_scope():
+            edited_read = await access.get_event(room_id, original_event_id)
+            assert isinstance(edited_read, nio.RoomGetEventResponse)
+            assert edited_read.event.source["content"]["body"] == "edited"
+
+            access.notify_outbound_redaction(room_id, edit_event_id)
+            original_read = await access.get_event(room_id, original_event_id)
+
+        assert isinstance(original_read, nio.RoomGetEventResponse)
+        assert original_read.event.source["content"]["body"] == "original"
+        client.room_get_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_outbound_send_sync_echo_replaces_synthetic_payload_without_duplication(
         self,
         event_cache: ConversationEventCache,
