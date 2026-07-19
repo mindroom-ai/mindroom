@@ -372,8 +372,9 @@ async def write_lookup_index_rows(
     """Persist point-lookup, edit-index, and thread-index rows for cached events.
 
     Point payload quality is monotonic per event ID: clear content may replace a stored opaque
-    ``m.room.encrypted`` payload, but an opaque payload never replaces stored clear content, and
-    edit and thread index rows are derived only from payloads the upsert accepted.
+    ``m.room.encrypted`` payload, but an opaque payload never replaces stored clear content.
+    Payload-derived indexes use only accepted payloads; explicit snapshots always record their
+    authoritative event-to-thread membership.
     """
     accepted_events: list[SerializedCachedEvent] = []
     for event in serialized_events:
