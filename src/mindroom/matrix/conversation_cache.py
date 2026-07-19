@@ -506,18 +506,25 @@ class MatrixConversationCache(ConversationCacheProtocol):
     ) -> EventLookupResult:
         """Resolve one event through per-turn memoization and the advisory cache."""
         normalized_event_id = event_id.strip()
-        coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is not None and not coordinator.current_task_holds_room_barrier(room_id):
-            await coordinator.wait_for_room_idle(room_id)
         cache_key = (room_id, normalized_event_id)
         turn_cache = self._turn_event_cache.get()
         if turn_cache is not None and cache_key in turn_cache:
             cached_lookup = turn_cache[cache_key]
-            if (
+            requires_lookup_fill = (
                 persist_lookup_fill
                 and not cached_lookup.lookup_fill_persisted
                 and cached_lookup.fetched_event_source is not None
-            ):
+            )
+            if not requires_lookup_fill:
+                return cached_lookup.response
+
+        coordinator = self.runtime.event_cache_write_coordinator
+        if coordinator is not None and not coordinator.current_task_holds_room_barrier(room_id):
+            await coordinator.wait_for_prior_room_updates(room_id)
+
+        if turn_cache is not None and cache_key in turn_cache:
+            cached_lookup = turn_cache[cache_key]
+            if cached_lookup.fetched_event_source is not None:
                 await self._persist_lookup_fill(
                     room_id=room_id,
                     event_id=normalized_event_id,
