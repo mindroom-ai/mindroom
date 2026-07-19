@@ -189,8 +189,8 @@ async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_legacy_plaintext_sync_token_forces_cold_sync(tmp_path: Path) -> None:
-    """Unbound legacy tokens cannot skip history outside the durable cache generation."""
+async def test_legacy_plaintext_sync_token_forces_initial_recovery(tmp_path: Path) -> None:
+    """Unbound legacy tokens cannot skip the tokenless initial recovery window."""
     bot = _agent_bot(tmp_path)
     token_path = _token_path(tmp_path, agent_name=bot.agent_name)
     token_path.parent.mkdir(parents=True, exist_ok=True)
@@ -209,7 +209,7 @@ async def test_legacy_plaintext_sync_token_forces_cold_sync(tmp_path: Path) -> N
         await bot.start()
 
     assert client.next_batch is None
-    assert bot._sync_trust_state is SyncTrustState.COLD
+    assert bot._sync_trust_state is SyncTrustState.RESET_RECOVERY
     assert token_path.exists()
 
     response = MagicMock(spec=nio.SyncResponse)
@@ -266,7 +266,7 @@ async def test_cache_generation_rejects_token_after_reset_crash_window(tmp_path:
         bot._restore_saved_sync_token()
 
         assert bot.client.next_batch is None
-        assert bot._sync_trust_state is SyncTrustState.COLD
+        assert bot._sync_trust_state is SyncTrustState.RESET_RECOVERY
         assert not _token_path(tmp_path).exists()
     finally:
         await restarted_cache.close()
