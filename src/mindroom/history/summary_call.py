@@ -114,6 +114,8 @@ class SummaryRetryPolicy:
         """Return whether a smaller summary input may resolve this provider failure."""
         if isinstance(error, _TYPED_SHRINKABLE_ERRORS):
             return True
+        if self.should_retry_same_input(error):
+            return False
         message = str(error).lower()
         return any(fragment in message for fragment in _RETRYABLE_PROVIDER_ERROR_FRAGMENTS)
 
@@ -125,14 +127,13 @@ class SummaryRetryPolicy:
         """Return the next input budget, preserving it for same-input retries."""
         if attempt >= self.max_attempts:
             return None
-        typed_shrinkable = isinstance(error, _TYPED_SHRINKABLE_ERRORS)
-        if not typed_shrinkable and self.should_retry_same_input(error):
-            return budget
-        if typed_shrinkable or self.should_shrink(error):
+        if self.should_shrink(error):
             smaller_budget = max(self.floor_tokens, budget // self.shrink_divisor)
             if smaller_budget >= budget:
                 return None
             return smaller_budget
+        if self.should_retry_same_input(error):
+            return budget
         return None
 
 

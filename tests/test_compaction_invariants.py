@@ -655,6 +655,7 @@ def test_retry_policy_halves_budget_for_typed_safeguard_refusal() -> None:
     ],
 )
 def test_retry_policy_retries_transient_provider_error_without_shrinking(error: ModelProviderError) -> None:
+    assert DEFAULT_SUMMARY_RETRY_POLICY.should_shrink(error) is False
     assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) == 16_000
     assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=2, budget=16_000, error=error) is None
 
