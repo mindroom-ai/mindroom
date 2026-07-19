@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -18,8 +19,10 @@ from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
+
+    from aiosqlite import Cursor
 
 
 def _sidecar_content(mxc_url: str, *, encrypted: bool) -> dict[str, Any]:
@@ -267,9 +270,18 @@ async def test_departure_discards_read_that_started_before_fence(
     event = _event(event_id, 1, sidecar_url=mxc_url)
     read_obtained_result = asyncio.Event()
     release_read = asyncio.Event()
-    module = sqlite_event_cache_events if isinstance(cache, SqliteEventCache) else postgres_event_cache_events
-    loader_name = "load_event" if lookup_kind == "event" else "load_mxc_text"
-    original_loader = getattr(module, loader_name)
+    if isinstance(cache, SqliteEventCache):
+        sqlite_loader = (
+            sqlite_event_cache_events.load_event if lookup_kind == "event" else sqlite_event_cache_events.load_mxc_text
+        )
+        original_loader = cast("Callable[..., Awaitable[object]]", sqlite_loader)
+    else:
+        postgres_loader = (
+            postgres_event_cache_events.load_event
+            if lookup_kind == "event"
+            else postgres_event_cache_events.load_mxc_text
+        )
+        original_loader = cast("Callable[..., Awaitable[object]]", postgres_loader)
 
     async def pause_after_read(*args: object, **kwargs: object) -> object:
         result = await original_loader(*args, **kwargs)
@@ -280,7 +292,15 @@ async def test_departure_discards_read_that_started_before_fence(
     try:
         await cache.store_event(event_id, room_id, event)
         assert await cache.store_mxc_text(room_id, event_id, mxc_url, "plaintext")
-        monkeypatch.setattr(module, loader_name, pause_after_read)
+        if isinstance(cache, SqliteEventCache):
+            if lookup_kind == "event":
+                monkeypatch.setattr(sqlite_event_cache_events, "load_event", pause_after_read)
+            else:
+                monkeypatch.setattr(sqlite_event_cache_events, "load_mxc_text", pause_after_read)
+        elif lookup_kind == "event":
+            monkeypatch.setattr(postgres_event_cache_events, "load_event", pause_after_read)
+        else:
+            monkeypatch.setattr(postgres_event_cache_events, "load_mxc_text", pause_after_read)
         if lookup_kind == "event":
             read_task = asyncio.create_task(cache.get_event(room_id, event_id))
         else:
@@ -587,22 +607,35 @@ async def test_postgres_principal_purge_excludes_other_runtime_operations(
     event = _event(event_id, 1)
     purge_deleted = asyncio.Event()
     release_purge = asyncio.Event()
+    store_lock_attempted = asyncio.Event()
     original_purge = postgres_event_cache_events.purge_principal_locked
+    original_acquire = second._runtime.acquire_db_operation
 
     async def pause_after_delete(*args: object, **kwargs: object) -> None:
         await original_purge(*args, **kwargs)
         purge_deleted.set()
         await release_purge.wait()
 
+    @asynccontextmanager
+    async def signal_store_lock_attempt(
+        acquired_room_id: str,
+        *,
+        operation: str,
+    ) -> AsyncIterator[Any]:
+        store_lock_attempted.set()
+        async with original_acquire(acquired_room_id, operation=operation) as db:
+            yield db
+
     await first.initialize()
     await second.initialize()
     monkeypatch.setattr(postgres_event_cache_events, "purge_principal_locked", pause_after_delete)
+    monkeypatch.setattr(second._runtime, "acquire_db_operation", signal_store_lock_attempt)
     purge_task = asyncio.create_task(first.purge_principal())
     store_task: asyncio.Task[None] | None = None
     try:
         await purge_deleted.wait()
         store_task = asyncio.create_task(second.store_event(event_id, room_id, event))
-        await asyncio.sleep(0.05)
+        await store_lock_attempted.wait()
 
         assert not store_task.done()
 
@@ -635,7 +668,9 @@ async def test_postgres_resumed_principal_purge_upgrades_to_exclusive_namespace_
     event = _event(event_id, 1)
     purge_deleted = asyncio.Event()
     release_purge = asyncio.Event()
+    store_lock_attempted = asyncio.Event()
     original_purge = postgres_event_cache_events.purge_principal_locked
+    original_acquire = second._runtime.acquire_db_operation
     fail_initial_purge = True
     failure_reason = "temporary purge failure"
 
@@ -646,9 +681,20 @@ async def test_postgres_resumed_principal_purge_upgrades_to_exclusive_namespace_
         purge_deleted.set()
         await release_purge.wait()
 
+    @asynccontextmanager
+    async def signal_store_lock_attempt(
+        acquired_room_id: str,
+        *,
+        operation: str,
+    ) -> AsyncIterator[Any]:
+        store_lock_attempted.set()
+        async with original_acquire(acquired_room_id, operation=operation) as db:
+            yield db
+
     await first.initialize()
     await second.initialize()
     monkeypatch.setattr(postgres_event_cache_events, "purge_principal_locked", control_purge)
+    monkeypatch.setattr(second._runtime, "acquire_db_operation", signal_store_lock_attempt)
     try:
         with pytest.raises(RuntimeError, match="temporary purge failure"):
             await first.purge_principal()
@@ -657,7 +703,7 @@ async def test_postgres_resumed_principal_purge_upgrades_to_exclusive_namespace_
         resumed_purge = asyncio.create_task(first.get_event(first_room_id, "$missing"))
         await purge_deleted.wait()
         store_task = asyncio.create_task(second.store_event(event_id, second_room_id, event))
-        await asyncio.sleep(0.05)
+        await store_lock_attempted.wait()
 
         assert not store_task.done()
 
@@ -686,6 +732,7 @@ async def test_sqlite_write_transaction_serializes_tombstone_authorization(
     event = _event(event_id, 1)
     event_checked = asyncio.Event()
     release_event_write = asyncio.Event()
+    redaction_write_attempted = asyncio.Event()
     original_filter = sqlite_event_cache_events.filter_cacheable_events
 
     async def pause_after_tombstone_check(*args: object, **kwargs: object) -> object:
@@ -696,12 +743,21 @@ async def test_sqlite_write_transaction_serializes_tombstone_authorization(
 
     await first.initialize()
     await second.initialize()
+    second_db = second._runtime.require_db()
+    original_execute = second_db.execute
+
+    async def signal_redaction_write(sql: str, *args: object, **kwargs: object) -> Cursor:
+        if sql == "BEGIN IMMEDIATE":
+            redaction_write_attempted.set()
+        return await original_execute(sql, *args, **kwargs)
+
     try:
         monkeypatch.setattr(sqlite_event_cache_events, "filter_cacheable_events", pause_after_tombstone_check)
+        monkeypatch.setattr(second_db, "execute", signal_redaction_write)
         late_store = asyncio.create_task(first.store_event(event_id, room_id, event))
         await event_checked.wait()
         redact_late_event = asyncio.create_task(second.redact_event(room_id, event_id))
-        await asyncio.sleep(0.05)
+        await redaction_write_attempted.wait()
         assert not redact_late_event.done()
 
         release_event_write.set()
@@ -729,6 +785,7 @@ async def test_sqlite_write_transaction_serializes_mxc_authorization(
     mxc_url = "mxc://server/plaintext"
     ownership_checked = asyncio.Event()
     release_plaintext_write = asyncio.Event()
+    redaction_write_attempted = asyncio.Event()
     original_ownership_check = sqlite_event_cache_events._event_owns_mxc_text
 
     async def pause_after_ownership_check(*args: object, **kwargs: object) -> object:
@@ -739,6 +796,14 @@ async def test_sqlite_write_transaction_serializes_mxc_authorization(
 
     await first.initialize()
     await second.initialize()
+    second_db = second._runtime.require_db()
+    original_execute = second_db.execute
+
+    async def signal_redaction_write(sql: str, *args: object, **kwargs: object) -> Cursor:
+        if sql == "BEGIN IMMEDIATE":
+            redaction_write_attempted.set()
+        return await original_execute(sql, *args, **kwargs)
+
     try:
         await first.store_event(
             sidecar_event_id,
@@ -746,12 +811,13 @@ async def test_sqlite_write_transaction_serializes_mxc_authorization(
             _event(sidecar_event_id, 2, sidecar_url=mxc_url),
         )
         monkeypatch.setattr(sqlite_event_cache_events, "_event_owns_mxc_text", pause_after_ownership_check)
+        monkeypatch.setattr(second_db, "execute", signal_redaction_write)
         plaintext_store = asyncio.create_task(
             first.store_mxc_text(room_id, sidecar_event_id, mxc_url, "plaintext"),
         )
         await ownership_checked.wait()
         redact_sidecar = asyncio.create_task(second.redact_event(room_id, sidecar_event_id))
-        await asyncio.sleep(0.05)
+        await redaction_write_attempted.wait()
         assert not redact_sidecar.done()
 
         release_plaintext_write.set()
