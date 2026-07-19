@@ -519,7 +519,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 return cached_lookup.response
 
         coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is not None and not coordinator.current_task_holds_room_barrier(room_id):
+        holds_room_barrier = coordinator is not None and coordinator.current_task_holds_room_barrier(room_id)
+        if coordinator is not None and not holds_room_barrier:
             await coordinator.wait_for_prior_room_updates(room_id)
 
         if turn_cache is not None and cache_key in turn_cache:
@@ -556,7 +557,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 room_id=room_id,
                 event_id=normalized_event_id,
                 fetched_event_source=fetched_event_source,
-                queue_write=True,
+                queue_write=not holds_room_barrier,
             )
         if turn_cache is not None:
             turn_cache[cache_key] = _TurnEventLookup(
