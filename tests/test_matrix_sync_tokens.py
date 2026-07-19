@@ -21,6 +21,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.dispatch_handoff import PendingDispatchMetadata
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
+from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.sync_certification import SyncCertificationDecision, SyncCheckpoint, SyncTrustState
@@ -551,6 +552,96 @@ async def test_bot_start_initializes_postgres_principal_before_restoring_checkpo
 
 
 @pytest.mark.asyncio
+async def test_postgres_outage_preserves_unverified_checkpoint_until_generation_recovers(
+    tmp_path: Path,
+    postgres_event_cache_url: str,
+) -> None:
+    """A transient outage must leave a valid cache/checkpoint pair available for a later restart."""
+    namespace = f"sync_restore_outage_{uuid.uuid4().hex}"
+    principal_id = "@mindroom_code:localhost"
+    room_id = "!room:localhost"
+    event_id = "$cached-before-outage"
+    event = {
+        "content": {"body": "cached", "msgtype": "m.text"},
+        "event_id": event_id,
+        "origin_server_ts": 1,
+        "room_id": room_id,
+        "sender": "@user:localhost",
+        "type": "m.room.message",
+    }
+    seed_root = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
+    seed_view = seed_root.for_principal(principal_id)
+    await seed_view.initialize()
+    await seed_view.store_event(event_id, room_id, event)
+    generation = seed_view.cache_generation
+    assert generation is not None
+    await seed_root.close()
+    save_sync_token(
+        tmp_path,
+        "code",
+        "s_before_outage",
+        cache_generation=generation,
+    )
+
+    unavailable_bot = _agent_bot(tmp_path)
+    unavailable_root = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
+    unavailable_bot.event_cache = unavailable_root.for_principal(principal_id)
+    unavailable_client = make_matrix_client_mock(user_id=principal_id)
+    unavailable_client.next_batch = None
+    empty_response = MagicMock(spec=nio.SyncResponse)
+    empty_response.next_batch = "s_empty_during_outage"
+    empty_response.rooms = MagicMock(join={}, leave={})
+    message_event = nio.RoomMessageText.from_dict(event)
+    event_response = MagicMock(spec=nio.SyncResponse)
+    event_response.next_batch = "s_event_during_outage"
+    event_response.rooms = MagicMock(
+        join={room_id: MagicMock(timeline=MagicMock(events=[message_event], limited=False))},
+        leave={},
+    )
+    try:
+        with (
+            patch.object(unavailable_bot, "ensure_user_account", AsyncMock()),
+            patch("mindroom.bot.login_agent_user", AsyncMock(return_value=unavailable_client)),
+            patch.object(unavailable_bot, "_set_avatar_if_available", AsyncMock()),
+            patch.object(unavailable_bot, "_set_presence_with_model_info", AsyncMock()),
+            patch("mindroom.bot.interactive.init_persistence"),
+            patch(
+                "mindroom.matrix.cache.postgres_event_cache._initialize_postgres_event_cache_db",
+                AsyncMock(side_effect=EventCacheBackendUnavailableError("database unavailable")),
+            ),
+        ):
+            await unavailable_bot.start()
+            await unavailable_bot._on_sync_response(empty_response)
+            await unavailable_bot._on_sync_response(event_response)
+
+        assert unavailable_client.next_batch is None
+        assert _load_sync_token_value(tmp_path, unavailable_bot.agent_name) == "s_before_outage"
+    finally:
+        await unavailable_root.close()
+
+    recovered_bot = _agent_bot(tmp_path)
+    recovered_root = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
+    recovered_view = recovered_root.for_principal(principal_id)
+    recovered_bot.event_cache = recovered_view
+    recovered_client = make_matrix_client_mock(user_id=principal_id)
+    recovered_client.next_batch = None
+    try:
+        with (
+            patch.object(recovered_bot, "ensure_user_account", AsyncMock()),
+            patch("mindroom.bot.login_agent_user", AsyncMock(return_value=recovered_client)),
+            patch.object(recovered_bot, "_set_avatar_if_available", AsyncMock()),
+            patch.object(recovered_bot, "_set_presence_with_model_info", AsyncMock()),
+            patch("mindroom.bot.interactive.init_persistence"),
+        ):
+            await recovered_bot.start()
+
+        assert recovered_client.next_batch == "s_before_outage"
+        assert await recovered_view.get_event(room_id, event_id) == event
+    finally:
+        await recovered_root.close()
+
+
+@pytest.mark.asyncio
 async def test_sqlite_checkpoint_generation_rejects_matrix_principal_rebind(tmp_path: Path) -> None:
     """A retained agent token must not cross a Matrix account or homeserver change."""
     root = SqliteEventCache(tmp_path / "event-cache.db")
@@ -572,7 +663,7 @@ async def test_sqlite_checkpoint_generation_rejects_matrix_principal_rebind(tmp_
     bot.client.next_batch = None
 
     try:
-        bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification())
+        await bot._prepare_cache_and_restore_saved_sync_token()
 
         assert bot.client.next_batch is None
         assert load_sync_token_record(tmp_path, bot.agent_name) is None
@@ -607,8 +698,8 @@ async def test_bot_start_rejects_checkpoint_from_reset_cache_generation(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_bot_start_rejects_checkpoint_when_cache_generation_is_unavailable(tmp_path: Path) -> None:
-    """An unavailable cache generation cannot certify a previously saved checkpoint."""
+async def test_bot_start_preserves_checkpoint_when_cache_generation_is_unavailable(tmp_path: Path) -> None:
+    """An unavailable generation starts cold without destroying an unverified checkpoint."""
     bot = _agent_bot(tmp_path)
     bot.event_cache.cache_generation = None
     save_sync_token(
@@ -630,7 +721,30 @@ async def test_bot_start_rejects_checkpoint_when_cache_generation_is_unavailable
         await bot.start()
 
     assert client.next_batch is None
-    assert load_sync_token_record(tmp_path, bot.agent_name) is None
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_stale"
+
+
+@pytest.mark.asyncio
+async def test_bot_start_purges_untrusted_cache_without_checkpoint_when_generation_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    """Generation failure cannot excuse stale rows when no checkpoint proves their sync position."""
+    bot = _agent_bot(tmp_path)
+    bot.event_cache.cache_generation = None
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.next_batch = None
+
+    with (
+        patch.object(bot, "ensure_user_account", AsyncMock()),
+        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch.object(bot, "_set_avatar_if_available", AsyncMock()),
+        patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+        patch("mindroom.bot.interactive.init_persistence"),
+    ):
+        await bot.start()
+
+    assert client.next_batch is None
+    bot.event_cache.purge_principal.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -678,7 +792,7 @@ def test_restore_saved_sync_token_ignores_invalid_utf8(tmp_path: Path) -> None:
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_bytes(b"\xff\xfe\xfd")
 
-    bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification())
+    bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification().checkpoint)
 
     assert bot.client.next_batch is None
 
@@ -1010,7 +1124,7 @@ async def test_prepare_for_sync_shutdown_skips_precallback_uncertified_token(tmp
         cache_generation=bot.event_cache.cache_generation,
     )
     bot._runtime_view.mark_runtime_started()
-    bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification())
+    bot._restore_loaded_sync_token(bot._loaded_sync_token_for_certification().checkpoint)
 
     bot.client.next_batch = "s_after_precallback"
 
