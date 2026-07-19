@@ -89,11 +89,7 @@ def preferred_cached_events_by_id(events: list[SerializedCachedEvent]) -> list[S
     for event in events:
         previous = preferred_events.get(event.event_id)
         event_type = event.event.get("type")
-        if (
-            previous is None
-            or previous.event.get("type") == "m.room.encrypted"
-            or (event_type is not None and event_type != "m.room.encrypted")
-        ):
+        if previous is None or previous.event.get("type") == "m.room.encrypted" or event_type != "m.room.encrypted":
             preferred_events[event.event_id] = event
     return list(preferred_events.values())
 

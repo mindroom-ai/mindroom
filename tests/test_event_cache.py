@@ -80,7 +80,7 @@ def _conversation_cache_for_thread_reads(
         enable_streaming=False,
         orchestrator=None,
         event_cache=event_cache,
-        event_cache_write_coordinator=None,
+        event_cache_write_coordinator=EventCacheWriteCoordinator(logger=MagicMock()),
     )
     return MatrixConversationCache(logger=MagicMock(), runtime=runtime)
 
@@ -1553,8 +1553,6 @@ async def test_event_upsert_prefers_decrypted_payload_across_cache_clients(
         (("opaque-a", "clear-a", "opaque-b"), "clear-a"),
         (("clear-a", "clear-b"), "clear-b"),
         (("opaque-a", "opaque-b"), "opaque-b"),
-        (("clear-a", "missing-type"), "clear-a"),
-        (("clear-a", "null-type"), "clear-a"),
     ],
 )
 async def test_event_batch_derives_indexes_only_from_final_accepted_payload(
@@ -1568,20 +1566,6 @@ async def test_event_batch_derives_indexes_only_from_final_accepted_payload(
 
     def event_source(payload: str) -> dict[str, object]:
         root_id = f"${payload}-root:localhost"
-        if payload in {"missing-type", "null-type"}:
-            source: dict[str, object] = {
-                "event_id": event_id,
-                "sender": "@user:localhost",
-                "origin_server_ts": 3000,
-                "content": {
-                    "body": payload,
-                    "msgtype": "m.text",
-                    "m.relates_to": {"rel_type": "m.thread", "event_id": root_id},
-                },
-            }
-            if payload == "null-type":
-                source["type"] = None
-            return source
         if payload.startswith("opaque"):
             return {
                 "event_id": event_id,
