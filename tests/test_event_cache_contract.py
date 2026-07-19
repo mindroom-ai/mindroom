@@ -16,6 +16,8 @@ from mindroom.constants import (
 )
 from mindroom.matrix.cache import (
     ConversationEventCache,
+    cache_maintenance,
+    event_cache_events,
     postgres_event_cache_events,
     postgres_event_cache_threads,
     postgres_streaming_compaction,
@@ -29,6 +31,11 @@ from tests.event_cache_test_support import replace_thread_unconditionally
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+
+def test_terminal_stream_trigger_uses_maintenance_status_policy() -> None:
+    """Compaction triggering and selection share one terminal-status policy."""
+    assert event_cache_events.TERMINAL_STREAM_STATUSES is cache_maintenance.TERMINAL_STREAM_STATUSES
 
 
 def _message_event(
