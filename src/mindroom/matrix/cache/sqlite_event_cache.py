@@ -643,6 +643,12 @@ class SqliteEventCache:
                         principal_id=self.principal_id,
                         room_id=room_id,
                     )
+                    await sqlite_event_cache_threads.mark_room_stale_locked(
+                        db,
+                        principal_id=self.principal_id,
+                        room_id=room_id,
+                        reason="room_departed",
+                    )
                 if pending_principal_purge or pending_room_purge:
                     result = disabled_result
                 else:

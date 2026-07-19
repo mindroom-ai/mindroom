@@ -861,6 +861,67 @@ async def test_pre_departure_thread_refill_cannot_resurrect_after_rejoin(
 
 
 @pytest.mark.asyncio
+async def test_pre_departure_thread_refill_from_another_runtime_cannot_resurrect(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """A durable departure marker must reject stale work from another cache runtime."""
+    departing_root = _shared_cache(event_cache_factory)
+    stale_root = _shared_cache(event_cache_factory)
+    await departing_root.initialize()
+    await stale_root.initialize()
+    principal_id = "@alice:localhost"
+    departing_cache = departing_root.for_principal(principal_id)
+    stale_cache = stale_root.for_principal(principal_id)
+    room_id = "!room:localhost"
+    thread_id = "$thread"
+    events = [_event(thread_id, 1, body="root"), _event("$secret", 2, body="secret")]
+    try:
+        await replace_thread_unconditionally(
+            departing_cache,
+            room_id,
+            thread_id,
+            events,
+            validated_at=50.0,
+        )
+        stale_fetch_epoch = stale_cache.room_departure_epoch(room_id)
+
+        departure_epoch = departing_cache.mark_room_departed(room_id)
+        await departing_cache.purge_room(room_id)
+        await departing_cache.mark_room_joined(
+            room_id,
+            expected_departure_epoch=departure_epoch,
+        )
+
+        state = await departing_cache.get_thread_cache_state(room_id, thread_id)
+        assert state is not None
+        assert state.room_invalidated_at is not None
+        assert state.room_invalidation_reason == "room_departed"
+
+        replaced = await stale_cache.replace_thread_if_not_newer(
+            room_id,
+            thread_id,
+            events,
+            expected_departure_epoch=stale_fetch_epoch,
+            fetch_started_at=state.room_invalidated_at - 1.0,
+        )
+
+        assert replaced is False
+        assert await departing_cache.get_thread_events(room_id, thread_id) is None
+        assert await departing_cache.get_event(room_id, "$secret") is None
+
+        assert await stale_cache.replace_thread_if_not_newer(
+            room_id,
+            thread_id,
+            events,
+            expected_departure_epoch=stale_fetch_epoch,
+            fetch_started_at=state.room_invalidated_at + 1.0,
+        )
+    finally:
+        await stale_root.close()
+        await departing_root.close()
+
+
+@pytest.mark.asyncio
 async def test_proactive_leave_purges_each_room_before_processing_the_next(
     event_cache_factory: Callable[[], ConversationEventCache],
     monkeypatch: pytest.MonkeyPatch,

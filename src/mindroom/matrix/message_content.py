@@ -264,7 +264,7 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
                 if not ownership_persisted:
                     if not event_cache.durable_writes_available:
                         logger.info(
-                            "mxc_plaintext_returned_without_disabled_cache",
+                            "mxc_plaintext_returned_uncached_cache_unavailable",
                             room_id=room_id,
                             event_id=event_id,
                         )

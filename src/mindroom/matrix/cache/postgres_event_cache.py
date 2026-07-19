@@ -1045,6 +1045,12 @@ class PostgresEventCache:
                 namespace=self._runtime.namespace,
                 room_id=room_id,
             )
+            await postgres_event_cache_threads.mark_room_stale_locked(
+                db,
+                namespace=self._runtime.namespace,
+                room_id=room_id,
+                reason="room_departed",
+            )
             return _FlushedPendingWrites(room_purge=True)
 
         flushed: list[tuple[str, str | None, _PendingInvalidation]] = []
