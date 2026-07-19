@@ -12,33 +12,37 @@ SQLite assigns active events and thread memberships from a persisted monotonic w
 
 PostgreSQL retains a nullable legacy `event_json` column so the shared physical version-1 table can be migrated without rewriting another namespace, but current writes and reads never use that column.
 
-Superseded nonterminal MindRoom streaming edits move from the active tables into `compacted_streaming_edits` as one zlib-compressed JSON payload plus the minimal ordering, edit, and thread projections needed to preserve behavior.
+Superseded nonterminal MindRoom streaming edits move from `events` into `compacted_streaming_edits` as one zlib-compressed JSON payload plus the sender and active ordering metadata.
+
+Their normalized `event_edits`, `event_threads`, and `thread_events` rows remain the stable projections for both active and cold payloads.
 
 The cold archive is part of the event source of truth because Matrix redaction of a newer terminal edit can make an earlier nonterminal edit visible again.
 
-Point lookup, recent-room lookup, latest-edit selection, thread lookup, thread ordering, snapshot replacement, invalidation, redaction, and late-replay filtering therefore operate across active and cold storage.
+Point lookup, latest-edit selection, thread lookup, thread ordering, snapshot replacement, invalidation, redaction, and late-replay filtering therefore operate across active and cold payload storage.
+
+Recent-room consumers query active events only; they reject replacement events, and the cold archive contains only replacements.
 
 Compaction never creates a redaction tombstone because compaction is not deletion from Matrix history.
 
 Compaction requires a strictly newer terminal edit from the same room, original event, and sender, which avoids ambiguous equal-timestamp replacement races and cross-sender replacement.
 
-Compaction selects, compresses, bulk-writes, and removes bounded batches inside one caller-owned transaction, so startup memory is bounded and cancellation rolls every batch back together.
+Compaction selects, compresses, bulk-writes, and removes only the active JSON payload in bounded batches inside one caller-owned transaction, so startup memory is bounded and cancellation rolls every batch back together.
 
-PostgreSQL startup compaction acquires the same transaction-scoped room advisory lock as older runtimes and reselects candidates under that lock before archiving them.
+PostgreSQL startup compaction acquires the same transaction-scoped room advisory lock as current writers and redactors and reselects candidates under that lock before archiving them.
 
 ## Startup maintenance
 
 Startup maintenance runs inside the same transaction as schema migration.
 
-It audits and repairs edit-index rows whose edit event is absent.
+It audits and repairs edit-index rows whose edit payload is absent from both active and cold storage.
 
-It audits and repairs event-to-thread rows whose event is absent while retaining root self-mappings proven by a surviving active child mapping, normalized thread membership, or cold child mapping.
+It audits and repairs event-to-thread rows whose event payload is absent from both active and cold storage while retaining root self-mappings proven by a surviving child mapping or normalized thread membership.
 
-It marks a thread stale before removing a membership row whose active source event is absent.
+It marks a thread stale before removing a membership row whose source payload is absent from both active and cold storage.
 
-It compacts eligible streaming edits again so replayed or partially processed writes converge after restart.
+It compacts eligible streaming edits again so replayed or pre-upgrade writes converge after restart.
 
-The startup log includes backend bytes where available, namespace payload bytes for PostgreSQL, normalized legacy thread-payload rows, row counts for active tables and cold history, tombstone counts, stale marker counts, streaming categories, orphan counts before and after repair, and repair and compaction outcomes.
+The startup log includes backend bytes where available, namespace payload bytes for PostgreSQL, normalized legacy thread-payload rows, row counts for active tables and cold history, tombstone counts, stale marker counts, streaming categories, remaining orphan counts, and repair and compaction outcomes.
 
 Runtime diagnostics expose the immutable startup maintenance report plus basic live backend, reconnection, and pending-invalidation state.
 SQLite omits byte size when startup filesystem metadata is unavailable.
@@ -57,7 +61,7 @@ Unsupported SQLite shapes still use a destructive reset, and that reset transact
 
 A token from the prior generation is rejected on every later process even if the resetting process crashes before any bot can clear its token file.
 
-Unbound legacy token records also start cold because they cannot prove which durable cache generation they certify.
+Only version-2 generation-bound token records are accepted, so older token formats start cold.
 
 PostgreSQL migration takes a transaction-scoped global advisory lock, changes the legacy payload column to nullable, creates cold storage, normalizes only the initializing namespace, repairs only that namespace, and commits the schema version and maintenance result together.
 
@@ -72,7 +76,7 @@ Cancellation or failure rolls back SQLite and PostgreSQL DDL, payload normalizat
 
 Migration tests use real version-10 and version-1 shapes on disposable storage and never access a production database.
 
-SQLite version-10 migration adds and populates event write order in place instead of rebuilding the 1.31-GiB JSON-bearing `events` table observed by the audit.
+SQLite version-10 migration adds and populates event write order in place instead of rebuilding the JSON-bearing `events` table.
 The write-order update still rewrites event pages into the WAL, so operators must budget temporary free space at least comparable to the active events table plus safety margin and must take an offline backup before upgrade.
 Dropping the legacy JSON-bearing `thread_events` table adds free pages to the database but does not shrink the physical file automatically.
 After a successful upgrade and backup verification, an operator who needs immediate filesystem reclamation can stop MindRoom, run SQLite `VACUUM INTO` to a new file on storage with enough free space, verify the new database, atomically replace the old database while it is offline, and then restart.

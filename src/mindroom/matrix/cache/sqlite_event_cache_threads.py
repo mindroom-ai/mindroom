@@ -43,7 +43,6 @@ from .sqlite_event_cache_events import (
     write_lookup_index_rows,
 )
 from .sqlite_streaming_compaction import (
-    archived_thread_event_ids,
     compact_superseded_streaming_edits,
     delete_archived_events,
     load_archived_thread_events,
@@ -106,20 +105,13 @@ async def load_recent_room_thread_ids(
     cursor = await db.execute(
         """
         SELECT thread_id
-        FROM (
-            SELECT thread_id, origin_server_ts
-            FROM thread_events
-            WHERE room_id = ?
-            UNION ALL
-            SELECT thread_id, thread_origin_server_ts
-            FROM compacted_streaming_edits
-            WHERE room_id = ? AND thread_id IS NOT NULL
-        )
+        FROM thread_events
+        WHERE room_id = ?
         GROUP BY thread_id
         ORDER BY MAX(origin_server_ts) DESC, thread_id ASC
         LIMIT ?
         """,
-        (room_id, room_id, limit),
+        (room_id, limit),
     )
     rows = await cursor.fetchall()
     await cursor.close()
@@ -288,6 +280,7 @@ async def _replace_thread_locked(
             db,
             room_id,
             event_ids=existing_event_ids,
+            affected_thread_ids=[thread_id],
         )
     await _store_thread_events_locked(
         db,
@@ -353,6 +346,7 @@ async def invalidate_thread_locked(
             db,
             room_id,
             event_ids=event_ids,
+            affected_thread_ids=[thread_id],
         )
     await db.execute(
         """
@@ -370,6 +364,7 @@ async def invalidate_room_threads_locked(
 ) -> None:
     """Delete every cached thread snapshot and room state for one room."""
     event_ids = await _thread_event_ids_for_room(db, room_id=room_id)
+    thread_ids = await _thread_ids_for_room(db, room_id=room_id)
     await db.execute(
         """
         DELETE FROM thread_events
@@ -390,6 +385,7 @@ async def invalidate_room_threads_locked(
             db,
             room_id,
             event_ids=event_ids,
+            affected_thread_ids=thread_ids,
         )
     await db.execute(
         """
@@ -522,33 +518,25 @@ async def append_existing_thread_event(
     cursor = await db.execute(
         """
         SELECT 1
-        FROM (
-            SELECT thread_id
-            FROM thread_events
-            WHERE room_id = ? AND thread_id = ?
-            UNION ALL
-            SELECT thread_id
-            FROM compacted_streaming_edits
-            WHERE room_id = ? AND thread_id = ?
-        )
+        FROM thread_events
+        LEFT JOIN events
+            ON events.event_id = thread_events.event_id
+            AND events.room_id = thread_events.room_id
+        LEFT JOIN compacted_streaming_edits
+            ON compacted_streaming_edits.event_id = thread_events.event_id
+            AND compacted_streaming_edits.room_id = thread_events.room_id
+        WHERE thread_events.room_id = ? AND thread_events.thread_id = ?
+            AND (
+                events.event_id IS NOT NULL
+                OR compacted_streaming_edits.event_id IS NOT NULL
+            )
         LIMIT 1
         """,
-        (room_id, thread_id, room_id, thread_id),
+        (room_id, thread_id),
     )
     row = await cursor.fetchone()
     await cursor.close()
-    if row is None:
-        await write_lookup_index_rows(
-            db,
-            room_id=room_id,
-            serialized_events=[serialized_event],
-            cached_at=time.time(),
-            thread_id=thread_id,
-        )
-        if has_terminal_streaming_edit([serialized_event]):
-            await compact_superseded_streaming_edits(db, room_id=room_id)
-        return False
-
+    thread_exists = row is not None
     await write_lookup_index_rows(
         db,
         room_id=room_id,
@@ -556,27 +544,28 @@ async def append_existing_thread_event(
         cached_at=time.time(),
         thread_id=thread_id,
     )
-    write_sequence = (await allocate_write_sequences(db, 1))[0]
-    await db.execute(
-        """
-        INSERT INTO thread_events(room_id, thread_id, event_id, origin_server_ts, write_seq)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(room_id, event_id) DO UPDATE SET
-            thread_id = excluded.thread_id,
-            origin_server_ts = excluded.origin_server_ts,
-            write_seq = excluded.write_seq
-        """,
-        (
-            room_id,
-            thread_id,
-            serialized_event.event_id,
-            serialized_event.origin_server_ts,
-            write_sequence,
-        ),
-    )
+    if thread_exists:
+        write_sequence = (await allocate_write_sequences(db, 1))[0]
+        await db.execute(
+            """
+            INSERT INTO thread_events(room_id, thread_id, event_id, origin_server_ts, write_seq)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(room_id, event_id) DO UPDATE SET
+                thread_id = excluded.thread_id,
+                origin_server_ts = excluded.origin_server_ts,
+                write_seq = excluded.write_seq
+            """,
+            (
+                room_id,
+                thread_id,
+                serialized_event.event_id,
+                serialized_event.origin_server_ts,
+                write_sequence,
+            ),
+        )
     if has_terminal_streaming_edit([serialized_event]):
         await compact_superseded_streaming_edits(db, room_id=room_id)
-    return True
+    return thread_exists
 
 
 async def _thread_event_ids_for_thread(
@@ -596,14 +585,7 @@ async def _thread_event_ids_for_thread(
     )
     rows = await cursor.fetchall()
     await cursor.close()
-    return [
-        *(str(row[0]) for row in rows),
-        *await archived_thread_event_ids(
-            db,
-            room_id=room_id,
-            thread_id=thread_id,
-        ),
-    ]
+    return [str(row[0]) for row in rows]
 
 
 async def _thread_event_ids_for_room(
@@ -622,10 +604,23 @@ async def _thread_event_ids_for_room(
     )
     rows = await cursor.fetchall()
     await cursor.close()
-    return [
-        *(str(row[0]) for row in rows),
-        *await archived_thread_event_ids(
-            db,
-            room_id=room_id,
-        ),
-    ]
+    return [str(row[0]) for row in rows]
+
+
+async def _thread_ids_for_room(
+    db: aiosqlite.Connection,
+    *,
+    room_id: str,
+) -> list[str]:
+    """Return roots whose room-wide snapshot proof is about to be removed."""
+    cursor = await db.execute(
+        """
+        SELECT thread_id
+        FROM thread_cache_state
+        WHERE room_id = ?
+        """,
+        (room_id,),
+    )
+    rows = await cursor.fetchall()
+    await cursor.close()
+    return [str(row[0]) for row in rows]

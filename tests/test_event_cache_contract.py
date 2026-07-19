@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import zlib
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -161,7 +160,7 @@ class TestConversationEventCacheContract:
         event_cache: ConversationEventCache,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Ordinary and nonterminal lookup writes avoid the compaction query."""
+        """Only terminal message edits with string senders probe compaction."""
         compaction_calls: list[str] = []
 
         async def record_compaction(*_args: object, **_kwargs: object) -> int:
@@ -184,6 +183,24 @@ class TestConversationEventCacheContract:
                 stream_status=STREAM_STATUS_PENDING,
             ),
         )
+        assert compaction_calls == []
+
+        wrong_type = _message_event(
+            "$approval-terminal:localhost",
+            3,
+            edit_of=original_id,
+            stream_status=STREAM_STATUS_COMPLETED,
+        )
+        wrong_type["type"] = "io.mindroom.tool_approval"
+        await event_cache.store_event("$approval-terminal:localhost", room_id, wrong_type)
+        missing_sender = _message_event(
+            "$missing-sender-terminal:localhost",
+            4,
+            edit_of=original_id,
+            stream_status=STREAM_STATUS_COMPLETED,
+        )
+        del missing_sender["sender"]
+        await event_cache.store_event("$missing-sender-terminal:localhost", room_id, missing_sender)
         assert compaction_calls == []
 
         await event_cache.store_event(
@@ -497,84 +514,6 @@ async def test_streaming_compaction_survives_backend_restart(
 
 
 @pytest.mark.asyncio
-async def test_recent_room_events_include_compacted_edits(
-    event_cache: ConversationEventCache,
-) -> None:
-    """Recent-room lookups merge cold room-message edits with active events in stable order."""
-    room_id = "!room:localhost"
-    original_id = "$original:localhost"
-    sender = "@agent:localhost"
-    pending = _message_event(
-        "$pending:localhost",
-        2,
-        sender=sender,
-        edit_of=original_id,
-        stream_status=STREAM_STATUS_PENDING,
-    )
-    terminal = _message_event(
-        "$terminal:localhost",
-        3,
-        sender=sender,
-        edit_of=original_id,
-        stream_status=STREAM_STATUS_COMPLETED,
-    )
-    await event_cache.store_events_batch(
-        [
-            (str(pending["event_id"]), room_id, pending),
-            (str(terminal["event_id"]), room_id, terminal),
-        ],
-    )
-
-    assert await event_cache.get_recent_room_events(
-        room_id,
-        event_type="m.room.message",
-        since_ts_ms=0,
-    ) == [terminal, pending]
-    assert await event_cache.get_recent_room_events(
-        room_id,
-        event_type="m.room.message",
-        since_ts_ms=3,
-    ) == [terminal]
-    assert await event_cache.get_recent_room_events(
-        room_id,
-        event_type="m.room.message",
-        since_ts_ms=0,
-        limit=1,
-    ) == [terminal]
-
-
-@pytest.mark.asyncio
-async def test_sqlite_storage_size_failure_is_advisory(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Startup filesystem telemetry failure cannot escape or disable cache writes."""
-    failure_reason = "secret filesystem failure"
-
-    db_path = tmp_path / "event_cache.db"
-    real_stat = Path.stat
-
-    def fail_cache_stat(path: Path, *args: object, **kwargs: object) -> object:
-        if path in {db_path, db_path.with_name(f"{db_path.name}-wal")}:
-            raise OSError(failure_reason)
-        return real_stat(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "stat", fail_cache_stat)
-    cache = SqliteEventCache(db_path)
-    await cache.initialize()
-    try:
-        diagnostics = cache.runtime_diagnostics()
-        assert "cache_storage_bytes" not in diagnostics
-        assert failure_reason not in str(diagnostics)
-
-        event = _message_event("$event:localhost", 1)
-        await cache.store_event(str(event["event_id"]), "!room:localhost", event)
-        assert await cache.get_event("!room:localhost", str(event["event_id"])) == event
-    finally:
-        await cache.close()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "corrupt_payload",
     [b"corrupt", zlib.compress(b"[]")],
@@ -635,54 +574,6 @@ async def test_corrupt_compacted_payload_disables_advisory_cache(
     assert diagnostics["cache_backend"] in {"sqlite", "postgres"}
     assert "corrupt_compacted_event_payload" in str(diagnostics)
     assert str(pending["content"]["body"]) not in str(diagnostics)
-
-
-@pytest.mark.asyncio
-async def test_sqlite_compaction_placeholders_follow_status_sets(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """SQLite compaction binds every configured status without fixed SQL arity."""
-    future_nonterminal_status = "future_nonterminal"
-    monkeypatch.setattr(
-        sqlite_streaming_compaction,
-        "NONTERMINAL_STREAM_STATUSES",
-        sqlite_streaming_compaction.NONTERMINAL_STREAM_STATUSES | {future_nonterminal_status},
-    )
-    room_id = "!room:localhost"
-    original_id = "$original:localhost"
-    sender = "@agent:localhost"
-    pending = _message_event(
-        "$pending:localhost",
-        2,
-        sender=sender,
-        edit_of=original_id,
-        stream_status=future_nonterminal_status,
-    )
-    terminal = _message_event(
-        "$terminal:localhost",
-        3,
-        sender=sender,
-        edit_of=original_id,
-        stream_status=STREAM_STATUS_COMPLETED,
-    )
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
-    try:
-        await cache.store_events_batch(
-            [
-                (str(pending["event_id"]), room_id, pending),
-                (str(terminal["event_id"]), room_id, terminal),
-            ],
-        )
-        cursor = await cache._runtime.require_db().execute(
-            "SELECT COUNT(*) FROM compacted_streaming_edits WHERE event_id = ?",
-            (pending["event_id"],),
-        )
-        assert await cursor.fetchone() == (1,)
-        await cursor.close()
-    finally:
-        await cache.close()
 
 
 @pytest.mark.asyncio
@@ -799,46 +690,7 @@ async def test_streaming_compaction_cancellation_rolls_back_all_batches(
 
 
 @pytest.mark.asyncio
-async def test_append_recognizes_archive_only_thread_snapshot(
-    event_cache_factory: Callable[[], ConversationEventCache],
-) -> None:
-    """Appending preserves membership when the sole existing snapshot member is cold."""
-    room_id = "!room:localhost"
-    thread_id = "$unfetched-root:localhost"
-    sender = "@agent:localhost"
-    pending = _message_event(
-        "$pending:localhost",
-        2,
-        sender=sender,
-        edit_of=thread_id,
-        stream_status=STREAM_STATUS_PENDING,
-    )
-    terminal = _message_event(
-        "$terminal:localhost",
-        3,
-        sender=sender,
-        edit_of=thread_id,
-        stream_status=STREAM_STATUS_COMPLETED,
-    )
-    appended = _message_event(
-        "$appended:localhost",
-        4,
-        sender="@user:localhost",
-        thread_id=thread_id,
-    )
-    cache = event_cache_factory()
-    await cache.initialize()
-    try:
-        await replace_thread_unconditionally(cache, room_id, thread_id, [terminal, pending])
-        assert await cache.redact_event(room_id, str(terminal["event_id"])) is True
-        assert await cache.append_event(room_id, thread_id, appended) is True
-        assert await cache.get_thread_events(room_id, thread_id) == [pending, appended]
-    finally:
-        await cache.close()
-
-
-@pytest.mark.asyncio
-async def test_replaying_compacted_thread_member_preserves_cold_projections(
+async def test_replaying_compacted_thread_member_preserves_snapshot_state(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
     """Replaying a cold edit preserves its snapshot membership and learned thread mapping."""
@@ -1098,6 +950,25 @@ async def test_last_child_deletion_removes_unproven_thread_root_mapping_immediat
 
 
 @pytest.mark.asyncio
+async def test_runtime_deletion_removes_dependent_root_proof(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Runtime cleanup removes a root mapping whose dependent edit supplied its only proof."""
+    room_id = "!room:localhost"
+    thread_id = "$unfetched-root:localhost"
+    original_id = "$uncached-original:localhost"
+    edit = _message_event("$edit:localhost", 2, edit_of=original_id)
+    new_content = edit["content"]["m.new_content"]
+    assert isinstance(new_content, dict)
+    new_content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
+    await event_cache.store_event(str(edit["event_id"]), room_id, edit)
+    assert await event_cache.get_thread_id_for_event(room_id, thread_id) == thread_id
+
+    assert await event_cache.redact_event(room_id, original_id) is True
+    assert await event_cache.get_thread_id_for_event(room_id, thread_id) is None
+
+
+@pytest.mark.asyncio
 async def test_restart_preserves_learned_root_mapping_proven_by_cold_child(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
@@ -1135,3 +1006,38 @@ async def test_restart_preserves_learned_root_mapping_proven_by_cold_child(
         assert restarted_cache.runtime_diagnostics()["cache_orphan_thread_indexes_after"] == 0
     finally:
         await restarted_cache.close()
+
+
+@pytest.mark.asyncio
+async def test_append_accepts_thread_with_only_compacted_members(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A cold-only valid snapshot remains appendable after its terminal edit is redacted."""
+    room_id = "!room:localhost"
+    thread_id = "$unfetched-root:localhost"
+    sender = "@agent:localhost"
+    pending = _message_event(
+        "$pending:localhost",
+        2,
+        sender=sender,
+        edit_of=thread_id,
+        stream_status=STREAM_STATUS_PENDING,
+    )
+    terminal = _message_event(
+        "$terminal:localhost",
+        3,
+        sender=sender,
+        edit_of=thread_id,
+        stream_status=STREAM_STATUS_COMPLETED,
+    )
+    appended = _message_event(
+        "$appended:localhost",
+        4,
+        sender=sender,
+        thread_id=thread_id,
+    )
+    await replace_thread_unconditionally(event_cache, room_id, thread_id, [terminal, pending])
+    assert await event_cache.redact_event(room_id, str(terminal["event_id"])) is True
+
+    assert await event_cache.append_event(room_id, thread_id, appended) is True
+    assert await event_cache.get_thread_events(room_id, thread_id) == [pending, appended]

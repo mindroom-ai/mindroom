@@ -90,6 +90,8 @@ def has_terminal_streaming_edit(events: list[SerializedCachedEvent]) -> bool:
     """Return whether a durable batch can make nonterminal streaming edits superseded."""
     for serialized_event in events:
         event = serialized_event.event
+        if event.get("type") != "m.room.message" or not isinstance(event.get("sender"), str):
+            continue
         if not EventInfo.from_event(event).is_edit:
             continue
         content = event.get("content")

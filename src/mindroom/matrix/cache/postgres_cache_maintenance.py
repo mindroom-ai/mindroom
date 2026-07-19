@@ -81,44 +81,63 @@ async def _count(
     return 0 if row is None else int(row[0])
 
 
+_ORPHAN_EDIT_INDEX_PREDICATE = """
+    NOT EXISTS (
+        SELECT 1
+        FROM mindroom_event_cache_events AS events
+        WHERE events.namespace = event_edits.namespace
+            AND events.event_id = event_edits.edit_event_id
+            AND events.room_id = event_edits.room_id
+    )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM mindroom_event_cache_compacted_streaming_edits AS archived
+        WHERE archived.namespace = event_edits.namespace
+            AND archived.event_id = event_edits.edit_event_id
+            AND archived.room_id = event_edits.room_id
+    )
+"""
+
+_ORPHAN_THREAD_EVENT_REFERENCE_PREDICATE = """
+    NOT EXISTS (
+        SELECT 1
+        FROM mindroom_event_cache_events AS events
+        WHERE events.namespace = thread_events.namespace
+            AND events.event_id = thread_events.event_id
+            AND events.room_id = thread_events.room_id
+    )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM mindroom_event_cache_compacted_streaming_edits AS archived
+        WHERE archived.namespace = thread_events.namespace
+            AND archived.event_id = thread_events.event_id
+            AND archived.room_id = thread_events.room_id
+    )
+"""
+
+
 async def _orphan_edit_index_count(db: AsyncConnection, *, namespace: str) -> int:
     return await _count(
         db,
-        """
+        f"""
         SELECT COUNT(*)
         FROM mindroom_event_cache_event_edits AS event_edits
         WHERE event_edits.namespace = %s
-            AND NOT EXISTS (
-                SELECT 1
-                FROM mindroom_event_cache_events AS events
-                WHERE events.namespace = event_edits.namespace
-                    AND events.event_id = event_edits.edit_event_id
-                    AND events.room_id = event_edits.room_id
-            )
-        """,
+            AND {_ORPHAN_EDIT_INDEX_PREDICATE}
+        """,  # noqa: S608
         (namespace,),
     )
-
-
-async def _orphan_thread_index_count(db: AsyncConnection, *, namespace: str) -> int:
-    return await orphan_thread_index_count(db, namespace=namespace)
 
 
 async def _orphan_thread_event_reference_count(db: AsyncConnection, *, namespace: str) -> int:
     return await _count(
         db,
-        """
+        f"""
         SELECT COUNT(*)
         FROM mindroom_event_cache_thread_events AS thread_events
         WHERE thread_events.namespace = %s
-            AND NOT EXISTS (
-                SELECT 1
-                FROM mindroom_event_cache_events AS events
-                WHERE events.namespace = thread_events.namespace
-                    AND events.event_id = thread_events.event_id
-                    AND events.room_id = thread_events.room_id
-            )
-        """,
+            AND {_ORPHAN_THREAD_EVENT_REFERENCE_PREDICATE}
+        """,  # noqa: S608
         (namespace,),
     )
 
@@ -131,23 +150,17 @@ async def _repair_orphan_derived_rows(
     """Remove invalid derived rows while preserving learned thread-root mappings."""
     repaired_edit_indexes = await rowcount(
         db,
-        """
+        f"""
         DELETE FROM mindroom_event_cache_event_edits AS event_edits
         WHERE event_edits.namespace = %s
-            AND NOT EXISTS (
-                SELECT 1
-                FROM mindroom_event_cache_events AS events
-                WHERE events.namespace = event_edits.namespace
-                    AND events.event_id = event_edits.edit_event_id
-                    AND events.room_id = event_edits.room_id
-            )
-        """,
+            AND {_ORPHAN_EDIT_INDEX_PREDICATE}
+        """,  # noqa: S608
         (namespace,),
     )
     repaired_thread_indexes = await repair_orphan_thread_indexes(db, namespace=namespace)
     stale_at = time.time()
     await db.execute(
-        """
+        f"""
         INSERT INTO mindroom_event_cache_thread_state(
             namespace,
             room_id,
@@ -165,13 +178,7 @@ async def _repair_orphan_derived_rows(
             'startup_orphan_thread_event_reference'
         FROM mindroom_event_cache_thread_events AS thread_events
         WHERE thread_events.namespace = %s
-            AND NOT EXISTS (
-                SELECT 1
-                FROM mindroom_event_cache_events AS events
-                WHERE events.namespace = thread_events.namespace
-                    AND events.event_id = thread_events.event_id
-                    AND events.room_id = thread_events.room_id
-            )
+            AND {_ORPHAN_THREAD_EVENT_REFERENCE_PREDICATE}
         ON CONFLICT(namespace, room_id, thread_id) DO UPDATE SET
             validated_at = NULL,
             invalidated_at = CASE
@@ -186,22 +193,16 @@ async def _repair_orphan_derived_rows(
                     THEN excluded.invalidation_reason
                 ELSE mindroom_event_cache_thread_state.invalidation_reason
             END
-        """,
+        """,  # noqa: S608
         (stale_at, namespace),
     )
     repaired_thread_event_references = await rowcount(
         db,
-        """
+        f"""
         DELETE FROM mindroom_event_cache_thread_events AS thread_events
         WHERE thread_events.namespace = %s
-            AND NOT EXISTS (
-                SELECT 1
-                FROM mindroom_event_cache_events AS events
-                WHERE events.namespace = thread_events.namespace
-                    AND events.event_id = thread_events.event_id
-                    AND events.room_id = thread_events.room_id
-            )
-        """,
+            AND {_ORPHAN_THREAD_EVENT_REFERENCE_PREDICATE}
+        """,  # noqa: S608
         (namespace,),
     )
     return repaired_edit_indexes, repaired_thread_indexes, repaired_thread_event_references
@@ -214,7 +215,6 @@ async def _collect_maintenance_report(
     schema_version: int,
     migrated_from_schema_version: int | None,
     normalized_legacy_thread_payload_rows: int,
-    orphan_counts_before: tuple[int, int, int],
     repaired_counts: tuple[int, int, int],
     compacted_nonterminal_streaming_edits: int,
 ) -> CacheMaintenanceReport:
@@ -350,11 +350,8 @@ async def _collect_maintenance_report(
             """,
             (namespace,),
         ),
-        orphan_edit_indexes_before=orphan_counts_before[0],
         orphan_edit_indexes_after=await _orphan_edit_index_count(db, namespace=namespace),
-        orphan_thread_indexes_before=orphan_counts_before[1],
-        orphan_thread_indexes_after=await _orphan_thread_index_count(db, namespace=namespace),
-        orphan_thread_event_references_before=orphan_counts_before[2],
+        orphan_thread_indexes_after=await orphan_thread_index_count(db, namespace=namespace),
         orphan_thread_event_references_after=await _orphan_thread_event_reference_count(db, namespace=namespace),
         repaired_edit_indexes=repaired_counts[0],
         repaired_thread_indexes=repaired_counts[1],
@@ -372,11 +369,6 @@ async def run_startup_maintenance(
     normalized_legacy_thread_payload_rows: int,
 ) -> CacheMaintenanceReport:
     """Audit, safely repair, compact, and recount one PostgreSQL namespace."""
-    orphan_counts = (
-        await _orphan_edit_index_count(db, namespace=namespace),
-        await _orphan_thread_index_count(db, namespace=namespace),
-        await _orphan_thread_event_reference_count(db, namespace=namespace),
-    )
     repaired_counts = await _repair_orphan_derived_rows(db, namespace=namespace)
     compacted = await compact_superseded_streaming_edits(db, namespace=namespace)
     return await _collect_maintenance_report(
@@ -385,7 +377,6 @@ async def run_startup_maintenance(
         schema_version=schema_version,
         migrated_from_schema_version=migrated_from_schema_version,
         normalized_legacy_thread_payload_rows=normalized_legacy_thread_payload_rows,
-        orphan_counts_before=orphan_counts,
         repaired_counts=repaired_counts,
         compacted_nonterminal_streaming_edits=compacted,
     )

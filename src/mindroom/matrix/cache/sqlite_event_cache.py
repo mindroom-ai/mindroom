@@ -242,23 +242,11 @@ async def _create_event_cache_schema(db: aiosqlite.Connection) -> None:
         CREATE TABLE IF NOT EXISTS compacted_streaming_edits (
             event_id TEXT PRIMARY KEY,
             room_id TEXT NOT NULL,
-            original_event_id TEXT NOT NULL,
             sender TEXT NOT NULL,
-            origin_server_ts INTEGER NOT NULL,
             event_json_zlib BLOB NOT NULL,
             cached_at REAL NOT NULL,
-            event_order INTEGER NOT NULL,
-            thread_id TEXT,
-            thread_origin_server_ts INTEGER,
-            thread_order INTEGER,
-            indexed_thread_id TEXT
+            event_order INTEGER NOT NULL
         )
-        """,
-    )
-    await db.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_compacted_streaming_edits_original
-        ON compacted_streaming_edits(room_id, original_event_id, sender, origin_server_ts)
         """,
     )
     await db.execute(f"PRAGMA user_version = {_EVENT_CACHE_SCHEMA_VERSION}")
@@ -275,8 +263,6 @@ async def _initialize_cache_metadata(db: aiosqlite.Connection) -> str:
             SELECT COALESCE(MAX(write_seq), 0) AS value FROM thread_events
             UNION ALL
             SELECT COALESCE(MAX(event_order), 0) AS value FROM compacted_streaming_edits
-            UNION ALL
-            SELECT COALESCE(MAX(thread_order), 0) AS value FROM compacted_streaming_edits
         )
         """,
     )

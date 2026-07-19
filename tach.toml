@@ -1745,6 +1745,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.matrix.cache.event_cache_events"
 depends_on = [
+    "mindroom.matrix.cache.cache_maintenance",
     "mindroom.constants",
     "mindroom.matrix.cache.cache_maintenance",
     "mindroom.matrix.event_info",

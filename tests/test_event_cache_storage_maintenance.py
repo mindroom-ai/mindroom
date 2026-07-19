@@ -324,11 +324,12 @@ async def test_sqlite_version_10_migrates_without_reset_and_repairs_orphans(tmp_
         stale_state = await cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
 
         assert diagnostics["cache_schema_migrated_from"] == 10
-        assert diagnostics["cache_orphan_edit_indexes_before"] == 1
         assert diagnostics["cache_orphan_edit_indexes_after"] == 0
-        assert diagnostics["cache_orphan_thread_indexes_before"] == 1
         assert diagnostics["cache_orphan_thread_indexes_after"] == 0
+        assert diagnostics["cache_repaired_edit_indexes"] == 1
+        assert diagnostics["cache_repaired_thread_indexes"] == 1
         assert diagnostics["cache_normalized_legacy_thread_payload_rows"] == 2
+        assert diagnostics["cache_storage_bytes"] > 0
         assert cached_thread == [_message_event(_CHILD_ID, thread_id=_THREAD_ID)]
         assert stale_state is not None
         assert stale_state.validated_at is None
@@ -380,7 +381,6 @@ async def test_sqlite_startup_repair_stales_orphan_membership(tmp_path: Path) ->
     await repaired_cache.initialize()
     try:
         diagnostics = repaired_cache.runtime_diagnostics()
-        assert diagnostics["cache_orphan_thread_event_references_before"] == 1
         assert diagnostics["cache_orphan_thread_event_references_after"] == 0
         assert diagnostics["cache_repaired_thread_event_references"] == 1
         state = await repaired_cache.get_thread_cache_state(_ROOM_ID, "$dangling-thread:localhost")
@@ -473,10 +473,10 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
             stale_state = await cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
 
             assert diagnostics["cache_schema_migrated_from"] == 1
-            assert diagnostics["cache_orphan_edit_indexes_before"] == 1
             assert diagnostics["cache_orphan_edit_indexes_after"] == 0
-            assert diagnostics["cache_orphan_thread_indexes_before"] == 1
             assert diagnostics["cache_orphan_thread_indexes_after"] == 0
+            assert diagnostics["cache_repaired_edit_indexes"] == 1
+            assert diagnostics["cache_repaired_thread_indexes"] == 1
             assert diagnostics["cache_normalized_legacy_thread_payload_rows"] == 2
             assert diagnostics["cache_storage_bytes"] > 0
             assert diagnostics["cache_namespace_payload_bytes"] > 0
@@ -806,7 +806,6 @@ async def test_postgres_startup_repair_stales_orphan_membership(
         await repaired_cache.initialize()
         try:
             diagnostics = repaired_cache.runtime_diagnostics()
-            assert diagnostics["cache_orphan_thread_event_references_before"] == 1
             assert diagnostics["cache_orphan_thread_event_references_after"] == 0
             assert diagnostics["cache_repaired_thread_event_references"] == 1
             state = await repaired_cache.get_thread_cache_state(_ROOM_ID, thread_id)
@@ -847,4 +846,64 @@ async def test_postgres_reconnect_does_not_repeat_startup_maintenance(
         assert maintenance_calls == 1
         assert cache.runtime_diagnostics()["cache_postgres_reconnect_count"] == 1
     finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("metadata_state", ["missing", "changed"])
+async def test_postgres_reconnect_rejects_changed_certification_generation(
+    postgres_event_cache_url: str,
+    metadata_state: str,
+) -> None:
+    """Reconnect must not certify an old sync position against replaced cache state."""
+    namespace = f"reconnect_generation_{uuid.uuid4().hex}"
+    cache = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
+    await cache.initialize()
+    expected_generation = cache.certification_generation
+    assert expected_generation is not None
+    admin = await psycopg.AsyncConnection.connect(postgres_event_cache_url)
+    try:
+        if metadata_state == "missing":
+            await admin.execute(
+                """
+                DELETE FROM mindroom_event_cache_namespace_metadata
+                WHERE namespace = %s AND key = 'certification_generation'
+                """,
+                (namespace,),
+            )
+        else:
+            await admin.execute(
+                """
+                UPDATE mindroom_event_cache_namespace_metadata
+                SET value = %s
+                WHERE namespace = %s AND key = 'certification_generation'
+                """,
+                (uuid.uuid4().hex, namespace),
+            )
+        await admin.commit()
+
+        db = cache._runtime.db
+        assert db is not None
+        await db.close()
+
+        assert await cache.get_event(_ROOM_ID, _MISSING_ID) is None
+        assert cache.certification_generation == expected_generation
+        assert cache.durable_writes_available is False
+        diagnostics = cache.runtime_diagnostics()
+        assert diagnostics["cache_postgres_disabled_reason"] == "certification_generation_changed"
+
+        cursor = await admin.execute(
+            """
+            SELECT value
+            FROM mindroom_event_cache_namespace_metadata
+            WHERE namespace = %s AND key = 'certification_generation'
+            """,
+            (namespace,),
+        )
+        row = await cursor.fetchone()
+        assert (row is None) is (metadata_state == "missing")
+        if row is not None:
+            assert row[0] != expected_generation
+    finally:
+        await admin.close()
         await cache.close()
