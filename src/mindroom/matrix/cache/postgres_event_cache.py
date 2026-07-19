@@ -819,6 +819,8 @@ class PostgresEventCache:
         if self._runtime.is_disabled or not self._runtime.is_initialized:
             return self.runtime_diagnostics()
         async with self._runtime._db_lock:
+            if self._runtime.is_disabled or not self._runtime.is_initialized:
+                return self.runtime_diagnostics()
             db = self._runtime.require_db()
             report = self._runtime.maintenance_report
             if report is None:
