@@ -42,7 +42,6 @@ from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, Comp
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 from mindroom.token_budget import (
-    approximate_o200k_tokens,
     compaction_estimate_kind,
     compaction_payload_token_upper_bound,
     estimate_text_tokens,
@@ -697,7 +696,7 @@ def _build_summary_input(
     compacted_runs: Sequence[RunOutput | TeamRunOutput],
     max_input_tokens: int,
     history_settings: ResolvedHistorySettings,
-    token_estimator: Callable[[str], int] = approximate_o200k_tokens,
+    token_estimator: Callable[[str], int],
 ) -> tuple[str, list[RunOutput | TeamRunOutput]]:
     summary_block = ""
     if previous_summary is not None and previous_summary.strip():

@@ -49,6 +49,17 @@ def test_kind_resolves_models_without_a_local_tokenizer_to_the_byte_bound(model_
     assert compaction_estimate_kind(model_id) == "utf8_bytes_token_upper_bound"
 
 
+def test_kind_pins_gpt_5_6_to_the_byte_bound() -> None:
+    """Pinned decision (ISSUE-246 fix round 1): gpt-5.6 stays on the byte bound.
+
+    Provider-aware guessing would reintroduce undercount risk, so any model the
+    installed tiktoken does not recognize — including gpt-5.6 today — is sized
+    by the byte bound. When a tiktoken upgrade learns gpt-5.6, this test should
+    be consciously UPDATED to expect "model_tiktoken_tokens".
+    """
+    assert compaction_estimate_kind("gpt-5.6") == "utf8_bytes_token_upper_bound"
+
+
 @pytest.mark.parametrize("model_id", ["claude-sonnet-5", "gemini-3.5-flash", None])
 @pytest.mark.parametrize("payload", _BOUND_PAYLOADS)
 def test_byte_bound_branch_is_exactly_the_utf8_byte_count(payload: str, model_id: str | None) -> None:
@@ -66,6 +77,36 @@ def test_known_model_branch_counts_with_the_model_encoding(payload: str) -> None
 def test_approximate_o200k_tokens_matches_the_o200k_encoding(payload: str) -> None:
     expected = len(tiktoken.get_encoding("o200k_base").encode(payload, disallowed_special=()))
     assert approximate_o200k_tokens(payload) == expected
+
+
+_SURROGATE_PAYLOADS = [
+    pytest.param("\ud800", id="lone-high-surrogate"),
+    pytest.param("\udc00", id="lone-low-surrogate"),
+    pytest.param("🎉\ud800 tail", id="valid-pair-adjacent-to-lone-surrogate"),
+]
+
+
+@pytest.mark.parametrize("model_id", ["claude-sonnet-5", "gemini-3.5-flash", None])
+@pytest.mark.parametrize("payload", _SURROGATE_PAYLOADS)
+def test_byte_bound_tolerates_unpaired_surrogates(payload: str, model_id: str | None) -> None:
+    """JSON-decoded provider payloads can carry unpaired surrogates; sizing must not raise."""
+    expected = len(payload.encode("utf-8", errors="surrogatepass"))
+    assert compaction_payload_token_upper_bound(payload, model_id=model_id) == expected
+
+
+@pytest.mark.parametrize("payload", _SURROGATE_PAYLOADS)
+def test_chunk_selection_tolerates_unpaired_surrogates(payload: str) -> None:
+    estimator = partial(compaction_payload_token_upper_bound, model_id="claude-sonnet-5")
+    runs = [_completed_run("run-0", messages=[Message(role="user", content=payload * 100)])]
+    summary_input, included_runs = _build_summary_input(
+        previous_summary=None,
+        compacted_runs=runs,
+        max_input_tokens=10_000,
+        history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=estimator,
+    )
+    assert included_runs == runs
+    assert estimator(summary_input) <= 10_000
 
 
 @pytest.mark.parametrize("payload_char", ["汉", "🎉"])

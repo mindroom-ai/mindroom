@@ -14,9 +14,6 @@ import tiktoken
 
 _CompactionEstimateKind = Literal[
     "model_tiktoken_tokens",
-    # Surrogate encoding; produced only by approximate_o200k_tokens callers
-    # (the Vertex request guard), never by compaction_estimate_kind.
-    "o200k_base_tokens",
     "utf8_bytes_token_upper_bound",
 ]
 
@@ -60,11 +57,13 @@ def compaction_payload_token_upper_bound(value: str, *, model_id: str | None) ->
 
     Known tiktoken encodings count exactly. Every other model is sized by
     UTF-8 byte count, a true token upper bound for any tokenizer.
+    ``surrogatepass`` keeps unpaired surrogates (reachable via JSON-decoded
+    provider payloads) countable at 3 bytes each instead of raising.
     """
-    encoding = _compaction_encoding(model_id) if compaction_estimate_kind(model_id) == "model_tiktoken_tokens" else None
+    encoding = _compaction_encoding(model_id)
     if encoding is not None:
         return len(encoding.encode(value, disallowed_special=()))
-    return len(value.encode("utf-8"))
+    return len(value.encode("utf-8", errors="surrogatepass"))
 
 
 def approximate_o200k_tokens(value: str) -> int:

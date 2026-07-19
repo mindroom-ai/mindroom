@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -56,7 +55,7 @@ from mindroom.hooks import (
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.message_target import MessageTarget
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
-from mindroom.token_budget import approximate_o200k_tokens, compaction_payload_token_upper_bound, estimate_text_tokens
+from mindroom.token_budget import estimate_text_tokens
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
     FakeModel,
@@ -66,6 +65,7 @@ from tests.conftest import (
 )
 from tests.history_helpers import (  # noqa: F401
     _ALL_HISTORY_SETTINGS,
+    _SUMMARY_MODEL_BOUND,
     RecordingCompactionLifecycle,
     _agent,
     _close_test_storages,
@@ -84,10 +84,6 @@ if TYPE_CHECKING:
     from agno.session.agent import AgentSession
 
     from mindroom.history.compaction import _CompactionRewriteResult
-
-# The budget finders below must size runs exactly like the production
-# compaction path for the "summary-model" summary model used by these tests.
-_SUMMARY_MODEL_BOUND = partial(compaction_payload_token_upper_bound, model_id="summary-model")
 
 
 async def _rewrite_single_run(
@@ -191,19 +187,21 @@ def test_build_summary_input_accounts_for_wrappers_separators_and_run_indexes() 
         compacted_runs=runs,
         max_input_tokens=1_000_000,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=_SUMMARY_MODEL_BOUND,
     )
     assert len(full_runs) == len(runs)
 
-    tight_budget = approximate_o200k_tokens(full_input) - 50
+    tight_budget = _SUMMARY_MODEL_BOUND(full_input) - 50
     summary_input, included_runs = _build_summary_input(
         previous_summary="existing summary",
         compacted_runs=runs,
         max_input_tokens=tight_budget,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=_SUMMARY_MODEL_BOUND,
     )
 
     assert 0 < len(included_runs) < len(runs)
-    assert approximate_o200k_tokens(summary_input) <= tight_budget
+    assert _SUMMARY_MODEL_BOUND(summary_input) <= tight_budget
 
 
 @pytest.mark.asyncio

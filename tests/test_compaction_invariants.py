@@ -1411,7 +1411,7 @@ async def test_claude_compaction_splits_dense_preserved_metadata_before_the_inpu
     assert outcome.compacted_run_count == 20
     assert len(summary_inputs) == 2
     assert all(len(summary_input.encode("utf-8")) <= summary_input_limit for summary_input in summary_inputs)
-    assert approximate_o200k_tokens(summary_inputs[0]) < summary_input_limit
+    assert compaction_payload_token_upper_bound(summary_inputs[0], model_id="claude-sonnet-5") <= summary_input_limit
     storage.close()
 
 

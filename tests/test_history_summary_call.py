@@ -33,6 +33,7 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
+from mindroom.token_budget import approximate_o200k_tokens
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,
@@ -421,6 +422,7 @@ def test_build_summary_input_advances_past_oversized_oldest_run() -> None:
         compacted_runs=[big_run, small_run],
         max_input_tokens=220,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=approximate_o200k_tokens,
     )
 
     assert [run.run_id for run in included_runs] == ["run-big"]
@@ -448,6 +450,7 @@ def test_build_summary_input_oversized_run_preserves_messages_before_tool_schema
         compacted_runs=[run],
         max_input_tokens=280,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=approximate_o200k_tokens,
     )
 
     assert [included_run.run_id for included_run in included_runs] == ["run-big-metadata"]
@@ -473,6 +476,7 @@ def test_build_summary_input_oversized_run_omits_empty_filtered_metadata() -> No
         compacted_runs=[run],
         max_input_tokens=220,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=approximate_o200k_tokens,
     )
 
     assert included_runs == [run]
@@ -492,6 +496,7 @@ def test_build_summary_input_normal_run_omits_empty_filtered_metadata() -> None:
         compacted_runs=[run],
         max_input_tokens=10_000,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=approximate_o200k_tokens,
     )
 
     assert included_runs == [run]
@@ -537,6 +542,7 @@ def test_build_summary_input_normal_run_omits_only_bulky_metadata() -> None:
         compacted_runs=[run],
         max_input_tokens=10_000,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=approximate_o200k_tokens,
     )
 
     assert included_runs == [run]
@@ -563,6 +569,7 @@ def test_build_summary_input_preserves_complete_near_cap_summary_without_claimin
         compacted_runs=[run],
         max_input_tokens=1_001,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=approximate_o200k_tokens,
     )
 
     assert included_runs == []
@@ -578,6 +585,7 @@ def test_build_summary_input_returns_no_progress_when_run_envelope_cannot_fit() 
         compacted_runs=[_completed_run("run-1")],
         max_input_tokens=1,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=approximate_o200k_tokens,
     )
 
     assert summary_input == ""
@@ -592,6 +600,7 @@ def test_build_summary_input_preserves_previous_summary_text() -> None:
         compacted_runs=[run],
         max_input_tokens=1_000,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=approximate_o200k_tokens,
     )
 
     assert included_runs == [run]
@@ -654,6 +663,7 @@ def test_build_summary_input_excludes_legacy_persisted_prompt_roles() -> None:
             system_message_role="instructions",
         ),
         max_input_tokens=1_000,
+        token_estimator=approximate_o200k_tokens,
     )
 
     assert included_runs == [run]
@@ -693,6 +703,7 @@ def test_build_summary_input_honors_tool_call_history_limit() -> None:
             max_tool_calls_from_history=1,
         ),
         max_input_tokens=1_000,
+        token_estimator=approximate_o200k_tokens,
     )
 
     assert included_runs == [run]
