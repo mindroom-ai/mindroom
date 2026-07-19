@@ -140,7 +140,7 @@ async def load_recent_room_events(
     rows = await fetchall(
         db,
         """
-        SELECT origin_server_ts, write_seq, event_json
+        SELECT event_json
         FROM mindroom_event_cache_events
         WHERE namespace = %s
             AND room_id = %s
@@ -151,7 +151,7 @@ async def load_recent_room_events(
         """,
         (namespace, room_id, since_ts_ms, event_type, limit),
     )
-    return [json.loads(row[2]) for row in rows]
+    return [json.loads(row[0]) for row in rows]
 
 
 async def load_latest_edit(

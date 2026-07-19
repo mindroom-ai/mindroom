@@ -129,7 +129,7 @@ async def load_recent_room_events(
         return []
     cursor = await db.execute(
         """
-        SELECT origin_server_ts, write_seq, event_json
+        SELECT event_json
         FROM events
         WHERE room_id = ?
             AND origin_server_ts >= ?
@@ -141,7 +141,7 @@ async def load_recent_room_events(
     )
     rows = await cursor.fetchall()
     await cursor.close()
-    return [json.loads(row[2]) for row in rows]
+    return [json.loads(row[0]) for row in rows]
 
 
 async def load_latest_edit(

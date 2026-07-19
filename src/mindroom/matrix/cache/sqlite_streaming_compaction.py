@@ -187,8 +187,7 @@ async def _compaction_candidates(
         JOIN events AS nonterminal_event
             ON nonterminal_event.event_id = nonterminal_index.edit_event_id
             AND nonterminal_event.room_id = nonterminal_index.room_id
-        WHERE nonterminal_event.event_json IS NOT NULL
-            AND json_extract(nonterminal_event.event_json, '$.type') = 'm.room.message'
+        WHERE json_extract(nonterminal_event.event_json, '$.type') = 'm.room.message'
             AND json_type(nonterminal_event.event_json, '$.sender') = 'text'
             AND json_extract(
                 nonterminal_event.event_json,
