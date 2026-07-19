@@ -33,7 +33,11 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_info import (
+    EventInfo,
+    event_source_has_thread_affecting_relation,
+    is_thread_affecting_relation,
+)
 from mindroom.matrix.sync_certification import SyncCacheWriteResult
 from mindroom.matrix.thread_bookkeeping import (
     MutationResolutionContext,
@@ -41,7 +45,6 @@ from mindroom.matrix.thread_bookkeeping import (
     MutationThreadImpactState,
     MutationWriteContext,
     ThreadMutationResolver,
-    is_thread_affecting_relation,
 )
 from mindroom.timing import elapsed_ms_since, emit_timing_event, timing_enabled
 
@@ -82,13 +85,7 @@ def _collect_sync_timeline_cache_updates(
             room_redactions.setdefault(room_id, []).append(redacted_event_id)
         return
 
-    event_info = EventInfo.from_event(event_source)
-    event_type = event_source.get("type")
-    opaque_redaction_target = event_source.get("redacts") if is_opaque_encrypted_event_source(event_source) else None
-    if isinstance(opaque_redaction_target, str) or is_thread_affecting_relation(
-        event_info,
-        event_type=event_type if isinstance(event_type, str) else None,
-    ):
+    if event_source_has_thread_affecting_relation(event_source):
         cache_update = _collect_sync_event_cache_update(room_id, event)
         if cache_update is None:
             return

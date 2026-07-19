@@ -58,7 +58,7 @@ from mindroom.matrix.client_visible_messages import (
     apply_latest_edits_to_messages,
     record_latest_thread_edit,
 )
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_info import EventInfo, event_source_has_thread_affecting_relation
 from mindroom.matrix.message_content import extract_and_resolve_message, resolve_event_source_content
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
@@ -69,7 +69,12 @@ from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_HOMESERVER,
     THREAD_HISTORY_SOURCE_STALE_CACHE,
 )
-from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
+from mindroom.matrix.thread_membership import (
+    ThreadResolutionState,
+    ThreadRoomScanRootNotFoundError,
+    map_backed_thread_membership_access,
+    resolve_event_thread_membership,
+)
 from mindroom.matrix.thread_projection import (
     ordered_event_ids_from_scanned_event_sources,
     resolve_thread_ids_for_event_infos,
@@ -1087,7 +1092,7 @@ async def fetch_thread_event_sources_via_room_messages(
 ) -> _ThreadEventSourceScanResult:
     """Fetch one thread's event sources by scanning room history pages."""
     scan_result = await _bulk_scan_thread_event_sources(client, room_id, thread_root_ids=(thread_id,))
-    if scan_result.has_opaque_events:
+    if scan_result.has_unresolved_opaque_relations:
         msg = f"thread history for {thread_id} contains undecrypted Matrix events"
         raise _OpaqueEncryptedThreadHistoryError(msg)
     if thread_id in scan_result.missing_root_ids:
@@ -1113,7 +1118,7 @@ class _BulkThreadScanResult:
 
     thread_event_sources: dict[str, list[dict[str, Any]]]
     missing_root_ids: frozenset[str]
-    has_opaque_events: bool
+    has_unresolved_opaque_relations: bool
     page_count: int
     scanned_event_count: int
 
@@ -1129,21 +1134,69 @@ class BulkThreadRefreshStats:
     scanned_event_count: int
 
 
+async def _bucket_opaque_thread_relations(
+    *,
+    room_id: str,
+    grouped: dict[str, dict[str, dict[str, Any]]],
+    event_infos: dict[str, EventInfo],
+    scanned_message_sources: dict[str, dict[str, Any]],
+    resolved_thread_ids: dict[str, str],
+) -> bool:
+    """Bucket scoped opaque relations and report any whose thread impact stays unknown."""
+    membership_access = map_backed_thread_membership_access(
+        event_infos=event_infos,
+        resolved_thread_ids=resolved_thread_ids,
+    )
+    has_unresolved_relations = False
+    for event_id, event_source in scanned_message_sources.items():
+        if (
+            not is_opaque_encrypted_event_source(event_source)
+            or not event_source_has_thread_affecting_relation(event_source)
+            or event_id in resolved_thread_ids
+        ):
+            continue
+        redacted_event_id = event_source.get("redacts")
+        if isinstance(redacted_event_id, str):
+            thread_id = resolved_thread_ids.get(redacted_event_id)
+            if thread_id is None and redacted_event_id in grouped:
+                thread_id = redacted_event_id
+            if thread_id in grouped:
+                grouped[thread_id][event_id] = event_source
+            elif redacted_event_id not in event_infos:
+                has_unresolved_relations = True
+            continue
+
+        event_info = event_infos[event_id]
+        resolution = await resolve_event_thread_membership(
+            room_id,
+            event_info,
+            access=membership_access,
+        )
+        if resolution.state is ThreadResolutionState.INDETERMINATE:
+            has_unresolved_relations = True
+            continue
+        thread_id = resolution.thread_id
+        if thread_id is None:
+            candidate_thread_id = event_info.next_related_event_id("")
+            thread_id = candidate_thread_id if candidate_thread_id in grouped else None
+        if thread_id in grouped:
+            grouped[thread_id][event_id] = event_source
+    return has_unresolved_relations
+
+
 async def _group_scanned_sources_by_thread(
     *,
     room_id: str,
     thread_root_ids: Collection[str],
     scanned_message_sources: dict[str, dict[str, Any]],
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
-) -> dict[str, list[dict[str, Any]]]:
-    """Bucket one room scan's event sources per requested thread with one canonical resolution."""
+) -> tuple[dict[str, list[dict[str, Any]]], bool]:
+    """Bucket room-scan sources and report opaque thread relations that could not resolve."""
     grouped: dict[str, dict[str, dict[str, Any]]] = {
         root_id: {root_id: scanned_message_sources[root_id]}
         for root_id in thread_root_ids
         if root_id in scanned_message_sources
     }
-    if not grouped:
-        return {}
     event_infos = {
         event_id: EventInfo.from_event(event_source) for event_id, event_source in scanned_message_sources.items()
     }
@@ -1162,6 +1215,14 @@ async def _group_scanned_sources_by_thread(
             continue
         bucket[event_id] = scanned_message_sources[event_id]
 
+    has_unresolved_opaque_relations = await _bucket_opaque_thread_relations(
+        room_id=room_id,
+        grouped=grouped,
+        event_infos=event_infos,
+        scanned_message_sources=scanned_message_sources,
+        resolved_thread_ids=resolved_thread_ids,
+    )
+
     edits_by_root: dict[str, list[dict[str, Any]]] = {}
     for original_event_id, (edit_event, edit_thread_id) in latest_edits_by_original_event_id.items():
         target_roots = {
@@ -1172,13 +1233,14 @@ async def _group_scanned_sources_by_thread(
         for root_id in target_roots:
             edits_by_root.setdefault(root_id, []).append(_event_source_for_cache(edit_event))
 
-    return {
+    grouped_sources = {
         root_id: sort_thread_event_sources_root_first(
             [*bucket.values(), *edits_by_root.get(root_id, [])],
             thread_id=root_id,
         )
         for root_id, bucket in grouped.items()
     }
+    return grouped_sources, has_unresolved_opaque_relations
 
 
 async def _bulk_scan_thread_event_sources(
@@ -1225,7 +1287,7 @@ async def _bulk_scan_thread_event_sources(
             break
         from_token = response.end
 
-    thread_event_sources = await _group_scanned_sources_by_thread(
+    thread_event_sources, has_unresolved_opaque_relations = await _group_scanned_sources_by_thread(
         room_id=room_id,
         thread_root_ids=thread_root_ids,
         scanned_message_sources=scanned_message_sources,
@@ -1234,9 +1296,7 @@ async def _bulk_scan_thread_event_sources(
     return _BulkThreadScanResult(
         thread_event_sources=thread_event_sources,
         missing_root_ids=frozenset(remaining_root_ids),
-        has_opaque_events=any(
-            is_opaque_encrypted_event_source(event_source) for event_source in scanned_message_sources.values()
-        ),
+        has_unresolved_opaque_relations=has_unresolved_opaque_relations,
         page_count=page_count,
         scanned_event_count=scanned_event_count,
     )
@@ -1262,7 +1322,7 @@ async def bulk_refresh_room_thread_histories(
     fetch_started_at = time.time()
     scan_result = await _bulk_scan_thread_event_sources(client, room_id, thread_root_ids=thread_root_ids)
     stored_threads = 0
-    if scan_result.has_opaque_events:
+    if scan_result.has_unresolved_opaque_relations:
         for thread_id in set(thread_root_ids):
             await _mark_thread_cache_stale_for_opaque_history(
                 event_cache,
@@ -1275,6 +1335,13 @@ async def bulk_refresh_room_thread_histories(
                 event_sources,
                 thread_id=thread_id,
             )
+            if cache_rejection_reason == "opaque_encrypted_event":
+                await _mark_thread_cache_stale_for_opaque_history(
+                    event_cache,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                )
+                continue
             if cache_rejection_reason is not None:
                 continue
             if await _store_thread_history_cache(

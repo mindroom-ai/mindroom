@@ -120,6 +120,25 @@ class EventInfo:
         return None
 
 
+def is_thread_affecting_relation(
+    event_info: EventInfo,
+    *,
+    event_type: str | None,
+) -> bool:
+    """Return whether one event relation can affect visible thread-scoped cache state."""
+    return event_type_supports_thread_relations(event_type) and (
+        event_info.is_thread or event_info.is_edit or event_info.is_reply or event_info.relation_type == "m.reference"
+    )
+
+
+def event_source_has_thread_affecting_relation(event_source: Mapping[str, object]) -> bool:
+    """Return whether exposed event metadata can affect visible thread-scoped cache state."""
+    event_info = EventInfo.from_event(dict(event_source))
+    return (
+        event_info.event_type == "m.room.encrypted" and isinstance(event_source.get("redacts"), str)
+    ) or is_thread_affecting_relation(event_info, event_type=event_info.event_type)
+
+
 def _analyze_event_relations(event_source: dict | None) -> EventInfo:
     """Analyze complete relation information for a Matrix event.
 

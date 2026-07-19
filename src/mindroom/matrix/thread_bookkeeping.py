@@ -86,22 +86,6 @@ if TYPE_CHECKING:
 MutationWriteContext = Literal["outbound", "live", "sync"]
 
 
-def is_thread_affecting_relation(
-    event_info: EventInfo,
-    *,
-    event_type: str | None,
-) -> bool:
-    """Return whether one event relation can affect visible thread-scoped cache state.
-
-    Relation names are reused by non-message event families.
-    Only relations carried by plaintext or encrypted room messages can add visible
-    conversation history, so every non-message relation stays room-level.
-    """
-    return event_type_supports_thread_relations(event_type) and (
-        event_info.is_thread or event_info.is_edit or event_info.is_reply or event_info.relation_type == "m.reference"
-    )
-
-
 def _redaction_can_affect_thread_cache(event_info: EventInfo) -> bool:
     """Return whether redacting one related event can invalidate cached thread messages."""
     return event_type_supports_thread_relations(event_info.event_type) and not event_info.is_reaction

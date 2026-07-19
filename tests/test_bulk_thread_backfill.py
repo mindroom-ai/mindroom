@@ -69,6 +69,32 @@ def _edit_event(
     )
 
 
+def _opaque_event(
+    event_id: str = "$opaque:localhost",
+    *,
+    relates_to: dict[str, object] | None = None,
+) -> nio.MegolmEvent:
+    content: dict[str, object] = {
+        "algorithm": "m.megolm.v1.aes-sha2",
+        "ciphertext": "opaque ciphertext",
+        "device_id": "DEVICE",
+        "sender_key": "sender-key",
+        "session_id": "session",
+    }
+    if relates_to is not None:
+        content["m.relates_to"] = relates_to
+    return nio.MegolmEvent.from_dict(
+        {
+            "event_id": event_id,
+            "sender": "@alice:localhost",
+            "origin_server_ts": 2000,
+            "room_id": _ROOM_ID,
+            "type": "m.room.encrypted",
+            "content": content,
+        },
+    )
+
+
 def _messages_response(chunk: list[nio.Event], *, end: str | None) -> nio.RoomMessagesResponse:
     return nio.RoomMessagesResponse(room_id=_ROOM_ID, chunk=chunk, start="", end=end)
 
@@ -162,31 +188,34 @@ async def test_bulk_refresh_reports_missing_roots_without_storing_partial_thread
 
 
 @pytest.mark.asyncio
-async def test_bulk_refresh_opaque_room_scan_marks_all_requested_snapshots_stale(tmp_path: Path) -> None:
-    """Ciphertext in a room scan must invalidate every requested populated snapshot."""
+@pytest.mark.parametrize(
+    ("relation_case", "expected_stored_threads", "expected_stale_threads"),
+    [
+        ("relationless", 1, frozenset()),
+        ("resolved_reference", 0, frozenset({"found"})),
+        ("unresolved_reference", 0, frozenset({"found", "missing"})),
+    ],
+)
+async def test_bulk_refresh_scopes_opaque_invalidation_from_exposed_relations(
+    tmp_path: Path,
+    relation_case: str,
+    expected_stored_threads: int,
+    expected_stale_threads: frozenset[str],
+) -> None:
+    """Opaque events must stale only snapshots their exposed relation can affect."""
     found_thread_id = "$found-root:localhost"
     missing_thread_id = "$missing-root:localhost"
     found_root = _message_event(found_thread_id, "found root", timestamp=1000)
     missing_root = _message_event(missing_thread_id, "missing root", timestamp=1000)
-    opaque_event = nio.MegolmEvent.from_dict(
-        {
-            "event_id": "$opaque:localhost",
-            "sender": "@alice:localhost",
-            "origin_server_ts": 2000,
-            "room_id": _ROOM_ID,
-            "type": "m.room.encrypted",
-            "content": {
-                "algorithm": "m.megolm.v1.aes-sha2",
-                "ciphertext": "opaque ciphertext",
-                "device_id": "DEVICE",
-                "sender_key": "sender-key",
-                "session_id": "session",
-            },
-        },
-    )
+    relation_target = {
+        "relationless": None,
+        "resolved_reference": found_thread_id,
+        "unresolved_reference": "$unknown:localhost",
+    }[relation_case]
+    relates_to = None if relation_target is None else {"rel_type": "m.reference", "event_id": relation_target}
     client = AsyncMock()
     client.room_messages = AsyncMock(
-        return_value=_messages_response([opaque_event, found_root], end=None),
+        return_value=_messages_response([_opaque_event(relates_to=relates_to), found_root], end=None),
     )
     event_cache = SqliteEventCache(tmp_path / "event_cache.db")
     await event_cache.initialize()
@@ -206,9 +235,13 @@ async def test_bulk_refresh_opaque_room_scan_marks_all_requested_snapshots_stale
     finally:
         await event_cache.close()
 
-    assert stats.stored_threads == 0
+    assert stats.stored_threads == expected_stored_threads
     assert stats.missing_root_ids == frozenset({missing_thread_id})
-    for cache_state in (found_cache_state, missing_cache_state):
+    cache_states = {"found": found_cache_state, "missing": missing_cache_state}
+    for thread_name, cache_state in cache_states.items():
         assert cache_state is not None
-        assert cache_state.invalidation_reason == "thread_history_opaque_encrypted_event"
-        assert thread_cache_rejection_reason(cache_state) == "thread_invalidated_after_validation"
+        if thread_name in expected_stale_threads:
+            assert cache_state.invalidation_reason == "thread_history_opaque_encrypted_event"
+            assert thread_cache_rejection_reason(cache_state) == "thread_invalidated_after_validation"
+        else:
+            assert thread_cache_rejection_reason(cache_state) is None
