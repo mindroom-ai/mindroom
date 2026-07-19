@@ -34,13 +34,19 @@ Diagnostics contain counts and sizes only and never contain event content or con
 
 ## Migration and sync certification
 
-SQLite version 10 is migrated to version 11 by transactionally rebuilding `thread_events` as normalized membership rows joined to active `events`.
+SQLite version 11 historically migrated version 10 by transactionally rebuilding `thread_events` as normalized membership rows joined to active `events`.
 
 A version-10 membership without an active source marks its thread stale instead of copying duplicated legacy JSON into the new source of truth.
 
-Every SQLite database and PostgreSQL namespace persists an opaque certification generation, and every certified sync checkpoint records the generation it covers.
+Every SQLite database and PostgreSQL principal namespace persists an opaque storage generation.
 
-Unsupported SQLite shapes still use a destructive reset, and that reset transactionally creates a new generation before it commits.
+Each principal view exposes one `cache_generation`; SQLite derives it from the storage generation plus the full principal ID, while PostgreSQL uses the principal-exclusive namespace generation.
+
+Certified sync checkpoints record only that principal-safe cache generation.
+
+SQLite version 12 resets version 11 and older rows because they have no provable principal owner, and that reset transactionally creates a new generation before it commits.
+
+Unsupported SQLite shapes use the same destructive reset.
 
 A token from the prior generation is rejected on every later process even if the resetting process crashes before any bot can clear its token file.
 
@@ -48,21 +54,21 @@ Only version-2 generation-bound token records are accepted, so older token forma
 
 PostgreSQL migration takes a transaction-scoped global advisory lock, makes the legacy payload column nullable, normalizes only the initializing namespace, repairs only that namespace, and commits the schema version and maintenance result together.
 
-PostgreSQL version-2 binary cutover requires an exclusive database-wide maintenance window because the schema version is global to the physical database.
+The historical PostgreSQL version-2 binary cutover required an exclusive database-wide maintenance window because the schema version is global to the physical database.
 
-Stop and drain every version-1 runtime sharing that database before starting the first version-2 runtime, and do not restart a version-1 runtime after migration.
+The version-3 security migration uses the same global transaction-scoped lock and must not run concurrently with older binaries sharing that database.
 
 Row normalization remains namespace-scoped after the binary cutover.
 
-Other PostgreSQL namespaces retain their legacy payload until their own version-2 runtime initializes.
+Other PostgreSQL namespaces retain their legacy thread payload until current namespace maintenance initializes them.
 
 Cancellation or failure rolls back SQLite and PostgreSQL DDL, payload normalization, repair, metadata, and stale markers as one unit.
 
-Migration tests use real version-10 and version-1 shapes on disposable storage and never access a production database.
+Migration tests use real immediate-predecessor version-11 and version-2 shapes, plus older version-10 and version-1 shapes, on disposable storage and never access a production database.
 
-SQLite version-10 migration adds and populates event write order in place instead of rebuilding the JSON-bearing `events` table.
+The historical version-10-to-version-11 SQLite migration adds and populates event write order in place instead of rebuilding the JSON-bearing `events` table.
 
-The write-order update still rewrites event pages into the WAL, so operators must budget temporary free space at least comparable to the active events table plus safety margin and must take an offline backup before upgrade.
+That historical write-order update still rewrites event pages into the WAL, so operators must budget temporary free space at least comparable to the active events table plus safety margin and must take an offline backup before upgrade.
 
 Dropping the legacy JSON-bearing `thread_events` table adds free pages to the database but does not shrink the physical file automatically.
 

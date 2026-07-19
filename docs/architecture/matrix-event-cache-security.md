@@ -91,7 +91,7 @@ SQLite content writes establish a durable room-membership row, and reads use `BE
 
 SQLite write results are reauthorized after commit while the operation lock is still held, so a concurrent leave cannot expose plaintext written before the fence.
 
-SQLite schema version 11 resets older advisory cache contents inside one rollback-safe transaction and creates a durable database-generation identifier.
+SQLite schema version 12 resets predecessor and older advisory cache contents inside one rollback-safe transaction because those rows have no provable principal owner, and it creates a new durable database-generation identifier.
 Each SQLite principal view derives a stable checkpoint generation from that database generation and the full Matrix principal ID, so a retained agent token cannot cross an account or homeserver rebind.
 
 PostgreSQL schema version 3 migrates under a global transaction-scoped advisory lock, preserves scoped rows from every namespace, expands event and plaintext keys with room scope, adds durable membership generations, and deletes legacy plaintext whose room and event ownership cannot be proven.
