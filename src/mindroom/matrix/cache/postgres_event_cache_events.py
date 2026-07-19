@@ -369,11 +369,16 @@ async def write_lookup_index_rows(
     cached_at: float,
     thread_id: str | None = None,
 ) -> None:
-    """Persist point-lookup, edit-index, and thread-index rows for cached events."""
-    if not serialized_events:
-        return
+    """Persist point-lookup, edit-index, and thread-index rows for cached events.
+
+    Point payload quality is monotonic per event ID: clear content may replace a stored opaque
+    ``m.room.encrypted`` payload, but an opaque payload never replaces stored clear content, and
+    edit and thread index rows are derived only from payloads the upsert accepted.
+    """
+    accepted_events: list[SerializedCachedEvent] = []
     for event in serialized_events:
-        await db.execute(
+        accepted_row = await fetchone(
+            db,
             """
             INSERT INTO mindroom_event_cache_events(namespace, event_id, room_id, origin_server_ts, event_json, cached_at)
             VALUES (%s, %s, %s, %s, %s, %s)
@@ -383,6 +388,9 @@ async def write_lookup_index_rows(
                 event_json = excluded.event_json,
                 cached_at = excluded.cached_at,
                 write_seq = nextval('mindroom_event_cache_write_seq')
+            WHERE mindroom_event_cache_events.event_json::jsonb ->> 'type' = 'm.room.encrypted'
+                OR excluded.event_json::jsonb ->> 'type' <> 'm.room.encrypted'
+            RETURNING event_id
             """,
             (
                 namespace,
@@ -393,8 +401,10 @@ async def write_lookup_index_rows(
                 cached_at,
             ),
         )
+        if accepted_row is not None:
+            accepted_events.append(event)
 
-    edit_rows = event_edit_rows(room_id, serialized_events)
+    edit_rows = event_edit_rows(room_id, accepted_events)
     for row in edit_rows:
         await db.execute(
             """
@@ -408,7 +418,7 @@ async def write_lookup_index_rows(
             (namespace, row.edit_event_id, row.room_id, row.original_event_id, row.origin_server_ts),
         )
 
-    thread_rows = event_thread_rows(room_id, serialized_events, thread_id=thread_id)
+    thread_rows = event_thread_rows(room_id, accepted_events, thread_id=thread_id)
     if thread_rows:
         for row in thread_rows:
             await db.execute(
