@@ -7,6 +7,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from .event_cache_events import (
+    SerializedCachedEvent,
     event_id_for_cache,
     serialize_cacheable_events,
     serialize_cached_event,
@@ -144,11 +145,11 @@ async def _store_thread_events_locked(
     namespace: str,
     room_id: str,
     thread_id: str,
-    events: list[dict[str, Any]],
+    serialized_events: list[SerializedCachedEvent],
     validated_at: float,
 ) -> None:
     """Persist one authoritative thread snapshot within an existing DB transaction."""
-    if not events:
+    if not serialized_events:
         await _upsert_thread_cache_state(
             db,
             namespace=namespace,
@@ -158,14 +159,6 @@ async def _store_thread_events_locked(
         )
         return
 
-    normalized_events = [normalize_event_source_for_cache(event) for event in events]
-    cacheable_events = await filter_cacheable_events(
-        db,
-        namespace,
-        room_id,
-        [(event_id_for_cache(event), event) for event in normalized_events],
-    )
-    serialized_events = serialize_cacheable_events(cacheable_events)
     await write_lookup_index_rows(
         db,
         namespace=namespace,
@@ -212,33 +205,43 @@ async def _replace_thread_locked(
     validated_at: float,
 ) -> None:
     """Replace one thread snapshot atomically within an existing DB transaction."""
+    normalized_events = [normalize_event_source_for_cache(event) for event in events]
+    cacheable_events = await filter_cacheable_events(
+        db,
+        namespace,
+        room_id,
+        [(event_id_for_cache(event), event) for event in normalized_events],
+    )
+    serialized_events = serialize_cacheable_events(cacheable_events)
+    replacement_event_ids = {event.event_id for event in serialized_events}
     existing_event_ids = await _thread_event_ids_for_thread(
         db,
         namespace=namespace,
         room_id=room_id,
         thread_id=thread_id,
     )
-    await db.execute(
-        """
-        DELETE FROM mindroom_event_cache_thread_events
-        WHERE namespace = %s AND room_id = %s AND thread_id = %s
-        """,
-        (namespace, room_id, thread_id),
-    )
-    if existing_event_ids:
-        await delete_cached_events(db, namespace=namespace, event_ids=existing_event_ids)
+    removed_event_ids = [event_id for event_id in existing_event_ids if event_id not in replacement_event_ids]
+    if removed_event_ids:
+        await db.execute(
+            """
+            DELETE FROM mindroom_event_cache_thread_events
+            WHERE namespace = %s AND room_id = %s AND thread_id = %s AND event_id = ANY(%s)
+            """,
+            (namespace, room_id, thread_id, removed_event_ids),
+        )
+        await delete_cached_events(db, namespace=namespace, event_ids=removed_event_ids)
         await delete_event_edit_rows(
             db,
             namespace,
             room_id,
-            event_ids=existing_event_ids,
+            event_ids=removed_event_ids,
             original_event_id=None,
         )
         await delete_event_thread_rows(
             db,
             namespace,
             room_id,
-            event_ids=existing_event_ids,
+            event_ids=removed_event_ids,
             affected_thread_ids=[thread_id],
         )
     await _store_thread_events_locked(
@@ -246,7 +249,7 @@ async def _replace_thread_locked(
         namespace=namespace,
         room_id=room_id,
         thread_id=thread_id,
-        events=events,
+        serialized_events=serialized_events,
         validated_at=validated_at,
     )
 
@@ -496,7 +499,10 @@ async def append_existing_thread_event(
     thread_id: str,
     normalized_event: dict[str, Any],
 ) -> bool:
-    """Append one event to an existing cached thread."""
+    """Append one event to an existing cached thread.
+
+    An opaque ``m.room.encrypted`` payload never replaces stored clear content for the same event ID.
+    """
     event_id = event_id_for_cache(normalized_event)
     if await event_or_original_is_redacted(
         db,

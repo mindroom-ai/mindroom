@@ -107,10 +107,18 @@ class ConversationEventCache(Protocol):
         """Return one durably cached MXC text payload when present."""
 
     async def store_event(self, event_id: str, room_id: str, event_data: dict[str, Any]) -> None:
-        """Insert or replace one individually cached Matrix event."""
+        """Insert or replace one individually cached Matrix event.
+
+        Payload quality is monotonic per event ID: an opaque ``m.room.encrypted``
+        payload never replaces already-clear cached content.
+        """
 
     async def store_events_batch(self, events: list[tuple[str, str, dict[str, Any]]]) -> None:
-        """Insert or replace a batch of individually cached Matrix events."""
+        """Insert or replace a batch of individually cached Matrix events.
+
+        Payload quality is monotonic per event ID: an opaque ``m.room.encrypted``
+        payload never replaces already-clear cached content.
+        """
 
     async def store_mxc_text(self, room_id: str, mxc_url: str, text: str) -> None:
         """Insert or replace one durably cached MXC text payload."""

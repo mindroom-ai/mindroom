@@ -1468,6 +1468,305 @@ async def test_individual_event_cache_store_and_retrieve(event_cache: Conversati
     assert missing_event is None
 
 
+def _clear_payload(
+    event_id: str,
+    *,
+    body: str = "clear",
+    thread_root_id: str | None = None,
+    edit_of: str | None = None,
+    origin_server_ts: int = 1000,
+) -> dict[str, object]:
+    content: dict[str, object] = {"body": body, "msgtype": "m.text"}
+    if thread_root_id is not None:
+        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_root_id}
+    if edit_of is not None:
+        content["body"] = f"* {body}"
+        content["m.new_content"] = {"body": body, "msgtype": "m.text"}
+        content["m.relates_to"] = {"rel_type": "m.replace", "event_id": edit_of}
+    return {
+        "event_id": event_id,
+        "sender": "@user:localhost",
+        "origin_server_ts": origin_server_ts,
+        "type": "m.room.message",
+        "content": content,
+    }
+
+
+def _opaque_payload(
+    event_id: str,
+    *,
+    thread_root_id: str | None = None,
+    origin_server_ts: int = 1000,
+) -> dict[str, object]:
+    content: dict[str, object] = {
+        "algorithm": "m.megolm.v1.aes-sha2",
+        "ciphertext": "opaque ciphertext",
+        "device_id": "DEVICE",
+        "sender_key": "sender-key",
+        "session_id": "session",
+    }
+    if thread_root_id is not None:
+        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_root_id}
+    return {
+        "event_id": event_id,
+        "sender": "@user:localhost",
+        "origin_server_ts": origin_server_ts,
+        "type": "m.room.encrypted",
+        "content": content,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arrival_order", [("clear", "opaque"), ("opaque", "clear")])
+async def test_point_payload_upgrade_is_monotonic_across_arrival_orders(
+    event_cache: ConversationEventCache,
+    arrival_order: tuple[str, str],
+) -> None:
+    """Opaque ciphertext must never replace a decrypted point payload in either arrival order.
+
+    The divergent thread roots make index derivation observable: a refused payload must
+    contribute no thread index rows, so the index always describes the accepted payload.
+    """
+    room_id = "!room:localhost"
+    event_id = "$mixed:localhost"
+    payloads = {
+        "clear": _clear_payload(event_id, body="decrypted", thread_root_id="$clear-root:localhost"),
+        "opaque": _opaque_payload(event_id, thread_root_id="$opaque-root:localhost"),
+    }
+
+    for payload_kind in arrival_order:
+        await event_cache.store_event(event_id, room_id, payloads[payload_kind])
+
+    cached_event = await event_cache.get_event(room_id, event_id)
+    assert cached_event is not None
+    assert cached_event["type"] == "m.room.message"
+    assert cached_event["content"]["body"] == "decrypted"
+    assert await event_cache.get_thread_id_for_event(room_id, event_id) == "$clear-root:localhost"
+    assert await event_cache.get_thread_id_for_event(room_id, "$clear-root:localhost") == "$clear-root:localhost"
+    if arrival_order == ("clear", "opaque"):
+        assert await event_cache.get_thread_id_for_event(room_id, "$opaque-root:localhost") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "batch_order",
+    [
+        ("clear", "opaque"),
+        ("opaque", "clear"),
+        ("opaque", "clear", "opaque"),
+    ],
+)
+async def test_duplicate_ids_in_one_batch_converge_on_clear_payload(
+    event_cache: ConversationEventCache,
+    batch_order: tuple[str, ...],
+) -> None:
+    """Duplicate event IDs inside one batch must converge on the decrypted payload."""
+    room_id = "!room:localhost"
+    event_id = "$duplicated:localhost"
+    thread_root_id = "$root:localhost"
+    payloads = {
+        "clear": _clear_payload(event_id, body="decrypted", thread_root_id=thread_root_id),
+        "opaque": _opaque_payload(event_id, thread_root_id=thread_root_id),
+    }
+
+    await event_cache.store_events_batch(
+        [(event_id, room_id, payloads[payload_kind]) for payload_kind in batch_order],
+    )
+
+    cached_event = await event_cache.get_event(room_id, event_id)
+    assert cached_event is not None
+    assert cached_event["type"] == "m.room.message"
+    assert cached_event["content"]["body"] == "decrypted"
+    assert await event_cache.get_thread_id_for_event(room_id, event_id) == thread_root_id
+    assert await event_cache.get_thread_id_for_event(room_id, thread_root_id) == thread_root_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arrival_order", [("clear", "opaque"), ("opaque", "clear")])
+async def test_separate_cache_clients_cannot_downgrade_decrypted_payload(
+    event_cache_factory: Callable[[], ConversationEventCache],
+    arrival_order: tuple[str, str],
+) -> None:
+    """Two cache clients on one backing store must converge on the decrypted payload."""
+    room_id = "!room:localhost"
+    event_id = "$shared:localhost"
+    thread_root_id = "$root:localhost"
+    decrypting_client = event_cache_factory()
+    keyless_client = event_cache_factory()
+    await decrypting_client.initialize()
+    await keyless_client.initialize()
+    try:
+        writers = {"clear": decrypting_client, "opaque": keyless_client}
+        payloads = {
+            "clear": _clear_payload(event_id, body="decrypted", thread_root_id=thread_root_id),
+            "opaque": _opaque_payload(event_id, thread_root_id=thread_root_id),
+        }
+        for payload_kind in arrival_order:
+            await writers[payload_kind].store_event(event_id, room_id, payloads[payload_kind])
+        cached_by_decrypting = await decrypting_client.get_event(room_id, event_id)
+        cached_by_keyless = await keyless_client.get_event(room_id, event_id)
+    finally:
+        await keyless_client.close()
+        await decrypting_client.close()
+
+    for cached_event in (cached_by_decrypting, cached_by_keyless):
+        assert cached_event is not None
+        assert cached_event["type"] == "m.room.message"
+        assert cached_event["content"]["body"] == "decrypted"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arrival_order", [("clear", "opaque"), ("opaque", "clear")])
+async def test_thread_append_preserves_decrypted_payload_across_arrival_orders(
+    event_cache: ConversationEventCache,
+    arrival_order: tuple[str, str],
+) -> None:
+    """Incremental appends must never downgrade an already-decrypted thread snapshot row."""
+    room_id = "!room:localhost"
+    thread_id = "$root:localhost"
+    child_event_id = "$child:localhost"
+    await _replace_thread(event_cache, room_id, thread_id, [_clear_payload(thread_id, body="root")])
+    payloads = {
+        "clear": _clear_payload(
+            child_event_id,
+            body="decrypted child",
+            thread_root_id=thread_id,
+            origin_server_ts=2000,
+        ),
+        "opaque": _opaque_payload(child_event_id, thread_root_id=thread_id, origin_server_ts=2000),
+    }
+
+    for payload_kind in arrival_order:
+        assert await event_cache.append_event(room_id, thread_id, payloads[payload_kind])
+
+    thread_events = await event_cache.get_thread_events(room_id, thread_id)
+    assert thread_events is not None
+    cached_child = next(event for event in thread_events if event["event_id"] == child_event_id)
+    assert cached_child["type"] == "m.room.message"
+    assert cached_child["content"]["body"] == "decrypted child"
+    cached_event = await event_cache.get_event(room_id, child_event_id)
+    assert cached_event is not None
+    assert cached_event["type"] == "m.room.message"
+    assert cached_event["content"]["body"] == "decrypted child"
+
+
+@pytest.mark.asyncio
+async def test_thread_replacement_preserves_decrypted_payload(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A full snapshot replacement must not bypass the clear-payload invariant."""
+    room_id = "!room:localhost"
+    thread_id = "$root:localhost"
+    await _replace_thread(
+        event_cache,
+        room_id,
+        thread_id,
+        [_clear_payload(thread_id, body="decrypted root")],
+    )
+
+    await _replace_thread(
+        event_cache,
+        room_id,
+        thread_id,
+        [_opaque_payload(thread_id)],
+    )
+
+    cached_event = await event_cache.get_event(room_id, thread_id)
+    thread_events = await event_cache.get_thread_events(room_id, thread_id)
+    assert cached_event is not None
+    assert cached_event["type"] == "m.room.message"
+    assert cached_event["content"]["body"] == "decrypted root"
+    assert thread_events is not None
+    assert len(thread_events) == 1
+    assert thread_events[0]["type"] == "m.room.message"
+    assert thread_events[0]["content"]["body"] == "decrypted root"
+
+
+@pytest.mark.asyncio
+async def test_refused_opaque_write_keeps_latest_edit_join_readable(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A keyless client's ciphertext for an indexed edit must not corrupt latest-edit reads."""
+    room_id = "!room:localhost"
+    original_event_id = "$original:localhost"
+    edit_event_id = "$edit:localhost"
+    await event_cache.store_event(
+        original_event_id,
+        room_id,
+        _clear_payload(original_event_id, body="original"),
+    )
+    await event_cache.store_event(
+        edit_event_id,
+        room_id,
+        _clear_payload(edit_event_id, body="edited", edit_of=original_event_id, origin_server_ts=2000),
+    )
+
+    await event_cache.store_event(edit_event_id, room_id, _opaque_payload(edit_event_id, origin_server_ts=2000))
+
+    latest_edit = await event_cache.get_latest_edit(room_id, original_event_id)
+    assert latest_edit is not None
+    assert latest_edit["type"] == "m.room.message"
+    assert latest_edit["content"]["m.new_content"]["body"] == "edited"
+
+
+@pytest.mark.asyncio
+async def test_redaction_tombstone_survives_clear_and_opaque_rewrites(
+    event_cache: ConversationEventCache,
+) -> None:
+    """The monotonic upsert must not resurrect durably redacted events for any payload quality."""
+    room_id = "!room:localhost"
+    event_id = "$redacted:localhost"
+    await event_cache.store_event(event_id, room_id, _clear_payload(event_id))
+    assert await event_cache.redact_event(room_id, event_id)
+
+    await event_cache.store_event(event_id, room_id, _opaque_payload(event_id))
+    await event_cache.store_event(event_id, room_id, _clear_payload(event_id))
+
+    assert await event_cache.get_event(room_id, event_id) is None
+
+
+@pytest.mark.asyncio
+async def test_accepted_clear_rewrite_still_moves_thread_index_row(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Accepted clear rewrites must keep last-wins thread index moves working."""
+    room_id = "!room:localhost"
+    event_id = "$moved:localhost"
+    await event_cache.store_events_batch(
+        [(event_id, room_id, _clear_payload(event_id, thread_root_id="$root-a:localhost"))],
+    )
+    assert await event_cache.get_thread_id_for_event(room_id, event_id) == "$root-a:localhost"
+
+    await event_cache.store_events_batch(
+        [(event_id, room_id, _clear_payload(event_id, thread_root_id="$root-b:localhost"))],
+    )
+
+    assert await event_cache.get_thread_id_for_event(room_id, event_id) == "$root-b:localhost"
+
+
+@pytest.mark.asyncio
+async def test_opaque_payload_remains_retained_and_refreshable(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Opaque events must stay retained and refreshable until clear content improves them."""
+    room_id = "!room:localhost"
+    event_id = "$opaque-only:localhost"
+    thread_root_id = "$root:localhost"
+    await event_cache.store_event(event_id, room_id, _opaque_payload(event_id, thread_root_id=thread_root_id))
+
+    cached_event = await event_cache.get_event(room_id, event_id)
+    assert cached_event is not None
+    assert cached_event["type"] == "m.room.encrypted"
+    assert await event_cache.get_thread_id_for_event(room_id, event_id) == thread_root_id
+    assert await event_cache.get_thread_id_for_event(room_id, thread_root_id) == thread_root_id
+
+    await event_cache.store_event(event_id, room_id, _opaque_payload(event_id, thread_root_id=thread_root_id))
+
+    refreshed_event = await event_cache.get_event(room_id, event_id)
+    assert refreshed_event is not None
+    assert refreshed_event["type"] == "m.room.encrypted"
+
+
 def test_event_cache_room_lock_cache_evicts_idle_rooms(tmp_path: Path) -> None:
     """Idle per-room locks should be evicted instead of growing without bound."""
     runtime = event_cache_module._SqliteEventCacheRuntime(tmp_path / "event_cache.db")

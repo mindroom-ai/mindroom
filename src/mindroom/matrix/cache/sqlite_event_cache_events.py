@@ -325,22 +325,31 @@ async def write_lookup_index_rows(
     cached_at: float,
     thread_id: str | None = None,
 ) -> None:
-    """Persist point-lookup, edit-index, and thread-index rows for cached events."""
+    """Persist point-lookup, edit-index, and thread-index rows for cached events.
+
+    Point payload quality is monotonic per event ID: clear content may replace a stored opaque
+    ``m.room.encrypted`` payload, but an opaque payload never replaces stored clear content, and
+    edit and thread index rows are derived only from payloads the upsert accepted.
+    """
     if not serialized_events:
         return
     write_sequences = await allocate_write_sequences(db, len(serialized_events))
-    await db.executemany(
-        """
-        INSERT INTO events(event_id, room_id, origin_server_ts, event_json, cached_at, write_seq)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(event_id) DO UPDATE SET
-            room_id = excluded.room_id,
-            origin_server_ts = excluded.origin_server_ts,
-            event_json = excluded.event_json,
-            cached_at = excluded.cached_at,
-            write_seq = excluded.write_seq
-        """,
-        [
+    accepted_events: list[SerializedCachedEvent] = []
+    for event, write_sequence in zip(serialized_events, write_sequences, strict=True):
+        cursor = await db.execute(
+            """
+            INSERT INTO events(event_id, room_id, origin_server_ts, event_json, cached_at, write_seq)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(event_id) DO UPDATE SET
+                room_id = excluded.room_id,
+                origin_server_ts = excluded.origin_server_ts,
+                event_json = excluded.event_json,
+                cached_at = excluded.cached_at,
+                write_seq = excluded.write_seq
+            WHERE json_extract(events.event_json, '$.type') = 'm.room.encrypted'
+                OR json_extract(excluded.event_json, '$.type') <> 'm.room.encrypted'
+            RETURNING event_id
+            """,
             (
                 event.event_id,
                 room_id,
@@ -348,11 +357,13 @@ async def write_lookup_index_rows(
                 event.event_json,
                 cached_at,
                 write_sequence,
-            )
-            for event, write_sequence in zip(serialized_events, write_sequences, strict=True)
-        ],
-    )
-    edit_rows = event_edit_rows(room_id, serialized_events)
+            ),
+        )
+        accepted = await cursor.fetchone() is not None
+        await cursor.close()
+        if accepted:
+            accepted_events.append(event)
+    edit_rows = event_edit_rows(room_id, accepted_events)
     if edit_rows:
         await db.executemany(
             """
@@ -361,7 +372,7 @@ async def write_lookup_index_rows(
             """,
             [(row.edit_event_id, row.room_id, row.original_event_id, row.origin_server_ts) for row in edit_rows],
         )
-    thread_rows = event_thread_rows(room_id, serialized_events, thread_id=thread_id)
+    thread_rows = event_thread_rows(room_id, accepted_events, thread_id=thread_id)
     if thread_rows:
         await db.executemany(
             """
