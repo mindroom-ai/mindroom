@@ -959,6 +959,7 @@ async def test_postgres_event_cache_flushes_pending_invalidations_before_guarded
             room_id,
             thread_id,
             [replacement_event],
+            expected_departure_epoch=cache.room_departure_epoch(room_id),
             fetch_started_at=150.0,
         )
 
@@ -1013,6 +1014,7 @@ async def test_postgres_event_cache_flushes_newer_thread_marker_with_pending_roo
             room_id,
             thread_id,
             [replacement_event],
+            expected_departure_epoch=cache.room_departure_epoch(room_id),
             fetch_started_at=150.0,
         )
 
@@ -1086,6 +1088,7 @@ async def test_postgres_event_cache_preserves_pending_marker_recorded_during_flu
             room_id,
             thread_id,
             [replacement_event],
+            expected_departure_epoch=cache.room_departure_epoch(room_id),
             fetch_started_at=150.0,
         )
 

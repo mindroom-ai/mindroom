@@ -273,6 +273,7 @@ class TestThreadHistory:
             room_id="!room:localhost",
             thread_id="$thread_root",
             event_sources=[{"event_id": "$thread_root"}],
+            expected_departure_epoch=0,
             fetch_started_at=ANY,
         )
 

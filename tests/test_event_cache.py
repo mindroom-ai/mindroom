@@ -1069,6 +1069,7 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_invalidation(
             "!room:localhost",
             "$thread_root",
             [root_source],
+            expected_departure_epoch=cache.room_departure_epoch("!room:localhost"),
             fetch_started_at=150.0,
             validated_at=300.0,
         )
@@ -1078,6 +1079,7 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_invalidation(
             "!room:localhost",
             "$thread_root",
             [root_source],
+            expected_departure_epoch=cache.room_departure_epoch("!room:localhost"),
             fetch_started_at=250.0,
             validated_at=300.0,
         )
@@ -1121,6 +1123,7 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_room_invalida
             "!room:localhost",
             "$thread_root",
             [root_source],
+            expected_departure_epoch=cache.room_departure_epoch("!room:localhost"),
             fetch_started_at=150.0,
             validated_at=300.0,
         )

@@ -160,6 +160,7 @@ class TestConversationEventCacheContract:
             room_id,
             thread_id,
             [root],
+            expected_departure_epoch=event_cache.room_departure_epoch(room_id),
             fetch_started_at=0.0,
         )
         cached_events = await event_cache.get_thread_events(room_id, thread_id)

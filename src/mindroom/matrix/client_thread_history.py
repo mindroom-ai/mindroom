@@ -11,9 +11,9 @@ Cache-trust rules (each encodes a shipped regression fix; do not weaken them):
    and the stale-fallback path refuse such rows and invalidate the entry, and a fresh homeserver fetch
    missing the root is never stored (PR #741).
 
-3. Cache repopulation is guarded against write races: every store passes the fetch start time to
-   ``replace_thread_if_not_newer``, so a fetch that raced with a thread or room invalidation cannot bury
-   the newer stale marker (PR #716).
+3. Cache repopulation is guarded against write races: every store passes the fetch start time and room
+   departure epoch to ``replace_thread_if_not_newer``, so a fetch cannot bury a newer stale marker
+   (PR #716) or cross a leave/rejoin boundary.
 
 4. Stale fallback exists only on the advisory path: ``fetch_thread_history`` may serve stale cached rows
    when a refetch fails, labelled ``stale_cache`` source with the degraded flag set.
@@ -621,6 +621,7 @@ async def refresh_thread_history_from_source(
 ) -> ThreadHistoryResult:
     """Fetch fresh thread history from Matrix and repopulate the advisory cache."""
     fetch_started_at = time.time() if cache_write_guard_started_at is None else cache_write_guard_started_at
+    fetch_departure_epoch = event_cache.room_departure_epoch(room_id)
     try:
         fetch_result = await _fetch_thread_history_with_events(
             client,
@@ -659,6 +660,7 @@ async def refresh_thread_history_from_source(
             room_id=room_id,
             thread_id=thread_id,
             event_sources=fetch_result.event_sources,
+            expected_departure_epoch=fetch_departure_epoch,
             fetch_started_at=fetch_started_at,
         )
         logger.info(
@@ -719,16 +721,17 @@ async def _store_thread_history_cache(
     room_id: str,
     thread_id: str,
     event_sources: Sequence[dict[str, Any]],
-    fetch_started_at: float | None = None,
+    expected_departure_epoch: int,
+    fetch_started_at: float,
 ) -> bool:
     """Best-effort replacement of one cached thread snapshot."""
     try:
-        write_guard_started_at = time.time() if fetch_started_at is None else fetch_started_at
         return await event_cache.replace_thread_if_not_newer(
             room_id,
             thread_id,
             list(event_sources),
-            fetch_started_at=write_guard_started_at,
+            expected_departure_epoch=expected_departure_epoch,
+            fetch_started_at=fetch_started_at,
         )
     except Exception as exc:
         logger.warning(
@@ -1194,6 +1197,7 @@ async def bulk_refresh_room_thread_histories(
     reported in ``missing_root_ids`` and never stored.
     """
     fetch_started_at = time.time()
+    fetch_departure_epoch = event_cache.room_departure_epoch(room_id)
     scan_result = await _bulk_scan_thread_event_sources(client, room_id, thread_root_ids=thread_root_ids)
     stored_threads = 0
     for thread_id, event_sources in scan_result.thread_event_sources.items():
@@ -1204,6 +1208,7 @@ async def bulk_refresh_room_thread_histories(
             room_id=room_id,
             thread_id=thread_id,
             event_sources=event_sources,
+            expected_departure_epoch=fetch_departure_epoch,
             fetch_started_at=fetch_started_at,
         ):
             stored_threads += 1

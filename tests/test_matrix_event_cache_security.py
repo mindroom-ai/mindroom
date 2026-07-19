@@ -819,6 +819,48 @@ async def test_thread_refresh_prunes_only_plaintext_absent_from_replacement(
 
 
 @pytest.mark.asyncio
+async def test_pre_departure_thread_refill_cannot_resurrect_after_rejoin(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """A fetch from an earlier membership epoch cannot replace a purged room snapshot."""
+    root = _shared_cache(event_cache_factory)
+    await root.initialize()
+    cache = root.for_principal("@alice:localhost")
+    room_id = "!room:localhost"
+    thread_id = "$thread"
+    root_event = _event(thread_id, 1, body="root")
+    redacted_event = _event("$redacted", 2, body="secret")
+    try:
+        await replace_thread_unconditionally(
+            cache,
+            room_id,
+            thread_id,
+            [root_event, redacted_event],
+            validated_at=50.0,
+        )
+        fetch_departure_epoch = cache.room_departure_epoch(room_id)
+        assert await cache.redact_event(room_id, "$redacted")
+
+        departure_epoch = cache.mark_room_departed(room_id)
+        await cache.purge_room(room_id)
+        await cache.mark_room_joined(room_id, expected_departure_epoch=departure_epoch)
+
+        replaced = await cache.replace_thread_if_not_newer(
+            room_id,
+            thread_id,
+            [root_event, redacted_event],
+            expected_departure_epoch=fetch_departure_epoch,
+            fetch_started_at=100.0,
+        )
+
+        assert replaced is False
+        assert await cache.get_thread_events(room_id, thread_id) is None
+        assert await cache.get_event(room_id, "$redacted") is None
+    finally:
+        await root.close()
+
+
+@pytest.mark.asyncio
 async def test_proactive_leave_purges_each_room_before_processing_the_next(
     event_cache_factory: Callable[[], ConversationEventCache],
     monkeypatch: pytest.MonkeyPatch,

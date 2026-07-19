@@ -750,6 +750,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 room_id,
                 thread_id,
                 [old_root_event.source, old_reply_event.source],
+                expected_departure_epoch=event_cache.room_departure_epoch(room_id),
                 fetch_started_at=prewarm_fetch_started_at,
                 validated_at=prewarm_fetch_started_at + 2,
             )
@@ -977,6 +978,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                         room_id,
                         thread_id,
                         [old_root_event.source, old_reply_event.source],
+                        expected_departure_epoch=bot.event_cache.room_departure_epoch(room_id),
                         fetch_started_at=fetch_started_at,
                     ),
                 )

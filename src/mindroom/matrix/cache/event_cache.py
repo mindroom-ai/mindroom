@@ -132,10 +132,11 @@ class ConversationEventCache(Protocol):
         thread_id: str,
         events: list[dict[str, Any]],
         *,
+        expected_departure_epoch: int,
         fetch_started_at: float,
         validated_at: float | None = None,
     ) -> bool:
-        """Replace one cached thread snapshot only when nothing newer touched it after fetch start."""
+        """Replace a fetched snapshot only when its room epoch and cache state remain current."""
 
     async def invalidate_thread(self, room_id: str, thread_id: str) -> None:
         """Delete cached events for one thread."""

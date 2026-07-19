@@ -57,6 +57,7 @@ Raising a room fence also records the durable purge synchronously, so cancellati
 Reads recheck the fence after the backend callback and PostgreSQL transaction completes, so a result obtained before a leave cannot be returned after that leave is observed.
 
 Each room fence has a monotonic runtime epoch, and queued rejoin work may clear the fence only when no newer departure changed that epoch.
+Thread snapshot refills capture that epoch before the homeserver fetch, and durable replacement rejects results from an earlier membership epoch.
 
 Per-turn event and thread memoization includes that epoch in every key, so active turns cannot replay pre-leave cached content.
 

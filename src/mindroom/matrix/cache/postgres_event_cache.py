@@ -1281,16 +1281,19 @@ class PostgresEventCache:
         thread_id: str,
         events: list[dict[str, Any]],
         *,
+        expected_departure_epoch: int,
         fetch_started_at: float,
         validated_at: float | None = None,
     ) -> bool:
-        """Replace one cached thread snapshot only when nothing newer touched it after fetch start."""
+        """Replace a fetched snapshot only when its room epoch and cache state remain current."""
         replacement_timestamp = replacement_validated_at(
             fetch_started_at=fetch_started_at,
             validated_at=validated_at,
         )
 
         async def replace_if_still_safe(db: psycopg.AsyncConnection) -> bool:
+            if self.room_departure_epoch(room_id) != expected_departure_epoch:
+                return False
             return await postgres_event_cache_threads.replace_thread_locked_if_not_newer(
                 db,
                 namespace=self._runtime.namespace,
