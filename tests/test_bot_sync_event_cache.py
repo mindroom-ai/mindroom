@@ -357,9 +357,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
     @pytest.mark.asyncio
-    async def test_limited_cold_first_sync_resets_positions_and_stales_snapshots(self, bot: AgentBot) -> None:
-        """A limited cold-start response must stale-mark the room and restart from no sync position."""
+    async def test_limited_cold_first_sync_keeps_new_position_and_stales_snapshots(self, bot: AgentBot) -> None:
+        """A limited token-less initial window must stale-mark the room without replaying the same window."""
         bot._runtime_view.mark_runtime_started()
+        bot._restore_saved_sync_token()
+        assert bot._sync_trust_state is SyncTrustState.RESET_RECOVERY
         bot.client.next_batch = "s_after_partial_cold_start"
         sync_response = self._sync_response(
             {"!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=True))},
@@ -367,8 +369,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         await self._run_sync_response_without_startup_side_effects(bot, sync_response)
 
-        assert bot._sync_trust_state is SyncTrustState.RESET_RECOVERY
-        assert bot.client.next_batch is None
+        assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
+        assert bot.client.next_batch == "s_after_partial_cold_start"
         assert _load_sync_token_value(bot.storage_path, bot.agent_name) is None
         bot.event_cache.mark_room_threads_stale.assert_awaited_once_with(
             "!test:localhost",

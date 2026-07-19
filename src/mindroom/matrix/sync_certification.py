@@ -16,8 +16,8 @@ class SyncTrustState(Enum):
     PENDING = "pending"
     CERTIFIED = "certified"
     UNCERTAIN = "uncertain"
-    # The certifier deliberately reset the sync position; the next response
-    # replays a fresh initial window whose limited timelines are expected.
+    # Without a sync position, the next response is a fresh initial window whose
+    # limited timelines are expected whether the position was absent or reset.
     RESET_RECOVERY = "reset_recovery"
 
 
@@ -68,13 +68,13 @@ def start_from_loaded_token(loaded: SyncCheckpoint | None) -> _SyncCertification
     """Build initial certifier state from a generation-bound checkpoint."""
     if loaded is None:
         return _SyncCertificationStart(
-            state=SyncTrustState.COLD,
+            state=SyncTrustState.RESET_RECOVERY,
             sync_token=None,
         )
     token = normalize_sync_token(loaded.token)
     if token is None:
         return _SyncCertificationStart(
-            state=SyncTrustState.COLD,
+            state=SyncTrustState.RESET_RECOVERY,
             sync_token=None,
         )
     return _SyncCertificationStart(
@@ -119,10 +119,10 @@ def certify_sync_response(
 ) -> SyncCertificationDecision:
     """Return the certifier decision for one sync response.
 
-    A limited joined-room timeline means the homeserver skipped events, so the
-    active and persisted sync positions are reset to replay a complete window.
-    The one limited response expected right after that deliberate reset is
-    consumed without resetting again.
+    A limited timeline after a sync position may omit events, so the active and
+    persisted positions are reset to replay a fresh initial window.
+    A client that already lacks a position consumes that expected limited initial
+    window without repeating the same since-less request.
     """
     reason = _uncertain_reason(cache_result, next_batch=next_batch)
     if reason is not None:

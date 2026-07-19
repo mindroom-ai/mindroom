@@ -33,11 +33,11 @@ def test_normalize_sync_token_accepts_only_non_empty_strings(value: object, expe
     assert normalize_sync_token(value) == expected
 
 
-def test_start_without_token_is_cold() -> None:
-    """Missing saved token should start from cold sync state."""
+def test_start_without_token_consumes_initial_window() -> None:
+    """Missing sync continuity should treat the first response as an initial recovery window."""
     startup = start_from_loaded_token(None)
 
-    assert startup.state is SyncTrustState.COLD
+    assert startup.state is SyncTrustState.RESET_RECOVERY
     assert startup.sync_token is None
 
 
@@ -137,7 +137,7 @@ def test_newly_limited_sync_resets_active_and_persisted_positions(
     state: SyncTrustState,
     first_sync: bool,
 ) -> None:
-    """A newly observed limited timeline must reset both sync positions in every trust state."""
+    """A limited positioned timeline must reset both sync positions in every positioned trust state."""
     decision = certify_sync_response(
         state,
         next_batch="s_partial",

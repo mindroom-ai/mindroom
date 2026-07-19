@@ -21,6 +21,9 @@ These three policies are the only writers of durable thread-cache state:
 5. Within one sync batch, UNKNOWN impacts invalidate the room at most once per pass (once across the
    message pass and once across the redaction pass); later UNKNOWN mutations in the same pass reuse
    that invalidation instead of writing duplicate markers.
+
+6. A limited sync timeline invalidates the room before any partial-window event is admitted; a later
+   write failure preserves the specific ``limited_sync_timeline`` reason instead of replacing it.
 """
 
 from __future__ import annotations
