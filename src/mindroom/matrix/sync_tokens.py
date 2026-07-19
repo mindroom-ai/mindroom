@@ -22,11 +22,6 @@ class _SyncTokenRecord:
     checkpoint: SyncCheckpoint
     cache_generation: str
 
-    @property
-    def token(self) -> str:
-        """Return the checkpoint token."""
-        return self.checkpoint.token
-
     def is_bound_to(self, cache_generation: str | None) -> bool:
         """Return whether this record was certified against the active cache."""
         return cache_generation is not None and self.cache_generation == cache_generation

@@ -80,7 +80,7 @@ def _load_sync_token_value(tmp_path: Path, agent_name: str) -> str | None:
     token_record = load_sync_token_record(tmp_path, agent_name)
     if token_record is None:
         return None
-    return token_record.token
+    return token_record.checkpoint.token
 
 
 def _text_event(event_id: str, body: str, origin_server_ts: int) -> nio.RoomMessageText:
@@ -220,7 +220,7 @@ async def test_legacy_plaintext_sync_token_forces_cold_sync(tmp_path: Path) -> N
 
     token_record = load_sync_token_record(tmp_path, bot.agent_name)
     assert token_record is not None
-    assert token_record.token == "s_after_legacy"  # noqa: S105
+    assert token_record.checkpoint.token == "s_after_legacy"  # noqa: S105
     assert token_record.checkpoint == SyncCheckpoint("s_after_legacy")
 
 
@@ -326,7 +326,7 @@ async def test_unknown_pos_restored_first_sync_saves_later_checkpoint(tmp_path: 
 
     token_record = load_sync_token_record(tmp_path, bot.agent_name)
     assert token_record is not None
-    assert token_record.token == "s_later"  # noqa: S105
+    assert token_record.checkpoint.token == "s_later"  # noqa: S105
     assert token_record.checkpoint == SyncCheckpoint("s_later")
 
 
@@ -375,7 +375,7 @@ async def test_unknown_pos_non_restored_runtime_allows_later_checkpoint(tmp_path
 
     token_record = load_sync_token_record(tmp_path, bot.agent_name)
     assert token_record is not None
-    assert token_record.token == "s_later_after_unknown_pos"  # noqa: S105
+    assert token_record.checkpoint.token == "s_later_after_unknown_pos"  # noqa: S105
     assert token_record.checkpoint == SyncCheckpoint("s_later_after_unknown_pos")
 
 

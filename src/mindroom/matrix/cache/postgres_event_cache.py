@@ -521,11 +521,6 @@ class _PostgresEventCacheRuntime:
         return not self.is_disabled and not self._explicitly_closed
 
     @property
-    def maintenance_report(self) -> CacheMaintenanceReport | None:
-        """Return the immutable startup maintenance report."""
-        return self._maintenance_report
-
-    @property
     def certification_generation(self) -> str | None:
         """Return the durable generation bound to certified sync checkpoints."""
         return self._certification_generation

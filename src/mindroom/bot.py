@@ -1826,7 +1826,7 @@ class AgentBot:
             else:
                 cache_generation = self.event_cache.certification_generation
                 retry_token = (
-                    token_record.token
+                    token_record.checkpoint.token
                     if token_record is not None and token_record.is_bound_to(cache_generation)
                     else None
                 )
