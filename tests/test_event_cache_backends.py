@@ -760,8 +760,8 @@ async def test_postgres_v1_migration_is_concurrent_and_namespace_preserving(
     isolated_url = await _seed_postgres_v1_schema(postgres_event_cache_url, schema_name)
     cache_a = PostgresEventCache(database_url=isolated_url, namespace="runtime_a")
     cache_b = PostgresEventCache(database_url=isolated_url, namespace="runtime_b")
-    await asyncio.gather(cache_a.initialize(), cache_b.initialize())
     try:
+        await asyncio.gather(cache_a.initialize(), cache_b.initialize())
         db = await psycopg.AsyncConnection.connect(isolated_url)
         version = await (
             await db.execute(
@@ -869,8 +869,8 @@ async def test_postgres_v2_migration_is_namespace_preserving(
     isolated_url = await _seed_postgres_v2_schema(postgres_event_cache_url, schema_name)
     cache_a = PostgresEventCache(database_url=isolated_url, namespace="runtime_a")
     cache_b = PostgresEventCache(database_url=isolated_url, namespace="runtime_b")
-    await asyncio.gather(cache_a.initialize(), cache_b.initialize())
     try:
+        await asyncio.gather(cache_a.initialize(), cache_b.initialize())
         db = await psycopg.AsyncConnection.connect(isolated_url)
         version = await (
             await db.execute(
@@ -1039,14 +1039,16 @@ async def test_postgres_cache_generation_is_durable_and_changes_after_namespace_
         database_url=postgres_event_cache_url,
         namespace=namespace,
     )
-    await cache.initialize()
-    first_generation = cache.cache_generation
-    assert first_generation is not None
+    try:
+        await cache.initialize()
+        first_generation = cache.cache_generation
+        assert first_generation is not None
 
-    await cache.close()
-    await cache.initialize()
-    assert cache.cache_generation == first_generation
-    await cache.close()
+        await cache.close()
+        await cache.initialize()
+        assert cache.cache_generation == first_generation
+    finally:
+        await cache.close()
 
     db = await psycopg.AsyncConnection.connect(postgres_event_cache_url)
     try:
