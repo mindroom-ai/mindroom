@@ -161,11 +161,8 @@ async def _store_thread_events_locked(
                 origin_server_ts = excluded.origin_server_ts,
                 event_json = excluded.event_json,
                 write_seq = nextval('mindroom_event_cache_write_seq')
-            WHERE excluded.event_json::jsonb ->> 'type' IS NOT NULL
-                AND (
-                    mindroom_event_cache_thread_events.event_json::jsonb ->> 'type' = 'm.room.encrypted'
-                    OR excluded.event_json::jsonb ->> 'type' <> 'm.room.encrypted'
-                )
+            WHERE mindroom_event_cache_thread_events.event_json::jsonb ->> 'type' = 'm.room.encrypted'
+                OR excluded.event_json::jsonb ->> 'type' <> 'm.room.encrypted'
             """,
             (
                 namespace,
@@ -521,11 +518,8 @@ async def append_existing_thread_event(
             origin_server_ts = excluded.origin_server_ts,
             event_json = excluded.event_json,
             write_seq = nextval('mindroom_event_cache_write_seq')
-        WHERE excluded.event_json::jsonb ->> 'type' IS NOT NULL
-            AND (
-                mindroom_event_cache_thread_events.event_json::jsonb ->> 'type' = 'm.room.encrypted'
-                OR excluded.event_json::jsonb ->> 'type' <> 'm.room.encrypted'
-            )
+        WHERE mindroom_event_cache_thread_events.event_json::jsonb ->> 'type' = 'm.room.encrypted'
+            OR excluded.event_json::jsonb ->> 'type' <> 'm.room.encrypted'
         """,
         (
             namespace,

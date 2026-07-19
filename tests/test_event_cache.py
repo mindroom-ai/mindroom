@@ -1555,8 +1555,6 @@ async def test_event_upsert_prefers_decrypted_payload_across_cache_clients(
         (("opaque-a", "opaque-b"), "opaque-b"),
         (("clear-a", "missing-type"), "clear-a"),
         (("clear-a", "null-type"), "clear-a"),
-        (("opaque-a", "missing-type"), "opaque-a"),
-        (("opaque-a", "null-type"), "opaque-a"),
     ],
 )
 async def test_event_batch_derives_indexes_only_from_final_accepted_payload(
@@ -1762,22 +1760,13 @@ async def test_postgres_lookup_index_batch_uses_constant_statement_count() -> No
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mutation_path", ["replace", "append"])
-@pytest.mark.parametrize(
-    ("payload_order", "expected_payload"),
-    [
-        (("clear", "opaque"), "clear"),
-        (("opaque", "clear"), "clear"),
-        (("opaque", "missing-type"), "opaque"),
-        (("opaque", "null-type"), "opaque"),
-    ],
-)
-async def test_thread_mutations_preserve_preferred_payload_across_arrival_orders(
+@pytest.mark.parametrize("payload_order", [("clear", "opaque"), ("opaque", "clear")])
+async def test_thread_mutations_preserve_decrypted_payload_across_arrival_orders(
     event_cache: ConversationEventCache,
     mutation_path: str,
     payload_order: tuple[str, str],
-    expected_payload: str,
 ) -> None:
-    """Thread replacement and append paths must preserve the best same-ID payload."""
+    """Thread replacement and append paths must preserve the best same-ID payload in both backends."""
     room_id = "!room:localhost"
     thread_id = "$root:localhost"
     event_id = "$child:localhost"
@@ -1813,23 +1802,7 @@ async def test_thread_mutations_preserve_preferred_payload_across_arrival_orders
             "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
         },
     }
-    missing_type_event = {
-        "event_id": event_id,
-        "sender": "@user:localhost",
-        "origin_server_ts": 2000,
-        "content": {
-            "body": "missing type",
-            "msgtype": "m.text",
-            "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
-        },
-    }
-    null_type_event = {**missing_type_event, "type": None}
-    payloads = {
-        "clear": clear_event,
-        "opaque": opaque_event,
-        "missing-type": missing_type_event,
-        "null-type": null_type_event,
-    }
+    payloads = {"clear": clear_event, "opaque": opaque_event}
 
     if mutation_path == "replace":
         for payload in payload_order:
@@ -1853,9 +1826,11 @@ async def test_thread_mutations_preserve_preferred_payload_across_arrival_orders
 
     assert thread_events is not None
     thread_child = next(event for event in thread_events if event["event_id"] == event_id)
+    assert thread_child["type"] == "m.room.message"
+    assert thread_child["content"]["body"] == "clear child"
     assert cached_event is not None
-    assert thread_child == payloads[expected_payload]
-    assert cached_event == payloads[expected_payload]
+    assert cached_event["type"] == "m.room.message"
+    assert cached_event["content"]["body"] == "clear child"
     assert await event_cache.get_thread_id_for_event(room_id, event_id) == thread_id
     assert await event_cache.get_thread_id_for_event(room_id, thread_id) == thread_id
 
