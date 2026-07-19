@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-__all__ = ["get_model_instance"]
+__all__ = ["canonical_provider", "get_model_instance"]
 
 _BEDROCK_CLAUDE_PROVIDER = "bedrock_claude"
 # The anthropic SDK rejects non-streaming requests whose max_tokens project past
@@ -38,8 +38,8 @@ _BEDROCK_CLAUDE_PROVIDER = "bedrock_claude"
 _CLAUDE_REQUEST_TIMEOUT_SECONDS = 3600.0
 
 
-def _canonical_provider(provider: str) -> str:
-    """Return normalized provider key for model dispatch."""
+def canonical_provider(provider: str) -> str:
+    """Return the normalized provider key used for model dispatch and identity checks."""
     return provider.strip().lower().replace("-", "_")
 
 
@@ -151,18 +151,18 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
     module never imports a provider SDK; only the configured provider's SDK
     loads at first model construction (#1436).
     """
-    canonical_provider = _canonical_provider(provider)
+    canonical_provider_key = canonical_provider(provider)
 
     if (
-        canonical_provider
+        canonical_provider_key
         not in {"ollama", "llama_cpp", "vertexai_claude", "codex", "openai_codex", _BEDROCK_CLAUDE_PROVIDER}
         and "api_key" not in extra_kwargs
     ):
-        api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
+        api_key = get_api_key_for_provider(canonical_provider_key, runtime_paths=runtime_paths)
         if api_key:
             extra_kwargs["api_key"] = api_key
 
-    if canonical_provider == "vertexai_claude":
+    if canonical_provider_key == "vertexai_claude":
         if "project_id" not in extra_kwargs:
             project_id = runtime_paths.env_value(VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"])
             if project_id:
@@ -183,27 +183,27 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
         if client_params:
             extra_kwargs["client_params"] = client_params
 
-    if canonical_provider == "azure":
+    if canonical_provider_key == "azure":
         _populate_azure_openai_runtime_kwargs(extra_kwargs, runtime_paths)
 
-    if canonical_provider in {"anthropic", "vertexai_claude", _BEDROCK_CLAUDE_PROVIDER}:
+    if canonical_provider_key in {"anthropic", "vertexai_claude", _BEDROCK_CLAUDE_PROVIDER}:
         extra_kwargs.setdefault("cache_system_prompt", True)
         extra_kwargs.setdefault("extended_cache_time", True)
         extra_kwargs.setdefault("timeout", _CLAUDE_REQUEST_TIMEOUT_SECONDS)
 
-    if canonical_provider == "ollama":
+    if canonical_provider_key == "ollama":
         from agno.models.ollama import Ollama  # noqa: PLC0415
 
         host = model_config.host or get_ollama_host(runtime_paths=runtime_paths) or OLLAMA_HOST_DEFAULT
         logger.debug("using_ollama_host", host=host)
         return Ollama(id=model_id, host=host, **extra_kwargs)
 
-    if canonical_provider == "openrouter":
+    if canonical_provider_key == "openrouter":
         from mindroom.openai_models import MindRoomOpenRouter  # noqa: PLC0415
 
         api_key = extra_kwargs.pop("api_key", None)
         if not api_key:
-            api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
+            api_key = get_api_key_for_provider(canonical_provider_key, runtime_paths=runtime_paths)
         if not api_key:
             logger.warning("No OpenRouter API key found in environment or CredentialsManager")
         # Agno's OpenRouter dataclass defaults max_tokens to 1024, which silently
@@ -212,7 +212,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
         extra_kwargs.setdefault("max_tokens", None)
         return MindRoomOpenRouter(id=model_id, api_key=api_key, **extra_kwargs)
 
-    if canonical_provider == "zai":
+    if canonical_provider_key == "zai":
         # OpenAILike neither reads a provider env var nor rejects a missing key,
         # so resolve the env fallback here and keep falsy keys out of the kwargs
         # (a falsy api_key would make agno's OpenAI client fall back to
@@ -231,7 +231,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
         return MindRoomOpenAILike(id=model_id, **extra_kwargs)
 
-    if canonical_provider in {"codex", "openai_codex"}:
+    if canonical_provider_key in {"codex", "openai_codex"}:
         from mindroom.codex_model import (  # noqa: PLC0415
             CodexResponses,
             derive_codex_prompt_cache_key,
@@ -245,7 +245,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 extra_kwargs["prompt_cache_key"] = prompt_cache_key
         return CodexResponses(id=normalize_codex_model_id(model_id), **extra_kwargs)
 
-    if canonical_provider == _BEDROCK_CLAUDE_PROVIDER:
+    if canonical_provider_key == _BEDROCK_CLAUDE_PROVIDER:
         extra_kwargs.pop("api_key", None)
         ensure_optional_deps(
             ["boto3"],
@@ -258,11 +258,11 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
         return AwsBedrockClaude(id=model_id, **extra_kwargs)
 
-    if canonical_provider == "openai":
+    if canonical_provider_key == "openai":
         from mindroom.openai_tool_search import openai_native_tool_search_supported  # noqa: PLC0415
 
         base_url = extra_kwargs.get("base_url") or runtime_paths.env_value("OPENAI_BASE_URL")
-        if openai_native_tool_search_supported(canonical_provider, model_id, base_url=base_url):
+        if openai_native_tool_search_supported(canonical_provider_key, model_id, base_url=base_url):
             from mindroom.openai_models import MindRoomOpenAIResponses  # noqa: PLC0415
 
             return MindRoomOpenAIResponses(id=model_id, **extra_kwargs)
@@ -271,22 +271,22 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
         return MindRoomOpenAIChat(id=model_id, **extra_kwargs)
 
-    if canonical_provider == "azure":
+    if canonical_provider_key == "azure":
         from mindroom.azure_openai_model import MindRoomAzureOpenAI  # noqa: PLC0415
 
         return MindRoomAzureOpenAI(id=model_id, **extra_kwargs)
 
-    if canonical_provider == "anthropic":
+    if canonical_provider_key == "anthropic":
         from agno.models.anthropic import Claude  # noqa: PLC0415
 
         return Claude(id=model_id, **extra_kwargs)
 
-    if canonical_provider in {"gemini", "google"}:
+    if canonical_provider_key in {"gemini", "google"}:
         from agno.models.google import Gemini  # noqa: PLC0415
 
         return Gemini(id=model_id, **extra_kwargs)
 
-    if canonical_provider == "vertexai_claude":
+    if canonical_provider_key == "vertexai_claude":
         from mindroom.vertex_claude_compat import MindroomVertexAIClaude  # noqa: PLC0415
 
         return MindroomVertexAIClaude(
@@ -295,22 +295,22 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
             **extra_kwargs,
         )
 
-    if canonical_provider == "llama_cpp":
+    if canonical_provider_key == "llama_cpp":
         from mindroom.openai_models import MindRoomLlamaCpp  # noqa: PLC0415
 
         return MindRoomLlamaCpp(id=model_id, **extra_kwargs)
 
-    if canonical_provider == "cerebras":
+    if canonical_provider_key == "cerebras":
         from agno.models.cerebras import Cerebras  # noqa: PLC0415
 
         return Cerebras(id=model_id, **extra_kwargs)
 
-    if canonical_provider == "groq":
+    if canonical_provider_key == "groq":
         from agno.models.groq import Groq  # noqa: PLC0415
 
         return Groq(id=model_id, **extra_kwargs)
 
-    if canonical_provider == "deepseek":
+    if canonical_provider_key == "deepseek":
         from mindroom.openai_models import MindRoomDeepSeek  # noqa: PLC0415
 
         return MindRoomDeepSeek(id=model_id, **extra_kwargs)
@@ -344,7 +344,7 @@ def get_model_instance(
     if model_api_key:
         extra_kwargs["api_key"] = model_api_key
 
-    if _canonical_provider(provider) in {"codex", "openai_codex"}:
+    if canonical_provider(provider) in {"codex", "openai_codex"}:
         extra_kwargs.setdefault("default_instructions", config.get_prompt("CODEX_DEFAULT_INSTRUCTIONS"))
 
     model = _create_model_for_provider(

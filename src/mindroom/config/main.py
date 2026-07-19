@@ -705,7 +705,7 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def validate_compaction_model_references(self) -> Config:
-        """Ensure explicit compaction.model references are statically valid."""
+        """Ensure explicit compaction model and fallback_model references are statically valid."""
         invalid_references = self._invalid_compaction_model_references()
         if invalid_references:
             msg = "Compaction model references unknown models: " + ", ".join(sorted(invalid_references))
@@ -713,7 +713,7 @@ class Config(BaseModel):
 
         missing_context_windows = self._compaction_models_missing_context_window()
         if missing_context_windows:
-            msg = "Explicit compaction.model requires a model with context_window: " + ", ".join(
+            msg = "Explicit compaction model references require a model with context_window: " + ", ".join(
                 sorted(missing_context_windows),
             )
             raise ValueError(msg)

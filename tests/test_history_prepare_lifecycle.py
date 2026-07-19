@@ -17,6 +17,7 @@ from agno.session.summary import SessionSummary
 
 from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.models import CompactionOverrideConfig
+from mindroom.error_handling import ModelSafeguardRefusalError
 from mindroom.execution_preparation import (
     _prepare_bound_team_execution_context,
     prepare_agent_execution_context,
@@ -1049,6 +1050,128 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     assert summary_mock.await_count == 2
     assert read_scope_state(persisted, scope).force_compact_before_next_run is False
     assert prepared.compaction_outcomes == []
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_model(
+    tmp_path: Path,
+) -> None:
+    """A chunk-2 failure after a fallback-served chunk 1 reports the fallback, not the primary."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="user", content="v" * 200),
+                    Message(role="assistant", content="b" * 200),
+                ],
+            ),
+        ],
+    )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+    visible_runs = list(session.runs or [])
+    first_summary_text = "first chunk summary"
+
+    summary_input_budget = next(
+        budget
+        for budget in range(1, 10_000)
+        if len(
+            _build_summary_input(
+                previous_summary=None,
+                compacted_runs=visible_runs,
+                max_input_tokens=budget,
+                history_settings=_ALL_HISTORY_SETTINGS,
+            )[1],
+        )
+        == 1
+        and len(
+            _build_summary_input(
+                previous_summary=first_summary_text,
+                compacted_runs=visible_runs[1:],
+                max_input_tokens=budget,
+                history_settings=_ALL_HISTORY_SETTINGS,
+            )[1],
+        )
+        == 1
+    )
+    execution_plan = ResolvedHistoryExecutionPlan(
+        authored_compaction_enabled=True,
+        destructive_compaction_available=True,
+        explicit_compaction_model=True,
+        compaction_model_name="summary-model",
+        compaction_context_window=4_096,
+        replay_window_tokens=64_000,
+        trigger_threshold_tokens=1,
+        reserve_tokens=0,
+        static_prompt_tokens=0,
+        replay_budget_tokens=1,
+        hard_replay_budget_tokens=1,
+        summary_input_budget_tokens=summary_input_budget,
+        compaction_fallback_model_name="fallback-model",
+    )
+    # Chunk 1: primary refuses, the fallback serves the retry; chunk 2 then
+    # fails hard on the fallback.
+    summary_mock = AsyncMock(
+        side_effect=[
+            ModelSafeguardRefusalError("provider-specific refusal wording"),
+            SessionSummary(summary=first_summary_text, updated_at=datetime.now(UTC)),
+            RuntimeError("summary failed"),
+        ],
+    )
+    lifecycle = RecordingCompactionLifecycle()
+
+    with (
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            side_effect=lambda _config, _paths, name, **_kwargs: FakeModel(id=f"{name}-id", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=summary_mock,
+        ),
+    ):
+        await prepare_history_for_run_for_test(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+            execution_plan=execution_plan,
+            compaction_lifecycle=lifecycle,
+        )
+
+    assert summary_mock.await_count == 3
+    start_events = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleStart)]
+    assert [event.summary_model for event in start_events] == ["summary-model"]
+    progress_events = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleProgress)]
+    assert [event.summary_model for event in progress_events] == ["fallback-model"]
+    failure_events = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleFailure)]
+    assert [event.summary_model for event in failure_events] == ["fallback-model"]
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == first_summary_text
+    assert [run.run_id for run in persisted.runs or []] == ["run-2"]
 
 
 @pytest.mark.asyncio

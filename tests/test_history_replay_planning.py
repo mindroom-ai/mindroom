@@ -473,7 +473,7 @@ def test_validate_compaction_model_references_rejects_explicit_model_without_con
 
     with pytest.raises(
         ValueError,
-        match=r"Explicit compaction\.model requires a model with context_window: agents\.test_agent\.compaction\.model -> summary-model",
+        match=r"Explicit compaction model references require a model with context_window: agents\.test_agent\.compaction\.model -> summary-model",
     ):
         bind_runtime_paths(
             Config(
@@ -508,7 +508,7 @@ def test_validate_compaction_model_references_rejects_disabled_explicit_model_wi
 
     with pytest.raises(
         ValueError,
-        match=r"Explicit compaction\.model requires a model with context_window",
+        match=r"Explicit compaction model references require a model with context_window",
     ):
         bind_runtime_paths(
             Config(
@@ -713,7 +713,7 @@ def test_resolve_history_execution_plan_carries_fallback_model_name(tmp_path: Pa
 
 
 def test_compaction_fallback_is_distinct_guards_same_alias_and_same_target(tmp_path: Path) -> None:
-    """A fallback naming the primary alias or the same (provider, id) target is never loaded."""
+    """A fallback naming the primary alias or the same canonical (provider, id) target is never loaded."""
     config = bind_runtime_paths(
         Config(
             defaults=DefaultsConfig(tools=[]),
@@ -722,6 +722,19 @@ def test_compaction_fallback_is_distinct_guards_same_alias_and_same_target(tmp_p
                 "summary-model": ModelConfig(provider="openai", id="summary-model-id", context_window=32_000),
                 "summary-model-alias": ModelConfig(provider="openai", id="summary-model-id", context_window=32_000),
                 "fallback-model": ModelConfig(provider="anthropic", id="summary-model-id", context_window=32_000),
+                "vertex-summary": ModelConfig(
+                    provider="vertexai_claude",
+                    id="claude-sonnet-5",
+                    context_window=32_000,
+                ),
+                # Same serving model as vertex-summary; the provider spelling
+                # differs only by hyphenation and case, which model loading
+                # canonicalizes away.
+                "vertex-summary-spelling-variant": ModelConfig(
+                    provider="Vertexai-Claude",
+                    id="claude-sonnet-5",
+                    context_window=32_000,
+                ),
             },
         ),
         _runtime_paths(tmp_path),
@@ -740,6 +753,14 @@ def test_compaction_fallback_is_distinct_guards_same_alias_and_same_target(tmp_p
             config,
             primary_model_name="summary-model",
             fallback_model_name="summary-model-alias",
+        )
+        is False
+    )
+    assert (
+        _compaction_fallback_is_distinct(
+            config,
+            primary_model_name="vertex-summary",
+            fallback_model_name="vertex-summary-spelling-variant",
         )
         is False
     )
