@@ -615,7 +615,7 @@ def test_build_summary_request_messages_is_the_single_request_seam() -> None:
     ]
 
 
-# --- Invariant 4: deterministic budget shrink on provider failure --------------
+# --- Invariant 4: deterministic retry on provider failure ----------------------
 
 
 def test_retry_policy_shrinks_on_timeout_and_output_limit() -> None:

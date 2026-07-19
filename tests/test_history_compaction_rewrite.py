@@ -122,7 +122,6 @@ async def test_rewrite_passes_full_summary_input_budget_into_chunk_construction(
     """
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
     runs = [
         _completed_run(
             f"run-{index}",
@@ -150,29 +149,11 @@ async def test_rewrite_passes_full_summary_input_budget_into_chunk_construction(
             wraps=_build_summary_input,
         ) as build_summary_input_spy,
     ):
-        rewrite_result = await _rewrite_working_session_for_compaction(
+        rewrite_result = await _rewrite_single_run(
             storage=storage,
-            persisted_session=working_session,
             working_session=working_session,
-            summary_model=FakeModel(id="summary-model", provider="fake"),
-            summary_model_name="summary-model",
-            session_id="session-1",
-            scope=scope,
-            state=HistoryScopeState(force_compact_before_next_run=True),
-            history_settings=ResolvedHistorySettings(
-                policy=HistoryPolicy(mode="all"),
-                max_tool_calls_from_history=None,
-            ),
-            available_history_budget=None,
             selected_run_ids=tuple(f"run-{index}" for index in range(1, 6)),
             summary_input_budget=110_000,
-            before_tokens=0,
-            runs_before=len(runs),
-            threshold_tokens=None,
-            summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            lifecycle_notice_event_id=None,
-            progress_callback=None,
-            collect_compaction_hook_messages=False,
         )
 
     assert rewrite_result is not None
@@ -216,7 +197,6 @@ def test_build_summary_input_accounts_for_wrappers_separators_and_run_indexes() 
 async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
     working_session = _session(
         "session-1",
         runs=[
@@ -242,30 +222,7 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path
         "mindroom.history.compaction.generate_compaction_summary",
         new=AsyncMock(side_effect=fake_summary),
     ):
-        rewrite_result = await _rewrite_working_session_for_compaction(
-            storage=storage,
-            persisted_session=working_session,
-            working_session=working_session,
-            summary_model=FakeModel(id="summary-model", provider="fake"),
-            summary_model_name="summary-model",
-            session_id="session-1",
-            scope=scope,
-            state=HistoryScopeState(force_compact_before_next_run=True),
-            history_settings=ResolvedHistorySettings(
-                policy=HistoryPolicy(mode="all"),
-                max_tool_calls_from_history=None,
-            ),
-            available_history_budget=None,
-            selected_run_ids=("run-1",),
-            summary_input_budget=8_000,
-            before_tokens=0,
-            runs_before=1,
-            threshold_tokens=None,
-            summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            lifecycle_notice_event_id=None,
-            progress_callback=None,
-            collect_compaction_hook_messages=False,
-        )
+        rewrite_result = await _rewrite_single_run(storage=storage, working_session=working_session)
 
     assert rewrite_result is not None
     assert len(summary_inputs) == 2
@@ -276,7 +233,6 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path
 async def test_rewrite_retries_summary_with_smaller_chunk_after_output_cap(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
     working_session = _session(
         "session-1",
         runs=[
@@ -302,30 +258,7 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_output_cap(tmp_p
         "mindroom.history.compaction.generate_compaction_summary",
         new=AsyncMock(side_effect=fake_summary),
     ):
-        rewrite_result = await _rewrite_working_session_for_compaction(
-            storage=storage,
-            persisted_session=working_session,
-            working_session=working_session,
-            summary_model=FakeModel(id="summary-model", provider="fake"),
-            summary_model_name="summary-model",
-            session_id="session-1",
-            scope=scope,
-            state=HistoryScopeState(force_compact_before_next_run=True),
-            history_settings=ResolvedHistorySettings(
-                policy=HistoryPolicy(mode="all"),
-                max_tool_calls_from_history=None,
-            ),
-            available_history_budget=None,
-            selected_run_ids=("run-1",),
-            summary_input_budget=8_000,
-            before_tokens=0,
-            runs_before=1,
-            threshold_tokens=None,
-            summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            lifecycle_notice_event_id=None,
-            progress_callback=None,
-            collect_compaction_hook_messages=False,
-        )
+        rewrite_result = await _rewrite_single_run(storage=storage, working_session=working_session)
 
     assert rewrite_result is not None
     assert len(summary_inputs) == 2
