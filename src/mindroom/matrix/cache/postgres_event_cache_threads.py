@@ -537,13 +537,18 @@ async def append_existing_thread_event(
         """
         SELECT 1
         FROM mindroom_event_cache_thread_events AS membership
-        JOIN mindroom_event_cache_events AS events
+        LEFT JOIN mindroom_event_cache_events AS events
             ON events.namespace = membership.namespace
             AND events.event_id = membership.event_id
             AND events.room_id = membership.room_id
+        LEFT JOIN mindroom_event_cache_compacted_streaming_edits AS archived
+            ON archived.namespace = membership.namespace
+            AND archived.event_id = membership.event_id
+            AND archived.room_id = membership.room_id
         WHERE membership.namespace = %s
             AND membership.room_id = %s
             AND membership.thread_id = %s
+            AND (events.event_id IS NOT NULL OR archived.event_id IS NOT NULL)
         LIMIT 1
         """,
         (namespace, room_id, thread_id),

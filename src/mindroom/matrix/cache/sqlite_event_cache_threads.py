@@ -519,10 +519,17 @@ async def append_existing_thread_event(
         """
         SELECT 1
         FROM thread_events
-        JOIN events
+        LEFT JOIN events
             ON events.event_id = thread_events.event_id
             AND events.room_id = thread_events.room_id
+        LEFT JOIN compacted_streaming_edits
+            ON compacted_streaming_edits.event_id = thread_events.event_id
+            AND compacted_streaming_edits.room_id = thread_events.room_id
         WHERE thread_events.room_id = ? AND thread_events.thread_id = ?
+            AND (
+                events.event_id IS NOT NULL
+                OR compacted_streaming_edits.event_id IS NOT NULL
+            )
         LIMIT 1
         """,
         (room_id, thread_id),

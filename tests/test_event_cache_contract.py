@@ -999,3 +999,38 @@ async def test_restart_preserves_learned_root_mapping_proven_by_cold_child(
         assert restarted_cache.runtime_diagnostics()["cache_orphan_thread_indexes_after"] == 0
     finally:
         await restarted_cache.close()
+
+
+@pytest.mark.asyncio
+async def test_append_accepts_thread_with_only_compacted_members(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A cold-only valid snapshot remains appendable after its terminal edit is redacted."""
+    room_id = "!room:localhost"
+    thread_id = "$unfetched-root:localhost"
+    sender = "@agent:localhost"
+    pending = _message_event(
+        "$pending:localhost",
+        2,
+        sender=sender,
+        edit_of=thread_id,
+        stream_status=STREAM_STATUS_PENDING,
+    )
+    terminal = _message_event(
+        "$terminal:localhost",
+        3,
+        sender=sender,
+        edit_of=thread_id,
+        stream_status=STREAM_STATUS_COMPLETED,
+    )
+    appended = _message_event(
+        "$appended:localhost",
+        4,
+        sender=sender,
+        thread_id=thread_id,
+    )
+    await replace_thread_unconditionally(event_cache, room_id, thread_id, [terminal, pending])
+    assert await event_cache.redact_event(room_id, str(terminal["event_id"])) is True
+
+    assert await event_cache.append_event(room_id, thread_id, appended) is True
+    assert await event_cache.get_thread_events(room_id, thread_id) == [pending, appended]
