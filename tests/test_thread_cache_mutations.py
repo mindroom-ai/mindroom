@@ -56,6 +56,27 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def _thread_reply_lookup_response() -> nio.RoomGetEventResponse:
+    """Return typed metadata for one cache-indexed threaded message."""
+    return nio.RoomGetEventResponse.from_dict(
+        {
+            "content": {
+                "body": "thread reply",
+                "msgtype": "m.text",
+                "m.relates_to": {
+                    "event_id": "$thread-root:localhost",
+                    "rel_type": "m.thread",
+                },
+            },
+            "event_id": "$thread-reply:localhost",
+            "sender": "@bridge:localhost",
+            "origin_server_ts": 1000,
+            "room_id": "!room:localhost",
+            "type": "m.room.message",
+        },
+    )
+
+
 def test_matrix_cache_package_does_not_export_thread_policy_wrappers() -> None:
     """Thread policy wrappers should not remain on the public cache package surface."""
     assert "ThreadReadPolicy" not in matrix_cache.__all__
@@ -871,6 +892,7 @@ class TestMatrixConversationCacheThreadReads:
         )
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = "@agent:localhost"
+        client.room_get_event = AsyncMock(return_value=_thread_reply_lookup_response())
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(client=client, event_cache=event_cache),
@@ -907,6 +929,7 @@ class TestMatrixConversationCacheThreadReads:
         )
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = "@agent:localhost"
+        client.room_get_event = AsyncMock(return_value=_thread_reply_lookup_response())
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(client=client, event_cache=event_cache),
@@ -978,6 +1001,8 @@ class TestMatrixConversationCacheThreadReads:
                     },
                 )
                 return _make_room_get_event_response(event)
+            if event_id == "$thread-reply:localhost":
+                return _thread_reply_lookup_response()
             message = f"unexpected lookup for {event_id}"
             raise AssertionError(message)
 

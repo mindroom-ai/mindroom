@@ -26,11 +26,26 @@ class EventCacheBackendUnavailableError(RuntimeError):
 
 @runtime_checkable
 class ConversationEventCache(Protocol):
-    """Principal-bound cache API for Matrix event and thread lookups.
+    """Principal-bound durable cache for joined-room conversation timelines.
 
     Every returned row belongs to ``principal_id`` and ``room_id``.
     A runtime-wide storage service must expose one bound view per authenticated Matrix
     account instead of sharing this interface directly between bots.
+
+    Sync ingestion admits only joined-room ``timeline.events`` and deliberately
+    excludes complete room state, invite and leave timelines, ephemeral typing
+    and receipts, presence, account data, to-device events, and device-list
+    changes.
+
+    Point lookup is broader than visible conversation history, so any admitted
+    timeline event with an event ID can be retained while thread projection
+    renders only supported ``m.room.message`` content.
+
+    Redaction envelopes are not stored as point events, while their durable
+    effect removes or tombstones the target and repairs dependent indexes.
+
+    Membership loss fences access and purges only the departed principal's
+    retained joined-room history.
     """
 
     @property

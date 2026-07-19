@@ -503,7 +503,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         mock_lookup.assert_awaited_once_with(room.room_id, "$plain_reply_1:localhost")
         mock_fetch.assert_awaited_once()
         assert mock_fetch.await_args.args == (room.room_id, "$thread_root:localhost")
-        bot.client.room_get_event.assert_not_awaited()
+        bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$plain_reply_1:localhost")
 
     @pytest.mark.asyncio
     async def test_extract_context_edit_of_thread_root_uses_cached_root_mapping(self, bot: AgentBot) -> None:
@@ -580,7 +580,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             assert context.is_thread is True
             assert context.thread_id == "$thread_root:localhost"
             assert context.thread_history == expected_history
-            bot.client.room_get_event.assert_not_awaited()
+            bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
             mock_fetch.assert_awaited_once()
             assert mock_fetch.await_args.args == (room.room_id, "$thread_root:localhost")
         finally:
@@ -1055,7 +1055,22 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 ).encode("utf-8"),
             ),
         )
-        bot.client.room_get_event = AsyncMock()
+        bot.client.room_get_event = AsyncMock(
+            return_value=nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": {
+                        "body": "Plain reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_msg:localhost"}},
+                    },
+                    "event_id": "$plain1:localhost",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567895,
+                    "room_id": "!test:localhost",
+                    "type": "m.room.message",
+                },
+            ),
+        )
 
         dispatch_history = ThreadHistoryResult(
             [
@@ -1094,7 +1109,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ]
             assert preview_context.requires_model_history_refresh is False
             bot.client.download.assert_not_awaited()
-            bot.client.room_get_event.assert_not_awaited()
+            bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$plain1:localhost")
             mock_lookup.assert_awaited_once_with(room.room_id, "$plain1:localhost")
             mock_history.assert_awaited_once()
             assert mock_history.await_args.args == (room.room_id, "$thread_root:localhost")
