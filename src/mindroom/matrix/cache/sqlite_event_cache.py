@@ -918,7 +918,7 @@ class SqliteEventCache:
         *,
         expected_membership_epoch: int | None = None,
     ) -> None:
-        """Insert or replace one individually cached Matrix event."""
+        """Insert or replace one event without replacing clear payloads with opaque ciphertext."""
         await self.store_events_batch(
             [(event_id, room_id, event_data)],
             expected_membership_epoch=expected_membership_epoch,
@@ -930,7 +930,7 @@ class SqliteEventCache:
         *,
         expected_membership_epoch: int | None = None,
     ) -> None:
-        """Insert or replace one batch of individually cached Matrix events."""
+        """Insert or replace events without replacing clear payloads with opaque ciphertext."""
         if self._runtime.is_disabled or not events:
             return
 
