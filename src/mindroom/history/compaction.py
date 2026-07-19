@@ -32,7 +32,6 @@ from mindroom.history.storage import (
 )
 from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, generate_compaction_summary
 from mindroom.history.types import (
-    CompactionBlockReason,
     CompactionLifecycleProgress,
     CompactionOutcome,
     HistoryScope,
@@ -83,17 +82,12 @@ class _CompactionRewriteResult:
     compacted_run_count: int
     compacted_run_ids: tuple[str, ...]
     compacted_messages: tuple[Message, ...]
-    blocked_reason: CompactionBlockReason | None = None
 
 
 @dataclass(frozen=True)
 class _GeneratedSummaryChunk:
     summary: SessionSummary
     included_runs: list[RunOutput | TeamRunOutput]
-
-
-class _CompactionBlockedError(RuntimeError):
-    """Raised after a terminal no-progress state has been durably blocked."""
 
 
 def _persist_cleared_force_state_if_needed(
@@ -112,30 +106,6 @@ def _persist_cleared_force_state_if_needed(
         # Only clear when the durable row still matches the state this run read;
         # a concurrent write (for example a fresh manual request) wins otherwise.
         lambda latest: replace(latest, force_compact_before_next_run=False) if latest == state else latest,
-    )
-
-
-def _persist_compaction_block(
-    *,
-    storage: BaseDb,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    summary_model_name: str,
-    summary_input_budget: int,
-    reason: CompactionBlockReason,
-) -> None:
-    """Persist a no-progress block scoped to the current summary model and budget."""
-    update_scope_state_on_latest(
-        storage,
-        session,
-        scope,
-        lambda latest: replace(
-            latest,
-            force_compact_before_next_run=False,
-            blocked_compaction_reason=reason,
-            blocked_compaction_model=summary_model_name,
-            blocked_summary_input_budget=summary_input_budget,
-        ),
     )
 
 
@@ -297,9 +267,6 @@ async def compact_scope_history(
         last_compacted_run_count=rewrite_result.compacted_run_count,
         compacted_run_ids=compacted_run_ids_with(state, rewrite_result.compacted_run_ids),
         force_compact_before_next_run=False,
-        blocked_compaction_reason=rewrite_result.blocked_reason,
-        blocked_compaction_model=summary_model_name if rewrite_result.blocked_reason is not None else None,
-        blocked_summary_input_budget=summary_input_budget if rewrite_result.blocked_reason is not None else None,
     )
     write_scope_state(session, scope, new_state)
     write_scope_state(working_session, scope, new_state)
@@ -388,17 +355,6 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
     all_compacted_run_id_set: set[str] = set()
     compacted_messages: list[Message] = []
     pending_selected_run_ids = set(selected_run_ids)
-    blocked_reason: CompactionBlockReason | None = None
-
-    def block_compaction(reason: CompactionBlockReason) -> None:
-        _persist_compaction_block(
-            storage=storage,
-            session=persisted_session,
-            scope=scope,
-            summary_model_name=summary_model_name,
-            summary_input_budget=summary_input_budget,
-            reason=reason,
-        )
 
     while pending_selected_run_ids:
         working_visible_runs = scope_visible_runs(working_session, scope)
@@ -418,19 +374,16 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
             token_estimator=token_estimator,
         )
         if not included_runs:
-            blocked_reason = "summary_input_cannot_include_run"
-            block_compaction(blocked_reason)
             logger.warning(
-                "Compaction blocked because the complete summary and one run cannot fit together",
+                "Compaction skipped because no run fit the single-pass summary budget",
                 session_id=session_id,
                 scope=scope.key,
                 candidate_runs=len(compactable_runs),
                 summary_input_budget=summary_input_budget,
             )
-            if total_compacted_run_count > 0:
-                break
-            message = "complete durable summary leaves no room for a compactable run"
-            raise _CompactionBlockedError(message)
+            if total_compacted_run_count == 0:
+                return None
+            break
 
         new_summary = await _generate_compaction_summary_with_retry(
             model=summary_model,
@@ -444,7 +397,6 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
             history_settings=history_settings,
             summary_prompt=summary_prompt,
             token_estimator=token_estimator,
-            block_compaction=block_compaction,
         )
         included_runs = new_summary.included_runs
         generated_summary = new_summary.summary
@@ -500,7 +452,6 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
         compacted_run_count=total_compacted_run_count,
         compacted_run_ids=tuple(all_compacted_run_ids),
         compacted_messages=tuple(compacted_messages),
-        blocked_reason=blocked_reason,
     )
 
 
@@ -561,7 +512,6 @@ async def _generate_compaction_summary_with_retry(
     history_settings: ResolvedHistorySettings,
     summary_prompt: str,
     token_estimator: Callable[[str], int],
-    block_compaction: Callable[[CompactionBlockReason], None],
 ) -> _GeneratedSummaryChunk:
     """Generate one summary chunk, shrinking the input per the retry policy when safe."""
     summary_input = initial_summary_input
@@ -624,18 +574,12 @@ async def _generate_compaction_summary_with_retry(
                     if shrink_retry and (
                         rebuilt_input == summary_input or rebuilt_input_tokens >= estimated_input_tokens
                     ):
-                        block_compaction("summary_retry_cannot_shrink_input")
-                        message = "shrink retry could not build a strictly smaller summary request"
-                        raise _CompactionBlockedError(message) from exc
+                        raise
                     summary_input = rebuilt_input
                     included_runs = rebuilt_runs
                     budget = retry_budget
                     attempt += 1
                     continue
-            if shrink_retry:
-                block_compaction("summary_retry_cannot_shrink_input")
-                message = "failed summary request cannot be rebuilt with a smaller legal input"
-                raise _CompactionBlockedError(message) from exc
             raise
         duration_ms = int((asyncio.get_running_loop().time() - started) * 1000)
         logger.info(

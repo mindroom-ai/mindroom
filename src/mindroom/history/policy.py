@@ -8,9 +8,7 @@ from typing import TYPE_CHECKING
 from mindroom.history.types import (
     COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
     CompactionAvailabilityReason,
-    CompactionBlockReason,
     CompactionDecision,
-    HistoryScopeState,
     ResolvedHistoryExecutionPlan,
 )
 from mindroom.token_budget import compute_compaction_input_budget
@@ -90,20 +88,11 @@ def classify_compaction_decision(  # noqa: PLR0911
     plan: ResolvedHistoryExecutionPlan,
     force_compact_before_next_run: bool,
     current_history_tokens: int | None,
-    blocked_reason: CompactionBlockReason | None = None,
 ) -> CompactionDecision:
     """Classify compaction as none or required before the next reply."""
     resolved_trigger_budget = plan.replay_budget_tokens
     resolved_hard_budget = plan.hard_replay_budget_tokens
 
-    if blocked_reason is not None:
-        return CompactionDecision(
-            mode="none",
-            reason="compaction_blocked",
-            current_history_tokens=current_history_tokens,
-            trigger_budget_tokens=resolved_trigger_budget,
-            hard_budget_tokens=resolved_hard_budget,
-        )
     if force_compact_before_next_run:
         if plan.destructive_compaction_available:
             return CompactionDecision(
@@ -182,32 +171,6 @@ def manual_compaction_unavailable_message(plan: ResolvedHistoryExecutionPlan) ->
     if description is None:
         return None
     return f"Error: Compaction is unavailable for this scope because {description}."
-
-
-def active_compaction_block_reason(
-    plan: ResolvedHistoryExecutionPlan,
-    state: HistoryScopeState,
-) -> CompactionBlockReason | None:
-    """Return the durable no-progress reason active for this model and budget."""
-    if (
-        state.blocked_compaction_reason is None
-        or state.blocked_compaction_model != plan.compaction_model_name
-        or state.blocked_summary_input_budget != plan.summary_input_budget_tokens
-    ):
-        return None
-    return state.blocked_compaction_reason
-
-
-def manual_compaction_blocked_message(reason: CompactionBlockReason) -> str:
-    """Return the user-facing error for a durable no-progress compaction block."""
-    return f"Error: Compaction is unavailable for this scope because {describe_compaction_block(reason)}."
-
-
-def describe_compaction_block(reason: CompactionBlockReason) -> str:
-    """Return a short description for one durable no-progress reason."""
-    if reason == "summary_input_cannot_include_run":
-        return "the complete durable summary leaves no room for a run under the current summary input budget"
-    return "the failed summary request cannot be rebuilt with a smaller legal input"
 
 
 def describe_compaction_unavailability(plan: ResolvedHistoryExecutionPlan) -> str | None:

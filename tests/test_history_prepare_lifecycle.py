@@ -385,10 +385,7 @@ async def test_prepare_history_for_run_required_compaction_classifies_provider_t
     assert prepared.compaction_reply_outcome == "timeout"
     assert isinstance(lifecycle.events[1], CompactionLifecycleFailure)
     assert lifecycle.events[1].status == "timeout"
-    assert lifecycle.events[1].failure_reason == "failed summary request cannot be rebuilt with a smaller legal input"
-    persisted = get_agent_session(storage, "session-1")
-    assert persisted is not None
-    assert read_scope_state(persisted, scope).blocked_compaction_reason == "summary_retry_cannot_shrink_input"
+    assert lifecycle.events[1].failure_reason == "TimeoutError"
 
 
 @pytest.mark.asyncio

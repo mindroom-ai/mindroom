@@ -5,12 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.history.policy import (
-    active_compaction_block_reason,
-    manual_compaction_blocked_message,
-    manual_compaction_unavailable_message,
-    resolve_history_execution_plan,
-)
+from mindroom.history.policy import manual_compaction_unavailable_message, resolve_history_execution_plan
 from mindroom.history.runtime import open_scope_session_context
 from mindroom.history.storage import add_pending_force_compaction_scope, read_scope_state, set_force_compaction_state
 from mindroom.logging_config import get_logger
@@ -21,7 +16,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.config.models import CompactionConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.history.types import ResolvedHistoryExecutionPlan
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -76,24 +70,17 @@ def request_compaction_before_next_reply(
             active_model_name=active_model_name,
             room_id=room_id,
         )
-        execution_plan = _resolve_manual_compaction_plan(
+        budget_error = _validate_compaction_budget(
             config=config,
             active_model_name=runtime_model.model_name,
             active_context_window=runtime_model.context_window,
             compaction_config=compaction_config,
         )
-        budget_error = manual_compaction_unavailable_message(execution_plan)
         if budget_error is not None:
             return _ManualCompactionRequestResult(budget_error, session_state=session_state)
 
         session = scope_context.session
         current_state = read_scope_state(session, scope_context.scope)
-        blocked_reason = active_compaction_block_reason(execution_plan, current_state)
-        if blocked_reason is not None:
-            return _ManualCompactionRequestResult(
-                manual_compaction_blocked_message(blocked_reason),
-                session_state=session_state,
-            )
         set_force_compaction_state(session, scope_context.scope, current_state, force=True)
         scope_context.storage.upsert_session(session)
 
@@ -146,15 +133,15 @@ def _resolve_active_compaction_settings(
     return runtime_model, config.resolve_entity(agent.team_id).compaction_config
 
 
-def _resolve_manual_compaction_plan(
+def _validate_compaction_budget(
     *,
     config: Config,
     active_model_name: str,
     active_context_window: int | None,
     compaction_config: CompactionConfig,
-) -> ResolvedHistoryExecutionPlan:
-    """Resolve the plan used to validate one manual compaction request."""
-    return resolve_history_execution_plan(
+) -> str | None:
+    """Return a user-facing error when destructive compaction is unavailable."""
+    execution_plan = resolve_history_execution_plan(
         config=config,
         compaction_config=compaction_config,
         has_authored_compaction_config=True,
@@ -162,3 +149,4 @@ def _resolve_manual_compaction_plan(
         active_context_window=active_context_window,
         static_prompt_tokens=None,
     )
+    return manual_compaction_unavailable_message(execution_plan)

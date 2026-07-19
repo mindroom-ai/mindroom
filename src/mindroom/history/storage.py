@@ -29,7 +29,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, TypeGuard, cast
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 from agno.db.base import SessionType
 from agno.run.agent import RunOutput
@@ -44,7 +44,7 @@ from mindroom.constants import (
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
 )
-from mindroom.history.types import CompactionBlockReason, HistoryScope, HistoryScopeState
+from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.metadata_merge import deep_merge_metadata
 
 if TYPE_CHECKING:
@@ -337,9 +337,6 @@ def _parse_state(raw_state: dict[str, Any]) -> HistoryScopeState:
     compacted_run_count = raw_state.get("last_compacted_run_count")
     compacted_run_ids = raw_state.get("compacted_run_ids")
     force_flag = raw_state.get("force_compact_before_next_run")
-    blocked_reason = raw_state.get("blocked_compaction_reason")
-    blocked_model = raw_state.get("blocked_compaction_model")
-    blocked_budget = raw_state.get("blocked_summary_input_budget")
     return HistoryScopeState(
         last_compacted_at=compacted_at if isinstance(compacted_at, str) else None,
         last_summary_model=summary_model if isinstance(summary_model, str) else None,
@@ -348,13 +345,6 @@ def _parse_state(raw_state: dict[str, Any]) -> HistoryScopeState:
             _normalize_compacted_run_ids(compacted_run_ids) if isinstance(compacted_run_ids, list) else ()
         ),
         force_compact_before_next_run=bool(force_flag),
-        blocked_compaction_reason=(
-            cast("CompactionBlockReason", blocked_reason)
-            if blocked_reason in {"summary_input_cannot_include_run", "summary_retry_cannot_shrink_input"}
-            else None
-        ),
-        blocked_compaction_model=blocked_model if isinstance(blocked_model, str) else None,
-        blocked_summary_input_budget=blocked_budget if isinstance(blocked_budget, int) else None,
     )
 
 
@@ -370,12 +360,6 @@ def _state_to_metadata(state: HistoryScopeState) -> dict[str, object]:
         payload["last_compacted_run_count"] = state.last_compacted_run_count
     if state.compacted_run_ids:
         payload["compacted_run_ids"] = list(_normalize_compacted_run_ids(state.compacted_run_ids))
-    if state.blocked_compaction_reason is not None:
-        payload["blocked_compaction_reason"] = state.blocked_compaction_reason
-    if state.blocked_compaction_model is not None:
-        payload["blocked_compaction_model"] = state.blocked_compaction_model
-    if state.blocked_summary_input_budget is not None:
-        payload["blocked_summary_input_budget"] = state.blocked_summary_input_budget
     return payload
 
 
@@ -386,9 +370,6 @@ def _state_is_empty(state: HistoryScopeState) -> bool:
         and state.last_compacted_run_count is None
         and not state.compacted_run_ids
         and not state.force_compact_before_next_run
-        and state.blocked_compaction_reason is None
-        and state.blocked_compaction_model is None
-        and state.blocked_summary_input_budget is None
     )
 
 

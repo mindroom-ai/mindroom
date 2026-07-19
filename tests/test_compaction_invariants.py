@@ -41,7 +41,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.error_handling import ModelSafeguardRefusalError
-from mindroom.history.compaction import _build_summary_input, _CompactionBlockedError, compact_scope_history
+from mindroom.history.compaction import _build_summary_input, compact_scope_history
 from mindroom.history.storage import (
     compacted_run_ids_with,
     prune_reintroduced_runs,
@@ -359,19 +359,6 @@ def test_write_scope_state_round_trips_capped_tombstones() -> None:
     assert len(serialized_run_ids) == 1_024
     assert serialized_run_ids[-2:] == ["run-1024", "run-1025"]
     assert read_scope_state(session, _SCOPE).compacted_run_ids == tuple(serialized_run_ids)
-
-
-def test_write_scope_state_round_trips_durable_compaction_block() -> None:
-    session = _session([])
-    blocked_state = HistoryScopeState(
-        blocked_compaction_reason="summary_retry_cannot_shrink_input",
-        blocked_compaction_model="summary-model",
-        blocked_summary_input_budget=10_000,
-    )
-
-    write_scope_state(session, _SCOPE, blocked_state)
-
-    assert read_scope_state(session, _SCOPE) == blocked_state
 
 
 # --- Invariant 2: chunk progress survives interruption ------------------------
@@ -1226,8 +1213,10 @@ async def test_compaction_shrinks_input_after_safeguard_refusal(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_small_refused_summary_request_blocks_without_identical_retry(tmp_path: Path) -> None:
-    """A shrink-class failure never resends a request already below the legal retry floor."""
+async def test_small_refused_summary_request_fails_without_identical_retry_or_persistent_state(
+    tmp_path: Path,
+) -> None:
+    """A request below the retry floor fails only its current attempt without being resent."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session([_completed_run("run-1", marker="RUN1-MARKER")])
@@ -1245,7 +1234,7 @@ async def test_small_refused_summary_request_blocks_without_identical_retry(tmp_
             "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(side_effect=refuse_summary),
         ),
-        pytest.raises(_CompactionBlockedError, match="cannot be rebuilt with a smaller legal input"),
+        pytest.raises(ModelSafeguardRefusalError, match="provider-specific refusal wording"),
     ):
         await compact_scope_history(
             storage=storage,
@@ -1268,17 +1257,13 @@ async def test_small_refused_summary_request_blocks_without_identical_retry(tmp_
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs or []] == ["run-1"]
-    blocked_state = read_scope_state(persisted, _SCOPE)
-    assert blocked_state.force_compact_before_next_run is False
-    assert blocked_state.blocked_compaction_reason == "summary_retry_cannot_shrink_input"
-    assert blocked_state.blocked_compaction_model == "summary-model"
-    assert blocked_state.blocked_summary_input_budget == 10_000
+    assert read_scope_state(persisted, _SCOPE) == HistoryScopeState(force_compact_before_next_run=True)
     storage.close()
 
 
 @pytest.mark.asyncio
-async def test_minimum_available_budget_blocks_when_no_smaller_request_can_be_built(tmp_path: Path) -> None:
-    """The smallest available plan durably blocks when its request cannot shrink."""
+async def test_minimum_available_budget_fails_current_attempt_when_request_cannot_shrink(tmp_path: Path) -> None:
+    """The smallest available plan does not persist suppression when its request cannot shrink."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session([_completed_run("run-1", marker="RUN1-MARKER", padding=4_000)])
@@ -1301,7 +1286,7 @@ async def test_minimum_available_budget_blocks_when_no_smaller_request_can_be_bu
             "mindroom.history.compaction._build_summary_input",
             wraps=_build_summary_input,
         ) as build_summary_input_spy,
-        pytest.raises(_CompactionBlockedError, match="cannot be rebuilt"),
+        pytest.raises(ModelSafeguardRefusalError, match="provider-specific refusal wording"),
     ):
         await compact_scope_history(
             storage=storage,
@@ -1326,17 +1311,13 @@ async def test_minimum_available_budget_blocks_when_no_smaller_request_can_be_bu
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs or []] == ["run-1"]
-    blocked_state = read_scope_state(persisted, _SCOPE)
-    assert blocked_state.force_compact_before_next_run is False
-    assert blocked_state.blocked_compaction_reason == "summary_retry_cannot_shrink_input"
-    assert blocked_state.blocked_compaction_model == "summary-model"
-    assert blocked_state.blocked_summary_input_budget == summary_input_budget
+    assert read_scope_state(persisted, _SCOPE) == HistoryScopeState(force_compact_before_next_run=True)
     storage.close()
 
 
 @pytest.mark.asyncio
-async def test_near_cap_durable_summary_blocks_without_losing_facts_or_retriggering(tmp_path: Path) -> None:
-    """An impossible full-summary merge is durably unavailable instead of destructive or repetitive."""
+async def test_near_cap_durable_summary_preserves_facts_without_suppressing_future_attempts(tmp_path: Path) -> None:
+    """An impossible full-summary merge makes no destructive rewrite or persistent policy state."""
     summary_input_budget = COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS + 1
     config, runtime_paths = _make_config(
         tmp_path,
@@ -1350,14 +1331,11 @@ async def test_near_cap_durable_summary_blocks_without_losing_facts_or_retrigger
     storage.upsert_session(session)
     generate_summary = AsyncMock()
 
-    with (
-        patch(
-            "mindroom.history.compaction.generate_compaction_summary",
-            new=generate_summary,
-        ),
-        pytest.raises(_CompactionBlockedError, match="complete durable summary"),
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=generate_summary,
     ):
-        await compact_scope_history(
+        outcome = await compact_scope_history(
             storage=storage,
             session=session,
             scope=_SCOPE,
@@ -1372,6 +1350,7 @@ async def test_near_cap_durable_summary_blocks_without_losing_facts_or_retrigger
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
         )
 
+    assert outcome is None
     generate_summary.assert_not_awaited()
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
@@ -1379,16 +1358,18 @@ async def test_near_cap_durable_summary_blocks_without_losing_facts_or_retrigger
     assert persisted.summary.summary == previous_summary
     assert "TAIL-FACT-MUST-SURVIVE" in persisted.summary.summary
     assert [run.run_id for run in persisted.runs or []] == ["run-1"]
-    blocked_state = read_scope_state(persisted, _SCOPE)
-    assert blocked_state.force_compact_before_next_run is False
-    assert blocked_state.blocked_compaction_reason == "summary_input_cannot_include_run"
-    assert blocked_state.blocked_compaction_model == "default"
-    assert blocked_state.blocked_summary_input_budget == summary_input_budget
+    assert read_scope_state(persisted, _SCOPE) == HistoryScopeState()
 
     runtime_generate_summary = AsyncMock()
-    with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
-        new=runtime_generate_summary,
+    with (
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=runtime_generate_summary,
+        ),
     ):
         prepared = await prepare_history_for_run_for_test(
             agent=_agent(db=storage),
@@ -1404,8 +1385,119 @@ async def test_near_cap_durable_summary_blocks_without_losing_facts_or_retrigger
         )
 
     runtime_generate_summary.assert_not_awaited()
-    assert prepared.compaction_decision.reason == "compaction_blocked"
+    assert prepared.compaction_decision.reason == "history_exceeds_hard_budget"
+    assert prepared.compaction_reply_outcome == "failed"
     assert prepared.compaction_outcomes == []
+    repeated = get_agent_session(storage, "session-1")
+    assert repeated is not None
+    assert repeated.summary is not None
+    assert repeated.summary.summary == previous_summary
+    assert [run.run_id for run in repeated.runs or []] == ["run-1"]
+    assert read_scope_state(repeated, _SCOPE) == HistoryScopeState()
+    storage.close()
+
+
+@pytest.mark.asyncio
+async def test_two_timeouts_exhaust_current_attempt_without_persisting_suppression(tmp_path: Path) -> None:
+    """Retry exhaustion after a smaller timeout request leaves no durable policy state."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session([_completed_run("run-1", marker="RUN1-MARKER", padding=16_000)])
+    write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+    attempts: list[str] = []
+
+    async def time_out_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+        attempts.append(summary_input)
+        raise TimeoutError
+
+    with (
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(side_effect=time_out_summary),
+        ),
+    ):
+        prepared = await prepare_history_for_run_for_test(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    assert len(attempts) == 2
+    assert estimate_compaction_input_tokens(attempts[1]) < estimate_compaction_input_tokens(attempts[0])
+    assert prepared.compaction_reply_outcome == "timeout"
+    assert prepared.compaction_outcomes == []
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    assert [run.run_id for run in persisted.runs or []] == ["run-1"]
+    assert read_scope_state(persisted, _SCOPE) == HistoryScopeState()
+    storage.close()
+
+
+@pytest.mark.asyncio
+async def test_successful_compaction_drops_legacy_persisted_block_fields(tmp_path: Path) -> None:
+    """A successful rewrite removes block metadata written by the abandoned round-five design."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session([_completed_run("run-1", marker="RUN1-MARKER", padding=4_000)])
+    write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
+    metadata = session.metadata or {}
+    raw_compaction = metadata[MINDROOM_COMPACTION_METADATA_KEY]
+    assert isinstance(raw_compaction, dict)
+    raw_states = raw_compaction["states"]
+    assert isinstance(raw_states, dict)
+    raw_state = raw_states[_SCOPE.key]
+    assert isinstance(raw_state, dict)
+    raw_state.update(
+        {
+            "blocked_compaction_reason": "summary_input_cannot_include_run",
+            "blocked_compaction_model": "old-summary-model",
+            "blocked_summary_input_budget": 1_001,
+        },
+    )
+    storage.upsert_session(session)
+
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(return_value=SessionSummary(summary="new summary", updated_at=datetime.now(UTC))),
+    ):
+        outcome = await compact_scope_history(
+            storage=storage,
+            session=session,
+            scope=_SCOPE,
+            state=read_scope_state(session, _SCOPE),
+            history_settings=_HISTORY_SETTINGS,
+            available_history_budget=None,
+            summary_input_budget=10_000,
+            summary_model=FakeModel(id="summary-model", provider="fake"),
+            summary_model_name="summary-model",
+            replay_window_tokens=64_000,
+            threshold_tokens=None,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+        )
+
+    assert outcome is not None
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    persisted_metadata = persisted.metadata or {}
+    persisted_compaction = persisted_metadata[MINDROOM_COMPACTION_METADATA_KEY]
+    assert isinstance(persisted_compaction, dict)
+    persisted_states = persisted_compaction["states"]
+    assert isinstance(persisted_states, dict)
+    persisted_state = persisted_states[_SCOPE.key]
+    assert isinstance(persisted_state, dict)
+    assert not any(key.startswith("blocked_") for key in persisted_state)
     storage.close()
 
 

@@ -231,42 +231,6 @@ async def test_compact_context_sets_force_flag_for_agent_scope(tmp_path: Path) -
     assert result == COMPACT_CONTEXT_SUCCESS
 
 
-@pytest.mark.asyncio
-async def test_compact_context_rejects_active_durable_no_progress_block(tmp_path: Path) -> None:
-    """Manual compaction should reject a durable block active for the current plan."""
-    config, runtime_paths = _make_config(tmp_path)
-    identity = _execution_identity()
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
-    session = _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")])
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    write_scope_state(
-        session,
-        scope,
-        HistoryScopeState(
-            blocked_compaction_reason="summary_input_cannot_include_run",
-            blocked_compaction_model="default",
-            blocked_summary_input_budget=24_816,
-        ),
-    )
-    storage.upsert_session(session)
-    tool = CompactContextTools(
-        agent_name="test_agent",
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=identity,
-    )
-
-    result = await tool.compact_context(agent=_agent())
-
-    persisted = get_agent_session(storage, "session-1")
-    assert persisted is not None
-    assert read_scope_state(persisted, scope).force_compact_before_next_run is False
-    assert result == (
-        "Error: Compaction is unavailable for this scope because the complete durable summary leaves no room "
-        "for a run under the current summary input budget."
-    )
-
-
 def test_request_compaction_before_next_reply_is_public_manual_seam(tmp_path: Path) -> None:
     """Manual compaction scheduling should be available without going through the tool adapter."""
     config, runtime_paths = _make_config(tmp_path)
