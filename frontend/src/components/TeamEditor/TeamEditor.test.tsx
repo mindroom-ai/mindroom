@@ -452,62 +452,77 @@ describe("TeamEditor", () => {
     });
   });
 
-  it("shows automatic required compaction as disabled for a pure team model clear when defaults are disabled", () => {
-    const compactionTeam: Team = {
-      ...mockTeam,
-      compaction: { model: null },
-    };
-    (useConfigStore as any).mockReturnValue({
-      teams: [compactionTeam],
-      agents: mockAgents,
-      rooms: [
-        {
-          id: "dev",
-          display_name: "Dev",
-          description: "Development room",
-          agents: ["code", "shell"],
-        },
-        {
-          id: "lobby",
-          display_name: "Lobby",
-          description: "Main lobby",
-          agents: [],
-        },
-        {
-          id: "research",
-          display_name: "Research",
-          description: "Research room",
-          agents: ["research"],
-        },
-      ],
-      config: {
-        ...mockConfig,
-        defaults: {
-          ...mockConfig.defaults,
-          compaction: {
-            enabled: false,
-            reserve_tokens: 16384,
-            threshold_percent: 0.8,
-          },
-        },
-        teams: { dev_team: compactionTeam },
-      },
-      selectedTeamId: "dev_team",
-      updateTeam: mockUpdateTeam,
-      deleteTeam: mockDeleteTeam,
-      saveConfig: mockSaveConfig,
-      isDirty: false,
-      diagnostics: [],
-      agentPoliciesByAgent: mockAgentPoliciesByAgent,
-      selectTeam: vi.fn(),
-    });
-
-    render(<TeamEditor />);
-
+  it("preserves explicit team compaction fallback model clears during normalization", () => {
     expect(
-      screen.getByLabelText("Enable automatic required compaction"),
-    ).not.toBeChecked();
+      normalizeTeamUpdates(mockTeam, { compaction: { fallback_model: null } })
+        .compaction,
+    ).toEqual({
+      fallback_model: null,
+    });
   });
+
+  it.each([
+    ["model", { model: null }],
+    ["fallback model", { fallback_model: null }],
+  ])(
+    "shows automatic required compaction as disabled for a pure team %s clear when defaults are disabled",
+    (_label, compaction) => {
+      const compactionTeam: Team = {
+        ...mockTeam,
+        compaction,
+      };
+      (useConfigStore as any).mockReturnValue({
+        teams: [compactionTeam],
+        agents: mockAgents,
+        rooms: [
+          {
+            id: "dev",
+            display_name: "Dev",
+            description: "Development room",
+            agents: ["code", "shell"],
+          },
+          {
+            id: "lobby",
+            display_name: "Lobby",
+            description: "Main lobby",
+            agents: [],
+          },
+          {
+            id: "research",
+            display_name: "Research",
+            description: "Research room",
+            agents: ["research"],
+          },
+        ],
+        config: {
+          ...mockConfig,
+          defaults: {
+            ...mockConfig.defaults,
+            compaction: {
+              enabled: false,
+              reserve_tokens: 16384,
+              threshold_percent: 0.8,
+            },
+          },
+          teams: { dev_team: compactionTeam },
+        },
+        selectedTeamId: "dev_team",
+        updateTeam: mockUpdateTeam,
+        deleteTeam: mockDeleteTeam,
+        saveConfig: mockSaveConfig,
+        isDirty: false,
+        diagnostics: [],
+        agentPoliciesByAgent: mockAgentPoliciesByAgent,
+        selectTeam: vi.fn(),
+      });
+
+      render(<TeamEditor />);
+
+      expect(
+        screen.getByLabelText("Enable automatic required compaction"),
+      ).not.toBeChecked();
+    },
+  );
 
   it("shows automatic required compaction as disabled for an empty team compaction override when defaults are disabled", () => {
     const compactionTeam: Team = {

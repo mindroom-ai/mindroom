@@ -22,6 +22,7 @@ from tests.conftest import (
     bind_runtime_paths,
     drain_coalescing,
     install_generate_response_mock,
+    install_runtime_cache_support,
     orchestrator_runtime_paths,
     runtime_paths_for,
     test_runtime_paths,
@@ -281,6 +282,7 @@ class TestDMIntegration:
             runtime_paths=runtime_paths_for(config),
             rooms=[],
         )
+        install_runtime_cache_support(bot)
 
         bot.client = AsyncMock()
         bot.client.user_id = bot.agent_user.user_id

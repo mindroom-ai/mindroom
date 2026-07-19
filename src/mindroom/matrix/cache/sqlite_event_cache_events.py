@@ -1,4 +1,4 @@
-"""Event lookup, normalization, index, and redaction storage for the Matrix event cache."""
+"""Event, index, redaction, and plaintext ownership storage for SQLite caches."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from .event_cache_events import (
     batch_redaction_candidate_ids,
     cache_rows_were_deleted,
     event_edit_rows,
+    event_mxc_urls,
     event_redaction_candidate_ids,
     event_thread_rows,
     filter_redacted_events,
@@ -21,12 +22,23 @@ from .event_cache_events import (
 if TYPE_CHECKING:
     import aiosqlite
 
+_ROOM_CONTENT_TABLES = (
+    "thread_events",
+    "events",
+    "event_edits",
+    "event_threads",
+    "redacted_events",
+    "event_mxc_references",
+    "mxc_text_cache",
+    "thread_cache_state",
+)
 _ORPHAN_THREAD_INDEX_PREDICATE = """
     NOT EXISTS (
         SELECT 1
         FROM events
-        WHERE events.event_id = event_threads.event_id
+        WHERE events.principal_id = event_threads.principal_id
             AND events.room_id = event_threads.room_id
+            AND events.event_id = event_threads.event_id
     )
     AND NOT (
         event_threads.event_id = event_threads.thread_id
@@ -34,27 +46,31 @@ _ORPHAN_THREAD_INDEX_PREDICATE = """
             EXISTS (
                 SELECT 1
                 FROM event_threads AS child
-                WHERE child.room_id = event_threads.room_id
+                WHERE child.principal_id = event_threads.principal_id
+                    AND child.room_id = event_threads.room_id
                     AND child.thread_id = event_threads.thread_id
                     AND child.event_id != child.thread_id
                     AND EXISTS (
                         SELECT 1
                         FROM events AS child_event
-                        WHERE child_event.event_id = child.event_id
+                        WHERE child_event.principal_id = child.principal_id
                             AND child_event.room_id = child.room_id
+                            AND child_event.event_id = child.event_id
                     )
             )
             OR EXISTS (
                 SELECT 1
                 FROM thread_events AS child_membership
-                WHERE child_membership.room_id = event_threads.room_id
+                WHERE child_membership.principal_id = event_threads.principal_id
+                    AND child_membership.room_id = event_threads.room_id
                     AND child_membership.thread_id = event_threads.thread_id
                     AND child_membership.event_id != child_membership.thread_id
                     AND EXISTS (
                         SELECT 1
                         FROM events AS child_event
-                        WHERE child_event.event_id = child_membership.event_id
+                        WHERE child_event.principal_id = child_membership.principal_id
                             AND child_event.room_id = child_membership.room_id
+                            AND child_event.event_id = child_membership.event_id
                     )
             )
         )
@@ -65,16 +81,18 @@ _ORPHAN_THREAD_INDEX_PREDICATE = """
 async def load_event(
     db: aiosqlite.Connection,
     *,
+    principal_id: str,
+    room_id: str,
     event_id: str,
 ) -> dict[str, Any] | None:
-    """Return one cached event payload by event ID."""
+    """Return one event only from its principal and room."""
     cursor = await db.execute(
         """
         SELECT event_json
         FROM events
-        WHERE event_id = ?
+        WHERE principal_id = ? AND room_id = ? AND event_id = ?
         """,
-        (event_id,),
+        (principal_id, room_id, event_id),
     )
     row = await cursor.fetchone()
     await cursor.close()
@@ -84,25 +102,27 @@ async def load_event(
 async def load_recent_room_events(
     db: aiosqlite.Connection,
     *,
+    principal_id: str,
     room_id: str,
     event_type: str,
     since_ts_ms: int,
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Return recent cached room events of one type, newest first."""
+    """Return recent events from one principal-owned room."""
     if limit <= 0:
         return []
     cursor = await db.execute(
         """
         SELECT event_json
         FROM events
-        WHERE room_id = ?
+        WHERE principal_id = ?
+            AND room_id = ?
             AND origin_server_ts >= ?
             AND json_extract(event_json, '$.type') = ?
         ORDER BY origin_server_ts DESC, write_seq DESC
         LIMIT ?
         """,
-        (room_id, since_ts_ms, event_type, limit),
+        (principal_id, room_id, since_ts_ms, event_type, limit),
     )
     rows = await cursor.fetchall()
     await cursor.close()
@@ -112,13 +132,15 @@ async def load_recent_room_events(
 async def load_latest_edit(
     db: aiosqlite.Connection,
     *,
+    principal_id: str,
     room_id: str,
     original_event_id: str,
     sender: str | None = None,
 ) -> dict[str, Any] | None:
-    """Return the latest cached edit event for one original event."""
+    """Return the latest principal- and room-scoped edit."""
     row = await _load_latest_edit_row(
         db,
+        principal_id=principal_id,
         room_id=room_id,
         original_event_id=original_event_id,
         sender=sender,
@@ -129,13 +151,15 @@ async def load_latest_edit(
 async def load_latest_edit_row(
     db: aiosqlite.Connection,
     *,
+    principal_id: str,
     room_id: str,
     original_event_id: str,
     sender: str,
 ) -> CachedEventRow | None:
-    """Return the latest cached edit event plus its lookup-row write time."""
+    """Return the latest edit and its write time within one ownership scope."""
     return await _load_latest_edit_row(
         db,
+        principal_id=principal_id,
         room_id=room_id,
         original_event_id=original_event_id,
         sender=sender,
@@ -145,20 +169,25 @@ async def load_latest_edit_row(
 async def _load_latest_edit_row(
     db: aiosqlite.Connection,
     *,
+    principal_id: str,
     room_id: str,
     original_event_id: str,
     sender: str | None,
 ) -> CachedEventRow | None:
     sender_predicate = "" if sender is None else "AND json_extract(events.event_json, '$.sender') = ?"
-    parameters = (room_id, original_event_id, *((sender,) if sender is not None else ()))
+    parameters = (principal_id, room_id, original_event_id, *((sender,) if sender is not None else ()))
     cursor = await db.execute(
         f"""
         SELECT events.event_json, events.cached_at
         FROM event_edits
-        JOIN events ON events.event_id = event_edits.edit_event_id
-        WHERE event_edits.room_id = ?
-            AND event_edits.original_event_id = ?
-            {sender_predicate}
+        JOIN events
+          ON events.principal_id = event_edits.principal_id
+         AND events.room_id = event_edits.room_id
+         AND events.event_id = event_edits.edit_event_id
+        WHERE event_edits.principal_id = ?
+          AND event_edits.room_id = ?
+          AND event_edits.original_event_id = ?
+          {sender_predicate}
         ORDER BY event_edits.origin_server_ts DESC, events.write_seq DESC
         LIMIT 1
         """,  # noqa: S608
@@ -168,60 +197,117 @@ async def _load_latest_edit_row(
     await cursor.close()
     if row is None:
         return None
-    return CachedEventRow(
-        event=json.loads(row[0]),
-        cached_at=None if row[1] is None else float(row[1]),
-    )
+    return CachedEventRow(event=json.loads(row[0]), cached_at=None if row[1] is None else float(row[1]))
 
 
 async def load_mxc_text(
     db: aiosqlite.Connection,
     *,
+    principal_id: str,
+    room_id: str,
+    event_id: str,
     mxc_url: str,
 ) -> str | None:
-    """Return one durably cached MXC text payload when present."""
+    """Return plaintext only through a surviving visible event reference."""
     cursor = await db.execute(
         """
-        SELECT text_content
-        FROM mxc_text_cache
-        WHERE mxc_url = ?
+        SELECT plaintext.text_content
+        FROM mxc_text_cache AS plaintext
+        JOIN event_mxc_references AS reference
+          ON reference.principal_id = plaintext.principal_id
+         AND reference.room_id = plaintext.room_id
+         AND reference.mxc_url = plaintext.mxc_url
+        JOIN events
+          ON events.principal_id = reference.principal_id
+         AND events.room_id = reference.room_id
+         AND events.event_id = reference.event_id
+        WHERE plaintext.principal_id = ?
+          AND plaintext.room_id = ?
+          AND reference.event_id = ?
+          AND plaintext.mxc_url = ?
         """,
-        (mxc_url,),
+        (principal_id, room_id, event_id, mxc_url),
     )
     row = await cursor.fetchone()
     await cursor.close()
     return None if row is None else str(row[0])
 
 
+async def _event_owns_mxc_text(
+    db: aiosqlite.Connection,
+    *,
+    principal_id: str,
+    room_id: str,
+    event_id: str,
+    mxc_url: str,
+) -> bool:
+    """Return whether one visible event currently owns the room-scoped MXC."""
+    cursor = await db.execute(
+        """
+        SELECT 1
+        FROM events
+        JOIN event_mxc_references AS reference
+          ON reference.principal_id = events.principal_id
+         AND reference.room_id = events.room_id
+         AND reference.event_id = events.event_id
+        WHERE events.principal_id = ?
+          AND events.room_id = ?
+          AND events.event_id = ?
+          AND reference.mxc_url = ?
+        """,
+        (principal_id, room_id, event_id, mxc_url),
+    )
+    owns_plaintext = await cursor.fetchone()
+    await cursor.close()
+    return owns_plaintext is not None
+
+
 async def persist_mxc_text(
     db: aiosqlite.Connection,
     *,
+    principal_id: str,
+    room_id: str,
+    event_id: str,
     mxc_url: str,
     text: str,
     cached_at: float,
-) -> None:
-    """Insert or replace one durably cached MXC text payload."""
+) -> bool:
+    """Persist plaintext only if its visible event ownership still exists."""
+    if not await _event_owns_mxc_text(
+        db,
+        principal_id=principal_id,
+        room_id=room_id,
+        event_id=event_id,
+        mxc_url=mxc_url,
+    ):
+        return False
     await db.execute(
         """
-        INSERT OR REPLACE INTO mxc_text_cache(mxc_url, text_content, cached_at)
-        VALUES (?, ?, ?)
+        INSERT INTO mxc_text_cache(principal_id, room_id, mxc_url, text_content, cached_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(principal_id, room_id, mxc_url) DO UPDATE SET
+            text_content = excluded.text_content,
+            cached_at = excluded.cached_at
         """,
-        (mxc_url, text, cached_at),
+        (principal_id, room_id, mxc_url, text, cached_at),
     )
+    return True
 
 
 async def persist_lookup_events(
     db: aiosqlite.Connection,
     *,
+    principal_id: str,
     room_id: str,
     room_events: list[tuple[str, dict[str, Any]]],
     cached_at: float,
     thread_id: str | None = None,
 ) -> None:
-    """Persist point-lookups and derived indexes for one room-scoped event batch."""
-    cacheable_events = await filter_cacheable_events(db, room_id, room_events)
+    """Persist lookup rows and all derived ownership indexes."""
+    cacheable_events = await filter_cacheable_events(db, principal_id, room_id, room_events)
     await write_lookup_index_rows(
         db,
+        principal_id=principal_id,
         room_id=room_id,
         serialized_events=serialize_cacheable_events(cacheable_events),
         cached_at=cached_at,
@@ -232,17 +318,18 @@ async def persist_lookup_events(
 async def load_thread_id_for_event(
     db: aiosqlite.Connection,
     *,
+    principal_id: str,
     room_id: str,
     event_id: str,
 ) -> str | None:
-    """Return the cached thread ID for one event."""
+    """Return one event's thread within its ownership scope."""
     cursor = await db.execute(
         """
         SELECT thread_id
         FROM event_threads
-        WHERE room_id = ? AND event_id = ?
+        WHERE principal_id = ? AND room_id = ? AND event_id = ?
         """,
-        (room_id, event_id),
+        (principal_id, room_id, event_id),
     )
     row = await cursor.fetchone()
     await cursor.close()
@@ -252,32 +339,46 @@ async def load_thread_id_for_event(
 async def redact_event_locked(
     db: aiosqlite.Connection,
     *,
+    principal_id: str,
     room_id: str,
     event_id: str,
 ) -> bool:
-    """Delete one cached event after a redaction within an existing transaction."""
-    dependent_edit_ids = await _dependent_edit_event_ids(db, room_id, original_event_id=event_id)
+    """Atomically tombstone and remove one event and its dependent edits."""
+    dependent_edit_ids = await _dependent_edit_event_ids(
+        db,
+        principal_id,
+        room_id,
+        original_event_id=event_id,
+    )
     removed_event_ids = redaction_removal_event_ids(event_id, dependent_edit_ids)
-    affected_thread_ids = await _thread_ids_for_event_ids(db, room_id=room_id, event_ids=removed_event_ids)
-    deleted_thread_rows = await _delete_room_thread_events(db, room_id, event_ids=removed_event_ids)
-    deleted_event_rows = await delete_cached_events(db, event_ids=removed_event_ids)
+    deleted_thread_rows = await _delete_scoped_event_rows(
+        db,
+        "thread_events",
+        "event_id",
+        principal_id,
+        room_id,
+        removed_event_ids,
+    )
+    deleted_event_rows = await delete_cached_events(
+        db,
+        principal_id=principal_id,
+        room_id=room_id,
+        event_ids=removed_event_ids,
+    )
     deleted_edit_rows = await delete_event_edit_rows(
         db,
+        principal_id,
         room_id,
         event_ids=removed_event_ids,
         original_event_id=event_id,
     )
     deleted_thread_index_rows = await delete_event_thread_rows(
         db,
-        room_id,
-        event_ids=removed_event_ids,
-        affected_thread_ids=affected_thread_ids,
-    )
-    await _record_redacted_events(
-        db,
+        principal_id,
         room_id,
         event_ids=removed_event_ids,
     )
+    await _record_redacted_events(db, principal_id, room_id, event_ids=removed_event_ids)
     return cache_rows_were_deleted(
         deleted_thread_rows,
         deleted_event_rows,
@@ -288,15 +389,17 @@ async def redact_event_locked(
 
 async def event_or_original_is_redacted(
     db: aiosqlite.Connection,
+    principal_id: str,
     room_id: str,
     *,
     event_id: str,
     event: dict[str, Any],
 ) -> bool:
-    """Return whether this event or its edited original was durably redacted."""
+    """Return whether this event or its edited original has a tombstone."""
     return bool(
         await _redacted_event_ids_for_candidates(
             db,
+            principal_id,
             room_id,
             event_ids=event_redaction_candidate_ids(event_id, event),
         ),
@@ -305,36 +408,114 @@ async def event_or_original_is_redacted(
 
 async def filter_cacheable_events(
     db: aiosqlite.Connection,
+    principal_id: str,
     room_id: str,
     room_events: list[tuple[str, dict[str, Any]]],
 ) -> list[tuple[str, dict[str, Any]]]:
-    """Drop events that target durable redaction tombstones before persisting them."""
+    """Drop late events covered by durable ownership-scoped tombstones."""
     redacted_event_ids = await _redacted_event_ids_for_candidates(
         db,
+        principal_id,
         room_id,
         event_ids=batch_redaction_candidate_ids(room_events),
     )
     return filter_redacted_events(room_events, redacted_event_ids=redacted_event_ids)
 
 
+async def _thread_ids_for_events(
+    db: aiosqlite.Connection,
+    principal_id: str,
+    room_id: str,
+    *,
+    event_ids: list[str],
+) -> set[str]:
+    """Return thread IDs currently mapped from one event set."""
+    placeholders = ",".join("?" for _ in event_ids)
+    cursor = await db.execute(
+        f"""
+        SELECT DISTINCT thread_id
+        FROM event_threads
+        WHERE principal_id = ? AND room_id = ? AND event_id IN ({placeholders})
+        """,  # noqa: S608
+        (principal_id, room_id, *event_ids),
+    )
+    rows = await cursor.fetchall()
+    await cursor.close()
+    return {str(row[0]) for row in rows}
+
+
+async def _reconcile_thread_root_self_rows(
+    db: aiosqlite.Connection,
+    principal_id: str,
+    room_id: str,
+    *,
+    candidate_root_ids: set[str],
+    current_self_root_ids: set[str],
+) -> None:
+    """Keep root self-mappings exactly while a current row still proves them."""
+    for root_id in candidate_root_ids:
+        cursor = await db.execute(
+            """
+            SELECT 1
+            FROM event_threads
+            WHERE principal_id = ? AND room_id = ? AND thread_id = ? AND event_id <> ?
+            LIMIT 1
+            """,
+            (principal_id, room_id, root_id, root_id),
+        )
+        has_surviving_child = await cursor.fetchone() is not None
+        await cursor.close()
+        if has_surviving_child or root_id in current_self_root_ids:
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO event_threads(principal_id, room_id, event_id, thread_id)
+                VALUES (?, ?, ?, ?)
+                """,
+                (principal_id, room_id, root_id, root_id),
+            )
+            continue
+        await db.execute(
+            """
+            DELETE FROM event_threads
+            WHERE principal_id = ? AND room_id = ? AND event_id = ? AND thread_id = ?
+            """,
+            (principal_id, room_id, root_id, root_id),
+        )
+
+
 async def write_lookup_index_rows(
     db: aiosqlite.Connection,
     *,
+    principal_id: str,
     room_id: str,
     serialized_events: list[SerializedCachedEvent],
     cached_at: float,
     thread_id: str | None = None,
 ) -> None:
-    """Persist point-lookup, edit-index, and thread-index rows for cached events."""
+    """Write visible events and reconcile edit, thread, and MXC references."""
     if not serialized_events:
         return
+    event_ids = [event.event_id for event in serialized_events]
+    previous_mxc_urls = await _mxc_urls_for_events(
+        db,
+        principal_id,
+        room_id,
+        event_ids=event_ids,
+    )
     write_sequences = await allocate_write_sequences(db, len(serialized_events))
     await db.executemany(
         """
-        INSERT INTO events(event_id, room_id, origin_server_ts, event_json, cached_at, write_seq)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(event_id) DO UPDATE SET
-            room_id = excluded.room_id,
+        INSERT INTO events(
+            principal_id,
+            event_id,
+            room_id,
+            origin_server_ts,
+            event_json,
+            cached_at,
+            write_seq
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(principal_id, room_id, event_id) DO UPDATE SET
             origin_server_ts = excluded.origin_server_ts,
             event_json = excluded.event_json,
             cached_at = excluded.cached_at,
@@ -342,6 +523,7 @@ async def write_lookup_index_rows(
         """,
         [
             (
+                principal_id,
                 event.event_id,
                 room_id,
                 event.origin_server_ts,
@@ -352,24 +534,212 @@ async def write_lookup_index_rows(
             for event, write_sequence in zip(serialized_events, write_sequences, strict=True)
         ],
     )
+    await db.executemany(
+        """
+        DELETE FROM event_mxc_references
+        WHERE principal_id = ? AND room_id = ? AND event_id = ?
+        """,
+        [(principal_id, room_id, event_id) for event_id in event_ids],
+    )
+    reference_rows = [
+        (principal_id, room_id, event.event_id, mxc_url)
+        for event in serialized_events
+        for mxc_url in event_mxc_urls(event.event)
+    ]
+    if reference_rows:
+        await db.executemany(
+            """
+            INSERT OR IGNORE INTO event_mxc_references(principal_id, room_id, event_id, mxc_url)
+            VALUES (?, ?, ?, ?)
+            """,
+            reference_rows,
+        )
+    await _delete_orphaned_mxc_text(db, principal_id, room_id, mxc_urls=previous_mxc_urls)
+
+    await db.executemany(
+        """
+        DELETE FROM event_edits
+        WHERE principal_id = ? AND room_id = ? AND edit_event_id = ?
+        """,
+        [(principal_id, room_id, event_id) for event_id in event_ids],
+    )
     edit_rows = event_edit_rows(room_id, serialized_events)
     if edit_rows:
         await db.executemany(
             """
-            INSERT OR REPLACE INTO event_edits(edit_event_id, room_id, original_event_id, origin_server_ts)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO event_edits(
+                principal_id, edit_event_id, room_id, original_event_id, origin_server_ts
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(principal_id, room_id, edit_event_id) DO UPDATE SET
+                original_event_id = excluded.original_event_id,
+                origin_server_ts = excluded.origin_server_ts
             """,
-            [(row.edit_event_id, row.room_id, row.original_event_id, row.origin_server_ts) for row in edit_rows],
+            [
+                (principal_id, row.edit_event_id, row.room_id, row.original_event_id, row.origin_server_ts)
+                for row in edit_rows
+            ],
         )
+
+    previous_thread_ids = await _thread_ids_for_events(
+        db,
+        principal_id,
+        room_id,
+        event_ids=event_ids,
+    )
     thread_rows = event_thread_rows(room_id, serialized_events, thread_id=thread_id)
+    await db.executemany(
+        """
+        DELETE FROM event_threads
+        WHERE principal_id = ? AND room_id = ? AND event_id = ?
+        """,
+        [(principal_id, room_id, event_id) for event_id in event_ids],
+    )
     if thread_rows:
         await db.executemany(
             """
-            INSERT OR REPLACE INTO event_threads(room_id, event_id, thread_id)
-            VALUES (?, ?, ?)
+            INSERT INTO event_threads(principal_id, room_id, event_id, thread_id)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(principal_id, room_id, event_id) DO UPDATE SET
+                thread_id = excluded.thread_id
             """,
-            [(row.room_id, row.event_id, row.thread_id) for row in thread_rows],
+            [(principal_id, row.room_id, row.event_id, row.thread_id) for row in thread_rows],
         )
+    await _reconcile_thread_root_self_rows(
+        db,
+        principal_id,
+        room_id,
+        candidate_root_ids=previous_thread_ids | {row.thread_id for row in thread_rows},
+        current_self_root_ids={row.thread_id for row in thread_rows if row.event_id == row.thread_id},
+    )
+
+
+async def delete_cached_events(
+    db: aiosqlite.Connection,
+    *,
+    principal_id: str,
+    room_id: str,
+    event_ids: list[str],
+) -> int:
+    """Delete visible rows and atomically prune newly orphaned plaintext."""
+    if not event_ids:
+        return 0
+    mxc_urls = await _mxc_urls_for_events(db, principal_id, room_id, event_ids=event_ids)
+    await db.executemany(
+        """
+        DELETE FROM event_mxc_references
+        WHERE principal_id = ? AND room_id = ? AND event_id = ?
+        """,
+        [(principal_id, room_id, event_id) for event_id in event_ids],
+    )
+    deleted_rows = await _delete_scoped_event_rows(
+        db,
+        "events",
+        "event_id",
+        principal_id,
+        room_id,
+        event_ids,
+    )
+    await _delete_orphaned_mxc_text(db, principal_id, room_id, mxc_urls=mxc_urls)
+    return deleted_rows
+
+
+async def delete_event_thread_rows(
+    db: aiosqlite.Connection,
+    principal_id: str,
+    room_id: str,
+    *,
+    event_ids: list[str],
+) -> int:
+    """Delete event-to-thread rows within one owner and room."""
+    affected_thread_ids = await _thread_ids_for_events(
+        db,
+        principal_id,
+        room_id,
+        event_ids=event_ids,
+    )
+    deleted_rows = await _delete_scoped_event_rows(
+        db,
+        "event_threads",
+        "event_id",
+        principal_id,
+        room_id,
+        event_ids,
+    )
+    await _reconcile_thread_root_self_rows(
+        db,
+        principal_id,
+        room_id,
+        candidate_root_ids=affected_thread_ids,
+        current_self_root_ids=set(),
+    )
+    return deleted_rows
+
+
+async def delete_event_edit_rows(
+    db: aiosqlite.Connection,
+    principal_id: str,
+    room_id: str,
+    *,
+    event_ids: list[str],
+    original_event_id: str | None,
+) -> int:
+    """Delete edit indexes within one owner and room."""
+    deleted_rows = await _delete_scoped_event_rows(
+        db,
+        "event_edits",
+        "edit_event_id",
+        principal_id,
+        room_id,
+        event_ids,
+    )
+    if original_event_id is None:
+        return deleted_rows
+    cursor = await db.execute(
+        """
+        DELETE FROM event_edits
+        WHERE principal_id = ? AND room_id = ? AND original_event_id = ?
+        """,
+        (principal_id, room_id, original_event_id),
+    )
+    deleted_rows += 0 if cursor.rowcount is None else int(cursor.rowcount)
+    await cursor.close()
+    return deleted_rows
+
+
+async def purge_room_locked(
+    db: aiosqlite.Connection,
+    *,
+    principal_id: str,
+    room_id: str,
+) -> None:
+    """Remove every row owned by one principal in one departed room."""
+    for table_name in _ROOM_CONTENT_TABLES:
+        await db.execute(
+            f"DELETE FROM {table_name} WHERE principal_id = ? AND room_id = ?",  # noqa: S608
+            (principal_id, room_id),
+        )
+
+
+async def purge_principal_locked(
+    db: aiosqlite.Connection,
+    *,
+    principal_id: str,
+) -> None:
+    """Delete principal content and invalidate every certified in-flight refill."""
+    for table_name in _ROOM_CONTENT_TABLES:
+        await db.execute(
+            f"DELETE FROM {table_name} WHERE principal_id = ?",  # noqa: S608
+            (principal_id,),
+        )
+    await db.execute(
+        """
+        UPDATE room_cache_state
+        SET membership_epoch = membership_epoch + 1
+        WHERE principal_id = ?
+        """,
+        (principal_id,),
+    )
 
 
 async def allocate_write_sequences(
@@ -400,98 +770,49 @@ async def allocate_write_sequences(
 
 async def _dependent_edit_event_ids(
     db: aiosqlite.Connection,
+    principal_id: str,
     room_id: str,
     *,
     original_event_id: str,
 ) -> list[str]:
-    """Return cached edit event IDs that target one original event."""
     cursor = await db.execute(
         """
         SELECT edit_event_id
         FROM event_edits
-        WHERE room_id = ? AND original_event_id = ?
+        WHERE principal_id = ? AND room_id = ? AND original_event_id = ?
         """,
-        (room_id, original_event_id),
+        (principal_id, room_id, original_event_id),
     )
     rows = await cursor.fetchall()
     await cursor.close()
     return [str(row[0]) for row in rows]
 
 
-async def delete_cached_events(
+async def _delete_scoped_event_rows(
     db: aiosqlite.Connection,
-    *,
-    event_ids: list[str],
-) -> int:
-    """Delete point-lookup cache rows for the provided event IDs."""
-    if not event_ids:
-        return 0
-    cursor = await db.executemany(
-        """
-        DELETE FROM events
-        WHERE event_id = ?
-        """,
-        [(event_id,) for event_id in event_ids],
-    )
-    return 0 if cursor.rowcount is None else int(cursor.rowcount)
-
-
-async def delete_event_thread_rows(
-    db: aiosqlite.Connection,
+    table_name: str,
+    event_column: str,
+    principal_id: str,
     room_id: str,
-    *,
     event_ids: list[str],
-    affected_thread_ids: list[str],
 ) -> int:
-    """Delete event mappings and unsupported roots whose proof was removed."""
     if not event_ids:
         return 0
-    cursor = await db.executemany(
-        """
-        DELETE FROM event_threads
-        WHERE room_id = ? AND event_id = ?
-        """,
-        [(room_id, event_id) for event_id in event_ids],
+    placeholders = ",".join("?" for _ in event_ids)
+    cursor = await db.execute(
+        f"""
+        DELETE FROM {table_name}
+        WHERE principal_id = ? AND room_id = ? AND {event_column} IN ({placeholders})
+        """,  # noqa: S608
+        (principal_id, room_id, *event_ids),
     )
     deleted_rows = 0 if cursor.rowcount is None else int(cursor.rowcount)
-    if not affected_thread_ids:
-        return deleted_rows
-    cursor = await db.executemany(
-        f"""
-        DELETE FROM event_threads
-        WHERE room_id = ?
-            AND event_id = ?
-            AND thread_id = ?
-            AND {_ORPHAN_THREAD_INDEX_PREDICATE}
-        """,  # noqa: S608
-        [(room_id, thread_id, thread_id) for thread_id in set(affected_thread_ids)],
-    )
-    return deleted_rows + (0 if cursor.rowcount is None else int(cursor.rowcount))
-
-
-async def _thread_ids_for_event_ids(
-    db: aiosqlite.Connection,
-    *,
-    room_id: str,
-    event_ids: list[str],
-) -> list[str]:
-    """Return roots whose supporting rows will be removed."""
-    encoded_event_ids = json.dumps(event_ids)
-    cursor = await db.execute(
-        """
-        SELECT thread_id
-        FROM event_threads
-        WHERE room_id = ? AND event_id IN (SELECT value FROM json_each(?))
-        """,
-        (room_id, encoded_event_ids),
-    )
-    rows = await cursor.fetchall()
     await cursor.close()
-    return [str(row[0]) for row in rows]
+    return deleted_rows
 
 
 async def orphan_thread_index_count(db: aiosqlite.Connection) -> int:
-    """Count unsupported event-to-thread rows."""
+    """Count unsupported principal-scoped event-to-thread rows."""
     cursor = await db.execute(
         f"SELECT COUNT(*) FROM event_threads WHERE {_ORPHAN_THREAD_INDEX_PREDICATE}",  # noqa: S608
     )
@@ -503,7 +824,7 @@ async def orphan_thread_index_count(db: aiosqlite.Connection) -> int:
 async def repair_orphan_thread_indexes(
     db: aiosqlite.Connection,
 ) -> int:
-    """Remove every unsupported thread mapping during startup maintenance."""
+    """Remove every unsupported principal-scoped thread mapping."""
     cursor = await db.execute(
         f"""
         DELETE FROM event_threads
@@ -515,94 +836,91 @@ async def repair_orphan_thread_indexes(
     return repaired
 
 
-async def delete_event_edit_rows(
-    db: aiosqlite.Connection,
-    room_id: str,
-    *,
-    event_ids: list[str],
-    original_event_id: str | None,
-) -> int:
-    """Delete derived edit-index rows affected by one event redaction."""
-    deleted_rows = 0
-    for event_id in event_ids:
-        cursor = await db.execute(
-            """
-            DELETE FROM event_edits
-            WHERE room_id = ? AND edit_event_id = ?
-            """,
-            (room_id, event_id),
-        )
-        deleted_rows += 0 if cursor.rowcount is None else int(cursor.rowcount)
-        await cursor.close()
-    if original_event_id is not None:
-        cursor = await db.execute(
-            """
-            DELETE FROM event_edits
-            WHERE room_id = ? AND original_event_id = ?
-            """,
-            (room_id, original_event_id),
-        )
-        deleted_rows += 0 if cursor.rowcount is None else int(cursor.rowcount)
-        await cursor.close()
-    return deleted_rows
-
-
-async def _delete_room_thread_events(
-    db: aiosqlite.Connection,
-    room_id: str,
-    *,
-    event_ids: list[str],
-) -> int:
-    """Delete cached thread rows for the provided event IDs within one room."""
-    if not event_ids:
-        return 0
-    cursor = await db.executemany(
-        """
-        DELETE FROM thread_events
-        WHERE room_id = ? AND event_id = ?
-        """,
-        [(room_id, event_id) for event_id in event_ids],
-    )
-    return 0 if cursor.rowcount is None else int(cursor.rowcount)
-
-
 async def _record_redacted_events(
     db: aiosqlite.Connection,
+    principal_id: str,
     room_id: str,
     *,
     event_ids: list[str],
 ) -> None:
-    """Persist durable tombstones for redacted event IDs."""
     if not event_ids:
         return
     await db.executemany(
         """
-        INSERT OR REPLACE INTO redacted_events(room_id, event_id)
-        VALUES (?, ?)
+        INSERT OR IGNORE INTO redacted_events(principal_id, room_id, event_id)
+        VALUES (?, ?, ?)
         """,
-        [(room_id, event_id) for event_id in event_ids],
+        [(principal_id, room_id, event_id) for event_id in event_ids],
     )
 
 
 async def _redacted_event_ids_for_candidates(
     db: aiosqlite.Connection,
+    principal_id: str,
     room_id: str,
     *,
     event_ids: frozenset[str],
 ) -> frozenset[str]:
-    """Return the subset of candidate event IDs that are durably tombstoned."""
     if not event_ids:
         return frozenset()
     placeholders = ",".join("?" for _ in event_ids)
-    query = f"""
+    cursor = await db.execute(
+        f"""
         SELECT event_id
         FROM redacted_events
-        WHERE room_id = ? AND event_id IN ({placeholders})
-        """  # noqa: S608
-    cursor = await db.execute(
-        query,
-        (room_id, *sorted(event_ids)),
+        WHERE principal_id = ? AND room_id = ? AND event_id IN ({placeholders})
+        """,  # noqa: S608
+        (principal_id, room_id, *sorted(event_ids)),
     )
     rows = await cursor.fetchall()
     await cursor.close()
     return frozenset(str(row[0]) for row in rows)
+
+
+async def _mxc_urls_for_events(
+    db: aiosqlite.Connection,
+    principal_id: str,
+    room_id: str,
+    *,
+    event_ids: list[str],
+) -> frozenset[str]:
+    placeholders = ",".join("?" for _ in event_ids)
+    cursor = await db.execute(
+        f"""
+        SELECT DISTINCT mxc_url
+        FROM event_mxc_references
+        WHERE principal_id = ? AND room_id = ? AND event_id IN ({placeholders})
+        """,  # noqa: S608
+        (principal_id, room_id, *event_ids),
+    )
+    rows = await cursor.fetchall()
+    await cursor.close()
+    return frozenset(str(row[0]) for row in rows)
+
+
+async def _delete_orphaned_mxc_text(
+    db: aiosqlite.Connection,
+    principal_id: str,
+    room_id: str,
+    *,
+    mxc_urls: frozenset[str],
+) -> None:
+    if not mxc_urls:
+        return
+    placeholders = ",".join("?" for _ in mxc_urls)
+    await db.execute(
+        f"""
+        DELETE FROM mxc_text_cache
+        WHERE principal_id = ?
+          AND room_id = ?
+          AND mxc_url IN ({placeholders})
+          AND NOT EXISTS (
+              SELECT 1
+              FROM event_mxc_references
+              WHERE event_mxc_references.principal_id = mxc_text_cache.principal_id
+                AND event_mxc_references.room_id = mxc_text_cache.room_id
+                AND event_mxc_references.mxc_url = mxc_text_cache.mxc_url
+          )
+        """,  # noqa: S608
+        (principal_id, room_id, *sorted(mxc_urls)),
+    )

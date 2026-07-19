@@ -19,7 +19,6 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
-import mindroom.matrix.message_content as message_content_module
 from mindroom import interactive
 from mindroom.agent_storage import get_agent_session
 from mindroom.agents import remove_run_by_event_id
@@ -444,7 +443,6 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> None:
     """Edit regeneration should use the resolved edited body from a v2 sidecar."""
-    message_content_module._mxc_cache.clear()
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:example.com",
@@ -552,7 +550,6 @@ async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> 
 @pytest.mark.asyncio
 async def test_bot_edit_regeneration_does_not_rerun_response_gating_after_hydrated_recovery(tmp_path: Path) -> None:
     """Edit regeneration should not re-run should-respond heuristics after durable recovery."""
-    message_content_module._mxc_cache.clear()
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:example.com",

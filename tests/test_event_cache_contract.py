@@ -46,13 +46,14 @@ class TestConversationEventCacheContract:
         assert isinstance(event_cache, ConversationEventCache)
         assert event_cache.is_initialized is True
         assert event_cache.durable_writes_available is True
-        assert isinstance(event_cache.certification_generation, str)
+        assert isinstance(event_cache.cache_generation, str)
         assert isinstance(event_cache.runtime_diagnostics()["cache_backend"], str)
         assert isinstance(event_cache.pending_durable_write_room_ids(), tuple)
 
         event_cache.disable("contract_test")
 
         assert event_cache.durable_writes_available is False
+        assert event_cache.cache_generation is None
         assert await event_cache.get_event("!room:localhost", "$missing") is None
         assert (
             await event_cache.get_recent_room_events(
@@ -161,6 +162,7 @@ class TestConversationEventCacheContract:
             room_id,
             thread_id,
             [root],
+            expected_membership_epoch=await event_cache.room_membership_epoch(room_id),
             fetch_started_at=0.0,
         )
         cached_events = await event_cache.get_thread_events(room_id, thread_id)
@@ -229,6 +231,8 @@ async def test_last_child_deletion_removes_unproven_thread_root_mapping_immediat
         await event_cache.store_event(str(child["event_id"]), room_id, child)
     else:
         await replace_thread_unconditionally(event_cache, room_id, thread_id, [child])
+    root = _message_event(thread_id, 1)
+    await event_cache.store_event(thread_id, room_id, root)
     assert await event_cache.get_thread_id_for_event(room_id, thread_id) == thread_id
 
     if deletion == "redaction":
@@ -239,6 +243,7 @@ async def test_last_child_deletion_removes_unproven_thread_root_mapping_immediat
         await event_cache.invalidate_thread(room_id, thread_id)
 
     assert await event_cache.get_thread_id_for_event(room_id, thread_id) is None
+    assert await event_cache.get_event(room_id, thread_id) == root
 
 
 @pytest.mark.asyncio

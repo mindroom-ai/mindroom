@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -13,91 +12,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import aiosqlite
-
-
-async def migrate_version_10_thread_events(db: aiosqlite.Connection) -> int:
-    """Normalize a complete version-10 thread snapshot without losing cached events."""
-    await db.execute("ALTER TABLE events ADD COLUMN write_seq INTEGER NOT NULL DEFAULT 0")
-    await db.execute("UPDATE events SET write_seq = rowid")
-
-    await db.execute("ALTER TABLE thread_events RENAME TO thread_events_v10")
-    await db.execute("DROP INDEX IF EXISTS idx_thread_events_room_thread_ts")
-    normalized_thread_payload_rows = await _scalar_count(db, "SELECT COUNT(*) FROM thread_events_v10")
-    await db.execute(
-        """
-        CREATE TABLE thread_events (
-            room_id TEXT NOT NULL,
-            thread_id TEXT NOT NULL,
-            event_id TEXT NOT NULL,
-            origin_server_ts INTEGER NOT NULL,
-            write_seq INTEGER NOT NULL,
-            PRIMARY KEY (room_id, event_id)
-        )
-        """,
-    )
-    await db.execute(
-        """
-        CREATE INDEX idx_thread_events_room_thread_ts
-        ON thread_events(room_id, thread_id, origin_server_ts)
-        """,
-    )
-    await db.execute(
-        """
-        INSERT INTO thread_cache_state(
-            room_id,
-            thread_id,
-            validated_at,
-            invalidated_at,
-            invalidation_reason
-        )
-        SELECT DISTINCT
-            thread_events_v10.room_id,
-            thread_events_v10.thread_id,
-            NULL,
-            ?,
-            'schema_migration_missing_thread_event_source'
-        FROM thread_events_v10
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM events
-            WHERE events.event_id = thread_events_v10.event_id
-                AND events.room_id = thread_events_v10.room_id
-        )
-        ON CONFLICT(room_id, thread_id) DO UPDATE SET
-            validated_at = NULL,
-            invalidated_at = CASE
-                WHEN thread_cache_state.invalidated_at IS NULL
-                    OR excluded.invalidated_at >= thread_cache_state.invalidated_at
-                    THEN excluded.invalidated_at
-                ELSE thread_cache_state.invalidated_at
-            END,
-            invalidation_reason = CASE
-                WHEN thread_cache_state.invalidated_at IS NULL
-                    OR excluded.invalidated_at >= thread_cache_state.invalidated_at
-                    THEN excluded.invalidation_reason
-                ELSE thread_cache_state.invalidation_reason
-            END
-        """,
-        (time.time(),),
-    )
-    await db.execute(
-        """
-        INSERT INTO thread_events(room_id, thread_id, event_id, origin_server_ts, write_seq)
-        SELECT
-            thread_events_v10.room_id,
-            thread_events_v10.thread_id,
-            thread_events_v10.event_id,
-            thread_events_v10.origin_server_ts,
-            (SELECT COALESCE(MAX(write_seq), 0) FROM events) + thread_events_v10.rowid
-        FROM thread_events_v10
-        JOIN events
-            ON events.event_id = thread_events_v10.event_id
-            AND events.room_id = thread_events_v10.room_id
-        ORDER BY thread_events_v10.rowid
-        """,
-    )
-    await db.execute("DROP TABLE thread_events_v10")
-    return normalized_thread_payload_rows
 
 
 async def _scalar_count(
@@ -115,8 +29,9 @@ _ORPHAN_EDIT_INDEX_PREDICATE = """
     NOT EXISTS (
         SELECT 1
         FROM events
-        WHERE events.event_id = event_edits.edit_event_id
+        WHERE events.principal_id = event_edits.principal_id
             AND events.room_id = event_edits.room_id
+            AND events.event_id = event_edits.edit_event_id
     )
 """
 

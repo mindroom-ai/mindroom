@@ -14,6 +14,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import normalize_nio_event_for_cache
 from mindroom.matrix.client_delivery import can_send_to_encrypted_room
 from mindroom.matrix.large_messages import content_fits_normal_event, sidecar_upload_is_usable, upload_json_sidecar
+from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content, build_thread_relation
 from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
 from mindroom.tool_approval import (
@@ -371,6 +372,9 @@ class ApprovalMatrixTransport:
         if bot.client is None:
             return
         try:
+            membership_epoch = await bot.event_cache.room_membership_epoch(room_id)
+            if membership_epoch is None:
+                membership_epoch = UNCERTIFIED_MEMBERSHIP_EPOCH
             response = await bot.client.room_get_event(room_id, event_id)
             if not isinstance(response, nio.RoomGetEventResponse):
                 return
@@ -378,6 +382,7 @@ class ApprovalMatrixTransport:
                 event_id,
                 room_id,
                 normalize_nio_event_for_cache(response.event, event_id=event_id),
+                expected_membership_epoch=membership_epoch,
             )
         except Exception as exc:
             logger.warning(

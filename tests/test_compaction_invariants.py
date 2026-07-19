@@ -14,7 +14,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -759,9 +759,11 @@ def test_retry_policy_propagates_second_typed_context_window_error() -> None:
     )
 
 
-def test_retry_policy_shrinks_budget_for_safeguard_refusal() -> None:
+def test_retry_policy_does_not_shrink_safeguard_refusal() -> None:
+    """A safeguard refusal is a content decision, not a size problem: no shrink retry."""
     error = ModelSafeguardRefusalError("provider-specific refusal wording")
 
+    assert DEFAULT_SUMMARY_RETRY_POLICY.should_shrink(error) is False
     assert (
         _retry_budget_value(
             DEFAULT_SUMMARY_RETRY_POLICY,
@@ -770,24 +772,13 @@ def test_retry_policy_shrinks_budget_for_safeguard_refusal() -> None:
             input_tokens=16_000,
             error=error,
         )
-        == 8_000
-    )
-    assert (
-        _retry_budget_value(
-            DEFAULT_SUMMARY_RETRY_POLICY,
-            attempt=2,
-            budget=8_000,
-            input_tokens=8_000,
-            error=error,
-        )
         is None
     )
 
 
-def test_retry_policy_should_shrink_for_refusal_and_empty_result() -> None:
+def test_retry_policy_should_shrink_for_empty_result() -> None:
     policy = DEFAULT_SUMMARY_RETRY_POLICY
 
-    assert policy.should_shrink(ModelSafeguardRefusalError("provider-specific refusal wording")) is True
     assert policy.should_shrink(_CompactionSummaryEmptyResultError("summary generation returned no result")) is True
 
 
@@ -811,7 +802,7 @@ def test_retry_policy_clamps_shrink_target_to_minimum_progress_input() -> None:
         budget=10_000,
         input_tokens=8_573,
         minimum_progress_input_tokens=6_230,
-        error=ModelSafeguardRefusalError("provider-specific refusal wording"),
+        error=CompactionSummaryOutputLimitError("renamed owned output-limit signal"),
     )
 
     assert decision == SummaryRetryDecision(budget=6_230, kind="shrink")
@@ -878,7 +869,7 @@ def test_retry_policy_does_not_resend_non_transient_shrink_errors_at_floor() -> 
             attempt=1,
             budget=16_000,
             input_tokens=1_000,
-            error=ModelSafeguardRefusalError("provider-specific refusal wording"),
+            error=CompactionSummaryOutputLimitError("renamed owned output-limit signal"),
         )
         is None
     )
@@ -1140,7 +1131,7 @@ def test_retry_schedule_halves_deterministically() -> None:
 async def test_retry_helper_propagates_original_error_when_rebuilt_input_is_not_smaller() -> None:
     """A defensive estimate guard prevents a shrink retry from resending equal-size input."""
     run = _completed_run("run-1")
-    original_error = ModelSafeguardRefusalError("provider-specific refusal wording")
+    original_error = CompactionSummaryOutputLimitError("renamed owned output-limit signal")
     generate_summary = AsyncMock(side_effect=original_error)
 
     with (
@@ -1152,10 +1143,11 @@ async def test_retry_helper_propagates_original_error_when_rebuilt_input_is_not_
             "mindroom.history.compaction._build_summary_input",
             return_value=("rebuilt request with the same estimate", [run]),
         ),
-        pytest.raises(ModelSafeguardRefusalError) as raised,
+        pytest.raises(CompactionSummaryOutputLimitError) as raised,
     ):
         await _generate_compaction_summary_with_retry(
             model=FakeModel(id="summary-model", provider="fake"),
+            model_name="summary-model",
             previous_summary=None,
             compactable_runs=[run],
             initial_summary_input="original request",
@@ -1194,6 +1186,7 @@ async def test_retry_helper_honors_transient_fallthrough_for_shrink_message_at_f
     ):
         generated = await _generate_compaction_summary_with_retry(
             model=FakeModel(id="summary-model", provider="fake"),
+            model_name="summary-model",
             previous_summary=None,
             compactable_runs=[run],
             initial_summary_input="original request",
@@ -1223,7 +1216,7 @@ async def test_retry_helper_shrinks_around_a_large_durable_summary() -> None:
     Regression: the halved shrink target used to fall below the previous-summary
     block, the rebuild came back run-less, and the original error propagated
     without any smaller attempt — so the next turn reselected required
-    compaction and resent the identical refusal-prone request.
+    compaction and resent the identical failing request.
     """
     previous_summary = "s" * 24_000
     runs = [_completed_run(f"run-{index}", padding=2_000) for index in range(3)]
@@ -1241,12 +1234,13 @@ async def test_retry_helper_shrinks_around_a_large_durable_summary() -> None:
     assert _chars_per_token_estimator(previous_summary) > initial_tokens // 2
     recovered_summary = SessionSummary(summary="recovered summary", updated_at=datetime.now(UTC))
     generate_summary = AsyncMock(
-        side_effect=[ModelSafeguardRefusalError("provider-specific refusal wording"), recovered_summary],
+        side_effect=[CompactionSummaryOutputLimitError("renamed owned output-limit signal"), recovered_summary],
     )
 
     with patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary):
         generated = await _generate_compaction_summary_with_retry(
             model=FakeModel(id="summary-model", provider="fake"),
+            model_name="summary-model",
             previous_summary=previous_summary,
             compactable_runs=runs,
             initial_summary_input=initial_input,
@@ -1282,15 +1276,16 @@ async def test_retry_helper_propagates_error_when_no_smaller_progress_input_exis
         token_estimator=_chars_per_token_estimator,
     )
     assert [run.run_id for run in initial_runs] == ["run-1"]
-    original_error = ModelSafeguardRefusalError("provider-specific refusal wording")
+    original_error = CompactionSummaryOutputLimitError("renamed owned output-limit signal")
     generate_summary = AsyncMock(side_effect=original_error)
 
     with (
         patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
-        pytest.raises(ModelSafeguardRefusalError) as raised,
+        pytest.raises(CompactionSummaryOutputLimitError) as raised,
     ):
         await _generate_compaction_summary_with_retry(
             model=FakeModel(id="summary-model", provider="fake"),
+            model_name="summary-model",
             previous_summary=previous_summary,
             compactable_runs=runs,
             initial_summary_input=initial_input,
@@ -1487,8 +1482,162 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_compaction_shrinks_input_after_safeguard_refusal(tmp_path: Path) -> None:
-    """A safeguard refusal retries with a smaller input and persists the result."""
+async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_input() -> None:
+    """A primary refusal resends the unchanged prompt and input bytes once to the fallback model."""
+    run = _completed_run("run-1")
+    primary = FakeModel(id="summary-model", provider="fake")
+    fallback = FakeModel(id="fallback-model-id", provider="fake")
+    recovered_summary = SessionSummary(summary="recovered summary", updated_at=datetime.now(UTC))
+    generate_summary = AsyncMock(
+        side_effect=[ModelSafeguardRefusalError("provider-specific refusal wording"), recovered_summary],
+    )
+    retry_sleep = AsyncMock()
+    logger_mock = MagicMock()
+
+    with (
+        patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
+        patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
+        patch("mindroom.history.compaction.logger", logger_mock),
+    ):
+        generated = await _generate_compaction_summary_with_retry(
+            model=primary,
+            model_name="summary-model",
+            previous_summary=None,
+            compactable_runs=[run],
+            initial_summary_input="original request",
+            initial_included_runs=[run],
+            summary_input_budget=4_000,
+            session_id="session-1",
+            scope=_SCOPE,
+            history_settings=_HISTORY_SETTINGS,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            token_estimator=lambda _value: 2_000,
+            fallback_model=fallback,
+            fallback_model_name="fallback-model",
+        )
+
+    assert generated.summary is recovered_summary
+    assert generated.included_runs == [run]
+    assert generated.model is fallback
+    assert generated.model_name == "fallback-model"
+    assert generate_summary.await_count == 2
+    assert [call.kwargs["model"] for call in generate_summary.await_args_list] == [primary, fallback]
+    assert [call.kwargs["summary_input"] for call in generate_summary.await_args_list] == [
+        "original request",
+        "original request",
+    ]
+    assert [call.kwargs["summary_prompt"] for call in generate_summary.await_args_list] == [
+        COMPACTION_SUMMARY_PROMPT,
+        COMPACTION_SUMMARY_PROMPT,
+    ]
+    retry_sleep.assert_not_awaited()
+    # Structured request/failure/completion logs identify the actual serving model.
+    assert [
+        call.kwargs["model_name"]
+        for call in logger_mock.info.call_args_list
+        if call.args[0] == "Compaction summary chunk request"
+    ] == ["summary-model", "fallback-model"]
+    assert [
+        call.kwargs["model_name"]
+        for call in logger_mock.warning.call_args_list
+        if call.args[0] == "Compaction summary chunk failed"
+    ] == ["summary-model"]
+    assert [
+        call.kwargs["model_name"]
+        for call in logger_mock.info.call_args_list
+        if call.args[0] == "Compaction summary chunk completed"
+    ] == ["fallback-model"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fallback_error",
+    [
+        pytest.param(ModelSafeguardRefusalError("fallback also refused"), id="fallback-refusal"),
+        pytest.param(ModelProviderError("invalid request", status_code=400), id="fallback-failure"),
+    ],
+)
+async def test_retry_helper_propagates_fallback_refusal_or_failure(fallback_error: Exception) -> None:
+    """The fallback call is the one bounded second attempt; its errors propagate."""
+    run = _completed_run("run-1")
+    primary = FakeModel(id="summary-model", provider="fake")
+    fallback = FakeModel(id="fallback-model-id", provider="fake")
+    generate_summary = AsyncMock(
+        side_effect=[ModelSafeguardRefusalError("provider-specific refusal wording"), fallback_error],
+    )
+
+    with (
+        patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
+        pytest.raises(type(fallback_error)) as raised,
+    ):
+        await _generate_compaction_summary_with_retry(
+            model=primary,
+            model_name="summary-model",
+            previous_summary=None,
+            compactable_runs=[run],
+            initial_summary_input="original request",
+            initial_included_runs=[run],
+            summary_input_budget=4_000,
+            session_id="session-1",
+            scope=_SCOPE,
+            history_settings=_HISTORY_SETTINGS,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            token_estimator=lambda _value: 2_000,
+            fallback_model=fallback,
+            fallback_model_name="fallback-model",
+        )
+
+    assert raised.value is fallback_error
+    assert generate_summary.await_count == 2
+    assert [call.kwargs["summary_input"] for call in generate_summary.await_args_list] == [
+        "original request",
+        "original request",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_retry_helper_refusal_after_transient_retry_propagates_within_attempt_bound() -> None:
+    """A refusal on the bounded second attempt propagates instead of issuing a third fallback call."""
+    run = _completed_run("run-1")
+    primary = FakeModel(id="summary-model", provider="fake")
+    fallback = FakeModel(id="fallback-model-id", provider="fake")
+    refusal = ModelSafeguardRefusalError("provider-specific refusal wording")
+    generate_summary = AsyncMock(
+        side_effect=[ModelProviderError("temporary provider failure", status_code=503), refusal],
+    )
+    retry_sleep = AsyncMock()
+
+    with (
+        patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
+        patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
+        pytest.raises(ModelSafeguardRefusalError) as raised,
+    ):
+        await _generate_compaction_summary_with_retry(
+            model=primary,
+            model_name="summary-model",
+            previous_summary=None,
+            compactable_runs=[run],
+            initial_summary_input="original request",
+            initial_included_runs=[run],
+            summary_input_budget=4_000,
+            session_id="session-1",
+            scope=_SCOPE,
+            history_settings=_HISTORY_SETTINGS,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            token_estimator=lambda _value: 2_000,
+            fallback_model=fallback,
+            fallback_model_name="fallback-model",
+        )
+
+    assert raised.value is refusal
+    assert generate_summary.await_count == 2
+    assert [call.kwargs["model"] for call in generate_summary.await_args_list] == [primary, primary]
+    retry_sleep.assert_awaited_once_with(DEFAULT_SUMMARY_RETRY_POLICY.same_input_retry_delay_seconds)
+
+
+@pytest.mark.asyncio
+async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_path: Path) -> None:
+    """After a fallback switch, the fallback serves later chunks and is the reported summary model."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session(
@@ -1499,11 +1648,12 @@ async def test_compaction_shrinks_input_after_safeguard_refusal(tmp_path: Path) 
     )
     write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
     storage.upsert_session(session)
+    primary = FakeModel(id="summary-model", provider="fake")
+    fallback = FakeModel(id="fallback-model-id", provider="fake")
+    attempts: list[tuple[str, str]] = []
 
-    attempts: list[str] = []
-
-    async def flaky_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
-        attempts.append(summary_input)
+    async def flaky_summary(*, model: FakeModel, summary_input: str, **_kwargs: object) -> SessionSummary:
+        attempts.append((model.id, summary_input))
         if len(attempts) == 1:
             msg = "provider-specific refusal wording"
             raise ModelSafeguardRefusalError(msg)
@@ -1521,21 +1671,27 @@ async def test_compaction_shrinks_input_after_safeguard_refusal(tmp_path: Path) 
             history_settings=_HISTORY_SETTINGS,
             available_history_budget=None,
             summary_input_budget=10_000,
-            summary_model=FakeModel(id="summary-model", provider="fake"),
+            summary_model=primary,
             summary_model_name="summary-model",
             replay_window_tokens=64_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            fallback_summary_model=fallback,
+            fallback_summary_model_name="fallback-model",
         )
 
     assert outcome is not None
-    assert len(attempts) == 3
-    assert estimate_compaction_input_tokens(attempts[1]) < estimate_compaction_input_tokens(attempts[0])
-    assert attempts[2] != attempts[1]
+    # Chunk 1 refuses on the primary and resends the unchanged prompt and
+    # input to the fallback; chunk 2 goes straight to the fallback.
+    assert [model_id for model_id, _ in attempts] == ["summary-model", "fallback-model-id", "fallback-model-id"]
+    assert attempts[1][1] == attempts[0][1]
+    assert "RUN2-MARKER" in attempts[2][1]
+    assert outcome.summary_model == "fallback-model"
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.summary == "recovered summary"
+    assert read_scope_state(persisted, _SCOPE).last_summary_model == "fallback-model-id"
     storage.close()
 
 
@@ -1602,8 +1758,8 @@ async def test_minimum_available_budget_can_issue_smaller_degradation_retry(tmp_
     async def flaky_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
         attempts.append(summary_input)
         if len(attempts) == 1:
-            message = "provider-specific refusal wording"
-            raise ModelSafeguardRefusalError(message)
+            message = "summary generation returned no result"
+            raise _CompactionSummaryEmptyResultError(message)
         return SessionSummary(summary="recovered summary", updated_at=datetime.now(UTC))
 
     with (

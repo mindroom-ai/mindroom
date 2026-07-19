@@ -59,10 +59,6 @@ def _assert_missing_source_state(state: ThreadCacheState | None) -> None:
 async def _prepare_sqlite_version_10(db_path: Path) -> None:
     db = await aiosqlite.connect(db_path)
     try:
-        await sqlite_event_cache._create_event_cache_schema(db)
-        await db.execute("DROP TABLE cache_metadata")
-        await db.execute("DROP TABLE thread_events")
-        await db.execute("DROP TABLE events")
         await db.execute(
             """
             CREATE TABLE events (
@@ -74,78 +70,13 @@ async def _prepare_sqlite_version_10(db_path: Path) -> None:
             )
             """,
         )
-        await db.execute(
-            """
-            CREATE INDEX idx_events_room_origin_ts
-            ON events(room_id, origin_server_ts DESC)
-            """,
-        )
-        await db.execute(
-            """
-            CREATE TABLE thread_events (
-                room_id TEXT NOT NULL,
-                thread_id TEXT NOT NULL,
-                event_id TEXT NOT NULL,
-                origin_server_ts INTEGER NOT NULL,
-                event_json TEXT NOT NULL,
-                PRIMARY KEY (room_id, event_id)
-            )
-            """,
-        )
-        await db.execute(
-            """
-            CREATE INDEX idx_thread_events_room_thread_ts
-            ON thread_events(room_id, thread_id, origin_server_ts)
-            """,
-        )
         child_json = json.dumps(_message_event(_CHILD_ID, thread_id=_THREAD_ID))
-        missing_json = json.dumps(_message_event(_MISSING_ID, thread_id=_THREAD_ID))
         await db.execute(
             """
             INSERT INTO events(event_id, room_id, origin_server_ts, event_json, cached_at)
             VALUES (?, ?, ?, ?, ?)
             """,
             (_CHILD_ID, _ROOM_ID, 10, child_json, 1.0),
-        )
-        await db.executemany(
-            """
-            INSERT INTO thread_events(room_id, thread_id, event_id, origin_server_ts, event_json)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            [
-                (_ROOM_ID, _THREAD_ID, _CHILD_ID, 10, child_json),
-                (_ROOM_ID, _THREAD_ID, _MISSING_ID, 11, missing_json),
-            ],
-        )
-        await db.executemany(
-            """
-            INSERT INTO event_threads(room_id, event_id, thread_id)
-            VALUES (?, ?, ?)
-            """,
-            [
-                (_ROOM_ID, _THREAD_ID, _THREAD_ID),
-                (_ROOM_ID, _ORPHAN_ID, "$unlearned:localhost"),
-            ],
-        )
-        await db.execute(
-            """
-            INSERT INTO event_edits(edit_event_id, room_id, original_event_id, origin_server_ts)
-            VALUES (?, ?, ?, ?)
-            """,
-            (_ORPHAN_ID, _ROOM_ID, _THREAD_ID, 12),
-        )
-        await db.execute(
-            """
-            INSERT INTO thread_cache_state(
-                room_id,
-                thread_id,
-                validated_at,
-                invalidated_at,
-                invalidation_reason
-            )
-            VALUES (?, ?, ?, ?, 'preexisting_newer_invalidation')
-            """,
-            (_ROOM_ID, _THREAD_ID, _FUTURE_VALIDATED_AT, _FUTURE_INVALIDATED_AT),
         )
         await db.execute("PRAGMA user_version = 10")
         await db.commit()
@@ -175,6 +106,14 @@ async def _prepare_postgres_version_1(database_url: str, *, namespace: str, othe
             """
             ALTER TABLE mindroom_event_cache_thread_events
             ALTER COLUMN event_json SET NOT NULL
+            """,
+        )
+        await db.execute(
+            """
+            CREATE TABLE mindroom_event_cache_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
             """,
         )
         await db.execute(
@@ -279,47 +218,19 @@ async def _prepare_postgres_version_1(database_url: str, *, namespace: str, othe
 
 
 @pytest.mark.asyncio
-async def test_sqlite_version_10_migrates_without_reset_and_repairs_orphans(tmp_path: Path) -> None:
-    """The exact version-10 shape migrates transactionally and preserves valid learned roots."""
+async def test_sqlite_unowned_version_10_is_reset(tmp_path: Path) -> None:
+    """Rows without a principal owner are discarded instead of assigned speculatively."""
     db_path = tmp_path / "event_cache.db"
     await _prepare_sqlite_version_10(db_path)
-    before_db = await aiosqlite.connect(db_path)
-    try:
-        cursor = await before_db.execute("SELECT rootpage FROM sqlite_master WHERE name = 'events'")
-        events_rootpage_before = await cursor.fetchone()
-        await cursor.close()
-    finally:
-        await before_db.close()
 
     cache = SqliteEventCache(db_path)
     await cache.initialize()
     try:
         diagnostics = cache.runtime_diagnostics()
-        cached_thread = await cache.get_thread_events(_ROOM_ID, _THREAD_ID)
-        stale_state = await cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
-
-        assert diagnostics["cache_schema_migrated_from"] == 10
-        assert diagnostics["cache_orphan_edit_indexes_after"] == 0
-        assert diagnostics["cache_orphan_thread_indexes_after"] == 0
-        assert diagnostics["cache_repaired_edit_indexes"] == 1
-        assert diagnostics["cache_repaired_thread_indexes"] == 1
-        assert diagnostics["cache_normalized_legacy_thread_payload_rows"] == 2
+        assert diagnostics["cache_schema_destructive_reset"] is True
+        assert diagnostics["cache_event_rows"] == 0
         assert diagnostics["cache_storage_bytes"] > 0
-        assert cached_thread == [_message_event(_CHILD_ID, thread_id=_THREAD_ID)]
-        assert stale_state is not None
-        assert stale_state.validated_at is None
-        assert stale_state.invalidated_at == _FUTURE_INVALIDATED_AT
-        assert stale_state.invalidation_reason == "preexisting_newer_invalidation"
-        assert await cache.get_thread_id_for_event(_ROOM_ID, _THREAD_ID) == _THREAD_ID
-        assert await cache.get_thread_id_for_event(_ROOM_ID, _ORPHAN_ID) is None
-
-        cursor = await cache._runtime.require_db().execute("PRAGMA table_info(thread_events)")
-        columns = [str(row[1]) for row in await cursor.fetchall()]
-        await cursor.close()
-        assert "event_json" not in columns
-        cursor = await cache._runtime.require_db().execute("SELECT rootpage FROM sqlite_master WHERE name = 'events'")
-        assert await cursor.fetchone() == events_rootpage_before
-        await cursor.close()
+        assert await cache.get_event(_ROOM_ID, _CHILD_ID) is None
     finally:
         await cache.close()
 
@@ -329,7 +240,7 @@ async def test_sqlite_version_10_migration_rolls_back_on_cancellation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cancellation after the schema rewrite leaves the complete version-10 database intact."""
+    """Cancellation during reset leaves the version-10 database intact."""
     db_path = tmp_path / "event_cache.db"
     await _prepare_sqlite_version_10(db_path)
     cancel_reason = "migration cancelled"
@@ -346,10 +257,9 @@ async def test_sqlite_version_10_migration_rolls_back_on_cancellation(
         version_cursor = await db.execute("PRAGMA user_version")
         assert await version_cursor.fetchone() == (10,)
         await version_cursor.close()
-        column_cursor = await db.execute("PRAGMA table_info(thread_events)")
-        columns = [str(row[1]) for row in await column_cursor.fetchall()]
-        await column_cursor.close()
-        assert "event_json" in columns
+        event_cursor = await db.execute("SELECT event_id FROM events")
+        assert await event_cursor.fetchone() == (_CHILD_ID,)
+        await event_cursor.close()
     finally:
         await db.close()
 
@@ -428,7 +338,7 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
             cursor = await db.execute(
                 "SELECT value FROM mindroom_event_cache_metadata WHERE key = 'schema_version'",
             )
-            assert await cursor.fetchone() == ("2",)
+            assert await cursor.fetchone() == ("3",)
             await cursor.close()
         finally:
             await cache.close()
@@ -458,7 +368,7 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
 
 
 @pytest.mark.asyncio
-async def test_postgres_version_2_maintenance_avoids_exclusive_schema_lock(
+async def test_postgres_current_version_maintenance_avoids_exclusive_schema_lock(
     postgres_event_cache_url: str,
 ) -> None:
     """Routine namespace maintenance must run beside readers without repeating migration DDL."""
@@ -478,8 +388,8 @@ async def test_postgres_version_2_maintenance_avoids_exclusive_schema_lock(
             migration_result = await migrate_postgres_schema(
                 maintainer,
                 namespace=namespace,
-                current_schema_version=2,
-                target_schema_version=2,
+                current_schema_version=3,
+                target_schema_version=3,
             )
             assert migration_result.migrated_from_schema_version is None
             assert migration_result.normalized_legacy_thread_payload_rows == 0
@@ -584,7 +494,7 @@ async def test_postgres_reconnect_rejects_changed_certification_generation(
     namespace = f"reconnect_generation_{uuid.uuid4().hex}"
     cache = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
     await cache.initialize()
-    expected_generation = cache.certification_generation
+    expected_generation = cache.cache_generation
     assert expected_generation is not None
     admin = await psycopg.AsyncConnection.connect(postgres_event_cache_url)
     try:
@@ -612,7 +522,7 @@ async def test_postgres_reconnect_rejects_changed_certification_generation(
         await db.close()
 
         assert await cache.get_event(_ROOM_ID, _MISSING_ID) is None
-        assert cache.certification_generation == expected_generation
+        assert cache.cache_generation is None
         assert cache.durable_writes_available is False
         diagnostics = cache.runtime_diagnostics()
         assert diagnostics["cache_postgres_disabled_reason"] == "certification_generation_changed"

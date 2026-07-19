@@ -16,11 +16,16 @@ It enforces the call-side half of the compaction invariants
 
 4. Retry on provider failure is deterministic.
    ``SummaryRetryPolicy`` decides which error classes warrant a smaller retry
-   (timeouts, typed context-window and safeguard errors, empty results, output
-   limits, and named legacy context-length fragments), the shrink schedule
+   (timeouts, typed context-window errors, empty results, output limits, and
+   named legacy context-length fragments), the shrink schedule
    (halving, clamped to the caller's smallest progress-preserving rebuild), and the
    give-up floor — no inline string matching at call sites. Selected typed
-   transient provider errors get one delayed same-budget retry.
+   transient provider errors get one delayed same-budget retry. Safeguard
+   refusals are deliberately not shrinkable: the retry wrapper in
+   ``history.compaction`` switches once to the configured fallback model,
+   keeping the summary prompt and summary input bytes, included runs, and
+   budget unchanged (only the target model differs) instead of shrinking a
+   request the model refused on content grounds.
 
 5. Output-capped summaries use an explicit retry signal.
    ``generate_compaction_summary`` refuses to return a likely truncated summary,
@@ -48,7 +53,7 @@ from agno.session.summary import SessionSummary
 from mindroom.cancellation import request_task_cancel
 from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
-from mindroom.error_handling import TRANSIENT_PROVIDER_STATUS_CODES, ModelSafeguardRefusalError
+from mindroom.error_handling import TRANSIENT_PROVIDER_STATUS_CODES
 from mindroom.history.types import COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
@@ -63,7 +68,7 @@ _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
 
 # Status 502 is excluded because ``ModelProviderError`` uses it for unclassified
 # errors. Default-502 errors retry only when their cause chain proves a typed
-# network failure. Safeguard refusals shrink before either transient path.
+# network failure.
 _TRANSIENT_SUMMARY_STATUS_CODES = TRANSIENT_PROVIDER_STATUS_CODES - {502}
 
 _SHRINKABLE_PROVIDER_ERROR_FRAGMENTS = (
@@ -126,7 +131,6 @@ _TYPED_SHRINKABLE_ERRORS = (
     _CompactionSummaryEmptyResultError,
     TimeoutError,
     ContextWindowExceededError,
-    ModelSafeguardRefusalError,
     CompactionSummaryOutputLimitError,
 )
 
