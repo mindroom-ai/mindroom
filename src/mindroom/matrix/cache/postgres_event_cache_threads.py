@@ -23,7 +23,6 @@ from .postgres_event_cache_events import (
     write_lookup_index_rows,
 )
 from .postgres_streaming_compaction import (
-    archived_thread_event_ids,
     compact_superseded_streaming_edits,
     delete_archived_events,
     load_archived_thread_events,
@@ -92,20 +91,13 @@ async def load_recent_room_thread_ids(
         db,
         """
         SELECT thread_id
-        FROM (
-            SELECT thread_id, origin_server_ts
-            FROM mindroom_event_cache_thread_events
-            WHERE namespace = %s AND room_id = %s
-            UNION ALL
-            SELECT thread_id, thread_origin_server_ts
-            FROM mindroom_event_cache_compacted_streaming_edits
-            WHERE namespace = %s AND room_id = %s AND thread_id IS NOT NULL
-        ) AS thread_activity
+        FROM mindroom_event_cache_thread_events
+        WHERE namespace = %s AND room_id = %s
         GROUP BY thread_id
         ORDER BY MAX(origin_server_ts) DESC, thread_id ASC
         LIMIT %s
         """,
-        (namespace, room_id, namespace, room_id, limit),
+        (namespace, room_id, limit),
     )
     return [str(row[0]) for row in rows]
 
@@ -544,32 +536,19 @@ async def append_existing_thread_event(
         db,
         """
         SELECT 1
-        FROM (
-            SELECT thread_id
-            FROM mindroom_event_cache_thread_events
-            WHERE namespace = %s AND room_id = %s AND thread_id = %s
-            UNION ALL
-            SELECT thread_id
-            FROM mindroom_event_cache_compacted_streaming_edits
-            WHERE namespace = %s AND room_id = %s AND thread_id = %s
-        ) AS cached_thread
+        FROM mindroom_event_cache_thread_events AS membership
+        JOIN mindroom_event_cache_events AS events
+            ON events.namespace = membership.namespace
+            AND events.event_id = membership.event_id
+            AND events.room_id = membership.room_id
+        WHERE membership.namespace = %s
+            AND membership.room_id = %s
+            AND membership.thread_id = %s
         LIMIT 1
         """,
-        (namespace, room_id, thread_id, namespace, room_id, thread_id),
+        (namespace, room_id, thread_id),
     )
-    if row is None:
-        await write_lookup_index_rows(
-            db,
-            namespace=namespace,
-            room_id=room_id,
-            serialized_events=[serialized_event],
-            cached_at=time.time(),
-            thread_id=thread_id,
-        )
-        if has_terminal_streaming_edit([serialized_event]):
-            await compact_superseded_streaming_edits(db, namespace=namespace, room_id=room_id)
-        return False
-
+    thread_exists = row is not None
     await write_lookup_index_rows(
         db,
         namespace=namespace,
@@ -578,27 +557,28 @@ async def append_existing_thread_event(
         cached_at=time.time(),
         thread_id=thread_id,
     )
-    await db.execute(
-        """
-        INSERT INTO mindroom_event_cache_thread_events(namespace, room_id, thread_id, event_id, origin_server_ts)
-        VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
-            thread_id = excluded.thread_id,
-            origin_server_ts = excluded.origin_server_ts,
-            event_json = NULL,
-            write_seq = nextval('mindroom_event_cache_write_seq')
-        """,
-        (
-            namespace,
-            room_id,
-            thread_id,
-            serialized_event.event_id,
-            serialized_event.origin_server_ts,
-        ),
-    )
+    if thread_exists:
+        await db.execute(
+            """
+            INSERT INTO mindroom_event_cache_thread_events(namespace, room_id, thread_id, event_id, origin_server_ts)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
+                thread_id = excluded.thread_id,
+                origin_server_ts = excluded.origin_server_ts,
+                event_json = NULL,
+                write_seq = nextval('mindroom_event_cache_write_seq')
+            """,
+            (
+                namespace,
+                room_id,
+                thread_id,
+                serialized_event.event_id,
+                serialized_event.origin_server_ts,
+            ),
+        )
     if has_terminal_streaming_edit([serialized_event]):
         await compact_superseded_streaming_edits(db, namespace=namespace, room_id=room_id)
-    return True
+    return thread_exists
 
 
 async def _upsert_thread_cache_state(
@@ -646,15 +626,7 @@ async def _thread_event_ids_for_thread(
         """,
         (namespace, room_id, thread_id),
     )
-    return [
-        *(str(row[0]) for row in rows),
-        *await archived_thread_event_ids(
-            db,
-            namespace=namespace,
-            room_id=room_id,
-            thread_id=thread_id,
-        ),
-    ]
+    return [str(row[0]) for row in rows]
 
 
 async def _thread_event_ids_for_room(
@@ -673,14 +645,7 @@ async def _thread_event_ids_for_room(
         """,
         (namespace, room_id),
     )
-    return [
-        *(str(row[0]) for row in rows),
-        *await archived_thread_event_ids(
-            db,
-            namespace=namespace,
-            room_id=room_id,
-        ),
-    ]
+    return [str(row[0]) for row in rows]
 
 
 async def _thread_ids_for_room(

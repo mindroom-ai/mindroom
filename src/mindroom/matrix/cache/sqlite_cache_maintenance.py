@@ -119,6 +119,12 @@ _ORPHAN_EDIT_INDEX_PREDICATE = """
         WHERE events.event_id = event_edits.edit_event_id
             AND events.room_id = event_edits.room_id
     )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM compacted_streaming_edits
+        WHERE compacted_streaming_edits.event_id = event_edits.edit_event_id
+            AND compacted_streaming_edits.room_id = event_edits.room_id
+    )
 """
 
 _ORPHAN_THREAD_EVENT_REFERENCE_PREDICATE = """
@@ -127,6 +133,12 @@ _ORPHAN_THREAD_EVENT_REFERENCE_PREDICATE = """
         FROM events
         WHERE events.event_id = thread_events.event_id
             AND events.room_id = thread_events.room_id
+    )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM compacted_streaming_edits
+        WHERE compacted_streaming_edits.event_id = thread_events.event_id
+            AND compacted_streaming_edits.room_id = thread_events.room_id
     )
 """
 

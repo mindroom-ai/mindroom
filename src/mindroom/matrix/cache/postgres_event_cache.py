@@ -360,30 +360,11 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
             namespace TEXT NOT NULL,
             event_id TEXT NOT NULL,
             room_id TEXT NOT NULL,
-            original_event_id TEXT NOT NULL,
             sender TEXT NOT NULL,
-            origin_server_ts BIGINT NOT NULL,
             event_json_zlib BYTEA NOT NULL,
             cached_at DOUBLE PRECISION NOT NULL,
             event_order BIGINT NOT NULL,
-            thread_id TEXT,
-            thread_origin_server_ts BIGINT,
-            thread_order BIGINT,
-            indexed_thread_id TEXT,
             PRIMARY KEY (namespace, event_id)
-        )
-        """,
-    )
-    await db.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_mindroom_event_cache_compacted_streaming_edits_original
-        ON mindroom_event_cache_compacted_streaming_edits(
-            namespace,
-            room_id,
-            original_event_id,
-            sender,
-            origin_server_ts,
-            event_order
         )
         """,
     )

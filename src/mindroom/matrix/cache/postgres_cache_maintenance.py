@@ -95,6 +95,13 @@ async def _orphan_edit_index_count(db: AsyncConnection, *, namespace: str) -> in
                     AND events.event_id = event_edits.edit_event_id
                     AND events.room_id = event_edits.room_id
             )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM mindroom_event_cache_compacted_streaming_edits AS archived
+                WHERE archived.namespace = event_edits.namespace
+                    AND archived.event_id = event_edits.edit_event_id
+                    AND archived.room_id = event_edits.room_id
+            )
         """,
         (namespace,),
     )
@@ -113,6 +120,13 @@ async def _orphan_thread_event_reference_count(db: AsyncConnection, *, namespace
                 WHERE events.namespace = thread_events.namespace
                     AND events.event_id = thread_events.event_id
                     AND events.room_id = thread_events.room_id
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM mindroom_event_cache_compacted_streaming_edits AS archived
+                WHERE archived.namespace = thread_events.namespace
+                    AND archived.event_id = thread_events.event_id
+                    AND archived.room_id = thread_events.room_id
             )
         """,
         (namespace,),
@@ -136,6 +150,13 @@ async def _repair_orphan_derived_rows(
                 WHERE events.namespace = event_edits.namespace
                     AND events.event_id = event_edits.edit_event_id
                     AND events.room_id = event_edits.room_id
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM mindroom_event_cache_compacted_streaming_edits AS archived
+                WHERE archived.namespace = event_edits.namespace
+                    AND archived.event_id = event_edits.edit_event_id
+                    AND archived.room_id = event_edits.room_id
             )
         """,
         (namespace,),
@@ -168,6 +189,13 @@ async def _repair_orphan_derived_rows(
                     AND events.event_id = thread_events.event_id
                     AND events.room_id = thread_events.room_id
             )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM mindroom_event_cache_compacted_streaming_edits AS archived
+                WHERE archived.namespace = thread_events.namespace
+                    AND archived.event_id = thread_events.event_id
+                    AND archived.room_id = thread_events.room_id
+            )
         ON CONFLICT(namespace, room_id, thread_id) DO UPDATE SET
             validated_at = NULL,
             invalidated_at = CASE
@@ -196,6 +224,13 @@ async def _repair_orphan_derived_rows(
                 WHERE events.namespace = thread_events.namespace
                     AND events.event_id = thread_events.event_id
                     AND events.room_id = thread_events.room_id
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM mindroom_event_cache_compacted_streaming_edits AS archived
+                WHERE archived.namespace = thread_events.namespace
+                    AND archived.event_id = thread_events.event_id
+                    AND archived.room_id = thread_events.room_id
             )
         """,
         (namespace,),

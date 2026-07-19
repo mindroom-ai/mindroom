@@ -22,14 +22,10 @@ from .event_cache_events import (
 )
 from .postgres_cursor import fetchall, fetchone, rowcount
 from .postgres_streaming_compaction import (
-    archived_dependent_edit_ids,
     compact_superseded_streaming_edits,
     delete_archived_events,
     load_archived_event,
-    load_archived_thread_id,
     load_latest_archived_edit,
-    load_recent_archived_room_events,
-    restore_archived_event_projections,
 )
 
 if TYPE_CHECKING:
@@ -45,40 +41,63 @@ _ORPHAN_THREAD_INDEX_PREDICATE = """
             AND events.event_id = event_threads.event_id
             AND events.room_id = event_threads.room_id
     )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM mindroom_event_cache_compacted_streaming_edits AS archived
+        WHERE archived.namespace = event_threads.namespace
+            AND archived.event_id = event_threads.event_id
+            AND archived.room_id = event_threads.room_id
+    )
     AND NOT (
         event_threads.event_id = event_threads.thread_id
         AND (
             EXISTS (
                 SELECT 1
                 FROM mindroom_event_cache_event_threads AS child
-                JOIN mindroom_event_cache_events AS child_event
-                    ON child_event.namespace = child.namespace
-                    AND child_event.event_id = child.event_id
-                    AND child_event.room_id = child.room_id
                 WHERE child.namespace = event_threads.namespace
                     AND child.room_id = event_threads.room_id
                     AND child.thread_id = event_threads.thread_id
                     AND child.event_id != child.thread_id
+                    AND (
+                        EXISTS (
+                            SELECT 1
+                            FROM mindroom_event_cache_events AS child_event
+                            WHERE child_event.namespace = child.namespace
+                                AND child_event.event_id = child.event_id
+                                AND child_event.room_id = child.room_id
+                        )
+                        OR EXISTS (
+                            SELECT 1
+                            FROM mindroom_event_cache_compacted_streaming_edits AS archived_child
+                            WHERE archived_child.namespace = child.namespace
+                                AND archived_child.event_id = child.event_id
+                                AND archived_child.room_id = child.room_id
+                        )
+                    )
             )
             OR EXISTS (
                 SELECT 1
                 FROM mindroom_event_cache_thread_events AS child_membership
-                JOIN mindroom_event_cache_events AS child_event
-                    ON child_event.namespace = child_membership.namespace
-                    AND child_event.event_id = child_membership.event_id
-                    AND child_event.room_id = child_membership.room_id
                 WHERE child_membership.namespace = event_threads.namespace
                     AND child_membership.room_id = event_threads.room_id
                     AND child_membership.thread_id = event_threads.thread_id
                     AND child_membership.event_id != child_membership.thread_id
-            )
-            OR EXISTS (
-                SELECT 1
-                FROM mindroom_event_cache_compacted_streaming_edits AS archived_child
-                WHERE archived_child.namespace = event_threads.namespace
-                    AND archived_child.room_id = event_threads.room_id
-                    AND archived_child.indexed_thread_id = event_threads.thread_id
-                    AND archived_child.event_id != event_threads.thread_id
+                    AND (
+                        EXISTS (
+                            SELECT 1
+                            FROM mindroom_event_cache_events AS child_event
+                            WHERE child_event.namespace = child_membership.namespace
+                                AND child_event.event_id = child_membership.event_id
+                                AND child_event.room_id = child_membership.room_id
+                        )
+                        OR EXISTS (
+                            SELECT 1
+                            FROM mindroom_event_cache_compacted_streaming_edits AS archived_child
+                            WHERE archived_child.namespace = child_membership.namespace
+                                AND archived_child.event_id = child_membership.event_id
+                                AND archived_child.room_id = child_membership.room_id
+                        )
+                    )
             )
         )
     )
@@ -132,18 +151,7 @@ async def load_recent_room_events(
         """,
         (namespace, room_id, since_ts_ms, event_type, limit),
     )
-    active = [(int(row[0]), int(row[1]), json.loads(row[2])) for row in rows]
-    if event_type != "m.room.message":
-        return [event for _timestamp, _order, event in active]
-    archived = await load_recent_archived_room_events(
-        db,
-        namespace=namespace,
-        room_id=room_id,
-        since_ts_ms=since_ts_ms,
-        limit=limit,
-    )
-    ordered = sorted([*active, *archived], key=lambda row: row[:2], reverse=True)
-    return [event for _timestamp, _order, event in ordered[:limit]]
+    return [json.loads(row[2]) for row in rows]
 
 
 async def load_latest_edit(
@@ -341,14 +349,7 @@ async def load_thread_id_for_event(
         """,
         (namespace, room_id, event_id),
     )
-    if row is not None:
-        return str(row[0])
-    return await load_archived_thread_id(
-        db,
-        namespace=namespace,
-        room_id=room_id,
-        event_id=event_id,
-    )
+    return None if row is None else str(row[0])
 
 
 async def redact_event_locked(
@@ -365,13 +366,7 @@ async def redact_event_locked(
         room_id,
         original_event_id=event_id,
     )
-    archived_edit_ids = await archived_dependent_edit_ids(
-        db,
-        namespace=namespace,
-        room_id=room_id,
-        original_event_id=event_id,
-    )
-    removed_event_ids = redaction_removal_event_ids(event_id, [*dependent_edit_ids, *archived_edit_ids])
+    removed_event_ids = redaction_removal_event_ids(event_id, dependent_edit_ids)
     affected_thread_ids = await _thread_ids_for_event_ids(
         db,
         namespace=namespace,
@@ -468,12 +463,6 @@ async def write_lookup_index_rows(
     if not serialized_events:
         return
     event_ids = [event.event_id for event in serialized_events]
-    await restore_archived_event_projections(
-        db,
-        namespace=namespace,
-        room_id=room_id,
-        event_ids=event_ids,
-    )
     await delete_archived_events(
         db,
         namespace=namespace,
@@ -612,22 +601,15 @@ async def _thread_ids_for_event_ids(
     room_id: str,
     event_ids: list[str],
 ) -> list[str]:
-    """Return roots whose active or archived supporting rows will be removed."""
+    """Return roots whose supporting rows will be removed."""
     rows = await fetchall(
         db,
         """
         SELECT thread_id
         FROM mindroom_event_cache_event_threads
         WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
-        UNION
-        SELECT indexed_thread_id
-        FROM mindroom_event_cache_compacted_streaming_edits
-        WHERE namespace = %s
-            AND room_id = %s
-            AND event_id = ANY(%s)
-            AND indexed_thread_id IS NOT NULL
         """,
-        (namespace, room_id, event_ids, namespace, room_id, event_ids),
+        (namespace, room_id, event_ids),
     )
     return [str(row[0]) for row in rows]
 

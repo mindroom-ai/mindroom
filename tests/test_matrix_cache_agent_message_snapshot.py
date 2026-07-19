@@ -175,7 +175,7 @@ async def test_get_latest_agent_message_snapshot_returns_streaming_status_for_th
 
 
 @pytest.mark.asyncio
-async def test_thread_snapshot_resolves_compacted_edit_without_materializing_cold_history(
+async def test_thread_snapshot_resolves_compacted_edit_after_terminal_redaction(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
     """Thread candidates stream from active rows while latest-edit lookup retains cold fallback."""
