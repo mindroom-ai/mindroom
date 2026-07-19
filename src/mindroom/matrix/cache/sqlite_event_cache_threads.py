@@ -625,18 +625,6 @@ async def append_existing_thread_event(
     )
     row = await cursor.fetchone()
     await cursor.close()
-    thread_exists = row is not None
-    if row is None:
-        await write_lookup_index_rows(
-            db,
-            principal_id=principal_id,
-            room_id=room_id,
-            serialized_events=[serialized_event],
-            cached_at=time.time(),
-            thread_id=thread_id,
-        )
-        return False
-
     await write_lookup_index_rows(
         db,
         principal_id=principal_id,
@@ -645,34 +633,36 @@ async def append_existing_thread_event(
         cached_at=time.time(),
         thread_id=thread_id,
     )
-    if thread_exists:
-        write_sequence = (await allocate_write_sequences(db, 1))[0]
-        await db.execute(
-            """
-            INSERT INTO thread_events(
-                principal_id,
-                room_id,
-                thread_id,
-                event_id,
-                origin_server_ts,
-                write_seq
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(principal_id, room_id, event_id) DO UPDATE SET
-                thread_id = excluded.thread_id,
-                origin_server_ts = excluded.origin_server_ts,
-                write_seq = excluded.write_seq
-            """,
-            (
-                principal_id,
-                room_id,
-                thread_id,
-                serialized_event.event_id,
-                serialized_event.origin_server_ts,
-                write_sequence,
-            ),
+    if row is None:
+        return False
+
+    write_sequence = (await allocate_write_sequences(db, 1))[0]
+    await db.execute(
+        """
+        INSERT INTO thread_events(
+            principal_id,
+            room_id,
+            thread_id,
+            event_id,
+            origin_server_ts,
+            write_seq
         )
-    return thread_exists
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(principal_id, room_id, event_id) DO UPDATE SET
+            thread_id = excluded.thread_id,
+            origin_server_ts = excluded.origin_server_ts,
+            write_seq = excluded.write_seq
+        """,
+        (
+            principal_id,
+            room_id,
+            thread_id,
+            serialized_event.event_id,
+            serialized_event.origin_server_ts,
+            write_sequence,
+        ),
+    )
+    return True
 
 
 async def _thread_event_ids_for_thread(

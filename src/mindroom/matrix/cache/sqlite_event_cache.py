@@ -589,11 +589,6 @@ class SqliteEventCache:
         principal_generation = f"{generation}\0{self.principal_id}".encode()
         return hashlib.sha256(principal_generation).hexdigest()
 
-    @property
-    def certification_generation(self) -> str | None:
-        """Return the durable generation bound to certified sync checkpoints."""
-        return self._runtime.certification_generation
-
     def runtime_diagnostics(self) -> dict[str, object]:
         """Return log-safe runtime state for sync certification diagnostics."""
         diagnostics: dict[str, object] = {
@@ -608,7 +603,7 @@ class SqliteEventCache:
                 self.principal_id,
             ),
             "cache_sqlite_departed_room_count": len(self._runtime.departed_room_ids(self.principal_id)),
-            "cache_certification_generation_present": self.certification_generation is not None,
+            "cache_certification_generation_present": self.cache_generation is not None,
         }
         if self._runtime.disabled_reason is not None:
             diagnostics["cache_sqlite_disabled_reason"] = self._runtime.disabled_reason

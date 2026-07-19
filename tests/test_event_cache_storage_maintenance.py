@@ -494,7 +494,7 @@ async def test_postgres_reconnect_rejects_changed_certification_generation(
     namespace = f"reconnect_generation_{uuid.uuid4().hex}"
     cache = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
     await cache.initialize()
-    expected_generation = cache.certification_generation
+    expected_generation = cache.cache_generation
     assert expected_generation is not None
     admin = await psycopg.AsyncConnection.connect(postgres_event_cache_url)
     try:
@@ -522,7 +522,7 @@ async def test_postgres_reconnect_rejects_changed_certification_generation(
         await db.close()
 
         assert await cache.get_event(_ROOM_ID, _MISSING_ID) is None
-        assert cache.certification_generation == expected_generation
+        assert cache.cache_generation == expected_generation
         assert cache.durable_writes_available is False
         diagnostics = cache.runtime_diagnostics()
         assert diagnostics["cache_postgres_disabled_reason"] == "certification_generation_changed"

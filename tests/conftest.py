@@ -781,7 +781,6 @@ def make_event_cache_mock() -> AsyncMock:
     event_cache.principal_id = "@mindroom_test:localhost"
     event_cache.cache_generation = "test-cache-generation"
     event_cache.durable_writes_available = True
-    event_cache.certification_generation = "test-cache-generation"
     event_cache.get_event.return_value = None
     event_cache.get_latest_edit.return_value = None
     event_cache.get_mxc_text.return_value = None

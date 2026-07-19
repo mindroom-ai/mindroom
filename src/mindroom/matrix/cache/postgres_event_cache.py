@@ -968,13 +968,6 @@ class PostgresEventCache:
             return None
         return self._runtime.certification_generation
 
-    @property
-    def certification_generation(self) -> str | None:
-        """Return the durable generation bound to certified sync checkpoints."""
-        if self._runtime.has_pending_principal_purge:
-            return None
-        return self._runtime.certification_generation
-
     async def initialize(self) -> None:
         """Open the PostgreSQL database and create the cache schema."""
         await self._runtime.initialize()

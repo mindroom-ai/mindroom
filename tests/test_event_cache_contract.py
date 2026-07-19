@@ -46,7 +46,7 @@ class TestConversationEventCacheContract:
         assert isinstance(event_cache, ConversationEventCache)
         assert event_cache.is_initialized is True
         assert event_cache.durable_writes_available is True
-        assert isinstance(event_cache.certification_generation, str)
+        assert isinstance(event_cache.cache_generation, str)
         assert isinstance(event_cache.runtime_diagnostics()["cache_backend"], str)
         assert isinstance(event_cache.pending_durable_write_room_ids(), tuple)
 
