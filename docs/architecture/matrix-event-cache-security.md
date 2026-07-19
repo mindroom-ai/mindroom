@@ -74,6 +74,10 @@ Every authoritative leave invalidates both the in-memory and saved checkpoint be
 
 If saved-checkpoint deletion fails, the runtime disables cache reads and writes, leaves durable rows consistent with the older checkpoint, and poisons further certification so restart can replay the leave.
 
+`SyncCacheTrust` owns saved-checkpoint loading, cache-generation validation, checkpoint persistence and invalidation, cold-start principal cleanup sequencing, and generation-safe redaction retry-token selection.
+
+The bot lifecycle owns authenticated identity binding, Matrix client token assignment, authoritative room membership detection, local-leave coordination, and calls into room/cache lifecycle services.
+
 Sync-response leave cleanup commits before unrelated call reconciliation can suspend or fail.
 
 Thread lookup indexes are rebuilt on event replacement, while root self-mappings survive only when a current batch or a surviving child still proves them.
