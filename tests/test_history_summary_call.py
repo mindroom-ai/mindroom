@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
@@ -52,6 +53,9 @@ from tests.history_helpers import (  # noqa: F401
     _make_config,
     _session,
 )
+
+if TYPE_CHECKING:
+    from agno.run.agent import RunOutput
 
 
 @pytest.mark.asyncio
@@ -595,6 +599,32 @@ def test_build_summary_input_preserves_source_prompt_metadata_when_message_text_
     assert "Original coalesced prompt missing from replay." in summary_input
 
 
+def test_build_summary_input_preserves_source_prompt_metadata_for_coincidental_substring() -> None:
+    run = _completed_run(
+        "run-short-source-prompt",
+        messages=[
+            Message(role="user", content="The smoke test passed."),
+            Message(role="assistant", content="Visible answer."),
+        ],
+    )
+    run.metadata = {
+        MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {
+            "$short": "ok",
+        },
+    }
+
+    summary_input, included_runs = _build_summary_input(
+        previous_summary=None,
+        compacted_runs=[run],
+        max_input_tokens=10_000,
+        history_settings=_ALL_HISTORY_SETTINGS,
+    )
+
+    assert included_runs == [run]
+    assert MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY in summary_input
+    assert "$short" in summary_input
+
+
 def test_build_summary_input_deduplicates_only_exact_generated_memory_items() -> None:
     shared_memory = "Shared durable memory."
     first_memory = "First-run durable memory."
@@ -659,6 +689,45 @@ def test_build_summary_input_deduplicates_only_exact_generated_memory_items() ->
     assert "Team answer." in summary_input
     assert "Tool evidence must survive." in summary_input
     assert second_run.messages[0].content == original_second_content
+
+
+def test_build_summary_input_deduplicates_when_source_prompt_is_memory_substring() -> None:
+    shared_memory = "First. and Second. are coincidental substrings in this shared memory."
+
+    def run_with_prompt(run_id: str, prompt: str) -> RunOutput:
+        run = _completed_run(
+            run_id,
+            messages=[
+                Message(
+                    role="user",
+                    content=(
+                        f"{prompt}\n\n"
+                        "[Automatically extracted agent file memories - may not be relevant to current context]\n"
+                        "Previous agent file memories that might be related:\n"
+                        f"- {shared_memory}"
+                    ),
+                ),
+                Message(role="assistant", content=f"{prompt} answer."),
+            ],
+        )
+        run.metadata = {MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {f"${run_id}": prompt}}
+        return run
+
+    runs = [
+        run_with_prompt("run-memory-first", "First."),
+        run_with_prompt("run-memory-second", "Second."),
+    ]
+
+    summary_input, included_runs = _build_summary_input(
+        previous_summary=None,
+        compacted_runs=runs,
+        max_input_tokens=10_000,
+        history_settings=_ALL_HISTORY_SETTINGS,
+    )
+
+    assert included_runs == runs
+    assert summary_input.count(shared_memory) == 1
+    assert "1 repeated agent file memory item omitted" in summary_input
 
 
 def test_build_summary_input_leaves_ambiguous_multiline_memory_context_unchanged() -> None:

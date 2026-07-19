@@ -88,6 +88,8 @@ _REPEATED_MEMORY_NOTE = (
     "[Compaction projection: {count} repeated {context_type} memory {noun} omitted; "
     "identical text appears earlier in this summary input.]"
 )
+_SOURCE_PROMPT_LEFT_BOUNDARIES = ("\n\n", "<![CDATA[")
+_SOURCE_PROMPT_RIGHT_BOUNDARIES = ("\n\n", "]]></msg>")
 
 
 @dataclass(frozen=True)
@@ -910,8 +912,8 @@ def _metadata_for_summary(metadata: dict[str, object], messages: Sequence[Messag
 
 def _source_prompts_are_represented(source_prompts: Sequence[str], messages: Sequence[Message]) -> bool:
     """Return whether a source-prompt map adds no text beyond replayed user messages."""
-    user_content = "\n".join(_render_message_content(message) for message in messages if message.role == "user")
-    return all(prompt in user_content for prompt in source_prompts)
+    user_contents = tuple(_render_message_content(message) for message in messages if message.role == "user")
+    return all(any(_source_prompt_spans(content, (prompt,)) for content in user_contents) for prompt in source_prompts)
 
 
 def _source_prompt_texts(source_prompts: object) -> tuple[str, ...] | None:
@@ -970,9 +972,21 @@ def _source_prompt_spans(content: str, source_prompts: Sequence[str]) -> tuple[t
     for source_prompt in source_prompts:
         start = 0
         while (index := content.find(source_prompt, start)) >= 0:
-            spans.append((index, index + len(source_prompt)))
+            end = index + len(source_prompt)
+            if _has_source_prompt_boundaries(content, index, end):
+                spans.append((index, end))
             start = index + len(source_prompt)
     return tuple(spans)
+
+
+def _has_source_prompt_boundaries(content: str, start: int, end: int) -> bool:
+    left = content[:start]
+    right = content[end:]
+    has_left_boundary = start == 0 or any(left.endswith(boundary) for boundary in _SOURCE_PROMPT_LEFT_BOUNDARIES)
+    has_right_boundary = end == len(content) or any(
+        right.startswith(boundary) for boundary in _SOURCE_PROMPT_RIGHT_BOUNDARIES
+    )
+    return has_left_boundary and has_right_boundary
 
 
 def _spans_overlap(left: tuple[int, int], right: tuple[int, int]) -> bool:
