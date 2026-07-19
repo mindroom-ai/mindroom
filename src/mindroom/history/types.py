@@ -17,7 +17,7 @@ _CompactionLifecycleStatus = Literal["success", "failed", "timeout"]
 CompactionAvailabilityReason = Literal[
     "no_context_window",
     "non_positive_summary_input_budget",
-    "summary_input_budget_at_or_below_retry_floor",
+    "summary_input_budget_without_retry_headroom",
 ]
 _ReplayPlanMode = Literal["configured", "limited", "disabled"]
 

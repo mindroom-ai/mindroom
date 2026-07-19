@@ -554,28 +554,27 @@ async def _generate_compaction_summary_with_retry(
                 duration_ms=duration_ms,
                 error=str(exc) or type(exc).__name__,
             )
-            shrink_retry = retry_policy.should_shrink(exc)
-            retry_budget = retry_policy.retry_budget(
+            retry_decision = retry_policy.retry_budget(
                 attempt=attempt,
                 budget=budget,
                 input_tokens=estimated_input_tokens,
                 error=exc,
             )
-            if retry_budget is not None:
+            if retry_decision is not None:
                 rebuilt_input, rebuilt_runs = _build_summary_input(
                     previous_summary=previous_summary,
                     compacted_runs=compactable_runs,
                     history_settings=history_settings,
-                    max_input_tokens=retry_budget,
+                    max_input_tokens=retry_decision.budget,
                     token_estimator=token_estimator,
                 )
                 if rebuilt_runs:
                     rebuilt_input_tokens = token_estimator(rebuilt_input)
-                    if shrink_retry and rebuilt_input_tokens >= estimated_input_tokens:
+                    if retry_decision.kind == "shrink" and rebuilt_input_tokens >= estimated_input_tokens:
                         raise
                     summary_input = rebuilt_input
                     included_runs = rebuilt_runs
-                    budget = retry_budget
+                    budget = retry_decision.budget
                     attempt += 1
                     continue
             raise

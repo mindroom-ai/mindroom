@@ -190,10 +190,10 @@ Automatic destructive compaction is enabled by default through `defaults.compact
 `replay_window_tokens` can cap persisted replay, required-compaction planning, and summary input chunks below the model's real context window without lowering the provider request limit.
 If the active model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
 The effective replay window also caps each compaction summary input chunk.
-Destructive compaction requires the resolved summary input budget to exceed 1,000 tokens.
+Destructive compaction requires the resolved summary input budget to exceed 2,000 tokens.
 Set `enabled: false` in defaults or the agent override to disable automatic pre-reply compaction.
 Manual `compact_context` records a durable request that runs before the next reply in the same conversation scope.
-Manual `compact_context` remains available when a compaction model and context window are configured and the resolved summary input budget exceeds 1,000 tokens.
+Manual `compact_context` remains available when a compaction model and context window are configured and the resolved summary input budget exceeds 2,000 tokens.
 Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place; otherwise MindRoom leaves the session unchanged and relies on replay fitting for that reply.
 Compaction rewrites the live session so compacted history moves into `session.summary` while only recent raw runs remain in `session.runs`
 - **max_tool_calls_from_history**: Max tool call messages replayed from history (per-agent override)

@@ -369,7 +369,7 @@ async def test_compact_context_requires_positive_summary_input_budget(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_compact_context_requires_summary_input_budget_above_retry_floor(tmp_path: Path) -> None:
+async def test_compact_context_requires_summary_input_budget_with_retry_headroom(tmp_path: Path) -> None:
     """Manual compaction should not set the force flag when the summary budget cannot shrink."""
     config, runtime_paths = _make_config_with_context_window(
         tmp_path,
@@ -395,7 +395,7 @@ async def test_compact_context_requires_summary_input_budget_above_retry_floor(t
     assert state.force_compact_before_next_run is False
     assert result == (
         "Error: Compaction is unavailable for this scope because the summary input budget must exceed "
-        "1,000 tokens so a failed summary call can retry with a smaller request."
+        "2,000 tokens to provide meaningful headroom for a smaller retry."
     )
 
 

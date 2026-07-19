@@ -260,10 +260,10 @@ You can tune compaction behavior with these settings:
 When the active runtime model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
 When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
 The effective replay window also caps each compaction summary input chunk.
-Destructive compaction requires the resolved summary input budget to exceed 1,000 tokens.
+Destructive compaction requires the resolved summary input budget to exceed 2,000 tokens.
 
 Manual `compact_context` records a durable request that runs before the next reply in the same conversation scope.
-Manual `compact_context` remains available when a compaction model and context window are configured and the resolved summary input budget exceeds 1,000 tokens.
+Manual `compact_context` remains available when a compaction model and context window are configured and the resolved summary input budget exceeds 2,000 tokens.
 It still uses the active runtime window for the final replay-fit step, while an explicit `compaction.model` can supply the summary-generation window subject to the same minimum summary-input budget.
 If you set `compaction.model`, that summary model must also define its own `context_window` for the durable summary-generation pass.
 Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place.

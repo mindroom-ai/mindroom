@@ -37,7 +37,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import httpx
 from agno.exceptions import ContextWindowExceededError, ModelProviderError
@@ -111,6 +111,17 @@ class _CompactionSummaryEmptyResultError(RuntimeError):
     """Raised when the summary model returns a success response with no text."""
 
 
+_SummaryRetryKind = Literal["shrink", "same-budget-transient"]
+
+
+@dataclass(frozen=True)
+class _SummaryRetryDecision:
+    """One policy-owned retry action for the compaction summary caller."""
+
+    budget: int
+    kind: _SummaryRetryKind
+
+
 @dataclass(frozen=True)
 class SummaryRetryPolicy:
     """Explicit retry policy for failed compaction summary calls.
@@ -145,8 +156,13 @@ class SummaryRetryPolicy:
         budget: int,
         input_tokens: int,
         error: Exception,
-    ) -> int | None:
-        """Return the next smaller or same input budget, or None when retries end."""
+    ) -> _SummaryRetryDecision | None:
+        """Return the next retry action, or None when retries end.
+
+        The decision kind is authoritative so callers cannot independently
+        reclassify the error and apply shrink-only safeguards to a same-budget
+        transient retry.
+        """
         if attempt >= self.max_attempts:
             return None
         if self.should_shrink(error):
@@ -155,12 +171,12 @@ class SummaryRetryPolicy:
                 max(COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS, input_tokens // self.shrink_divisor),
             )
             if smaller_budget < input_tokens:
-                return smaller_budget
+                return _SummaryRetryDecision(budget=smaller_budget, kind="shrink")
         if isinstance(error, ModelProviderError):
             if error.status_code in _TRANSIENT_SUMMARY_STATUS_CODES:
-                return budget
+                return _SummaryRetryDecision(budget=budget, kind="same-budget-transient")
             if error.status_code == 502 and _has_typed_network_cause(error):
-                return budget
+                return _SummaryRetryDecision(budget=budget, kind="same-budget-transient")
         return None
 
 

@@ -388,7 +388,7 @@ defaults:
     enabled: true
     threshold_percent: 0.8
     # The effective replay window also caps compaction summary input chunks.
-    # Destructive compaction requires a resolved summary input budget greater than 1,000 tokens.
+    # Destructive compaction requires a resolved summary input budget greater than 2,000 tokens.
     replay_window_tokens: null     # Optional operational cap; does not change the model's real context window
     reserve_tokens: 16384
   max_tool_calls_from_history: null  # Limit tool call messages replayed from history (null = no limit)

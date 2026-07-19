@@ -182,10 +182,11 @@ def describe_compaction_unavailability(plan: ResolvedHistoryExecutionPlan) -> st
         return "no context_window is configured on the active model"
     if reason == "non_positive_summary_input_budget":
         return "the active compaction model leaves no usable summary input budget after reserve and prompt overhead"
-    if reason == "summary_input_budget_at_or_below_retry_floor":
+    if reason == "summary_input_budget_without_retry_headroom":
         return (
             "the summary input budget must exceed "
-            f"{COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS:,} tokens so a failed summary call can retry with a smaller request"
+            f"{2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS:,} tokens to provide meaningful headroom "
+            "for a smaller retry"
         )
     return None
 
@@ -198,8 +199,8 @@ def _resolve_summary_input_budget(
 ) -> tuple[int | None, CompactionAvailabilityReason | None]:
     """Resolve a summary budget large enough for the request envelope and one degradation retry.
 
-    The shared retry floor is an inclusive lower bound for retry targets, so
-    plans are available only when their initial budget is strictly larger.
+    Plans require more than twice the shared retry floor so halving leaves a
+    genuinely smaller target with room for the request envelope and run content.
     """
     if compaction_context_window is None:
         return None, "no_context_window"
@@ -216,8 +217,8 @@ def _resolve_summary_input_budget(
         summary_input_budget_tokens = min(summary_input_budget_tokens, replay_window_tokens)
     if summary_input_budget_tokens <= 0:
         return summary_input_budget_tokens, "non_positive_summary_input_budget"
-    if summary_input_budget_tokens <= COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS:
-        return summary_input_budget_tokens, "summary_input_budget_at_or_below_retry_floor"
+    if summary_input_budget_tokens <= 2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS:
+        return summary_input_budget_tokens, "summary_input_budget_without_retry_headroom"
     return summary_input_budget_tokens, None
 
 

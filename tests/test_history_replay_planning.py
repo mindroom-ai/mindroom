@@ -141,9 +141,9 @@ async def test_small_replay_window_cannot_select_required_compaction_without_pro
 
     assert execution_plan.summary_input_budget_tokens == 1
     assert execution_plan.destructive_compaction_available is False
-    assert execution_plan.unavailable_reason == "summary_input_budget_at_or_below_retry_floor"
+    assert execution_plan.unavailable_reason == "summary_input_budget_without_retry_headroom"
     assert describe_compaction_unavailability(execution_plan) == (
-        "the summary input budget must exceed 1,000 tokens so a failed summary call can retry with a smaller request"
+        "the summary input budget must exceed 2,000 tokens to provide meaningful headroom for a smaller retry"
     )
 
     with patch("mindroom.history.runtime._run_scope_compaction_with_lifecycle", new=AsyncMock()) as compact_mock:
@@ -749,8 +749,8 @@ def test_resolve_history_execution_plan_marks_non_positive_summary_budget_unavai
 @pytest.mark.parametrize(
     ("replay_window_tokens", "expected_available"),
     [
-        (COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS, False),
-        (COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS + 1, True),
+        (2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS, False),
+        (2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS + 1, True),
     ],
 )
 def test_resolve_history_execution_plan_enforces_minimum_summary_input_budget(

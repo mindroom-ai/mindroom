@@ -246,7 +246,7 @@ class CompactionOverrideConfig(BaseModel):
         ge=1,
         description=(
             "Optional operational cap for persisted replay, required-compaction planning, and summary input chunks; "
-            "destructive compaction requires the resolved summary input budget to exceed 1,000 tokens"
+            "destructive compaction requires the resolved summary input budget to exceed 2,000 tokens"
         ),
     )
     reserve_tokens: int | None = Field(
@@ -295,7 +295,7 @@ class CompactionConfig(BaseModel):
         ge=1,
         description=(
             "Optional operational cap for persisted replay, required-compaction planning, and summary input chunks; "
-            "destructive compaction requires the resolved summary input budget to exceed 1,000 tokens"
+            "destructive compaction requires the resolved summary input budget to exceed 2,000 tokens"
         ),
     )
     reserve_tokens: int = Field(
