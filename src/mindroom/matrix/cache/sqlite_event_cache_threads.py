@@ -395,10 +395,10 @@ async def mark_thread_stale_locked(
     reason: str,
 ) -> None:
     """Persist a durable invalidate-and-refetch marker within an active transaction."""
-    incremental_reasons = incremental_thread_revalidation_reasons()
-    incremental_reason_placeholders = ", ".join("?" for _ in incremental_reasons)
+    incremental_reasons_json = json.dumps(incremental_thread_revalidation_reasons())
+    incoming_is_incremental = is_incremental_thread_revalidation_reason(reason)
     await db.execute(
-        f"""
+        """
         INSERT INTO thread_cache_state(
             room_id,
             thread_id,
@@ -417,20 +417,34 @@ async def mark_thread_stale_locked(
             invalidation_reason = CASE
                 WHEN thread_cache_state.invalidated_at IS NULL
                     THEN excluded.invalidation_reason
-                WHEN ? AND thread_cache_state.invalidation_reason NOT IN ({incremental_reason_placeholders})
+                WHEN ?
+                    AND NOT COALESCE(
+                        thread_cache_state.invalidation_reason
+                            IN (SELECT value FROM json_each(?)),
+                        FALSE
+                    )
                     THEN thread_cache_state.invalidation_reason
+                WHEN NOT ?
+                    AND COALESCE(
+                        thread_cache_state.invalidation_reason
+                            IN (SELECT value FROM json_each(?)),
+                        FALSE
+                    )
+                    THEN excluded.invalidation_reason
                 WHEN excluded.invalidated_at >= thread_cache_state.invalidated_at
                     THEN excluded.invalidation_reason
                 ELSE thread_cache_state.invalidation_reason
             END
-        """,  # noqa: S608
+        """,
         (
             room_id,
             thread_id,
             time.time(),
             reason,
-            is_incremental_thread_revalidation_reason(reason),
-            *incremental_reasons,
+            incoming_is_incremental,
+            incremental_reasons_json,
+            incoming_is_incremental,
+            incremental_reasons_json,
         ),
     )
 
