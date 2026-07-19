@@ -53,6 +53,7 @@ class TestConversationEventCacheContract:
         event_cache.disable("contract_test")
 
         assert event_cache.durable_writes_available is False
+        assert event_cache.cache_generation is None
         assert await event_cache.get_event("!room:localhost", "$missing") is None
         assert (
             await event_cache.get_recent_room_events(

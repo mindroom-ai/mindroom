@@ -582,6 +582,7 @@ class SqliteEventCache:
         generation = self._runtime.certification_generation
         if (
             generation is None
+            or self._runtime.is_disabled
             or self._runtime.is_principal_disabled(self.principal_id)
             or self._runtime.has_pending_principal_purge(self.principal_id)
         ):

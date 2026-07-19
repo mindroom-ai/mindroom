@@ -964,7 +964,7 @@ class PostgresEventCache:
     @property
     def cache_generation(self) -> str | None:
         """Return the principal namespace's durable cache generation when available."""
-        if self._runtime.has_pending_principal_purge:
+        if self._runtime.is_disabled or self._runtime.has_pending_principal_purge:
             return None
         return self._runtime.certification_generation
 
