@@ -8,8 +8,15 @@ from __future__ import annotations
 
 import json
 from functools import lru_cache
+from typing import Literal
 
 import tiktoken
+
+_CompactionEstimateKind = Literal[
+    "model_tiktoken_tokens",
+    "o200k_base_tokens",
+    "utf8_bytes_token_upper_bound",
+]
 
 
 def estimate_text_tokens(value: str | list[str] | None) -> int:
@@ -33,18 +40,45 @@ def _compaction_encoding(model_id: str | None) -> tiktoken.Encoding | None:
     return None
 
 
-def estimate_compaction_input_tokens(
-    value: str,
-    *,
-    model_id: str | None = None,
-    conservative_fallback: bool = False,
-) -> int:
-    """Estimate serialized compaction history with an optional conservative fallback."""
+def compaction_estimate_kind(model_id: str | None) -> _CompactionEstimateKind:
+    """Resolve how compaction sizes summary payloads for one summary model.
+
+    Single source of truth for the sizing branch: the bound function and the
+    structured sizing logs both derive their branch from this resolver.
+    """
+    if _compaction_encoding(model_id) is not None:
+        return "model_tiktoken_tokens"
+    # Mirrors the previous instance-based Claude gate: anthropic, vertexai_claude,
+    # and bedrock_claude model IDs all contain "claude".
+    if model_id is not None and "claude" in model_id.lower():
+        return "utf8_bytes_token_upper_bound"
+    return "o200k_base_tokens"
+
+
+def compaction_payload_token_upper_bound(value: str, *, model_id: str | None) -> int:
+    """Size one serialized compaction payload for the summary model.
+
+    Known tiktoken encodings count exactly. Claude models have no local
+    tokenizer, so their payloads use the UTF-8 byte count, a true token upper
+    bound. Other unknown models keep the o200k_base surrogate count.
+    """
+    kind = compaction_estimate_kind(model_id)
     encoding = _compaction_encoding(model_id)
-    if encoding is None and conservative_fallback:
-        return len(value.encode("utf-8"))
-    resolved_encoding = encoding or tiktoken.get_encoding("o200k_base")
-    return len(resolved_encoding.encode(value, disallowed_special=()))
+    if kind == "model_tiktoken_tokens" and encoding is not None:
+        return len(encoding.encode(value, disallowed_special=()))
+    if kind == "o200k_base_tokens":
+        return approximate_o200k_tokens(value)
+    return len(value.encode("utf-8"))
+
+
+def approximate_o200k_tokens(value: str) -> int:
+    """Approximate a token count with the o200k_base encoding.
+
+    An approximation, not a bound: o200k_base can undercount other tokenizers.
+    Callers that need a safe compaction sizing bound use
+    ``compaction_payload_token_upper_bound``.
+    """
+    return len(tiktoken.get_encoding("o200k_base").encode(value, disallowed_special=()))
 
 
 def compute_compaction_input_budget(

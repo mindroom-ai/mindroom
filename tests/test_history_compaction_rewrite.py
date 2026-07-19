@@ -55,7 +55,7 @@ from mindroom.hooks import (
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.message_target import MessageTarget
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
-from mindroom.token_budget import estimate_compaction_input_tokens, estimate_text_tokens
+from mindroom.token_budget import approximate_o200k_tokens, estimate_text_tokens
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
     FakeModel,
@@ -189,7 +189,7 @@ def test_build_summary_input_accounts_for_wrappers_separators_and_run_indexes() 
     )
     assert len(full_runs) == len(runs)
 
-    tight_budget = estimate_compaction_input_tokens(full_input) - 50
+    tight_budget = approximate_o200k_tokens(full_input) - 50
     summary_input, included_runs = _build_summary_input(
         previous_summary="existing summary",
         compacted_runs=runs,
@@ -198,7 +198,7 @@ def test_build_summary_input_accounts_for_wrappers_separators_and_run_indexes() 
     )
 
     assert 0 < len(included_runs) < len(runs)
-    assert estimate_compaction_input_tokens(summary_input) <= tight_budget
+    assert approximate_o200k_tokens(summary_input) <= tight_budget
 
 
 @pytest.mark.asyncio

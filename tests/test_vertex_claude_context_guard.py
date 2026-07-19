@@ -139,7 +139,7 @@ def test_estimate_request_input_tokens_uses_full_provider_payload() -> None:
 
     with (
         patch(
-            "mindroom.vertex_claude_compat.estimate_compaction_input_tokens",
+            "mindroom.vertex_claude_compat.approximate_o200k_tokens",
             return_value=30,
         ) as estimator,
         patch("mindroom.vertex_claude_compat.count_schema_tokens", return_value=5),
@@ -164,7 +164,7 @@ def test_estimate_requires_exact_count_for_images() -> None:
         Message(role="user", content="what is in this picture?", images=[Image(content=image_bytes)]),
     ]
 
-    with patch("mindroom.vertex_claude_compat.estimate_compaction_input_tokens") as estimator:
+    with patch("mindroom.vertex_claude_compat.approximate_o200k_tokens") as estimator:
         estimated_tokens = model._estimate_request_input_tokens(
             messages,
             tools=None,
@@ -200,7 +200,7 @@ def test_estimate_requires_exact_count_for_base64_documents() -> None:
 
     with (
         patch.object(model, "_request_input_kwargs", return_value=request_kwargs),
-        patch("mindroom.vertex_claude_compat.estimate_compaction_input_tokens") as estimator,
+        patch("mindroom.vertex_claude_compat.approximate_o200k_tokens") as estimator,
     ):
         estimated_tokens = model._estimate_request_input_tokens(
             [Message(role="user", content="summarize")],

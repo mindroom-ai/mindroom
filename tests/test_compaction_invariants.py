@@ -72,7 +72,7 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
-from mindroom.token_budget import estimate_compaction_input_tokens
+from mindroom.token_budget import approximate_o200k_tokens, compaction_payload_token_upper_bound
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 from tests.conftest import FakeModel, bind_runtime_paths, prepare_history_for_run_for_test
 
@@ -1346,22 +1346,16 @@ def test_retry_policy_shrinks_budget_for_empty_result() -> None:
     )
 
 
-def test_compaction_input_estimate_uses_tiktoken() -> None:
-    assert estimate_compaction_input_tokens("structured: true") == 3
-    assert estimate_compaction_input_tokens("☃☃") == 4
+def test_compaction_input_bound_counts_known_model_encodings_exactly() -> None:
+    assert compaction_payload_token_upper_bound("structured: true", model_id="gpt-4o") == 3
+    assert compaction_payload_token_upper_bound("☃☃", model_id="gpt-4o") == 4
 
 
-def test_compaction_input_estimate_uses_conservative_claude_fallback() -> None:
-    assert estimate_compaction_input_tokens(
-        "structured: true",
-        model_id="claude-sonnet-5",
-        conservative_fallback=True,
-    ) == len(b"structured: true")
-    assert estimate_compaction_input_tokens("☃☃", model_id="claude-sonnet-5", conservative_fallback=True) == 6
-
-
-def test_compaction_input_estimate_keeps_known_model_encoding() -> None:
-    assert estimate_compaction_input_tokens("structured: true", model_id="gpt-4o", conservative_fallback=True) == 3
+def test_compaction_input_bound_uses_utf8_bytes_for_claude() -> None:
+    assert compaction_payload_token_upper_bound("structured: true", model_id="claude-sonnet-5") == len(
+        b"structured: true",
+    )
+    assert compaction_payload_token_upper_bound("☃☃", model_id="claude-sonnet-5") == 6
 
 
 @pytest.mark.asyncio
@@ -1417,13 +1411,7 @@ async def test_claude_compaction_splits_dense_preserved_metadata_before_the_inpu
     assert outcome.compacted_run_count == 20
     assert len(summary_inputs) == 2
     assert all(len(summary_input.encode("utf-8")) <= summary_input_limit for summary_input in summary_inputs)
-    assert (
-        estimate_compaction_input_tokens(
-            summary_inputs[0],
-            model_id="claude-sonnet-5",
-        )
-        < summary_input_limit
-    )
+    assert approximate_o200k_tokens(summary_inputs[0]) < summary_input_limit
     storage.close()
 
 
@@ -1472,7 +1460,7 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
     assert outcome is not None
     # Chunk 1 fails empty, is rebuilt smaller, then chunk 2 compacts run-2.
     assert len(attempts) == 3
-    assert estimate_compaction_input_tokens(attempts[1]) < estimate_compaction_input_tokens(attempts[0])
+    assert approximate_o200k_tokens(attempts[1]) < approximate_o200k_tokens(attempts[0])
     assert attempts[2] != attempts[1]
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
@@ -1735,7 +1723,7 @@ async def test_small_refused_summary_request_fails_without_identical_retry_or_pe
         )
 
     assert len(attempts) == 1
-    assert estimate_compaction_input_tokens(attempts[0]) < 1_000
+    assert approximate_o200k_tokens(attempts[0]) < 1_000
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
     assert persisted.summary is None
@@ -1792,7 +1780,7 @@ async def test_minimum_available_budget_can_issue_smaller_degradation_retry(tmp_
     build_budgets = [call.kwargs["max_input_tokens"] for call in build_summary_input_spy.call_args_list]
     assert build_budgets[0] == summary_input_budget
     assert build_budgets[1] < build_budgets[0]
-    assert estimate_compaction_input_tokens(attempts[1]) < estimate_compaction_input_tokens(attempts[0])
+    assert approximate_o200k_tokens(attempts[1]) < approximate_o200k_tokens(attempts[0])
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
     assert persisted.summary is not None
@@ -1920,7 +1908,7 @@ async def test_two_timeouts_exhaust_current_attempt_without_persisting_suppressi
         )
 
     assert len(attempts) == 2
-    assert estimate_compaction_input_tokens(attempts[1]) < estimate_compaction_input_tokens(attempts[0])
+    assert approximate_o200k_tokens(attempts[1]) < approximate_o200k_tokens(attempts[0])
     assert prepared.compaction_reply_outcome == "timeout"
     assert prepared.compaction_outcomes == []
     persisted = get_agent_session(storage, "session-1")

@@ -18,7 +18,6 @@ from agno.session.summary import SessionSummary
 from agno.utils.message import filter_tool_calls
 from pydantic import BaseModel
 
-from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS, prompt_roles_for_history_storage
 from mindroom.error_handling import is_model_safeguard_refusal
 from mindroom.history.storage import (
@@ -42,7 +41,13 @@ from mindroom.history.types import (
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
-from mindroom.token_budget import estimate_compaction_input_tokens, estimate_text_tokens, stable_serialize
+from mindroom.token_budget import (
+    approximate_o200k_tokens,
+    compaction_estimate_kind,
+    compaction_payload_token_upper_bound,
+    estimate_text_tokens,
+    stable_serialize,
+)
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
 
 if TYPE_CHECKING:
@@ -391,7 +396,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
                 session_id=session_id,
                 scope=scope.key,
                 candidate_runs=len(compactable_runs),
-                summary_input_budget=summary_input_budget,
+                summary_input_budget_tokens=summary_input_budget,
             )
             if total_compacted_run_count == 0:
                 return None
@@ -483,9 +488,8 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
 def _compaction_token_estimator(summary_model: Model) -> Callable[[str], int]:
     """Return the summary-input token estimator tuned for one loaded summary model."""
     return partial(
-        estimate_compaction_input_tokens,
+        compaction_payload_token_upper_bound,
         model_id=summary_model.id,
-        conservative_fallback=as_anthropic_claude(summary_model) is not None,
     )
 
 
@@ -531,6 +535,15 @@ async def _emit_lifecycle_progress_after_persist(
             threshold_tokens=threshold_tokens,
         ),
     )
+
+
+def _sizing_log_fields(*, model_id: str | None, estimate: int, budget_tokens: int) -> dict[str, object]:
+    """Truthful sizing fields shared by the compaction chunk log events."""
+    return {
+        "summary_input_estimate": estimate,
+        "summary_input_estimate_kind": compaction_estimate_kind(model_id),
+        "summary_input_budget_tokens": budget_tokens,
+    }
 
 
 async def _generate_compaction_summary_with_retry(
@@ -582,8 +595,7 @@ async def _generate_compaction_summary_with_retry(
             attempt=attempt,
             candidate_runs=len(compactable_runs),
             included_runs=len(included_runs),
-            estimated_input_tokens=estimated_input_tokens,
-            summary_input_budget=budget,
+            **_sizing_log_fields(model_id=model.id, estimate=estimated_input_tokens, budget_tokens=budget),
             timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
         )
         try:
@@ -602,8 +614,7 @@ async def _generate_compaction_summary_with_retry(
                 attempt=attempt,
                 candidate_runs=len(compactable_runs),
                 included_runs=len(included_runs),
-                estimated_input_tokens=estimated_input_tokens,
-                summary_input_budget=budget,
+                **_sizing_log_fields(model_id=model.id, estimate=estimated_input_tokens, budget_tokens=budget),
                 timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
                 duration_ms=duration_ms,
                 error=str(exc) or type(exc).__name__,
@@ -667,8 +678,7 @@ async def _generate_compaction_summary_with_retry(
             attempt=attempt,
             candidate_runs=len(compactable_runs),
             included_runs=len(included_runs),
-            estimated_input_tokens=estimated_input_tokens,
-            summary_input_budget=budget,
+            **_sizing_log_fields(model_id=model.id, estimate=estimated_input_tokens, budget_tokens=budget),
             timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
             duration_ms=duration_ms,
         )
@@ -687,7 +697,7 @@ def _build_summary_input(
     compacted_runs: Sequence[RunOutput | TeamRunOutput],
     max_input_tokens: int,
     history_settings: ResolvedHistorySettings,
-    token_estimator: Callable[[str], int] = estimate_compaction_input_tokens,
+    token_estimator: Callable[[str], int] = approximate_o200k_tokens,
 ) -> tuple[str, list[RunOutput | TeamRunOutput]]:
     summary_block = ""
     if previous_summary is not None and previous_summary.strip():

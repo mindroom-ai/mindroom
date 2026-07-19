@@ -22,7 +22,7 @@ from mindroom.claude_prompt_cache import (
 )
 from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
 from mindroom.logging_config import get_logger
-from mindroom.token_budget import estimate_compaction_input_tokens, stable_serialize
+from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -278,7 +278,7 @@ class MindroomVertexAIClaude(VertexAIClaude):
         )
         if _request_requires_exact_count(request_kwargs):
             return None
-        return estimate_compaction_input_tokens(stable_serialize(request_kwargs)) + count_schema_tokens(
+        return approximate_o200k_tokens(stable_serialize(request_kwargs)) + count_schema_tokens(
             response_format,
             self.id,
         )
