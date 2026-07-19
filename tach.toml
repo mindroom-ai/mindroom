@@ -1675,6 +1675,7 @@ depends_on = []
 path = "mindroom.matrix.cache.cache_maintenance"
 depends_on = ["mindroom.constants"]
 visibility = [
+    "mindroom.matrix.cache.event_cache_events",
     "mindroom.matrix.cache.postgres_cache_maintenance",
     "mindroom.matrix.cache.postgres_event_cache",
     "mindroom.matrix.cache.postgres_streaming_compaction",
@@ -1745,6 +1746,7 @@ depends_on = []
 path = "mindroom.matrix.cache.event_cache_events"
 depends_on = [
     "mindroom.constants",
+    "mindroom.matrix.cache.cache_maintenance",
     "mindroom.matrix.event_info",
 ]
 visibility = [

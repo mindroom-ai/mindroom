@@ -6,24 +6,12 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from mindroom.constants import (
-    STREAM_STATUS_CANCELLED,
-    STREAM_STATUS_COMPLETED,
-    STREAM_STATUS_ERROR,
-    STREAM_STATUS_INTERRUPTED,
-    STREAM_STATUS_KEY,
-)
+from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.matrix.event_info import EventInfo, event_type_supports_thread_relations
 
+from .cache_maintenance import TERMINAL_STREAM_STATUSES
+
 _EDITABLE_EVENT_TYPES = frozenset({"m.room.message", "io.mindroom.tool_approval"})
-_TERMINAL_STREAM_STATUSES = frozenset(
-    {
-        STREAM_STATUS_CANCELLED,
-        STREAM_STATUS_COMPLETED,
-        STREAM_STATUS_ERROR,
-        STREAM_STATUS_INTERRUPTED,
-    },
-)
 
 type _CachedEventValue = tuple[str, dict[str, Any]]
 
@@ -108,7 +96,7 @@ def has_terminal_streaming_edit(events: list[SerializedCachedEvent]) -> bool:
         if not isinstance(content, dict):
             continue
         new_content = content.get("m.new_content")
-        if isinstance(new_content, dict) and new_content.get(STREAM_STATUS_KEY) in _TERMINAL_STREAM_STATUSES:
+        if isinstance(new_content, dict) and new_content.get(STREAM_STATUS_KEY) in TERMINAL_STREAM_STATUSES:
             return True
     return False
 
