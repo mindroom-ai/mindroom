@@ -83,6 +83,27 @@ def _opaque_encrypted_event(
     return nio.MegolmEvent.from_dict(event_source)
 
 
+def _thread_reply_lookup_response() -> nio.RoomGetEventResponse:
+    """Return typed metadata for one cache-indexed threaded message."""
+    return nio.RoomGetEventResponse.from_dict(
+        {
+            "content": {
+                "body": "thread reply",
+                "msgtype": "m.text",
+                "m.relates_to": {
+                    "event_id": "$thread-root:localhost",
+                    "rel_type": "m.thread",
+                },
+            },
+            "event_id": "$thread-reply:localhost",
+            "sender": "@bridge:localhost",
+            "origin_server_ts": 1000,
+            "room_id": "!room:localhost",
+            "type": "m.room.message",
+        },
+    )
+
+
 def test_matrix_cache_package_does_not_export_thread_policy_wrappers() -> None:
     """Thread policy wrappers should not remain on the public cache package surface."""
     assert "ThreadReadPolicy" not in matrix_cache.__all__
@@ -826,6 +847,7 @@ class TestMatrixConversationCacheThreadReads:
         )
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = "@agent:localhost"
+        client.room_get_event = AsyncMock(return_value=_thread_reply_lookup_response())
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(client=client, event_cache=event_cache),
@@ -862,6 +884,7 @@ class TestMatrixConversationCacheThreadReads:
         )
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = "@agent:localhost"
+        client.room_get_event = AsyncMock(return_value=_thread_reply_lookup_response())
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(client=client, event_cache=event_cache),
@@ -933,6 +956,8 @@ class TestMatrixConversationCacheThreadReads:
                     },
                 )
                 return _make_room_get_event_response(event)
+            if event_id == "$thread-reply:localhost":
+                return _thread_reply_lookup_response()
             message = f"unexpected lookup for {event_id}"
             raise AssertionError(message)
 
@@ -1192,21 +1217,22 @@ class TestMatrixConversationCacheThreadReads:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("relation_case", "expected_scope"),
+        ("relation_case", "expected_scope", "needs_resolved_index"),
         [
-            ("thread_child", "thread"),
-            ("edit", "thread"),
-            ("reply", "thread"),
-            ("reference", "thread"),
-            ("redaction", "room"),
-            ("custom_relation", "room"),
-            ("hidden_relation", "room"),
+            ("thread_child", "thread", False),
+            ("edit", "thread", False),
+            ("reply", "thread", True),
+            ("reference", "thread", True),
+            ("redaction", "room", False),
+            ("custom_relation", "room", False),
+            ("hidden_relation", "room", False),
         ],
     )
     async def test_opaque_encrypted_sync_mutations_leave_snapshots_stale(
         self,
         relation_case: str,
         expected_scope: str,
+        needs_resolved_index: bool,
     ) -> None:
         """Opaque children and relation-bearing events must never revalidate reconstructed history."""
         target_id = "$target:localhost"
@@ -1265,7 +1291,9 @@ class TestMatrixConversationCacheThreadReads:
         result = await access.cache_sync_timeline_for_certification(response)
 
         assert result.complete is True
-        event_cache.store_events_batch.assert_awaited_once()
+        assert event_cache.store_events_batch.await_count == 1 + int(needs_resolved_index)
+        if needs_resolved_index:
+            assert event_cache.store_events_batch.await_args_list[-1].kwargs == {"thread_id": thread_id}
         event_cache.append_event.assert_not_awaited()
         event_cache.revalidate_thread_after_incremental_update.assert_not_awaited()
         if expected_scope == "thread":
@@ -1361,7 +1389,8 @@ class TestMatrixConversationCacheThreadReads:
             assert reason == "limited_sync_timeline"
             operations.append("invalidate")
 
-        async def store_events_batch(_events: object) -> None:
+        async def store_events_batch(_events: object, *, thread_id: str | None = None) -> None:
+            assert thread_id is None
             operations.append("store")
 
         event_cache.mark_room_threads_stale = AsyncMock(side_effect=mark_room_threads_stale)

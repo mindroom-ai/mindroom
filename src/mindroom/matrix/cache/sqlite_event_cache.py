@@ -593,8 +593,13 @@ class SqliteEventCache:
         """Insert or replace one individually cached Matrix event."""
         await self.store_events_batch([(event_id, room_id, event_data)])
 
-    async def store_events_batch(self, events: list[tuple[str, str, dict[str, Any]]]) -> None:
-        """Insert or replace one batch of individually cached Matrix events."""
+    async def store_events_batch(
+        self,
+        events: list[tuple[str, str, dict[str, Any]]],
+        *,
+        thread_id: str | None = None,
+    ) -> None:
+        """Insert or replace cached events with an optional known thread mapping."""
         if self._runtime.is_disabled or not events:
             return
 
@@ -610,6 +615,7 @@ class SqliteEventCache:
                         room_id=room_id,
                         room_events=room_events,
                         cached_at=cached_at,
+                        thread_id=thread_id,
                     )
                 ),
             )

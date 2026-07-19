@@ -3624,7 +3624,12 @@ expose = [
 from = ["mindroom.matrix.conversation_cache"]
 
 [[interfaces]]
-expose = ["EventInfo", "origin_server_ts_from_event_source", "reply_to_event_id_from_content"]
+expose = [
+    "EventInfo",
+    "event_type_supports_thread_relations",
+    "origin_server_ts_from_event_source",
+    "reply_to_event_id_from_content",
+]
 from = ["mindroom.matrix.event_info"]
 
 [[interfaces]]

@@ -26,7 +26,23 @@ class EventCacheBackendUnavailableError(RuntimeError):
 
 @runtime_checkable
 class ConversationEventCache(Protocol):
-    """Storage-agnostic cache API for Matrix event and thread lookups."""
+    """Storage-agnostic durable cache for joined-room conversation timelines.
+
+    Sync ingestion admits only joined-room ``timeline.events`` and deliberately
+    excludes complete room state, invite and leave timelines, ephemeral typing
+    and receipts, presence, account data, to-device events, and device-list
+    changes.
+
+    Point lookup is broader than visible conversation history, so any admitted
+    timeline event with an event ID can be retained while thread projection
+    renders only supported ``m.room.message`` content.
+
+    Redaction envelopes are not stored as point events, while their durable
+    effect removes or tombstones the target and repairs dependent indexes.
+
+    Membership loss is a separate lifecycle concern and does not currently
+    purge retained joined-room history.
+    """
 
     @property
     def durable_writes_available(self) -> bool:
@@ -89,8 +105,13 @@ class ConversationEventCache(Protocol):
     async def store_event(self, event_id: str, room_id: str, event_data: dict[str, Any]) -> None:
         """Insert or replace one individually cached Matrix event."""
 
-    async def store_events_batch(self, events: list[tuple[str, str, dict[str, Any]]]) -> None:
-        """Insert or replace a batch of individually cached Matrix events."""
+    async def store_events_batch(
+        self,
+        events: list[tuple[str, str, dict[str, Any]]],
+        *,
+        thread_id: str | None = None,
+    ) -> None:
+        """Insert or replace cached events with an optional known thread mapping."""
 
     async def store_mxc_text(self, room_id: str, mxc_url: str, text: str) -> None:
         """Insert or replace one durably cached MXC text payload."""

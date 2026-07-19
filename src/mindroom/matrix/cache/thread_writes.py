@@ -82,9 +82,12 @@ def _collect_sync_timeline_cache_updates(
             room_redactions.setdefault(room_id, []).append(redacted_event_id)
         return
 
-    event_info = EventInfo.from_event(event_source)
-    if is_opaque_encrypted_event_source(event_source) or is_thread_affecting_relation(event_info):
-        cache_update = _threaded_sync_event_cache_update(room_id, event)
+    event_type = event_source.get("type")
+    if is_opaque_encrypted_event_source(event_source) or is_thread_affecting_relation(
+        EventInfo.from_event(event_source),
+        event_type=event_type if isinstance(event_type, str) else None,
+    ):
+        cache_update = _collect_sync_event_cache_update(room_id, event)
         if cache_update is None:
             return
         update_room_id, normalized_event_source = cache_update
@@ -102,20 +105,6 @@ def _collect_sync_event_cache_update(
     room_id: str,
     event: nio.Event,
 ) -> tuple[str, dict[str, object]] | None:
-    event_id = event.event_id
-    if not isinstance(event_id, str) or not event_id:
-        return None
-    return room_id, normalize_nio_event_for_cache(event)
-
-
-def _threaded_sync_event_cache_update(
-    room_id: str,
-    event: nio.Event,
-) -> tuple[str, dict[str, object]] | None:
-    event_source = event.source if isinstance(event.source, dict) else {}
-    event_info = EventInfo.from_event(event_source)
-    if not is_opaque_encrypted_event_source(event_source) and not is_thread_affecting_relation(event_info):
-        return None
     event_id = event.event_id
     if not isinstance(event_id, str) or not event_id:
         return None
@@ -392,7 +381,10 @@ class ThreadOutboundWritePolicy:
                     emit_timing=emit_timing,
                 )
                 return
-            if not is_thread_affecting_relation(event_info):
+            if not is_thread_affecting_relation(
+                event_info,
+                event_type=event_type,
+            ):
                 persisted_batch = [(event_id, room_id, normalized_event_source)]
                 self._schedule_fail_open_room_update(
                     room_id,
@@ -1021,6 +1013,16 @@ class ThreadSyncWritePolicy:
             if is_opaque_encrypted_event_source(event_source):
                 if impact.state is MutationThreadImpactState.THREADED:
                     assert impact.thread_id is not None
+                    directly_indexed_thread_id = event_info.thread_id or event_info.thread_id_from_edit
+                    if not event_info.is_reaction and directly_indexed_thread_id != impact.thread_id:
+                        assert isinstance(event_id, str) and event_id
+                        await self._cache_ops.store_events_batch(
+                            room_id,
+                            [(event_id, room_id, event_source)],
+                            failure_message="Failed to persist resolved opaque sync event thread mapping",
+                            thread_id=impact.thread_id,
+                            raise_on_failure=raise_on_cache_write_failure,
+                        )
                     await self._cache_ops.invalidate_known_thread(
                         room_id,
                         impact.thread_id,

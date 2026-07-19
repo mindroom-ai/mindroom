@@ -1284,7 +1284,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         release_room_a = asyncio.Event()
         room_b_finished = asyncio.Event()
 
-        async def store_events_batch(events: list[tuple[str, str, dict[str, object]]]) -> None:
+        async def store_events_batch(
+            events: list[tuple[str, str, dict[str, object]]],
+            *,
+            thread_id: str | None = None,
+        ) -> None:
+            assert thread_id is None
             room_id = events[0][1]
             if room_id == "!room-a:localhost":
                 room_a_started.set()

@@ -550,8 +550,23 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             assert lookup_room_id == room_id
             assert requested_thread_root_id == thread_root_id
             return [
-                {"event_id": thread_root_id},
-                {"event_id": "$child:localhost"},
+                {
+                    "content": {"body": "root", "msgtype": "m.text"},
+                    "event_id": thread_root_id,
+                    "type": "m.room.message",
+                },
+                {
+                    "content": {
+                        "body": "child",
+                        "msgtype": "m.text",
+                        "m.relates_to": {
+                            "event_id": thread_root_id,
+                            "rel_type": "m.thread",
+                        },
+                    },
+                    "event_id": "$child:localhost",
+                    "type": "m.room.message",
+                },
             ], True
 
         resolution = await resolve_event_thread_membership(
