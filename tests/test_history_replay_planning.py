@@ -740,38 +740,49 @@ def test_compaction_fallback_is_distinct_guards_same_alias_and_same_target(tmp_p
         _runtime_paths(tmp_path),
     )
 
-    assert (
-        _compaction_fallback_is_distinct(
-            config,
-            primary_model_name="summary-model",
-            fallback_model_name="summary-model",
+    with patch("mindroom.history.runtime.logger.warning") as warning_mock:
+        assert (
+            _compaction_fallback_is_distinct(
+                config,
+                primary_model_name="summary-model",
+                fallback_model_name="summary-model",
+            )
+            is False
         )
-        is False
-    )
-    assert (
-        _compaction_fallback_is_distinct(
-            config,
-            primary_model_name="summary-model",
-            fallback_model_name="summary-model-alias",
+        assert (
+            _compaction_fallback_is_distinct(
+                config,
+                primary_model_name="summary-model",
+                fallback_model_name="summary-model-alias",
+            )
+            is False
         )
-        is False
-    )
-    assert (
-        _compaction_fallback_is_distinct(
-            config,
-            primary_model_name="vertex-summary",
-            fallback_model_name="vertex-summary-spelling-variant",
+        assert (
+            _compaction_fallback_is_distinct(
+                config,
+                primary_model_name="vertex-summary",
+                fallback_model_name="vertex-summary-spelling-variant",
+            )
+            is False
         )
-        is False
-    )
-    assert (
-        _compaction_fallback_is_distinct(
-            config,
-            primary_model_name="summary-model",
-            fallback_model_name="fallback-model",
+        assert (
+            _compaction_fallback_is_distinct(
+                config,
+                primary_model_name="summary-model",
+                fallback_model_name="fallback-model",
+            )
+            is True
         )
-        is True
+
+    assert warning_mock.call_count == 3
+    assert all(
+        call.args[0] == "Compaction fallback resolves to the primary serving model; continuing without a fallback"
+        for call in warning_mock.call_args_list
     )
+    assert warning_mock.call_args_list[0].kwargs == {
+        "compaction_model": "summary-model",
+        "fallback_model": "summary-model",
+    }
 
 
 def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_summary_budget(

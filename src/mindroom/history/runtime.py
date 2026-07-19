@@ -127,15 +127,23 @@ def _compaction_fallback_is_distinct(
     ``vertexai_claude`` count as the same serving model.
     """
     if fallback_model_name == primary_model_name:
-        return False
-    primary_config = config.models.get(primary_model_name)
-    fallback_config = config.models.get(fallback_model_name)
-    if primary_config is None or fallback_config is None:
-        return True
-    return (model_loading.canonical_provider(primary_config.provider), primary_config.id) != (
-        model_loading.canonical_provider(fallback_config.provider),
-        fallback_config.id,
-    )
+        is_distinct = False
+    else:
+        primary_config = config.models.get(primary_model_name)
+        fallback_config = config.models.get(fallback_model_name)
+        if primary_config is None or fallback_config is None:
+            return True
+        is_distinct = (model_loading.canonical_provider(primary_config.provider), primary_config.id) != (
+            model_loading.canonical_provider(fallback_config.provider),
+            fallback_config.id,
+        )
+    if not is_distinct:
+        logger.warning(
+            "Compaction fallback resolves to the primary serving model; continuing without a fallback",
+            compaction_model=primary_model_name,
+            fallback_model=fallback_model_name,
+        )
+    return is_distinct
 
 
 @dataclass(frozen=True)
