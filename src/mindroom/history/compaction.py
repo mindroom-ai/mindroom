@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -19,7 +20,14 @@ from agno.utils.message import filter_tool_calls
 from pydantic import BaseModel
 
 from mindroom.claude_prompt_cache import as_anthropic_claude
-from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS, prompt_roles_for_history_storage
+from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
+    MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
+    MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
+    MINDROOM_COMPACTION_METADATA_KEY,
+    MINDROOM_MATRIX_HISTORY_METADATA_KEY,
+    prompt_roles_for_history_storage,
+)
 from mindroom.error_handling import is_model_safeguard_refusal
 from mindroom.history.storage import (
     compacted_run_ids_with,
@@ -60,9 +68,25 @@ _WRAPPER_OVERHEAD_TOKENS = 200
 _OVERSIZED_RUN_NOTE = "Run truncated to fit compaction budget."
 _SUMMARY_METADATA_OMIT_KEYS = frozenset(
     {
+        AI_RUN_METADATA_KEY,
+        MINDROOM_COMPACTION_METADATA_KEY,
+        MINDROOM_MATRIX_HISTORY_METADATA_KEY,
         "model_params",
         "tools_schema",
     },
+)
+_MEMORY_CONTEXT_PATTERN = re.compile(
+    r"(?m)^"
+    r"(?P<header>"
+    r"\[Automatically extracted (?P<context_type>[^\]\n]+) memories - may not be relevant to current context\]\n"
+    r"Previous (?P=context_type) memories that might be related:\n"
+    r")"
+    r"(?P<items>- [^\n]*(?:\n- [^\n]*)*)"
+    r"(?=\n\n|\Z)",
+)
+_REPEATED_MEMORY_NOTE = (
+    "[Compaction projection: {count} repeated {context_type} memory {noun} omitted; "
+    "identical text appears earlier in this summary input.]"
 )
 
 
@@ -707,8 +731,15 @@ def _build_summary_input(
 
     included_runs: list[RunOutput | TeamRunOutput] = []
     serialized_runs: list[str] = []
+    seen_memory_items: set[tuple[str, str]] = set()
     for index, run in enumerate(compacted_runs):
-        serialized_run = _serialize_run(run, index, history_settings)
+        candidate_seen_memory_items = set(seen_memory_items)
+        serialized_run = _serialize_run(
+            run,
+            index,
+            history_settings,
+            seen_memory_items=candidate_seen_memory_items,
+        )
         separator = "\n\n" if serialized_runs else ""
         run_tokens = token_estimator(f"{separator}{serialized_run}")
         if run_tokens > remaining:
@@ -723,6 +754,7 @@ def _build_summary_input(
             break
         included_runs.append(run)
         serialized_runs.append(serialized_run)
+        seen_memory_items = candidate_seen_memory_items
         remaining -= run_tokens
 
     if not included_runs:
@@ -847,21 +879,104 @@ def _compaction_replay_messages(
 
 def _excerpt_blocks(run: RunOutput | TeamRunOutput, history_settings: ResolvedHistorySettings) -> list[_ExcerptBlock]:
     blocks: list[_ExcerptBlock] = []
+    messages = _compaction_replay_messages(run, history_settings)
+    source_prompts = (
+        _source_prompt_texts(
+            run.metadata.get(MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY) if run.metadata else None,
+        )
+        or ()
+    )
     if run.metadata:
-        metadata = _metadata_for_summary(run.metadata)
+        metadata = _metadata_for_summary(run.metadata, messages)
         if metadata:
             blocks.append(_ExcerptBlock("<run_metadata>", stable_serialize(metadata), "</run_metadata>"))
-    for message in _compaction_replay_messages(run, history_settings):
-        content = _render_message_content(message)
+    seen_memory_items: set[tuple[str, str]] = set()
+    for message in messages:
+        content = _summary_message_content(message, seen_memory_items, source_prompts)
         if not content:
             continue
         blocks.append(_ExcerptBlock(_message_open_tag(message), content, "</message>"))
     return blocks
 
 
-def _metadata_for_summary(metadata: dict[str, object]) -> dict[str, object]:
-    """Omit bulky request metadata from compaction summary inputs."""
-    return {key: value for key, value in metadata.items() if key not in _SUMMARY_METADATA_OMIT_KEYS}
+def _metadata_for_summary(metadata: dict[str, object], messages: Sequence[Message]) -> dict[str, object]:
+    """Project run metadata down to information the summary model can use."""
+    projected = {key: value for key, value in metadata.items() if key not in _SUMMARY_METADATA_OMIT_KEYS}
+    source_prompts = _source_prompt_texts(projected.get(MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY))
+    if source_prompts is not None and _source_prompts_are_represented(source_prompts, messages):
+        projected.pop(MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY, None)
+    return projected
+
+
+def _source_prompts_are_represented(source_prompts: Sequence[str], messages: Sequence[Message]) -> bool:
+    """Return whether a source-prompt map adds no text beyond replayed user messages."""
+    user_content = "\n".join(_render_message_content(message) for message in messages if message.role == "user")
+    return all(prompt in user_content for prompt in source_prompts)
+
+
+def _source_prompt_texts(source_prompts: object) -> tuple[str, ...] | None:
+    if not isinstance(source_prompts, dict):
+        return None
+    values = tuple(source_prompts.values())
+    prompts = tuple(prompt for prompt in values if isinstance(prompt, str))
+    if len(prompts) != len(values):
+        return None
+    return tuple(prompt for prompt in prompts if prompt)
+
+
+def _deduplicate_memory_context(
+    content: str,
+    seen_memory_items: set[tuple[str, str]],
+    source_prompts: Sequence[str],
+) -> str:
+    """Keep each exact generated memory item once within one summary input."""
+    source_prompt_spans = _source_prompt_spans(content, source_prompts)
+    if not source_prompt_spans:
+        return content
+
+    def _replace(match: re.Match[str]) -> str:
+        if any(_spans_overlap(match.span(), source_prompt_span) for source_prompt_span in source_prompt_spans):
+            return match.group(0)
+        item_lines = match.group("items").splitlines()
+        unique_lines: list[str] = []
+        duplicate_count = 0
+        context_type = match.group("context_type")
+        for line in item_lines:
+            item = line.removeprefix("- ")
+            item_key = (context_type, item)
+            if item_key in seen_memory_items:
+                duplicate_count += 1
+                continue
+            seen_memory_items.add(item_key)
+            unique_lines.append(line)
+
+        if duplicate_count == 0:
+            return match.group(0)
+
+        note = _REPEATED_MEMORY_NOTE.format(
+            count=duplicate_count,
+            context_type=context_type,
+            noun="item" if duplicate_count == 1 else "items",
+        )
+        if not unique_lines:
+            return note
+        return f"{match.group('header')}{'\n'.join(unique_lines)}\n{note}"
+
+    return _MEMORY_CONTEXT_PATTERN.sub(_replace, content)
+
+
+def _source_prompt_spans(content: str, source_prompts: Sequence[str]) -> tuple[tuple[int, int], ...]:
+    spans: list[tuple[int, int]] = []
+    for source_prompt in source_prompts:
+        start = 0
+        while (index := content.find(source_prompt, start)) >= 0:
+            spans.append((index, index + len(source_prompt)))
+            start = index + len(source_prompt)
+    return tuple(spans)
+
+
+def _spans_overlap(left: tuple[int, int], right: tuple[int, int]) -> bool:
+    return left[0] < right[1] and right[0] < left[1]
 
 
 def _truncate_excerpt(text: str, max_chars: int) -> str:
@@ -904,20 +1019,39 @@ def _messages_for_runs(
     return messages
 
 
-def _serialize_run(run: RunOutput | TeamRunOutput, index: int, history_settings: ResolvedHistorySettings) -> str:
+def _serialize_run(
+    run: RunOutput | TeamRunOutput,
+    index: int,
+    history_settings: ResolvedHistorySettings,
+    *,
+    seen_memory_items: set[tuple[str, str]] | None = None,
+) -> str:
     lines = [_run_open_tag(run, index)]
+    messages = _compaction_replay_messages(run, history_settings)
+    source_prompts = (
+        _source_prompt_texts(
+            run.metadata.get(MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY) if run.metadata else None,
+        )
+        or ()
+    )
     if run.metadata:
-        metadata = _metadata_for_summary(run.metadata)
+        metadata = _metadata_for_summary(run.metadata, messages)
         if metadata:
             lines.extend(["<run_metadata>", _escape_xml_content(stable_serialize(metadata)), "</run_metadata>"])
-    for message in _compaction_replay_messages(run, history_settings):
-        lines.extend(_serialize_message(message))
+    projected_memory_items = seen_memory_items if seen_memory_items is not None else set()
+    for message in messages:
+        lines.extend(_serialize_message(message, projected_memory_items, source_prompts))
     lines.append("</run>")
     return "\n".join(lines)
 
 
-def _serialize_message(message: Message) -> list[str]:
-    lines = [_message_open_tag(message), _escape_xml_content(_render_message_content(message)), "</message>"]
+def _serialize_message(
+    message: Message,
+    seen_memory_items: set[tuple[str, str]],
+    source_prompts: Sequence[str],
+) -> list[str]:
+    content = _summary_message_content(message, seen_memory_items, source_prompts)
+    lines = [_message_open_tag(message), _escape_xml_content(content), "</message>"]
     if message.tool_calls:
         lines.extend(["<tool_calls>", _escape_xml_content(stable_serialize(message.tool_calls)), "</tool_calls>"])
     for tag, media_value in _message_media_entries(message):
@@ -926,6 +1060,17 @@ def _serialize_message(message: Message) -> list[str]:
             continue
         lines.extend([f"<{tag}>", _escape_xml_content(serialized), f"</{tag}>"])
     return lines
+
+
+def _summary_message_content(
+    message: Message,
+    seen_memory_items: set[tuple[str, str]],
+    source_prompts: Sequence[str],
+) -> str:
+    content = _render_message_content(message)
+    if message.role != "user":
+        return content
+    return _deduplicate_memory_context(content, seen_memory_items, source_prompts)
 
 
 def _run_open_tag(run: RunOutput | TeamRunOutput, index: int) -> str:
