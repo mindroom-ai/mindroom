@@ -1303,6 +1303,46 @@ class TestMatrixConversationCacheThreadReads:
             event_cache.mark_thread_stale.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_opaque_encrypted_sync_relation_to_room_level_event_preserves_threads(self) -> None:
+        """A visible encrypted relation proven room-level cannot affect cached threads."""
+        target_id = "$room-level-target:localhost"
+        target = nio.RoomMessageText.from_dict(
+            {
+                "content": {"body": "room message", "msgtype": "m.text"},
+                "event_id": target_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567889,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+        opaque_reply = _opaque_encrypted_event(
+            content_updates={"m.relates_to": {"m.in_reply_to": {"event_id": target_id}}},
+        )
+        event_cache = _runtime_event_cache()
+        event_cache.get_thread_events.return_value = []
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(
+                client=_make_client_mock(),
+                event_cache=event_cache,
+            ),
+        )
+        response = MagicMock()
+        response.__class__ = nio.SyncResponse
+        response.rooms = MagicMock(
+            join={"!test:localhost": MagicMock(timeline=MagicMock(events=[target, opaque_reply], limited=False))},
+        )
+
+        result = await access.cache_sync_timeline_for_certification(response)
+
+        assert result.complete is True
+        assert event_cache.store_events_batch.await_count == 2
+        event_cache.append_event.assert_not_awaited()
+        event_cache.mark_thread_stale.assert_not_awaited()
+        event_cache.mark_room_threads_stale.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_cyclic_sync_relation_fails_closed_with_room_invalidation(self) -> None:
         """A malformed relation cycle must reach UNKNOWN-impact sync handling."""
         room_id = "!test:localhost"

@@ -74,6 +74,7 @@ from mindroom.matrix.thread_membership import (
     ThreadRoomScanRootNotFoundError,
     map_backed_thread_membership_access,
     resolve_event_thread_membership,
+    resolve_related_event_thread_membership,
 )
 from mindroom.matrix.thread_projection import (
     ordered_event_ids_from_scanned_event_sources,
@@ -1162,8 +1163,18 @@ async def _bucket_opaque_thread_relations(
                 thread_id = redacted_event_id
             if thread_id in grouped:
                 grouped[thread_id][event_id] = event_source
-            elif redacted_event_id not in event_infos:
+                continue
+            resolution = await resolve_related_event_thread_membership(
+                room_id,
+                redacted_event_id,
+                access=membership_access,
+            )
+            if resolution.state is ThreadResolutionState.INDETERMINATE:
                 has_unresolved_relations = True
+                continue
+            thread_id = resolution.thread_id
+            if thread_id in grouped:
+                grouped[thread_id][event_id] = event_source
             continue
 
         event_info = event_infos[event_id]

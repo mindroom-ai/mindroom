@@ -1380,6 +1380,59 @@ class TestThreadHistory:
         assert has_unresolved_opaque_relations is False
         assert [source["event_id"] for source in grouped["$root"]] == ["$root", "$thread_reply", "$plain1", "$plain2"]
 
+    @pytest.mark.asyncio
+    async def test_room_scan_opaque_redaction_of_cyclic_relation_stays_unresolved(self) -> None:
+        """Opaque redactions must preserve indeterminate relation ancestry."""
+        grouped, has_unresolved_opaque_relations = await _group_scanned_sources_by_thread(
+            room_id="!room:localhost",
+            thread_root_ids=("$root",),
+            latest_edits_by_original_event_id={},
+            scanned_message_sources={
+                "$root": {
+                    "event_id": "$root",
+                    "origin_server_ts": 1000,
+                    "type": "m.room.message",
+                    "content": {"msgtype": "m.text", "body": "root"},
+                },
+                "$cycle-a": {
+                    "event_id": "$cycle-a",
+                    "origin_server_ts": 2000,
+                    "type": "m.room.message",
+                    "content": {
+                        "msgtype": "m.text",
+                        "body": "a",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": "$cycle-b"}},
+                    },
+                },
+                "$cycle-b": {
+                    "event_id": "$cycle-b",
+                    "origin_server_ts": 3000,
+                    "type": "m.room.message",
+                    "content": {
+                        "msgtype": "m.text",
+                        "body": "b",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": "$cycle-a"}},
+                    },
+                },
+                "$opaque-redaction": {
+                    "event_id": "$opaque-redaction",
+                    "origin_server_ts": 4000,
+                    "type": "m.room.encrypted",
+                    "redacts": "$cycle-a",
+                    "content": {
+                        "algorithm": "m.megolm.v1.aes-sha2",
+                        "ciphertext": "opaque ciphertext",
+                        "device_id": "DEVICE",
+                        "sender_key": "sender-key",
+                        "session_id": "session",
+                    },
+                },
+            },
+        )
+
+        assert has_unresolved_opaque_relations is True
+        assert [source["event_id"] for source in grouped["$root"]] == ["$root"]
+
     def test_ordered_event_ids_from_scanned_event_sources_preserves_input_order_on_timestamp_ties(self) -> None:
         """Scanned-source ordering should preserve first-seen order before falling back to event IDs."""
         ordered_event_ids = ordered_event_ids_from_scanned_event_sources(

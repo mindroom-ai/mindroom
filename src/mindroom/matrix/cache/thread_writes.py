@@ -1013,7 +1013,7 @@ class ThreadSyncWritePolicy:
                 if impact.state is MutationThreadImpactState.THREADED:
                     assert impact.thread_id is not None
                     directly_indexed_thread_id = event_info.thread_id or event_info.thread_id_from_edit
-                    if not event_info.is_reaction and directly_indexed_thread_id != impact.thread_id:
+                    if directly_indexed_thread_id != impact.thread_id:
                         assert isinstance(event_id, str)
                         assert event_id
                         await self._cache_ops.store_events_batch(
@@ -1029,7 +1029,10 @@ class ThreadSyncWritePolicy:
                         reason=_OPAQUE_ENCRYPTED_SYNC_EVENT_REASON,
                         raise_on_failure=raise_on_cache_write_failure,
                     )
-                elif not room_threads_invalidated:
+                elif (
+                    impact.state is MutationThreadImpactState.UNKNOWN
+                    or isinstance(event_source.get("redacts"), str)
+                ) and not room_threads_invalidated:
                     await self._cache_ops.invalidate_room_threads(
                         room_id,
                         reason=_OPAQUE_ENCRYPTED_SYNC_EVENT_REASON,
