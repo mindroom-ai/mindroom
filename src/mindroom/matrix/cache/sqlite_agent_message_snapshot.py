@@ -71,7 +71,21 @@ async def _iter_scope_events(
     db: aiosqlite.Connection,
     *,
     room_id: str,
+    thread_id: str | None,
 ) -> aiosqlite.Cursor:
+    if thread_id is not None:
+        return await db.execute(
+            """
+            SELECT events.event_json, events.cached_at
+            FROM thread_events
+            JOIN events
+                ON events.event_id = thread_events.event_id
+                AND events.room_id = thread_events.room_id
+            WHERE thread_events.room_id = ? AND thread_events.thread_id = ?
+            ORDER BY thread_events.origin_server_ts DESC, thread_events.write_seq DESC
+            """,
+            (room_id, thread_id),
+        )
     return await db.execute(
         """
         SELECT event_json, cached_at
@@ -91,18 +105,10 @@ async def _load_scope_snapshot(
     sender: str,
     runtime_started_at: float | None,
 ) -> AgentMessageSnapshot | None:
-    if thread_id is not None:
-        return await _load_thread_scope_snapshot(
-            db,
-            room_id=room_id,
-            thread_id=thread_id,
-            sender=sender,
-            runtime_started_at=runtime_started_at,
-        )
-
     cursor = await _iter_scope_events(
         db,
         room_id=room_id,
+        thread_id=thread_id,
     )
     try:
         while True:
@@ -131,38 +137,6 @@ async def _load_scope_snapshot(
                 return result.snapshot
     finally:
         await cursor.close()
-
-
-async def _load_thread_scope_snapshot(
-    db: aiosqlite.Connection,
-    *,
-    room_id: str,
-    thread_id: str,
-    sender: str,
-    runtime_started_at: float | None,
-) -> AgentMessageSnapshot | None:
-    events = await sqlite_event_cache_threads.load_thread_events(
-        db,
-        room_id=room_id,
-        thread_id=thread_id,
-    )
-    for event in reversed(events or []):
-        if not event_matches_snapshot_scope(event, thread_id=thread_id, sender=sender):
-            continue
-        result = await _snapshot_from_event(
-            db,
-            room_id=room_id,
-            thread_id=thread_id,
-            sender=sender,
-            event=event,
-            cached_at=None,
-            runtime_started_at=runtime_started_at,
-        )
-        if result.stop_scanning:
-            return None
-        if result.snapshot is not None:
-            return result.snapshot
-    return None
 
 
 async def load_sqlite_agent_message_snapshot(

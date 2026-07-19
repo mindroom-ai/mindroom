@@ -175,6 +175,81 @@ async def test_get_latest_agent_message_snapshot_returns_streaming_status_for_th
 
 
 @pytest.mark.asyncio
+async def test_thread_snapshot_resolves_compacted_edit_without_materializing_cold_history(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """Thread candidates stream from active rows while latest-edit lookup retains cold fallback."""
+    room_id = "!room:localhost"
+    thread_id = "$thread-root"
+    terminal_id = "$reply-terminal"
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        await _replace_thread(
+            cache,
+            room_id,
+            thread_id,
+            [
+                _message_event(
+                    event_id=thread_id,
+                    sender="@user:localhost",
+                    body="Question",
+                    origin_server_ts=1000,
+                ),
+                _message_event(
+                    event_id="$reply",
+                    sender="@agent:localhost",
+                    body="Working...",
+                    origin_server_ts=2000,
+                    relates_to={"rel_type": "m.thread", "event_id": thread_id},
+                ),
+                _message_event(
+                    event_id="$reply-pending",
+                    sender="@agent:localhost",
+                    body="* Working...",
+                    origin_server_ts=3000,
+                    relates_to={"rel_type": "m.replace", "event_id": "$reply"},
+                    new_content={
+                        "body": "Pending fallback",
+                        "io.mindroom.stream_status": "pending",
+                    },
+                ),
+                _message_event(
+                    event_id=terminal_id,
+                    sender="@agent:localhost",
+                    body="* Working...",
+                    origin_server_ts=4000,
+                    relates_to={"rel_type": "m.replace", "event_id": "$reply"},
+                    new_content={
+                        "body": "Finished",
+                        "io.mindroom.stream_status": "completed",
+                    },
+                ),
+            ],
+        )
+        assert await cache.redact_event(room_id, terminal_id) is True
+    finally:
+        await cache.close()
+
+    snapshot = await _read_snapshot(
+        event_cache_factory,
+        room_id=room_id,
+        thread_id=thread_id,
+        sender="@agent:localhost",
+        runtime_started_at=0.0,
+    )
+
+    assert snapshot == AgentMessageSnapshot(
+        content={
+            "body": "Pending fallback",
+            "msgtype": "m.text",
+            "io.mindroom.stream_status": "pending",
+        },
+        origin_server_ts=3000,
+    )
+
+
+@pytest.mark.asyncio
 async def test_get_latest_agent_message_snapshot_ignores_foreign_sender_edits(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
