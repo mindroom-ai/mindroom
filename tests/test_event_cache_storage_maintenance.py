@@ -323,7 +323,6 @@ async def test_sqlite_version_10_migrates_without_reset_and_repairs_orphans(tmp_
         cached_thread = await cache.get_thread_events(_ROOM_ID, _THREAD_ID)
         stale_state = await cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
 
-        assert cache.startup_requires_sync_reset is False
         assert diagnostics["cache_schema_migrated_from"] == 10
         assert diagnostics["cache_orphan_edit_indexes_before"] == 1
         assert diagnostics["cache_orphan_edit_indexes_after"] == 0
@@ -347,49 +346,6 @@ async def test_sqlite_version_10_migrates_without_reset_and_repairs_orphans(tmp_
         await cursor.close()
     finally:
         await cache.close()
-
-
-@pytest.mark.asyncio
-async def test_sqlite_startup_repair_unconditionally_stales_orphan_membership(tmp_path: Path) -> None:
-    """A future validation cannot make a repaired incomplete snapshot look fresh."""
-    db_path = tmp_path / "event_cache.db"
-    cache = SqliteEventCache(db_path)
-    await cache.initialize()
-    await cache.close()
-
-    db = await aiosqlite.connect(db_path)
-    try:
-        await db.execute(
-            """
-            INSERT INTO thread_events(room_id, thread_id, event_id, origin_server_ts, write_seq)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (_ROOM_ID, "$dangling-thread:localhost", "$dangling:localhost", 20, 100),
-        )
-        await db.execute(
-            """
-            INSERT INTO thread_cache_state(room_id, thread_id, validated_at)
-            VALUES (?, ?, ?)
-            """,
-            (_ROOM_ID, "$dangling-thread:localhost", _FUTURE_VALIDATED_AT),
-        )
-        await db.commit()
-    finally:
-        await db.close()
-
-    repaired_cache = SqliteEventCache(db_path)
-    await repaired_cache.initialize()
-    try:
-        diagnostics = repaired_cache.runtime_diagnostics()
-        assert diagnostics["cache_orphan_thread_event_references_before"] == 1
-        assert diagnostics["cache_orphan_thread_event_references_after"] == 0
-        assert diagnostics["cache_repaired_thread_event_references"] == 1
-        state = await repaired_cache.get_thread_cache_state(_ROOM_ID, "$dangling-thread:localhost")
-        assert state is not None
-        assert state.validated_at is None
-        assert state.invalidation_reason == "startup_orphan_thread_event_reference"
-    finally:
-        await repaired_cache.close()
 
 
 @pytest.mark.asyncio
@@ -447,7 +403,6 @@ async def test_sqlite_unsupported_schema_reset_requires_sync_recertification(tmp
     await cache.initialize()
     try:
         diagnostics = cache.runtime_diagnostics()
-        assert cache.startup_requires_sync_reset is True
         assert diagnostics["cache_schema_destructive_reset"] is True
         assert diagnostics["cache_event_rows"] == 0
     finally:
@@ -529,63 +484,6 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
             await cursor.close()
         finally:
             await other_cache.close()
-
-
-@pytest.mark.asyncio
-async def test_postgres_startup_repair_unconditionally_stales_orphan_membership(
-    postgres_event_cache_url: str,
-) -> None:
-    """A future validation cannot make a repaired incomplete snapshot look fresh."""
-    namespace = f"tenant_{uuid.uuid4().hex}"
-    thread_id = "$dangling-thread:localhost"
-    async with _isolated_postgres_database(postgres_event_cache_url) as database_url:
-        cache = PostgresEventCache(database_url=database_url, namespace=namespace)
-        await cache.initialize()
-        await cache.close()
-
-        db = await psycopg.AsyncConnection.connect(database_url)
-        try:
-            await db.execute(
-                """
-                INSERT INTO mindroom_event_cache_thread_events(
-                    namespace,
-                    room_id,
-                    thread_id,
-                    event_id,
-                    origin_server_ts
-                )
-                VALUES (%s, %s, %s, %s, %s)
-                """,
-                (namespace, _ROOM_ID, thread_id, "$dangling:localhost", 20),
-            )
-            await db.execute(
-                """
-                INSERT INTO mindroom_event_cache_thread_state(
-                    namespace,
-                    room_id,
-                    thread_id,
-                    validated_at
-                )
-                VALUES (%s, %s, %s, %s)
-                """,
-                (namespace, _ROOM_ID, thread_id, _FUTURE_VALIDATED_AT),
-            )
-            await db.commit()
-        finally:
-            await db.close()
-
-        repaired_cache = PostgresEventCache(database_url=database_url, namespace=namespace)
-        await repaired_cache.initialize()
-        try:
-            diagnostics = repaired_cache.runtime_diagnostics()
-            assert diagnostics["cache_orphan_thread_event_references_before"] == 1
-            assert diagnostics["cache_orphan_thread_event_references_after"] == 0
-            state = await repaired_cache.get_thread_cache_state(_ROOM_ID, thread_id)
-            assert state is not None
-            assert state.validated_at is None
-            assert state.invalidation_reason == "startup_orphan_thread_event_reference"
-        finally:
-            await repaired_cache.close()
 
 
 @pytest.mark.asyncio

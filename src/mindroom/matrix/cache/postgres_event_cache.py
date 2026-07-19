@@ -16,12 +16,12 @@ from mindroom.logging_config import get_logger
 from mindroom.timing import milliseconds
 
 from . import postgres_event_cache_events, postgres_event_cache_threads
-from .cache_maintenance import CacheMetricsState, CorruptEventCachePayloadError, cancel_task_once_and_wait
+from .cache_maintenance import CorruptEventCachePayloadError
 from .event_batching import group_lookup_events_by_room
 from .event_cache import EventCacheBackendUnavailableError
 from .event_normalization import normalize_event_source_for_cache
 from .postgres_agent_message_snapshot import load_postgres_agent_message_snapshot
-from .postgres_cache_maintenance import migrate_postgres_schema, refresh_runtime_metrics, run_startup_maintenance
+from .postgres_cache_maintenance import migrate_postgres_schema, run_startup_maintenance
 from .postgres_redaction import redact_postgres_connection_info
 from .thread_cache_state import replacement_validated_at
 
@@ -434,7 +434,7 @@ class _PostgresEventCacheRuntime:
         self._database_url = database_url
         self._namespace = namespace
         self._db: psycopg.AsyncConnection | None = None
-        self._metrics = CacheMetricsState()
+        self._maintenance_report: CacheMaintenanceReport | None = None
         self._certification_generation: str | None = None
         self._disabled_reason: str | None = None
         self._unavailable_reason: str | None = None
@@ -484,8 +484,8 @@ class _PostgresEventCacheRuntime:
 
     @property
     def maintenance_report(self) -> CacheMaintenanceReport | None:
-        """Return current counts plus immutable startup maintenance outcomes."""
-        return self._metrics.report
+        """Return the immutable startup maintenance report."""
+        return self._maintenance_report
 
     @property
     def certification_generation(self) -> str | None:
@@ -521,7 +521,8 @@ class _PostgresEventCacheRuntime:
             diagnostics["cache_postgres_disabled_reason"] = self._disabled_reason
         if self._unavailable_reason is not None:
             diagnostics["cache_postgres_unavailable_reason"] = self._unavailable_reason
-        diagnostics.update(self._metrics.as_runtime_diagnostics())
+        if self._maintenance_report is not None:
+            diagnostics.update(self._maintenance_report.as_runtime_diagnostics())
         return diagnostics
 
     async def initialize(self) -> None:
@@ -539,7 +540,7 @@ class _PostgresEventCacheRuntime:
                     self._database_url,
                     namespace=self._namespace,
                 )
-                self._metrics.initialize(report)
+                self._maintenance_report = report
             except Exception as exc:
                 if _is_transient_postgres_failure(exc):
                     self._transient_failure_count += 1
@@ -753,9 +754,6 @@ class PostgresEventCache:
 
     def __init__(self, *, database_url: str, namespace: str) -> None:
         self._runtime = _PostgresEventCacheRuntime(database_url, namespace)
-        self._metrics_refresh_task: asyncio.Task[None] | None = None
-        self._metrics_refresh_enabled = True
-        self._metrics_refresh_lifecycle_lock = asyncio.Lock()
 
     @property
     def database_url(self) -> str:
@@ -778,90 +776,17 @@ class PostgresEventCache:
         return self._runtime.durable_writes_available
 
     @property
-    def startup_requires_sync_reset(self) -> bool:
-        """Return whether startup discarded cache contents certified by saved sync tokens."""
-        report = self._runtime.maintenance_report
-        return report is not None and report.startup_requires_sync_reset
-
-    @property
     def certification_generation(self) -> str | None:
         """Return the durable generation bound to certified sync checkpoints."""
         return self._runtime.certification_generation
 
     async def initialize(self) -> None:
         """Open the PostgreSQL database and create the cache schema."""
-        self._metrics_refresh_enabled = True
         await self._runtime.initialize()
 
     def runtime_diagnostics(self) -> dict[str, object]:
         """Return log-safe runtime state for sync certification diagnostics."""
-        diagnostics = self._runtime.runtime_diagnostics()
-        diagnostics["cache_metrics_refresh_in_progress"] = self._metrics_refresh_task is not None
-        return diagnostics
-
-    async def refresh_runtime_diagnostics(self) -> dict[str, object]:
-        """Force an exact metrics refresh without changing cache availability on telemetry failure."""
-        async with self._metrics_refresh_lifecycle_lock:
-            try:
-                await self._cancel_metrics_refresh(disable=False)
-                return await self._collect_runtime_diagnostics()
-            finally:
-                if (
-                    self._metrics_refresh_enabled
-                    and self._runtime._metrics.dirty
-                    and self._runtime.is_initialized
-                    and not self._runtime.is_disabled
-                ):
-                    self._schedule_metrics_refresh()
-
-    async def _collect_runtime_diagnostics(self) -> dict[str, object]:
-        """Collect one exact PostgreSQL storage snapshot."""
-        if self._runtime.is_disabled or not self._runtime.is_initialized:
-            return self.runtime_diagnostics()
-        async with self._runtime._db_lock:
-            if self._runtime.is_disabled or not self._runtime.is_initialized:
-                return self.runtime_diagnostics()
-            db = self._runtime.require_db()
-            report = self._runtime.maintenance_report
-            if report is None:
-                return self.runtime_diagnostics()
-            try:
-                await db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-                refreshed_report = await refresh_runtime_metrics(
-                    db,
-                    namespace=self.namespace,
-                    startup_report=report,
-                )
-                await db.commit()
-            except asyncio.CancelledError:
-                await _rollback_postgres_connection_best_effort(
-                    db,
-                    namespace=self.namespace,
-                    operation="refresh_runtime_diagnostics",
-                )
-                raise
-            except Exception as exc:
-                await _rollback_postgres_connection_best_effort(
-                    db,
-                    namespace=self.namespace,
-                    operation="refresh_runtime_diagnostics",
-                )
-                self._runtime._metrics.record_refresh_failure()
-                logger.warning(
-                    "Matrix event cache metrics refresh failed",
-                    backend="postgres",
-                    namespace=self.namespace,
-                    error_type=type(exc).__name__,
-                )
-            else:
-                self._runtime._metrics.record_refresh(refreshed_report)
-                logger.info(
-                    "Matrix event cache runtime metrics refreshed",
-                    backend="postgres",
-                    namespace=self.namespace,
-                    **refreshed_report.as_runtime_diagnostics(snapshot="runtime"),
-                )
-        return self.runtime_diagnostics()
+        return self._runtime.runtime_diagnostics()
 
     def pending_durable_write_room_ids(self) -> tuple[str, ...]:
         """Return rooms with runtime-only writes that must persist before certifying a sync token."""
@@ -886,9 +811,7 @@ class PostgresEventCache:
 
     async def close(self) -> None:
         """Close the PostgreSQL connection when the cache is no longer needed."""
-        async with self._metrics_refresh_lifecycle_lock:
-            await self._cancel_metrics_refresh()
-            await self._runtime.close()
+        await self._runtime.close()
 
     async def _read_operation(
         self,
@@ -917,16 +840,12 @@ class PostgresEventCache:
         disabled_result: _T,
         writer: Callable[[psycopg.AsyncConnection], Awaitable[_T]],
     ) -> _T:
-        result = await self._operation(
+        return await self._operation(
             room_id,
             operation=operation,
             disabled_result=disabled_result,
             callback=writer,
         )
-        if not self._runtime.is_disabled and self._runtime.is_initialized:
-            self._runtime._metrics.mark_dirty()
-            self._schedule_metrics_refresh()
-        return result
 
     async def _operation(
         self,
@@ -970,60 +889,8 @@ class PostgresEventCache:
                 raise _cache_backend_unavailable(operation, exc) from exc
             else:
                 self._forget_flushed_pending_invalidations(room_id, flushed_pending)
-                self._record_flushed_invalidation_metrics(flushed_pending)
                 return result
         raise _cache_backend_unavailable(operation, transient_error or RuntimeError("operation did not run"))
-
-    def _record_flushed_invalidation_metrics(
-        self,
-        flushed_pending: tuple[tuple[str, str | None, _PendingInvalidation], ...],
-    ) -> None:
-        """Mark metrics stale when a read operation committed pending invalidations."""
-        if not flushed_pending:
-            return
-        self._runtime._metrics.mark_dirty()
-        self._schedule_metrics_refresh()
-
-    def _schedule_metrics_refresh(self) -> None:
-        """Coalesce hot-path mutations into one bounded-staleness metrics refresh."""
-        if not self._metrics_refresh_enabled or self._metrics_refresh_task is not None:
-            return
-        self._metrics_refresh_task = asyncio.create_task(
-            self._refresh_metrics_after_delay(),
-            name="postgres_event_cache_metrics_refresh",
-        )
-
-    async def _refresh_metrics_after_delay(self) -> None:
-        """Refresh metrics after the shared throttle interval."""
-        refresh_task = asyncio.current_task()
-        try:
-            await asyncio.sleep(self._runtime._metrics.refresh_delay_seconds)
-            await self._collect_runtime_diagnostics()
-        finally:
-            if self._metrics_refresh_task is refresh_task:
-                self._metrics_refresh_task = None
-            if (
-                self._metrics_refresh_enabled
-                and self._runtime._metrics.dirty
-                and self._runtime.is_initialized
-                and not self._runtime.is_disabled
-            ):
-                self._schedule_metrics_refresh()
-
-    async def _cancel_metrics_refresh(self, *, disable: bool = True) -> None:
-        """Cancel and await the owned metrics task during shutdown."""
-        refresh_was_enabled = self._metrics_refresh_enabled
-        self._metrics_refresh_enabled = False
-        task = self._metrics_refresh_task
-        try:
-            if task is None:
-                return
-            await cancel_task_once_and_wait(task)
-        finally:
-            if task is not None and task.done() and self._metrics_refresh_task is task:
-                self._metrics_refresh_task = None
-            if not disable:
-                self._metrics_refresh_enabled = refresh_was_enabled
 
     async def _flush_pending_invalidations(
         self,

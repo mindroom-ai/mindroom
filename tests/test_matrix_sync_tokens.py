@@ -274,7 +274,6 @@ async def test_cache_generation_rejects_token_after_reset_crash_window(tmp_path:
     reset_cache = SqliteEventCache(db_path)
     await reset_cache.initialize()
     reset_generation = reset_cache.certification_generation
-    assert reset_cache.startup_requires_sync_reset is True
     assert reset_generation is not None
     assert reset_generation != first_generation
     await reset_cache.close()
@@ -282,7 +281,6 @@ async def test_cache_generation_rejects_token_after_reset_crash_window(tmp_path:
     restarted_cache = SqliteEventCache(db_path)
     await restarted_cache.initialize()
     try:
-        assert restarted_cache.startup_requires_sync_reset is False
         assert restarted_cache.certification_generation == reset_generation
 
         bot = _agent_bot(tmp_path)
@@ -311,26 +309,6 @@ def test_restore_saved_sync_token_ignores_invalid_utf8(tmp_path: Path) -> None:
     bot._restore_saved_sync_token()
 
     assert bot.client.next_batch is None
-
-
-def test_restore_saved_sync_token_clears_certification_after_cache_reset(tmp_path: Path) -> None:
-    """A destructive cache reset invalidates the saved sync bound that certified discarded rows."""
-    bot = _agent_bot(tmp_path)
-    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    bot.client.next_batch = None
-    bot.event_cache.startup_requires_sync_reset = True
-    save_sync_token(
-        tmp_path,
-        bot.agent_name,
-        "s_before_cache_reset",
-        cache_generation=_TEST_CACHE_GENERATION,
-    )
-
-    bot._restore_saved_sync_token()
-
-    assert bot.client.next_batch is None
-    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
-    assert bot._sync_trust_state is SyncTrustState.COLD
 
 
 @pytest.mark.asyncio

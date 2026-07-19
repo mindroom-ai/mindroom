@@ -593,30 +593,6 @@ async def test_postgres_event_cache_recovers_after_backend_connection_terminatio
 
 
 @pytest.mark.asyncio
-async def test_postgres_metrics_refresh_rechecks_connection_after_lock_wait(
-    postgres_event_cache_url: str,
-) -> None:
-    """A queued telemetry recount returns safely when a transient failure drops its connection."""
-    cache = PostgresEventCache(
-        database_url=postgres_event_cache_url,
-        namespace=f"tenant_{uuid.uuid4().hex}",
-    )
-
-    await cache.initialize()
-    try:
-        async with cache._runtime._db_lock:
-            refresh_task = asyncio.create_task(cache._collect_runtime_diagnostics())
-            await asyncio.sleep(0)
-            await cache._runtime._close_db_locked(operation="test_transient_failure")
-
-        diagnostics = await asyncio.wait_for(refresh_task, timeout=5)
-        assert diagnostics["cache_postgres_initialized"] is False
-        assert diagnostics["cache_metrics_refresh_failure_count"] == 0
-    finally:
-        await cache.close()
-
-
-@pytest.mark.asyncio
 async def test_postgres_event_cache_flushes_pending_invalidations_before_guarded_replace(
     postgres_event_cache_url: str,
 ) -> None:

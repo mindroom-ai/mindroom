@@ -127,38 +127,7 @@ _ORPHAN_THREAD_INDEX_PREDICATE = """
         WHERE events.event_id = event_threads.event_id
             AND events.room_id = event_threads.room_id
     )
-    AND NOT (
-        event_threads.event_id = event_threads.thread_id
-        AND (
-            EXISTS (
-                SELECT 1
-                FROM event_threads AS child
-                JOIN events AS child_event
-                    ON child_event.event_id = child.event_id
-                    AND child_event.room_id = child.room_id
-                WHERE child.room_id = event_threads.room_id
-                    AND child.thread_id = event_threads.thread_id
-                    AND child.event_id != child.thread_id
-            )
-            OR EXISTS (
-                SELECT 1
-                FROM thread_events AS child_membership
-                JOIN events AS child_event
-                    ON child_event.event_id = child_membership.event_id
-                    AND child_event.room_id = child_membership.room_id
-                WHERE child_membership.room_id = event_threads.room_id
-                    AND child_membership.thread_id = event_threads.thread_id
-                    AND child_membership.event_id != child_membership.thread_id
-            )
-            OR EXISTS (
-                SELECT 1
-                FROM compacted_streaming_edits AS archived_child
-                WHERE archived_child.room_id = event_threads.room_id
-                    AND archived_child.indexed_thread_id = event_threads.thread_id
-                    AND archived_child.event_id != event_threads.thread_id
-            )
-        )
-    )
+    AND event_threads.event_id != event_threads.thread_id
 """
 
 _ORPHAN_THREAD_EVENT_REFERENCE_PREDICATE = """
@@ -375,31 +344,7 @@ async def run_startup_maintenance(
     )
 
 
-async def refresh_runtime_metrics(
-    db: aiosqlite.Connection,
-    *,
-    startup_report: CacheMaintenanceReport,
-    db_path: Path,
-) -> CacheMaintenanceReport:
-    """Refresh current counts while preserving immutable startup repair outcomes."""
-    report = await _collect_maintenance_report(
-        db,
-        schema_version=startup_report.schema_version,
-        migrated_from_schema_version=startup_report.migrated_from_schema_version,
-        destructive_reset=startup_report.destructive_reset,
-        normalized_legacy_thread_payload_rows=startup_report.normalized_legacy_thread_payload_rows,
-        orphan_edit_indexes_before=startup_report.orphan_edit_indexes_before,
-        orphan_thread_indexes_before=startup_report.orphan_thread_indexes_before,
-        orphan_thread_event_references_before=startup_report.orphan_thread_event_references_before,
-        repaired_edit_indexes=startup_report.repaired_edit_indexes,
-        repaired_thread_indexes=startup_report.repaired_thread_indexes,
-        repaired_thread_event_references=startup_report.repaired_thread_event_references,
-        compacted_nonterminal_streaming_edits=startup_report.compacted_nonterminal_streaming_edits,
-    )
-    return with_sqlite_storage_bytes(report, db_path)
-
-
-def sqlite_storage_bytes(db_path: Path) -> int | None:
+def _sqlite_storage_bytes(db_path: Path) -> int | None:
     """Return current SQLite main/WAL bytes when filesystem metadata is available."""
     paths = (db_path, db_path.with_name(f"{db_path.name}-wal"))
     try:
@@ -410,4 +355,4 @@ def sqlite_storage_bytes(db_path: Path) -> int | None:
 
 def with_sqlite_storage_bytes(report: CacheMaintenanceReport, db_path: Path) -> CacheMaintenanceReport:
     """Attach the committed SQLite file size to a maintenance report."""
-    return replace(report, storage_bytes=sqlite_storage_bytes(db_path))
+    return replace(report, storage_bytes=_sqlite_storage_bytes(db_path))

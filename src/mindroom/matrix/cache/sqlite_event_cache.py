@@ -16,15 +16,13 @@ from mindroom.logging_config import get_logger
 from mindroom.timing import milliseconds
 
 from . import sqlite_event_cache_events, sqlite_event_cache_threads
-from .cache_maintenance import CacheMetricsState, CorruptEventCachePayloadError, cancel_task_once_and_wait
+from .cache_maintenance import CorruptEventCachePayloadError
 from .event_batching import group_lookup_events_by_room
 from .event_normalization import normalize_event_source_for_cache
 from .sqlite_agent_message_snapshot import load_sqlite_agent_message_snapshot
 from .sqlite_cache_maintenance import (
     migrate_version_10_thread_events,
-    refresh_runtime_metrics,
     run_startup_maintenance,
-    sqlite_storage_bytes,
     with_sqlite_storage_bytes,
 )
 from .thread_cache_state import replacement_validated_at
@@ -389,7 +387,7 @@ class _SqliteEventCacheRuntime:
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
         self._db: aiosqlite.Connection | None = None
-        self._metrics = CacheMetricsState()
+        self._maintenance_report: CacheMaintenanceReport | None = None
         self._certification_generation: str | None = None
         self._disabled_reason: str | None = None
         self._db_lock = asyncio.Lock()
@@ -422,8 +420,8 @@ class _SqliteEventCacheRuntime:
 
     @property
     def maintenance_report(self) -> CacheMaintenanceReport | None:
-        """Return current counts plus immutable startup maintenance outcomes."""
-        return self._metrics.report
+        """Return the immutable startup maintenance report."""
+        return self._maintenance_report
 
     @property
     def certification_generation(self) -> str | None:
@@ -447,7 +445,7 @@ class _SqliteEventCacheRuntime:
             if self._disabled_reason is not None or self._db is not None:
                 return
             self._db, report, self._certification_generation = await _initialize_event_cache_db(self._db_path)
-            self._metrics.initialize(report)
+            self._maintenance_report = report
 
     async def close(self) -> None:
         """Close the SQLite connection when the cache is no longer needed."""
@@ -534,9 +532,6 @@ class SqliteEventCache:
 
     def __init__(self, db_path: Path) -> None:
         self._runtime = _SqliteEventCacheRuntime(db_path)
-        self._metrics_refresh_task: asyncio.Task[None] | None = None
-        self._metrics_refresh_enabled = True
-        self._metrics_refresh_lifecycle_lock = asyncio.Lock()
 
     @property
     def db_path(self) -> Path:
@@ -554,85 +549,24 @@ class SqliteEventCache:
         return self._runtime.is_initialized and not self._runtime.is_disabled
 
     @property
-    def startup_requires_sync_reset(self) -> bool:
-        """Return whether startup destructively reset cache contents."""
-        report = self._runtime.maintenance_report
-        return report is not None and report.startup_requires_sync_reset
-
-    @property
     def certification_generation(self) -> str | None:
         """Return the durable generation bound to certified sync checkpoints."""
         return self._runtime.certification_generation
 
     def runtime_diagnostics(self) -> dict[str, object]:
         """Return log-safe runtime state for sync certification diagnostics."""
-        storage_bytes = sqlite_storage_bytes(self.db_path)
         diagnostics: dict[str, object] = {
             "cache_backend": "sqlite",
             "cache_sqlite_initialized": self._runtime.is_initialized,
             "cache_sqlite_disabled": self._runtime.is_disabled,
             "cache_certification_generation_present": self.certification_generation is not None,
-            "cache_storage_bytes_available": storage_bytes is not None,
         }
-        if storage_bytes is not None:
-            diagnostics["cache_storage_bytes"] = storage_bytes
         if self._runtime.disabled_reason is not None:
             diagnostics["cache_sqlite_disabled_reason"] = self._runtime.disabled_reason
-        diagnostics.update(self._runtime._metrics.as_runtime_diagnostics())
-        diagnostics["cache_metrics_refresh_in_progress"] = self._metrics_refresh_task is not None
+        report = self._runtime.maintenance_report
+        if report is not None:
+            diagnostics.update(report.as_runtime_diagnostics())
         return diagnostics
-
-    async def refresh_runtime_diagnostics(self) -> dict[str, object]:
-        """Force an exact metrics refresh without changing cache availability on telemetry failure."""
-        async with self._metrics_refresh_lifecycle_lock:
-            try:
-                await self._cancel_metrics_refresh(disable=False)
-                return await self._collect_runtime_diagnostics()
-            finally:
-                if (
-                    self._metrics_refresh_enabled
-                    and self._runtime._metrics.dirty
-                    and self._runtime.is_initialized
-                    and not self._runtime.is_disabled
-                ):
-                    self._schedule_metrics_refresh()
-
-    async def _collect_runtime_diagnostics(self) -> dict[str, object]:
-        """Collect one exact SQLite storage snapshot."""
-        if self._runtime.is_disabled or not self._runtime.is_initialized:
-            return self.runtime_diagnostics()
-        async with self._runtime._db_lock:
-            db = self._runtime.require_db()
-            report = self._runtime.maintenance_report
-            if report is None:
-                return self.runtime_diagnostics()
-            try:
-                await db.execute("BEGIN")
-                refreshed_report = await refresh_runtime_metrics(
-                    db,
-                    startup_report=report,
-                    db_path=self.db_path,
-                )
-                await db.commit()
-            except asyncio.CancelledError:
-                await _rollback_sqlite_connection_best_effort(db, operation="refresh_runtime_diagnostics")
-                raise
-            except Exception as exc:
-                await _rollback_sqlite_connection_best_effort(db, operation="refresh_runtime_diagnostics")
-                self._runtime._metrics.record_refresh_failure()
-                logger.warning(
-                    "Matrix event cache metrics refresh failed",
-                    backend="sqlite",
-                    error_type=type(exc).__name__,
-                )
-            else:
-                self._runtime._metrics.record_refresh(refreshed_report)
-                logger.info(
-                    "Matrix event cache runtime metrics refreshed",
-                    backend="sqlite",
-                    **refreshed_report.as_runtime_diagnostics(snapshot="runtime"),
-                )
-        return self.runtime_diagnostics()
 
     def pending_durable_write_room_ids(self) -> tuple[str, ...]:
         """Return rooms with runtime-only writes that must persist before certifying a sync token."""
@@ -644,7 +578,6 @@ class SqliteEventCache:
 
     async def initialize(self) -> None:
         """Open the SQLite database and create the cache schema."""
-        self._metrics_refresh_enabled = True
         await self._runtime.initialize()
 
     def disable(self, reason: str) -> None:
@@ -653,9 +586,7 @@ class SqliteEventCache:
 
     async def close(self) -> None:
         """Close the SQLite connection when the cache is no longer needed."""
-        async with self._metrics_refresh_lifecycle_lock:
-            await self._cancel_metrics_refresh()
-            await self._runtime.close()
+        await self._runtime.close()
 
     async def _read_operation(
         self,
@@ -691,50 +622,7 @@ class SqliteEventCache:
             except BaseException:
                 await _rollback_sqlite_connection_best_effort(db, operation=operation)
                 raise
-        self._runtime._metrics.mark_dirty()
-        self._schedule_metrics_refresh()
         return result
-
-    def _schedule_metrics_refresh(self) -> None:
-        """Coalesce hot-path mutations into one bounded-staleness metrics refresh."""
-        if not self._metrics_refresh_enabled or self._metrics_refresh_task is not None:
-            return
-        self._metrics_refresh_task = asyncio.create_task(
-            self._refresh_metrics_after_delay(),
-            name="sqlite_event_cache_metrics_refresh",
-        )
-
-    async def _refresh_metrics_after_delay(self) -> None:
-        """Refresh metrics after the shared throttle interval."""
-        refresh_task = asyncio.current_task()
-        try:
-            await asyncio.sleep(self._runtime._metrics.refresh_delay_seconds)
-            await self._collect_runtime_diagnostics()
-        finally:
-            if self._metrics_refresh_task is refresh_task:
-                self._metrics_refresh_task = None
-            if (
-                self._metrics_refresh_enabled
-                and self._runtime._metrics.dirty
-                and self._runtime.is_initialized
-                and not self._runtime.is_disabled
-            ):
-                self._schedule_metrics_refresh()
-
-    async def _cancel_metrics_refresh(self, *, disable: bool = True) -> None:
-        """Cancel and await the owned metrics task during shutdown."""
-        refresh_was_enabled = self._metrics_refresh_enabled
-        self._metrics_refresh_enabled = False
-        task = self._metrics_refresh_task
-        try:
-            if task is None:
-                return
-            await cancel_task_once_and_wait(task)
-        finally:
-            if task is not None and task.done() and self._metrics_refresh_task is task:
-                self._metrics_refresh_task = None
-            if not disable:
-                self._metrics_refresh_enabled = refresh_was_enabled
 
     async def get_thread_events(self, room_id: str, thread_id: str) -> list[dict[str, Any]] | None:
         """Return cached events for one thread sorted by timestamp."""

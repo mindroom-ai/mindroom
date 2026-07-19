@@ -17,10 +17,7 @@ from mindroom.constants import (
 )
 from mindroom.matrix.cache import (
     ConversationEventCache,
-    cache_maintenance,
-    postgres_event_cache,
     postgres_streaming_compaction,
-    sqlite_event_cache,
     sqlite_streaming_compaction,
 )
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
@@ -59,20 +56,6 @@ def _message_event(
         "type": "m.room.message",
         "content": content,
     }
-
-
-async def _wait_for_runtime_metrics_idle(
-    event_cache: ConversationEventCache,
-) -> dict[str, object]:
-    async with asyncio.timeout(5):
-        while True:
-            diagnostics = event_cache.runtime_diagnostics()
-            if (
-                diagnostics["cache_metrics_dirty"] is False
-                and diagnostics["cache_metrics_refresh_in_progress"] is False
-            ):
-                return diagnostics
-            await asyncio.sleep(0.01)
 
 
 class TestConversationEventCacheContract:
@@ -469,106 +452,27 @@ async def test_recent_room_events_include_compacted_edits(
 
 
 @pytest.mark.asyncio
-async def test_runtime_diagnostics_refresh_current_storage_metrics(
-    event_cache: ConversationEventCache,
-) -> None:
-    """Both backends expose exact on-demand gauges and bounded-staleness metadata."""
-    room_id = "!room:localhost"
-    original_id = "$original:localhost"
-    sender = "@agent:localhost"
-    pending = _message_event(
-        "$pending:localhost",
-        2,
-        sender=sender,
-        edit_of=original_id,
-        stream_status=STREAM_STATUS_PENDING,
-    )
-    terminal = _message_event(
-        "$terminal:localhost",
-        3,
-        sender=sender,
-        edit_of=original_id,
-        stream_status=STREAM_STATUS_COMPLETED,
-    )
-    await event_cache.store_events_batch(
-        [
-            (str(pending["event_id"]), room_id, pending),
-            (str(terminal["event_id"]), room_id, terminal),
-        ],
-    )
-    dirty_diagnostics = event_cache.runtime_diagnostics()
-    assert dirty_diagnostics["cache_metrics_dirty"] is True
-    assert dirty_diagnostics["cache_metrics_refresh_in_progress"] is True
-
-    diagnostics = await event_cache.refresh_runtime_diagnostics()
-    assert diagnostics["cache_metrics_snapshot"] == "runtime"
-    assert diagnostics["cache_metrics_dirty"] is False
-    assert diagnostics["cache_metrics_refresh_in_progress"] is False
-    assert diagnostics["cache_event_rows"] == 1
-    assert diagnostics["cache_edit_index_rows"] == 1
-    assert diagnostics["cache_terminal_streaming_edit_rows"] == 1
-    assert diagnostics["cache_nonterminal_streaming_edit_rows"] == 0
-    assert diagnostics["cache_compacted_streaming_edit_archive_rows"] == 1
-    assert diagnostics["cache_compacted_streaming_edit_archive_bytes"] > 0
-    assert diagnostics["cache_orphan_edit_indexes_current"] == 0
-
-    await event_cache.mark_thread_stale(room_id, original_id, reason="contract_refresh")
-    await event_cache.store_mxc_text(room_id, "mxc://localhost/secret-media", "secret body")
-    await event_cache.redact_event(room_id, str(pending["event_id"]))
-    refreshed = await event_cache.refresh_runtime_diagnostics()
-    assert refreshed["cache_stale_thread_markers"] == 1
-    assert refreshed["cache_mxc_rows"] == 1
-    assert refreshed["cache_tombstone_rows"] == 1
-    assert refreshed["cache_compacted_streaming_edit_archive_rows"] == 0
-    assert "secret-media" not in str(refreshed)
-    assert "secret body" not in str(refreshed)
-
-
-@pytest.mark.asyncio
-async def test_runtime_metrics_refresh_failure_is_advisory(
-    event_cache: ConversationEventCache,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Telemetry failure preserves the last snapshot and cannot disable durable cache writes."""
-    room_id = "!room:localhost"
-    event = _message_event("$event:localhost", 1)
-    await event_cache.store_event(str(event["event_id"]), room_id, event)
-    failure_reason = "secret database URL"
-
-    async def fail_refresh(*_args: object, **_kwargs: object) -> None:
-        raise RuntimeError(failure_reason)
-
-    if isinstance(event_cache, SqliteEventCache):
-        monkeypatch.setattr(sqlite_event_cache, "refresh_runtime_metrics", fail_refresh)
-    else:
-        assert isinstance(event_cache, PostgresEventCache)
-        monkeypatch.setattr(postgres_event_cache, "refresh_runtime_metrics", fail_refresh)
-
-    diagnostics = await event_cache.refresh_runtime_diagnostics()
-    assert event_cache.durable_writes_available is True
-    assert diagnostics["cache_metrics_dirty"] is True
-    assert diagnostics["cache_metrics_refresh_failure_count"] == 1
-    assert failure_reason not in str(diagnostics)
-
-
-@pytest.mark.asyncio
 async def test_sqlite_storage_size_failure_is_advisory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Filesystem telemetry failure cannot escape diagnostics or disable cache writes."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
+    """Startup filesystem telemetry failure cannot escape or disable cache writes."""
+    failure_reason = "secret filesystem failure"
+
+    db_path = tmp_path / "event_cache.db"
+    real_stat = Path.stat
+
+    def fail_cache_stat(path: Path, *args: object, **kwargs: object) -> object:
+        if path in {db_path, db_path.with_name(f"{db_path.name}-wal")}:
+            raise OSError(failure_reason)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", fail_cache_stat)
+    cache = SqliteEventCache(db_path)
     await cache.initialize()
     try:
-        failure_reason = "secret filesystem failure"
-
-        def fail_stat(*_args: object, **_kwargs: object) -> None:
-            raise OSError(failure_reason)
-
-        monkeypatch.setattr(Path, "stat", fail_stat)
         diagnostics = cache.runtime_diagnostics()
-        assert diagnostics["cache_storage_bytes_available"] is False
-        assert diagnostics["cache_storage_bytes"] > 0
+        assert "cache_storage_bytes" not in diagnostics
         assert failure_reason not in str(diagnostics)
 
         event = _message_event("$event:localhost", 1)
@@ -576,217 +480,6 @@ async def test_sqlite_storage_size_failure_is_advisory(
         assert await cache.get_event("!room:localhost", str(event["event_id"])) == event
     finally:
         await cache.close()
-
-
-@pytest.mark.asyncio
-async def test_forced_metrics_refresh_rolls_back_cancelled_transaction(
-    event_cache: ConversationEventCache,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Cancelling an in-flight telemetry transaction cannot poison the shared connection."""
-    monkeypatch.setattr(cache_maintenance, "_RUNTIME_METRICS_REFRESH_INTERVAL_SECONDS", 0.0)
-    first_refresh_started = asyncio.Event()
-    never_resume_first_refresh = asyncio.Event()
-
-    if isinstance(event_cache, SqliteEventCache):
-        metrics_module = sqlite_event_cache
-    else:
-        assert isinstance(event_cache, PostgresEventCache)
-        metrics_module = postgres_event_cache
-    real_refresh = metrics_module.refresh_runtime_metrics
-    refresh_attempts = 0
-
-    async def block_first_refresh(*args: object, **kwargs: object) -> object:
-        nonlocal refresh_attempts
-        refresh_attempts += 1
-        if refresh_attempts == 1:
-            first_refresh_started.set()
-            await never_resume_first_refresh.wait()
-        return await real_refresh(*args, **kwargs)
-
-    monkeypatch.setattr(metrics_module, "refresh_runtime_metrics", block_first_refresh)
-    room_id = "!room:localhost"
-    first = _message_event("$first:localhost", 1)
-    await event_cache.store_event(str(first["event_id"]), room_id, first)
-    await asyncio.wait_for(first_refresh_started.wait(), timeout=5)
-
-    diagnostics = await asyncio.wait_for(event_cache.refresh_runtime_diagnostics(), timeout=5)
-    assert diagnostics["cache_metrics_snapshot"] == "runtime"
-    assert diagnostics["cache_metrics_refresh_failure_count"] == 0
-    second = _message_event("$second:localhost", 2)
-    await event_cache.store_event(str(second["event_id"]), room_id, second)
-    assert await event_cache.get_event(room_id, str(second["event_id"])) == second
-
-
-@pytest.mark.asyncio
-async def test_cancelled_forced_metrics_refresh_reschedules_exact_recount(
-    event_cache: ConversationEventCache,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Cancelling a forced recount preserves automatic bounded-staleness recovery."""
-    monkeypatch.setattr(cache_maintenance, "_RUNTIME_METRICS_REFRESH_INTERVAL_SECONDS", 3_600.0)
-    room_id = "!room:localhost"
-    event = _message_event("$event:localhost", 1)
-    await event_cache.store_event(str(event["event_id"]), room_id, event)
-    await asyncio.sleep(0)
-    assert event_cache.runtime_diagnostics()["cache_metrics_refresh_in_progress"] is True
-
-    if isinstance(event_cache, SqliteEventCache):
-        metrics_module = sqlite_event_cache
-    else:
-        assert isinstance(event_cache, PostgresEventCache)
-        metrics_module = postgres_event_cache
-    real_refresh = metrics_module.refresh_runtime_metrics
-    forced_refresh_started = asyncio.Event()
-    automatic_refresh_finished = asyncio.Event()
-    never_finish_forced_refresh = asyncio.Event()
-    refresh_attempts = 0
-
-    async def block_forced_refresh(*args: object, **kwargs: object) -> object:
-        nonlocal refresh_attempts
-        refresh_attempts += 1
-        if refresh_attempts == 1:
-            forced_refresh_started.set()
-            await never_finish_forced_refresh.wait()
-        result = await real_refresh(*args, **kwargs)
-        automatic_refresh_finished.set()
-        return result
-
-    monkeypatch.setattr(metrics_module, "refresh_runtime_metrics", block_forced_refresh)
-    monkeypatch.setattr(cache_maintenance, "_RUNTIME_METRICS_REFRESH_INTERVAL_SECONDS", 0.0)
-    forced_refresh = asyncio.create_task(event_cache.refresh_runtime_diagnostics())
-    await asyncio.wait_for(forced_refresh_started.wait(), timeout=5)
-    forced_refresh.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await forced_refresh
-
-    await asyncio.wait_for(automatic_refresh_finished.wait(), timeout=5)
-    diagnostics = await _wait_for_runtime_metrics_idle(event_cache)
-    assert diagnostics["cache_metrics_snapshot"] == "runtime"
-    assert diagnostics["cache_metrics_dirty"] is False
-    assert diagnostics["cache_metrics_refresh_in_progress"] is False
-    assert refresh_attempts == 2
-    assert await event_cache.get_event(room_id, str(event["event_id"])) == event
-
-
-@pytest.mark.asyncio
-async def test_cancelled_forced_refresh_during_prior_cleanup_restores_scheduler(
-    event_cache: ConversationEventCache,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Caller cancellation cannot strand refresh scheduling while an old recount unwinds."""
-    monkeypatch.setattr(cache_maintenance, "_RUNTIME_METRICS_REFRESH_INTERVAL_SECONDS", 0.0)
-    if isinstance(event_cache, SqliteEventCache):
-        metrics_module = sqlite_event_cache
-    else:
-        assert isinstance(event_cache, PostgresEventCache)
-        metrics_module = postgres_event_cache
-    real_refresh = metrics_module.refresh_runtime_metrics
-    first_refresh_started = asyncio.Event()
-    first_refresh_cleanup_started = asyncio.Event()
-    release_first_refresh_cleanup = asyncio.Event()
-    automatic_refresh_finished = asyncio.Event()
-    never_finish_first_refresh = asyncio.Event()
-    refresh_attempts = 0
-
-    async def delay_first_refresh_cleanup(*args: object, **kwargs: object) -> object:
-        nonlocal refresh_attempts
-        refresh_attempts += 1
-        if refresh_attempts == 1:
-            first_refresh_started.set()
-            try:
-                await never_finish_first_refresh.wait()
-            except asyncio.CancelledError:
-                first_refresh_cleanup_started.set()
-                await release_first_refresh_cleanup.wait()
-                raise
-        result = await real_refresh(*args, **kwargs)
-        automatic_refresh_finished.set()
-        return result
-
-    monkeypatch.setattr(metrics_module, "refresh_runtime_metrics", delay_first_refresh_cleanup)
-    room_id = "!room:localhost"
-    event = _message_event("$event:localhost", 1)
-    await event_cache.store_event(str(event["event_id"]), room_id, event)
-    await asyncio.wait_for(first_refresh_started.wait(), timeout=5)
-
-    forced_refresh = asyncio.create_task(event_cache.refresh_runtime_diagnostics())
-    await asyncio.wait_for(first_refresh_cleanup_started.wait(), timeout=5)
-    forced_refresh.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await forced_refresh
-    assert event_cache.runtime_diagnostics()["cache_metrics_refresh_in_progress"] is True
-
-    release_first_refresh_cleanup.set()
-    await asyncio.wait_for(automatic_refresh_finished.wait(), timeout=5)
-    diagnostics = await _wait_for_runtime_metrics_idle(event_cache)
-    assert diagnostics["cache_metrics_snapshot"] == "runtime"
-    assert refresh_attempts == 2
-    assert await event_cache.get_event(room_id, str(event["event_id"])) == event
-
-
-@pytest.mark.asyncio
-async def test_concurrent_forced_metrics_refresh_does_not_recancel_cleanup(
-    event_cache: ConversationEventCache,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Concurrent forced recounts share one cancellation without interrupting cleanup."""
-    monkeypatch.setattr(cache_maintenance, "_RUNTIME_METRICS_REFRESH_INTERVAL_SECONDS", 0.0)
-    if isinstance(event_cache, SqliteEventCache):
-        metrics_module = sqlite_event_cache
-    else:
-        assert isinstance(event_cache, PostgresEventCache)
-        metrics_module = postgres_event_cache
-    real_refresh = metrics_module.refresh_runtime_metrics
-    first_refresh_started = asyncio.Event()
-    first_refresh_cleanup_started = asyncio.Event()
-    release_first_refresh_cleanup = asyncio.Event()
-    first_refresh_cleanup_interrupted = asyncio.Event()
-    never_finish_first_refresh = asyncio.Event()
-    refresh_attempts = 0
-
-    async def delay_first_refresh_cleanup(*args: object, **kwargs: object) -> object:
-        nonlocal refresh_attempts
-        refresh_attempts += 1
-        if refresh_attempts == 1:
-            first_refresh_started.set()
-            try:
-                await never_finish_first_refresh.wait()
-            except asyncio.CancelledError:
-                first_refresh_cleanup_started.set()
-                try:
-                    await release_first_refresh_cleanup.wait()
-                except asyncio.CancelledError:
-                    first_refresh_cleanup_interrupted.set()
-                    raise
-                raise
-        return await real_refresh(*args, **kwargs)
-
-    monkeypatch.setattr(metrics_module, "refresh_runtime_metrics", delay_first_refresh_cleanup)
-    room_id = "!room:localhost"
-    first = _message_event("$first:localhost", 1)
-    await event_cache.store_event(str(first["event_id"]), room_id, first)
-    await asyncio.wait_for(first_refresh_started.wait(), timeout=5)
-
-    first_forced_refresh = asyncio.create_task(event_cache.refresh_runtime_diagnostics())
-    await asyncio.wait_for(first_refresh_cleanup_started.wait(), timeout=5)
-    second_forced_refresh = asyncio.create_task(event_cache.refresh_runtime_diagnostics())
-    await asyncio.sleep(0)
-    assert first_refresh_cleanup_interrupted.is_set() is False
-
-    release_first_refresh_cleanup.set()
-    await asyncio.wait_for(
-        asyncio.gather(first_forced_refresh, second_forced_refresh),
-        timeout=5,
-    )
-    assert first_refresh_cleanup_interrupted.is_set() is False
-    assert refresh_attempts == 3
-
-    second = _message_event("$second:localhost", 2)
-    await event_cache.store_event(str(second["event_id"]), room_id, second)
-    await _wait_for_runtime_metrics_idle(event_cache)
-    assert refresh_attempts == 4
-    assert await event_cache.get_event(room_id, str(second["event_id"])) == second
 
 
 @pytest.mark.asyncio

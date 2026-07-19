@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import time
 import zlib
 from dataclasses import dataclass
 from typing import Any
@@ -27,22 +25,10 @@ TERMINAL_STREAM_STATUSES = frozenset(
         STREAM_STATUS_INTERRUPTED,
     },
 )
-_RUNTIME_METRICS_REFRESH_INTERVAL_SECONDS = 60.0
 
 
 class CorruptEventCachePayloadError(RuntimeError):
     """Raised when one compressed cache payload cannot be reconstructed safely."""
-
-
-async def cancel_task_once_and_wait(task: asyncio.Task[None]) -> None:
-    """Cancel one owned task at most once and wait for its coroutine cleanup to finish."""
-    completed = asyncio.Event()
-    task.add_done_callback(lambda _task: completed.set())
-    if not task.done() and task.cancelling() == 0:
-        task.cancel()
-    await completed.wait()
-    if not task.cancelled():
-        task.result()
 
 
 def decompress_event_payload(event_json_zlib: bytes, *, backend: str) -> dict[str, Any]:
@@ -93,15 +79,10 @@ class CacheMaintenanceReport:
     repaired_thread_event_references: int = 0
     compacted_nonterminal_streaming_edits: int = 0
 
-    @property
-    def startup_requires_sync_reset(self) -> bool:
-        """Return whether startup discarded cache contents certified by saved sync tokens."""
-        return self.destructive_reset
-
-    def as_runtime_diagnostics(self, *, snapshot: str = "startup") -> dict[str, object]:
+    def as_runtime_diagnostics(self) -> dict[str, object]:
         """Return flat structured-log fields without connection details or event content."""
         diagnostics: dict[str, object] = {
-            "cache_metrics_snapshot": snapshot,
+            "cache_maintenance_snapshot": "startup",
             "cache_schema_version": self.schema_version,
             "cache_schema_destructive_reset": self.destructive_reset,
             "cache_normalized_legacy_thread_payload_rows": self.normalized_legacy_thread_payload_rows,
@@ -121,13 +102,10 @@ class CacheMaintenanceReport:
             "cache_compacted_streaming_edit_archive_bytes": self.compacted_streaming_edit_archive_bytes,
             "cache_orphan_edit_indexes_before": self.orphan_edit_indexes_before,
             "cache_orphan_edit_indexes_after": self.orphan_edit_indexes_after,
-            "cache_orphan_edit_indexes_current": self.orphan_edit_indexes_after,
             "cache_orphan_thread_indexes_before": self.orphan_thread_indexes_before,
             "cache_orphan_thread_indexes_after": self.orphan_thread_indexes_after,
-            "cache_orphan_thread_indexes_current": self.orphan_thread_indexes_after,
             "cache_orphan_thread_event_references_before": self.orphan_thread_event_references_before,
             "cache_orphan_thread_event_references_after": self.orphan_thread_event_references_after,
-            "cache_orphan_thread_event_references_current": self.orphan_thread_event_references_after,
             "cache_repaired_edit_indexes": self.repaired_edit_indexes,
             "cache_repaired_thread_indexes": self.repaired_thread_indexes,
             "cache_repaired_thread_event_references": self.repaired_thread_event_references,
@@ -139,60 +117,4 @@ class CacheMaintenanceReport:
             diagnostics["cache_storage_bytes"] = self.storage_bytes
         if self.namespace_payload_bytes is not None:
             diagnostics["cache_namespace_payload_bytes"] = self.namespace_payload_bytes
-        return diagnostics
-
-
-@dataclass(slots=True)
-class CacheMetricsState:
-    """Track the latest bounded runtime metrics snapshot plus startup outcomes."""
-
-    report: CacheMaintenanceReport | None = None
-    snapshot: str = "startup"
-    dirty: bool = False
-    captured_at: float | None = None
-    _captured_monotonic: float | None = None
-    refresh_failure_count: int = 0
-
-    def initialize(self, report: CacheMaintenanceReport) -> None:
-        """Record startup metrics as the initial exact storage snapshot."""
-        self.report = report
-        self.snapshot = "startup"
-        self.dirty = False
-        self.captured_at = time.time()
-        self._captured_monotonic = time.monotonic()
-
-    def mark_dirty(self) -> None:
-        """Record that committed mutations may have changed the last exact snapshot."""
-        self.dirty = True
-
-    def record_refresh(self, refreshed_report: CacheMaintenanceReport) -> None:
-        """Publish one exact runtime snapshot."""
-        self.report = refreshed_report
-        self.snapshot = "runtime"
-        self.dirty = False
-        self.captured_at = time.time()
-        self._captured_monotonic = time.monotonic()
-
-    def record_refresh_failure(self) -> None:
-        """Count one failed telemetry refresh without affecting cache availability."""
-        self.refresh_failure_count += 1
-        self._captured_monotonic = time.monotonic()
-
-    @property
-    def refresh_delay_seconds(self) -> float:
-        """Return the remaining throttle delay before another automatic refresh."""
-        if self._captured_monotonic is None:
-            return 0.0
-        age = time.monotonic() - self._captured_monotonic
-        return max(0.0, _RUNTIME_METRICS_REFRESH_INTERVAL_SECONDS - age)
-
-    def as_runtime_diagnostics(self) -> dict[str, object]:
-        """Return current metrics and explicit freshness metadata."""
-        if self.report is None:
-            return {}
-        diagnostics = self.report.as_runtime_diagnostics(snapshot=self.snapshot)
-        diagnostics["cache_metrics_dirty"] = self.dirty
-        diagnostics["cache_metrics_refresh_failure_count"] = self.refresh_failure_count
-        if self.captured_at is not None:
-            diagnostics["cache_metrics_snapshot_age_seconds"] = max(0.0, time.time() - self.captured_at)
         return diagnostics

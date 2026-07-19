@@ -32,7 +32,7 @@ Startup maintenance runs inside the same transaction as schema migration.
 
 It audits and repairs edit-index rows whose edit event is absent.
 
-It audits and repairs event-to-thread rows whose event is absent while retaining root self-mappings that are proven by a surviving active child mapping, normalized thread membership, or cold child mapping.
+It audits and repairs non-root event-to-thread rows whose event is absent while retaining learned root self-mappings.
 
 It marks a thread stale before removing a membership row whose active source event is absent.
 
@@ -40,12 +40,8 @@ It compacts eligible streaming edits again so replayed or partially processed wr
 
 The startup log includes backend bytes where available, namespace payload bytes for PostgreSQL, normalized legacy thread-payload rows, row counts for active tables and cold history, tombstone counts, stale marker counts, streaming categories, orphan counts before and after repair, and repair and compaction outcomes.
 
-Runtime diagnostics preserve the immutable startup outcomes and overlay an exact, bounded-staleness storage snapshot with its age, dirty state, refresh state, and refresh-failure count.
-SQLite diagnostics explicitly report when filesystem metadata makes byte size unavailable.
-
-Committed mutations coalesce into a throttled background recount, and operators can force an exact recount through the cache diagnostics API.
-
-Telemetry refresh failure preserves the last good snapshot and never rolls back a cache write, disables the cache, or weakens sync certification.
+Runtime diagnostics expose the immutable startup maintenance report plus basic live backend, reconnection, and pending-invalidation state.
+SQLite omits byte size when startup filesystem metadata is unavailable.
 
 Diagnostics contain counts and sizes only and never contain event content or connection URLs.
 
@@ -73,8 +69,6 @@ Row normalization remains namespace-scoped after the binary cutover.
 Other PostgreSQL namespaces retain their legacy payload until their own version-2 runtime initializes, and each startup reports how many legacy payload rows it normalized, so one namespace never deletes another namespace's only pre-migration copy.
 
 Cancellation or failure rolls back SQLite and PostgreSQL DDL, payload normalization, repair, compaction, metadata, and stale markers as one unit.
-
-Cancellation of a background or forced metrics recount also rolls back its read transaction before the shared connection can serve another cache operation.
 
 Migration tests use real version-10 and version-1 shapes on disposable storage and never access a production database.
 

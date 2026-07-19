@@ -113,43 +113,7 @@ async def _orphan_thread_index_count(db: AsyncConnection, *, namespace: str) -> 
                     AND events.event_id = event_threads.event_id
                     AND events.room_id = event_threads.room_id
             )
-            AND NOT (
-                event_threads.event_id = event_threads.thread_id
-                AND (
-                    EXISTS (
-                        SELECT 1
-                        FROM mindroom_event_cache_event_threads AS child
-                        JOIN mindroom_event_cache_events AS child_event
-                            ON child_event.namespace = child.namespace
-                            AND child_event.event_id = child.event_id
-                            AND child_event.room_id = child.room_id
-                        WHERE child.namespace = event_threads.namespace
-                            AND child.room_id = event_threads.room_id
-                            AND child.thread_id = event_threads.thread_id
-                            AND child.event_id != child.thread_id
-                    )
-                    OR EXISTS (
-                        SELECT 1
-                        FROM mindroom_event_cache_thread_events AS child_membership
-                        JOIN mindroom_event_cache_events AS child_event
-                            ON child_event.namespace = child_membership.namespace
-                            AND child_event.event_id = child_membership.event_id
-                            AND child_event.room_id = child_membership.room_id
-                        WHERE child_membership.namespace = event_threads.namespace
-                            AND child_membership.room_id = event_threads.room_id
-                            AND child_membership.thread_id = event_threads.thread_id
-                            AND child_membership.event_id != child_membership.thread_id
-                    )
-                    OR EXISTS (
-                        SELECT 1
-                        FROM mindroom_event_cache_compacted_streaming_edits AS archived_child
-                        WHERE archived_child.namespace = event_threads.namespace
-                            AND archived_child.room_id = event_threads.room_id
-                            AND archived_child.indexed_thread_id = event_threads.thread_id
-                            AND archived_child.event_id != event_threads.thread_id
-                    )
-                )
-            )
+            AND event_threads.event_id != event_threads.thread_id
         """,
         (namespace,),
     )
@@ -207,43 +171,7 @@ async def _repair_orphan_derived_rows(
                     AND events.event_id = event_threads.event_id
                     AND events.room_id = event_threads.room_id
             )
-            AND NOT (
-                event_threads.event_id = event_threads.thread_id
-                AND (
-                    EXISTS (
-                        SELECT 1
-                        FROM mindroom_event_cache_event_threads AS child
-                        JOIN mindroom_event_cache_events AS child_event
-                            ON child_event.namespace = child.namespace
-                            AND child_event.event_id = child.event_id
-                            AND child_event.room_id = child.room_id
-                        WHERE child.namespace = event_threads.namespace
-                            AND child.room_id = event_threads.room_id
-                            AND child.thread_id = event_threads.thread_id
-                            AND child.event_id != child.thread_id
-                    )
-                    OR EXISTS (
-                        SELECT 1
-                        FROM mindroom_event_cache_thread_events AS child_membership
-                        JOIN mindroom_event_cache_events AS child_event
-                            ON child_event.namespace = child_membership.namespace
-                            AND child_event.event_id = child_membership.event_id
-                            AND child_event.room_id = child_membership.room_id
-                        WHERE child_membership.namespace = event_threads.namespace
-                            AND child_membership.room_id = event_threads.room_id
-                            AND child_membership.thread_id = event_threads.thread_id
-                            AND child_membership.event_id != child_membership.thread_id
-                    )
-                    OR EXISTS (
-                        SELECT 1
-                        FROM mindroom_event_cache_compacted_streaming_edits AS archived_child
-                        WHERE archived_child.namespace = event_threads.namespace
-                            AND archived_child.room_id = event_threads.room_id
-                            AND archived_child.indexed_thread_id = event_threads.thread_id
-                            AND archived_child.event_id != event_threads.thread_id
-                    )
-                )
-            )
+            AND event_threads.event_id != event_threads.thread_id
         """,
         (namespace,),
     )
@@ -490,31 +418,4 @@ async def run_startup_maintenance(
         orphan_counts_before=orphan_counts,
         repaired_counts=repaired_counts,
         compacted_nonterminal_streaming_edits=compacted,
-    )
-
-
-async def refresh_runtime_metrics(
-    db: AsyncConnection,
-    *,
-    namespace: str,
-    startup_report: CacheMaintenanceReport,
-) -> CacheMaintenanceReport:
-    """Refresh current counts while preserving immutable startup repair outcomes."""
-    return await _collect_maintenance_report(
-        db,
-        namespace=namespace,
-        schema_version=startup_report.schema_version,
-        migrated_from_schema_version=startup_report.migrated_from_schema_version,
-        normalized_legacy_thread_payload_rows=startup_report.normalized_legacy_thread_payload_rows,
-        orphan_counts_before=(
-            startup_report.orphan_edit_indexes_before,
-            startup_report.orphan_thread_indexes_before,
-            startup_report.orphan_thread_event_references_before,
-        ),
-        repaired_counts=(
-            startup_report.repaired_edit_indexes,
-            startup_report.repaired_thread_indexes,
-            startup_report.repaired_thread_event_references,
-        ),
-        compacted_nonterminal_streaming_edits=startup_report.compacted_nonterminal_streaming_edits,
     )

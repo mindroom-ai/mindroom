@@ -1048,13 +1048,7 @@ class AgentBot:
     def _restore_saved_sync_token(self) -> None:
         """Restore Matrix sync continuity and initialize cache certification state."""
         assert self.client is not None
-        if self.event_cache.startup_requires_sync_reset:
-            self._clear_saved_sync_token()
-            loaded_token = None
-            self.logger.warning("matrix_sync_token_cleared_after_cache_reset")
-        else:
-            loaded_token = self._loaded_sync_token_for_certification()
-        startup = start_from_loaded_token(loaded_token)
+        startup = start_from_loaded_token(self._loaded_sync_token_for_certification())
         self._sync_trust_state = startup.state
         self._sync_checkpoint = None
         client = cast("Any", self.client)
