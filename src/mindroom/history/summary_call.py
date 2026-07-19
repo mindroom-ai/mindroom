@@ -16,10 +16,11 @@ It enforces the call-side half of the compaction invariants
 
 4. Retry on provider failure is deterministic.
    ``SummaryRetryPolicy`` decides which error classes warrant a smaller retry
-   (timeouts, typed context-window errors, safeguard refusals, and named legacy
-   context-length fragments), which warrant one same-input retry (typed transient
-   provider errors), the shrink schedule (halving), and the give-up floor — no
-   inline string matching at call sites.
+   (timeouts, typed context-window errors, and named legacy context-length
+   fragments), which warrant one same-input retry (typed transient provider
+   errors), and which must abort without retry (typed safeguard refusals).
+   It also owns the shrink schedule (halving) and give-up floor, with no inline
+   string matching at call sites.
    Empty-text success responses also retry with less input because some providers
    surface rejected or oversized requests as an empty successful response.
 
@@ -89,7 +90,6 @@ _TYPED_SHRINKABLE_ERRORS = (
     _CompactionSummaryEmptyResultError,
     TimeoutError,
     ContextWindowExceededError,
-    ModelSafeguardRefusalError,
     CompactionSummaryOutputLimitError,
 )
 
@@ -112,6 +112,8 @@ class SummaryRetryPolicy:
 
     def should_shrink(self, error: Exception) -> bool:
         """Return whether a smaller summary input may resolve this provider failure."""
+        if isinstance(error, ModelSafeguardRefusalError):
+            return False
         if isinstance(error, _TYPED_SHRINKABLE_ERRORS):
             return True
         if self.should_retry_same_input(error):
@@ -121,7 +123,11 @@ class SummaryRetryPolicy:
 
     def should_retry_same_input(self, error: Exception) -> bool:
         """Return whether a transient provider failure warrants one unchanged retry."""
-        return isinstance(error, ModelProviderError) and error.status_code in TRANSIENT_PROVIDER_STATUS_CODES
+        return (
+            not isinstance(error, ModelSafeguardRefusalError)
+            and isinstance(error, ModelProviderError)
+            and error.status_code in TRANSIENT_PROVIDER_STATUS_CODES
+        )
 
     def retry_budget(self, *, attempt: int, budget: int, error: Exception) -> int | None:
         """Return the next input budget, preserving it for same-input retries."""

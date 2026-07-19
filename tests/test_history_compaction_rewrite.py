@@ -266,7 +266,7 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_output_cap(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_rewrite_retries_safeguard_refusal_with_smaller_chunk(tmp_path: Path) -> None:
+async def test_rewrite_aborts_safeguard_refusal_without_persisting(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     working_session = _session(
@@ -288,12 +288,9 @@ async def test_rewrite_retries_safeguard_refusal_with_smaller_chunk(tmp_path: Pa
             ),
         ],
     )
+    storage.upsert_session(working_session)
     summary_mock = AsyncMock(
-        side_effect=[
-            ModelSafeguardRefusalError(message="Vertex Claude returned stop_reason=refusal"),
-            SessionSummary(summary="first chunk summary", updated_at=datetime.now(UTC)),
-            SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
-        ],
+        side_effect=ModelSafeguardRefusalError(message="Vertex Claude returned stop_reason=refusal"),
     )
     retry_sleep = AsyncMock()
 
@@ -304,34 +301,27 @@ async def test_rewrite_retries_safeguard_refusal_with_smaller_chunk(tmp_path: Pa
             "mindroom.history.compaction.record_compaction_chunk",
             wraps=record_compaction_chunk,
         ) as persist_spy,
+        pytest.raises(ModelSafeguardRefusalError, match="stop_reason=refusal"),
     ):
-        rewrite_result = await _rewrite_single_run(
+        await _rewrite_single_run(
             storage=storage,
             working_session=working_session,
             selected_run_ids=("run-1", "run-2"),
             summary_input_budget=12_000,
         )
 
-    assert rewrite_result is not None
-    summary_inputs = [call.kwargs["summary_input"] for call in summary_mock.await_args_list]
-    assert len(summary_inputs) == 3
-    assert "RUN1-MARKER" in summary_inputs[0]
-    assert "RUN2-MARKER" in summary_inputs[0]
-    assert estimate_text_tokens(summary_inputs[1]) < estimate_text_tokens(summary_inputs[0])
-    assert "RUN1-MARKER" in summary_inputs[1]
-    assert "RUN2-MARKER" not in summary_inputs[1]
-    assert "RUN2-MARKER" in summary_inputs[2]
+    summary_mock.assert_awaited_once()
+    summary_input = summary_mock.await_args.kwargs["summary_input"]
+    assert "RUN1-MARKER" in summary_input
+    assert "RUN2-MARKER" in summary_input
     retry_sleep.assert_not_awaited()
-    assert [call.kwargs["compacted_run_ids"] for call in persist_spy.call_args_list] == [
-        ("run-1",),
-        ("run-2",),
-    ]
-    assert rewrite_result.compacted_run_ids == ("run-1", "run-2")
+    persist_spy.assert_not_called()
+    assert working_session.summary is None
+    assert [run.run_id for run in working_session.runs or []] == ["run-1", "run-2"]
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
-    assert persisted.summary is not None
-    assert persisted.summary.summary == "merged summary"
-    assert persisted.runs == []
+    assert persisted.summary is None
+    assert [run.run_id for run in persisted.runs or []] == ["run-1", "run-2"]
 
 
 @pytest.mark.parametrize(
@@ -388,21 +378,12 @@ async def test_rewrite_retries_transient_provider_error_with_same_input_and_one_
     assert persist_spy.call_args.kwargs["compacted_run_ids"] == ("run-1",)
 
 
-@pytest.mark.parametrize(
-    "error",
-    [
-        ModelSafeguardRefusalError(message="Vertex Claude returned stop_reason=refusal"),
-        ModelProviderError(message="service unavailable", status_code=503),
-    ],
-)
 @pytest.mark.asyncio
-async def test_rewrite_gives_up_after_one_bounded_retry(
-    tmp_path: Path,
-    error: ModelProviderError,
-) -> None:
+async def test_rewrite_gives_up_after_one_transient_retry(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     working_session = _session("session-1", runs=[_completed_run("run-1")])
+    error = ModelProviderError(message="service unavailable", status_code=503)
     summary_mock = AsyncMock(side_effect=[error, error])
     retry_sleep = AsyncMock()
 
@@ -418,10 +399,7 @@ async def test_rewrite_gives_up_after_one_bounded_retry(
         await _rewrite_single_run(storage=storage, working_session=working_session)
 
     assert summary_mock.await_count == 2
-    if isinstance(error, ModelSafeguardRefusalError):
-        retry_sleep.assert_not_awaited()
-    else:
-        retry_sleep.assert_awaited_once_with(DEFAULT_SUMMARY_RETRY_POLICY.same_input_retry_delay_seconds)
+    retry_sleep.assert_awaited_once_with(DEFAULT_SUMMARY_RETRY_POLICY.same_input_retry_delay_seconds)
     persist_spy.assert_not_called()
     assert working_session.summary is None
     assert [run.run_id for run in working_session.runs or []] == ["run-1"]

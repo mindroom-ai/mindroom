@@ -638,10 +638,15 @@ def test_retry_policy_halves_budget_for_typed_context_window_error() -> None:
     assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) == 8_000
 
 
-def test_retry_policy_halves_budget_for_typed_safeguard_refusal() -> None:
-    error = ModelSafeguardRefusalError(message="provider-specific wording does not matter")
+def test_retry_policy_never_retries_typed_safeguard_refusal() -> None:
+    error = ModelSafeguardRefusalError(
+        message="input too long; provider-specific wording does not matter",
+        status_code=503,
+    )
 
-    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) == 8_000
+    assert DEFAULT_SUMMARY_RETRY_POLICY.should_shrink(error) is False
+    assert DEFAULT_SUMMARY_RETRY_POLICY.should_retry_same_input(error) is False
+    assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=1, budget=16_000, error=error) is None
     assert DEFAULT_SUMMARY_RETRY_POLICY.retry_budget(attempt=2, budget=8_000, error=error) is None
 
 
