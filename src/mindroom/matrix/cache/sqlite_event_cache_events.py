@@ -370,21 +370,20 @@ async def _thread_ids_for_events(
     event_ids: list[str],
 ) -> set[str]:
     """Return thread IDs currently mapped from one event set."""
-    thread_ids: set[str] = set()
-    for event_id in event_ids:
-        cursor = await db.execute(
-            """
-            SELECT thread_id
-            FROM event_threads
-            WHERE principal_id = ? AND room_id = ? AND event_id = ?
-            """,
-            (principal_id, room_id, event_id),
-        )
-        row = await cursor.fetchone()
-        await cursor.close()
-        if row is not None:
-            thread_ids.add(str(row[0]))
-    return thread_ids
+    if not event_ids:
+        return set()
+    placeholders = ",".join("?" for _ in event_ids)
+    cursor = await db.execute(
+        f"""
+        SELECT DISTINCT thread_id
+        FROM event_threads
+        WHERE principal_id = ? AND room_id = ? AND event_id IN ({placeholders})
+        """,  # noqa: S608
+        (principal_id, room_id, *event_ids),
+    )
+    rows = await cursor.fetchall()
+    await cursor.close()
+    return {str(row[0]) for row in rows}
 
 
 async def _reconcile_thread_root_self_rows(
@@ -557,17 +556,14 @@ async def delete_cached_events(
         """,
         [(principal_id, room_id, event_id) for event_id in event_ids],
     )
-    deleted_rows = 0
-    for event_id in event_ids:
-        cursor = await db.execute(
-            """
-            DELETE FROM events
-            WHERE principal_id = ? AND room_id = ? AND event_id = ?
-            """,
-            (principal_id, room_id, event_id),
-        )
-        deleted_rows += 0 if cursor.rowcount is None else int(cursor.rowcount)
-        await cursor.close()
+    deleted_rows = await _delete_scoped_event_rows(
+        db,
+        "events",
+        "event_id",
+        principal_id,
+        room_id,
+        event_ids,
+    )
     await _delete_orphaned_mxc_text(db, principal_id, room_id, mxc_urls=mxc_urls)
     return deleted_rows
 
@@ -727,17 +723,18 @@ async def _delete_scoped_event_rows(
     room_id: str,
     event_ids: list[str],
 ) -> int:
-    deleted_rows = 0
-    for event_id in event_ids:
-        cursor = await db.execute(
-            f"""
-            DELETE FROM {table_name}
-            WHERE principal_id = ? AND room_id = ? AND {event_column} = ?
-            """,  # noqa: S608
-            (principal_id, room_id, event_id),
-        )
-        deleted_rows += 0 if cursor.rowcount is None else int(cursor.rowcount)
-        await cursor.close()
+    if not event_ids:
+        return 0
+    placeholders = ",".join("?" for _ in event_ids)
+    cursor = await db.execute(
+        f"""
+        DELETE FROM {table_name}
+        WHERE principal_id = ? AND room_id = ? AND {event_column} IN ({placeholders})
+        """,  # noqa: S608
+        (principal_id, room_id, *event_ids),
+    )
+    deleted_rows = 0 if cursor.rowcount is None else int(cursor.rowcount)
+    await cursor.close()
     return deleted_rows
 
 
@@ -812,20 +809,22 @@ async def _delete_orphaned_mxc_text(
     *,
     mxc_urls: frozenset[str],
 ) -> None:
-    for mxc_url in mxc_urls:
-        await db.execute(
-            """
-            DELETE FROM mxc_text_cache
-            WHERE principal_id = ?
-              AND room_id = ?
-              AND mxc_url = ?
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM event_mxc_references
-                  WHERE principal_id = ?
-                    AND room_id = ?
-                    AND mxc_url = ?
-              )
-            """,
-            (principal_id, room_id, mxc_url, principal_id, room_id, mxc_url),
-        )
+    if not mxc_urls:
+        return
+    placeholders = ",".join("?" for _ in mxc_urls)
+    await db.execute(
+        f"""
+        DELETE FROM mxc_text_cache
+        WHERE principal_id = ?
+          AND room_id = ?
+          AND mxc_url IN ({placeholders})
+          AND NOT EXISTS (
+              SELECT 1
+              FROM event_mxc_references
+              WHERE event_mxc_references.principal_id = mxc_text_cache.principal_id
+                AND event_mxc_references.room_id = mxc_text_cache.room_id
+                AND event_mxc_references.mxc_url = mxc_text_cache.mxc_url
+          )
+        """,  # noqa: S608
+        (principal_id, room_id, *sorted(mxc_urls)),
+    )
