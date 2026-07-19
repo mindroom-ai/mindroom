@@ -39,30 +39,44 @@ def _compaction_encoding(model_id: str | None) -> tiktoken.Encoding | None:
     return None
 
 
-def compaction_estimate_kind(model_id: str | None) -> _CompactionEstimateKind:
+def compaction_estimate_kind(model_id: str | None, *, genuine_openai_endpoint: bool) -> _CompactionEstimateKind:
     """Resolve how compaction sizes summary payloads for one summary model.
 
-    Single source of truth for the sizing branch: the bound function and the
-    structured sizing logs both derive their branch from this resolver.
-    Encoding absence is the fallback criterion, so every model without a local
-    tokenizer gets the safe byte bound without provider-specific gating.
+    Single source of truth for the sizing branch:
+    ``compaction_payload_token_upper_bound`` dispatches on this result and the
+    structured sizing logs record it, so arithmetic and labels cannot diverge.
+    The tiktoken branch additionally requires the genuine OpenAI endpoint
+    because a model id alone does not identify the serving tokenizer — custom
+    OpenAI-compatible endpoints can serve arbitrary models under
+    tiktoken-recognized ids, so those fall to the byte bound.
     """
-    if _compaction_encoding(model_id) is not None:
+    if genuine_openai_endpoint and _compaction_encoding(model_id) is not None:
         return "model_tiktoken_tokens"
     return "utf8_bytes_token_upper_bound"
 
 
-def compaction_payload_token_upper_bound(value: str, *, model_id: str | None) -> int:
+def compaction_payload_token_upper_bound(value: str, *, model_id: str | None, genuine_openai_endpoint: bool) -> int:
     """Size one serialized compaction payload for the summary model.
 
-    Known tiktoken encodings count exactly. Every other model is sized by
-    UTF-8 byte count, a true token upper bound for any tokenizer.
-    ``surrogatepass`` keeps unpaired surrogates (reachable via JSON-decoded
+    Models with a tiktoken-recognized id served by the genuine OpenAI endpoint
+    count exactly. Every other model is sized by UTF-8 byte count, with
+    ``surrogatepass`` keeping unpaired surrogates (reachable via JSON-decoded
     provider payloads) countable at 3 bytes each instead of raising.
+
+    The byte count is a proven token upper bound for byte-level BPE
+    tokenizers, where every token consumes at least one byte; that covers the
+    providers routed through this path today. Tokenizers that normalize text
+    before segmentation (NFKC/SentencePiece-class) can expand rare
+    compatibility characters (for example U+FDFA) beyond their byte length,
+    so the bound is not universal there — realistic chat and tool content
+    sits well below the bound, and the compaction budget's reserve and safety
+    margin absorb such pockets.
     """
-    encoding = _compaction_encoding(model_id)
-    if encoding is not None:
-        return len(encoding.encode(value, disallowed_special=()))
+    kind = compaction_estimate_kind(model_id, genuine_openai_endpoint=genuine_openai_endpoint)
+    if kind == "model_tiktoken_tokens":
+        encoding = _compaction_encoding(model_id)
+        if encoding is not None:
+            return len(encoding.encode(value, disallowed_special=()))
     return len(value.encode("utf-8", errors="surrogatepass"))
 
 

@@ -272,9 +272,11 @@ If you set `compaction.model`, that summary model must also define its own `cont
 Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place.
 Otherwise MindRoom leaves the session unchanged and relies on replay fitting for that reply.
 Replay planning uses a chars/4 approximation and reserves headroom for the current prompt and output.
-Summary-input chunk sizing uses the model's tiktoken encoding when recognized.
-Any summary model without a recognized local tiktoken encoding — including Claude, Gemini, local OpenAI-compatible models, and OpenAI models newer than the installed tiktoken (for example `gpt-5.6`) — is sized at one token per UTF-8 byte as a conservative upper bound.
-This guarantees chunk sizing never undercounts the provider's real tokenizer, at the cost of roughly 3-4x more summary chunks and calls for content with a high bytes-per-token ratio.
+Summary-input chunk sizing counts with the model's tiktoken encoding only when the summary model is served by the genuine OpenAI endpoint (provider `openai` with no custom `base_url` and no `OPENAI_BASE_URL` override) and tiktoken recognizes the model id.
+Every other summary model — including Claude, Gemini, OpenAI-compatible endpoints even when they reuse OpenAI-style ids, and OpenAI ids newer than the installed tiktoken (for example `gpt-5.6`) — is sized at one token per UTF-8 byte.
+The byte count is a proven token upper bound for byte-level BPE tokenizers, where every token consumes at least one byte; this covers the providers MindRoom routes through this path today.
+Tokenizers that normalize text before segmentation (NFKC/SentencePiece-class) can expand rare compatibility characters (for example U+FDFA) beyond their byte length, so the bound is not universal; realistic chat and tool content typically sits 3-4x below the bound, and the compaction budget's reserve and safety margin absorb such pockets.
+The cost of the byte bound is roughly 3-4x more summary chunks and calls for content with a high bytes-per-token ratio.
 MindRoom does not mutate configured `num_history_runs` to fit the window.
 Instead, it computes the replay plan that actually fits the current call and uses compaction to keep future replay healthy.
 If needed, that replay plan can reduce raw replay, fall back to summary-only replay, or disable persisted replay entirely for the run.

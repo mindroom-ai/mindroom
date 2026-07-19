@@ -40,6 +40,7 @@ from mindroom.history.types import (
 )
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.logging_config import get_logger
+from mindroom.model_instance_checks import is_genuine_openai_endpoint
 from mindroom.timing import timed
 from mindroom.token_budget import (
     compaction_estimate_kind,
@@ -489,6 +490,7 @@ def _compaction_token_estimator(summary_model: Model) -> Callable[[str], int]:
     return partial(
         compaction_payload_token_upper_bound,
         model_id=summary_model.id,
+        genuine_openai_endpoint=is_genuine_openai_endpoint(summary_model),
     )
 
 
@@ -536,11 +538,19 @@ async def _emit_lifecycle_progress_after_persist(
     )
 
 
-def _sizing_log_fields(*, model_id: str | None, estimate: int, budget_tokens: int) -> dict[str, object]:
-    """Truthful sizing fields shared by the compaction chunk log events."""
+def _sizing_log_fields(*, model: Model, estimate: int, budget_tokens: int) -> dict[str, object]:
+    """Truthful sizing fields shared by the compaction chunk log events.
+
+    ``summary_input_budget_tokens`` is denominated in the same units as the
+    estimate — shrink retries derive the next budget from the estimate — so
+    ``summary_input_estimate_kind`` disambiguates both fields.
+    """
     return {
         "summary_input_estimate": estimate,
-        "summary_input_estimate_kind": compaction_estimate_kind(model_id),
+        "summary_input_estimate_kind": compaction_estimate_kind(
+            model.id,
+            genuine_openai_endpoint=is_genuine_openai_endpoint(model),
+        ),
         "summary_input_budget_tokens": budget_tokens,
     }
 
@@ -594,7 +604,7 @@ async def _generate_compaction_summary_with_retry(
             attempt=attempt,
             candidate_runs=len(compactable_runs),
             included_runs=len(included_runs),
-            **_sizing_log_fields(model_id=model.id, estimate=estimated_input_tokens, budget_tokens=budget),
+            **_sizing_log_fields(model=model, estimate=estimated_input_tokens, budget_tokens=budget),
             timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
         )
         try:
@@ -613,7 +623,7 @@ async def _generate_compaction_summary_with_retry(
                 attempt=attempt,
                 candidate_runs=len(compactable_runs),
                 included_runs=len(included_runs),
-                **_sizing_log_fields(model_id=model.id, estimate=estimated_input_tokens, budget_tokens=budget),
+                **_sizing_log_fields(model=model, estimate=estimated_input_tokens, budget_tokens=budget),
                 timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
                 duration_ms=duration_ms,
                 error=str(exc) or type(exc).__name__,
@@ -677,7 +687,7 @@ async def _generate_compaction_summary_with_retry(
             attempt=attempt,
             candidate_runs=len(compactable_runs),
             included_runs=len(included_runs),
-            **_sizing_log_fields(model_id=model.id, estimate=estimated_input_tokens, budget_tokens=budget),
+            **_sizing_log_fields(model=model, estimate=estimated_input_tokens, budget_tokens=budget),
             timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
             duration_ms=duration_ms,
         )

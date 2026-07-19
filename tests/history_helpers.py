@@ -61,8 +61,13 @@ from tests.conftest import (
 _DEFAULT_TEST_COMPACTION = CompactionConfig()
 
 # Budget finders and summary-input builders in tests must size runs exactly
-# like the production compaction path for the "summary-model" summary model.
-_SUMMARY_MODEL_BOUND = partial(compaction_payload_token_upper_bound, model_id="summary-model")
+# like the production compaction path for the "summary-model" summary model,
+# which is a fake provider and therefore never a genuine OpenAI endpoint.
+_SUMMARY_MODEL_BOUND = partial(
+    compaction_payload_token_upper_bound,
+    model_id="summary-model",
+    genuine_openai_endpoint=False,
+)
 
 _ALL_HISTORY_SETTINGS = ResolvedHistorySettings(
     policy=HistoryPolicy(mode="all"),

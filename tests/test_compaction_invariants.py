@@ -1347,15 +1347,19 @@ def test_retry_policy_shrinks_budget_for_empty_result() -> None:
 
 
 def test_compaction_input_bound_counts_known_model_encodings_exactly() -> None:
-    assert compaction_payload_token_upper_bound("structured: true", model_id="gpt-4o") == 3
-    assert compaction_payload_token_upper_bound("☃☃", model_id="gpt-4o") == 4
+    assert (
+        compaction_payload_token_upper_bound("structured: true", model_id="gpt-4o", genuine_openai_endpoint=True) == 3
+    )
+    assert compaction_payload_token_upper_bound("☃☃", model_id="gpt-4o", genuine_openai_endpoint=True) == 4
 
 
 def test_compaction_input_bound_uses_utf8_bytes_for_claude() -> None:
-    assert compaction_payload_token_upper_bound("structured: true", model_id="claude-sonnet-5") == len(
-        b"structured: true",
-    )
-    assert compaction_payload_token_upper_bound("☃☃", model_id="claude-sonnet-5") == 6
+    assert compaction_payload_token_upper_bound(
+        "structured: true",
+        model_id="claude-sonnet-5",
+        genuine_openai_endpoint=False,
+    ) == len(b"structured: true")
+    assert compaction_payload_token_upper_bound("☃☃", model_id="claude-sonnet-5", genuine_openai_endpoint=False) == 6
 
 
 @pytest.mark.asyncio
@@ -1411,7 +1415,14 @@ async def test_claude_compaction_splits_dense_preserved_metadata_before_the_inpu
     assert outcome.compacted_run_count == 20
     assert len(summary_inputs) == 2
     assert all(len(summary_input.encode("utf-8")) <= summary_input_limit for summary_input in summary_inputs)
-    assert compaction_payload_token_upper_bound(summary_inputs[0], model_id="claude-sonnet-5") <= summary_input_limit
+    assert (
+        compaction_payload_token_upper_bound(
+            summary_inputs[0],
+            model_id="claude-sonnet-5",
+            genuine_openai_endpoint=False,
+        )
+        <= summary_input_limit
+    )
     storage.close()
 
 

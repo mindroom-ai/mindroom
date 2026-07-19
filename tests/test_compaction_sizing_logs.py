@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 import tiktoken
+from agno.models.openai.chat import OpenAIChat
 from agno.session.summary import SessionSummary
 from structlog.testing import capture_logs
 
@@ -26,9 +27,11 @@ from tests.history_helpers import (  # noqa: F401
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from agno.db.base import BaseDb
+    from agno.models.base import Model
     from agno.session.agent import AgentSession
 
     from mindroom.history.compaction import _CompactionRewriteResult
@@ -39,13 +42,13 @@ async def _rewrite_with_summary_model(
     storage: BaseDb,
     working_session: AgentSession,
     summary_input_budget: int,
-    model_id: str = "claude-sonnet-5",
+    summary_model: Model | None = None,
 ) -> _CompactionRewriteResult | None:
     return await _rewrite_working_session_for_compaction(
         storage=storage,
         persisted_session=working_session,
         working_session=working_session,
-        summary_model=FakeModel(id=model_id, provider="fake"),
+        summary_model=summary_model or FakeModel(id="claude-sonnet-5", provider="fake"),
         summary_model_name="summary-model",
         session_id=working_session.session_id,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
@@ -84,25 +87,42 @@ def _assert_truthful_sizing_fields(
     assert "summary_input_budget" not in entry
 
 
-def _expected_estimate(payload: str, model_id: str) -> int:
-    if model_id == "gpt-4o":
+def _expected_estimate(payload: str, expected_kind: str) -> int:
+    if expected_kind == "model_tiktoken_tokens":
         return len(tiktoken.encoding_for_model("gpt-4o").encode(payload, disallowed_special=()))
     return len(payload.encode("utf-8"))
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("model_id", "expected_kind"),
+    ("summary_model_factory", "expected_kind"),
     [
-        ("claude-sonnet-5", "utf8_bytes_token_upper_bound"),
-        ("gpt-4o", "model_tiktoken_tokens"),
+        pytest.param(
+            lambda: FakeModel(id="claude-sonnet-5", provider="fake"),
+            "utf8_bytes_token_upper_bound",
+            id="claude",
+        ),
+        # A tiktoken-recognized id on a non-OpenAI endpoint must stay on the
+        # byte bound: the id alone does not identify the serving tokenizer.
+        pytest.param(
+            lambda: FakeModel(id="gpt-4o", provider="fake"),
+            "utf8_bytes_token_upper_bound",
+            id="custom-endpoint-openai-alias",
+        ),
+        pytest.param(
+            lambda: OpenAIChat(id="gpt-4o"),
+            "model_tiktoken_tokens",
+            id="genuine-openai",
+        ),
     ],
 )
 async def test_chunk_request_and_completed_events_use_truthful_sizing_fields(
     tmp_path: Path,
-    model_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+    summary_model_factory: Callable[[], Model],
     expected_kind: str,
 ) -> None:
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     working_session = _session("session-1", runs=[_completed_run("run-1")])
@@ -123,11 +143,11 @@ async def test_chunk_request_and_completed_events_use_truthful_sizing_fields(
             storage=storage,
             working_session=working_session,
             summary_input_budget=8_000,
-            model_id=model_id,
+            summary_model=summary_model_factory(),
         )
 
     assert rewrite_result is not None
-    expected_estimate = _expected_estimate(summary_inputs[0], model_id)
+    expected_estimate = _expected_estimate(summary_inputs[0], expected_kind)
     request_event = _single_event(logs, "Compaction summary chunk request")
     completed_event = _single_event(logs, "Compaction summary chunk completed")
     _assert_truthful_sizing_fields(
