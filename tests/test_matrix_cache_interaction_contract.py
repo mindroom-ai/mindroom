@@ -1162,32 +1162,22 @@ async def test_sync_opaque_stale_marker_failure_deletes_snapshot_instead_of_serv
 ) -> None:
     """A failed opaque stale marker must remove the cached snapshot rather than leave it trusted."""
     await _seed_thread(event_cache)
-    failing_cache = cast("ConversationEventCache", _FailingStaleMarkerCache(event_cache))
     opaque_child = _encrypted_source("$opaque-child", timestamp=60, relation=_thread_relation())
 
-    result = await _build_sync_harness(failing_cache).policy.cache_sync_timeline_for_certification(
-        cast("nio.SyncResponse", _sync_response([raw_nio_event(opaque_child)])),
-    )
+    with patch.object(
+        event_cache,
+        "mark_thread_stale",
+        AsyncMock(side_effect=RuntimeError("stale marker write refused")),
+    ):
+        result = await _build_sync_harness(event_cache).policy.cache_sync_timeline_for_certification(
+            cast("nio.SyncResponse", _sync_response([raw_nio_event(opaque_child)])),
+        )
 
     assert result.complete is False
     assert result.errors
     assert await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID) is None
     state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
     assert thread_cache_rejection_reason(state) is not None
-
-
-class _FailingStaleMarkerCache:
-    """Delegate to a real cache while refusing to persist thread stale markers."""
-
-    def __init__(self, inner: ConversationEventCache) -> None:
-        self._inner = inner
-
-    def __getattr__(self, name: str) -> object:
-        return getattr(self._inner, name)
-
-    async def mark_thread_stale(self, room_id: str, thread_id: str, *, reason: str) -> None:
-        msg = f"stale marker write refused for {room_id}/{thread_id}: {reason}"
-        raise RuntimeError(msg)
 
 
 @pytest.mark.asyncio
