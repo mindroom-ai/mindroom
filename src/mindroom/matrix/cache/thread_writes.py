@@ -532,9 +532,7 @@ class ThreadOutboundWritePolicy:
     ) -> None:
         """Schedule advisory bookkeeping for one locally redacted threaded message."""
         try:
-            if not self._cache_ops.cache_runtime_available():
-                return
-            if not redacted_event_id:
+            if not redacted_event_id or not self._cache_ops.cache_runtime_available():
                 return
 
             # Lookup-dependent outbound mutations stay on the room barrier because earlier outbound writes can create the lookup rows needed to resolve thread impact. Safe parallelization would require reservation-based routing (see ISSUE-189).

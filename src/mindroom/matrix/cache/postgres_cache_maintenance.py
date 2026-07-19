@@ -32,15 +32,15 @@ async def migrate_postgres_schema(
     target_schema_version: int,
 ) -> _PostgresSchemaMigrationResult:
     """Transactionally normalize one namespace while upgrading the shared schema."""
-    if current_schema_version not in {None, 1, target_schema_version}:
+    if current_schema_version not in {None, 1, 2, target_schema_version}:
         msg = (
             "PostgreSQL Matrix event cache schema version "
             f"{current_schema_version} is not compatible with expected version {target_schema_version}"
         )
         raise RuntimeError(msg)
 
-    migrated_from = 1 if current_schema_version == 1 else None
-    if migrated_from is not None:
+    migrated_from = current_schema_version if current_schema_version in {1, 2} else None
+    if current_schema_version == 1:
         await db.execute(
             """
             ALTER TABLE mindroom_event_cache_thread_events

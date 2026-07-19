@@ -29,7 +29,7 @@ from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.sync_tokens import load_sync_token_record, save_sync_token
+from mindroom.matrix.sync_tokens import load_sync_checkpoint, save_sync_token
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
@@ -67,10 +67,10 @@ async def _wait_for_room_cache_idle(coordinator: EventCacheWriteCoordinator) -> 
 
 
 def _load_sync_token_value(storage_path: Path, agent_name: str) -> str | None:
-    token_record = load_sync_token_record(storage_path, agent_name)
-    if token_record is None:
+    checkpoint = load_sync_checkpoint(storage_path, agent_name)
+    if checkpoint is None:
         return None
-    return token_record.checkpoint.token
+    return checkpoint.token
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
@@ -532,7 +532,7 @@ def _save_certified_sync_token(
         bot.storage_path,
         bot.agent_name,
         token,
-        cache_generation=bot.event_cache.certification_generation or "test-cache-generation",
+        cache_generation=bot.event_cache.cache_generation,
     )
 
 

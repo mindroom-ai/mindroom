@@ -26,6 +26,7 @@ class SyncCheckpoint:
     """A sync token saved after its sync response was durably cached."""
 
     token: str
+    cache_generation: str | None = None
 
 
 @dataclass(frozen=True)

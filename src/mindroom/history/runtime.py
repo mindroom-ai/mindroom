@@ -111,6 +111,41 @@ def _load_compaction_model(
     return model_loading.get_model_instance(config, runtime_paths, model_name)
 
 
+def _compaction_fallback_is_distinct(
+    config: Config,
+    *,
+    primary_model_name: str,
+    fallback_model_name: str,
+) -> bool:
+    """Return whether the configured fallback targets a different serving model.
+
+    A fallback that names the primary alias, or a different alias resolving to
+    the same ``(provider, id)``, would resend the refused request to the same
+    model, so it is not loaded at all. Providers are compared through
+    ``model_loading.canonical_provider`` — the same normalization model
+    dispatch uses — so spelling variants like ``vertexai-claude`` and
+    ``vertexai_claude`` count as the same serving model.
+    """
+    if fallback_model_name == primary_model_name:
+        is_distinct = False
+    else:
+        primary_config = config.models.get(primary_model_name)
+        fallback_config = config.models.get(fallback_model_name)
+        if primary_config is None or fallback_config is None:
+            return True
+        is_distinct = (model_loading.canonical_provider(primary_config.provider), primary_config.id) != (
+            model_loading.canonical_provider(fallback_config.provider),
+            fallback_config.id,
+        )
+    if not is_distinct:
+        logger.warning(
+            "Compaction fallback resolves to the primary serving model; continuing without a fallback",
+            compaction_model=primary_model_name,
+            fallback_model=fallback_model_name,
+        )
+    return is_distinct
+
+
 @dataclass(frozen=True)
 class ScopeSessionContext:
     """Resolved storage/session context for one logical history scope."""
@@ -437,13 +472,18 @@ async def _run_scope_compaction_with_lifecycle(
         ),
     )
 
+    # Progress events report the model that actually served each persisted
+    # chunk, so failure notices after a fallback switch name the fallback
+    # instead of the configured primary.
+    serving_summary_model = execution_plan.compaction_model_name
+
     def _failure_event(status: Literal["failed", "timeout"], failure_reason: str) -> CompactionLifecycleFailure:
         return CompactionLifecycleFailure(
             notice_event_id=notice_event_id,
             mode=mode,
             session_id=session.session_id,
             scope=scope.key,
-            summary_model=execution_plan.compaction_model_name,
+            summary_model=serving_summary_model,
             status=status,
             duration_ms=_elapsed_ms(compaction_start),
             failure_reason=failure_reason,
@@ -451,6 +491,8 @@ async def _run_scope_compaction_with_lifecycle(
         )
 
     async def _progress(event: CompactionLifecycleProgress) -> None:
+        nonlocal serving_summary_model
+        serving_summary_model = event.summary_model
         await lifecycle.progress(replace(event, duration_ms=_elapsed_ms(compaction_start)))
 
     progress_callback = _progress if lifecycle.enabled else None
@@ -524,6 +566,27 @@ async def _run_scope_compaction(
         runtime_paths,
         execution_plan.compaction_model_name,
     )
+    fallback_model_name = execution_plan.compaction_fallback_model_name
+    fallback_model: Model | None = None
+    if fallback_model_name is not None and _compaction_fallback_is_distinct(
+        config,
+        primary_model_name=execution_plan.compaction_model_name,
+        fallback_model_name=fallback_model_name,
+    ):
+        # The fallback is an optional resilience knob: when its construction
+        # fails (missing SDK, credentials, client setup), compaction still
+        # runs on the healthy primary instead of aborting before any call.
+        try:
+            fallback_model = _load_compaction_model(config, runtime_paths, fallback_model_name)
+        except Exception:
+            logger.warning(
+                "Compaction fallback model failed to load; continuing without a fallback",
+                session_id=session.session_id,
+                scope=scope.key,
+                compaction_model=execution_plan.compaction_model_name,
+                fallback_model=fallback_model_name,
+                exc_info=True,
+            )
     return await compact_scope_history(
         storage=storage,
         session=session,
@@ -537,6 +600,8 @@ async def _run_scope_compaction(
         replay_window_tokens=execution_plan.replay_window_tokens,
         threshold_tokens=execution_plan.trigger_threshold_tokens,
         summary_prompt=config.get_prompt("COMPACTION_SUMMARY_PROMPT"),
+        fallback_summary_model=fallback_model,
+        fallback_summary_model_name=fallback_model_name if fallback_model is not None else None,
         lifecycle_notice_event_id=lifecycle_notice_event_id,
         progress_callback=progress_callback,
     )

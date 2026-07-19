@@ -358,6 +358,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix.cache",
     "mindroom.matrix.client_delivery",
+    "mindroom.matrix.membership_fence",
     "mindroom.matrix.message_builder",
     "mindroom.sync_bridge_state",
     "mindroom.tool_approval",
@@ -1664,6 +1665,7 @@ depends_on = [
     "mindroom.matrix.cache.event_batching",
     "mindroom.matrix.cache.event_cache",
     "mindroom.matrix.cache.event_normalization",
+    "mindroom.matrix.cache.startup_cleanup",
     "mindroom.matrix.cache.write_coordinator",
     "mindroom.matrix.cache.thread_cache_helpers",
     "mindroom.matrix.cache.thread_history_result",
@@ -1740,8 +1742,16 @@ path = "mindroom.matrix.cache.event_cache"
 depends_on = []
 
 [[modules]]
+path = "mindroom.matrix.cache.startup_cleanup"
+depends_on = []
+visibility = ["mindroom.matrix.cache"]
+
+[[modules]]
 path = "mindroom.matrix.cache.event_cache_events"
-depends_on = ["mindroom.matrix.event_info"]
+depends_on = [
+    "mindroom.matrix.event_info",
+    "mindroom.matrix.sidecar_content",
+]
 visibility = [
     "mindroom.matrix.cache.postgres_event_cache_events",
     "mindroom.matrix.cache.postgres_event_cache_threads",
@@ -1890,6 +1900,7 @@ depends_on = [
     "mindroom.matrix.cache.thread_writes",
     "mindroom.matrix.client_thread_history",
     "mindroom.matrix.event_info",
+    "mindroom.matrix.membership_fence",
     "mindroom.matrix.media",
     "mindroom.matrix.message_content",
     "mindroom.matrix.thread_bookkeeping",
@@ -2213,7 +2224,25 @@ visibility = [
 
 [[modules]]
 path = "mindroom.matrix.message_content"
-depends_on = ["mindroom.matrix.visible_body"]
+depends_on = [
+    "mindroom.matrix.membership_fence",
+    "mindroom.matrix.sidecar_content",
+    "mindroom.matrix.visible_body",
+]
+
+[[modules]]
+path = "mindroom.matrix.membership_fence"
+depends_on = []
+visibility = [
+    "mindroom.approval_transport",
+    "mindroom.matrix.client_thread_history",
+    "mindroom.matrix.conversation_cache",
+    "mindroom.matrix.message_content",
+]
+
+[[modules]]
+path = "mindroom.matrix.sidecar_content"
+depends_on = []
 
 [[modules]]
 path = "mindroom.matrix.client_thread_history"
@@ -2222,6 +2251,7 @@ depends_on = [
     "mindroom.matrix.cache.thread_history_result",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.event_info",
+    "mindroom.matrix.membership_fence",
     "mindroom.matrix.media",
     "mindroom.matrix.message_content",
     "mindroom.matrix.thread_membership",
@@ -2516,6 +2546,7 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
     "mindroom.knowledge",
+    "mindroom.matrix.cache",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
     "mindroom.matrix.conversation_cache",
@@ -3556,8 +3587,10 @@ expose = [
     "AgentMessageSnapshotUnavailable",
     "ConversationEventCache",
     "EventCacheWriteCoordinator",
+    "SharedConversationEventCache",
     "ThreadCacheState",
     "ThreadHistoryResult",
+    "clear_untrusted_principal_cache",
     "normalize_nio_event_for_cache",
     "thread_cache_rejection_reason",
     "thread_cache_state_is_usable",
@@ -3566,7 +3599,12 @@ expose = [
 from = ["mindroom.matrix.cache"]
 
 [[interfaces]]
-expose = ["ConversationEventCache", "EventCacheBackendUnavailableError", "ThreadCacheState"]
+expose = [
+    "ConversationEventCache",
+    "EventCacheBackendUnavailableError",
+    "SharedConversationEventCache",
+    "ThreadCacheState",
+]
 from = ["mindroom.matrix.cache.event_cache"]
 visibility = ["mindroom.matrix.cache"]
 exclusive = true
@@ -3625,6 +3663,15 @@ exclusive = true
 expose = ["ThreadMutationCacheOps"]
 from = ["mindroom.matrix.cache.thread_write_cache_ops"]
 visibility = ["mindroom.matrix.conversation_cache"]
+exclusive = true
+
+[[interfaces]]
+expose = ["sidecar_mxc_url"]
+from = ["mindroom.matrix.sidecar_content"]
+visibility = [
+    "mindroom.matrix.cache.event_cache_events",
+    "mindroom.matrix.message_content",
+]
 exclusive = true
 
 [[interfaces]]

@@ -121,13 +121,16 @@ export interface CompactionConfig {
   replay_window_tokens?: number | null;
   reserve_tokens?: number;
   model?: string | null;
+  fallback_model?: string | null;
 }
 
 const DEFAULT_INHERITED_TOOLS = ["scheduler"] as const;
 
 function isPureCompactionModelClear(compaction: CompactionConfig): boolean {
+  const modelFields = [compaction.model, compaction.fallback_model];
   return (
-    compaction.model === null &&
+    modelFields.some((value) => value === null) &&
+    modelFields.every((value) => value === null || value === undefined) &&
     compaction.enabled === undefined &&
     compaction.threshold_tokens === undefined &&
     compaction.threshold_percent === undefined &&
@@ -140,6 +143,7 @@ function isEmptyCompactionOverride(compaction: CompactionConfig): boolean {
   return (
     compaction.enabled === undefined &&
     compaction.model === undefined &&
+    compaction.fallback_model === undefined &&
     compaction.threshold_tokens === undefined &&
     compaction.threshold_percent === undefined &&
     compaction.replay_window_tokens === undefined &&
@@ -382,18 +386,21 @@ function normalizeCompactionConfig(
     return compaction;
   }
 
-  const normalizedModel =
-    compaction.model === null
+  const normalizeModelName = (
+    modelName: string | null | undefined,
+  ): string | null | undefined =>
+    modelName === null
       ? null
-      : compaction.model?.trim()
-        ? compaction.model.trim()
+      : modelName?.trim()
+        ? modelName.trim()
         : undefined;
   const hasExplicitNullClear = Object.values(compaction).some(
     (value) => value === null,
   );
   const normalizedCompaction: CompactionConfig = {
     ...compaction,
-    model: normalizedModel,
+    model: normalizeModelName(compaction.model),
+    fallback_model: normalizeModelName(compaction.fallback_model),
   };
 
   if (

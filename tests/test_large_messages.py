@@ -797,6 +797,7 @@ async def test_prepare_large_message_trusted_metadata_round_trips_through_sideca
     class MockClient:
         rooms: dict = {}  # noqa: RUF012
         uploaded_data: bytes | None = None
+        user_id = "@mindroom_agent:localhost"
 
         async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
             data_provider = kwargs.get("data_provider")

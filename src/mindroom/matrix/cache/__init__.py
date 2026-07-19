@@ -6,6 +6,7 @@ Developer note:
 - `event_cache_events.py` owns backend-neutral serialized event values, indexes, and redaction decisions.
 - `cache_maintenance.py` owns backend-neutral maintenance reports.
 - `thread_cache_state.py` owns backend-neutral durable state values and comparison rules.
+- `startup_cleanup.py` owns fail-closed cold-start principal cleanup policy.
 - `agent_message_snapshot_semantics.py` owns backend-neutral latest-message selection rules.
 - `sqlite_event_cache.py` owns the SQLite implementation, runtime, locking, and schema lifecycle.
 - `postgres_event_cache.py` owns the PostgreSQL implementation, runtime, advisory locking, and schema lifecycle.
@@ -29,8 +30,9 @@ Main invariants:
 """
 
 from .agent_message_snapshot import AgentMessageSnapshot
-from .event_cache import ConversationEventCache, ThreadCacheState
+from .event_cache import ConversationEventCache, SharedConversationEventCache, ThreadCacheState
 from .event_normalization import normalize_nio_event_for_cache
+from .startup_cleanup import clear_untrusted_principal_cache
 from .thread_cache_helpers import thread_cache_rejection_reason
 from .thread_history_result import ThreadHistoryResult, thread_history_result
 from .write_coordinator import EventCacheWriteCoordinator
@@ -39,8 +41,10 @@ __all__ = [
     "AgentMessageSnapshot",
     "ConversationEventCache",
     "EventCacheWriteCoordinator",
+    "SharedConversationEventCache",
     "ThreadCacheState",
     "ThreadHistoryResult",
+    "clear_untrusted_principal_cache",
     "normalize_nio_event_for_cache",
     "thread_cache_rejection_reason",
     "thread_history_result",

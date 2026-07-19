@@ -35,6 +35,7 @@ from mindroom.hooks import (
     emit,
     send_hook_message,
 )
+from mindroom.matrix.cache import clear_untrusted_principal_cache
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.decrypt_failure import handle_decrypt_failure, raise_notice_floor
 from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source
@@ -54,7 +55,7 @@ from mindroom.matrix.sync_certification import (
     start_from_loaded_token,
     sync_cache_write_diagnostics,
 )
-from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token_record, save_sync_token
+from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_checkpoint, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user
 from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manager
 from mindroom.memory import store_conversation_memory
@@ -305,6 +306,7 @@ class AgentBot:
     _room_member_join_hooks_armed: bool
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
+    _local_departures_awaiting_sync: set[str]
 
     def __init__(
         self,
@@ -349,6 +351,7 @@ class AgentBot:
         self._startup_thread_prewarm_task = None
         self._call_manager: CallManager | None = None
         self._calls_reconcile_pending = False
+        self._local_departures_awaiting_sync = set()
 
         async def send_room_lifecycle_response(
             *,
@@ -373,7 +376,9 @@ class AgentBot:
                 get_logger=lambda: self.logger,
                 get_configured_rooms=lambda: self.rooms,
                 send_response=send_room_lifecycle_response,
-                on_configured_room_joined=lambda room_id: self._post_join_room_setup(room_id),
+                on_room_joined=self._on_room_joined,
+                on_configured_room_joined=self._post_join_room_setup,
+                on_room_left=self._purge_left_room,
             ),
         )
         self._init_runtime_components()
@@ -596,6 +601,7 @@ class AgentBot:
 
         self.agent_user.__dict__.pop("matrix_id", None)
         self.__dict__.pop("matrix_id", None)
+        self.event_cache = self.event_cache.for_principal(self.matrix_id.full_id)
         self._init_runtime_components()
 
     @property
@@ -792,7 +798,7 @@ class AgentBot:
                 )
         finally:
             if not completed:
-                await self.startup_thread_prewarm_registry.release(room_id)
+                await self.startup_thread_prewarm_registry.release(self.event_cache.principal_id, room_id)
 
     async def _run_startup_thread_prewarm(self) -> None:
         """Prewarm recent thread snapshots per joined room without blocking live dispatch behind cache seeding."""
@@ -801,7 +807,7 @@ class AgentBot:
             for room_id in joined_rooms:
                 if self._sync_shutting_down:
                     return
-                if not await self.startup_thread_prewarm_registry.try_claim(room_id):
+                if not await self.startup_thread_prewarm_registry.try_claim(self.event_cache.principal_id, room_id):
                     continue
                 await self._prewarm_claimed_startup_thread_room(room_id)
         finally:
@@ -965,6 +971,11 @@ class AgentBot:
         if self._first_sync_done:
             self._maybe_start_deferred_overdue_task_drain()
 
+    async def _on_room_joined(self, room_id: str) -> None:
+        """Reopen cache access after an explicit homeserver-confirmed join."""
+        self._local_departures_awaiting_sync.discard(room_id)
+        await self._conversation_cache.mark_room_joined(room_id)
+
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""
         await self._room_lifecycle.leave_unconfigured_rooms()
@@ -1024,27 +1035,31 @@ class AgentBot:
     def _loaded_sync_token_for_certification(self) -> SyncCheckpoint | None:
         """Load a saved token record without deciding trust in bot code."""
         try:
-            token_record = load_sync_token_record(self.storage_path, self.agent_name)
+            checkpoint = load_sync_checkpoint(self.storage_path, self.agent_name)
         except OSError as exc:
             self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
             return None
-        if token_record is None:
+        if checkpoint is None:
             return None
-        cache_generation = self.event_cache.certification_generation
-        if not token_record.is_bound_to(cache_generation):
-            self.logger.warning(
-                "matrix_sync_token_cache_generation_mismatch",
-                cache_generation_present=cache_generation is not None,
-            )
+        current_cache_generation = self.event_cache.cache_generation
+        if current_cache_generation is None:
+            self.logger.warning("matrix_sync_token_cache_generation_unavailable")
             self._clear_saved_sync_token()
             return None
-        self.logger.info("matrix_sync_token_restored")
-        return token_record.checkpoint
+        if checkpoint.cache_generation != current_cache_generation:
+            self.logger.warning("matrix_sync_token_cache_generation_mismatch")
+            self._clear_saved_sync_token()
+            return None
+        self.logger.info(
+            "matrix_sync_token_restored",
+            certified=True,
+        )
+        return checkpoint
 
-    def _restore_saved_sync_token(self) -> None:
-        """Restore Matrix sync continuity and initialize cache certification state."""
+    def _restore_loaded_sync_token(self, loaded_token: SyncCheckpoint | None) -> None:
+        """Apply one already-validated saved token to the client and certifier."""
         assert self.client is not None
-        startup = start_from_loaded_token(self._loaded_sync_token_for_certification())
+        startup = start_from_loaded_token(loaded_token)
         self._sync_trust_state = startup.state
         self._sync_checkpoint = None
         client = cast("Any", self.client)
@@ -1054,13 +1069,35 @@ class AgentBot:
             # earlier device may already have handled; don't re-notify on it.
             raise_notice_floor(self.client.user_id)
 
-    def _save_sync_checkpoint(self, checkpoint: SyncCheckpoint | None) -> None:
-        """Persist one certified sync checkpoint if present."""
-        if checkpoint is None:
-            return
-        cache_generation = self.event_cache.certification_generation
+    async def _prepare_cache_and_restore_saved_sync_token(self) -> None:
+        """Restore a trusted checkpoint or clear untrusted principal-owned rows first."""
+        loaded_token = self._loaded_sync_token_for_certification()
+        if loaded_token is None and self._invalidate_sync_checkpoint_for_cache_scope_cleanup():
+            try:
+                await clear_untrusted_principal_cache(self.event_cache)
+            except Exception as exc:
+                self.logger.warning(
+                    "matrix_untrusted_principal_cache_disabled",
+                    error=str(exc),
+                )
+        self._restore_loaded_sync_token(loaded_token)
+
+    async def _initialize_event_cache_for_sync_restore(self) -> None:
+        """Load this principal's durable generation before trusting a sync checkpoint."""
+        try:
+            await self.event_cache.initialize()
+        except Exception as exc:
+            self.logger.warning(
+                "matrix_principal_event_cache_init_failed",
+                error=str(exc),
+            )
+
+    def _save_sync_checkpoint(self, checkpoint: SyncCheckpoint) -> None:
+        """Persist one certified sync checkpoint."""
+        cache_generation = self.event_cache.cache_generation
         if cache_generation is None:
-            self.logger.warning("matrix_sync_token_save_failed", error="cache generation unavailable")
+            self.logger.warning("matrix_sync_checkpoint_skipped_without_cache_generation")
+            self._clear_saved_sync_token()
             return
         try:
             save_sync_token(
@@ -1072,20 +1109,33 @@ class AgentBot:
         except (OSError, ValueError) as exc:
             self.logger.warning("matrix_sync_token_save_failed", error=str(exc))
 
-    def _clear_saved_sync_token(self) -> None:
+    def _clear_saved_sync_token(self) -> bool:
         """Clear the saved sync token file."""
         try:
             clear_sync_token(self.storage_path, self.agent_name)
         except OSError as exc:
             self.logger.warning("matrix_sync_token_clear_failed", error=str(exc))
+            return False
+        return True
+
+    def _invalidate_sync_checkpoint_for_cache_scope_cleanup(self) -> bool:
+        """Prevent an older checkpoint from certifying rows removed by membership cleanup."""
+        self._sync_trust_state = SyncTrustState.UNCERTAIN
+        self._sync_checkpoint = None
+        if self._clear_saved_sync_token():
+            return True
+        self._runtime_view.mark_callback_failed()
+        self.event_cache.disable("sync_checkpoint_clear_failed")
+        self.logger.warning("matrix_cache_scope_cleanup_deferred_until_checkpoint_replay")
+        return False
 
     def _mark_callback_failed(self) -> None:
         """Mark sync certification unsafe after a Matrix callback failure."""
+        recovering_from_reset = self._sync_trust_state is SyncTrustState.RESET_RECOVERY
         self._runtime_view.mark_callback_failed()
-        if self._sync_trust_state is not SyncTrustState.RESET_RECOVERY:
-            self._sync_trust_state = SyncTrustState.UNCERTAIN
-        self._sync_checkpoint = None
-        self._clear_saved_sync_token()
+        self._invalidate_sync_checkpoint_for_cache_scope_cleanup()
+        if recovering_from_reset:
+            self._sync_trust_state = SyncTrustState.RESET_RECOVERY
 
     def _apply_sync_certification_decision(
         self,
@@ -1395,12 +1445,30 @@ class AgentBot:
         """Apply this bot's authoritative joined/left room sections before other sync work."""
         joined_room_ids = set(response.rooms.join)
         left_room_ids = set(response.rooms.leave)
-        for room_id in left_room_ids:
+        timeline_departure_room_ids = {
+            room_id
+            for room_id, room_info in response.rooms.join.items()
+            if any(
+                isinstance(event, nio.RoomMemberEvent)
+                and event.state_key == self.agent_user.user_id
+                and event.membership in {"leave", "ban"}
+                for event in room_info.timeline.events
+            )
+        }
+        departed_room_ids = left_room_ids | timeline_departure_room_ids
+        if departed_room_ids:
+            self._invalidate_sync_checkpoint_for_cache_scope_cleanup()
+        for room_id in departed_room_ids:
             self._room_lifecycle.forget_invited_room(room_id)
+        await self._conversation_cache.purge_rooms(departed_room_ids)
+        self._local_departures_awaiting_sync.difference_update(departed_room_ids)
+        current_joined_room_ids = joined_room_ids - left_room_ids - self._local_departures_awaiting_sync
+        for room_id in current_joined_room_ids:
+            await self._conversation_cache.mark_room_joined(room_id)
         call_manager = self._call_manager
         if call_manager is not None:
             await call_manager.on_sync_room_membership(
-                joined_room_ids=joined_room_ids,
+                joined_room_ids=current_joined_room_ids,
                 left_room_ids=left_room_ids,
             )
 
@@ -1425,8 +1493,6 @@ class AgentBot:
         event: nio.RoomMemberEvent,
     ) -> None:
         """Apply invited-room cleanup before optional call reconciliation."""
-        if event.state_key == self.agent_user.user_id and event.membership in {"leave", "ban"}:
-            self._room_lifecycle.forget_invited_room(room.room_id)
         call_manager = self._call_manager
         if call_manager is not None:
             await call_manager.on_room_membership_event(room, event)
@@ -1447,7 +1513,8 @@ class AgentBot:
             if orchestrator is not None:
                 orchestrator.validate_managed_entity_identities()
             self._runtime_view.mark_runtime_started()
-            self._restore_saved_sync_token()
+            await self._initialize_event_cache_for_sync_restore()
+            await self._prepare_cache_and_restore_saved_sync_token()
             await self._set_avatar_if_available()
             # Keep durable tracking-state loading off the event loop at startup.
             await asyncio.to_thread(self._turn_store.warm)
@@ -1565,12 +1632,22 @@ class AgentBot:
         try:
             joined_rooms = await get_joined_rooms(self.client)
             if joined_rooms:
-                await leave_non_dm_rooms(self.client, joined_rooms)
+                await leave_non_dm_rooms(
+                    self.client,
+                    joined_rooms,
+                    on_room_left=self._purge_left_room,
+                )
         except Exception:
             self.logger.exception("Error leaving rooms during cleanup")
 
         # Stop the bot
         await self.stop(shutdown_intent=ENTITY_REMOVED_SHUTDOWN)
+
+    async def _purge_left_room(self, room_id: str) -> None:
+        """Fence and purge one principal-owned room immediately after departure."""
+        self._local_departures_awaiting_sync.add(room_id)
+        self._invalidate_sync_checkpoint_for_cache_scope_cleanup()
+        await self._conversation_cache.purge_rooms((room_id,))
 
     async def stop(
         self,
@@ -1709,6 +1786,7 @@ class AgentBot:
             and callback_failure_count == 0
             and self._sync_trust_state is SyncTrustState.CERTIFIED
         ):
+            assert self._sync_checkpoint is not None
             self._save_sync_checkpoint(self._sync_checkpoint)
         elif (
             not background_tasks_completed
@@ -1825,14 +1903,16 @@ class AgentBot:
         retry_token = checkpoint.token if checkpoint is not None else None
         if retry_token is None:
             try:
-                token_record = load_sync_token_record(self.storage_path, self.agent_name)
+                saved_checkpoint = load_sync_checkpoint(self.storage_path, self.agent_name)
             except OSError as exc:
                 self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
             else:
-                cache_generation = self.event_cache.certification_generation
+                cache_generation = self.event_cache.cache_generation
                 retry_token = (
-                    token_record.checkpoint.token
-                    if token_record is not None and token_record.is_bound_to(cache_generation)
+                    saved_checkpoint.token
+                    if saved_checkpoint is not None
+                    and cache_generation is not None
+                    and saved_checkpoint.cache_generation == cache_generation
                     else None
                 )
         cast("Any", client).next_batch = retry_token

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.matrix.sync_certification import SyncCheckpoint
@@ -15,25 +14,13 @@ if TYPE_CHECKING:
 _SYNC_TOKEN_RECORD_VERSION = "mindroom-sync-token-v2"  # noqa: S105
 
 
-@dataclass(frozen=True)
-class _SyncTokenRecord:
-    """One sync checkpoint bound to the cache generation that certified it."""
-
-    checkpoint: SyncCheckpoint
-    cache_generation: str
-
-    def is_bound_to(self, cache_generation: str | None) -> bool:
-        """Return whether this record was certified against the active cache."""
-        return cache_generation is not None and self.cache_generation == cache_generation
-
-
 def _sync_token_path(storage_path: Path, agent_name: str) -> Path:
     """Return the on-disk path for one agent's sync token."""
     return storage_path / "sync_tokens" / f"{agent_name}.token"
 
 
-def _record_from_json(text: str) -> _SyncTokenRecord | None:
-    """Return a token record from the JSON checkpoint format."""
+def _checkpoint_from_json(text: str) -> SyncCheckpoint | None:
+    """Return a checkpoint from the durable JSON format."""
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
@@ -43,19 +30,17 @@ def _record_from_json(text: str) -> _SyncTokenRecord | None:
     token = normalize_sync_token(payload.get("token"))
     if token is None:
         return None
-    cache_generation = payload.get("cache_generation")
-    if not isinstance(cache_generation, str) or not cache_generation:
+    cache_generation_value = payload.get("cache_generation")
+    cache_generation = normalize_sync_token(cache_generation_value)
+    if cache_generation is None:
         return None
-    return _SyncTokenRecord(
-        checkpoint=SyncCheckpoint(token=token),
-        cache_generation=cache_generation,
-    )
+    return SyncCheckpoint(token=token, cache_generation=cache_generation)
 
 
-def _record_json(checkpoint: SyncCheckpoint, *, cache_generation: str) -> str:
+def _record_json(checkpoint: SyncCheckpoint) -> str:
     """Return the durable JSON token record for one certified checkpoint."""
     payload = {
-        "cache_generation": cache_generation,
+        "cache_generation": checkpoint.cache_generation,
         "token": checkpoint.token,
         "version": _SYNC_TOKEN_RECORD_VERSION,
     }
@@ -75,15 +60,13 @@ def save_sync_token(
     if token_value is None:
         msg = "Certified sync tokens require a non-empty token"
         raise ValueError(msg)
-    if not cache_generation:
-        msg = "Certified sync tokens require a cache generation"
+    generation_value = normalize_sync_token(cache_generation)
+    if generation_value is None:
+        msg = "Certified sync tokens require a non-empty cache generation"
         raise ValueError(msg)
-    checkpoint = SyncCheckpoint(token=token_value)
+    checkpoint = SyncCheckpoint(token=token_value, cache_generation=generation_value)
     token_path.parent.mkdir(parents=True, exist_ok=True)
-    token_path.write_text(
-        _record_json(checkpoint, cache_generation=cache_generation),
-        encoding="utf-8",
-    )
+    token_path.write_text(_record_json(checkpoint), encoding="utf-8")
 
 
 def clear_sync_token(storage_path: Path, agent_name: str) -> None:
@@ -92,8 +75,8 @@ def clear_sync_token(storage_path: Path, agent_name: str) -> None:
     token_path.unlink(missing_ok=True)
 
 
-def load_sync_token_record(storage_path: Path, agent_name: str) -> _SyncTokenRecord | None:
-    """Load one persisted sync token with its certification provenance."""
+def load_sync_checkpoint(storage_path: Path, agent_name: str) -> SyncCheckpoint | None:
+    """Load one persisted cache-certified sync checkpoint."""
     token_path = _sync_token_path(storage_path, agent_name)
     if not token_path.is_file():
         return None
@@ -104,4 +87,4 @@ def load_sync_token_record(storage_path: Path, agent_name: str) -> _SyncTokenRec
     if not token_text:
         return None
 
-    return _record_from_json(token_text)
+    return _checkpoint_from_json(token_text)

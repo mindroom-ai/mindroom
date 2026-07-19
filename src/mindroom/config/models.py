@@ -258,6 +258,10 @@ class CompactionOverrideConfig(BaseModel):
         default=None,
         description="Optional model config name to use for summary generation",
     )
+    fallback_model: str | None = Field(
+        default=None,
+        description="Optional model config name retried once when the summary model refuses for safeguards",
+    )
 
     @model_validator(mode="after")
     def validate_threshold_choice(self) -> Self:
@@ -306,6 +310,10 @@ class CompactionConfig(BaseModel):
     model: str | None = Field(
         default=None,
         description="Optional model config name to use for summary generation",
+    )
+    fallback_model: str | None = Field(
+        default=None,
+        description="Optional model config name retried once when the summary model refuses for safeguards",
     )
 
     @model_validator(mode="after")
@@ -560,7 +568,8 @@ class ModelConfig(BaseModel):
         description=(
             "Actual provider context window size in tokens. MindRoom uses it as the default replay-planning "
             "window unless compaction.replay_window_tokens sets a smaller cap. An explicit compaction.model "
-            "also needs its own context_window for summary generation. On vertexai_claude models it additionally "
+            "or compaction.fallback_model also needs its own context_window for summary generation. "
+            "On vertexai_claude models it additionally "
             "enables request-time fitting that trims replayed history when a request would exceed the window"
         ),
     )

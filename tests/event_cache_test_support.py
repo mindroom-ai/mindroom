@@ -25,6 +25,7 @@ async def replace_thread_unconditionally(
         room_id,
         thread_id,
         events,
+        expected_membership_epoch=await cache.room_membership_epoch(room_id),
         fetch_started_at=float("inf"),
         validated_at=timestamp,
     )
