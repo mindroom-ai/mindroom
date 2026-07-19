@@ -182,7 +182,7 @@ class ConversationEventCache(Protocol):
         self,
         room_id: str,
         *,
-        expected_departure_epoch: int | None = None,
+        expected_departure_epoch: int,
     ) -> None:
         """Allow cache access after an authoritative rejoin finishes any pending purge."""
 

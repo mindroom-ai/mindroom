@@ -234,7 +234,10 @@ async def test_principal_isolation_survives_asymmetric_decryption_and_leave(
         assert await bob.get_event(room_id, event_id) == bob_event
         assert await bob.get_mxc_text(room_id, event_id, mxc_url) == "bob plaintext"
 
-        await alice.mark_room_joined(room_id)
+        await alice.mark_room_joined(
+            room_id,
+            expected_departure_epoch=alice.room_departure_epoch(room_id),
+        )
         rejoined_event = _event("$rejoined", 4, sidecar_url=mxc_url)
         await alice.store_event("$rejoined", room_id, rejoined_event)
         assert await alice.store_mxc_text(room_id, "$rejoined", mxc_url, "rejoined plaintext")

@@ -921,7 +921,10 @@ class TestDownloadMxcText:
             )
             assert await cache.get_mxc_text(room_id, event_id, mxc_url) is None
 
-            await cache.mark_room_joined(room_id)
+            await cache.mark_room_joined(
+                room_id,
+                expected_departure_epoch=cache.room_departure_epoch(room_id),
+            )
             await cache.store_event(event_id, room_id, event)
 
             assert (

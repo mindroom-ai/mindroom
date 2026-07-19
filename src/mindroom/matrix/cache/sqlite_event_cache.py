@@ -1038,15 +1038,12 @@ class SqliteEventCache:
         self,
         room_id: str,
         *,
-        expected_departure_epoch: int | None = None,
+        expected_departure_epoch: int,
     ) -> None:
         """Remove a departure fence only after any pending purge commits."""
         if not self._runtime.is_room_departed(self.principal_id, room_id):
             return
-        departure_epoch = (
-            self.room_departure_epoch(room_id) if expected_departure_epoch is None else expected_departure_epoch
-        )
-        if self.room_departure_epoch(room_id) != departure_epoch:
+        if self.room_departure_epoch(room_id) != expected_departure_epoch:
             return
         if not self.durable_writes_available:
             return
@@ -1062,7 +1059,7 @@ class SqliteEventCache:
             self._runtime.mark_room_joined(
                 self.principal_id,
                 room_id,
-                expected_departure_epoch=departure_epoch,
+                expected_departure_epoch=expected_departure_epoch,
             )
 
     async def purge_principal(self) -> None:
