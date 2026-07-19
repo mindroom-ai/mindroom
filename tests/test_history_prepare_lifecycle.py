@@ -1175,6 +1175,86 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
 
 
 @pytest.mark.asyncio
+async def test_prepare_history_for_run_compacts_on_primary_when_fallback_construction_fails(
+    tmp_path: Path,
+) -> None:
+    """A fallback that fails to load is logged and unavailable; the healthy primary still compacts."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session("session-1", runs=[_completed_run("run-1")])
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+    execution_plan = ResolvedHistoryExecutionPlan(
+        authored_compaction_enabled=True,
+        destructive_compaction_available=True,
+        explicit_compaction_model=True,
+        compaction_model_name="summary-model",
+        compaction_context_window=4_096,
+        replay_window_tokens=64_000,
+        trigger_threshold_tokens=1,
+        reserve_tokens=0,
+        static_prompt_tokens=0,
+        replay_budget_tokens=1,
+        hard_replay_budget_tokens=1,
+        summary_input_budget_tokens=16_000,
+        compaction_fallback_model_name="fallback-model",
+    )
+
+    def _load_model(_config: object, _paths: object, name: str = "default", **_kwargs: object) -> FakeModel:
+        if name == "fallback-model":
+            message = "fallback provider SDK unavailable"
+            raise RuntimeError(message)
+        return FakeModel(id=f"{name}-id", provider="fake")
+
+    summary_mock = AsyncMock(
+        return_value=SessionSummary(summary="primary summary", updated_at=datetime.now(UTC)),
+    )
+    lifecycle = RecordingCompactionLifecycle()
+
+    with (
+        patch("mindroom.model_loading.get_model_instance", side_effect=_load_model),
+        patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
+        patch("mindroom.history.runtime.logger.warning") as warning_mock,
+    ):
+        prepared = await prepare_history_for_run_for_test(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+            execution_plan=execution_plan,
+            compaction_lifecycle=lifecycle,
+        )
+
+    assert len(prepared.compaction_outcomes) == 1
+    assert prepared.compaction_outcomes[0].summary_model == "summary-model"
+    assert summary_mock.await_count == 1
+    assert summary_mock.await_args.kwargs["model"].id == "summary-model-id"
+    fallback_warnings = [
+        call
+        for call in warning_mock.call_args_list
+        if call.args[0] == "Compaction fallback model failed to load; continuing without a fallback"
+    ]
+    assert len(fallback_warnings) == 1
+    assert fallback_warnings[0].kwargs["fallback_model"] == "fallback-model"
+    assert not any(isinstance(event, CompactionLifecycleFailure) for event in lifecycle.events)
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "primary summary"
+    assert read_scope_state(persisted, scope).last_summary_model == "summary-model-id"
+
+
+@pytest.mark.asyncio
 async def test_prepare_history_for_run_reuses_completed_auto_compaction(
     tmp_path: Path,
 ) -> None:

@@ -565,7 +565,20 @@ async def _run_scope_compaction(
         primary_model_name=execution_plan.compaction_model_name,
         fallback_model_name=fallback_model_name,
     ):
-        fallback_model = _load_compaction_model(config, runtime_paths, fallback_model_name)
+        # The fallback is an optional resilience knob: when its construction
+        # fails (missing SDK, credentials, client setup), compaction still
+        # runs on the healthy primary instead of aborting before any call.
+        try:
+            fallback_model = _load_compaction_model(config, runtime_paths, fallback_model_name)
+        except Exception:
+            logger.warning(
+                "Compaction fallback model failed to load; continuing without a fallback",
+                session_id=session.session_id,
+                scope=scope.key,
+                compaction_model=execution_plan.compaction_model_name,
+                fallback_model=fallback_model_name,
+                exc_info=True,
+            )
     return await compact_scope_history(
         storage=storage,
         session=session,
