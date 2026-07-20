@@ -390,7 +390,7 @@ class TestUnseenMessagesPartialReplies:
             "Answer the new question.",
             thread_history,
             seen_event_ids={"e1"},
-            current_event_id="e3",
+            reply_to_event_id="e3",
             active_event_ids={"e2"},
             response_sender_id=agent_id,
             config=config,
@@ -400,7 +400,10 @@ class TestUnseenMessagesPartialReplies:
         assert [message.role for message in context_messages] == ["user", "user", "user"]
         assert "Your previous response is still being delivered." in str(context_messages[0].content)
         assert "Do NOT repeat or redo that work." in str(context_messages[0].content)
-        assert context_messages[1].content == "You (reply still streaming): Partial reply"
+        assert context_messages[1].content == (
+            '<msg event_id="e2" from="@mindroom_helper:localhost">'
+            "<![CDATA[You (reply still streaming): Partial reply]]></msg>"
+        )
         assert context_messages[2].content == "Answer the new question."
 
     def test_replay_fallback_sanitizer_matches_unseen_context_rules(self) -> None:
@@ -459,7 +462,7 @@ class TestUnseenMessagesPartialReplies:
             "Continue.",
             thread_history,
             seen_event_ids=set(),
-            current_event_id="e2",
+            reply_to_event_id="e2",
             active_event_ids=set(),
             response_sender_id=agent_id,
             config=config,

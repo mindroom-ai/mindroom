@@ -1065,6 +1065,7 @@ depends_on = [
     "mindroom.agent_storage",
     "mindroom.constants",
     "mindroom.history.storage",
+    "mindroom.prompt_message_tags",
     "mindroom.tool_system.events",
 ]
 visibility = [
@@ -1500,7 +1501,9 @@ path = "mindroom.prompt_message_tags"
 depends_on = []
 visibility = [
     "mindroom.coalescing_batch",
+    "mindroom.conversation_state_writer",
     "mindroom.execution_preparation",
+    "mindroom.history.interrupted_replay",
 ]
 
 [[modules]]
@@ -2575,6 +2578,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.history.runtime",
     "mindroom.history.types",
+    "mindroom.prompt_message_tags",
     "mindroom.runtime_protocols",
     "mindroom.team_scope",
 ]

@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import html
+import re
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING
 
 from agno.models.message import Message
+from agno.run.agent import RunOutput
+from agno.run.team import TeamRunOutput
 
 from mindroom import ai_runtime
 from mindroom.attachment_media import attachment_records_to_media
@@ -64,6 +68,17 @@ _PARTIAL_REPLY_SENDER_LABELS = {
     "interrupted": "You (interrupted reply draft)",
     "in_progress": "You (reply still streaming)",
 }
+_PARTIAL_REPLY_GUIDANCE_LABELS = frozenset({*_PARTIAL_REPLY_SENDER_LABELS.values(), "You (partial reply)"})
+
+_LOCATION_ITEM_RE = re.compile(
+    r'\n?(<item key="location" cache_policy="[^"]*">\n(.*?)\n</item>)',
+    re.DOTALL,
+)
+_MESSAGE_CONTEXT_BLOCK_RE = re.compile(
+    r"<mindroom_message_context>.*?</mindroom_message_context>",
+    re.DOTALL,
+)
+_LOCATION_MARKER_PREFIX = "📍 "
 
 
 class _PartialReplyKind(str, Enum):
@@ -125,10 +140,11 @@ def _build_matrix_prompt_with_history(
     prompt_intro: str,
     current_sender: str | None,
     current_ts: str | None = None,
+    current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
 ) -> str:
     if current_sender is not None and not current_prompt_is_structured:
-        current_block = render_msg_tag(sender=current_sender, body=prompt, ts=current_ts)
+        current_block = render_msg_tag(sender=current_sender, body=prompt, event_id=current_event_id, ts=current_ts)
     else:
         current_block = prompt
     standalone_prompt = f"{prompt_intro}{current_block}" if current_sender is not None else prompt
@@ -249,6 +265,7 @@ def _context_message_from_visible_message(
     annotation = format_attachment_annotation(list(attachment_records))
     if annotation:
         body = f"{body}\n{annotation}" if body else annotation
+    event_id = message.event_id or None
     if (
         response_sender_id is not None
         and message.sender == response_sender_id
@@ -256,11 +273,16 @@ def _context_message_from_visible_message(
     ):
         # Provider APIs reject media on assistant turns, so agent-sent
         # attachments surface through the annotation text only.
-        return Message(role="assistant", content=body)
+        return Message(role="assistant", content=render_msg_tag(sender=message.sender, body=body, event_id=event_id))
     speaker_label = _message_speaker_label(message)
     if not speaker_label:
         speaker_label = missing_sender_label
-    content = f"{speaker_label}: {body}" if speaker_label else body
+    if speaker_label in _PARTIAL_REPLY_GUIDANCE_LABELS and response_sender_id is not None:
+        # The guidance label replaced the real sender; keep it in the body so the
+        # partial-state semantics survive while the real event stays addressable.
+        content = render_msg_tag(sender=response_sender_id, body=f"{speaker_label}: {body}", event_id=event_id)
+    else:
+        content = render_msg_tag(sender=speaker_label or "", body=body, event_id=event_id)
     if not attachment_records:
         return Message(role="user", content=content)
     audio, images, files, videos = attachment_records_to_media(list(attachment_records))
@@ -319,6 +341,7 @@ def _messages_with_capped_context(
     transient_context_messages: Sequence[Message] = (),
     current_sender_id: str | None,
     current_timestamp_ms: float | None = None,
+    current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
     config: Config,
     static_token_budget: int,
@@ -332,6 +355,7 @@ def _messages_with_capped_context(
         transient_context_messages=transient_context_messages,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
+        current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
         config=config,
     )
@@ -347,6 +371,7 @@ def _messages_with_capped_context(
             transient_context_messages=transient_context_messages,
             current_sender_id=current_sender_id,
             current_timestamp_ms=current_timestamp_ms,
+            current_event_id=current_event_id,
             current_prompt_is_structured=current_prompt_is_structured,
             config=config,
         )
@@ -359,6 +384,7 @@ def _messages_with_capped_context(
         transient_context_messages=transient_context_messages,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
+        current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
         config=config,
     )
@@ -371,6 +397,7 @@ def _messages_with_current_prompt(
     transient_context_messages: Sequence[Message] = (),
     current_sender_id: str | None = None,
     current_timestamp_ms: float | None = None,
+    current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
     config: Config,
 ) -> tuple[Message, ...]:
@@ -385,6 +412,7 @@ def _messages_with_current_prompt(
             prompt_intro=config.get_prompt("CURRENT_MESSAGE_PROMPT_INTRO"),
             current_sender=current_sender_id,
             current_ts=current_ts,
+            current_event_id=current_event_id,
             current_prompt_is_structured=current_prompt_is_structured,
         )
         if current_sender_id is not None
@@ -417,11 +445,12 @@ def _build_unseen_context_messages(
     *,
     transient_context_messages: Sequence[Message] = (),
     seen_event_ids: set[str],
-    current_event_id: str,
+    reply_to_event_id: str,
     active_event_ids: Collection[str],
     response_sender_id: str | None,
     current_sender_id: str | None = None,
     current_timestamp_ms: float | None = None,
+    current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
     config: Config,
     attachment_context: _ThreadAttachmentContext | None = None,
@@ -431,7 +460,7 @@ def _build_unseen_context_messages(
         thread_history,
         sender_id=response_sender_id,
         seen_event_ids=seen_event_ids,
-        current_event_id=current_event_id,
+        current_event_id=reply_to_event_id,
         active_event_ids=active_event_ids,
     )
     context_messages = _context_messages_from_visible_messages(
@@ -451,6 +480,7 @@ def _build_unseen_context_messages(
             transient_context_messages=transient_context_messages,
             current_sender_id=current_sender_id,
             current_timestamp_ms=current_timestamp_ms,
+            current_event_id=current_event_id,
             current_prompt_is_structured=current_prompt_is_structured,
             config=config,
         ),
@@ -469,6 +499,7 @@ def _build_thread_history_messages(
     response_sender_id: str | None,
     current_sender_id: str | None = None,
     current_timestamp_ms: float | None = None,
+    current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
     config: Config,
     max_messages: int | None = None,
@@ -486,6 +517,7 @@ def _build_thread_history_messages(
             transient_context_messages=transient_context_messages,
             current_sender_id=current_sender_id,
             current_timestamp_ms=current_timestamp_ms,
+            current_event_id=current_event_id,
             current_prompt_is_structured=current_prompt_is_structured,
             config=config,
         )
@@ -508,6 +540,7 @@ def _build_thread_history_messages(
             transient_context_messages=transient_context_messages,
             current_sender_id=current_sender_id,
             current_timestamp_ms=current_timestamp_ms,
+            current_event_id=current_event_id,
             current_prompt_is_structured=current_prompt_is_structured,
             config=config,
             static_token_budget=static_token_budget,
@@ -520,6 +553,7 @@ def _build_thread_history_messages(
         transient_context_messages=transient_context_messages,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
+        current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
         config=config,
     )
@@ -659,6 +693,98 @@ def _scope_seen_event_ids(scope_context: ScopeSessionContext | None) -> set[str]
     return read_scope_seen_event_ids(scope_context.session, scope_context.scope)
 
 
+def _split_location_enrichment(prompt: str) -> tuple[str, str, str]:
+    """Split the terminal block's location item into (persisted_prompt, item_markup, item_text).
+
+    Markup and text are empty without a terminal core-rendered ``key="location"``
+    item; every other enrichment item stays byte-for-byte in the persisted prompt.
+    """
+    stripped = prompt.rstrip()
+    if not stripped.endswith("</mindroom_message_context>"):
+        return prompt, "", ""
+    block_start = stripped.rfind("<mindroom_message_context>")
+    if block_start == -1:
+        return prompt, "", ""
+    block = stripped[block_start:]
+    match = _LOCATION_ITEM_RE.search(block)
+    if match is None:
+        return prompt, "", ""
+    remaining_block = block[: match.start()] + block[match.end() :]
+    if "<item " in remaining_block:
+        persisted_prompt = stripped[:block_start] + remaining_block
+    else:
+        persisted_prompt = stripped[:block_start].rstrip()
+    return persisted_prompt, match.group(1), match.group(2)
+
+
+def _location_marker_from_fields(item_text: str) -> str | None:
+    """Derive the short persisted location marker from one escaped location item."""
+    fields: dict[str, str] = {}
+    for line in html.unescape(item_text).splitlines():
+        key, sep, value = line.partition(":")
+        if sep:
+            fields[key.strip()] = value.strip()
+    if fields.get("at_home", "").lower() == "true":
+        return f"{_LOCATION_MARKER_PREFIX}Home"
+    nearby_place = fields.get("nearby_place", "")
+    if nearby_place and nearby_place.lower() != "unknown":
+        return f"{_LOCATION_MARKER_PREFIX}{nearby_place}"
+    latitude = fields.get("latitude", "")
+    longitude = fields.get("longitude", "")
+    if latitude and longitude:
+        return f"{_LOCATION_MARKER_PREFIX}{latitude}, {longitude}"
+    return None
+
+
+def _last_location_marker_in_text(text: str) -> str | None:
+    """Return the last generated ``📍 ...`` marker line in one stored message text."""
+    marker: str | None = None
+    for line in _MESSAGE_CONTEXT_BLOCK_RE.sub("", text).splitlines():
+        candidate = line.strip()
+        if candidate.endswith("]]></msg>"):
+            candidate = candidate[: -len("]]></msg>")].rstrip()
+        if candidate.startswith(_LOCATION_MARKER_PREFIX):
+            marker = candidate
+    return marker
+
+
+def _last_persisted_location_marker(scope_context: ScopeSessionContext | None) -> str | None:
+    """Scan stored scope runs backward for the most recent surviving location marker."""
+    if scope_context is None or scope_context.session is None:
+        return None
+    for run in reversed(scope_context.session.runs or []):
+        if not isinstance(run, (RunOutput, TeamRunOutput)):
+            continue
+        for message in reversed(run.messages or []):
+            if message.role != "user" or not isinstance(message.content, str):
+                continue
+            marker = _last_location_marker_in_text(message.content)
+            if marker is not None:
+                return marker
+    return None
+
+
+def _extract_current_location_context(
+    prompt: str,
+    *,
+    scope_context: ScopeSessionContext | None,
+) -> tuple[str, str]:
+    """Split current-turn location detail into ``(persisted_prompt, location_block)``.
+
+    Full detail always leaves the persisted prompt, which gains at most one plain
+    ``📍 ...`` line when the last known marker changed; missing location data
+    leaves the prompt and the last known marker untouched.
+    """
+    persisted_prompt, item_markup, item_text = _split_location_enrichment(prompt)
+    if not item_markup:
+        return prompt, ""
+    location_block = f"<mindroom_message_context>\n{item_markup}\n</mindroom_message_context>"
+    marker = _location_marker_from_fields(item_text)
+    if marker is not None and marker != _last_persisted_location_marker(scope_context):
+        persisted_prompt = f"{persisted_prompt}\n\n{marker}" if persisted_prompt.strip() else marker
+    return persisted_prompt, location_block
+
+
 def _prepared_history_with_scheduled_limit(
     prepared_history: PreparedHistoryState,
     max_persisted_messages: int,
@@ -711,6 +837,7 @@ async def _prepare_execution_context_common(
     response_sender_id: str | None,
     current_sender_id: str | None,
     current_timestamp_ms: float | None = None,
+    current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
     config: Config,
     prepare_scope_history_fn: Callable[[str], Awaitable[PreparedScopeHistory]],
@@ -739,6 +866,7 @@ async def _prepare_execution_context_common(
         transient_context_messages=transient_context_messages,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
+        current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
         config=config,
     )
@@ -748,11 +876,12 @@ async def _prepare_execution_context_common(
             thread_history,
             transient_context_messages=transient_context_messages,
             seen_event_ids=seen_event_ids,
-            current_event_id=reply_to_event_id,
+            reply_to_event_id=reply_to_event_id,
             active_event_ids=active_event_ids,
             response_sender_id=response_sender_id,
             current_sender_id=current_sender_id,
             current_timestamp_ms=current_timestamp_ms,
+            current_event_id=current_event_id,
             current_prompt_is_structured=current_prompt_is_structured,
             config=config,
             attachment_context=attachment_context,
@@ -765,6 +894,7 @@ async def _prepare_execution_context_common(
         transient_context_messages=transient_context_messages,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
+        current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
         config=config,
     )
@@ -774,11 +904,12 @@ async def _prepare_execution_context_common(
             thread_history,
             transient_context_messages=transient_context_messages,
             seen_event_ids=_scope_seen_event_ids(scope_context),
-            current_event_id=reply_to_event_id,
+            reply_to_event_id=reply_to_event_id,
             active_event_ids=active_event_ids,
             response_sender_id=response_sender_id,
             current_sender_id=current_sender_id,
             current_timestamp_ms=current_timestamp_ms,
+            current_event_id=current_event_id,
             current_prompt_is_structured=current_prompt_is_structured,
             config=config,
             attachment_context=attachment_context,
@@ -816,6 +947,7 @@ async def _prepare_execution_context_common(
             response_sender_id=response_sender_id,
             current_sender_id=current_sender_id,
             current_timestamp_ms=current_timestamp_ms,
+            current_event_id=current_event_id,
             current_prompt_is_structured=current_prompt_is_structured,
             config=config,
             max_messages=thread_history_render_limits.max_messages if thread_history_render_limits else None,
@@ -860,11 +992,20 @@ async def prepare_agent_execution_context(
     compaction_lifecycle: CompactionLifecycle | None = None,
     current_sender_id: str | None = None,
     current_timestamp_ms: float | None = None,
+    current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
     include_openai_compat_guidance: bool = False,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedExecutionContext:
     """Prepare one agent's final prompt and replay plan for the current call."""
+    prompt, location_block = _extract_current_location_context(prompt, scope_context=scope_context)
+    if location_block:
+        # Full location detail stays current-turn-only: Agno drops
+        # add_to_agent_memory=False messages before persisting the run.
+        transient_context_messages = (
+            *transient_context_messages,
+            Message(role="user", content=location_block, add_to_agent_memory=False),
+        )
     agent_name = ctx.entity_label
     response_sender = None
     if not include_openai_compat_guidance:
@@ -915,6 +1056,7 @@ async def prepare_agent_execution_context(
         response_sender_id=response_sender,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
+        current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
         config=config,
         prepare_scope_history_fn=_prepare_agent_scope_history,
@@ -933,6 +1075,12 @@ async def prepare_agent_execution_context(
     )
 
 
+def _append_transient_additional_context(entity: Agent | Team, context_chunk: str) -> None:
+    """Append one current-turn context block without discarding existing system context."""
+    existing_context = entity.additional_context.strip() if entity.additional_context else ""
+    entity.additional_context = f"{existing_context}\n\n{context_chunk}" if existing_context else context_chunk
+
+
 async def _prepare_bound_team_execution_context(
     ctx: ResponseTurnContext,
     *,
@@ -949,12 +1097,19 @@ async def _prepare_bound_team_execution_context(
     response_sender_id: str | None = None,
     current_sender_id: str | None = None,
     current_timestamp_ms: float | None = None,
+    current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
     compaction_lifecycle: CompactionLifecycle | None = None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedExecutionContext:
     """Prepare one bound team scope for the current call."""
+    prompt, location_block = _extract_current_location_context(prompt, scope_context=scope_context)
+    if location_block:
+        # Team input is flattened to one persisted string, so full location
+        # detail rides the volatile additional-context tail instead.
+        for entity in (team, *agents):
+            _append_transient_additional_context(entity, location_block)
     static_token_estimator = team_static_token_estimator(team)
 
     async def _prepare_team_scope_history(
@@ -989,6 +1144,7 @@ async def _prepare_bound_team_execution_context(
         response_sender_id=response_sender_id,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
+        current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
         config=config,
         prepare_scope_history_fn=_prepare_team_scope_history,
@@ -1038,6 +1194,7 @@ async def prepare_bound_team_run_context(
     response_sender_id: str | None = None,
     current_sender_id: str | None = None,
     current_timestamp_ms: float | None = None,
+    current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
     compaction_lifecycle: CompactionLifecycle | None = None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
@@ -1064,6 +1221,7 @@ async def prepare_bound_team_run_context(
         response_sender_id=response_sender_id,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
+        current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
         compaction_lifecycle=compaction_lifecycle,
         thread_history_render_limits=thread_history_render_limits,

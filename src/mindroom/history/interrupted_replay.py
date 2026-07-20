@@ -16,8 +16,9 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom.agent_storage import get_agent_session, get_team_session
-from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
+from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.history.storage import new_scope_session
+from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.events import (
     ToolTraceEntry,
@@ -199,6 +200,28 @@ def _interrupted_replay_metadata(snapshot: InterruptedReplaySnapshot) -> dict[st
     return metadata
 
 
+def _wrapped_snapshot_user_message(snapshot: InterruptedReplaySnapshot) -> str:
+    """Wrap the canonical interrupted user message when its Matrix identity is known."""
+    requester_id = snapshot.run_metadata.get("requester_id")
+    source_event_id = snapshot.run_metadata.get(MATRIX_EVENT_ID_METADATA_KEY)
+    if isinstance(requester_id, str) and requester_id and isinstance(source_event_id, str) and source_event_id:
+        return render_msg_tag(sender=requester_id, body=snapshot.user_message, event_id=source_event_id)
+    return snapshot.user_message
+
+
+def _wrapped_snapshot_assistant_content(
+    snapshot: InterruptedReplaySnapshot,
+    content: str,
+    *,
+    response_sender_id: str | None,
+) -> str:
+    """Wrap the canonical interrupted assistant content when a visible event exists."""
+    response_event_id = snapshot.run_metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
+    if response_sender_id and isinstance(response_event_id, str) and response_event_id:
+        return render_msg_tag(sender=response_sender_id, body=content, event_id=response_event_id)
+    return content
+
+
 def _build_interrupted_replay_run(
     *,
     snapshot: InterruptedReplaySnapshot,
@@ -206,13 +229,19 @@ def _build_interrupted_replay_run(
     scope_id: str,
     session_id: str,
     is_team: bool,
+    response_sender_id: str | None = None,
 ) -> RunOutput | TeamRunOutput:
     """Build one canonical replayable run for an interrupted top-level turn."""
     content = _render_interrupted_replay_content(snapshot)
     messages = []
     if snapshot.user_message:
-        messages.append(Message(role="user", content=snapshot.user_message))
-    messages.append(Message(role="assistant", content=content))
+        messages.append(Message(role="user", content=_wrapped_snapshot_user_message(snapshot)))
+    messages.append(
+        Message(
+            role="assistant",
+            content=_wrapped_snapshot_assistant_content(snapshot, content, response_sender_id=response_sender_id),
+        ),
+    )
     metadata = _interrupted_replay_metadata(snapshot)
     if is_team:
         return TeamRunOutput(
@@ -271,6 +300,7 @@ def persist_interrupted_replay_snapshot(
     run_id: str,
     snapshot: InterruptedReplaySnapshot,
     is_team: bool,
+    response_sender_id: str | None = None,
 ) -> None:
     """Persist one canonical interrupted replay snapshot into session history."""
     persisted_session = _load_persisted_session(
@@ -292,6 +322,7 @@ def persist_interrupted_replay_snapshot(
         scope_id=scope_id,
         session_id=session_id,
         is_team=is_team,
+        response_sender_id=response_sender_id,
     )
     if is_team:
         assert isinstance(persisted_session, TeamSession)

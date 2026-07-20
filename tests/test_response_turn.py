@@ -139,12 +139,13 @@ def _ctx(**overrides: object) -> ResponseTurnContext:
     return ResponseTurnContext(**values)
 
 
-def _continuation(prompt: str = "hello") -> DynamicContinuationRunState:
+def _continuation(prompt: str = "hello", current_event_id: str | None = None) -> DynamicContinuationRunState:
     return DynamicContinuationRunState.initial(
         prompt=prompt,
         model_prompt=None,
         current_timestamp_ms=None,
         current_prompt_is_structured=False,
+        current_event_id=current_event_id,
         run_id="run-1",
         continuation_model_prompt_tail="",
     )
@@ -1223,3 +1224,17 @@ def test_stream_resolution_union_covers_handled() -> None:
     """The streaming resolution union accepts the handled sentinel."""
     resolution: StreamAttemptResolution = HandledAttempt()
     assert isinstance(resolution, HandledAttempt)
+
+
+def test_continuation_initial_keeps_event_id_and_advance_clears_it() -> None:
+    """Same-input retries keep the source event identity; synthetic continuations drop it."""
+    continuation = _continuation(current_event_id="$source-event")
+
+    assert continuation.active_current_event_id == "$source-event"
+
+    advanced = continuation.advance(continuation_prompt="continue", previous_run_id="run-1")
+
+    assert advanced.active_current_event_id is None
+    assert advanced.active_current_timestamp_ms is None
+    assert advanced.active_current_prompt_is_structured is False
+    assert advanced.original_prompt == "hello"

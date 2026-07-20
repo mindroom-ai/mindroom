@@ -12,6 +12,7 @@ from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 
 from mindroom.agent_storage import create_state_storage, get_agent_session
+from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.history.interrupted_replay import (
     InterruptedReplaySnapshot,
     _build_interrupted_replay_run,
@@ -514,5 +515,136 @@ def test_persist_interrupted_replay_snapshot_keeps_minimal_interrupted_turn(tmp_
         assert persisted.runs is not None
         assert len(persisted.runs) == 1
         assert _assistant_text(persisted.runs[0]) == "(turn stopped before completion)"
+    finally:
+        storage.close()
+
+
+def test_build_interrupted_replay_run_wraps_known_matrix_identities() -> None:
+    """Known source and visible response identities wrap both canonical messages."""
+    snapshot = build_interrupted_replay_snapshot(
+        user_message="What is the plan?",
+        partial_text="Half an answer",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata={
+            "requester_id": "@alice:localhost",
+            MATRIX_EVENT_ID_METADATA_KEY: "$source",
+            MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$visible",
+        },
+    )
+
+    run = _build_interrupted_replay_run(
+        snapshot=snapshot,
+        run_id="run-1",
+        scope_id="test_agent",
+        session_id="session-1",
+        is_team=False,
+        response_sender_id="@mindroom_code:localhost",
+    )
+
+    assert run.messages is not None
+    assert run.messages[0].role == "user"
+    assert run.messages[0].content == (
+        '<msg event_id="$source" from="@alice:localhost"><![CDATA[What is the plan?]]></msg>'
+    )
+    assert run.messages[1].role == "assistant"
+    assert run.messages[1].content == (
+        '<msg event_id="$visible" from="@mindroom_code:localhost">'
+        "<![CDATA[Half an answer\n\n(turn stopped before completion)]]></msg>"
+    )
+    assert run.content == "Half an answer\n\n(turn stopped before completion)"
+
+
+def test_build_interrupted_replay_run_stays_bare_without_matrix_identities() -> None:
+    """Unspoken or non-Matrix interrupted snapshots keep plain replay messages."""
+    snapshot = build_interrupted_replay_snapshot(
+        user_message="What is the plan?",
+        partial_text="Half an answer",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata={"requester_id": "@alice:localhost"},
+    )
+
+    run = _build_interrupted_replay_run(
+        snapshot=snapshot,
+        run_id="run-1",
+        scope_id="test_agent",
+        session_id="session-1",
+        is_team=False,
+    )
+
+    assert run.messages is not None
+    assert run.messages[0].content == "What is the plan?"
+    assert run.messages[1].content == "Half an answer\n\n(turn stopped before completion)"
+
+
+def test_build_interrupted_replay_run_wraps_only_the_side_with_known_identity() -> None:
+    """A missing response sender leaves the assistant bare while the source still wraps."""
+    snapshot = build_interrupted_replay_snapshot(
+        user_message="What is the plan?",
+        partial_text="Half an answer",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata={
+            "requester_id": "@alice:localhost",
+            MATRIX_EVENT_ID_METADATA_KEY: "$source",
+            MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$visible",
+        },
+    )
+
+    run = _build_interrupted_replay_run(
+        snapshot=snapshot,
+        run_id="run-1",
+        scope_id="test_agent",
+        session_id="session-1",
+        is_team=False,
+        response_sender_id=None,
+    )
+
+    assert run.messages is not None
+    assert run.messages[0].content == (
+        '<msg event_id="$source" from="@alice:localhost"><![CDATA[What is the plan?]]></msg>'
+    )
+    assert run.messages[1].content == "Half an answer\n\n(turn stopped before completion)"
+
+
+def test_persist_interrupted_replay_snapshot_passes_response_sender(tmp_path: Path) -> None:
+    """The persistence entry point forwards the response sender into the stored run."""
+    storage = create_state_storage(
+        "test_agent",
+        tmp_path,
+        subdir="sessions",
+        session_table="test_agent_sessions",
+    )
+    try:
+        persist_interrupted_replay_snapshot(
+            storage=storage,
+            session=None,
+            session_id="session-1",
+            scope_id="test_agent",
+            run_id="run-1",
+            snapshot=build_interrupted_replay_snapshot(
+                user_message="What is the plan?",
+                partial_text="Half an answer",
+                completed_tools=(),
+                interrupted_tools=(),
+                run_metadata={
+                    "requester_id": "@alice:localhost",
+                    MATRIX_EVENT_ID_METADATA_KEY: "$source",
+                    MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$visible",
+                },
+            ),
+            is_team=False,
+            response_sender_id="@mindroom_code:localhost",
+        )
+
+        persisted = get_agent_session(storage, "session-1")
+        assert persisted is not None
+        run = (persisted.runs or [])[0]
+        assert isinstance(run, RunOutput)
+        assert _assistant_text(run) == (
+            '<msg event_id="$visible" from="@mindroom_code:localhost">'
+            "<![CDATA[Half an answer\n\n(turn stopped before completion)]]></msg>"
+        )
     finally:
         storage.close()

@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -36,6 +37,8 @@ from mindroom.history.storage import (
     update_scope_seen_event_ids,
 )
 from mindroom.history.types import HistoryScope, PreparedHistoryState
+from mindroom.hooks import EnrichmentItem
+from mindroom.hooks.enrichment import render_enrichment_block
 from mindroom.memory import MemoryPromptParts
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from tests.conftest import (
@@ -383,8 +386,8 @@ async def test_prepare_agent_and_prompt_uses_thread_history_and_transient_memory
     config, runtime_paths = _make_config(tmp_path)
     live_agent = _agent()
     thread_history = [
-        make_visible_message(sender="alice", body="Earlier context"),
-        make_visible_message(sender="bob", body="More context"),
+        make_visible_message(sender="alice", body="Earlier context", event_id="$earlier"),
+        make_visible_message(sender="bob", body="More context", event_id="$more"),
     ]
 
     with (
@@ -420,14 +423,16 @@ async def test_prepare_agent_and_prompt_uses_thread_history_and_transient_memory
     assert prepared_agent is live_agent
     assert prepared.replays_persisted_history is False
     assert [message.content for message in prepared_run.messages] == [
-        "alice: Earlier context",
-        "bob: More context",
+        '<msg event_id="$earlier" from="alice"><![CDATA[Earlier context]]></msg>',
+        '<msg event_id="$more" from="bob"><![CDATA[More context]]></msg>',
         "Retrieved memory for this turn",
         "Current prompt",
     ]
     assert [message.add_to_agent_memory for message in prepared_run.messages] == [True, True, False, True]
     assert full_prompt == (
-        "alice: Earlier context\n\nbob: More context\n\nRetrieved memory for this turn\n\nCurrent prompt"
+        '<msg event_id="$earlier" from="alice"><![CDATA[Earlier context]]></msg>\n\n'
+        '<msg event_id="$more" from="bob"><![CDATA[More context]]></msg>\n\n'
+        "Retrieved memory for this turn\n\nCurrent prompt"
     )
 
 
@@ -436,12 +441,12 @@ async def test_prepare_agent_and_prompt_caps_thread_fallback_to_active_window(tm
     config, runtime_paths = _make_config(
         tmp_path,
         defaults_compaction=CompactionConfig(reserve_tokens=0),
-        context_window=16,
+        context_window=32,
     )
     live_agent = _agent()
     thread_history = [
-        make_visible_message(sender="alice", body="Old context " + ("o" * 120)),
-        make_visible_message(sender="bob", body="Recent context"),
+        make_visible_message(sender="alice", body="Old context " + ("o" * 120), event_id="$old"),
+        make_visible_message(sender="bob", body="Recent context", event_id="$recent"),
     ]
 
     class FakeAgentStaticTokenEstimator:
@@ -472,8 +477,10 @@ async def test_prepare_agent_and_prompt_caps_thread_fallback_to_active_window(tm
             thread_history=thread_history,
         )
 
-    assert prepared_run.prompt_text == "bob: Recent context\n\nCurrent prompt"
-    assert estimate_text_tokens(prepared_run.prompt_text) <= 16
+    assert prepared_run.prompt_text == (
+        '<msg event_id="$recent" from="bob"><![CDATA[Recent context]]></msg>\n\nCurrent prompt'
+    )
+    assert estimate_text_tokens(prepared_run.prompt_text) <= 32
 
 
 @pytest.mark.asyncio
@@ -516,9 +523,10 @@ async def test_prepare_agent_and_prompt_uses_full_thread_fallback_for_threaded_m
 
     assert prepared_run.prepared_history.replays_persisted_history is False
     assert prepared_run.prompt_text == (
-        "@alice:localhost: Original question\n\n"
-        "Prior diagnosis\n\n"
-        'Current message:\n<msg from="@alice:localhost"><![CDATA[What was that?]]></msg>'
+        '<msg event_id="$root" from="@alice:localhost"><![CDATA[Original question]]></msg>\n\n'
+        '<msg event_id="$agent-reply" from="@bot:localhost"><![CDATA[Prior diagnosis]]></msg>\n\n'
+        "Current message:\n"
+        '<msg from="@alice:localhost"><![CDATA[What was that?]]></msg>'
     )
     assert "Later reaction" not in prepared_run.prompt_text
 
@@ -789,7 +797,7 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
 
     unseen_user_message = recording_model.seen_messages[-2]
     assert unseen_user_message.role == "user"
-    assert unseen_user_message.content == "alice: Fresh follow-up"
+    assert unseen_user_message.content == '<msg event_id="event-2" from="alice"><![CDATA[Fresh follow-up]]></msg>'
 
     final_user_message = recording_model.seen_messages[-1]
     assert final_user_message.role == "user"
@@ -1008,3 +1016,98 @@ async def test_prepare_agent_and_prompt_timestamps_current_turn_without_duplicat
         "Available attachment IDs: att_3. Use tool calls to inspect or process them.]]></msg>"
     )
     assert third_request[-1]["add_to_agent_memory"] is True
+
+
+_HOME_LOCATION_FIELDS = {
+    "status": "fresh",
+    "latitude": "52.3702",
+    "longitude": "4.8952",
+    "nearby_place": "Home",
+    "at_home": "true",
+}
+_OFFICE_LOCATION_FIELDS = {**_HOME_LOCATION_FIELDS, "nearby_place": "Office", "at_home": "false"}
+
+
+def _location_prompt(prompt: str, fields: dict[str, str]) -> str:
+    item_text = "\n".join(f"{key}: {value}" for key, value in fields.items())
+    block = render_enrichment_block([EnrichmentItem(key="location", text=item_text)])
+    return f"{prompt}\n\n{block}"
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_persists_location_markers_only_on_change(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path, num_history_runs=10)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    recording_model = RecordingModel(id="recording-model", provider="fake")
+    live_agent = _agent(model=recording_model, db=storage, num_history_runs=10)
+    recorded_requests: list[list[dict[str, object]]] = []
+
+    turns: list[tuple[str, dict[str, str] | None, str]] = [
+        ("First prompt", _HOME_LOCATION_FIELDS, "$turn-1"),
+        ("Second prompt", _HOME_LOCATION_FIELDS, "$turn-2"),
+        ("Third prompt", None, "$turn-3"),
+        ("Fourth prompt", _HOME_LOCATION_FIELDS, "$turn-4"),
+        ("Fifth prompt", _OFFICE_LOCATION_FIELDS, "$turn-5"),
+    ]
+
+    with (
+        patch("mindroom.ai.create_agent", return_value=live_agent),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+    ):
+        for prompt, location_fields, event_id in turns:
+            with open_scope_session_context(
+                agent=live_agent,
+                agent_name="test_agent",
+                session_id="session-1",
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=None,
+            ) as scope_context:
+                prepared_run = await _prepare_agent_and_prompt(
+                    make_turn_context("test_agent", session_id="session-1", requester_id="@alice:localhost"),
+                    prompt=_location_prompt(prompt, location_fields) if location_fields else prompt,
+                    runtime_paths=runtime_paths,
+                    config=config,
+                    scope_context=scope_context,
+                    current_event_id=event_id,
+                )
+            await prepared_run.agent.arun(prepared_run.run_input, session_id="session-1")
+            recorded_requests.append(
+                [
+                    {
+                        "content": str(message.content),
+                        "add_to_agent_memory": message.add_to_agent_memory,
+                    }
+                    for message in recording_model.seen_messages
+                ],
+            )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    persisted_contents = "\n".join(
+        str(message.content) for run in persisted.runs or [] for message in run.messages or []
+    )
+    assert persisted_contents.count("📍 Home") == 1
+    assert persisted_contents.count("📍 Office") == 1
+    for full_detail_line in ("latitude:", "longitude:", "nearby_place:", "at_home:"):
+        assert full_detail_line not in persisted_contents
+    assert "<mindroom_message_context>" not in persisted_contents
+    assert "[Matrix metadata for tool calls]" not in persisted_contents
+    for turn_number in range(1, 6):
+        assert f'event_id="$turn-{turn_number}"' in persisted_contents
+
+    for turn_index in (0, 1, 3, 4):
+        transient_message = recorded_requests[turn_index][-2]
+        assert transient_message["add_to_agent_memory"] is False
+        assert '<item key="location"' in cast("str", transient_message["content"])
+    assert all('<item key="location"' not in cast("str", message["content"]) for message in recorded_requests[2])
+
+    summary_input, _ = _build_summary_input(
+        previous_summary=None,
+        compacted_runs=list(persisted.runs or []),
+        max_input_tokens=100_000,
+        history_settings=_ALL_HISTORY_SETTINGS,
+    )
+    assert summary_input.count("📍 Home") == 1
+    assert summary_input.count("📍 Office") == 1
+    assert "latitude:" not in summary_input

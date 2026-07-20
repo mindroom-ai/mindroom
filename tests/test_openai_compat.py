@@ -4344,7 +4344,11 @@ class TestTeamCompletion:
 
         assert response.status_code == 200
         prompt = mock_team.arun.call_args.args[0]
-        assert prompt == "user: Start\n\nassistant: Ack\n\nFollow-up"
+        assert prompt == (
+            '<msg event_id="$openai-1" from="user"><![CDATA[Start]]></msg>\n\n'
+            '<msg event_id="$openai-2" from="assistant"><![CDATA[Ack]]></msg>\n\n'
+            "Follow-up"
+        )
 
     def test_team_non_streaming_preserves_full_request_history_for_ad_hoc_team_runs(
         self,
@@ -4382,8 +4386,8 @@ class TestTeamCompletion:
 
         assert response.status_code == 200
         run_input = mock_team.arun.call_args.args[0]
-        assert "user: msg 0" in run_input
-        assert f"assistant: {long_body}" in run_input
+        assert 'from="user"><![CDATA[msg 0]]></msg>' in run_input
+        assert f'from="assistant"><![CDATA[{long_body}]]></msg>' in run_input
         assert run_input.endswith("Final prompt")
 
     def test_team_non_streaming_prefers_persisted_history_over_thread_history(

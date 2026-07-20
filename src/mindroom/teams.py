@@ -1441,6 +1441,7 @@ def _initial_team_continuation(
     message: str,
     current_timestamp_ms: float | None,
     current_prompt_is_structured: bool,
+    current_event_id: str | None,
     run_id: str | None,
 ) -> DynamicContinuationRunState:
     """Build the continuation state for one team turn's first attempt."""
@@ -1449,6 +1450,7 @@ def _initial_team_continuation(
         model_prompt=None,
         current_timestamp_ms=current_timestamp_ms,
         current_prompt_is_structured=current_prompt_is_structured,
+        current_event_id=current_event_id,
         run_id=run_id,
         continuation_model_prompt_tail="",
     )
@@ -1840,11 +1842,14 @@ async def prepare_materialized_team_execution(
     configured_team_name: str | None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
+    current_event_id: str | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedMaterializedTeamExecution:
     """Prepare one materialized team for execution."""
+    # Stable system enrichment lands before the execution-preparation call so
+    # the current full location block is appended only as its volatile tail.
     if ctx.system_enrichment_items:
         rendered_system_context = render_system_enrichment_block(ctx.system_enrichment_items)
         _append_additional_context(team, rendered_system_context)
@@ -1865,6 +1870,7 @@ async def prepare_materialized_team_execution(
         response_sender_id=response_sender_id,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
+        current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
         compaction_lifecycle=compaction_lifecycle,
         thread_history_render_limits=thread_history_render_limits,
@@ -2015,6 +2021,7 @@ async def team_response(  # noqa: C901, PLR0915
             response_sender_id=response_sender_id,
             current_sender_id=user_id,
             current_timestamp_ms=continuation_state.active_current_timestamp_ms,
+            current_event_id=continuation_state.active_current_event_id,
             current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
             compaction_lifecycle=compaction_lifecycle,
             configured_team_name=configured_team_name,
@@ -2312,6 +2319,7 @@ async def team_response(  # noqa: C901, PLR0915
             message=message,
             current_timestamp_ms=current_timestamp_ms,
             current_prompt_is_structured=current_prompt_is_structured,
+            current_event_id=ctx.reply_to_event_id,
             run_id=ctx.run_id,
         ),
     )
@@ -2504,6 +2512,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             response_sender_id=response_sender_id,
             current_sender_id=user_id,
             current_timestamp_ms=continuation_state.active_current_timestamp_ms,
+            current_event_id=continuation_state.active_current_event_id,
             current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
             compaction_lifecycle=compaction_lifecycle,
             configured_team_name=configured_team_name,
@@ -3189,6 +3198,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             message=message,
             current_timestamp_ms=current_timestamp_ms,
             current_prompt_is_structured=current_prompt_is_structured,
+            current_event_id=ctx.reply_to_event_id,
             run_id=ctx.run_id,
         ),
     )

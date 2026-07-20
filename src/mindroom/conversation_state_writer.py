@@ -14,6 +14,7 @@ from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.history.runtime import create_scope_session_storage
 from mindroom.history.types import HistoryScope
+from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.runtime_protocols import SupportsConfig  # noqa: TC001
 from mindroom.team_scope import ad_hoc_team_scope_id
 
@@ -115,6 +116,7 @@ class ConversationStateWriter:
         session_type: SessionType,
         run_id: str,
         response_event_id: str,
+        response_sender_id: str,
     ) -> None:
         """Persist Matrix response linkage onto the run that produced it."""
         session = (
@@ -132,5 +134,34 @@ class ConversationStateWriter:
                 return
             metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = response_event_id
             run.metadata = metadata
+            _wrap_final_assistant_message(
+                run,
+                response_sender_id=response_sender_id,
+                response_event_id=response_event_id,
+            )
             storage.upsert_session(session)
+            return
+
+
+def _wrap_final_assistant_message(
+    run: RunOutput | TeamRunOutput,
+    *,
+    response_sender_id: str,
+    response_event_id: str,
+) -> None:
+    """Wrap the run's final assistant message with its visible Matrix event identity.
+
+    Rebuilds from canonical ``run.content`` so a repeated or changed callback can
+    never nest tags; runs without string content or a final assistant message
+    keep response metadata only.
+    """
+    if not isinstance(run.content, str) or not run.content:
+        return
+    for message in reversed(run.messages or []):
+        if message.role == "assistant":
+            message.content = render_msg_tag(
+                sender=response_sender_id,
+                body=run.content,
+                event_id=response_event_id,
+            )
             return

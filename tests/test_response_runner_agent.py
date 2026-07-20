@@ -44,6 +44,7 @@ from mindroom.hooks import (
     EVENT_MESSAGE_BEFORE_RESPONSE,
     AfterResponseContext,
     BeforeResponseContext,
+    EnrichmentItem,
     HookRegistry,
     MessageEnvelope,
     hook,
@@ -100,12 +101,20 @@ if TYPE_CHECKING:
     from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
     from mindroom.matrix.users import AgentMatrixUser
     from mindroom.post_response_effects import ResponseOutcome
+    from mindroom.response_turn import ResponseTurnContext
 
 
 @pytest.fixture
 def mock_agent_user() -> AgentMatrixUser:
     """Mock agent user for testing."""
     return make_mock_agent_user()
+
+
+def _single_matrix_target_item(ctx: ResponseTurnContext) -> EnrichmentItem:
+    """Return the single stable Matrix-target item carried by one turn context."""
+    items = [item for item in ctx.system_enrichment_items if item.key == "matrix_message_target"]
+    assert len(items) == 1
+    return items[0]
 
 
 class TestAgentBot(AgentBotTestBase):
@@ -117,7 +126,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Agents with matrix_message should receive room/thread/event ids in the model prompt."""
+        """Agents with matrix_message should receive one stable Matrix-target system item."""
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -158,11 +167,12 @@ class TestAgentBot(AgentBotTestBase):
 
         assert generation.delivery.event_id == "$response"
         assert mock_ai.call_args.kwargs["prompt"] == "Please send an update"
-        model_prompt = mock_ai.call_args.kwargs["model_prompt"]
-        assert "[Matrix metadata for tool calls]" in model_prompt
-        assert "room_id: !test:localhost" in model_prompt
-        assert "thread_id: none" in model_prompt
-        assert "reply_to_event_id: $event123" in model_prompt
+        assert "[Matrix metadata for tool calls]" not in mock_ai.call_args.kwargs["model_prompt"]
+        item = _single_matrix_target_item(mock_ai.call_args.args[0])
+        assert item.cache_policy == "stable"
+        assert "!test:localhost" in item.text
+        assert "do not pass thread_id" in item.text
+        assert "$event123" not in item.text
 
     @pytest.mark.asyncio
     async def test_process_and_respond_includes_matrix_metadata_when_openclaw_compat_enabled(
@@ -212,11 +222,10 @@ class TestAgentBot(AgentBotTestBase):
 
         assert generation.delivery.event_id == "$response"
         assert mock_ai.call_args.kwargs["prompt"] == "Please send an update"
-        model_prompt = mock_ai.call_args.kwargs["model_prompt"]
-        assert "[Matrix metadata for tool calls]" in model_prompt
-        assert "room_id: !test:localhost" in model_prompt
-        assert "thread_id: none" in model_prompt
-        assert "reply_to_event_id: $event123" in model_prompt
+        assert "[Matrix metadata for tool calls]" not in mock_ai.call_args.kwargs["model_prompt"]
+        item = _single_matrix_target_item(mock_ai.call_args.args[0])
+        assert "!test:localhost" in item.text
+        assert "do not pass thread_id" in item.text
 
     @pytest.mark.asyncio
     async def test_process_and_respond_streaming_includes_matrix_metadata_when_tool_enabled(
@@ -274,11 +283,12 @@ class TestAgentBot(AgentBotTestBase):
 
         assert generation.delivery.event_id == "$response"
         assert mock_stream_agent_response.call_args.kwargs["prompt"] == "Please reply in thread"
-        model_prompt = mock_stream_agent_response.call_args.kwargs["model_prompt"]
-        assert "[Matrix metadata for tool calls]" in model_prompt
-        assert "room_id: !test:localhost" in model_prompt
-        assert "thread_id: none" in model_prompt
-        assert "reply_to_event_id: $event456" in model_prompt
+        assert "[Matrix metadata for tool calls]" not in mock_stream_agent_response.call_args.kwargs["model_prompt"]
+        item = _single_matrix_target_item(mock_stream_agent_response.call_args.args[0])
+        assert item.cache_policy == "stable"
+        assert "!test:localhost" in item.text
+        assert "do not pass thread_id" in item.text
+        assert "$event456" not in item.text
 
     @pytest.mark.asyncio
     async def test_process_and_respond_uses_safe_thread_root_for_prompt_metadata(
@@ -333,9 +343,10 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             )
 
-        model_prompt = mock_ai.call_args.kwargs["model_prompt"]
-        assert "thread_id: $thread_root:localhost" in model_prompt
-        assert "reply_to_event_id: $reply_plain:localhost" in model_prompt
+        item = _single_matrix_target_item(mock_ai.call_args.args[0])
+        assert "thread $thread_root:localhost" in item.text
+        assert "reply_to_event_id" in item.text
+        assert "$reply_plain:localhost" not in item.text
 
     @pytest.mark.asyncio
     async def test_process_and_respond_keeps_thread_root_metadata_when_reply_anchor_is_root(
@@ -390,9 +401,68 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             )
 
-        model_prompt = mock_ai.call_args.kwargs["model_prompt"]
-        assert "thread_id: $thread_root:localhost" in model_prompt
-        assert "reply_to_event_id: $thread_root:localhost" in model_prompt
+        item = _single_matrix_target_item(mock_ai.call_args.args[0])
+        assert "thread $thread_root:localhost" in item.text
+        assert "reply_to_event_id" in item.text
+
+    @pytest.mark.asyncio
+    async def test_matrix_target_context_is_identical_across_source_events(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Two turns with different source events must produce byte-identical target text."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                        tools=["matrix_message"],
+                        include_default_tools=False,
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot.client.room_send.return_value = _room_send_response("$response")
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+        mock_ai = AsyncMock(return_value="Handled")
+
+        with patch_response_runner_module(
+            typing_indicator=_noop_typing_indicator,
+            ai_response=mock_ai,
+        ):
+            for reply_to_event_id in ("$first_event:localhost", "$second_event:localhost"):
+                target = MessageTarget.resolve(
+                    room_id="!test:localhost",
+                    thread_id=None,
+                    reply_to_event_id=reply_to_event_id,
+                    thread_start_root_event_id="$thread_root:localhost",
+                )
+                await bot._response_runner.process_and_respond(
+                    _response_request(
+                        room_id="!test:localhost",
+                        prompt="Continue",
+                        reply_to_event_id=reply_to_event_id,
+                        thread_history=[],
+                        user_id="@user:localhost",
+                        response_envelope=request_envelope(
+                            room_id="!test:localhost",
+                            reply_to_event_id=reply_to_event_id,
+                            prompt="Continue",
+                            user_id="@user:localhost",
+                            target=target,
+                        ),
+                    ),
+                )
+
+        first_item, second_item = (_single_matrix_target_item(call.args[0]) for call in mock_ai.call_args_list)
+        assert first_item.text == second_item.text
+        assert "$first_event:localhost" not in first_item.text
+        assert "$second_event:localhost" not in second_item.text
 
     @pytest.mark.asyncio
     async def test_process_and_respond_streaming_resolves_knowledge_once(

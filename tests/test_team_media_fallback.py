@@ -1185,14 +1185,17 @@ async def test_prepare_bound_team_execution_context_uses_team_renderer_for_trimm
             ),
         )
 
+    wrapped_team_reply = (
+        '<msg event_id="event-2" from="@mindroom_team:example.org"><![CDATA[Previous team reply]]></msg>'
+    )
     assert tuple((message.role, message.content) for message in prepared.messages) == (
-        ("assistant", "Previous team reply"),
+        ("assistant", wrapped_team_reply),
         ("user", "Analyze this."),
     )
     assert captured_prompts == [
         ("Analyze this.", None),
         ("Analyze this.", None),
-        ("assistant: Previous team reply\n\nAnalyze this.", None),
+        (f"assistant: {wrapped_team_reply}\n\nAnalyze this.", None),
     ]
 
 
@@ -1230,8 +1233,8 @@ async def test_prepare_bound_team_execution_context_truncates_long_fallback_mess
     )
 
     assert tuple((message.role, message.content) for message in prepared.messages) == (
-        ("user", f"alice: {'x' * 199}…"),
-        ("user", f"bob: {exact_limit_body}"),
+        ("user", f'<msg event_id="event-1" from="alice"><![CDATA[{"x" * 199}…]]></msg>'),
+        ("user", f'<msg event_id="event-2" from="bob"><![CDATA[{exact_limit_body}]]></msg>'),
         ("user", "Analyze this."),
     )
 

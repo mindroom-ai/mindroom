@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import re
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -17,11 +19,19 @@ from mindroom import execution_preparation
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.config.main import Config, ResolvedRuntimeModel
 from mindroom.config.models import CompactionConfig
-from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, RuntimePaths, resolve_runtime_paths
+from mindroom.constants import (
+    ATTACHMENT_IDS_KEY,
+    ORIGINAL_SENDER_KEY,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_STREAMING,
+    RuntimePaths,
+    resolve_runtime_paths,
+)
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.execution_preparation import (
     _build_thread_history_messages,
     _build_unseen_context_messages,
+    _extract_current_location_context,
     _fallback_static_token_budget,
     _messages_with_current_prompt,
     _prepare_execution_context_common,
@@ -30,10 +40,11 @@ from mindroom.execution_preparation import (
     _ThreadAttachmentContext,
     prepare_agent_execution_context,
     render_prepared_messages_text,
+    render_prepared_team_messages_text,
 )
 from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.prompt_tokens import estimate_agent_static_tokens
-from mindroom.history.runtime import PreparedScopeHistory, _HistoryPreparationInputs
+from mindroom.history.runtime import PreparedScopeHistory, ScopeSessionContext, _HistoryPreparationInputs
 from mindroom.history.types import (
     HistoryPolicy,
     HistoryScope,
@@ -41,6 +52,8 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
     ResolvedReplayPlan,
 )
+from mindroom.hooks import EnrichmentItem
+from mindroom.hooks.enrichment import render_enrichment_block
 from mindroom.tool_schema_cache import clear_tool_schema_cache
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import FakeModel, bind_runtime_paths, make_turn_context, make_visible_message
@@ -48,9 +61,18 @@ from tests.conftest import FakeModel, bind_runtime_paths, make_turn_context, mak
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from agno.team import Team
+
 
 def _config() -> Config:
     return Config.model_validate({})
+
+
+def _msg_body(content: object) -> str:
+    """Extract the CDATA body from one wrapped ``<msg>`` context message."""
+    match = re.search(r"<!\[CDATA\[(.*)\]\]></msg>$", str(content), re.DOTALL)
+    assert match is not None, content
+    return match.group(1)
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -210,7 +232,9 @@ async def test_prepare_execution_context_skips_fallback_replay_when_persisted_hi
     )
 
     assert prepared.prepared_history.replays_persisted_history is True
-    assert prepared.context_messages[0].content == "@alice:localhost: older context"
+    assert prepared.context_messages[0].content == (
+        '<msg event_id="$older" from="@alice:localhost"><![CDATA[older context]]></msg>'
+    )
 
 
 def test_scheduled_limit_zero_disables_replay_plan() -> None:
@@ -364,8 +388,8 @@ async def test_scheduled_history_limit_does_not_count_current_event_as_history()
     )
 
     assert [str(message.content) for message in prepared.context_messages] == [
-        "@alice:localhost: recent context",
-        "@alice:localhost: newest context",
+        '<msg event_id="$recent" from="@alice:localhost"><![CDATA[recent context]]></msg>',
+        '<msg event_id="$newest" from="@alice:localhost"><![CDATA[newest context]]></msg>',
     ]
     replay_plan = prepared.prepared_history.replay_plan
     assert replay_plan is not None
@@ -459,7 +483,7 @@ async def test_routed_scheduled_history_budget_exempts_the_prompt_source(
         fallback_static_token_budget=100,
     )
 
-    assert [str(message.content).split(": ", 1)[-1] for message in prepared.context_messages] == expected_context
+    assert [_msg_body(message.content) for message in prepared.context_messages] == expected_context
     assert "Poll the deployment queue" in str(prepared.messages[-1].content)
     assert all("Automated Task" not in str(message.content) for message in prepared.context_messages)
 
@@ -653,7 +677,7 @@ def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> N
 
     assert len(messages) == 2
     assert messages[0].role == "user"
-    assert messages[0].content == f"@alice:localhost: {'x' * 199}…"
+    assert messages[0].content == f'<msg event_id="$long" from="@alice:localhost"><![CDATA[{"x" * 199}…]]></msg>'
     assert long_body not in str(messages[0].content)
     assert messages[1].content == "Current request"
 
@@ -787,9 +811,12 @@ def test_fallback_thread_history_pins_attachments_to_their_messages(tmp_path: Pa
     assert len(messages) == 3
     history_with_media = messages[0]
     assert history_with_media.role == "user"
-    assert history_with_media.content == ('@alice:localhost: look at this\n[attachments: att_car (image, "car.jpg")]')
+    assert history_with_media.content == (
+        '<msg event_id="$img" from="@alice:localhost">'
+        '<![CDATA[look at this\n[attachments: att_car (image, "car.jpg")]]]></msg>'
+    )
     assert [image.id for image in (history_with_media.images or [])] == ["att_car"]
-    assert messages[1].content == "@alice:localhost: no attachments here"
+    assert messages[1].content == '<msg event_id="$text" from="@alice:localhost"><![CDATA[no attachments here]]></msg>'
     assert not messages[1].images
     assert not messages[2].images
 
@@ -825,7 +852,10 @@ def test_fallback_thread_history_maps_raw_media_events_to_attachments(tmp_path: 
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
     )
 
-    assert messages[0].content == (f'@alice:localhost: photo.png\n[attachments: {attachment_id} (image, "photo.png")]')
+    assert messages[0].content == (
+        f'<msg event_id="$raw-img" from="@alice:localhost">'
+        f'<![CDATA[photo.png\n[attachments: {attachment_id} (image, "photo.png")]]]></msg>'
+    )
     assert [image.id for image in (messages[0].images or [])] == [attachment_id]
 
 
@@ -859,7 +889,10 @@ def test_fallback_thread_history_agent_attachments_annotate_without_media(tmp_pa
     )
 
     assert messages[0].role == "assistant"
-    assert messages[0].content == 'here is the report\n[attachments: att_report (file, "report.pdf")]'
+    assert messages[0].content == (
+        '<msg event_id="$agent-file" from="@mindroom_team:localhost">'
+        '<![CDATA[here is the report\n[attachments: att_report (file, "report.pdf")]]]></msg>'
+    )
     assert not messages[0].files
 
 
@@ -892,7 +925,7 @@ def test_fallback_thread_history_drops_cross_room_attachments(tmp_path: Path) ->
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
     )
 
-    assert messages[0].content == "@alice:localhost: see file"
+    assert messages[0].content == '<msg event_id="$cross" from="@alice:localhost"><![CDATA[see file]]></msg>'
     assert not messages[0].files
 
 
@@ -937,7 +970,10 @@ def test_fallback_thread_history_drops_cross_thread_attachments(tmp_path: Path) 
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
     )
 
-    assert messages[0].content == ('@alice:localhost: see files\n[attachments: att_in_thread (file, "in-thread.txt")]')
+    assert messages[0].content == (
+        '<msg event_id="$in-thread" from="@alice:localhost">'
+        '<![CDATA[see files\n[attachments: att_in_thread (file, "in-thread.txt")]]]></msg>'
+    )
     assert [file.id for file in (messages[0].files or [])] == ["att_in_thread"]
 
 
@@ -971,7 +1007,10 @@ def test_fallback_thread_history_matches_thread_root_attachments(tmp_path: Path)
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
     )
 
-    assert messages[0].content == '@alice:localhost: root image\n[attachments: att_root (image, "root.png")]'
+    assert messages[0].content == (
+        '<msg event_id="$root" from="@alice:localhost">'
+        '<![CDATA[root image\n[attachments: att_root (image, "root.png")]]]></msg>'
+    )
     assert [image.id for image in (messages[0].images or [])] == ["att_root"]
 
 
@@ -998,7 +1037,10 @@ def test_fallback_thread_history_strips_visible_tool_markers_from_assistant_cont
     )
 
     assert messages[0].role == "assistant"
-    assert messages[0].content == "Checking status.\n\n\nStill checking.\n\n\nDone."
+    assert messages[0].content == (
+        '<msg event_id="$assistant" from="@mindroom_code:localhost">'
+        "<![CDATA[Checking status.\n\n\nStill checking.\n\n\nDone.]]></msg>"
+    )
     assert "🔧" not in str(messages[0].content)
 
 
@@ -1037,7 +1079,10 @@ def test_fallback_thread_history_preserves_user_authored_tool_marker_text() -> N
     )
 
     assert messages[0].role == "user"
-    assert messages[0].content == "@alice:localhost: Please see:\n\n🔧 `run_shell_command` [1]\n\nActual content"
+    assert messages[0].content == (
+        '<msg event_id="$user" from="@alice:localhost">'
+        "<![CDATA[Please see:\n\n🔧 `run_shell_command` [1]\n\nActual content]]></msg>"
+    )
 
 
 def test_fallback_thread_history_strips_structured_tool_markers_from_labeled_context() -> None:
@@ -1060,7 +1105,9 @@ def test_fallback_thread_history_strips_structured_tool_markers_from_labeled_con
     )
 
     assert messages[0].role == "user"
-    assert messages[0].content == "@mindroom_research:localhost: Please see:\n\n\nActual content"
+    assert messages[0].content == (
+        '<msg event_id="$agent" from="@mindroom_research:localhost"><![CDATA[Please see:\n\n\nActual content]]></msg>'
+    )
 
 
 def test_unseen_context_keeps_self_sent_relayed_user_message() -> None:
@@ -1086,7 +1133,7 @@ def test_unseen_context_keeps_self_sent_relayed_user_message() -> None:
         "What happened?",
         thread_history,
         seen_event_ids=set(),
-        current_event_id="$question",
+        reply_to_event_id="$question",
         active_event_ids=(),
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
@@ -1095,7 +1142,10 @@ def test_unseen_context_keeps_self_sent_relayed_user_message() -> None:
 
     assert unseen_event_ids == ["$spawn-root"]
     assert messages[0].role == "user"
-    assert messages[0].content == "@alice:localhost: @mindroom_missing_agent Please investigate this"
+    assert messages[0].content == (
+        '<msg event_id="$spawn-root" from="@alice:localhost">'
+        "<![CDATA[@mindroom_missing_agent Please investigate this]]></msg>"
+    )
 
 
 def test_unseen_context_keeps_unpersisted_self_sent_message() -> None:
@@ -1117,7 +1167,7 @@ def test_unseen_context_keeps_unpersisted_self_sent_message() -> None:
         "What happened?",
         thread_history,
         seen_event_ids=set(),
-        current_event_id="$question",
+        reply_to_event_id="$question",
         active_event_ids=(),
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
@@ -1126,7 +1176,10 @@ def test_unseen_context_keeps_unpersisted_self_sent_message() -> None:
 
     assert unseen_event_ids == ["$spawn-root"]
     assert messages[0].role == "assistant"
-    assert messages[0].content == "@mindroom_missing_agent Please investigate this"
+    assert messages[0].content == (
+        '<msg event_id="$spawn-root" from="@mindroom_code:localhost">'
+        "<![CDATA[@mindroom_missing_agent Please investigate this]]></msg>"
+    )
 
 
 def test_unseen_context_skips_persisted_self_sent_response_event() -> None:
@@ -1148,7 +1201,7 @@ def test_unseen_context_skips_persisted_self_sent_response_event() -> None:
         "What next?",
         thread_history,
         seen_event_ids={"$answer"},
-        current_event_id="$question",
+        reply_to_event_id="$question",
         active_event_ids=(),
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
@@ -1158,3 +1211,345 @@ def test_unseen_context_skips_persisted_self_sent_response_event() -> None:
     assert unseen_event_ids == []
     assert len(messages) == 1
     assert messages[0].content == 'Current message:\n<msg from="@alice:localhost"><![CDATA[What next?]]></msg>'
+
+
+def _location_item_block(fields: dict[str, str]) -> str:
+    """Render one core-shaped enrichment block carrying only the location item."""
+    item_text = "\n".join(f"{key}: {value}" for key, value in fields.items())
+    return render_enrichment_block([EnrichmentItem(key="location", text=item_text)])
+
+
+_HOME_LOCATION_FIELDS = {
+    "status": "fresh",
+    "latitude": "52.3702",
+    "longitude": "4.8952",
+    "nearby_place": "Home",
+    "at_home": "true",
+}
+
+
+def _scope_with_user_contents(contents: list[str]) -> ScopeSessionContext:
+    """Build one open scope whose stored runs carry the given user-message contents."""
+    session = AgentSession(
+        session_id="session-1",
+        agent_id="test_agent",
+        runs=[
+            RunOutput(
+                run_id=f"run-{index}",
+                agent_id="test_agent",
+                status=RunStatus.completed,
+                messages=[Message(role="user", content=content), Message(role="assistant", content="ok")],
+            )
+            for index, content in enumerate(contents)
+        ],
+        created_at=1,
+        updated_at=1,
+    )
+    return ScopeSessionContext(
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        storage=MagicMock(),
+        session=session,
+    )
+
+
+def test_current_matrix_message_includes_event_id_attribute() -> None:
+    """A direct Matrix turn should carry its source event ID on the current msg tag."""
+    messages = _messages_with_current_prompt(
+        "Hello",
+        current_sender_id="@alice:localhost",
+        current_event_id="$evt1",
+        config=_config(),
+    )
+
+    assert messages[0].content == (
+        'Current message:\n<msg event_id="$evt1" from="@alice:localhost"><![CDATA[Hello]]></msg>'
+    )
+
+
+def test_current_matrix_message_omits_event_id_when_unknown() -> None:
+    """Turns without a real Matrix event keep the msg tag free of an event_id attribute."""
+    messages = _messages_with_current_prompt(
+        "Hello",
+        current_sender_id="@alice:localhost",
+        config=_config(),
+    )
+
+    assert messages[0].content == 'Current message:\n<msg from="@alice:localhost"><![CDATA[Hello]]></msg>'
+
+
+def test_structured_current_prompt_keeps_inner_event_ids_without_outer_wrapper() -> None:
+    """Coalesced structured input keeps per-child event IDs and gains no outer duplicate."""
+    structured = (
+        '<messages>\n<msg event_id="$a1:localhost" from="@alice:localhost"><![CDATA[first]]></msg>\n</messages>'
+    )
+
+    messages = _messages_with_current_prompt(
+        structured,
+        current_sender_id="@alice:localhost",
+        current_event_id="$outer",
+        current_prompt_is_structured=True,
+        config=_config(),
+    )
+
+    content = str(messages[0].content)
+    assert content == f"Current message:\n{structured}"
+    assert "$outer" not in content
+
+
+def test_unseen_context_wraps_in_progress_partial_with_response_sender() -> None:
+    """An in-progress partial keeps its guidance label while the real event stays addressable."""
+    partial = make_visible_message(
+        sender="@mindroom_code:localhost",
+        body="Draft so far",
+        event_id="$partial",
+        content={"body": "Draft so far", STREAM_STATUS_KEY: STREAM_STATUS_STREAMING},
+    )
+    thread_history = [
+        partial,
+        make_visible_message(sender="@alice:localhost", body="What next?", event_id="$question"),
+    ]
+
+    messages, unseen_event_ids = _build_unseen_context_messages(
+        "What next?",
+        thread_history,
+        seen_event_ids=set(),
+        reply_to_event_id="$question",
+        active_event_ids={"$partial"},
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        config=_config(),
+    )
+
+    assert unseen_event_ids == []
+    partial_message = messages[1]
+    assert partial_message.role == "user"
+    assert partial_message.content == (
+        '<msg event_id="$partial" from="@mindroom_code:localhost">'
+        "<![CDATA[You (reply still streaming): Draft so far]]></msg>"
+    )
+
+
+def test_location_split_persists_home_marker_as_first_baseline() -> None:
+    """A first valid Home location persists one baseline marker without full detail."""
+    prompt = f"Hi\n\n{_location_item_block(_HOME_LOCATION_FIELDS)}"
+
+    persisted, location_block = _extract_current_location_context(prompt, scope_context=None)
+
+    assert persisted == "Hi\n\n📍 Home"
+    assert '<item key="location"' in location_block
+    assert "latitude: 52.3702" in location_block
+    assert location_block.startswith("<mindroom_message_context>")
+
+
+def test_location_split_uses_named_place_when_not_home() -> None:
+    """A named nearby place derives the place marker."""
+    fields = {**_HOME_LOCATION_FIELDS, "nearby_place": "Coffee Bar", "at_home": "false"}
+
+    persisted, _ = _extract_current_location_context(
+        f"Hi\n\n{_location_item_block(fields)}",
+        scope_context=None,
+    )
+
+    assert persisted == "Hi\n\n📍 Coffee Bar"
+
+
+def test_location_split_falls_back_to_coordinates() -> None:
+    """Unknown places fall back to a coordinate marker."""
+    fields = {**_HOME_LOCATION_FIELDS, "nearby_place": "unknown", "at_home": "false"}
+
+    persisted, _ = _extract_current_location_context(
+        f"Hi\n\n{_location_item_block(fields)}",
+        scope_context=None,
+    )
+
+    assert persisted == "Hi\n\n📍 52.3702, 4.8952"
+
+
+def test_location_split_is_order_independent() -> None:
+    """Reordered location lines derive the same marker."""
+    reordered = {
+        "at_home": "true",
+        "longitude": "4.8952",
+        "status": "fresh",
+        "latitude": "52.3702",
+        "nearby_place": "Home",
+    }
+
+    persisted, _ = _extract_current_location_context(
+        f"Hi\n\n{_location_item_block(reordered)}",
+        scope_context=None,
+    )
+
+    assert persisted == "Hi\n\n📍 Home"
+
+
+def test_location_split_fails_closed_on_renamed_fields() -> None:
+    """Malformed location fields drop the full item from persistence and omit the marker."""
+    fields = {"home": "true", "place": "Home", "lat": "52.3702"}
+
+    persisted, location_block = _extract_current_location_context(
+        f"Hi\n\n{_location_item_block(fields)}",
+        scope_context=None,
+    )
+
+    assert persisted == "Hi"
+    assert "📍" not in persisted
+    assert "home: true" in location_block
+
+
+def test_location_split_leaves_prompts_without_location_untouched() -> None:
+    """Turns without a location item keep the prompt byte-for-byte."""
+    plain_prompt = "Hi there"
+    other_block = render_enrichment_block([EnrichmentItem(key="weather", text="rainy")])
+    enriched_prompt = f"Hi\n\n{other_block}"
+
+    assert _extract_current_location_context(plain_prompt, scope_context=None) == (plain_prompt, "")
+    assert _extract_current_location_context(enriched_prompt, scope_context=None) == (enriched_prompt, "")
+
+
+def test_location_split_keeps_other_enrichment_items_in_place() -> None:
+    """Only the location item leaves the persisted prompt; other items stay byte-for-byte."""
+    location_text = "\n".join(f"{key}: {value}" for key, value in _HOME_LOCATION_FIELDS.items())
+    block = render_enrichment_block(
+        [
+            EnrichmentItem(key="weather", text="rainy & cold"),
+            EnrichmentItem(key="location", text=location_text),
+        ],
+    )
+
+    persisted, location_block = _extract_current_location_context(f"Hi\n\n{block}", scope_context=None)
+
+    expected_weather_block = render_enrichment_block([EnrichmentItem(key="weather", text="rainy & cold")])
+    assert persisted == f"Hi\n\n{expected_weather_block}\n\n📍 Home"
+    assert '<item key="weather"' not in location_block
+
+
+def test_location_marker_dedups_across_no_location_gap() -> None:
+    """A Home, no-location, Home sequence persists exactly one Home marker."""
+    scope_context = _scope_with_user_contents(
+        [
+            "Turn one\n\n📍 Home",
+            "Turn two without location",
+        ],
+    )
+
+    persisted, _ = _extract_current_location_context(
+        f"Turn three\n\n{_location_item_block(_HOME_LOCATION_FIELDS)}",
+        scope_context=scope_context,
+    )
+
+    assert persisted == "Turn three"
+
+
+def test_location_marker_reads_last_marker_from_wrapped_current_message() -> None:
+    """Markers persisted inside msg CDATA bodies still dedup later turns."""
+    scope_context = _scope_with_user_contents(
+        [
+            'Current message:\n<msg event_id="$e1" from="@alice:localhost"><![CDATA[Turn one\n\n📍 Home]]></msg>',
+        ],
+    )
+
+    persisted, _ = _extract_current_location_context(
+        f"Turn two\n\n{_location_item_block(_HOME_LOCATION_FIELDS)}",
+        scope_context=scope_context,
+    )
+
+    assert persisted == "Turn two"
+
+
+def test_location_marker_change_persists_new_marker() -> None:
+    """A place change persists one new marker on the changed turn."""
+    scope_context = _scope_with_user_contents(["Turn one\n\n📍 Home"])
+    office_fields = {**_HOME_LOCATION_FIELDS, "nearby_place": "Office", "at_home": "false"}
+
+    persisted, _ = _extract_current_location_context(
+        f"Turn two\n\n{_location_item_block(office_fields)}",
+        scope_context=scope_context,
+    )
+
+    assert persisted == "Turn two\n\n📍 Office"
+
+
+def test_location_marker_ignores_old_full_location_blocks() -> None:
+    """Pre-upgrade full location blocks never count as a compact marker baseline."""
+    old_block = _location_item_block({**_HOME_LOCATION_FIELDS, "note": "📍 Home legacy line"})
+    scope_context = _scope_with_user_contents([f"Old turn\n\n{old_block}"])
+
+    persisted, _ = _extract_current_location_context(
+        f"Turn two\n\n{_location_item_block(_HOME_LOCATION_FIELDS)}",
+        scope_context=scope_context,
+    )
+
+    assert persisted == "Turn two\n\n📍 Home"
+
+
+@pytest.mark.asyncio
+async def test_agent_location_detail_rides_transient_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agent full location detail becomes a transient message and leaves the persisted prompt."""
+    config, runtime_paths = _bound_agent_config(tmp_path)
+    prepare_common = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr(execution_preparation, "_prepare_execution_context_common", prepare_common)
+    monkeypatch.setattr(execution_preparation, "agent_static_token_estimator", MagicMock())
+
+    await prepare_agent_execution_context(
+        make_turn_context("test_agent"),
+        scope_context=None,
+        agent=MagicMock(),
+        prompt=f"Hi\n\n{_location_item_block(_HOME_LOCATION_FIELDS)}",
+        thread_history=None,
+        runtime_paths=runtime_paths,
+        config=config,
+        resolved_runtime_model=ResolvedRuntimeModel(model_name="default", context_window=6_000),
+        include_openai_compat_guidance=True,
+    )
+
+    kwargs = prepare_common.await_args.kwargs
+    assert kwargs["prompt"] == "Hi\n\n📍 Home"
+    transient_messages = kwargs["transient_context_messages"]
+    assert len(transient_messages) == 1
+    assert transient_messages[-1].role == "user"
+    assert transient_messages[-1].add_to_agent_memory is False
+    assert '<item key="location"' in str(transient_messages[-1].content)
+
+
+@pytest.mark.asyncio
+async def test_team_location_detail_appends_volatile_additional_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Team full location detail rides additional_context and stays out of flattened input."""
+    config, runtime_paths = _bound_agent_config(tmp_path)
+    prepare_common = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr(execution_preparation, "_prepare_execution_context_common", prepare_common)
+    monkeypatch.setattr(execution_preparation, "team_static_token_estimator", MagicMock())
+    team = SimpleNamespace(additional_context="stable system context")
+    member = SimpleNamespace(additional_context=None)
+
+    await execution_preparation._prepare_bound_team_execution_context(
+        make_turn_context("test_agent"),
+        scope_context=None,
+        agents=[cast("Agent", member)],
+        team=cast("Team", team),
+        prompt=f"Hi\n\n{_location_item_block(_HOME_LOCATION_FIELDS)}",
+        thread_history=None,
+        runtime_paths=runtime_paths,
+        config=config,
+        team_name=None,
+        active_model_name=None,
+        active_context_window=None,
+    )
+
+    kwargs = prepare_common.await_args.kwargs
+    assert kwargs["prompt"] == "Hi\n\n📍 Home"
+    assert kwargs["transient_context_messages"] == ()
+    assert team.additional_context.startswith("stable system context")
+    assert '<item key="location"' in team.additional_context
+    assert '<item key="location"' in cast("str", member.additional_context)
+    flattened = render_prepared_team_messages_text(
+        _messages_with_current_prompt(kwargs["prompt"], config=config),
+    )
+    assert '<item key="location"' not in flattened
+    assert "📍 Home" in flattened

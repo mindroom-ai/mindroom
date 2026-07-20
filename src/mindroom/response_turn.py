@@ -148,6 +148,7 @@ class DynamicContinuationRunState:
     active_model_prompt: str | None
     active_current_timestamp_ms: float | None
     active_current_prompt_is_structured: bool
+    active_current_event_id: str | None
     active_run_id: str | None
     continuation_model_prompt_tail: str
 
@@ -159,6 +160,7 @@ class DynamicContinuationRunState:
         model_prompt: str | None,
         current_timestamp_ms: float | None,
         current_prompt_is_structured: bool,
+        current_event_id: str | None,
         run_id: str | None,
         continuation_model_prompt_tail: str,
     ) -> DynamicContinuationRunState:
@@ -169,6 +171,7 @@ class DynamicContinuationRunState:
             active_model_prompt=model_prompt,
             active_current_timestamp_ms=current_timestamp_ms,
             active_current_prompt_is_structured=current_prompt_is_structured,
+            active_current_event_id=current_event_id,
             active_run_id=run_id,
             continuation_model_prompt_tail=continuation_model_prompt_tail,
         )
@@ -180,12 +183,14 @@ class DynamicContinuationRunState:
         previous_run_id: str | None,
     ) -> DynamicContinuationRunState:
         """Return the continuation state for one more same-turn attempt."""
+        # A synthetic continuation prompt must not claim the source Matrix event.
         return replace(
             self,
             active_prompt=continuation_prompt,
             active_model_prompt=self.continuation_model_prompt_tail or None,
             active_current_timestamp_ms=None,
             active_current_prompt_is_structured=False,
+            active_current_event_id=None,
             active_run_id=ai_runtime.next_retry_run_id(previous_run_id),
         )
 
