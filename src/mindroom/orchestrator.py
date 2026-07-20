@@ -113,6 +113,7 @@ from .orchestration.runtime import (
     sync_forever_with_restart,
     wait_for_matrix_homeserver,
 )
+from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 from .runtime_support import (
     OwnedRuntimeSupport,
     build_owned_runtime_support,
@@ -239,6 +240,7 @@ class _MultiAgentOrchestrator:
     _bot_start_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     _memory_auto_flush_worker: MemoryAutoFlushWorker | None = field(default=None, init=False)
     _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
+    _todo_poke_runtime: TodoPokeRuntimeCoordinator = field(init=False, repr=False)
     config_reload: ConfigReloadLifecycle = field(init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
     _config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
@@ -270,6 +272,11 @@ class _MultiAgentOrchestrator:
         self._external_trigger_runtime = ExternalTriggerRuntimeCoordinator(
             runtime_paths=self.runtime_paths,
             api_enabled=self.api_enabled,
+        )
+        self._todo_poke_runtime = TodoPokeRuntimeCoordinator(
+            runtime_paths=self.runtime_paths,
+            config_provider=lambda: self.config,
+            bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
         )
         self.config_reload = ConfigReloadLifecycle(
             runtime_paths=self.runtime_paths,
@@ -619,6 +626,7 @@ class _MultiAgentOrchestrator:
         await self._sync_event_cache_service(config)
         self._configure_approval_store_transport()
         await self._sync_memory_auto_flush_worker()
+        await self._todo_poke_runtime.sync()
 
     async def _stop_mcp_manager(self) -> None:
         """Stop the MCP manager and clear the active runtime binding."""
@@ -1821,6 +1829,7 @@ class _MultiAgentOrchestrator:
         await shutdown_approval_runtime()
         await self.config_reload.cancel()
         await self._startup_maintenance.cancel()
+        await self._todo_poke_runtime.stop()
         await self._stop_memory_auto_flush_worker()
         await self._knowledge_source_watcher.shutdown()
         await self._knowledge_refresh_scheduler.shutdown()

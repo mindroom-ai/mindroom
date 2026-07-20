@@ -89,7 +89,7 @@ class _PreparedExecutionContext:
     @property
     def context_messages(self) -> tuple[Message, ...]:
         """Return replayed context messages without the current user turn."""
-        return self.messages[:-1]
+        return tuple(message for message in self.messages[:-1] if message.add_to_agent_memory)
 
     @property
     def replay_plan(self) -> ResolvedReplayPlan | None:
@@ -316,6 +316,7 @@ def _messages_with_capped_context(
     prompt: str,
     *,
     context_messages: Sequence[Message],
+    transient_context_messages: Sequence[Message] = (),
     current_sender_id: str | None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
@@ -328,6 +329,7 @@ def _messages_with_capped_context(
     selected_context: list[Message] = []
     current_only_messages = _messages_with_current_prompt(
         prompt,
+        transient_context_messages=transient_context_messages,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
         current_prompt_is_structured=current_prompt_is_structured,
@@ -342,6 +344,7 @@ def _messages_with_capped_context(
         candidate_messages = _messages_with_current_prompt(
             prompt,
             context_messages=candidate_context,
+            transient_context_messages=transient_context_messages,
             current_sender_id=current_sender_id,
             current_timestamp_ms=current_timestamp_ms,
             current_prompt_is_structured=current_prompt_is_structured,
@@ -353,6 +356,7 @@ def _messages_with_capped_context(
     return _messages_with_current_prompt(
         prompt,
         context_messages=selected_context,
+        transient_context_messages=transient_context_messages,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
         current_prompt_is_structured=current_prompt_is_structured,
@@ -364,6 +368,7 @@ def _messages_with_current_prompt(
     prompt: str,
     *,
     context_messages: Sequence[Message] = (),
+    transient_context_messages: Sequence[Message] = (),
     current_sender_id: str | None = None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
@@ -385,6 +390,7 @@ def _messages_with_current_prompt(
         if current_sender_id is not None
         else prompt
     )
+    messages.extend(message.model_copy(deep=True) for message in transient_context_messages)
     messages.append(Message(role="user", content=current_prompt))
     return tuple(messages)
 
@@ -409,6 +415,7 @@ def _build_unseen_context_messages(
     prompt: str,
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
+    transient_context_messages: Sequence[Message] = (),
     seen_event_ids: set[str],
     current_event_id: str,
     active_event_ids: Collection[str],
@@ -441,6 +448,7 @@ def _build_unseen_context_messages(
         _messages_with_current_prompt(
             prompt,
             context_messages=context_messages,
+            transient_context_messages=transient_context_messages,
             current_sender_id=current_sender_id,
             current_timestamp_ms=current_timestamp_ms,
             current_prompt_is_structured=current_prompt_is_structured,
@@ -457,6 +465,7 @@ def _build_thread_history_messages(
     prompt: str,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     *,
+    transient_context_messages: Sequence[Message] = (),
     response_sender_id: str | None,
     current_sender_id: str | None = None,
     current_timestamp_ms: float | None = None,
@@ -474,6 +483,7 @@ def _build_thread_history_messages(
     if not thread_history:
         return _messages_with_current_prompt(
             prompt,
+            transient_context_messages=transient_context_messages,
             current_sender_id=current_sender_id,
             current_timestamp_ms=current_timestamp_ms,
             current_prompt_is_structured=current_prompt_is_structured,
@@ -495,6 +505,7 @@ def _build_thread_history_messages(
         return _messages_with_capped_context(
             prompt,
             context_messages=context_messages,
+            transient_context_messages=transient_context_messages,
             current_sender_id=current_sender_id,
             current_timestamp_ms=current_timestamp_ms,
             current_prompt_is_structured=current_prompt_is_structured,
@@ -506,6 +517,7 @@ def _build_thread_history_messages(
     return _messages_with_current_prompt(
         prompt,
         context_messages=context_messages,
+        transient_context_messages=transient_context_messages,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
         current_prompt_is_structured=current_prompt_is_structured,
@@ -694,6 +706,7 @@ async def _prepare_execution_context_common(
     *,
     scope_context: ScopeSessionContext | None,
     prompt: str,
+    transient_context_messages: Sequence[Message] = (),
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     response_sender_id: str | None,
     current_sender_id: str | None,
@@ -723,6 +736,7 @@ async def _prepare_execution_context_common(
 
     provisional_messages = _messages_with_current_prompt(
         prompt,
+        transient_context_messages=transient_context_messages,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
         current_prompt_is_structured=current_prompt_is_structured,
@@ -732,6 +746,7 @@ async def _prepare_execution_context_common(
         provisional_messages, _ = _build_unseen_context_messages(
             prompt,
             thread_history,
+            transient_context_messages=transient_context_messages,
             seen_event_ids=seen_event_ids,
             current_event_id=reply_to_event_id,
             active_event_ids=active_event_ids,
@@ -747,6 +762,7 @@ async def _prepare_execution_context_common(
 
     final_messages = _messages_with_current_prompt(
         prompt,
+        transient_context_messages=transient_context_messages,
         current_sender_id=current_sender_id,
         current_timestamp_ms=current_timestamp_ms,
         current_prompt_is_structured=current_prompt_is_structured,
@@ -756,6 +772,7 @@ async def _prepare_execution_context_common(
         final_messages, unseen_event_ids = _build_unseen_context_messages(
             prompt,
             thread_history,
+            transient_context_messages=transient_context_messages,
             seen_event_ids=_scope_seen_event_ids(scope_context),
             current_event_id=reply_to_event_id,
             active_event_ids=active_event_ids,
@@ -777,7 +794,7 @@ async def _prepare_execution_context_common(
         pipeline_timing=pipeline_timing,
     )
     if scheduled_history_budget is not None:
-        inline_history_messages = max(0, len(final_messages) - 1)
+        inline_history_messages = sum(message.add_to_agent_memory for message in final_messages[:-1])
         prepared_history = _prepared_history_with_scheduled_limit(
             prepared_history,
             max(0, scheduled_history_budget.limit - inline_history_messages),
@@ -795,6 +812,7 @@ async def _prepare_execution_context_common(
         replay_fallback_messages = _build_thread_history_messages(
             prompt,
             fallback_thread_history,
+            transient_context_messages=transient_context_messages,
             response_sender_id=response_sender_id,
             current_sender_id=current_sender_id,
             current_timestamp_ms=current_timestamp_ms,
@@ -834,6 +852,7 @@ async def prepare_agent_execution_context(
     scope_context: ScopeSessionContext | None,
     agent: Agent,
     prompt: str,
+    transient_context_messages: Sequence[Message] = (),
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     runtime_paths: RuntimePaths,
     config: Config,
@@ -891,6 +910,7 @@ async def prepare_agent_execution_context(
         ctx,
         scope_context=scope_context,
         prompt=prompt,
+        transient_context_messages=transient_context_messages,
         thread_history=thread_history,
         response_sender_id=response_sender,
         current_sender_id=current_sender_id,
@@ -964,6 +984,7 @@ async def _prepare_bound_team_execution_context(
         ctx,
         scope_context=scope_context,
         prompt=prompt,
+        transient_context_messages=(),
         thread_history=thread_history,
         response_sender_id=response_sender_id,
         current_sender_id=current_sender_id,

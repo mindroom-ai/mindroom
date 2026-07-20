@@ -320,6 +320,11 @@ async def test_matrix_api_send_event_room_message_preserves_raw_payload() -> Non
         content=content,
         ignore_unverified_devices=True,
     )
+    ctx.conversation_cache.notify_outbound_message.assert_called_once_with(
+        ctx.room_id,
+        "$send:localhost",
+        content,
+    )
 
 
 @pytest.mark.asyncio
@@ -450,8 +455,8 @@ async def test_matrix_api_send_event_room_message_preserves_matrix_error_details
 
 
 @pytest.mark.asyncio
-async def test_matrix_api_send_event_room_mode_edit_with_cache_does_not_notify_thread_bookkeeping() -> None:
-    """Room-mode edits should not call threaded cache bookkeeping when the target is not in a thread."""
+async def test_matrix_api_send_event_room_mode_edit_records_point_cache_bookkeeping() -> None:
+    """Room-mode edits should be visible locally before the Matrix sync echo arrives."""
     tool = MatrixApiTools()
     ctx = _make_context()
     ctx.conversation_cache.get_thread_id_for_event.return_value = None
@@ -498,7 +503,11 @@ async def test_matrix_api_send_event_room_mode_edit_with_cache_does_not_notify_t
         )
 
     assert payload["status"] == "ok"
-    ctx.conversation_cache.notify_outbound_message.assert_not_called()
+    ctx.conversation_cache.notify_outbound_message.assert_called_once_with(
+        ctx.room_id,
+        "$send:localhost",
+        content,
+    )
 
 
 @pytest.mark.asyncio
@@ -717,8 +726,8 @@ async def test_matrix_api_redact_delegates_thread_classification_to_shared_helpe
 
 
 @pytest.mark.asyncio
-async def test_matrix_api_redact_room_level_target_does_not_notify_thread_bookkeeping() -> None:
-    """Room-level redactions should not call threaded cache bookkeeping when the target is not in a thread."""
+async def test_matrix_api_redact_room_level_target_records_point_cache_bookkeeping() -> None:
+    """Room-level redactions should delete local point-cache rows before the sync echo."""
     tool = MatrixApiTools()
     ctx = _make_context()
     ctx.conversation_cache.get_thread_id_for_event.return_value = None
@@ -762,7 +771,10 @@ async def test_matrix_api_redact_room_level_target_does_not_notify_thread_bookke
         )
 
     assert payload["status"] == "ok"
-    ctx.conversation_cache.notify_outbound_redaction.assert_not_called()
+    ctx.conversation_cache.notify_outbound_redaction.assert_called_once_with(
+        ctx.room_id,
+        "$target:localhost",
+    )
 
 
 @pytest.mark.asyncio

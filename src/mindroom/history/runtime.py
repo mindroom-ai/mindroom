@@ -34,12 +34,12 @@ from mindroom.history.policy import (
 from mindroom.history.prompt_tokens import estimate_agent_static_tokens, estimate_team_static_tokens
 from mindroom.history.storage import (
     clear_force_compaction_state,
-    consume_force_compaction_request,
     consume_pending_force_compaction_scope,
     new_scope_session,
     prune_reintroduced_runs,
     read_scope_state,
     set_force_compaction_state,
+    update_scope_state_on_latest,
 )
 from mindroom.history.types import (
     CompactionDecision,
@@ -195,16 +195,22 @@ def _clear_forced_compaction_after_failure(
     scope: HistoryScope,
     state: HistoryScopeState,
 ) -> None:
-    """Consume the force request that started a failed compaction attempt.
+    """Clear a consumed manual force marker after a compaction failure.
 
-    Uses the shared compare-by-generation transition every attempt exit uses:
-    the consumed request is cleared so a failing manual compaction cannot
-    retry-loop on every reply, while a fresh request written mid-attempt
-    carries a newer generation and survives the clear.
+    Clears against the freshest row unconditionally so a failing manual
+    compaction cannot retry-loop on every reply. This deliberately differs
+    from the no-candidates path (_persist_cleared_force_state_if_needed in
+    compaction.py), which refuses to clear when a concurrent write moved the
+    durable row, so a fresh manual request placed mid-run survives.
     """
-    if session is None:
+    if session is None or not state.force_compact_before_next_run:
         return
-    consume_force_compaction_request(storage, session, scope, state)
+    update_scope_state_on_latest(
+        storage,
+        session,
+        scope,
+        lambda latest: replace(latest, force_compact_before_next_run=False),
+    )
 
 
 @dataclass(frozen=True)
@@ -561,20 +567,8 @@ async def _run_scope_compaction(
         execution_plan.compaction_model_name,
     )
     fallback_model_name = execution_plan.compaction_fallback_model_name
-    fallback_summary_input_budget = execution_plan.compaction_fallback_summary_input_budget_tokens
     fallback_model: Model | None = None
-    if fallback_model_name is not None and fallback_summary_input_budget is None:
-        # A fallback whose own summary plan is unavailable (unknown context
-        # window or a budget below the availability floor) is never admitted:
-        # it could not size the requests it would have to serve.
-        logger.warning(
-            "Compaction fallback has no available summary budget; continuing without a fallback",
-            session_id=session.session_id,
-            scope=scope.key,
-            compaction_model=execution_plan.compaction_model_name,
-            fallback_model=fallback_model_name,
-        )
-    elif fallback_model_name is not None and _compaction_fallback_is_distinct(
+    if fallback_model_name is not None and _compaction_fallback_is_distinct(
         config,
         primary_model_name=execution_plan.compaction_model_name,
         fallback_model_name=fallback_model_name,
@@ -608,7 +602,6 @@ async def _run_scope_compaction(
         summary_prompt=config.get_prompt("COMPACTION_SUMMARY_PROMPT"),
         fallback_summary_model=fallback_model,
         fallback_summary_model_name=fallback_model_name if fallback_model is not None else None,
-        fallback_summary_input_budget=fallback_summary_input_budget if fallback_model is not None else None,
         lifecycle_notice_event_id=lifecycle_notice_event_id,
         progress_callback=progress_callback,
     )

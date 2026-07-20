@@ -672,9 +672,9 @@ class TestMemoryFacade:
 
         assert prompt_parts.session_preamble == ""
         assert "[Automatically extracted agent memories - may not be relevant to current context]" in (
-            prompt_parts.turn_context
+            prompt_parts.transient_turn_context
         )
-        assert "I previously calculated 2+2=4" in prompt_parts.turn_context
+        assert "I previously calculated 2+2=4" in prompt_parts.transient_turn_context
 
     @pytest.mark.asyncio
     async def test_build_memory_prompt_parts_no_memories(
@@ -708,9 +708,9 @@ class TestMemoryFacade:
         finally:
             capture_embedder_health_recorder().record(None)
 
-        assert "Semantic memory search is unavailable this turn" in prompt_parts.turn_context
-        assert "embedder authentication failed (HTTP 401)" in prompt_parts.turn_context
-        assert "Do not claim to have checked stored memories." in prompt_parts.turn_context
+        assert "Semantic memory search is unavailable this turn" in prompt_parts.transient_turn_context
+        assert "embedder authentication failed (HTTP 401)" in prompt_parts.transient_turn_context
+        assert "Do not claim to have checked stored memories." in prompt_parts.transient_turn_context
 
     @pytest.mark.asyncio
     async def test_disabled_backend_build_memory_prompt_parts_skips_mem0(

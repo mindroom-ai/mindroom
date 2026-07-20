@@ -29,7 +29,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, TypeGuard, cast
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 from agno.db.base import SessionType
 from agno.run.agent import RunOutput
@@ -44,7 +44,7 @@ from mindroom.constants import (
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
 )
-from mindroom.history.types import CarriedSummaryUnfitMarker, HistoryScope, HistoryScopeState
+from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.metadata_merge import deep_merge_metadata
 
 if TYPE_CHECKING:
@@ -156,61 +156,10 @@ def set_force_compaction_state(
     *,
     force: bool,
 ) -> HistoryScopeState:
-    """Set the next-run force flag in one session scope.
-
-    Every force request bumps ``force_compact_generation``, so a consumer that
-    clears the flag can distinguish the request it consumed from a fresh one
-    written while its attempt was in flight.
-    """
-    next_state = replace(
-        state,
-        force_compact_before_next_run=force,
-        force_compact_generation=state.force_compact_generation + 1 if force else state.force_compact_generation,
-    )
+    """Set the next-run force flag in one session scope."""
+    next_state = replace(state, force_compact_before_next_run=force)
     write_scope_state(session, scope, next_state)
     return next_state
-
-
-def consumed_force_cleared(
-    latest: HistoryScopeState,
-    consumed: HistoryScopeState,
-) -> HistoryScopeState:
-    """Return ``latest`` with exactly one consumed force request cleared.
-
-    The comparison is by generation: the flag clears only while the durable
-    generation still equals the one the finished attempt read, so a fresh
-    request written mid-attempt (which bumped the generation) survives every
-    attempt exit — success, failure, no-op, and marker write alike.
-    """
-    if not consumed.force_compact_before_next_run:
-        return latest
-    if not latest.force_compact_before_next_run:
-        return latest
-    if latest.force_compact_generation != consumed.force_compact_generation:
-        return latest
-    return replace(latest, force_compact_before_next_run=False)
-
-
-def consume_force_compaction_request(
-    storage: BaseDb,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    consumed_state: HistoryScopeState,
-) -> HistoryScopeState:
-    """Durably clear the force request one compaction attempt consumed.
-
-    This is the single force-consumption transition shared by every attempt
-    exit; it applies ``consumed_force_cleared`` against the freshest stored
-    row and never touches any other control or audit field.
-    """
-    if not consumed_state.force_compact_before_next_run:
-        return consumed_state
-    return update_scope_state_on_latest(
-        storage,
-        session,
-        scope,
-        lambda latest: consumed_force_cleared(latest, consumed_state),
-    )
 
 
 def add_pending_force_compaction_scope(
@@ -353,14 +302,9 @@ def invalidate_compacted_replay(
         changed = True
 
     state = read_scope_state(session, scope)
-    # The force generation must survive the reset: rewinding it to zero would
-    # let a later request re-mint a generation an in-flight attempt already
-    # read, and that attempt's compare-by-generation clear would then consume
-    # the wrong (fresh) request.
     reset_state = HistoryScopeState(
         compacted_run_ids=state.compacted_run_ids,
         force_compact_before_next_run=state.force_compact_before_next_run,
-        force_compact_generation=state.force_compact_generation,
     )
     if state != reset_state:
         write_scope_state(session, scope, reset_state)
@@ -393,7 +337,6 @@ def _parse_state(raw_state: dict[str, Any]) -> HistoryScopeState:
     compacted_run_count = raw_state.get("last_compacted_run_count")
     compacted_run_ids = raw_state.get("compacted_run_ids")
     force_flag = raw_state.get("force_compact_before_next_run")
-    force_generation = raw_state.get("force_compact_generation")
     return HistoryScopeState(
         last_compacted_at=compacted_at if isinstance(compacted_at, str) else None,
         last_summary_model=summary_model if isinstance(summary_model, str) else None,
@@ -402,48 +345,6 @@ def _parse_state(raw_state: dict[str, Any]) -> HistoryScopeState:
             _normalize_compacted_run_ids(compacted_run_ids) if isinstance(compacted_run_ids, list) else ()
         ),
         force_compact_before_next_run=bool(force_flag),
-        force_compact_generation=force_generation if isinstance(force_generation, int) else 0,
-        carried_summary_unfit=_parse_carried_summary_unfit(raw_state.get("carried_summary_unfit")),
-    )
-
-
-def _parse_carried_summary_unfit(raw_marker: object) -> CarriedSummaryUnfitMarker | None:
-    """Parse one persisted unfit marker.
-
-    Markers written under an older key shape (the pre-fingerprint
-    ``model_identifier`` field, or the round-6 shape without
-    ``attempt_profiles``) parse as absent, which deliberately grants one
-    fresh condensation attempt instead of migrating the record.
-    """
-    if not isinstance(raw_marker, dict):
-        return None
-    marker_data = cast("dict[str, Any]", raw_marker)
-    summary_digest = marker_data.get("summary_digest")
-    serving_profile = marker_data.get("serving_profile")
-    summary_input_budget = marker_data.get("summary_input_budget")
-    raw_attempt_profiles = marker_data.get("attempt_profiles")
-    failed_at = marker_data.get("failed_at")
-    reason = marker_data.get("reason")
-    if (
-        not isinstance(summary_digest, str)
-        or not summary_digest
-        or not isinstance(serving_profile, str)
-        or not serving_profile
-        or not isinstance(summary_input_budget, int)
-        or not isinstance(raw_attempt_profiles, list)
-        or not raw_attempt_profiles
-        or not all(isinstance(profile, str) and profile for profile in raw_attempt_profiles)
-        or not isinstance(failed_at, str)
-        or not isinstance(reason, str)
-    ):
-        return None
-    return CarriedSummaryUnfitMarker(
-        summary_digest=summary_digest,
-        serving_profile=serving_profile,
-        summary_input_budget=summary_input_budget,
-        attempt_profiles=tuple(raw_attempt_profiles),
-        failed_at=failed_at,
-        reason=reason,
     )
 
 
@@ -459,17 +360,6 @@ def _state_to_metadata(state: HistoryScopeState) -> dict[str, object]:
         payload["last_compacted_run_count"] = state.last_compacted_run_count
     if state.compacted_run_ids:
         payload["compacted_run_ids"] = list(_normalize_compacted_run_ids(state.compacted_run_ids))
-    if state.force_compact_generation:
-        payload["force_compact_generation"] = state.force_compact_generation
-    if state.carried_summary_unfit is not None:
-        payload["carried_summary_unfit"] = {
-            "summary_digest": state.carried_summary_unfit.summary_digest,
-            "serving_profile": state.carried_summary_unfit.serving_profile,
-            "summary_input_budget": state.carried_summary_unfit.summary_input_budget,
-            "attempt_profiles": list(state.carried_summary_unfit.attempt_profiles),
-            "failed_at": state.carried_summary_unfit.failed_at,
-            "reason": state.carried_summary_unfit.reason,
-        }
     return payload
 
 
@@ -480,8 +370,6 @@ def _state_is_empty(state: HistoryScopeState) -> bool:
         and state.last_compacted_run_count is None
         and not state.compacted_run_ids
         and not state.force_compact_before_next_run
-        and state.force_compact_generation == 0
-        and state.carried_summary_unfit is None
     )
 
 
@@ -618,8 +506,7 @@ def record_compaction_chunk(
     )
 
     target_session = _latest_persisted_session(storage, persisted_session)
-    latest_control_state = read_scope_state(target_session, scope)
-    preexisting_tombstones = latest_control_state.compacted_run_ids
+    preexisting_tombstones = read_scope_state(target_session, scope).compacted_run_ids
     target_session.summary = working_session.summary
     target_session.metadata = _metadata_with_merged_seen_event_ids(
         deep_merge_metadata(target_session.metadata, working_session.metadata),
@@ -632,11 +519,6 @@ def record_compaction_chunk(
     # survive, target_state carries the post-merge ids, and the explicit chunk_run_ids
     # guard against the generic metadata merge dropping the compaction key entirely.
     # _normalize_compacted_run_ids dedupes.
-    # The compaction-control fields are pinned from the pre-merge stored row:
-    # the working session's copies are as stale as its read, so letting the
-    # metadata merge carry them would revert a force request or unfit verdict
-    # recorded while this rewrite ran. Force consumption happens only through
-    # consume_force_compaction_request's compare-by-generation transition.
     write_scope_state(
         target_session,
         scope,
@@ -645,9 +527,6 @@ def record_compaction_chunk(
             compacted_run_ids=_normalize_compacted_run_ids(
                 [*preexisting_tombstones, *target_state.compacted_run_ids, *chunk_run_ids],
             ),
-            force_compact_before_next_run=latest_control_state.force_compact_before_next_run,
-            force_compact_generation=latest_control_state.force_compact_generation,
-            carried_summary_unfit=latest_control_state.carried_summary_unfit,
         ),
     )
     target_session.runs = remove_runs_by_id(target_session.runs or [], chunk_run_ids)

@@ -46,7 +46,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Literal
 
 import httpx
-from agno.exceptions import ContextWindowExceededError, ModelProviderError, ModelRateLimitError
+from agno.exceptions import ContextWindowExceededError, ModelProviderError
 from agno.models.message import Message
 from agno.session.summary import SessionSummary
 
@@ -119,77 +119,8 @@ def _is_same_budget_transient(error: Exception) -> bool:
     return error.status_code == 502 and _has_typed_network_cause(error)
 
 
-def _is_timeout_failure(error: Exception) -> bool:
-    """Return whether a failure is a timeout, typed or via the named fragment.
-
-    Covers provider ``TimeoutError`` and MindRoom's own chunk-timeout
-    ``RuntimeError("compaction summary timed out ...")``.
-    """
-    if isinstance(error, TimeoutError):
-        return True
-    return _TIMEOUT_PROVIDER_ERROR_FRAGMENT in str(error).lower()
-
-
-# Explicit INPUT-context rejection phrases and provider error codes. This set
-# feeds DURABLE terminal verdicts, so it is deliberately narrower than
-# _SHRINKABLE_PROVIDER_ERROR_FRAGMENTS: wording that TPM rate limits, output
-# max_tokens validation, or gateway body-size limits also use ("too large",
-# "max tokens", "request too large", ...) must never mint a terminal verdict.
-_TERMINAL_INPUT_CONTEXT_FRAGMENTS = (
-    "context_length_exceeded",
-    "maximum context length",
-    "context window",
-    "prompt is too long",
-    "input is too long",
-    "input token count exceeds",
-    "exceeds the maximum number of tokens allowed",
-    "exceeds the available context size",
-)
-
-
-def is_context_window_rejection(error: Exception) -> bool:
-    """Return whether a provider failure is a DURABLE input-context rejection.
-
-    This classifier mints terminal verdicts (the condensation backstop's
-    one-shot unfit marker), so it accepts only the typed
-    ``ContextWindowExceededError`` and explicit input-context phrases or
-    provider error codes, and it classifies transient shapes — rate-limit
-    types and retryable status codes — BEFORE any message matching: a TPM 429
-    that happens to say "request too large" retries on a later turn instead
-    of writing a durable wrong diagnosis. The broad shrink fragments keep
-    their existing meaning for non-durable shrink-retry decisions only.
-    """
-    if isinstance(error, ContextWindowExceededError):
-        return True
-    if not isinstance(error, ModelProviderError):
-        return False
-    if isinstance(error, ModelRateLimitError):
-        return False
-    status_code = error.status_code
-    if status_code == 502:
-        # agno's default for unclassified errors: only a proven network cause
-        # makes it transient; otherwise the message may still carry a genuine
-        # input-context rejection.
-        if _has_typed_network_cause(error):
-            return False
-    elif status_code in TRANSIENT_PROVIDER_STATUS_CODES or (isinstance(status_code, int) and status_code >= 500):
-        return False
-    message = str(error).lower()
-    return any(fragment in message for fragment in _TERMINAL_INPUT_CONTEXT_FRAGMENTS)
-
-
 class CompactionSummaryOutputLimitError(RuntimeError):
     """Raised when the summary response reaches the configured output-token cap."""
-
-
-class CompactionSummaryOversizedOutputError(RuntimeError):
-    """Raised when a generated summary fails the persisted-summary fit check.
-
-    The candidate's escaped ``<previous_summary>`` block exceeds the acceptance
-    limit of a model profile that can serve the next compaction attempt, so
-    persisting it would recreate the zero-run corner. Shrinking the input and
-    retrying usually yields a shorter merge, so the error is typed shrinkable.
-    """
 
 
 class _CompactionSummaryEmptyResultError(RuntimeError):
@@ -201,7 +132,6 @@ _TYPED_SHRINKABLE_ERRORS = (
     TimeoutError,
     ContextWindowExceededError,
     CompactionSummaryOutputLimitError,
-    CompactionSummaryOversizedOutputError,
 )
 
 
@@ -222,19 +152,12 @@ class SummaryRetryPolicy:
     and to the caller's smallest progress-preserving rebuild, while selected typed
     transient failures wait ``same_input_retry_delay_seconds`` and retry the
     same configured budget.
-    ``shrink_allowed=False`` disables the shrink branch entirely for callers
-    whose input is indivisible under the complete-input invariant (the
-    carried-summary condensation backstop); transient same-budget retries
-    stay, and timeouts (typed ``TimeoutError`` or the named fragment,
-    including MindRoom's own chunk timeout) count as same-budget transient
-    there because an indivisible input cannot shrink its way past them.
     Once ``max_attempts`` is reached or no retry applies, the error propagates.
     """
 
     max_attempts: int = 2
     shrink_divisor: int = 2
     same_input_retry_delay_seconds: float = 1.0
-    shrink_allowed: bool = True
 
     def should_shrink(self, error: Exception) -> bool:
         """Return whether rebuilding a smaller summary input may resolve the failure."""
@@ -265,7 +188,7 @@ class SummaryRetryPolicy:
         """
         if attempt >= self.max_attempts:
             return None
-        if self.shrink_allowed and self.should_shrink(error):
+        if self.should_shrink(error):
             smaller_budget = min(
                 budget,
                 max(
@@ -277,13 +200,6 @@ class SummaryRetryPolicy:
             if smaller_budget < input_tokens:
                 return SummaryRetryDecision(budget=smaller_budget, kind="shrink")
         if _is_same_budget_transient(error):
-            return SummaryRetryDecision(budget=budget, kind="same-budget-transient")
-        if not self.shrink_allowed and _is_timeout_failure(error):
-            # An indivisible input cannot shrink its way past a timeout, but
-            # the documented delayed byte-identical retry still applies: a
-            # typed provider TimeoutError or MindRoom's own chunk timeout is
-            # as transient as a 503 for an unchanged request. The shrinkable
-            # path keeps its existing timeout classification.
             return SummaryRetryDecision(budget=budget, kind="same-budget-transient")
         return None
 

@@ -378,16 +378,13 @@ def _validate_region(region: DesktopRect, *, screen_width: int, screen_height: i
 
 def _capture_macos_primary_screen() -> PillowImage:
     """Capture the primary macOS display without spawning an unbounded child process."""
-    import Quartz  # noqa: PLC0415  # ty: ignore[unresolved-import]
+    import Quartz  # noqa: PLC0415
 
-    # pyobjc generates the framework attributes dynamically, so the module is
-    # used through an Any alias instead of per-line attribute ignores.
-    quartz: Any = Quartz
-    if not quartz.CGPreflightScreenCaptureAccess():
+    if not Quartz.CGPreflightScreenCaptureAccess():  # ty: ignore[unresolved-attribute]
         msg = "macOS Screen Recording permission is required for desktop screenshots."
         raise DesktopProviderError(msg)
-    display_id = quartz.CGMainDisplayID()
-    cg_image = quartz.CGDisplayCreateImage(display_id)
+    display_id = Quartz.CGMainDisplayID()  # ty: ignore[unresolved-attribute]
+    cg_image = Quartz.CGDisplayCreateImage(display_id)  # ty: ignore[unresolved-attribute]
     if cg_image is None:
         msg = "macOS did not return a primary-display screenshot; check Screen Recording permission."
         raise DesktopProviderError(msg)
@@ -396,26 +393,25 @@ def _capture_macos_primary_screen() -> PillowImage:
 
 def _capture_macos_window(process_id: int, region: DesktopRect) -> PillowImage:
     """Capture the one on-screen Core Graphics window matching the revalidated AX target."""
-    import Quartz  # noqa: PLC0415  # ty: ignore[unresolved-import]
+    import Quartz  # noqa: PLC0415
 
-    quartz: Any = Quartz
-    if not quartz.CGPreflightScreenCaptureAccess():
+    if not Quartz.CGPreflightScreenCaptureAccess():  # ty: ignore[unresolved-attribute]
         msg = "macOS Screen Recording permission is required for desktop screenshots."
         raise DesktopProviderError(msg)
-    on_screen_only = quartz.kCGWindowListOptionOnScreenOnly
-    exclude_desktop = quartz.kCGWindowListExcludeDesktopElements
+    on_screen_only = Quartz.kCGWindowListOptionOnScreenOnly  # ty: ignore[unresolved-attribute]
+    exclude_desktop = Quartz.kCGWindowListExcludeDesktopElements  # ty: ignore[unresolved-attribute]
     options = on_screen_only | exclude_desktop
-    window_infos = quartz.CGWindowListCopyWindowInfo(options, quartz.kCGNullWindowID)
+    window_infos = Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID)  # ty: ignore[unresolved-attribute]
     matching_window_ids: list[int] = []
     for info in window_infos:
-        if int(info.get(quartz.kCGWindowOwnerPID, -1)) != process_id:
+        if int(info.get(Quartz.kCGWindowOwnerPID, -1)) != process_id:  # ty: ignore[unresolved-attribute]
             continue
-        if int(info.get(quartz.kCGWindowLayer, -1)) != 0:
+        if int(info.get(Quartz.kCGWindowLayer, -1)) != 0:  # ty: ignore[unresolved-attribute]
             continue
-        raw_bounds = info.get(quartz.kCGWindowBounds)
+        raw_bounds = info.get(Quartz.kCGWindowBounds)  # ty: ignore[unresolved-attribute]
         if raw_bounds is None:
             continue
-        converted, bounds = quartz.CGRectMakeWithDictionaryRepresentation(raw_bounds, None)
+        converted, bounds = Quartz.CGRectMakeWithDictionaryRepresentation(raw_bounds, None)  # ty: ignore[unresolved-attribute]
         if not converted:
             continue
         candidate = DesktopRect(
@@ -425,15 +421,19 @@ def _capture_macos_window(process_id: int, region: DesktopRect) -> PillowImage:
             round(bounds.size.height),
         )
         if candidate == region:
-            matching_window_ids.append(int(info[quartz.kCGWindowNumber]))
+            matching_window_ids.append(int(info[Quartz.kCGWindowNumber]))  # ty: ignore[unresolved-attribute]
     if len(matching_window_ids) != 1:
         msg = "macOS could not bind the accessibility target to one exact on-screen application window."
         raise DesktopProviderError(msg)
-    cg_image = quartz.CGWindowListCreateImage(
-        quartz.CGRectNull,
-        quartz.kCGWindowListOptionIncludingWindow,
+    null_rect = Quartz.CGRectNull  # ty: ignore[unresolved-attribute]
+    including_window = Quartz.kCGWindowListOptionIncludingWindow  # ty: ignore[unresolved-attribute]
+    ignore_framing = Quartz.kCGWindowImageBoundsIgnoreFraming  # ty: ignore[unresolved-attribute]
+    nominal_resolution = Quartz.kCGWindowImageNominalResolution  # ty: ignore[unresolved-attribute]
+    cg_image = Quartz.CGWindowListCreateImage(  # ty: ignore[unresolved-attribute]
+        null_rect,
+        including_window,
         matching_window_ids[0],
-        quartz.kCGWindowImageBoundsIgnoreFraming | quartz.kCGWindowImageNominalResolution,
+        ignore_framing | nominal_resolution,
     )
     if cg_image is None:
         msg = "macOS did not return the bound application-window screenshot."
@@ -443,19 +443,18 @@ def _capture_macos_window(process_id: int, region: DesktopRect) -> PillowImage:
 
 def _pillow_image_from_macos_capture(cg_image: object) -> PillowImage:
     """Convert one 32-bit Core Graphics capture into a Pillow image."""
-    import Quartz  # noqa: PLC0415  # ty: ignore[unresolved-import]
+    import Quartz  # noqa: PLC0415
     from PIL import Image  # noqa: PLC0415
 
-    quartz: Any = Quartz
-    width = int(quartz.CGImageGetWidth(cg_image))
-    height = int(quartz.CGImageGetHeight(cg_image))
-    bytes_per_row = int(quartz.CGImageGetBytesPerRow(cg_image))
-    bits_per_pixel = int(quartz.CGImageGetBitsPerPixel(cg_image))
+    width = int(Quartz.CGImageGetWidth(cg_image))  # ty: ignore[unresolved-attribute]
+    height = int(Quartz.CGImageGetHeight(cg_image))  # ty: ignore[unresolved-attribute]
+    bytes_per_row = int(Quartz.CGImageGetBytesPerRow(cg_image))  # ty: ignore[unresolved-attribute]
+    bits_per_pixel = int(Quartz.CGImageGetBitsPerPixel(cg_image))  # ty: ignore[unresolved-attribute]
     if width <= 0 or height <= 0 or bits_per_pixel != 32 or bytes_per_row < width * 4:
         msg = "macOS returned an unsupported primary-display pixel format."
         raise DesktopProviderError(msg)
-    provider = quartz.CGImageGetDataProvider(cg_image)
-    content = bytes(quartz.CGDataProviderCopyData(provider))
+    provider = Quartz.CGImageGetDataProvider(cg_image)  # ty: ignore[unresolved-attribute]
+    content = bytes(Quartz.CGDataProviderCopyData(provider))  # ty: ignore[unresolved-attribute]
     if len(content) < bytes_per_row * height:
         msg = "macOS returned an incomplete primary-display screenshot."
         raise DesktopProviderError(msg)
@@ -472,21 +471,20 @@ def _pillow_image_from_macos_capture(cg_image: object) -> PillowImage:
 
 def _type_macos_unicode(text: str) -> None:
     """Post layout-independent Unicode keyboard events to the active macOS app."""
-    import Quartz  # noqa: PLC0415  # ty: ignore[unresolved-import]
+    import Quartz  # noqa: PLC0415
 
-    quartz: Any = Quartz
     for offset in range(0, len(text), _MACOS_UNICODE_CHUNK_LENGTH):
         chunk = text[offset : offset + _MACOS_UNICODE_CHUNK_LENGTH]
         utf16_length = len(chunk.encode("utf-16-le")) // 2
-        key_down = quartz.CGEventCreateKeyboardEvent(None, 0, True)
-        key_up = quartz.CGEventCreateKeyboardEvent(None, 0, False)
+        key_down = Quartz.CGEventCreateKeyboardEvent(None, 0, True)  # ty: ignore[unresolved-attribute]
+        key_up = Quartz.CGEventCreateKeyboardEvent(None, 0, False)  # ty: ignore[unresolved-attribute]
         if key_down is None or key_up is None:
             msg = "macOS could not create a Unicode keyboard event."
             raise DesktopProviderError(msg)
-        quartz.CGEventKeyboardSetUnicodeString(key_down, utf16_length, chunk)
-        quartz.CGEventKeyboardSetUnicodeString(key_up, utf16_length, chunk)
-        quartz.CGEventPost(quartz.kCGHIDEventTap, key_down)
-        quartz.CGEventPost(quartz.kCGHIDEventTap, key_up)
+        Quartz.CGEventKeyboardSetUnicodeString(key_down, utf16_length, chunk)  # ty: ignore[unresolved-attribute]
+        Quartz.CGEventKeyboardSetUnicodeString(key_up, utf16_length, chunk)  # ty: ignore[unresolved-attribute]
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, key_down)  # ty: ignore[unresolved-attribute]
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, key_up)  # ty: ignore[unresolved-attribute]
 
 
 def _normalized_point(rect: DesktopRect, *, x: int, y: int) -> tuple[int, int]:

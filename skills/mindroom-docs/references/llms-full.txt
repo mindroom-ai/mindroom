@@ -2587,17 +2587,9 @@ If you set `compaction.model`, that summary model must also define its own `cont
 Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place.
 Otherwise MindRoom leaves the session unchanged and relies on replay fitting for that reply.
 Replay planning uses a chars/4 approximation and reserves headroom for the current prompt and output.
-Summary-input chunk sizing counts with the model's tiktoken encoding only when the summary model provably targets the genuine OpenAI endpoint: provider `openai` with no custom `base_url`, no `client_params`, no prebuilt or custom HTTP client, and no `OPENAI_BASE_URL` override — any unrecognized client customization falls back conservatively.
-Every other summary model — including Claude, Gemini, OpenAI-compatible endpoints even when they reuse OpenAI-style ids, and OpenAI ids newer than the installed tiktoken (for example `gpt-5.6`) — is sized at one token per UTF-8 byte.
-The byte count is a proven token upper bound for byte-level BPE tokenizers, where every token consumes at least one byte; this is established for Claude and the o200k-family OpenAI encodings.
-SentencePiece-based tokenizers such as Gemini's can normalize text before segmentation (NFKC-class), and rare compatibility characters (for example U+FDFA) can expand beyond their byte length there, so the bound is not proven for that class.
-Realistic chat and tool content typically sits 3-4x below the bound, and the compaction budget's reserve and safety margin absorb such pockets.
-Every persisted summary must also pass a fit check before it is written: sized by the same estimator the next request will use, its wrapped summary block must leave at least max(1,000 units, a quarter of the summary input budget) of headroom, and when `compaction.fallback_model` is configured the check covers both models, so persisted summaries fit the next compaction request by construction.
-A generated summary that fails the fit check is rejected before persistence and retried once with smaller input; exhaustion fails that compaction attempt with nothing persisted.
-A stored summary that predates this contract, or was written under a larger model or budget, gets one provider-arbitrated condensation attempt carrying the complete summary with no client-side size gate.
-Condensed output that fits is persisted immediately as durable summary-only progress, and strictly smaller output that still fails the fit check is persisted together with a durable marker that stops further automatic attempts for that state.
-A provider context-window rejection of that condensation — typed, or surfaced as a legacy context-length message — is terminal for that exact combination of summary, serving model profile (model and endpoint), and budget: MindRoom records a durable marker, spends nothing further on it, and reports the remedies (raise the compaction model's `context_window`, switch `compaction.model`, or force a retry with the `compact_context` tool).
-The cost of the byte bound is roughly 3-4x more summary chunks and calls for content with a high bytes-per-token ratio.
+Summary-input chunk sizing uses the model's tiktoken encoding when recognized.
+Direct Anthropic, Vertex AI Claude, and Bedrock Claude summary models without a recognized encoding use one token per UTF-8 byte as a conservative upper bound.
+Compaction chunk logs report `summary_input_estimate`, `summary_input_estimate_kind`, and `summary_input_budget_tokens` so tiktoken counts, o200k estimates, and UTF-8 byte upper bounds are never presented as the same measurement.
 MindRoom does not mutate configured `num_history_runs` to fit the window.
 Instead, it computes the replay plan that actually fits the current call and uses compaction to keep future replay healthy.
 If needed, that replay plan can reduce raw replay, fall back to summary-only replay, or disable persisted replay entirely for the run.
@@ -8321,6 +8313,23 @@ Each item can have a priority, dependency list, status, and assigned agent name.
 State is stored under `mindroom_data/todo/` and survives restarts.
 Built-in templates live with the package, and agents can add workspace-local templates under `todo/templates`.
 
+### Native Auto-Poke
+
+MindRoom scans native todo state in the background and wakes an idle configured agent when that agent has assigned, open, dependency-unblocked work.
+The scanner waits for the quiet period measured from the newest update among the agent's actionable items in the thread; an item unblocked by a completed dependency keeps its old timestamp, so it becomes eligible as soon as the rest of that agent's actionable work in the thread is quiet.
+Future item timestamps beyond one quiet window are treated as already quiet so clock skew cannot disable a scope indefinitely.
+A pending schedule for the same room and existing thread suppresses the poke, while schedules that create a new thread do not suppress room-main work.
+Work fingerprints are persisted under `mindroom_data/todo/poke_state.json`, so changed work observes a cooldown and unchanged work receives at most three one-hour anti-stall retries.
+A failed send is recorded like any other attempt, so the retry waits out the changed-work cooldown instead of tracking a separate failure counter.
+Future persisted timestamps beyond the relevant cooldown or backstop window are treated as elapsed so clock skew cannot mute valid work indefinitely.
+Each scan sends at most one poke to a given agent even when that agent has actionable work in multiple scopes.
+Todo titles are rendered as literal text, and only the assigned agent is mentioned for dispatch.
+
+| Environment variable | Default | Behavior |
+| --- | --- | --- |
+| `MINDROOM_TODO_POKE_INTERVAL_SECONDS` | `120` | Sets the scan interval in seconds, `0` disables the worker, and enabled values must be at least `1`. |
+| `MINDROOM_TODO_POKE_QUIET_SECONDS` | `300` | Sets the minimum quiet period for actionable assigned work. |
+
 ### Configuration
 
 This tool has no tool-specific inline configuration fields.
@@ -8348,6 +8357,7 @@ apply_template("mindroom-dev", {"ISSUE_REF": "ISSUE-123", "REPO": "mindroom"})
 - `update_todo()` can change title, priority, status, dependency list, and assignee.
 - `apply_template(..., dry_run=True)` previews template expansion before writing state.
 - The built-in `mindroom-dev` template includes a nested `parallel-review-loop` template.
+- Auto-poke scheduling, deduplication, and idle checks are built into the orchestrator and require no plugin.
 
 ## [`bitbucket`]
 
@@ -11758,7 +11768,7 @@ plugins:
 | --- | --- |
 | [thread-snooze-plugin](https://github.com/mindroom-ai/thread-snooze-plugin) | Snooze and unsnooze threads — temporarily resolves a thread and wakes it at a specified time. |
 | [thread-goal-plugin](https://github.com/mindroom-ai/thread-goal-plugin) | Persistent per-thread goals stored in Matrix room state that survive context compaction and restarts. |
-| [workloop-plugin](https://github.com/mindroom-ai/workloop-plugin) | Optional hook package for workloop-style auto-poke behavior; core per-thread work plans are now built in as the `todo` tool. |
+| [workloop-plugin](https://github.com/mindroom-ai/workloop-plugin) | Legacy external workloop implementation; native per-thread todo plans and auto-poke behavior are now built into MindRoom, so this plugin is not needed for that workflow. |
 | [openviking-plugin](https://github.com/mindroom-ai/openviking-plugin) | Long-term memory via [OpenViking](https://github.com/volcengine/OpenViking) — automatic memory extraction, recall, and compaction archiving. |
 
 # Hooks

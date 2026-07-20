@@ -14,6 +14,7 @@ import tiktoken
 
 CompactionEstimateKind = Literal[
     "model_tiktoken_tokens",
+    "o200k_base_tokens",
     "utf8_bytes_token_upper_bound",
 ]
 
@@ -39,60 +40,38 @@ def _compaction_encoding(model_id: str | None) -> tiktoken.Encoding | None:
     return None
 
 
-def _resolved_compaction_encoding(model_id: str | None, *, genuine_openai_endpoint: bool) -> tiktoken.Encoding | None:
-    """Return the exact-count encoding, or None when sizing must use the byte bound.
-
-    Single source of truth for the sizing branch: both the kind resolver and
-    the bound function dispatch on this one predicate, so the logged kind and
-    the arithmetic are structurally incapable of diverging. The tiktoken
-    branch requires the genuine OpenAI endpoint because a model id alone does
-    not identify the serving tokenizer — custom OpenAI-compatible endpoints
-    can serve arbitrary models under tiktoken-recognized ids.
-    """
-    if not genuine_openai_endpoint:
-        return None
-    return _compaction_encoding(model_id)
-
-
-def compaction_estimate_kind(model_id: str | None, *, genuine_openai_endpoint: bool) -> CompactionEstimateKind:
-    """Resolve how compaction sizes summary payloads for one summary model."""
-    if _resolved_compaction_encoding(model_id, genuine_openai_endpoint=genuine_openai_endpoint) is not None:
+def compaction_estimate_kind(
+    model_id: str | None,
+    *,
+    conservative_fallback: bool = False,
+) -> CompactionEstimateKind:
+    """Describe the unchanged sizing strategy used for one compaction model."""
+    if _compaction_encoding(model_id) is not None:
         return "model_tiktoken_tokens"
-    return "utf8_bytes_token_upper_bound"
+    if conservative_fallback:
+        return "utf8_bytes_token_upper_bound"
+    return "o200k_base_tokens"
 
 
-def compaction_payload_token_upper_bound(value: str, *, model_id: str | None, genuine_openai_endpoint: bool) -> int:
-    """Size one serialized compaction payload for the summary model.
-
-    Models with a tiktoken-recognized id served by the genuine OpenAI endpoint
-    count exactly. Every other model is sized by UTF-8 byte count, with
-    ``surrogatepass`` keeping unpaired surrogates (reachable via JSON-decoded
-    provider payloads) countable at 3 bytes each instead of raising.
-
-    The byte count is a proven token upper bound for byte-level BPE
-    tokenizers, where every token consumes at least one byte; that is
-    established for Claude and the o200k-family OpenAI encodings.
-    SentencePiece-based tokenizers such as Gemini's can normalize text before
-    segmentation (NFKC-class), where rare compatibility characters (for
-    example U+FDFA) can expand beyond their byte length, so the bound is not
-    proven for that class — realistic chat and tool content sits well below
-    the bound, the compaction budget's reserve and safety margin absorb such
-    pockets, and an oversized request recovers through the existing
-    shrink-retry path.
-    """
-    encoding = _resolved_compaction_encoding(model_id, genuine_openai_endpoint=genuine_openai_endpoint)
-    if encoding is not None:
+def estimate_compaction_input_tokens(
+    value: str,
+    *,
+    model_id: str | None = None,
+    conservative_fallback: bool = False,
+) -> int:
+    """Estimate serialized compaction history using the selected sizing strategy."""
+    kind = compaction_estimate_kind(model_id, conservative_fallback=conservative_fallback)
+    if kind == "model_tiktoken_tokens":
+        encoding = _compaction_encoding(model_id)
+        assert encoding is not None
         return len(encoding.encode(value, disallowed_special=()))
-    return len(value.encode("utf-8", errors="surrogatepass"))
+    if kind == "utf8_bytes_token_upper_bound":
+        return len(value.encode("utf-8", errors="surrogatepass"))
+    return approximate_o200k_tokens(value)
 
 
 def approximate_o200k_tokens(value: str) -> int:
-    """Approximate a token count with the o200k_base encoding.
-
-    An approximation, not a bound: o200k_base can undercount other tokenizers.
-    Callers that need a safe compaction sizing bound use
-    ``compaction_payload_token_upper_bound``.
-    """
+    """Approximate token count with the o200k_base encoding."""
     return len(tiktoken.get_encoding("o200k_base").encode(value, disallowed_special=()))
 
 

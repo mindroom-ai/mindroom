@@ -237,16 +237,13 @@ class MacAccessibilityBackend:
     """macOS AXUIElement backend with exact app allowlisting and stale-state checks."""
 
     def __init__(self, allowed_app_ids: frozenset[str], screen_size: Callable[[], tuple[int, int]]) -> None:
-        import AppKit  # noqa: PLC0415  # ty: ignore[unresolved-import]
-        import ApplicationServices  # noqa: PLC0415  # ty: ignore[unresolved-import]
+        import AppKit  # noqa: PLC0415
+        import ApplicationServices  # noqa: PLC0415
 
-        # pyobjc generates the framework attributes dynamically, so the
-        # modules are used through Any aliases instead of attribute ignores.
-        appkit: Any = AppKit
         self._allowed_app_ids = allowed_app_ids
         self._screen_size = screen_size
         self._services: Any = ApplicationServices
-        self._workspace: _Workspace = appkit.NSWorkspace.sharedWorkspace()
+        self._workspace: _Workspace = AppKit.NSWorkspace.sharedWorkspace()  # ty: ignore[unresolved-attribute]
         self._states: dict[str, _StoredMacState] = {}
 
     def availability(self) -> dict[str, object]:
@@ -885,11 +882,10 @@ def _require_valid_activation_app_id(app_id: str) -> None:
 def _request_application_activation(app_id: str) -> None:
     """Ask macOS to activate one exact bundle ID through a bounded Apple event."""
     _require_valid_activation_app_id(app_id)
-    import AppKit  # noqa: PLC0415  # ty: ignore[unresolved-import]
+    import AppKit  # noqa: PLC0415
 
-    appkit: Any = AppKit
     source = f'with timeout of 2 seconds\ntell application id "{app_id}" to activate\nend timeout'
-    script = appkit.NSAppleScript.alloc().initWithSource_(source)
+    script = AppKit.NSAppleScript.alloc().initWithSource_(source)  # ty: ignore[unresolved-attribute]
     _result, error = script.executeAndReturnError_(None)
     if error is not None:
         msg = "Allowed application activation request failed before input."

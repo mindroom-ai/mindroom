@@ -6,7 +6,6 @@ from __future__ import annotations
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -49,7 +48,6 @@ from mindroom.hooks import (
     HookRegistry,
 )
 from mindroom.message_target import MessageTarget
-from mindroom.token_budget import compaction_payload_token_upper_bound
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from tests.conftest import (
     FakeModel,
@@ -59,15 +57,6 @@ from tests.conftest import (
 )
 
 _DEFAULT_TEST_COMPACTION = CompactionConfig()
-
-# Budget finders and summary-input builders in tests must size runs exactly
-# like the production compaction path for the "summary-model" summary model,
-# which is a fake provider and therefore never a genuine OpenAI endpoint.
-_SUMMARY_MODEL_BOUND = partial(
-    compaction_payload_token_upper_bound,
-    model_id="summary-model",
-    genuine_openai_endpoint=False,
-)
 
 _ALL_HISTORY_SETTINGS = ResolvedHistorySettings(
     policy=HistoryPolicy(mode="all"),

@@ -98,45 +98,12 @@ class ResolvedHistorySettings:
 
 
 @dataclass(frozen=True)
-class CarriedSummaryUnfitMarker:
-    """Durable one-shot record that condensing one stored summary ended terminally.
-
-    Control state only: it never touches the summary or runs. It matches — and
-    suppresses further automatic condensation attempts — only while the stored
-    summary digest and ``attempt_profiles`` — the full ordered attempt set the
-    failing attempt could traverse, each entry a serving-profile fingerprint
-    (provider/model class, model id, endpoint-trust classification, estimator
-    kind, and non-secret endpoint/routing identity) plus its summary input
-    budget — equal the values recorded here. Changing any member of the set
-    (a new primary above a retained fallback included) implicitly re-enables
-    exactly one fresh attempt, and a forced compaction bypasses it outright.
-    ``serving_profile`` and ``summary_input_budget`` record which member
-    actually served the terminal verdict, for audit only. Markers persisted
-    under an older key shape parse as absent, which likewise grants one fresh
-    attempt.
-    """
-
-    summary_digest: str
-    serving_profile: str
-    summary_input_budget: int
-    attempt_profiles: tuple[str, ...]
-    failed_at: str
-    reason: str
-
-
-@dataclass(frozen=True)
 class HistoryScopeState:
     """Persisted compaction control/audit state stored in session metadata.
 
     ``compacted_run_ids`` are tombstones for runs already folded into the durable
     summary; they let the state owner prune runs that a stale session write
     reintroduced after compaction progress was persisted.
-    ``carried_summary_unfit`` bounds spend on inherited oversized summaries to
-    one condensation attempt-set per distinct (summary, profile, budget) state.
-    ``force_compact_generation`` increments on every new force request, so a
-    consumer that read generation G clears only the request it consumed: a
-    fresh request written while an attempt was in flight carries G+1 and
-    survives the clear.
     """
 
     last_compacted_at: str | None = None
@@ -144,8 +111,6 @@ class HistoryScopeState:
     last_compacted_run_count: int | None = None
     compacted_run_ids: tuple[str, ...] = ()
     force_compact_before_next_run: bool = False
-    force_compact_generation: int = 0
-    carried_summary_unfit: CarriedSummaryUnfitMarker | None = None
 
 
 @dataclass(frozen=True)
@@ -166,12 +131,6 @@ class ResolvedHistoryExecutionPlan:
     unavailable_reason: CompactionAvailabilityReason | None = None
     hard_replay_budget_tokens: int | None = None
     compaction_fallback_model_name: str | None = None
-    # The fallback's own summary-input budget (its window min'd with the replay
-    # window, minus reserve/overhead/margin), resolved only when it clears the
-    # same availability floor as the primary; None otherwise. Summary
-    # acceptance sizes the fallback profile with this budget so a persisted
-    # summary also fits a fallback-served next attempt.
-    compaction_fallback_summary_input_budget_tokens: int | None = None
 
 
 @dataclass(frozen=True)

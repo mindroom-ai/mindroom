@@ -8,7 +8,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from agno.exceptions import ContextWindowExceededError, ModelProviderError, ModelRateLimitError
 from agno.media import Image
 from agno.models.message import Message
 from agno.models.response import ModelResponse
@@ -18,6 +17,12 @@ import mindroom.background_tasks as background_tasks_module
 from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.models import CompactionOverrideConfig
+from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
+    MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
+    MINDROOM_COMPACTION_METADATA_KEY,
+    MINDROOM_MATRIX_HISTORY_METADATA_KEY,
+)
 from mindroom.history.compaction import (
     _build_summary_input,
     _compaction_replay_messages,
@@ -26,12 +31,7 @@ from mindroom.history.storage import (
     read_scope_state,
     write_scope_state,
 )
-from mindroom.history.summary_call import (
-    SummaryRetryDecision,
-    SummaryRetryPolicy,
-    generate_compaction_summary,
-    is_context_window_rejection,
-)
+from mindroom.history.summary_call import generate_compaction_summary
 from mindroom.history.types import (
     HistoryPolicy,
     HistoryScope,
@@ -39,7 +39,6 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
-from mindroom.token_budget import approximate_o200k_tokens
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,
@@ -428,7 +427,6 @@ def test_build_summary_input_advances_past_oversized_oldest_run() -> None:
         compacted_runs=[big_run, small_run],
         max_input_tokens=220,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=approximate_o200k_tokens,
     )
 
     assert [run.run_id for run in included_runs] == ["run-big"]
@@ -456,7 +454,6 @@ def test_build_summary_input_oversized_run_preserves_messages_before_tool_schema
         compacted_runs=[run],
         max_input_tokens=280,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=approximate_o200k_tokens,
     )
 
     assert [included_run.run_id for included_run in included_runs] == ["run-big-metadata"]
@@ -482,7 +479,6 @@ def test_build_summary_input_oversized_run_omits_empty_filtered_metadata() -> No
         compacted_runs=[run],
         max_input_tokens=220,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=approximate_o200k_tokens,
     )
 
     assert included_runs == [run]
@@ -502,14 +498,13 @@ def test_build_summary_input_normal_run_omits_empty_filtered_metadata() -> None:
         compacted_runs=[run],
         max_input_tokens=10_000,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=approximate_o200k_tokens,
     )
 
     assert included_runs == [run]
     assert "<run_metadata>" not in summary_input
 
 
-def test_build_summary_input_normal_run_omits_only_bulky_metadata() -> None:
+def test_build_summary_input_normal_run_omits_non_summary_metadata() -> None:
     run = _completed_run(
         "run-normal-metadata",
         messages=[
@@ -535,6 +530,10 @@ def test_build_summary_input_normal_run_omits_only_bulky_metadata() -> None:
         ],
     )
     metadata = {
+        AI_RUN_METADATA_KEY: {"compaction": {"decision": "required"}},
+        MINDROOM_COMPACTION_METADATA_KEY: {"states": {"agent:test": {"compacted_run_ids": ["old-run"]}}},
+        MINDROOM_MATRIX_HISTORY_METADATA_KEY: {"states": {"agent:test": {"seen_event_ids": ["$old"]}}},
+        MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {"$request": "Look up the deployment outcome."},
         "matrix_event_id": "$request",
         "started_at": "2026-07-17T20:00:00Z",
         "durable_outcome": {"state": "delivered"},
@@ -548,13 +547,16 @@ def test_build_summary_input_normal_run_omits_only_bulky_metadata() -> None:
         compacted_runs=[run],
         max_input_tokens=10_000,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=approximate_o200k_tokens,
     )
 
     assert included_runs == [run]
     assert run.metadata == metadata
     assert "tools_schema" not in summary_input
     assert "model_params" not in summary_input
+    assert AI_RUN_METADATA_KEY not in summary_input
+    assert MINDROOM_COMPACTION_METADATA_KEY not in summary_input
+    assert MINDROOM_MATRIX_HISTORY_METADATA_KEY not in summary_input
+    assert MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY in summary_input
     assert "$request" in summary_input
     assert "2026-07-17T20:00:00Z" in summary_input
     assert "durable_outcome" in summary_input
@@ -575,7 +577,6 @@ def test_build_summary_input_preserves_complete_near_cap_summary_without_claimin
         compacted_runs=[run],
         max_input_tokens=1_001,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=approximate_o200k_tokens,
     )
 
     assert included_runs == []
@@ -591,7 +592,6 @@ def test_build_summary_input_returns_no_progress_when_run_envelope_cannot_fit() 
         compacted_runs=[_completed_run("run-1")],
         max_input_tokens=1,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=approximate_o200k_tokens,
     )
 
     assert summary_input == ""
@@ -606,7 +606,6 @@ def test_build_summary_input_preserves_previous_summary_text() -> None:
         compacted_runs=[run],
         max_input_tokens=1_000,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=approximate_o200k_tokens,
     )
 
     assert included_runs == [run]
@@ -669,7 +668,6 @@ def test_build_summary_input_excludes_legacy_persisted_prompt_roles() -> None:
             system_message_role="instructions",
         ),
         max_input_tokens=1_000,
-        token_estimator=approximate_o200k_tokens,
     )
 
     assert included_runs == [run]
@@ -709,7 +707,6 @@ def test_build_summary_input_honors_tool_call_history_limit() -> None:
             max_tool_calls_from_history=1,
         ),
         max_input_tokens=1_000,
-        token_estimator=approximate_o200k_tokens,
     )
 
     assert included_runs == [run]
@@ -717,114 +714,3 @@ def test_build_summary_input_honors_tool_call_history_limit() -> None:
     assert "first result" not in summary_input
     assert "call-2" in summary_input
     assert "second result" in summary_input
-
-
-# --- ISSUE-246 review round 7 G3: the durable context-window classifier is narrow ---
-
-
-@pytest.mark.parametrize(
-    ("error", "expected"),
-    [
-        pytest.param(
-            ModelRateLimitError(
-                "Request too large for gpt-4o in organization org-x on tokens per min (TPM): "
-                "Limit 30000, Requested 62051. Visit platform.openai.com to learn more.",
-                status_code=429,
-            ),
-            False,
-            id="tpm-rate-limit-is-never-terminal",
-        ),
-        pytest.param(
-            ModelProviderError("max_tokens is too large: 300000 > 128000", status_code=400),
-            False,
-            id="output-max-tokens-validation-not-terminal",
-        ),
-        pytest.param(
-            ModelProviderError("413 Request Entity Too Large", status_code=413),
-            False,
-            id="proxy-body-size-not-terminal",
-        ),
-        pytest.param(
-            ModelProviderError("upstream timeout while checking maximum context length", status_code=503),
-            False,
-            id="transient-5xx-wins-over-fragment",
-        ),
-        pytest.param(
-            ModelProviderError("request too large", status_code=400),
-            False,
-            id="broad-shrink-fragment-alone-not-terminal",
-        ),
-        pytest.param(
-            ContextWindowExceededError("prompt is too long for this model"),
-            True,
-            id="typed-context-window-error",
-        ),
-        pytest.param(
-            ModelProviderError(
-                "Input validation failed: prompt exceeds the maximum context length of this model",
-                status_code=400,
-            ),
-            True,
-            id="explicit-input-context-phrase",
-        ),
-        pytest.param(
-            ModelProviderError("error code: context_length_exceeded", status_code=400),
-            True,
-            id="provider-input-context-error-code",
-        ),
-        pytest.param(
-            ModelProviderError("prompt is too long: 210000 tokens > 200000 maximum"),
-            True,
-            id="unclassified-default-status-with-explicit-phrase",
-        ),
-    ],
-)
-def test_is_context_window_rejection_is_narrow(error: Exception, expected: bool) -> None:
-    """Round-7 G3: only typed errors and explicit input-context wording are terminal.
-
-    Transient shapes (rate-limit types, retryable status codes) classify
-    before any message matching, so TPM 429s, output-cap validation, proxy
-    body-size limits, and 5xx never mint a durable wrong diagnosis.
-    """
-    assert is_context_window_rejection(error) is expected
-
-
-# --- ISSUE-246 review round 7 G6: timeouts are same-budget transient for indivisible input ---
-
-
-def test_retry_policy_timeouts_are_same_budget_transient_only_when_shrink_disabled() -> None:
-    """Round-7 G6 (B5): with shrink disabled, both timeout forms get the delayed unchanged retry.
-
-    The shrinkable path keeps its existing classification: a timeout there
-    still shrinks the input instead of retrying it unchanged.
-    """
-    indivisible = SummaryRetryPolicy(shrink_allowed=False)
-    for timeout_error in (TimeoutError("provider timed out"), RuntimeError("compaction summary timed out after 240s")):
-        decision = indivisible.retry_budget(
-            attempt=1,
-            budget=2_100,
-            input_tokens=13_000,
-            minimum_progress_input_tokens=0,
-            error=timeout_error,
-        )
-        assert decision == SummaryRetryDecision(budget=2_100, kind="same-budget-transient")
-        assert (
-            indivisible.retry_budget(
-                attempt=2,
-                budget=2_100,
-                input_tokens=13_000,
-                minimum_progress_input_tokens=0,
-                error=timeout_error,
-            )
-            is None
-        )
-
-    shrinkable_decision = SummaryRetryPolicy().retry_budget(
-        attempt=1,
-        budget=13_000,
-        input_tokens=13_000,
-        minimum_progress_input_tokens=0,
-        error=TimeoutError("provider timed out"),
-    )
-    assert shrinkable_decision is not None
-    assert shrinkable_decision.kind == "shrink"

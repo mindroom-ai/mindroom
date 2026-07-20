@@ -544,22 +544,21 @@ per-file-ignores."src/mindroom/tools/*" = [
 [tool.ty.environment]
 python-version = "3.13"
 [[tool.ty.overrides]]
-# Dotted rules keys keep each override self-contained so table reordering by
-# pyproject-fmt cannot detach a rules block from its override.
+include = [ "tests/" ]
+[tool.ty.overrides.rules]
 # Mock patterns cause many false positives in tests (e.g., mock.call_args
 # returns _Call | None, attribute access on MagicMock, passing mocks as
 # typed arguments).
-include = [ "tests/" ]
-rules.call-non-callable = "ignore"
-rules.invalid-argument-type = "ignore"
-rules.invalid-assignment = "ignore"
-rules.invalid-return-type = "ignore"
-rules.no-matching-overload = "ignore"
-rules.not-iterable = "ignore"
-rules.not-subscriptable = "ignore"
-rules.too-many-positional-arguments = "ignore"
-rules.unresolved-attribute = "ignore"
-rules.unsupported-operator = "ignore"
+call-non-callable = "ignore"
+invalid-argument-type = "ignore"
+invalid-assignment = "ignore"
+invalid-return-type = "ignore"
+no-matching-overload = "ignore"
+not-iterable = "ignore"
+not-subscriptable = "ignore"
+too-many-positional-arguments = "ignore"
+unresolved-attribute = "ignore"
+unsupported-operator = "ignore"
 [tool.ty.rules]
 deprecated = "ignore"  # FastAPI on_event deprecation; refactor to lifespan separately
 [tool.ty.src]

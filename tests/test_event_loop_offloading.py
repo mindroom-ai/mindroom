@@ -122,7 +122,7 @@ async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_h
             raise TimeoutError(msg)
         await memory_release.wait()
         memory_finished.set()
-        return MemoryPromptParts(session_preamble="session memory", turn_context="turn memory")
+        return MemoryPromptParts(session_preamble="session memory", transient_turn_context="turn memory")
 
     def gated_create_agent(*_args: object, **_kwargs: object) -> MagicMock:
         assert context_marker.get() == "preserved"
@@ -136,7 +136,10 @@ async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_h
     async def prepare_history(*_args: object, **kwargs: object) -> SimpleNamespace:
         history_started.set()
         assert kwargs["agent"] is built_agent
-        assert kwargs["prompt"] == "raw prompt\n\nturn memory\n\nmodel metadata"
+        assert kwargs["prompt"] == "raw prompt\n\nmodel metadata"
+        assert len(kwargs["transient_context_messages"]) == 1
+        assert kwargs["transient_context_messages"][0].content == "turn memory"
+        assert kwargs["transient_context_messages"][0].add_to_agent_memory is False
         assert kwargs["resolved_runtime_model"].model_name == "default"
         return SimpleNamespace(
             prepared_history=PreparedHistoryState(),
@@ -147,14 +150,13 @@ async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_h
 
     original_compose = ai_module._compose_current_turn_prompt
 
-    def compose_prompt(*, raw_prompt: str, model_prompt: str | None, prompt_parts: MemoryPromptParts) -> str:
+    def compose_prompt(*, raw_prompt: str, model_prompt: str | None) -> str:
         assert memory_finished.is_set()
         assert agent_finished.is_set()
         prompt_composed.set()
         return original_compose(
             raw_prompt=raw_prompt,
             model_prompt=model_prompt,
-            prompt_parts=prompt_parts,
         )
 
     monkeypatch.setattr(ai_module, "build_memory_prompt_parts", gated_memory)
@@ -195,7 +197,7 @@ async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_h
         agent_release.set()
 
     assert prepared_run.agent is built_agent
-    assert prepared_run.prompt_text == "raw prompt\n\nturn memory\n\nmodel metadata"
+    assert prepared_run.prompt_text == "raw prompt\n\nmodel metadata"
     assert built_agent.additional_context == "existing context\n\nsession memory"
 
 
