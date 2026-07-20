@@ -746,3 +746,36 @@ def test_snapshot_preserves_event_bound_whitespace() -> None:
         run_metadata={},
     )
     assert synthetic.user_message == "indented body"
+
+
+def test_snapshot_restores_model_only_suffix_and_timestamp() -> None:
+    """Interrupted replay keeps the suffix and ts the interrupted model actually received."""
+    snapshot = build_interrupted_replay_snapshot(
+        user_message="Describe this image",
+        partial_text="Half",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata={
+            "requester_id": "@alice:localhost",
+            MINDROOM_LOCATION_MARKER_METADATA_KEY: "📍 Home",
+        },
+        current_event_id="$source",
+        current_message_suffix="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
+        current_turn_ts="2026-03-20 08:15 PDT",
+    )
+
+    run = _build_interrupted_replay_run(
+        snapshot=snapshot,
+        run_id="run-1",
+        scope_id="test_agent",
+        session_id="session-1",
+        is_team=False,
+    )
+
+    assert run.messages is not None
+    assert run.messages[0].content == (
+        '<msg event_id="$source" from="@alice:localhost" ts="2026-03-20 08:15 PDT">'
+        "<![CDATA[Describe this image]]></msg>\n\n"
+        "Available attachment IDs: att_1. Use tool calls to inspect or process them.\n\n"
+        "📍 Home"
+    )

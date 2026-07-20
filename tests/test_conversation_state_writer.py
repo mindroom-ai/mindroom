@@ -718,3 +718,58 @@ def test_persist_response_event_id_never_splits_on_turn_paragraphs_in_model_text
         )
     finally:
         storage.close()
+
+
+def test_persist_response_event_id_never_crosses_tool_boundaries(tmp_path: Path) -> None:
+    """An ineligible final assistant stub never lets the wrap rewrite a pre-tool segment."""
+    config, runtime_paths = _agent_config(tmp_path)
+    writer = _writer(config, runtime_paths)
+    storage = writer.create_storage(None)
+    try:
+        session = AgentSession(
+            session_id="session-1",
+            agent_id="shared",
+            runs=[
+                RunOutput(
+                    run_id="run-1",
+                    agent_id="shared",
+                    status=RunStatus.completed,
+                    content=None,
+                    messages=[
+                        Message(role="user", content="question"),
+                        Message(role="assistant", content="Let me check that."),
+                        Message(role="tool", content="tool result"),
+                        Message(role="assistant", content=""),
+                    ],
+                ),
+            ],
+            created_at=1,
+            updated_at=1,
+        )
+        storage.upsert_session(session)
+
+        writer.persist_response_event_id_in_session_run(
+            storage=storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            run_id="run-1",
+            response_event_id="$visible",
+            response_sender_id="@mindroom_shared:localhost",
+            delivered_visible_body="Delivered final answer",
+        )
+
+        persisted = get_agent_session(storage, "session-1")
+        assert persisted is not None
+        run = cast("RunOutput", (persisted.runs or [])[0])
+        assert run.metadata is not None
+        assert run.metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] == "$visible"
+        # The intermediate pre-tool segment keeps its own text; the event is
+        # linked in metadata only.
+        assert [(message.role, message.content) for message in run.messages or []] == [
+            ("user", "question"),
+            ("assistant", "Let me check that."),
+            ("tool", "tool result"),
+            ("assistant", ""),
+        ]
+    finally:
+        storage.close()

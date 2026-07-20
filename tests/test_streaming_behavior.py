@@ -1115,13 +1115,19 @@ class TestStreamingBehavior:
         )
         streaming.last_update = float("-inf")
 
+        async def wait_for_sends(count: int) -> None:
+            # Delivery formatting hops through a worker thread, so loop ticks
+            # alone cannot guarantee the previous edit committed under load.
+            deadline = asyncio.get_running_loop().time() + 5.0
+            while mock_client.room_send.call_count < count:
+                assert asyncio.get_running_loop().time() < deadline, "timed out waiting for Matrix send"
+                await asyncio.sleep(0.01)
+
         async def response_stream() -> AsyncIterator[object]:
             yield ToolCallStartedEvent(tool=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}))
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
+            await wait_for_sends(1)
             yield "x"
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
+            await wait_for_sends(2)
             yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
 
         await _consume_streaming_chunks_for_test(mock_client, response_stream(), streaming)
@@ -4438,3 +4444,111 @@ class TestStreamingConfig:
         # interval_ramp_seconds=0 should be valid (disables ramp)
         sc = StreamingConfig(interval_ramp_seconds=0)
         assert sc.interval_ramp_seconds == 0
+
+
+class TestDeliveredBodyConfirmation:
+    """Terminal failures must report only content Matrix confirmed."""
+
+    def setup_method(self) -> None:
+        """Set up test config."""
+        runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+        self.config = bind_runtime_paths(
+            Config(models={"default": ModelConfig(provider="ollama", id="test-model")}),
+            runtime_paths,
+        )
+
+    @pytest.mark.asyncio
+    async def test_terminal_failure_reports_truncated_delivered_body(self) -> None:
+        """A failed terminal edit falls back to the delivered wire body, not pre-truncation text."""
+        mock_client = _make_matrix_client_mock()
+        full_text = "x" * 5_000
+        truncated = full_text[:1_000] + "…"
+
+        streaming = StreamingResponse(
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+        )
+        streaming.event_id = "$stream_msg"
+        streaming.update_interval = 0.0
+        streaming.min_update_interval = 0.0
+        streaming.min_char_update_interval = 0.0
+        streaming.last_update = float("-inf")
+
+        # Non-terminal edit lands, but sidecar upload failed and the wire body
+        # is the truncated fallback.
+        with patch(
+            "mindroom.streaming.edit_message_result",
+            new=AsyncMock(
+                return_value=DeliveredMatrixEvent(
+                    event_id="$edit",
+                    content_sent={"m.new_content": {"body": truncated}, "body": f"* {truncated}"},
+                ),
+            ),
+        ):
+            await streaming.update_content(full_text, mock_client)
+        assert streaming.accumulated_text == full_text
+
+        # The terminal update never reaches Matrix.
+        with patch("mindroom.streaming.edit_message_result", new=AsyncMock(return_value=None)):
+            outcome = await streaming.finalize(mock_client)
+
+        assert outcome.terminal_status == "completed"
+        assert outcome.failure_reason == "terminal_update_failed"
+        # Only the confirmed delivered body may be persisted for this event.
+        assert outcome.rendered_body == truncated
+
+    @pytest.mark.asyncio
+    async def test_note_only_terminal_is_not_run_output(self) -> None:
+        """A cancel note delivered onto a placeholder never counts as model output."""
+        mock_client = _make_matrix_client_mock()
+        streaming = StreamingResponse(
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+        )
+        streaming.event_id = "$placeholder_msg"
+        streaming.placeholder_progress_sent = True
+
+        with patch(
+            "mindroom.streaming.edit_message_result",
+            new=AsyncMock(
+                return_value=DeliveredMatrixEvent(
+                    event_id="$edit",
+                    content_sent={"m.new_content": {"body": "**[Response cancelled]**"}},
+                ),
+            ),
+        ):
+            outcome = await streaming.finalize(mock_client, cancelled=True)
+
+        assert outcome.terminal_status == "cancelled"
+        assert outcome.visible_body_state == "visible_body"
+        assert outcome.rendered_body == "**[Response cancelled]**"
+        assert outcome.visible_body_is_run_output is False
+
+    @pytest.mark.asyncio
+    async def test_partial_plus_note_terminal_stays_run_output(self) -> None:
+        """Partial model text with an appended note is still the run's own output."""
+        mock_client = _make_matrix_client_mock()
+        streaming = StreamingResponse(
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+        )
+        streaming.event_id = "$stream_msg"
+        streaming.accumulated_text = "Half an answer"
+
+        with patch(
+            "mindroom.streaming.edit_message_result",
+            new=AsyncMock(
+                return_value=DeliveredMatrixEvent(
+                    event_id="$edit",
+                    content_sent={"m.new_content": {"body": "Half an answer\n\n**[Response cancelled]**"}},
+                ),
+            ),
+        ):
+            outcome = await streaming.finalize(mock_client, cancelled=True)
+
+        assert outcome.terminal_status == "cancelled"
+        assert outcome.rendered_body == "Half an answer\n\n**[Response cancelled]**"
+        assert outcome.visible_body_is_run_output is True

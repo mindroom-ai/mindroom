@@ -177,8 +177,13 @@ _MAX_RENDERED_FILENAME_LENGTH = 80
 
 
 def _sanitize_rendered_filename(filename: str) -> str:
-    """Neutralize newline/quote injection from attacker-controlled filenames."""
+    """Neutralize markup and quote injection from attacker-controlled filenames.
+
+    Annotations render outside ``<msg>`` CDATA, so XML-significant characters
+    are entity-escaped: a filename can never form a second system-looking tag.
+    """
     sanitized = "".join(char for char in filename if char.isprintable()).replace('"', "'").strip()
+    sanitized = sanitized.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     if len(sanitized) > _MAX_RENDERED_FILENAME_LENGTH:
         sanitized = f"{sanitized[: _MAX_RENDERED_FILENAME_LENGTH - 1]}…"
     return sanitized

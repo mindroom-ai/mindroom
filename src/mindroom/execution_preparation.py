@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, replace
 from enum import Enum
+from math import isfinite
 from typing import TYPE_CHECKING
 
 from agno.models.message import Message
@@ -71,6 +72,7 @@ _PARTIAL_REPLY_SENDER_LABELS = {
 _PARTIAL_REPLY_GUIDANCE_LABELS = frozenset({*_PARTIAL_REPLY_SENDER_LABELS.values(), "You (partial reply)"})
 
 _LOCATION_MARKER_PREFIX = "📍 "
+_LOCATION_MARKER_MAX_PLACE_CHARS = 80
 
 
 class _PartialReplyKind(str, Enum):
@@ -764,8 +766,42 @@ def _scope_seen_event_ids(scope_context: ScopeSessionContext | None) -> set[str]
     return read_scope_seen_event_ids(scope_context.session, scope_context.scope)
 
 
+def _location_marker_place(nearby_place: str) -> str | None:
+    """Return a marker-safe place name, or None when the value fails validation.
+
+    The marker is durable and rendered outside ``<msg>`` CDATA, so the place —
+    external reverse-geocoder output — must stay short, printable, and unable
+    to form markup. Invalid values fail closed instead of truncating
+    potentially sensitive provider output.
+    """
+    place = " ".join(nearby_place.split())
+    if not place or place.lower() == "unknown" or len(place) > _LOCATION_MARKER_MAX_PLACE_CHARS:
+        return None
+    if not place.isprintable() or any(char in place for char in "<>&"):
+        return None
+    return place
+
+
+def _location_marker_coordinates(latitude: str, longitude: str) -> str | None:
+    """Return canonical bounded coordinates, or None for non-geographic values."""
+    try:
+        latitude_value = float(latitude)
+        longitude_value = float(longitude)
+    except ValueError:
+        return None
+    if not (isfinite(latitude_value) and isfinite(longitude_value)):
+        return None
+    if abs(latitude_value) > 90 or abs(longitude_value) > 180:
+        return None
+    return f"{latitude_value:.4f}, {longitude_value:.4f}"
+
+
 def _location_marker_from_fields(item_text: str) -> str | None:
-    """Derive the short persisted location marker from one trusted location item."""
+    """Derive the short persisted location marker from one trusted location item.
+
+    Every arm is bounded and markup-safe; anything else fails closed to no
+    marker while the full location block still rides the current turn.
+    """
     fields: dict[str, str] = {}
     for line in item_text.splitlines():
         key, sep, value = line.partition(":")
@@ -773,13 +809,12 @@ def _location_marker_from_fields(item_text: str) -> str | None:
             fields[key.strip()] = value.strip()
     if fields.get("at_home", "").lower() == "true":
         return f"{_LOCATION_MARKER_PREFIX}Home"
-    nearby_place = fields.get("nearby_place", "")
-    if nearby_place and nearby_place.lower() != "unknown":
-        return f"{_LOCATION_MARKER_PREFIX}{nearby_place}"
-    latitude = fields.get("latitude", "")
-    longitude = fields.get("longitude", "")
-    if latitude and longitude:
-        return f"{_LOCATION_MARKER_PREFIX}{latitude}, {longitude}"
+    place = _location_marker_place(fields.get("nearby_place", ""))
+    if place is not None:
+        return f"{_LOCATION_MARKER_PREFIX}{place}"
+    coordinates = _location_marker_coordinates(fields.get("latitude", ""), fields.get("longitude", ""))
+    if coordinates is not None:
+        return f"{_LOCATION_MARKER_PREFIX}{coordinates}"
     return None
 
 

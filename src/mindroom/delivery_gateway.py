@@ -1120,8 +1120,9 @@ class DeliveryGateway:
     ) -> FinalDeliveryOutcome:
         """Build the terminal outcome for a stream whose own body is visible at ``event_id``.
 
-        The stream outcome's rendered body is the canonical delivered text, so
-        run-output ownership is exactly its presence — computed here once for
+        The stream outcome's rendered body is the canonical delivered text and
+        it reports whether that text contains the run's own output (a synthetic
+        note-only terminal does not) — ownership is computed here once for
         every arm instead of per constructor.
         """
         body = stream_outcome.visible_body_text or None
@@ -1130,7 +1131,7 @@ class DeliveryGateway:
             event_id=event_id,
             is_visible_response=True,
             final_visible_body=body,
-            body_is_run_output=bool(body),
+            body_is_run_output=bool(body) and stream_outcome.visible_body_is_run_output,
             delivery_kind=delivery_kind,
             failure_reason=failure_reason,
             tool_trace=tuple(request.tool_trace or ()),
@@ -1161,7 +1162,7 @@ class DeliveryGateway:
             event_id=event_id,
             is_visible_response=event_id is not None,
             final_visible_body=body,
-            body_is_run_output=bool(body),
+            body_is_run_output=bool(body) and stream_outcome.visible_body_is_run_output,
             failure_reason=failure_reason,
             tool_trace=tuple(request.tool_trace or ()),
             extra_content=request.extra_content,
@@ -1388,7 +1389,18 @@ class DeliveryGateway:
                 )
             try:
                 if stream_outcome.failure_reason is not None:
-                    assert visible_stream_event_id is not None
+                    if visible_stream_event_id is None:
+                        self.deps.logger.error(
+                            "Visible stream failure outcome missing its event id",
+                            correlation_id=request.identity.correlation_id,
+                        )
+                        return FinalDeliveryOutcome(
+                            terminal_status="error",
+                            event_id=None,
+                            failure_reason=stream_outcome.failure_reason or "terminal_update_failed",
+                            tool_trace=tuple(request.tool_trace or ()),
+                            extra_content=request.extra_content,
+                        )
                     return self._visible_stream_outcome(
                         request,
                         stream_outcome,
@@ -1438,7 +1450,18 @@ class DeliveryGateway:
                     correlation_id=request.identity.correlation_id,
                 )
 
-            assert streamed_event_id is not None
+            if streamed_event_id is None:
+                self.deps.logger.error(
+                    "Completed visible stream missing its event id",
+                    correlation_id=request.identity.correlation_id,
+                )
+                return FinalDeliveryOutcome(
+                    terminal_status="error",
+                    event_id=None,
+                    failure_reason="stream_completed_without_visible_body",
+                    tool_trace=tuple(request.tool_trace or ()),
+                    extra_content=request.extra_content,
+                )
             interactive_response = interactive_response_for_visible_body(
                 streamed_text,
                 canonical_body_candidate=final_body_candidate,

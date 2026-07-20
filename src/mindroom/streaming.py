@@ -664,12 +664,17 @@ class StreamingResponse:
             elif cancelled:
                 resolved_cancel_source = "user_stop"
         had_body_before_terminal = bool(self.accumulated_text.strip())
+        # Completed terminals always deliver run output (possibly final-only
+        # provider content); cancel/error terminals contain run output only
+        # when partial text existed before the synthetic note was appended.
+        terminal_body_is_run_output = False
         final_stream_status = self._prepare_terminal_text_and_status(
             cancelled=cancelled,
             restart_interrupted=restart_interrupted,
             cancel_source=cancel_source,
             error=error,
         )
+        terminal_body_is_run_output = final_stream_status == STREAM_STATUS_COMPLETED or had_body_before_terminal
         terminal_status = "cancelled" if resolved_cancel_source is not None else final_stream_status
         cancellation_failure_reason = (
             cancel_failure_reason(resolved_cancel_source) if resolved_cancel_source is not None else None
@@ -831,6 +836,7 @@ class StreamingResponse:
             # pre-delivery display text.
             rendered_body=self._last_delivered_canonical_body or attempted_rendered_body,
             visible_body_state=attempted_visible_body_state,
+            visible_body_is_run_output=terminal_body_is_run_output,
             canonical_final_body_candidate=canonical_final_body_candidate,
             failure_reason=cancellation_failure_reason,
             interactive_metadata=response.interactive_metadata,
@@ -990,7 +996,10 @@ class StreamingResponse:
         self._last_delivered_text = committed_state.accumulated_text
         self._last_delivered_tool_trace = deepcopy(committed_state.tool_trace)
         self._last_placeholder_progress_sent = committed_state.placeholder_progress_sent
-        self._last_committed_rendered_body = committed_state.rendered_body
+        # The delivered payload is authoritative: large-message fallback can
+        # truncate the wire body after this pre-delivery rendering was frozen,
+        # and terminal-failure outcomes must report only confirmed content.
+        self._last_committed_rendered_body = self._last_delivered_canonical_body or committed_state.rendered_body
         self._last_committed_visible_body_state = committed_state.visible_body_state
         self._last_committed_interactive_metadata = committed_state.interactive_metadata
         self.placeholder_progress_sent = committed_state.placeholder_progress_sent

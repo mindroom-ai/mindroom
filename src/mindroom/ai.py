@@ -70,7 +70,7 @@ from mindroom.media_fallback import (
     unsupported_media_kinds_for_route,
 )
 from mindroom.media_inputs import MediaInputs, MediaKind
-from mindroom.memory import build_memory_prompt_parts, strip_user_turn_time_prefix
+from mindroom.memory import build_memory_prompt_parts
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.pre_model_preparation import prepare_mem0_prompt_branches
 from mindroom.response_turn import (
@@ -127,17 +127,21 @@ AIStreamChunk = str | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent
 
 
 def model_prompt_tail_after_raw_prompt(*, raw_prompt: str, model_prompt: str | None) -> str:
-    """Return model-only additions after the raw user prompt prefix."""
+    """Return model-only additions after the raw user prompt prefix.
+
+    Prompts are compared verbatim apart from whitespace normalization: user
+    text that merely looks like a timestamp prefix is never parsed away, since
+    runtime timestamps ride the ``<msg ts="...">`` attribute.
+    """
     if not model_prompt:
         return ""
-    model_prompt_tail = strip_user_turn_time_prefix(model_prompt)
     normalized_raw_prompt = raw_prompt.strip()
-    normalized_model_prompt_tail = model_prompt_tail.strip()
-    if raw_prompt and normalized_model_prompt_tail == normalized_raw_prompt:
+    normalized_model_prompt = model_prompt.strip()
+    if raw_prompt and normalized_model_prompt == normalized_raw_prompt:
         return ""
-    if raw_prompt and normalized_model_prompt_tail.startswith(f"{normalized_raw_prompt}\n\n"):
-        return normalized_model_prompt_tail[len(normalized_raw_prompt) + 2 :].lstrip()
-    return model_prompt_tail
+    if raw_prompt and normalized_model_prompt.startswith(f"{normalized_raw_prompt}\n\n"):
+        return normalized_model_prompt[len(normalized_raw_prompt) + 2 :].lstrip()
+    return model_prompt
 
 
 def _initial_agent_continuation(
@@ -343,6 +347,7 @@ def _build_agent_turn_callbacks(
     *,
     agent_name: str,
     prompt: str,
+    model_prompt: str | None,
     session_id: str,
     runtime_paths: RuntimePaths,
     config: Config,
@@ -405,6 +410,10 @@ def _build_agent_turn_callbacks(
             interrupted_tools=snapshot.interrupted_tools,
             run_metadata=snapshot.run_metadata,
             is_team=False,
+            current_message_suffix=model_prompt_tail_after_raw_prompt(
+                raw_prompt=prompt,
+                model_prompt=model_prompt,
+            ),
             original_status=snapshot.original_status,
         )
 
@@ -1440,6 +1449,7 @@ async def ai_response(  # noqa: C901
         holder,
         agent_name=agent_name,
         prompt=prompt,
+        model_prompt=model_prompt,
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
@@ -1884,6 +1894,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         holder,
         agent_name=agent_name,
         prompt=prompt,
+        model_prompt=model_prompt,
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,

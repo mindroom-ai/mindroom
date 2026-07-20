@@ -261,12 +261,12 @@ class TestAgentBot(AgentBotTestBase):
         )
 
     @pytest.mark.asyncio
-    async def test_generate_team_response_helper_does_not_duplicate_already_timestamped_prompt(
+    async def test_generate_team_response_helper_never_parses_timestamp_like_user_text(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Team helper should treat an already timestamped prompt as the same user turn."""
+        """User text that merely looks like a timestamp prefix is compared verbatim."""
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
@@ -279,7 +279,7 @@ class TestAgentBot(AgentBotTestBase):
         )
         matrix_ids = entity_ids(config, runtime_paths_for(config))
         mock_team_response = AsyncMock(return_value="Team reply")
-        timestamped_prompt = "[2026-03-20 08:15 PDT] What time is it?"
+        timestamped_prompt = "[2026-03-20 08:15 PDT] deploy now"
 
         with (
             patch(
@@ -300,7 +300,7 @@ class TestAgentBot(AgentBotTestBase):
                 ResponseRequest(
                     thread_history=[],
                     user_id="@user:localhost",
-                    prompt="What time is it?",
+                    prompt=timestamped_prompt,
                     model_prompt=timestamped_prompt,
                     response_envelope=_hook_envelope(
                         body="What time is it?",
@@ -313,8 +313,8 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         assert _handled_response_event_id(resolution) == "$team"
-        assert mock_team_response.await_args.kwargs["message"] == "What time is it?"
-        # A stale pre-merged timestamp is model chrome, never a suffix to replay.
+        assert mock_team_response.await_args.kwargs["message"] == timestamped_prompt
+        # Timestamp-looking user text is never stripped or echoed as a suffix.
         assert mock_team_response.await_args.kwargs["current_message_suffix"] == ""
 
     @pytest.mark.asyncio

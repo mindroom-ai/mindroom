@@ -267,14 +267,16 @@ def test_model_prompt_tail_uses_normalized_tail_comparison() -> None:
     assert tail == "Available attachment IDs: att_report."
 
 
-def test_model_prompt_tail_strips_stale_model_timestamp_before_tail_comparison() -> None:
-    """Tail extraction should not reuse timestamp text from model prompts."""
-    tail = model_prompt_tail_after_raw_prompt(
-        raw_prompt=" report ",
-        model_prompt="[1999-01-01 00:00 UTC] report\n\nAvailable attachment IDs: att_report.",
-    )
+def test_model_prompt_tail_never_parses_timestamp_like_user_text() -> None:
+    """User text that looks like a timestamp prefix is compared verbatim, never stripped."""
+    for prompt in ("[12:30 UTC] hello", "[2026-07-20 04:30 PDT] deploy now"):
+        assert model_prompt_tail_after_raw_prompt(raw_prompt=prompt, model_prompt=prompt) == ""
 
-    assert tail == "Available attachment IDs: att_report."
+    tail = model_prompt_tail_after_raw_prompt(
+        raw_prompt="[2026-07-20 04:30 PDT] deploy now",
+        model_prompt="[2026-07-20 04:30 PDT] deploy now\n\nAvailable attachment IDs: att_x.",
+    )
+    assert tail == "Available attachment IDs: att_x."
 
 
 def test_model_prompt_tail_keeps_model_only_tail_without_timestamp() -> None:

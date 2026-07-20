@@ -20,6 +20,10 @@ class StreamTransportOutcome:  # noqa: D101
     terminal_status: _TerminalStatus
     rendered_body: str | None
     visible_body_state: VisibleBodyState
+    # False when the visible body is only a synthetic terminal note (cancel,
+    # restart, error) with no model output; committed pre-terminal bodies are
+    # always model output, so the default is True.
+    visible_body_is_run_output: bool = True
     canonical_final_body_candidate: str | None = None
     failure_reason: str | None = None
     interactive_metadata: InteractiveMetadata | None = None

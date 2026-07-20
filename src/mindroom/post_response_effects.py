@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -243,7 +244,14 @@ async def apply_post_response_effects(
             else None
         )
         try:
-            deps.persist_response_event_id(outcome.response_run_id, response_event_id, delivered_visible_body)
+            # The callback loads, rewrites, and upserts a whole session row;
+            # run it off-loop so large sessions cannot stall the event loop.
+            await asyncio.to_thread(
+                deps.persist_response_event_id,
+                outcome.response_run_id,
+                response_event_id,
+                delivered_visible_body,
+            )
         except Exception:
             deps.logger.exception(
                 "Failed to persist response event linkage in run metadata",

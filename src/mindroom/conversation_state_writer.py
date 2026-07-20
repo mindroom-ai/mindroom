@@ -170,13 +170,14 @@ class ConversationStateWriter:
 def _current_generation_assistant_message(run: RunOutput | TeamRunOutput) -> Message | None:
     """Return the run's own final content-bearing assistant message.
 
-    Scanning stops at the first user-role message from the end: assistant
-    entries before it belong to replayed or fallback context, and rewriting
-    those would bind an older answer to the new event. Tool-call stubs without
-    string content are never targeted.
+    Scanning stops at the first user- or tool-role message from the end:
+    assistant entries before a user turn belong to replayed or fallback
+    context, and assistant segments before a tool result are intermediate
+    generations — rewriting either would bind older text to the new event.
+    Tool-call stubs without string content are never targeted.
     """
     for message in reversed(run.messages or []):
-        if message.role == "user":
+        if message.role in {"user", "tool"}:
             return None
         if message.role == "assistant" and isinstance(message.content, str) and message.content:
             return message

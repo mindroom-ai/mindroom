@@ -288,7 +288,10 @@ def prepared_entity_user_ids(config: Config, runtime_paths: RuntimePaths) -> fro
     """Return persisted managed-entity user IDs, skipping accounts not yet prepared.
 
     Unprepared entities are simply absent, which fails closed for trust checks
-    that treat membership as the grant.
+    that treat membership as the grant. The set covers router, agent, and team
+    accounts only: relayed ``original_sender`` metadata must originate from an
+    entity account — relays sent from ``mindroom_user`` or ``bot_accounts``
+    entries fail closed to the sending account's own identity.
     """
     domain = _matrix_domain(runtime_paths)
     user_ids: set[str] = set()

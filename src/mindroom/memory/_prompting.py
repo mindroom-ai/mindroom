@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING
 
 from mindroom.prompt_templates import render_prompt_template
@@ -13,8 +12,6 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
     from ._shared import MemoryResult
-
-_USER_TURN_TIME_PREFIX_RE = re.compile(r"^\[(?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2} [^\]]+\]\s")
 
 
 def format_memories_as_context(
@@ -29,11 +26,6 @@ def format_memories_as_context(
 
     memory_lines = "\n".join(f"- {memory.get('memory', '')}" for memory in memories)
     return render_prompt_template(prompt_template, context_type=context_type, memory_lines=memory_lines)
-
-
-def strip_user_turn_time_prefix(text: str) -> str:
-    """Remove bot-injected timestamp metadata from a user turn."""
-    return _USER_TURN_TIME_PREFIX_RE.sub("", text, count=1)
 
 
 def _build_conversation_messages(

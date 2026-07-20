@@ -73,6 +73,7 @@ from mindroom.streaming import (
 from mindroom.sync_restart_retry import interrupted_source_needs_retry
 from mindroom.teams import TeamMode, select_model_for_team, team_response, team_response_stream
 from mindroom.thread_summary import thread_summary_message_count_hint
+from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import ToolDispatchContext, runtime_context_from_dispatch_context
@@ -529,11 +530,23 @@ class ResponseRunner:
         user_message: str,
         reply_to_event_id: str | None,
         current_event_id: str | None,
+        current_message_suffix: str = "",
+        current_timestamp_ms: float | None = None,
         requester_id: str | None,
         matrix_run_metadata: dict[str, Any] | None,
     ) -> TurnRecorder:
         """Create one lifecycle-owned recorder seeded with canonical Matrix metadata."""
-        recorder = TurnRecorder(user_message=user_message, current_event_id=current_event_id)
+        current_turn_ts = (
+            format_timestamp_ms(current_timestamp_ms, timezone=self.deps.runtime.config.timezone)
+            if current_event_id is not None and current_timestamp_ms is not None
+            else None
+        )
+        recorder = TurnRecorder(
+            user_message=user_message,
+            current_event_id=current_event_id,
+            current_message_suffix=current_message_suffix,
+            current_turn_ts=current_turn_ts,
+        )
         recorder.set_run_metadata(
             build_matrix_run_metadata(
                 reply_to_event_id,
@@ -1648,6 +1661,8 @@ class ResponseRunner:
             user_message=request.prompt,
             reply_to_event_id=request.reply_to_event_id,
             current_event_id=request.current_event_id,
+            current_message_suffix=team_message_suffix,
+            current_timestamp_ms=request.current_timestamp_ms,
             requester_id=requester_user_id or execution_identity.requester_id,
             matrix_run_metadata=matrix_run_metadata,
         )
@@ -2340,6 +2355,8 @@ class ResponseRunner:
             user_message=request.prompt,
             reply_to_event_id=request.reply_to_event_id,
             current_event_id=request.current_event_id,
+            current_message_suffix=request.model_prompt or "",
+            current_timestamp_ms=request.current_timestamp_ms,
             requester_id=request.user_id,
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
         )
@@ -2491,6 +2508,8 @@ class ResponseRunner:
             user_message=request.prompt,
             reply_to_event_id=request.reply_to_event_id,
             current_event_id=request.current_event_id,
+            current_message_suffix=request.model_prompt or "",
+            current_timestamp_ms=request.current_timestamp_ms,
             requester_id=request.user_id,
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
         )

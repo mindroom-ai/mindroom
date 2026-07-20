@@ -18,10 +18,13 @@ import mindroom.memory._file_backend as file_backend_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history.runtime import ScopeSessionContext
 from mindroom.history.types import HistoryScope, PreparedHistoryState
+from mindroom.logging_config import get_logger
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory._file_backend import FileMemoryBackend
+from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from tests.conftest import bind_runtime_paths, make_turn_context, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -334,3 +337,41 @@ async def test_location_marker_lookup_runs_off_event_loop(
     location_block, marker = await lookup_task
     assert marker == "📍 Home"
     assert '<item key="location"' in location_block
+
+
+@pytest.mark.asyncio
+async def test_response_event_persistence_runs_off_event_loop() -> None:
+    """The post-delivery wrap loads and rewrites a whole session; SQLite must not stall the loop."""
+    gate = threading.Event()
+    persist_started = threading.Event()
+    persisted: list[tuple[str, str, str | None]] = []
+
+    def blocking_persist(run_id: str, event_id: str, body: str | None) -> None:
+        persist_started.set()
+        gate.wait()
+        persisted.append((run_id, event_id, body))
+
+    effects_task = asyncio.get_running_loop().create_task(
+        apply_post_response_effects(
+            FinalDeliveryOutcome(
+                terminal_status="completed",
+                event_id="$response",
+                is_visible_response=True,
+                final_visible_body="ok",
+                body_is_run_output=True,
+            ),
+            ResponseOutcome(response_run_id="run-1", run_succeeded=True),
+            PostResponseEffectsDeps(
+                logger=get_logger("tests.persist_offload"),
+                persist_response_event_id=blocking_persist,
+            ),
+        ),
+    )
+    await asyncio.to_thread(persist_started.wait, 5.0)
+
+    # The persistence thread is parked on the gate; the loop must stay live.
+    await _assert_loop_heartbeats_while_pending(effects_task)
+
+    gate.set()
+    await effects_task
+    assert persisted == [("run-1", "$response", "ok")]

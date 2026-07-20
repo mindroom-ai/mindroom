@@ -60,6 +60,10 @@ class InterruptedReplaySnapshot:
     # edit, or transcription); None for
     # synthetic prompts and structured batches carrying per-child identity.
     current_event_id: str | None = None
+    # Model-only current-turn additions rendered after the event-tagged block.
+    current_message_suffix: str = ""
+    # Preformatted local send time for the current event's ``ts`` attribute.
+    current_turn_ts: str | None = None
     original_status: RunStatus = RunStatus.cancelled
 
 
@@ -228,16 +232,24 @@ def _wrapped_snapshot_user_message(snapshot: InterruptedReplaySnapshot) -> str:
 
     ``current_event_id`` is set only when the recorded prompt is the body one
     Matrix event resolves to for display, so synthetic prompts and structured batches whose
-    children carry their own event identity are never wrapped. A recorded
-    location-change marker is system-generated and lands outside the wrapped
-    block (the marker alone when the prompt was empty), and interrupted
-    assistant content always stays unwrapped: delivery is not finalized when
-    this snapshot persists, so no visible event can be claimed for it.
+    children carry their own event identity are never wrapped. Model-only
+    current-turn additions (suffix, then the recorded location marker) are
+    system-generated and land outside the wrapped block exactly as normal
+    execution preparation renders them, and interrupted assistant content
+    always stays unwrapped: delivery is not finalized when this snapshot
+    persists, so no visible event can be claimed for it.
     """
     body = snapshot.user_message
     requester_id = snapshot.run_metadata.get("requester_id")
     if snapshot.current_event_id and body and isinstance(requester_id, str) and requester_id:
-        body = render_msg_tag(sender=requester_id, body=body, event_id=snapshot.current_event_id)
+        body = render_msg_tag(
+            sender=requester_id,
+            body=body,
+            event_id=snapshot.current_event_id,
+            ts=snapshot.current_turn_ts,
+        )
+    if snapshot.current_message_suffix:
+        body = f"{body}\n\n{snapshot.current_message_suffix}" if body else snapshot.current_message_suffix
     marker = snapshot.run_metadata.get(MINDROOM_LOCATION_MARKER_METADATA_KEY)
     if isinstance(marker, str) and marker:
         return f"{body}\n\n{marker}" if body else marker
@@ -289,6 +301,8 @@ def build_interrupted_replay_snapshot(
     interrupted_tools: Sequence[ToolTraceEntry],
     run_metadata: Mapping[str, object] | None,
     current_event_id: str | None = None,
+    current_message_suffix: str = "",
+    current_turn_ts: str | None = None,
     response_event_id: str | None = None,
     original_status: RunStatus = RunStatus.cancelled,
 ) -> InterruptedReplaySnapshot:
@@ -309,6 +323,8 @@ def build_interrupted_replay_snapshot(
         interrupted_tools=tuple(interrupted_tools),
         run_metadata=metadata,
         current_event_id=current_event_id,
+        current_message_suffix=current_message_suffix,
+        current_turn_ts=current_turn_ts,
         original_status=original_status,
     )
 
@@ -366,6 +382,7 @@ def persist_interrupted_replay(
     interrupted_tools: Sequence[ToolTraceEntry],
     run_metadata: Mapping[str, object] | None,
     is_team: bool,
+    current_message_suffix: str = "",
     original_status: RunStatus = RunStatus.cancelled,
 ) -> None:
     """Persist one interrupted top-level turn from trusted runtime state."""
@@ -383,6 +400,7 @@ def persist_interrupted_replay(
             completed_tools=completed_tools,
             interrupted_tools=interrupted_tools,
             run_metadata=run_metadata,
+            current_message_suffix=current_message_suffix,
             response_event_id=None,
             original_status=original_status,
         ),

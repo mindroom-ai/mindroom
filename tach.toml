@@ -1308,10 +1308,10 @@ depends_on = [
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.entity_resolution",
-    "mindroom.history.storage",
-    "mindroom.history.types",
     "mindroom.history.interrupted_replay",
+    "mindroom.history.storage",
     "mindroom.history.turn_recorder",
+    "mindroom.history.types",
     "mindroom.hooks",
     "mindroom.matrix.client_visible_messages",
     "mindroom.memory",
@@ -1324,6 +1324,7 @@ depends_on = [
     "mindroom.sync_restart_retry",
     "mindroom.teams",
     "mindroom.thread_summary",
+    "mindroom.timestamp_formatting",
     "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
@@ -1489,6 +1490,7 @@ visibility = [
     "mindroom.coalescing_batch",
     "mindroom.edit_regenerator",
     "mindroom.execution_preparation",
+    "mindroom.response_runner",
     "mindroom.handled_turns",
     "mindroom.turn_controller",
 ]
@@ -3624,7 +3626,6 @@ expose = [
     "reprioritize_auto_flush_sessions",
     "search_agent_memories",
     "store_conversation_memory",
-    "strip_user_turn_time_prefix",
     "update_agent_memory",
 ]
 from = ["mindroom.memory"]
