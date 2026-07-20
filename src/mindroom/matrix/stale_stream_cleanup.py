@@ -24,7 +24,11 @@ from mindroom.constants import (
     STREAM_VISIBLE_BODY_KEY,
     STREAM_WARMUP_SUFFIX_KEY,
 )
-from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+from mindroom.dispatch_source import (
+    AUTO_RESUME_MESSAGE,
+    TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    is_auto_resume_relay_body,
+)
 from mindroom.entity_resolution import (
     MissingManagedEntityAccountError,
     current_entity_id,
@@ -84,9 +88,6 @@ _STOP_REACTION_KEYS = frozenset({"🛑", "⏹️"})
 _MAX_REQUESTER_RESOLUTION_DEPTH = 10
 _MAX_EXTRA_INTERRUPTED_HISTORY_PAGES = 10
 _INTERRUPTED_PARTIAL_TEXT_LIMIT = 280
-_AUTO_RESUME_MESSAGE = (
-    "[System: Previous response was interrupted by service restart. Please continue where you left off.]"
-)
 _TERMINAL_STREAM_STATUSES = frozenset(
     {STREAM_STATUS_CANCELLED, STREAM_STATUS_COMPLETED, STREAM_STATUS_ERROR, STREAM_STATUS_INTERRUPTED},
 )
@@ -472,6 +473,8 @@ def _later_thread_activity_is_internal(
         if not message.sender:
             msg = "Thread history contains a message without a trustworthy sender"
             raise ValueError(msg)
+        if message.sender in internal_sender_ids and is_auto_resume_relay_body(message.body):
+            continue
         effective_requester = _effective_requester_for_message(
             message,
             config=config,
@@ -861,7 +864,7 @@ def _auto_resume_target_event_ids(
     """Return interrupted event IDs that already have a queued auto-resume relay."""
     target_event_ids: set[str] = set()
     for message in messages:
-        if message.sender not in bot_user_ids or _AUTO_RESUME_MESSAGE not in message.body:
+        if message.sender not in bot_user_ids or not is_auto_resume_relay_body(message.body):
             continue
         reply_to_event_id = message.reply_to_event_id
         if reply_to_event_id is not None:
@@ -1833,13 +1836,13 @@ def _build_auto_resume_content(
     target_user_id = _current_configured_entity_user_id(interrupted_thread.agent_name, config, runtime_paths)
     display_name = _entity_display_name(interrupted_thread.agent_name, config)
 
-    body = _AUTO_RESUME_MESSAGE
+    body = AUTO_RESUME_MESSAGE
     formatted_body: str | None = None
     mentioned_user_ids: list[str] | None = None
     if target_user_id is not None:
-        body = f"@{display_name} {_AUTO_RESUME_MESSAGE}"
+        body = f"@{display_name} {AUTO_RESUME_MESSAGE}"
         formatted_body = markdown_to_html(
-            f"[@{display_name}](https://matrix.to/#/{target_user_id}) {_AUTO_RESUME_MESSAGE}",
+            f"[@{display_name}](https://matrix.to/#/{target_user_id}) {AUTO_RESUME_MESSAGE}",
         )
         mentioned_user_ids = [target_user_id]
 

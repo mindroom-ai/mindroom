@@ -21,7 +21,7 @@ from mindroom.constants import (
     STREAM_STATUS_INTERRUPTED,
     STREAM_STATUS_KEY,
 )
-from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+from mindroom.dispatch_source import AUTO_RESUME_MESSAGE, TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import MissingManagedEntityAccountError, entity_identity_registry
 from mindroom.matrix import stale_stream_cleanup as stale_stream_cleanup_module
 from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
@@ -67,9 +67,6 @@ ROOM_ID = "!room:example.com"
 NOW_MS = 1_000_000
 STALE_AGE_MS = stale_stream_cleanup_module._STALE_STREAM_RECENCY_GUARD_MS + 60_000
 OLD_STALE_AGE_MS = stale_stream_cleanup_module._STALE_STREAM_LOOKBACK_MS + 60_000
-AUTO_RESUME_MESSAGE = (
-    "[System: Previous response was interrupted by service restart. Please continue where you left off.]"
-)
 USER_ID = "@user:example.com"
 OTHER_USER_ID = "@other-user:example.com"
 
@@ -277,10 +274,11 @@ def _history_message(
     sender: str = BOT_USER_ID,
     timestamp: int = 0,
     content: dict[str, object] | None = None,
+    body: str | None = None,
 ) -> ResolvedVisibleMessage:
     return ResolvedVisibleMessage.synthetic(
         sender=sender,
-        body=event_id,
+        body=event_id if body is None else body,
         event_id=event_id,
         timestamp=timestamp,
         content=content,
@@ -868,6 +866,52 @@ async def test_auto_resume_classifies_later_activity_by_effective_sender_and_his
 
     assert resumed_count == expected_resumes
     assert mock_send.await_count == expected_resumes
+
+
+@pytest.mark.asyncio
+async def test_prior_auto_resume_relay_does_not_suppress_sibling_resume(tmp_path: Path) -> None:
+    """A synthetic resume relay should not masquerade as newer human work."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    interrupted = [
+        InterruptedThread(
+            ROOM_ID,
+            "$thread",
+            "$target",
+            "partial",
+            "test_agent",
+            original_sender_id=USER_ID,
+        ),
+    ]
+    conversation_cache = _auto_resume_conversation_cache(interrupted)
+    conversation_cache.get_strict_thread_history.side_effect = None
+    conversation_cache.get_strict_thread_history.return_value = _authoritative_history(
+        _history_message("$target"),
+        _history_message(
+            "$prior-resume",
+            sender=OTHER_BOT_USER_ID,
+            body=AUTO_RESUME_MESSAGE,
+            content={
+                SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                ORIGINAL_SENDER_KEY: USER_ID,
+            },
+        ),
+    )
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.send_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$resume")),
+    ) as mock_send:
+        resumed_count = await auto_resume_interrupted_threads(
+            client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            conversation_cache=conversation_cache,
+        )
+
+    assert resumed_count == 1
+    mock_send.assert_awaited_once()
 
 
 @pytest.mark.parametrize("history_case", ["missing", "failed", "degraded", "missing_target", "untrusted_sender"])
