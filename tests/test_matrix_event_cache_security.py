@@ -16,7 +16,6 @@ from mindroom.matrix import client_thread_history
 from mindroom.matrix.cache import (
     ConversationEventCache,
     SharedConversationEventCache,
-    clear_untrusted_principal_cache,
     postgres_event_cache_events,
     postgres_event_cache_threads,
     sqlite_event_cache_events,
@@ -26,6 +25,7 @@ from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.rooms import leave_non_dm_rooms
+from mindroom.matrix.sync_cache_trust import SyncCacheTrust
 from tests.event_cache_test_support import replace_thread_unconditionally
 
 if TYPE_CHECKING:
@@ -747,6 +747,7 @@ async def test_failed_principal_purge_blocks_generation_and_reads_until_recovery
 async def test_failed_startup_cleanup_disables_only_the_affected_principal(
     event_cache_factory: Callable[[], ConversationEventCache],
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Failed untrusted-row cleanup must keep one principal network-only until restart."""
     root = _shared_cache(event_cache_factory)
@@ -771,8 +772,14 @@ async def test_failed_startup_cleanup_disables_only_the_affected_principal(
 
     try:
         monkeypatch.setattr(module, "purge_principal_locked", fail_purge)
-        with pytest.raises(RuntimeError, match=failure_reason):
-            await clear_untrusted_principal_cache(alice)
+        runtime = MagicMock(event_cache=alice, callback_failure_count=0)
+        trust = SyncCacheTrust(
+            storage_path=tmp_path,
+            agent_name="alice",
+            runtime=runtime,
+            logger=MagicMock(),
+        )
+        assert await trust.prepare_startup() is None
 
         assert alice.durable_writes_available is False
         assert alice.cache_generation is None

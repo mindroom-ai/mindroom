@@ -21,6 +21,15 @@ These three policies are the only writers of durable thread-cache state:
 5. Within one sync batch, UNKNOWN impacts invalidate the room at most once per pass (once across the
    message pass and once across the redaction pass); later UNKNOWN mutations in the same pass reuse
    that invalidation instead of writing duplicate markers.
+
+6. A limited sync timeline invalidates the room before any partial-window event is admitted; a later
+   write failure preserves the specific ``limited_sync_timeline`` reason instead of replacing it.
+
+7. A still-opaque ``m.room.encrypted`` mutation with a known thread never appends into the snapshot or
+   revalidates it; it only marks that thread stale under a non-incremental reason, so the snapshot
+   stays rejected until a decryption-capable refresh replaces it.
+   Point rows and explicit relation indexes are still persisted by the batch store, and unknown-impact
+   opaque mutations fail closed through the standard room-scope invalidation.
 """
 
 from __future__ import annotations
@@ -33,7 +42,7 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_info import EventInfo, is_thread_affecting_relation
 from mindroom.matrix.sync_certification import SyncCacheWriteResult
 from mindroom.matrix.thread_bookkeeping import (
     MutationResolutionContext,
@@ -41,11 +50,14 @@ from mindroom.matrix.thread_bookkeeping import (
     MutationThreadImpactState,
     MutationWriteContext,
     ThreadMutationResolver,
-    is_thread_affecting_relation,
 )
 from mindroom.timing import elapsed_ms_since, emit_timing_event, timing_enabled
 
-from .event_normalization import normalize_event_source_for_cache, normalize_nio_event_for_cache
+from .event_normalization import (
+    is_opaque_encrypted_event_source,
+    normalize_event_source_for_cache,
+    normalize_nio_event_for_cache,
+)
 
 if TYPE_CHECKING:
     from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
@@ -58,6 +70,7 @@ __all__ = [
 
 
 _NONTERMINAL_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
+_LIMITED_SYNC_TIMELINE_REASON = "limited_sync_timeline"
 _SYNC_TIMELINE_WRITE_FAILED_REASON = "sync_timeline_write_failed"
 
 
@@ -171,6 +184,16 @@ async def _apply_thread_message_mutation(
         return True
     assert impact.thread_id is not None
     assert event_source is not None
+    if is_opaque_encrypted_event_source(event_source):
+        # A still-undecryptable payload cannot make the visible snapshot complete, so the thread
+        # stays stale under a non-incremental reason until a decryption-capable refresh replaces it.
+        await cache_ops.invalidate_known_thread(
+            room_id,
+            impact.thread_id,
+            reason=_mutation_reason(context, "opaque_encrypted_event"),
+            raise_on_failure=raise_on_cache_write_failure,
+        )
+        return False
     await cache_ops.invalidate_known_thread(
         room_id,
         impact.thread_id,
@@ -1046,8 +1069,20 @@ class ThreadSyncWritePolicy:
         threaded_events: typing.Sequence[dict[str, object]],
         redacted_event_ids: typing.Sequence[str],
         *,
+        limited_timeline: bool,
         raise_on_cache_write_failure: bool,
     ) -> None:
+        if limited_timeline:
+            # A limited timeline skipped events, so this room's cached thread
+            # snapshots must durably stop being trusted before the partial
+            # window is admitted.
+            await self._cache_ops.invalidate_room_threads(
+                room_id,
+                reason=_LIMITED_SYNC_TIMELINE_REASON,
+                raise_on_failure=raise_on_cache_write_failure,
+            )
+        if not plain_events and not threaded_events and not redacted_event_ids:
+            return
         try:
             plain_batch = [
                 (event_id, room_id, event_source)
@@ -1089,7 +1124,7 @@ class ThreadSyncWritePolicy:
                 raise_on_cache_write_failure=raise_on_cache_write_failure,
             )
         except Exception:
-            if raise_on_cache_write_failure:
+            if raise_on_cache_write_failure and not limited_timeline:
                 await self._cache_ops.invalidate_room_threads(
                     room_id,
                     reason=_SYNC_TIMELINE_WRITE_FAILED_REASON,
@@ -1133,21 +1168,27 @@ class ThreadSyncWritePolicy:
         """Queue sync timeline persistence through the room-ordered cache barrier."""
         if not self._cache_ops.cache_runtime_available():
             return []
+        limited_room_ids, validation_errors = self._limited_sync_timeline_room_ids(response)
+        if validation_errors:
+            raise validation_errors[0]
         room_plain_events, room_threaded_events, room_redactions = self._group_sync_timeline_updates(response)
+        limited_room_id_set = set(limited_room_ids)
         tasks: list[asyncio.Task[object]] = []
-        for room_id in set(room_plain_events) | set(room_threaded_events) | set(room_redactions):
+        for room_id in set(room_plain_events) | set(room_threaded_events) | set(room_redactions) | limited_room_id_set:
             plain_events = room_plain_events.get(room_id, ())
             threaded_events = room_threaded_events.get(room_id, ())
             redacted_event_ids = room_redactions.get(room_id, ())
+            limited_timeline = room_id in limited_room_id_set
             tasks.append(
                 self._cache_ops.queue_room_cache_update(
                     room_id,
-                    lambda room_id=room_id, plain_events=plain_events, threaded_events=threaded_events, redacted_event_ids=redacted_event_ids: (
+                    lambda room_id=room_id, plain_events=plain_events, threaded_events=threaded_events, redacted_event_ids=redacted_event_ids, limited_timeline=limited_timeline: (
                         self._persist_room_sync_timeline_updates(
                             room_id,
                             plain_events,
                             threaded_events,
                             redacted_event_ids,
+                            limited_timeline=limited_timeline,
                             raise_on_cache_write_failure=raise_on_cache_write_failure,
                         )
                     ),
@@ -1206,20 +1247,20 @@ class ThreadSyncWritePolicy:
         response: nio.SyncResponse,
     ) -> SyncCacheWriteResult:
         """Persist sync timeline data and report whether it certifies the sync token."""
-        if not self._cache_ops.cache_runtime_available():
-            return SyncCacheWriteResult(
-                complete=False,
-                runtime_available=False,
-                task_count=0,
-                runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
-            )
-
         limited_room_ids, validation_errors = self._limited_sync_timeline_room_ids(response)
         if validation_errors:
             return SyncCacheWriteResult(
                 complete=False,
                 errors=validation_errors,
                 runtime_available=self._cache_ops.cache_runtime_available(),
+                runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
+            )
+        if not self._cache_ops.cache_runtime_available():
+            return SyncCacheWriteResult(
+                complete=False,
+                limited_room_ids=limited_room_ids,
+                runtime_available=False,
+                task_count=0,
                 runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
             )
 

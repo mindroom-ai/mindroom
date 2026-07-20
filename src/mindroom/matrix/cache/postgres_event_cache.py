@@ -21,7 +21,12 @@ from .event_normalization import normalize_event_source_for_cache
 from .postgres_agent_message_snapshot import load_postgres_agent_message_snapshot
 from .postgres_cache_maintenance import migrate_postgres_schema, run_startup_maintenance
 from .postgres_redaction import redact_postgres_connection_info
-from .thread_cache_state import replacement_validated_at
+from .thread_cache_state import (
+    THREAD_HISTORY_TRUST_METADATA_KEY,
+    THREAD_HISTORY_TRUST_VERSION,
+    incoming_thread_invalidation_takes_precedence,
+    replacement_validated_at,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -193,6 +198,10 @@ async def _initialize_postgres_event_cache_db(
         if current_schema_version in {1, 2}:
             await _migrate_postgres_event_cache_security_schema(db)
         await _create_postgres_event_cache_schema(db)
+        await db.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
+            (namespace, _PRINCIPAL_NAMESPACE_LOCK_SCOPE),
+        )
         migration_result = await migrate_postgres_schema(
             db,
             namespace=namespace,
@@ -460,13 +469,45 @@ async def _initialize_namespace_certification_generation(
     namespace: str,
 ) -> str:
     """Return a durable cache generation for one PostgreSQL namespace."""
+    trust_cursor = await db.execute(
+        """
+        SELECT value
+        FROM mindroom_event_cache_namespace_metadata
+        WHERE namespace = %s AND key = %s
+        """,
+        (namespace, THREAD_HISTORY_TRUST_METADATA_KEY),
+    )
+    try:
+        trust_row = await trust_cursor.fetchone()
+    finally:
+        await trust_cursor.close()
+    trust_reset = trust_row != (THREAD_HISTORY_TRUST_VERSION,)
+    if trust_reset:
+        await db.execute(
+            "DELETE FROM mindroom_event_cache_thread_events WHERE namespace = %s",
+            (namespace,),
+        )
+        await db.execute(
+            "DELETE FROM mindroom_event_cache_thread_state WHERE namespace = %s",
+            (namespace,),
+        )
+        await db.execute(
+            """
+            INSERT INTO mindroom_event_cache_namespace_metadata(namespace, key, value)
+            VALUES (%s, %s, %s)
+            ON CONFLICT(namespace, key) DO UPDATE SET value = excluded.value
+            """,
+            (namespace, THREAD_HISTORY_TRUST_METADATA_KEY, THREAD_HISTORY_TRUST_VERSION),
+        )
+    generation = uuid.uuid4().hex
     await db.execute(
         """
         INSERT INTO mindroom_event_cache_namespace_metadata(namespace, key, value)
         VALUES (%s, 'certification_generation', %s)
-        ON CONFLICT(namespace, key) DO NOTHING
+        ON CONFLICT(namespace, key) DO UPDATE SET value = excluded.value
+        WHERE %s
         """,
-        (namespace, uuid.uuid4().hex),
+        (namespace, generation, trust_reset),
     )
     certification_generation = await _load_namespace_certification_generation(db, namespace=namespace)
     if certification_generation is None:
@@ -707,8 +748,15 @@ class _PostgresEventCacheRuntime:
         """Remember a best-effort stale marker that must be persisted before trusting cache rows."""
         key = (room_id, thread_id)
         existing = self._pending_thread_invalidations.get(key)
-        if existing is not None and existing.invalidated_at >= invalidated_at:
-            return
+        if existing is not None:
+            incoming_takes_precedence = incoming_thread_invalidation_takes_precedence(
+                current_invalidated_at=existing.invalidated_at,
+                current_reason=existing.reason,
+                incoming_invalidated_at=invalidated_at,
+                incoming_reason=reason,
+            )
+            reason = reason if incoming_takes_precedence else existing.reason
+            invalidated_at = max(existing.invalidated_at, invalidated_at)
         self._pending_thread_invalidations[key] = _PendingInvalidation(
             invalidated_at=invalidated_at,
             reason=reason,

@@ -7,9 +7,10 @@ Cache-trust rules (each encodes a shipped regression fix; do not weaken them):
    ``room_invalidated_at`` is at or after ``validated_at`` (see
    ``mindroom.matrix.cache.thread_cache_helpers`` for the age and restart rules).
 
-2. Cached rows that do not include the thread-root event are never served: both the trusted-read path
-   and the stale-fallback path refuse such rows and invalidate the entry, and a fresh homeserver fetch
-   missing the root is never stored (PR #741).
+2. Cached rows that do not include the thread-root event or that still contain opaque
+   ``m.room.encrypted`` payloads are never served: both the trusted-read path and the stale-fallback
+   path refuse such rows and invalidate the entry, and an incomplete fresh homeserver fetch is never
+   stored (PR #741).
 
 3. Cache repopulation is guarded against write races: every store passes the fetch start time plus the
    durable room-membership epoch to ``replace_thread_if_not_newer``, so a fetch cannot bury a newer
@@ -29,6 +30,12 @@ Cache-trust rules (each encodes a shipped regression fix; do not weaken them):
 6. The room scan requests both ``m.room.message`` and ``m.room.encrypted`` timeline events so nio can
    decrypt threads in encrypted rooms (PR #878), pages backwards until the root event is seen, and
    raises ``ThreadRoomScanRootNotFoundError`` when the scan drains without finding it.
+
+7. Still-opaque encrypted evidence fails closed: a reconstruction whose sources include an
+   undecryptable relation-bearing event for the requested thread, or whose scan contains one with
+   unresolved thread impact, marks the thread stale and raises ``OpaqueEncryptedThreadHistoryError``
+   instead of certifying incomplete history; the stale marker survives until a decryption-capable
+   refresh replaces the snapshot.
 """
 
 from __future__ import annotations
@@ -47,16 +54,21 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
     ThreadCacheState,
     ThreadHistoryResult,
+    is_opaque_encrypted_event_source,
     normalize_nio_event_for_cache,
     thread_cache_rejection_reason,
     thread_history_result,
+)
+from mindroom.matrix.cache.thread_cache_invalidation import (
+    mark_room_threads_stale_fail_closed,
+    mark_thread_stale_fail_closed,
 )
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     apply_latest_edits_to_messages,
     record_latest_thread_edit,
 )
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_info import EventInfo, is_thread_affecting_relation
 from mindroom.matrix.media import (
     is_encrypted_media_event_source,
     parse_matrix_media_event_source,
@@ -72,7 +84,12 @@ from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_HOMESERVER,
     THREAD_HISTORY_SOURCE_STALE_CACHE,
 )
-from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
+from mindroom.matrix.thread_membership import (
+    ThreadResolutionState,
+    ThreadRoomScanRootNotFoundError,
+    map_backed_thread_membership_access,
+    resolve_event_thread_membership,
+)
 from mindroom.matrix.thread_projection import (
     ordered_event_ids_from_scanned_event_sources,
     resolve_thread_ids_for_event_infos,
@@ -90,7 +107,18 @@ _VISIBLE_ROOM_MESSAGE_EVENT_TYPES = (nio.RoomMessageText, nio.RoomMessageNotice)
 _ROOM_HISTORY_MESSAGE_TYPES = ("m.room.message", "m.room.encrypted")
 _MAX_ENUMERATED_THREAD_ROOTS = 2000
 _MAX_THREAD_ENUMERATION_PAGES = 100
+_OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON = "thread_history_opaque_encrypted_event"
+_OPAQUE_ENCRYPTED_EVENT_REJECTION = "opaque_encrypted_event"
+_MISSING_THREAD_ROOT_REJECTION = "missing_thread_root"
 type _ThreadHistoryDiagnosticValue = str | int | float | bool | None
+
+
+class OpaqueEncryptedThreadHistoryError(RuntimeError):
+    """Raised when a thread reconstruction depends on still-undecryptable encrypted events."""
+
+
+class _UnresolvedOpaqueRoomHistoryError(OpaqueEncryptedThreadHistoryError):
+    """Raised when opaque room history cannot be assigned to a specific thread."""
 
 
 async def _capture_membership_epoch(event_cache: ConversationEventCache, room_id: str) -> int:
@@ -425,12 +453,14 @@ async def _load_stale_cached_thread_history(
         return None
     if cached_event_sources is None:
         return None
-    if not _thread_history_fetch_is_cacheable(cached_event_sources, thread_id=thread_id):
+    cached_rejection_reason = _thread_history_cache_rejection_reason(cached_event_sources, thread_id=thread_id)
+    if cached_rejection_reason is not None:
         logger.warning(
-            "Stale thread cache missing root; refusing degraded history",
+            "Stale thread cache is incomplete; refusing degraded history",
             room_id=room_id,
             thread_id=thread_id,
             error=str(fetch_error),
+            cache_rejection_reason=cached_rejection_reason,
         )
         await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
         return None
@@ -563,10 +593,11 @@ async def _load_cached_thread_history_if_usable(
             THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "cache_rows_missing",
         }
         return None, cache_reject_diagnostics
-    if not _thread_history_fetch_is_cacheable(cached_event_sources, thread_id=thread_id):
+    cached_rejection_reason = _thread_history_cache_rejection_reason(cached_event_sources, thread_id=thread_id)
+    if cached_rejection_reason is not None:
         await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
         cache_reject_diagnostics: dict[str, str | int | float | bool] = {
-            THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "cache_missing_thread_root",
+            THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: f"cache_{cached_rejection_reason}",
         }
         logger.info(
             "Thread cache rejected for read",
@@ -670,6 +701,9 @@ async def refresh_thread_history_from_source(
             expected_membership_epoch=fetch_membership_epoch,
             trusted_sender_ids=trusted_sender_ids,
         )
+    except _UnresolvedOpaqueRoomHistoryError:
+        await _mark_room_stale_for_opaque_history(event_cache, room_id=room_id)
+        raise
     except Exception as exc:
         if allow_stale_fallback:
             stale_history = await _load_stale_cached_thread_history(
@@ -693,7 +727,15 @@ async def refresh_thread_history_from_source(
                 )
                 return stale_history
         raise
-    if _thread_history_fetch_is_cacheable(fetch_result.event_sources, thread_id=thread_id):
+    fetch_rejection_reason = _thread_history_cache_rejection_reason(
+        fetch_result.event_sources,
+        thread_id=thread_id,
+    )
+    if fetch_rejection_reason == _OPAQUE_ENCRYPTED_EVENT_REJECTION:
+        await _mark_thread_stale_for_opaque_history(event_cache, room_id=room_id, thread_id=thread_id)
+        msg = f"thread history for {thread_id} contains still-undecryptable encrypted events"
+        raise OpaqueEncryptedThreadHistoryError(msg)
+    if fetch_rejection_reason is None:
         cache_store_written = await _store_thread_history_cache(
             event_cache,
             room_id=room_id,
@@ -718,7 +760,7 @@ async def refresh_thread_history_from_source(
             "Thread history cache store skipped",
             room_id=room_id,
             thread_id=thread_id,
-            cache_store_skipped_reason="missing_thread_root",
+            cache_store_skipped_reason=fetch_rejection_reason,
             has_thread_root=False,
             event_count=len(fetch_result.event_sources),
             history_event_count=len(fetch_result.history),
@@ -785,13 +827,47 @@ async def _store_thread_history_cache(
         return False
 
 
-def _thread_history_fetch_is_cacheable(
+def _thread_history_cache_rejection_reason(
     event_sources: Sequence[dict[str, Any]],
     *,
     thread_id: str,
-) -> bool:
-    """Return whether one homeserver fetch contains the root event and is safe to cache."""
-    return any(_event_id_from_source(event_source) == thread_id for event_source in event_sources)
+) -> str | None:
+    """Return why one thread event payload cannot become an authoritative snapshot."""
+    if any(is_opaque_encrypted_event_source(event_source) for event_source in event_sources):
+        return _OPAQUE_ENCRYPTED_EVENT_REJECTION
+    if not any(_event_id_from_source(event_source) == thread_id for event_source in event_sources):
+        return _MISSING_THREAD_ROOT_REJECTION
+    return None
+
+
+async def _mark_thread_stale_for_opaque_history(
+    event_cache: ConversationEventCache,
+    *,
+    room_id: str,
+    thread_id: str,
+) -> None:
+    """Keep one opaque-poisoned thread durably stale, deleting the snapshot only when the marker fails."""
+    await mark_thread_stale_fail_closed(
+        event_cache,
+        room_id=room_id,
+        thread_id=thread_id,
+        reason=_OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON,
+        logger=logger,
+    )
+
+
+async def _mark_room_stale_for_opaque_history(
+    event_cache: ConversationEventCache,
+    *,
+    room_id: str,
+) -> None:
+    """Keep every thread stale when opaque relation impact cannot be scoped within the room."""
+    await mark_room_threads_stale_fail_closed(
+        event_cache,
+        room_id=room_id,
+        reason=_OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON,
+        logger=logger,
+    )
 
 
 async def _resolve_thread_history_message(
@@ -1044,6 +1120,14 @@ async def _fetch_thread_history_via_room_messages_with_events(
     )
 
 
+def _is_opaque_thread_affecting_event_source(event_source: Mapping[str, Any]) -> bool:
+    """Return whether one scanned payload is undecrypted ciphertext with exposed thread-affecting relations."""
+    if not is_opaque_encrypted_event_source(event_source):
+        return False
+    event_info = EventInfo.from_event(dict(event_source))
+    return is_thread_affecting_relation(event_info, event_type=event_info.event_type)
+
+
 def _record_scanned_room_message_source(
     event: nio.Event,
     *,
@@ -1051,6 +1135,12 @@ def _record_scanned_room_message_source(
     scanned_message_sources: dict[str, dict[str, Any]],
 ) -> str | None:
     """Record one scanned room-message source and return the recorded event ID."""
+    event_source = event.source if isinstance(event.source, dict) else {}
+    if _is_opaque_thread_affecting_event_source(event_source):
+        # Undecryptable relation-bearing ciphertext is recorded as fail-closed evidence: it resolves
+        # thread membership through its exposed relation and poisons only that reconstruction.
+        scanned_message_sources[event.event_id] = _event_source_for_cache(event)
+        return event.event_id
     if not _is_room_message_event(event):
         return None
 
@@ -1085,6 +1175,15 @@ async def fetch_thread_event_sources_via_room_messages(
             scanned_event_count=scan_result.scanned_event_count,
         )
         raise ThreadRoomScanRootNotFoundError(msg)
+    if scan_result.unresolved_opaque_event_ids:
+        logger.warning(
+            "Thread room scan contains opaque encrypted relations with unresolved impact",
+            room_id=room_id,
+            thread_id=thread_id,
+            unresolved_opaque_event_ids=sorted(scan_result.unresolved_opaque_event_ids),
+        )
+        msg = f"thread history scan for {thread_id} contains undecryptable events with unresolved thread impact"
+        raise _UnresolvedOpaqueRoomHistoryError(msg)
     return _ThreadEventSourceScanResult(
         event_sources=scan_result.thread_event_sources[thread_id],
         page_count=scan_result.page_count,
@@ -1098,6 +1197,7 @@ class _BulkThreadScanResult:
 
     thread_event_sources: dict[str, list[dict[str, Any]]]
     missing_root_ids: frozenset[str]
+    unresolved_opaque_event_ids: frozenset[str]
     page_count: int
     scanned_event_count: int
 
@@ -1113,21 +1213,47 @@ class BulkThreadRefreshStats:
     scanned_event_count: int
 
 
+async def _unresolved_opaque_relation_event_ids(
+    room_id: str,
+    *,
+    event_infos: dict[str, EventInfo],
+    scanned_message_sources: dict[str, dict[str, Any]],
+    resolved_thread_ids: dict[str, str],
+) -> frozenset[str]:
+    """Return scanned opaque relation-bearing events whose thread impact stays unknown."""
+    access = map_backed_thread_membership_access(
+        event_infos=event_infos,
+        resolved_thread_ids=resolved_thread_ids,
+    )
+    unresolved_event_ids: set[str] = set()
+    for event_id, event_source in scanned_message_sources.items():
+        if event_id in resolved_thread_ids or not is_opaque_encrypted_event_source(event_source):
+            continue
+        resolution = await resolve_event_thread_membership(
+            room_id,
+            event_infos[event_id],
+            access=access,
+        )
+        if resolution.state is ThreadResolutionState.INDETERMINATE:
+            unresolved_event_ids.add(event_id)
+    return frozenset(unresolved_event_ids)
+
+
 async def _group_scanned_sources_by_thread(
     *,
     room_id: str,
     thread_root_ids: Collection[str],
     scanned_message_sources: dict[str, dict[str, Any]],
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
-) -> dict[str, list[dict[str, Any]]]:
-    """Bucket one room scan's event sources per requested thread with one canonical resolution."""
+) -> tuple[dict[str, list[dict[str, Any]]], frozenset[str]]:
+    """Bucket room-scan sources per requested thread and report unresolved opaque relations."""
     grouped: dict[str, dict[str, dict[str, Any]]] = {
         root_id: {root_id: scanned_message_sources[root_id]}
         for root_id in thread_root_ids
         if root_id in scanned_message_sources
     }
     if not grouped:
-        return {}
+        return {}, frozenset()
     event_infos = {
         event_id: EventInfo.from_event(event_source) for event_id, event_source in scanned_message_sources.items()
     }
@@ -1146,6 +1272,13 @@ async def _group_scanned_sources_by_thread(
             continue
         bucket[event_id] = scanned_message_sources[event_id]
 
+    unresolved_opaque_event_ids = await _unresolved_opaque_relation_event_ids(
+        room_id,
+        event_infos=event_infos,
+        scanned_message_sources=scanned_message_sources,
+        resolved_thread_ids=resolved_thread_ids,
+    )
+
     edits_by_root: dict[str, list[dict[str, Any]]] = {}
     for original_event_id, (edit_event, edit_thread_id) in latest_edits_by_original_event_id.items():
         target_roots = {
@@ -1156,13 +1289,14 @@ async def _group_scanned_sources_by_thread(
         for root_id in target_roots:
             edits_by_root.setdefault(root_id, []).append(_event_source_for_cache(edit_event))
 
-    return {
+    grouped_sources = {
         root_id: sort_thread_event_sources_root_first(
             [*bucket.values(), *edits_by_root.get(root_id, [])],
             thread_id=root_id,
         )
         for root_id, bucket in grouped.items()
     }
+    return grouped_sources, unresolved_opaque_event_ids
 
 
 async def _bulk_scan_thread_event_sources(
@@ -1209,7 +1343,7 @@ async def _bulk_scan_thread_event_sources(
             break
         from_token = response.end
 
-    thread_event_sources = await _group_scanned_sources_by_thread(
+    thread_event_sources, unresolved_opaque_event_ids = await _group_scanned_sources_by_thread(
         room_id=room_id,
         thread_root_ids=thread_root_ids,
         scanned_message_sources=scanned_message_sources,
@@ -1218,6 +1352,7 @@ async def _bulk_scan_thread_event_sources(
     return _BulkThreadScanResult(
         thread_event_sources=thread_event_sources,
         missing_root_ids=frozenset(remaining_root_ids),
+        unresolved_opaque_event_ids=unresolved_opaque_event_ids,
         page_count=page_count,
         scanned_event_count=scanned_event_count,
     )
@@ -1238,24 +1373,42 @@ async def bulk_refresh_room_thread_histories(
     O(history) walk, buckets every scanned event with the same canonical resolution rules as the
     per-thread path, and stores each requested thread through the same guarded
     ``replace_thread_if_not_newer`` path. Threads whose root never appeared in the scan are
-    reported in ``missing_root_ids`` and never stored.
+    reported in ``missing_root_ids`` and never stored. Threads whose reconstruction contains
+    still-opaque encrypted evidence are marked stale instead of stored, and a scan holding opaque
+    relations with unresolved impact marks every requested thread stale.
     """
     fetch_started_at = time.time()
     fetch_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
     scan_result = await _bulk_scan_thread_event_sources(client, room_id, thread_root_ids=thread_root_ids)
     stored_threads = 0
-    for thread_id, event_sources in scan_result.thread_event_sources.items():
-        if not _thread_history_fetch_is_cacheable(event_sources, thread_id=thread_id):
-            continue
-        if await _store_thread_history_cache(
-            event_cache,
+    opaque_stale_threads = 0
+    if scan_result.unresolved_opaque_event_ids:
+        logger.warning(
+            "Bulk thread refresh scan contains opaque encrypted relations with unresolved impact",
             room_id=room_id,
-            thread_id=thread_id,
-            event_sources=event_sources,
-            expected_membership_epoch=fetch_membership_epoch,
-            fetch_started_at=fetch_started_at,
-        ):
-            stored_threads += 1
+            caller_label=caller_label,
+            unresolved_opaque_event_ids=sorted(scan_result.unresolved_opaque_event_ids),
+        )
+        await _mark_room_stale_for_opaque_history(event_cache, room_id=room_id)
+        opaque_stale_threads = len(set(thread_root_ids))
+    else:
+        for thread_id, event_sources in scan_result.thread_event_sources.items():
+            rejection_reason = _thread_history_cache_rejection_reason(event_sources, thread_id=thread_id)
+            if rejection_reason == _OPAQUE_ENCRYPTED_EVENT_REJECTION:
+                await _mark_thread_stale_for_opaque_history(event_cache, room_id=room_id, thread_id=thread_id)
+                opaque_stale_threads += 1
+                continue
+            if rejection_reason is not None:
+                continue
+            if await _store_thread_history_cache(
+                event_cache,
+                room_id=room_id,
+                thread_id=thread_id,
+                event_sources=event_sources,
+                expected_membership_epoch=fetch_membership_epoch,
+                fetch_started_at=fetch_started_at,
+            ):
+                stored_threads += 1
     stats = BulkThreadRefreshStats(
         requested_threads=len(set(thread_root_ids)),
         stored_threads=stored_threads,
@@ -1269,6 +1422,7 @@ async def bulk_refresh_room_thread_histories(
         caller_label=caller_label,
         requested_threads=stats.requested_threads,
         stored_threads=stats.stored_threads,
+        opaque_stale_threads=opaque_stale_threads,
         missing_roots=len(stats.missing_root_ids),
         room_scan_pages=stats.room_scan_pages,
         scanned_event_count=stats.scanned_event_count,
@@ -1447,6 +1601,7 @@ async def enumerate_room_thread_root_ids(
 
 __all__ = [
     "BulkThreadRefreshStats",
+    "OpaqueEncryptedThreadHistoryError",
     "RoomThreadsPageError",
     "ThreadRoomScanRootNotFoundError",
     "bulk_refresh_room_thread_histories",

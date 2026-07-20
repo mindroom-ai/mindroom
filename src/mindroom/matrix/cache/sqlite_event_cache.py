@@ -21,7 +21,11 @@ from .sqlite_cache_maintenance import (
     run_startup_maintenance,
     with_sqlite_storage_bytes,
 )
-from .thread_cache_state import replacement_validated_at
+from .thread_cache_state import (
+    THREAD_HISTORY_TRUST_METADATA_KEY,
+    THREAD_HISTORY_TRUST_VERSION,
+    replacement_validated_at,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -295,13 +299,33 @@ async def _initialize_cache_metadata(db: aiosqlite.Connection) -> str:
         """,
         (str(maximum_write_sequence),),
     )
+    trust_cursor = await db.execute(
+        "SELECT value FROM cache_metadata WHERE key = ?",
+        (THREAD_HISTORY_TRUST_METADATA_KEY,),
+    )
+    trust_row = await trust_cursor.fetchone()
+    await trust_cursor.close()
+    trust_reset = trust_row != (THREAD_HISTORY_TRUST_VERSION,)
+    if trust_reset:
+        await db.execute("DELETE FROM thread_events")
+        await db.execute("DELETE FROM thread_cache_state")
+        await db.execute(
+            """
+            INSERT INTO cache_metadata(key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (THREAD_HISTORY_TRUST_METADATA_KEY, THREAD_HISTORY_TRUST_VERSION),
+        )
+    generation = uuid.uuid4().hex
     await db.execute(
         """
         INSERT INTO cache_metadata(key, value)
         VALUES ('certification_generation', ?)
-        ON CONFLICT(key) DO NOTHING
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        WHERE ?
         """,
-        (uuid.uuid4().hex,),
+        (generation, trust_reset),
     )
     generation_cursor = await db.execute(
         "SELECT value FROM cache_metadata WHERE key = 'certification_generation'",

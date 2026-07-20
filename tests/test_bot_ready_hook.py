@@ -303,8 +303,8 @@ async def test_sync_leave_section_forgets_invited_room_before_call_teardown(
     call_manager.on_sync_room_membership = AsyncMock(side_effect=assert_invite_was_forgotten)
     install_call_manager_mock(bot, call_manager)
     monkeypatch.setattr(
-        bot,
-        "_sync_cache_result_for_certification",
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
         AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
     )
 
@@ -392,8 +392,8 @@ async def test_sync_join_section_reaches_call_manager(
     call_manager.on_sync_room_membership = AsyncMock()
     install_call_manager_mock(bot, call_manager)
     monkeypatch.setattr(
-        bot,
-        "_sync_cache_result_for_certification",
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
         AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
     )
 
@@ -434,7 +434,7 @@ async def test_installed_runtime_cache_support_runs_fire_and_forget_sync_cache_w
     sync_response.__class__ = nio.SyncResponse
     sync_response.rooms = MagicMock(
         join={
-            "!room:localhost": MagicMock(timeline=MagicMock(events=[message_event])),
+            "!room:localhost": MagicMock(timeline=MagicMock(events=[message_event], limited=False)),
         },
     )
 

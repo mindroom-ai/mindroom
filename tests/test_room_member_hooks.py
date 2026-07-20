@@ -251,8 +251,8 @@ async def test_router_emits_room_member_joined_from_sync_state_after_initial_syn
     bot.client.rooms = {room.room_id: room}
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     monkeypatch.setattr(
-        bot,
-        "_sync_cache_result_for_certification",
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
         AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
     )
 
@@ -277,7 +277,7 @@ async def test_router_emits_room_member_joined_from_first_restored_token_sync_ti
     room = _room()
     bot._first_sync_done = False
     bot._room_member_join_hooks_armed = False
-    bot._sync_trust_state = SyncTrustState.PENDING
+    bot._sync_cache_trust.state = SyncTrustState.PENDING
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_restored"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
@@ -285,8 +285,8 @@ async def test_router_emits_room_member_joined_from_first_restored_token_sync_ti
     bot._maybe_start_startup_thread_prewarm = MagicMock()
     bot._maybe_start_deferred_overdue_task_drain = MagicMock()
     monkeypatch.setattr(
-        bot,
-        "_sync_cache_result_for_certification",
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
         AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
     )
 
@@ -317,7 +317,7 @@ async def test_router_ignores_restored_token_first_sync_full_state_member_snapsh
     room = _room()
     bot._first_sync_done = False
     bot._room_member_join_hooks_armed = False
-    bot._sync_trust_state = SyncTrustState.PENDING
+    bot._sync_cache_trust.state = SyncTrustState.PENDING
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_restored"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
@@ -325,8 +325,8 @@ async def test_router_ignores_restored_token_first_sync_full_state_member_snapsh
     bot._maybe_start_startup_thread_prewarm = MagicMock()
     bot._maybe_start_deferred_overdue_task_drain = MagicMock()
     monkeypatch.setattr(
-        bot,
-        "_sync_cache_result_for_certification",
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
         AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
     )
 
@@ -363,7 +363,7 @@ async def test_router_ignores_restored_token_timeline_profile_update_for_existin
     room = _room()
     bot._first_sync_done = False
     bot._room_member_join_hooks_armed = False
-    bot._sync_trust_state = SyncTrustState.PENDING
+    bot._sync_cache_trust.state = SyncTrustState.PENDING
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_restored"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
@@ -371,8 +371,8 @@ async def test_router_ignores_restored_token_timeline_profile_update_for_existin
     bot._maybe_start_startup_thread_prewarm = MagicMock()
     bot._maybe_start_deferred_overdue_task_drain = MagicMock()
     monkeypatch.setattr(
-        bot,
-        "_sync_cache_result_for_certification",
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
         AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
     )
 
@@ -404,8 +404,8 @@ async def test_router_ignores_sync_state_member_snapshot_without_previous_member
     bot.client.rooms = {room.room_id: room}
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     monkeypatch.setattr(
-        bot,
-        "_sync_cache_result_for_certification",
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
         AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
     )
 
@@ -443,8 +443,8 @@ async def test_router_ignores_limited_sync_state_member_snapshot(
     bot.client.rooms = {room.room_id: room}
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     monkeypatch.setattr(
-        bot,
-        "_sync_cache_result_for_certification",
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
         AsyncMock(return_value=SyncCacheWriteResult(complete=True, limited_room_ids=(room.room_id,))),
     )
 
@@ -476,8 +476,8 @@ async def test_unknown_pos_resync_does_not_emit_room_member_joined_snapshot(
     bot.client.next_batch = "s_rejected"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     monkeypatch.setattr(
-        bot,
-        "_sync_cache_result_for_certification",
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
         AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
     )
     sync_error = MagicMock(spec=nio.SyncError)
@@ -519,8 +519,8 @@ async def test_registered_room_member_callback_uses_delivery_time_arming_state(
     bot._register_room_member_callback_after_initial_sync()
     room_member_callback = bot.client.add_event_callback.call_args.args[0]
     monkeypatch.setattr(
-        bot,
-        "_sync_cache_result_for_certification",
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
         AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
     )
     sync_error = MagicMock(spec=nio.SyncError)
@@ -555,13 +555,13 @@ async def test_uncertain_first_sync_reset_does_not_emit_room_member_joined_snaps
     room = _room()
     bot._first_sync_done = False
     bot._room_member_join_hooks_armed = False
-    bot._sync_trust_state = SyncTrustState.PENDING
+    bot._sync_cache_trust.state = SyncTrustState.PENDING
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_restored"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     monkeypatch.setattr(
-        bot,
-        "_sync_cache_result_for_certification",
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
         AsyncMock(
             side_effect=[
                 SyncCacheWriteResult(complete=False),

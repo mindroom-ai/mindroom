@@ -1164,6 +1164,11 @@ async def test_incremental_revalidation_requires_incremental_invalidation_reason
         state_after_non_incremental = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
 
         await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="live_thread_mutation")
+        weakened = await cache.revalidate_thread_after_incremental_update("!room:localhost", "$thread_root")
+        state_after_weakening_attempt = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+
+        await _replace_thread(cache, "!room:localhost", "$thread_root", [root_source])
+        await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="live_thread_mutation")
         incremental = await cache.revalidate_thread_after_incremental_update("!room:localhost", "$thread_root")
         state_after_incremental = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
     finally:
@@ -1173,6 +1178,10 @@ async def test_incremental_revalidation_requires_incremental_invalidation_reason
     assert non_incremental is False
     assert state_after_non_incremental is not None
     assert thread_cache_rejection_reason(state_after_non_incremental) == "thread_invalidated_after_validation"
+    assert weakened is False
+    assert state_after_weakening_attempt is not None
+    assert state_after_weakening_attempt.invalidation_reason == "live_append_failed"
+    assert thread_cache_rejection_reason(state_after_weakening_attempt) == "thread_invalidated_after_validation"
     assert incremental is True
     assert state_after_incremental is not None
     assert thread_cache_rejection_reason(state_after_incremental) is None
