@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from agno.agent import Agent
 from agno.models.message import Message
-from agno.run.agent import RunOutput
+from agno.run.agent import RunInput, RunOutput
 from agno.session.summary import SessionSummary
 from defusedxml.ElementTree import fromstring
 
@@ -22,6 +23,7 @@ from mindroom.ai import _prepare_agent_and_prompt
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
+from mindroom.constants import MINDROOM_LOCATION_MARKER_METADATA_KEY
 from mindroom.execution_preparation import (
     _build_matrix_prompt_with_history,
     _PreparedExecutionContext,
@@ -37,8 +39,6 @@ from mindroom.history.storage import (
     update_scope_seen_event_ids,
 )
 from mindroom.history.types import HistoryScope, PreparedHistoryState
-from mindroom.hooks import EnrichmentItem
-from mindroom.hooks.enrichment import render_enrichment_block
 from mindroom.memory import MemoryPromptParts
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from tests.conftest import (
@@ -1018,20 +1018,11 @@ async def test_prepare_agent_and_prompt_timestamps_current_turn_without_duplicat
     assert third_request[-1]["add_to_agent_memory"] is True
 
 
-_HOME_LOCATION_FIELDS = {
-    "status": "fresh",
-    "latitude": "52.3702",
-    "longitude": "4.8952",
-    "nearby_place": "Home",
-    "at_home": "true",
-}
-_OFFICE_LOCATION_FIELDS = {**_HOME_LOCATION_FIELDS, "nearby_place": "Office", "at_home": "false"}
-
-
-def _location_prompt(prompt: str, fields: dict[str, str]) -> str:
-    item_text = "\n".join(f"{key}: {value}" for key, value in fields.items())
-    block = render_enrichment_block([EnrichmentItem(key="location", text=item_text)])
-    return f"{prompt}\n\n{block}"
+_HOME_LOCATION_TEXT = "status: fresh\nlatitude: 52.3702\nlongitude: 4.8952\nnearby_place: Home\nat_home: true"
+_OFFICE_LOCATION_TEXT = _HOME_LOCATION_TEXT.replace("nearby_place: Home", "nearby_place: Office").replace(
+    "at_home: true",
+    "at_home: false",
+)
 
 
 @pytest.mark.asyncio
@@ -1041,20 +1032,21 @@ async def test_prepare_agent_and_prompt_persists_location_markers_only_on_change
     recording_model = RecordingModel(id="recording-model", provider="fake")
     live_agent = _agent(model=recording_model, db=storage, num_history_runs=10)
     recorded_requests: list[list[dict[str, object]]] = []
+    recorded_markers: list[str | None] = []
 
-    turns: list[tuple[str, dict[str, str] | None, str]] = [
-        ("First prompt", _HOME_LOCATION_FIELDS, "$turn-1"),
-        ("Second prompt", _HOME_LOCATION_FIELDS, "$turn-2"),
+    turns: list[tuple[str, str | None, str]] = [
+        ("First prompt", _HOME_LOCATION_TEXT, "$turn-1"),
+        ("Second prompt", _HOME_LOCATION_TEXT, "$turn-2"),
         ("Third prompt", None, "$turn-3"),
-        ("Fourth prompt", _HOME_LOCATION_FIELDS, "$turn-4"),
-        ("Fifth prompt", _OFFICE_LOCATION_FIELDS, "$turn-5"),
+        ("Fourth prompt", _HOME_LOCATION_TEXT, "$turn-4"),
+        ("Fifth prompt", _OFFICE_LOCATION_TEXT, "$turn-5"),
     ]
 
     with (
         patch("mindroom.ai.create_agent", return_value=live_agent),
         patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
     ):
-        for prompt, location_fields, event_id in turns:
+        for prompt, location_item_text, event_id in turns:
             with open_scope_session_context(
                 agent=live_agent,
                 agent_name="test_agent",
@@ -1064,14 +1056,27 @@ async def test_prepare_agent_and_prompt_persists_location_markers_only_on_change
                 execution_identity=None,
             ) as scope_context:
                 prepared_run = await _prepare_agent_and_prompt(
-                    make_turn_context("test_agent", session_id="session-1", requester_id="@alice:localhost"),
-                    prompt=_location_prompt(prompt, location_fields) if location_fields else prompt,
+                    make_turn_context(
+                        "test_agent",
+                        session_id="session-1",
+                        requester_id="@alice:localhost",
+                        location_item_text=location_item_text,
+                    ),
+                    prompt=prompt,
                     runtime_paths=runtime_paths,
                     config=config,
                     scope_context=scope_context,
                     current_event_id=event_id,
                 )
-            await prepared_run.agent.arun(prepared_run.run_input, session_id="session-1")
+            recorded_markers.append(prepared_run.location_marker)
+            # The ai layer merges the accepted marker into the run metadata that
+            # Agno persists with the run; mirror that seam here.
+            run_metadata = (
+                {MINDROOM_LOCATION_MARKER_METADATA_KEY: prepared_run.location_marker}
+                if prepared_run.location_marker is not None
+                else None
+            )
+            await prepared_run.agent.arun(prepared_run.run_input, session_id="session-1", metadata=run_metadata)
             recorded_requests.append(
                 [
                     {
@@ -1082,19 +1087,23 @@ async def test_prepare_agent_and_prompt_persists_location_markers_only_on_change
                 ],
             )
 
+    assert recorded_markers == ["📍 Home", None, None, None, "📍 Office"]
+
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
-    persisted_contents = "\n".join(
+    replayed_contents = "\n".join(
         str(message.content) for run in persisted.runs or [] for message in run.messages or []
     )
-    assert persisted_contents.count("📍 Home") == 1
-    assert persisted_contents.count("📍 Office") == 1
-    for full_detail_line in ("latitude:", "longitude:", "nearby_place:", "at_home:"):
-        assert full_detail_line not in persisted_contents
-    assert "<mindroom_message_context>" not in persisted_contents
-    assert "[Matrix metadata for tool calls]" not in persisted_contents
+    assert replayed_contents.count("📍 Home") == 1
+    assert replayed_contents.count("📍 Office") == 1
     for turn_number in range(1, 6):
-        assert f'event_id="$turn-{turn_number}"' in persisted_contents
+        assert f'event_id="$turn-{turn_number}"' in replayed_contents
+    # The full location detail must not survive anywhere in the serialized
+    # session, including the persisted run input Agno captures.
+    serialized_session = json.dumps(persisted.to_dict(), ensure_ascii=False, default=str)
+    for full_detail_fragment in ("latitude", "longitude", "nearby_place", "at_home", "mindroom_message_context"):
+        assert full_detail_fragment not in serialized_session
+    assert "[Matrix metadata for tool calls]" not in serialized_session
 
     for turn_index in (0, 1, 3, 4):
         transient_message = recorded_requests[turn_index][-2]
@@ -1108,6 +1117,41 @@ async def test_prepare_agent_and_prompt_persists_location_markers_only_on_change
         max_input_tokens=100_000,
         history_settings=_ALL_HISTORY_SETTINGS,
     )
-    assert summary_input.count("📍 Home") == 1
-    assert summary_input.count("📍 Office") == 1
-    assert "latitude:" not in summary_input
+    # Compaction input carries the marker via message text and trusted run
+    # metadata, but never the full location detail.
+    assert "📍 Home" in summary_input
+    assert "📍 Office" in summary_input
+    assert "latitude" not in summary_input
+    assert "nearby_place" not in summary_input
+
+
+def test_session_storage_scrubs_transient_run_input(tmp_path: Path) -> None:
+    """Current-turn-only messages never survive in the persisted run input."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    run = _completed_run(
+        "run-1",
+        messages=[
+            Message(role="user", content="user request"),
+            Message(role="assistant", content="assistant answer"),
+        ],
+    )
+    run.input = RunInput(
+        input_content=[
+            Message(role="user", content="user request"),
+            Message(role="user", content="latitude: 52.3702", add_to_agent_memory=False),
+        ],
+    )
+
+    storage.upsert_session(_session("session-1", runs=[run]))
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.runs is not None
+    serialized = json.dumps(persisted.to_dict(), ensure_ascii=False, default=str)
+    assert "latitude" not in serialized
+    assert "user request" in serialized
+    # The caller's in-memory run keeps its live transient input untouched.
+    assert run.input is not None
+    assert isinstance(run.input.input_content, list)
+    assert len(run.input.input_content) == 2

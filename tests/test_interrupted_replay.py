@@ -12,7 +12,10 @@ from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 
 from mindroom.agent_storage import create_state_storage, get_agent_session
-from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
+from mindroom.constants import (
+    MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
+    MINDROOM_LOCATION_MARKER_METADATA_KEY,
+)
 from mindroom.history.interrupted_replay import (
     InterruptedReplaySnapshot,
     _build_interrupted_replay_run,
@@ -528,9 +531,9 @@ def test_build_interrupted_replay_run_wraps_known_matrix_identities() -> None:
         interrupted_tools=(),
         run_metadata={
             "requester_id": "@alice:localhost",
-            MATRIX_EVENT_ID_METADATA_KEY: "$source",
             MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$visible",
         },
+        current_event_id="$source",
     )
 
     run = _build_interrupted_replay_run(
@@ -587,9 +590,9 @@ def test_build_interrupted_replay_run_wraps_only_the_side_with_known_identity() 
         interrupted_tools=(),
         run_metadata={
             "requester_id": "@alice:localhost",
-            MATRIX_EVENT_ID_METADATA_KEY: "$source",
             MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$visible",
         },
+        current_event_id="$source",
     )
 
     run = _build_interrupted_replay_run(
@@ -630,9 +633,9 @@ def test_persist_interrupted_replay_snapshot_passes_response_sender(tmp_path: Pa
                 interrupted_tools=(),
                 run_metadata={
                     "requester_id": "@alice:localhost",
-                    MATRIX_EVENT_ID_METADATA_KEY: "$source",
                     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$visible",
                 },
+                current_event_id="$source",
             ),
             is_team=False,
             response_sender_id="@mindroom_code:localhost",
@@ -648,3 +651,62 @@ def test_persist_interrupted_replay_snapshot_passes_response_sender(tmp_path: Pa
         )
     finally:
         storage.close()
+
+
+def test_build_interrupted_replay_run_keeps_structured_batches_unwrapped() -> None:
+    """Structured coalesced prompts carry per-child identity and never get an outer wrapper."""
+    structured_prompt = (
+        "<messages>\n"
+        '<msg event_id="$a1" from="@alice:localhost"><![CDATA[first]]></msg>\n'
+        '<msg event_id="$a2" from="@alice:localhost"><![CDATA[second]]></msg>\n'
+        "</messages>"
+    )
+    snapshot = build_interrupted_replay_snapshot(
+        user_message=structured_prompt,
+        partial_text="Half an answer",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata={"requester_id": "@alice:localhost"},
+        current_event_id=None,
+    )
+
+    run = _build_interrupted_replay_run(
+        snapshot=snapshot,
+        run_id="run-1",
+        scope_id="test_agent",
+        session_id="session-1",
+        is_team=False,
+    )
+
+    assert run.messages is not None
+    assert run.messages[0].content == structured_prompt
+
+
+def test_build_interrupted_replay_run_restores_location_marker_from_metadata() -> None:
+    """The trusted marker recorded for this turn survives interruption inside the user turn."""
+    snapshot = build_interrupted_replay_snapshot(
+        user_message="Where am I?",
+        partial_text="Half an answer",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata={
+            "requester_id": "@alice:localhost",
+            MINDROOM_LOCATION_MARKER_METADATA_KEY: "📍 Home",
+        },
+        current_event_id="$source",
+    )
+
+    run = _build_interrupted_replay_run(
+        snapshot=snapshot,
+        run_id="run-1",
+        scope_id="test_agent",
+        session_id="session-1",
+        is_team=False,
+    )
+
+    assert run.messages is not None
+    assert run.messages[0].content == (
+        '<msg event_id="$source" from="@alice:localhost"><![CDATA[Where am I?\n\n📍 Home]]></msg>'
+    )
+    assert run.metadata is not None
+    assert run.metadata[MINDROOM_LOCATION_MARKER_METADATA_KEY] == "📍 Home"

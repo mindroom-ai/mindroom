@@ -1039,6 +1039,9 @@ MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
 MATRIX_RESPONSE_OWNER_METADATA_KEY = "matrix_response_owner"
 MATRIX_SEEN_EVENT_IDS_METADATA_KEY = "matrix_seen_event_ids"
 MATRIX_HISTORY_SCOPE_METADATA_KEY = "matrix_history_scope"
+# Trusted short location marker recorded on the run whose persisted current
+# prompt carried a location change; the only provenance location dedup reads.
+MINDROOM_LOCATION_MARKER_METADATA_KEY = "mindroom_location_marker"
 MATRIX_CONVERSATION_TARGET_METADATA_KEY = "matrix_conversation_target"
 MATRIX_SOURCE_EVENT_IDS_METADATA_KEY = "matrix_source_event_ids"
 MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY = "matrix_source_event_prompts"

@@ -61,3 +61,31 @@ Everything else follows PLAN.md exactly, including the existing-history policy (
 ## Live test
 
 **Pending** — bespoke live verification will be run in a later phase via the live-test skill (`/live-test`), per the task instructions.
+
+---
+
+# Round 2 — review-fix report
+
+Commit: "fix: address review findings (ISSUE-247)". All forwarded clusters (1-12) were triaged as real and fixed at the owning boundary; nothing was deferred.
+
+## Triage and root-cause fixes
+
+1. **Location trust boundary / spoofing (cluster 1) + duplicate-item leak (cluster 2) + team continuation leak/loss (cluster 6).** Root cause: provenance was inferred by re-parsing the composed prompt string. The reserved `key="location"` item is now split out at the typed hook boundary (`turn_policy.apply_message_enrichment`) before anything is flattened: it never enters `model_prompt`, any prompt, or any persisted text. The first collected item is authoritative; duplicates are dropped with a warning, so a second full block can never leak. The trusted text rides `_PreparedHookedPayload` → `ResponseRequest.location_item_text` → `ResponseTurnContext.location_item_text`, and execution preparation renders the transient block from typed data only. A user-authored terminal `<mindroom_message_context>` block is now plain persisted user content (regression tests for agent and team). Because the item never sits in a prompt, dynamic-tool continuations can neither leak it (B2) nor lose it (D6): every attempt re-reads the per-turn constant from ctx. The regex split machinery was deleted.
+2. **Marker provenance + excluded-run/continuation dedup (clusters 1/7/8 and A4/A5).** The accepted `📍 ...` marker is now recorded in trusted run metadata (`MINDROOM_LOCATION_MARKER_METADATA_KEY`), attached to the run via the existing run-metadata channel in both the agent and team preparation paths. Dedup reads only that key, from the session **reloaded from storage** (`ScopeSessionContext.storage` + `session_id`), so same-turn continuation attempts see markers persisted by earlier attempts and user-typed `📍` lines can never forge state. Interrupted turns keep the marker: the canonical interrupted run inherits the metadata from the recorder, and `_build_interrupted_replay_run` re-renders the `📍` line inside the persisted user turn (the recorder's `user_message` remains unsynchronized).
+3. **Current-message identity (cluster 3).** `reply_to_event_id` is a delivery anchor, not a message identity. Added `current_event_id` to `ResponseRequest` and `ResponseTurnContext`, populated only where the prompt is literally one Matrix event's body: the direct dispatch path in `turn_controller` (None for structured batches) and non-coalesced edit regeneration (the original edited event). Interactive selections, scheduled/detached synthetic turns, and OpenAI-compat turns default to None. Agent and team continuations seed from `ctx.current_event_id`; `TurnRecorder`/`InterruptedReplaySnapshot` carry it as a typed field, and the metadata-based (`matrix_event_id`) user wrap was deleted.
+4. **Structured interrupted double-wrap (cluster 4).** Falls out of the identity fix: structured batches have `current_event_id=None`, so interrupted persistence keeps the `<messages>`/`<queued_messages>` container byte-for-byte with its per-child event IDs (unit + runner-seam streaming regression).
+5. **OpenAI synthetic IDs (cluster 5).** The compat parser no longer mints `$openai-N` event IDs (empty identity), so compat history renders `<msg from="user">` without `event_id`; the prompt contract now states messages without `event_id` are not addressable, and `OPENAI_COMPAT_HISTORY_GUIDANCE` describes the synthetic-history form. Compat tests assert the absence of event IDs.
+6. **Persisted run-input leak (B1/G1).** `_PromptSanitizingSqliteDb` — the existing storage sanitization boundary — now also scrubs `add_to_agent_memory=False` messages from `RunOutput.input.input_content` before upsert (this also closes the same gap for PR #1596's transient memory). The location integration test asserts over the fully serialized session (including run input): no `latitude`/`longitude`/`nearby_place`/`at_home`/`mindroom_message_context` anywhere.
+7. **Team `additional_context` persistence (D1).** Investigated: Agno renders `additional_context` into the system message, which this storage boundary already strips (`prompt_roles`), and member responses are not persisted (`store_member_responses` defaults to False). No channel change needed; the serialized-session assertion above proves the invariant end-to-end.
+8. **Assistant wrap on suppressed/failed deliveries (E3, cluster 3).** `apply_post_response_effects` now passes a `delivered` flag (completed + unsuppressed + run succeeded); the runner's callback maps it to `response_sender_id=None`, and the writer wraps only when a sender is present — visible failure notes and undelivered outcomes keep metadata linkage only.
+9. **Content-less runs / tool-call stubs (F4 + H5, clusters 9/10).** `_wrap_final_assistant_message` targets the last assistant message with non-empty string content and falls back to that message's own text when `run.content` is absent, with wrapped-body recovery so changed callbacks still never nest tags.
+10. **Model-imitation guidance (H4, cluster 11).** The `<msg>` guidance now says the tags are system-added and must never be written in replies.
+11. **Reserved-key contract (C5, cluster 12).** `docs/hooks.md` documents the reserved `location` key: split at the typed boundary, current-turn-only delivery, marker schema and ordering, fail-closed behavior, and the duplicate policy.
+
+Dropped per triage: H6 (magic-string style). H7 (scan cost) is obsolete — dedup now does a metadata key lookup instead of regex text scans.
+
+## Gate results (round 2)
+
+1. pytest: focused files green, then full suite `uv run pytest` exit 0 in nix-shell.
+2. `uv run tach check --dependencies --interfaces`: all modules validated (new edges: `execution_preparation` → `hooks`/`agent_storage`, `turn_policy` → `logging_config`, `ai` → `constants`; `agent_storage` visibility extended).
+3. pre-commit on all changed files: all hooks pass except the pre-existing `ty` macOS-import failure documented in round 1 (unchanged, reproduced on base).

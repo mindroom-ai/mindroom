@@ -217,6 +217,13 @@ class ResponseTurnContext:
     active_model_name: str | None = None
     active_event_ids: frozenset[str] = frozenset()
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
+    # The Matrix event whose body the current prompt literally is; None for
+    # synthetic prompts and structured batches. Distinct from
+    # ``reply_to_event_id``, which is the delivery/thread anchor.
+    current_event_id: str | None = None
+    # Trusted text of the reserved ``key="location"`` enrichment item for this
+    # turn; delivered current-turn-only by execution preparation.
+    location_item_text: str | None = None
     # Set only for scheduled fires that carry a history limit; identifies the
     # prompt-owning event while capping this turn without changing authored config.
     scheduled_history_budget: ScheduledHistoryBudget | None = None

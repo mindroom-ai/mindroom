@@ -334,3 +334,81 @@ def test_persist_response_event_id_wraps_team_session_run(tmp_path: Path) -> Non
         )
     finally:
         storage.close()
+
+
+def test_persist_response_event_id_without_sender_keeps_metadata_only(tmp_path: Path) -> None:
+    """Undelivered outcomes link the event in metadata without claiming it for the assistant."""
+    config, runtime_paths = _agent_config(tmp_path)
+    writer = _writer(config, runtime_paths)
+    storage = writer.create_storage(None)
+    try:
+        storage.upsert_session(_agent_session_with_run(content="Final answer", with_assistant_message=True))
+
+        writer.persist_response_event_id_in_session_run(
+            storage=storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            run_id="run-1",
+            response_event_id="$failure-note",
+            response_sender_id=None,
+        )
+
+        persisted = get_agent_session(storage, "session-1")
+        assert persisted is not None
+        run = cast("RunOutput", (persisted.runs or [])[0])
+        assert run.metadata is not None
+        assert run.metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] == "$failure-note"
+        assert (run.messages or [])[-1].content == "Final answer"
+    finally:
+        storage.close()
+
+
+def test_persist_response_event_id_wraps_contentless_run_from_assistant_message(tmp_path: Path) -> None:
+    """Content-less runs fall back to the final assistant message's own text."""
+    config, runtime_paths = _agent_config(tmp_path)
+    writer = _writer(config, runtime_paths)
+    storage = writer.create_storage(None)
+    try:
+        session = AgentSession(
+            session_id="session-1",
+            agent_id="shared",
+            runs=[
+                RunOutput(
+                    run_id="run-1",
+                    agent_id="shared",
+                    status=RunStatus.completed,
+                    content=None,
+                    messages=[
+                        Message(role="user", content="question"),
+                        Message(role="assistant", content="Delivered team text"),
+                        Message(role="assistant", content=""),
+                    ],
+                ),
+            ],
+            created_at=1,
+            updated_at=1,
+        )
+        storage.upsert_session(session)
+
+        for response_event_id in ("$visible", "$edited"):
+            writer.persist_response_event_id_in_session_run(
+                storage=storage,
+                session_id="session-1",
+                session_type=SessionType.AGENT,
+                run_id="run-1",
+                response_event_id=response_event_id,
+                response_sender_id="@mindroom_shared:localhost",
+            )
+
+        persisted = get_agent_session(storage, "session-1")
+        assert persisted is not None
+        run = cast("RunOutput", (persisted.runs or [])[0])
+        messages = run.messages or []
+        # The tool-call-style empty assistant stub is never targeted, and a
+        # changed callback re-wraps from the recovered canonical body.
+        assert messages[1].content == (
+            '<msg event_id="$edited" from="@mindroom_shared:localhost"><![CDATA[Delivered team text]]></msg>'
+        )
+        assert messages[2].content == ""
+    finally:
+        storage.close()

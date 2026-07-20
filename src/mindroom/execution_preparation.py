@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import html
-import re
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -13,10 +11,12 @@ from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 
 from mindroom import ai_runtime
+from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.attachment_media import attachment_records_to_media
 from mindroom.attachments import attachment_records_for_visible_message, format_attachment_annotation
 from mindroom.constants import (
     COMPACTION_NOTICE_CONTENT_KEY,
+    MINDROOM_LOCATION_MARKER_METADATA_KEY,
     ORIGINAL_SENDER_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
@@ -41,6 +41,7 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.history.types import ResolvedReplayPlan
+from mindroom.hooks import EnrichmentItem, render_enrichment_block
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.prompt_message_tags import render_msg_tag
@@ -70,14 +71,6 @@ _PARTIAL_REPLY_SENDER_LABELS = {
 }
 _PARTIAL_REPLY_GUIDANCE_LABELS = frozenset({*_PARTIAL_REPLY_SENDER_LABELS.values(), "You (partial reply)"})
 
-_LOCATION_ITEM_RE = re.compile(
-    r'\n?(<item key="location" cache_policy="[^"]*">\n(.*?)\n</item>)',
-    re.DOTALL,
-)
-_MESSAGE_CONTEXT_BLOCK_RE = re.compile(
-    r"<mindroom_message_context>.*?</mindroom_message_context>",
-    re.DOTALL,
-)
 _LOCATION_MARKER_PREFIX = "📍 "
 
 
@@ -95,6 +88,9 @@ class _PreparedExecutionContext:
     messages: tuple[Message, ...]
     unseen_event_ids: list[str]
     prepared_history: PreparedHistoryState
+    # Trusted location-change marker appended to the persisted current prompt
+    # this turn; recorded into run metadata so later dedup has provenance.
+    location_marker: str | None = None
 
     @property
     def final_prompt(self) -> str:
@@ -693,34 +689,10 @@ def _scope_seen_event_ids(scope_context: ScopeSessionContext | None) -> set[str]
     return read_scope_seen_event_ids(scope_context.session, scope_context.scope)
 
 
-def _split_location_enrichment(prompt: str) -> tuple[str, str, str]:
-    """Split the terminal block's location item into (persisted_prompt, item_markup, item_text).
-
-    Markup and text are empty without a terminal core-rendered ``key="location"``
-    item; every other enrichment item stays byte-for-byte in the persisted prompt.
-    """
-    stripped = prompt.rstrip()
-    if not stripped.endswith("</mindroom_message_context>"):
-        return prompt, "", ""
-    block_start = stripped.rfind("<mindroom_message_context>")
-    if block_start == -1:
-        return prompt, "", ""
-    block = stripped[block_start:]
-    match = _LOCATION_ITEM_RE.search(block)
-    if match is None:
-        return prompt, "", ""
-    remaining_block = block[: match.start()] + block[match.end() :]
-    if "<item " in remaining_block:
-        persisted_prompt = stripped[:block_start] + remaining_block
-    else:
-        persisted_prompt = stripped[:block_start].rstrip()
-    return persisted_prompt, match.group(1), match.group(2)
-
-
 def _location_marker_from_fields(item_text: str) -> str | None:
-    """Derive the short persisted location marker from one escaped location item."""
+    """Derive the short persisted location marker from one trusted location item."""
     fields: dict[str, str] = {}
-    for line in html.unescape(item_text).splitlines():
+    for line in item_text.splitlines():
         key, sep, value = line.partition(":")
         if sep:
             fields[key.strip()] = value.strip()
@@ -736,53 +708,53 @@ def _location_marker_from_fields(item_text: str) -> str | None:
     return None
 
 
-def _last_location_marker_in_text(text: str) -> str | None:
-    """Return the last generated ``📍 ...`` marker line in one stored message text."""
-    marker: str | None = None
-    for line in _MESSAGE_CONTEXT_BLOCK_RE.sub("", text).splitlines():
-        candidate = line.strip()
-        if candidate.endswith("]]></msg>"):
-            candidate = candidate[: -len("]]></msg>")].rstrip()
-        if candidate.startswith(_LOCATION_MARKER_PREFIX):
-            marker = candidate
-    return marker
-
-
 def _last_persisted_location_marker(scope_context: ScopeSessionContext | None) -> str | None:
-    """Scan stored scope runs backward for the most recent surviving location marker."""
-    if scope_context is None or scope_context.session is None:
+    """Return the most recent trusted location marker recorded in stored run metadata.
+
+    Reloads the scope's session from storage so same-turn continuation attempts
+    see markers persisted by earlier attempts, and consults only the typed
+    metadata key so message text can never forge location state.
+    """
+    if scope_context is None or scope_context.session_id is None:
         return None
-    for run in reversed(scope_context.session.runs or []):
+    session = (
+        get_team_session(scope_context.storage, scope_context.session_id)
+        if scope_context.scope.kind == "team"
+        else get_agent_session(scope_context.storage, scope_context.session_id)
+    )
+    if session is None:
+        return None
+    for run in reversed(session.runs or []):
         if not isinstance(run, (RunOutput, TeamRunOutput)):
             continue
-        for message in reversed(run.messages or []):
-            if message.role != "user" or not isinstance(message.content, str):
-                continue
-            marker = _last_location_marker_in_text(message.content)
-            if marker is not None:
-                return marker
+        marker = (run.metadata or {}).get(MINDROOM_LOCATION_MARKER_METADATA_KEY)
+        if isinstance(marker, str) and marker:
+            return marker
     return None
 
 
 def _extract_current_location_context(
     prompt: str,
     *,
+    location_item_text: str | None,
     scope_context: ScopeSessionContext | None,
-) -> tuple[str, str]:
-    """Split current-turn location detail into ``(persisted_prompt, location_block)``.
+) -> tuple[str, str, str | None]:
+    """Resolve current-turn location delivery from the trusted enrichment channel.
 
-    Full detail always leaves the persisted prompt, which gains at most one plain
-    ``📍 ...`` line when the last known marker changed; missing location data
-    leaves the prompt and the last known marker untouched.
+    Returns ``(persisted_prompt, location_block, recorded_marker)``. The full
+    detail never touches the prompt; the persisted prompt gains at most one
+    plain ``📍 ...`` line when the last recorded marker changed, and
+    ``recorded_marker`` is set only for that change so it lands in trusted run
+    metadata. Missing location data changes nothing.
     """
-    persisted_prompt, item_markup, item_text = _split_location_enrichment(prompt)
-    if not item_markup:
-        return prompt, ""
-    location_block = f"<mindroom_message_context>\n{item_markup}\n</mindroom_message_context>"
-    marker = _location_marker_from_fields(item_text)
-    if marker is not None and marker != _last_persisted_location_marker(scope_context):
-        persisted_prompt = f"{persisted_prompt}\n\n{marker}" if persisted_prompt.strip() else marker
-    return persisted_prompt, location_block
+    if not location_item_text:
+        return prompt, "", None
+    location_block = render_enrichment_block([EnrichmentItem(key="location", text=location_item_text)])
+    marker = _location_marker_from_fields(location_item_text)
+    if marker is None or marker == _last_persisted_location_marker(scope_context):
+        return prompt, location_block, None
+    persisted_prompt = f"{prompt}\n\n{marker}" if prompt.strip() else marker
+    return persisted_prompt, location_block, marker
 
 
 def _prepared_history_with_scheduled_limit(
@@ -839,6 +811,7 @@ async def _prepare_execution_context_common(
     current_timestamp_ms: float | None = None,
     current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
+    location_marker: str | None = None,
     config: Config,
     prepare_scope_history_fn: Callable[[str], Awaitable[PreparedScopeHistory]],
     estimate_static_tokens_fn: Callable[[str], int],
@@ -974,6 +947,7 @@ async def _prepare_execution_context_common(
         messages=final_messages,
         unseen_event_ids=unseen_event_ids,
         prepared_history=prepared_history,
+        location_marker=location_marker,
     )
 
 
@@ -998,10 +972,15 @@ async def prepare_agent_execution_context(
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedExecutionContext:
     """Prepare one agent's final prompt and replay plan for the current call."""
-    prompt, location_block = _extract_current_location_context(prompt, scope_context=scope_context)
+    prompt, location_block, location_marker = _extract_current_location_context(
+        prompt,
+        location_item_text=ctx.location_item_text,
+        scope_context=scope_context,
+    )
     if location_block:
         # Full location detail stays current-turn-only: Agno drops
-        # add_to_agent_memory=False messages before persisting the run.
+        # add_to_agent_memory=False messages before persisting the run, and
+        # storage scrubs them from the persisted run input.
         transient_context_messages = (
             *transient_context_messages,
             Message(role="user", content=location_block, add_to_agent_memory=False),
@@ -1058,6 +1037,7 @@ async def prepare_agent_execution_context(
         current_timestamp_ms=current_timestamp_ms,
         current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
+        location_marker=location_marker,
         config=config,
         prepare_scope_history_fn=_prepare_agent_scope_history,
         estimate_static_tokens_fn=_estimate_agent_static_tokens,
@@ -1104,10 +1084,15 @@ async def _prepare_bound_team_execution_context(
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedExecutionContext:
     """Prepare one bound team scope for the current call."""
-    prompt, location_block = _extract_current_location_context(prompt, scope_context=scope_context)
+    prompt, location_block, location_marker = _extract_current_location_context(
+        prompt,
+        location_item_text=ctx.location_item_text,
+        scope_context=scope_context,
+    )
     if location_block:
         # Team input is flattened to one persisted string, so full location
-        # detail rides the volatile additional-context tail instead.
+        # detail rides the volatile additional-context tail instead; storage
+        # strips system-role messages before durable persistence.
         for entity in (team, *agents):
             _append_transient_additional_context(entity, location_block)
     static_token_estimator = team_static_token_estimator(team)
@@ -1146,6 +1131,7 @@ async def _prepare_bound_team_execution_context(
         current_timestamp_ms=current_timestamp_ms,
         current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
+        location_marker=location_marker,
         config=config,
         prepare_scope_history_fn=_prepare_team_scope_history,
         estimate_static_tokens_fn=_estimate_team_static_tokens,

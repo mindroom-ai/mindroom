@@ -222,10 +222,12 @@ def _open_agent_scope_context(
     *,
     scope_id: str = "general",
 ) -> Generator[ScopeSessionContext, None, None]:
+    session = storage.session
     yield ScopeSessionContext(
         scope=HistoryScope(kind="agent", scope_id=scope_id),
         storage=storage.open(),
-        session=storage.session,
+        session=session,
+        session_id=session.session_id if session is not None else None,
     )
 
 
@@ -235,10 +237,12 @@ def _open_team_scope_context(
     *,
     scope_id: str = "ultimate",
 ) -> Generator[ScopeSessionContext, None, None]:
+    session = storage.session
     yield ScopeSessionContext(
         scope=HistoryScope(kind="team", scope_id=scope_id),
         storage=storage.open(),
-        session=storage.session,
+        session=session,
+        session_id=session.session_id if session is not None else None,
     )
 
 
@@ -478,6 +482,9 @@ def _build_response_runner(
     )
 
 
+_USE_REPLY_ANCHOR = object()
+
+
 def _response_request(
     *,
     room_id: str = "!test:localhost",
@@ -488,8 +495,16 @@ def _response_request(
     media: MediaInputs | None = None,
     user_id: str | None = None,
     correlation_id: str | None = None,
+    current_event_id: str | None | object = _USE_REPLY_ANCHOR,
+    location_item_text: str | None = None,
 ) -> ResponseRequest:
-    """Build one response request for direct bot seam tests."""
+    """Build one response request for direct bot seam tests.
+
+    Mirrors direct-message ingress by default: the prompt is the reply-anchor
+    event's body, so ``current_event_id`` defaults to ``reply_to_event_id``.
+    Pass ``current_event_id=None`` to model synthetic prompts.
+    """
+    resolved_current_event_id = reply_to_event_id if current_event_id is _USE_REPLY_ANCHOR else current_event_id
     return ResponseRequest(
         thread_history=(),
         prompt=prompt,
@@ -504,6 +519,8 @@ def _response_request(
         media=media,
         user_id=user_id,
         correlation_id=correlation_id,
+        current_event_id=cast("str | None", resolved_current_event_id),
+        location_item_text=location_item_text,
     )
 
 
@@ -522,7 +539,7 @@ class _InertPostResponseEffects(PostResponseEffectsSupport):
         room_id: str,
         interactive_agent_name: str,
         queue_memory_persistence: Callable[[], None] | None = None,
-        persist_response_event_id: Callable[[str, str], None] | None = None,
+        persist_response_event_id: Callable[[str, str, bool], None] | None = None,
     ) -> PostResponseEffectsDeps:
         del room_id, interactive_agent_name, queue_memory_persistence, persist_response_event_id
         return PostResponseEffectsDeps(logger=self.logger)

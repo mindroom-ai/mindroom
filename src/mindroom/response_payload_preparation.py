@@ -124,6 +124,7 @@ class ResponsePayloadPreparer:
             attachment_ids=tuple(prepared_payload.payload.attachment_ids or ()),
             response_envelope=prepared_payload.envelope,
             system_enrichment_items=prepared_payload.system_enrichment_items,
+            location_item_text=prepared_payload.location_item_text,
             requires_model_history_refresh=False,
             payload_preparation=None,
         )

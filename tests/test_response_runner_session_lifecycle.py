@@ -2380,10 +2380,89 @@ def test_persist_response_event_id_effect_passes_bot_matrix_identity(tmp_path: P
         session_type=SessionType.AGENT,
         create_storage=lambda: storage,
     )
-    effect("run-1", "$visible")
+    effect("run-1", "$visible", True)
+    effect("run-2", "$failure-note", False)
 
-    call = cast("MagicMock", coordinator.deps.state_writer.persist_response_event_id_in_session_run).call_args
-    assert call.kwargs["run_id"] == "run-1"
-    assert call.kwargs["response_event_id"] == "$visible"
-    assert call.kwargs["response_sender_id"] == "@mindroom_general:localhost"
-    storage.close.assert_called_once()
+    persist_mock = cast("MagicMock", coordinator.deps.state_writer.persist_response_event_id_in_session_run)
+    delivered_call, undelivered_call = persist_mock.call_args_list
+    assert delivered_call.kwargs["run_id"] == "run-1"
+    assert delivered_call.kwargs["response_event_id"] == "$visible"
+    assert delivered_call.kwargs["response_sender_id"] == "@mindroom_general:localhost"
+    # Undelivered outcomes keep the linkage but never claim the event.
+    assert undelivered_call.kwargs["response_event_id"] == "$failure-note"
+    assert undelivered_call.kwargs["response_sender_id"] is None
+    assert storage.close.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_interrupted_synthetic_prompt_persists_without_event_wrapper(tmp_path: Path) -> None:
+    """Turns without their own Matrix event (selections, structured batches) stay unwrapped."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    storage = _SessionStorage()
+    structured_prompt = (
+        "<messages>\n"
+        '<msg event_id="$a1" from="@bob:localhost"><![CDATA[first]]></msg>\n'
+        '<msg event_id="$a2" from="@bob:localhost"><![CDATA[second]]></msg>\n'
+        "</messages>"
+    )
+
+    with patch("mindroom.response_runner.stream_agent_response") as mock_stream:
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@bob:localhost",
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        async def consume_delivery_and_fail(request: object) -> StreamTransportOutcome:
+            accumulated = ""
+            async for chunk in request.response_stream:
+                accumulated += str(chunk)
+            raise StreamingDeliveryError(
+                RuntimeError("boom"),
+                event_id="$terminal",
+                accumulated_text="Partial answer",
+                tool_trace=[],
+                transport_outcome=_stream_outcome(
+                    "$terminal",
+                    "Partial answer",
+                    terminal_status="error",
+                    failure_reason="boom",
+                ),
+            )
+
+        coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_fail
+
+        def fake_stream_agent_response(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+            async def fake_stream() -> AsyncIterator[str]:
+                yield "Partial answer"
+
+            return fake_stream()
+
+        mock_stream.side_effect = fake_stream_agent_response
+
+        await coordinator.process_and_respond_streaming(
+            replace(
+                _response_request(
+                    prompt=structured_prompt,
+                    user_id="@bob:localhost",
+                    thread_id="$thread-root",
+                    current_event_id=None,
+                ),
+                current_prompt_is_structured=True,
+            ),
+        )
+
+    persisted_session = cast("AgentSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    assert persisted_run.messages is not None
+    # The structured container keeps its per-child event identity untouched;
+    # no outer wrapper claims the batch for one anchor event.
+    assert persisted_run.messages[0].content == structured_prompt

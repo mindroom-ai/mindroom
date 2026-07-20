@@ -1733,6 +1733,9 @@ class TurnController:
 
             self.deps.logger.info(processing_log, event_id=event.event_id)
             current_timestamp_ms = normalize_timestamp_ms(event.server_timestamp)
+            # Structured batches carry per-child event identity; only a plain
+            # dispatch prompt is literally this event's body.
+            current_event_id = None if dispatch.current_prompt_is_structured else event.event_id
             payload_preparation = ResponsePayloadPreparation(
                 dispatch=dispatch,
                 prompt=event.body,
@@ -1782,6 +1785,7 @@ class TurnController:
                             scheduled_history_budget=dispatch.scheduled_history_budget,
                             payload_preparation=payload_preparation,
                             current_timestamp_ms=current_timestamp_ms,
+                            current_event_id=current_event_id,
                             current_prompt_is_structured=dispatch.current_prompt_is_structured,
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
@@ -1810,6 +1814,7 @@ class TurnController:
                             scheduled_history_budget=dispatch.scheduled_history_budget,
                             payload_preparation=payload_preparation,
                             current_timestamp_ms=current_timestamp_ms,
+                            current_event_id=current_event_id,
                             current_prompt_is_structured=dispatch.current_prompt_is_structured,
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,

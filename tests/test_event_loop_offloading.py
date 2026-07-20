@@ -67,6 +67,7 @@ async def test_prepare_agent_and_prompt_builds_agent_off_event_loop(
         replay_plan=None,
         unseen_event_ids=(),
         messages=[],
+        location_marker=None,
     )
     monkeypatch.setattr(
         ai_module,
@@ -146,6 +147,7 @@ async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_h
             replay_plan=None,
             unseen_event_ids=[],
             messages=(Message(role="user", content=kwargs["prompt"]),),
+            location_marker=None,
         )
 
     original_compose = ai_module._compose_current_turn_prompt
@@ -229,6 +231,7 @@ async def test_prepare_agent_and_prompt_keeps_file_memory_before_agent_build(
             replay_plan=None,
             unseen_event_ids=[],
             messages=(Message(role="user", content="hello"),),
+            location_marker=None,
         ),
     )
     monkeypatch.setattr(

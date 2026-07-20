@@ -318,6 +318,15 @@ Each enrichment item has a `cache_policy`:
 MindRoom preserves the merged enrichment block exactly as rendered for the live request.
 Use stable keys and deterministic hook output when you want later replays and cache keys to line up cleanly.
 
+### Reserved key: `location`
+
+The item key `location` is reserved and does not follow the persist-as-rendered contract above.
+A `key="location"` item is split out at the typed hook boundary and never enters the flattened prompt, so its full detail is current-turn-only: agents receive it as a non-persisted transient message directly before the current turn, and teams receive it through the volatile tail of `additional_context`.
+Persisted history instead records at most one short `📍 ...` line on the turn where the derived location changed, with the accepted marker stored in trusted run metadata for change detection; message text can never forge that state.
+The marker is derived from `key: value` lines in the item text, in this order: `at_home: true` yields `📍 Home`, a `nearby_place` that is neither empty nor `unknown` yields `📍 <nearby_place>`, and otherwise `latitude` plus `longitude` yield `📍 <latitude>, <longitude>`.
+If none of those fields parse, the full detail is still delivered live but no marker is persisted (fail closed).
+When hooks return more than one `location` item, the first collected item is authoritative and the rest are dropped with a warning.
+
 ### Adding enrichment items
 
 Use `ctx.add_metadata()` in any `message:enrich` hook:

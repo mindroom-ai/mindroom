@@ -32,6 +32,7 @@ from mindroom.ai_run_metadata import (
     build_prepared_history_metadata_content,
     empty_request_metric_totals,
 )
+from mindroom.constants import MINDROOM_LOCATION_MARKER_METADATA_KEY
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
 from mindroom.history.interrupted_replay import (
@@ -194,6 +195,8 @@ class _PreparedAgentRun:
     # this snapshot instead of re-resolving, because the per-thread override
     # store can change mid-run (for example via the thread_model tool).
     runtime_model_name: str
+    # Location-change marker to record in this run's trusted metadata.
+    location_marker: str | None = None
 
     @property
     def prompt_text(self) -> str:
@@ -1231,6 +1234,7 @@ async def _prepare_agent_and_prompt(
         unseen_event_ids=unseen_event_ids,
         prepared_history=prepared_history,
         runtime_model_name=runtime_model.model_name,
+        location_marker=prepared_execution.location_marker,
     )
 
 
@@ -1296,6 +1300,11 @@ async def _prepare_agent_run_context(
         )
 
     run_extra_content = build_prepared_history_metadata_content(prepared_run.prepared_history)
+    if prepared_run.location_marker is not None:
+        run_extra_content = {
+            **(run_extra_content or {}),
+            MINDROOM_LOCATION_MARKER_METADATA_KEY: prepared_run.location_marker,
+        }
     metadata = build_matrix_run_metadata(
         ctx.reply_to_event_id,
         prepared_run.unseen_event_ids,
@@ -1593,7 +1602,7 @@ async def ai_response(  # noqa: C901
             model_prompt=model_prompt,
             current_timestamp_ms=current_timestamp_ms,
             current_prompt_is_structured=current_prompt_is_structured,
-            current_event_id=ctx.reply_to_event_id,
+            current_event_id=ctx.current_event_id,
             run_id=ctx.run_id,
         ),
     )
@@ -2160,7 +2169,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             model_prompt=model_prompt,
             current_timestamp_ms=current_timestamp_ms,
             current_prompt_is_structured=current_prompt_is_structured,
-            current_event_id=ctx.reply_to_event_id,
+            current_event_id=ctx.current_event_id,
             run_id=ctx.run_id,
         ),
     )

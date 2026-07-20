@@ -20,6 +20,9 @@ class TurnRecorder:
     """Accumulate trusted runtime facts for one top-level turn."""
 
     user_message: str
+    # The Matrix event whose body ``user_message`` literally is; None for
+    # synthetic prompts and structured batches carrying per-child identity.
+    current_event_id: str | None = None
     run_metadata: dict[str, Any] | None = None
     run_id: str | None = None
     response_event_id: str | None = None
@@ -115,6 +118,7 @@ class TurnRecorder:
             completed_tools=self.completed_tools,
             interrupted_tools=self.interrupted_tools,
             run_metadata=self.run_metadata,
+            current_event_id=self.current_event_id,
             response_event_id=self.response_event_id,
             original_status=self.original_status or RunStatus.cancelled,
         )

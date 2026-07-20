@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 from agno.db.base import BaseDb, SessionType
 from agno.db.sqlite import SqliteDb
 from agno.learn import LearningMachine
+from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
@@ -128,7 +129,14 @@ def _create_agent_state_db(
 
 
 class _PromptSanitizingSqliteDb(SqliteDb):
-    """SQLite session DB that strips prompt messages before durable persistence."""
+    """SQLite session DB that strips prompt-only content before durable persistence.
+
+    Prompt-role messages (system/developer) and current-turn-only transient
+    messages (``add_to_agent_memory=False``, e.g. retrieved memory and full
+    location detail) never belong in stored history; Agno keeps the latter out
+    of ``run.messages`` but still captures them in ``RunOutput.input``, so both
+    surfaces are scrubbed here.
+    """
 
     def __init__(
         self,
@@ -171,13 +179,28 @@ def _session_without_prompt_messages(session: Session, prompt_roles: frozenset[s
     return sanitized_session
 
 
+def _is_transient_message(message: object) -> bool:
+    return isinstance(message, Message) and message.add_to_agent_memory is False
+
+
+def _run_input_has_transient_messages(run: RunOutput | TeamRunOutput) -> bool:
+    run_input = run.input
+    return (
+        run_input is not None
+        and isinstance(run_input.input_content, list)
+        and any(_is_transient_message(entry) for entry in run_input.input_content)
+    )
+
+
 def _session_has_prompt_messages(session: Session, prompt_roles: frozenset[str]) -> bool:
     if not isinstance(session, (AgentSession, TeamSession)) or not session.runs:
         return False
     return any(
         isinstance(run, (RunOutput, TeamRunOutput))
-        and run.messages is not None
-        and any(message.role in prompt_roles for message in run.messages)
+        and (
+            (run.messages is not None and any(message.role in prompt_roles for message in run.messages))
+            or _run_input_has_transient_messages(run)
+        )
         for run in session.runs
     )
 
@@ -186,9 +209,15 @@ def _strip_prompt_messages_from_session(session: Session, prompt_roles: frozense
     if not isinstance(session, (AgentSession, TeamSession)) or not session.runs:
         return
     for run in session.runs:
-        if not isinstance(run, (RunOutput, TeamRunOutput)) or not run.messages:
+        if not isinstance(run, (RunOutput, TeamRunOutput)):
             continue
-        run.messages = [message for message in run.messages if message.role not in prompt_roles]
+        if run.messages:
+            run.messages = [message for message in run.messages if message.role not in prompt_roles]
+        if _run_input_has_transient_messages(run):
+            run_input = run.input
+            assert run_input is not None
+            assert isinstance(run_input.input_content, list)
+            run_input.input_content = [entry for entry in run_input.input_content if not _is_transient_message(entry)]
 
 
 def create_culture_storage(culture_name: str, storage_path: Path) -> BaseDb:

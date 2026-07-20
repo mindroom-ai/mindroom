@@ -16,7 +16,7 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom.agent_storage import get_agent_session, get_team_session
-from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
+from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY, MINDROOM_LOCATION_MARKER_METADATA_KEY
 from mindroom.history.storage import new_scope_session
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.redaction import redact_sensitive_text
@@ -52,6 +52,9 @@ class InterruptedReplaySnapshot:
     completed_tools: tuple[ToolTraceEntry, ...]
     interrupted_tools: tuple[ToolTraceEntry, ...]
     run_metadata: dict[str, Any] = field(default_factory=dict)
+    # The Matrix event whose body ``user_message`` literally is; None for
+    # synthetic prompts and structured batches carrying per-child identity.
+    current_event_id: str | None = None
     original_status: RunStatus = RunStatus.cancelled
 
 
@@ -200,13 +203,26 @@ def _interrupted_replay_metadata(snapshot: InterruptedReplaySnapshot) -> dict[st
     return metadata
 
 
-def _wrapped_snapshot_user_message(snapshot: InterruptedReplaySnapshot) -> str:
-    """Wrap the canonical interrupted user message when its Matrix identity is known."""
-    requester_id = snapshot.run_metadata.get("requester_id")
-    source_event_id = snapshot.run_metadata.get(MATRIX_EVENT_ID_METADATA_KEY)
-    if isinstance(requester_id, str) and requester_id and isinstance(source_event_id, str) and source_event_id:
-        return render_msg_tag(sender=requester_id, body=snapshot.user_message, event_id=source_event_id)
+def _snapshot_user_message_body(snapshot: InterruptedReplaySnapshot) -> str:
+    """Return the persisted user body, restoring a trusted location-change marker."""
+    marker = snapshot.run_metadata.get(MINDROOM_LOCATION_MARKER_METADATA_KEY)
+    if isinstance(marker, str) and marker:
+        return f"{snapshot.user_message}\n\n{marker}"
     return snapshot.user_message
+
+
+def _wrapped_snapshot_user_message(snapshot: InterruptedReplaySnapshot) -> str:
+    """Wrap the canonical interrupted user message when its own Matrix event is known.
+
+    ``current_event_id`` is set only when the recorded prompt is literally one
+    Matrix event's body, so synthetic prompts and structured batches whose
+    children carry their own event identity are never wrapped.
+    """
+    body = _snapshot_user_message_body(snapshot)
+    requester_id = snapshot.run_metadata.get("requester_id")
+    if snapshot.current_event_id and isinstance(requester_id, str) and requester_id:
+        return render_msg_tag(sender=requester_id, body=body, event_id=snapshot.current_event_id)
+    return body
 
 
 def _wrapped_snapshot_assistant_content(
@@ -271,6 +287,7 @@ def build_interrupted_replay_snapshot(
     completed_tools: Sequence[ToolTraceEntry],
     interrupted_tools: Sequence[ToolTraceEntry],
     run_metadata: Mapping[str, object] | None,
+    current_event_id: str | None = None,
     response_event_id: str | None = None,
     original_status: RunStatus = RunStatus.cancelled,
 ) -> InterruptedReplaySnapshot:
@@ -287,6 +304,7 @@ def build_interrupted_replay_snapshot(
         completed_tools=tuple(completed_tools),
         interrupted_tools=tuple(interrupted_tools),
         run_metadata=metadata,
+        current_event_id=current_event_id,
         original_status=original_status,
     )
 

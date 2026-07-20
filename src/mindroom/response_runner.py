@@ -286,10 +286,15 @@ class ResponseRequest:
     correlation_id: str | None = None
     matrix_run_metadata: Mapping[str, Any] | None = None
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
+    location_item_text: str | None = None
     requires_model_history_refresh: bool = False
     scheduled_history_budget: ScheduledHistoryBudget | None = None
     payload_preparation: ResponsePayloadPreparation | None = None
     current_timestamp_ms: float | None = None
+    # The Matrix event whose body the current prompt literally is; None for
+    # synthetic prompts (interactive selections, continuations) and structured
+    # batches whose children carry their own event identity.
+    current_event_id: str | None = None
     current_prompt_is_structured: bool = False
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
     prepare_source_turn: Callable[[], bool] | None = None
@@ -547,11 +552,12 @@ class ResponseRunner:
         *,
         user_message: str,
         reply_to_event_id: str | None,
+        current_event_id: str | None,
         requester_id: str | None,
         matrix_run_metadata: dict[str, Any] | None,
     ) -> TurnRecorder:
         """Create one lifecycle-owned recorder seeded with canonical Matrix metadata."""
-        recorder = TurnRecorder(user_message=user_message)
+        recorder = TurnRecorder(user_message=user_message, current_event_id=current_event_id)
         recorder.set_run_metadata(
             build_matrix_run_metadata(
                 reply_to_event_id,
@@ -836,10 +842,10 @@ class ResponseRunner:
         session_id: str,
         session_type: SessionType,
         create_storage: Callable[[], BaseDb],
-    ) -> Callable[[str, str], None]:
+    ) -> Callable[[str, str, bool], None]:
         """Build the response-event persistence callback for one session-backed response."""
 
-        def persist_response_event_id(run_id: str, response_event_id: str) -> None:
+        def persist_response_event_id(run_id: str, response_event_id: str, delivered: bool) -> None:
             storage = create_storage()
             try:
                 self.deps.state_writer.persist_response_event_id_in_session_run(
@@ -848,7 +854,9 @@ class ResponseRunner:
                     session_type=session_type,
                     run_id=run_id,
                     response_event_id=response_event_id,
-                    response_sender_id=self.deps.matrix_full_id,
+                    # Suppressed or failed deliveries keep the metadata linkage
+                    # but never claim the event for the assistant message.
+                    response_sender_id=self.deps.matrix_full_id if delivered else None,
                 )
             finally:
                 storage.close()
@@ -1040,6 +1048,8 @@ class ResponseRunner:
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
             active_event_ids=frozenset(active_event_ids),
             system_enrichment_items=enrichment_items,
+            current_event_id=request.current_event_id,
+            location_item_text=request.location_item_text,
             scheduled_history_budget=request.scheduled_history_budget,
         )
 
@@ -1648,11 +1658,14 @@ class ResponseRunner:
             matrix_run_metadata=matrix_run_metadata,
             active_event_ids=frozenset(active_event_ids),
             system_enrichment_items=team_system_enrichment_items,
+            current_event_id=request.current_event_id,
+            location_item_text=request.location_item_text,
             scheduled_history_budget=request.scheduled_history_budget,
         )
         team_turn_recorder = self._build_turn_recorder(
             user_message=request.prompt,
             reply_to_event_id=request.reply_to_event_id,
+            current_event_id=request.current_event_id,
             requester_id=requester_user_id or execution_identity.requester_id,
             matrix_run_metadata=matrix_run_metadata,
         )
@@ -2344,6 +2357,7 @@ class ResponseRunner:
         turn_recorder = self._build_turn_recorder(
             user_message=request.prompt,
             reply_to_event_id=request.reply_to_event_id,
+            current_event_id=request.current_event_id,
             requester_id=request.user_id,
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
         )
@@ -2494,6 +2508,7 @@ class ResponseRunner:
         turn_recorder = self._build_turn_recorder(
             user_message=request.prompt,
             reply_to_event_id=request.reply_to_event_id,
+            current_event_id=request.current_event_id,
             requester_id=request.user_id,
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
         )

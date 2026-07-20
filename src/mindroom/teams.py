@@ -40,7 +40,11 @@ from mindroom.ai_run_metadata import (
     build_prepared_history_metadata_content,
 )
 from mindroom.authorization import get_available_responders_in_room
-from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME
+from mindroom.constants import (
+    MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
+    MINDROOM_LOCATION_MARKER_METADATA_KEY,
+    ROUTER_AGENT_NAME,
+)
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
@@ -200,6 +204,8 @@ class _PreparedMaterializedTeamExecution:
     # this snapshot instead of re-resolving, because the per-thread override
     # store can change mid-run (for example via the thread_model tool).
     runtime_model_name: str
+    # Location-change marker recorded in this run's trusted metadata.
+    location_marker: str | None = None
 
     @property
     def prepared_prompt(self) -> str:
@@ -1881,6 +1887,11 @@ async def prepare_materialized_team_execution(
         pipeline_timing.mark("history_ready")
         note_prepared_history_timing(pipeline_timing, prepared_history)
     run_extra_content = build_prepared_history_metadata_content(prepared_history)
+    if prepared_execution.location_marker is not None:
+        run_extra_content = {
+            **(run_extra_content or {}),
+            MINDROOM_LOCATION_MARKER_METADATA_KEY: prepared_execution.location_marker,
+        }
     run_metadata = build_matrix_run_metadata(
         ctx.reply_to_event_id,
         prepared_execution.unseen_event_ids,
@@ -1898,6 +1909,7 @@ async def prepare_materialized_team_execution(
         unseen_event_ids=prepared_execution.unseen_event_ids,
         prepared_history=prepared_history,
         runtime_model_name=runtime_model.model_name,
+        location_marker=prepared_execution.location_marker,
     )
 
 
@@ -2319,7 +2331,7 @@ async def team_response(  # noqa: C901, PLR0915
             message=message,
             current_timestamp_ms=current_timestamp_ms,
             current_prompt_is_structured=current_prompt_is_structured,
-            current_event_id=ctx.reply_to_event_id,
+            current_event_id=ctx.current_event_id,
             run_id=ctx.run_id,
         ),
     )
@@ -3198,7 +3210,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             message=message,
             current_timestamp_ms=current_timestamp_ms,
             current_prompt_is_structured=current_prompt_is_structured,
-            current_event_id=ctx.reply_to_event_id,
+            current_event_id=ctx.current_event_id,
             run_id=ctx.run_id,
         ),
     )

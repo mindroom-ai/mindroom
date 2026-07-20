@@ -1534,11 +1534,11 @@ async def test_delivery_failure_emits_cancelled_hook_and_passes_error_outcome_to
 async def test_apply_post_response_effects_gates_success_only_side_effects() -> None:
     """Memory persistence and run-event linkage run on success and stay off after a failed delivery."""
     memory_calls: list[str] = []
-    persisted: list[tuple[str, str]] = []
+    persisted: list[tuple[str, str, bool]] = []
     deps = PostResponseEffectsDeps(
         logger=get_logger("tests.post_effects"),
         queue_memory_persistence=lambda: memory_calls.append("memory"),
-        persist_response_event_id=lambda run_id, event_id: persisted.append((run_id, event_id)),
+        persist_response_event_id=lambda run_id, event_id, delivered: persisted.append((run_id, event_id, delivered)),
     )
 
     await apply_post_response_effects(
@@ -1547,7 +1547,7 @@ async def test_apply_post_response_effects_gates_success_only_side_effects() -> 
         deps,
     )
     assert memory_calls == ["memory"]
-    assert persisted == [("run-1", "$response")]
+    assert persisted == [("run-1", "$response", True)]
 
     await apply_post_response_effects(
         FinalDeliveryOutcome(terminal_status="error", event_id=None, failure_reason="delivery_failed"),
@@ -1556,4 +1556,19 @@ async def test_apply_post_response_effects_gates_success_only_side_effects() -> 
     )
     # The failed delivery added neither memory persistence nor run-event linkage.
     assert memory_calls == ["memory"]
-    assert persisted == [("run-1", "$response")]
+    assert persisted == [("run-1", "$response", True)]
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status="error",
+            event_id="$failure-note",
+            is_visible_response=True,
+            final_visible_body="Something went wrong",
+            failure_reason="boom",
+        ),
+        ResponseOutcome(response_run_id="run-2", run_succeeded=False),
+        deps,
+    )
+    # A visible failure note keeps the metadata linkage but is never marked as
+    # a delivered response, so the assistant message cannot claim its event.
+    assert persisted[-1] == ("run-2", "$failure-note", False)

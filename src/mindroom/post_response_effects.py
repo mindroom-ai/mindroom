@@ -59,7 +59,9 @@ class PostResponseEffectsDeps:
         | None
     ) = None
     queue_memory_persistence: Callable[[], None] | None = None
-    persist_response_event_id: Callable[[str, str], None] | None = None
+    # (run_id, response_event_id, delivered): ``delivered`` is True only when the
+    # run's output was actually delivered unsuppressed at that event.
+    persist_response_event_id: Callable[[str, str, bool], None] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
     queue_thread_summary: Callable[[str, str, str | None], None] | None = None
 
@@ -162,7 +164,7 @@ class PostResponseEffectsSupport:
         room_id: str,
         interactive_agent_name: str,
         queue_memory_persistence: Callable[[], None] | None = None,
-        persist_response_event_id: Callable[[str, str], None] | None = None,
+        persist_response_event_id: Callable[[str, str, bool], None] | None = None,
     ) -> PostResponseEffectsDeps:
         """Build the per-response post-effect dependency surface."""
 
@@ -232,8 +234,13 @@ async def apply_post_response_effects(
         and response_event_id is not None
         and deps.persist_response_event_id is not None
     ):
+        delivered = (
+            outcome.run_succeeded
+            and final_delivery_outcome.terminal_status == "completed"
+            and not final_delivery_outcome.suppressed
+        )
         try:
-            deps.persist_response_event_id(outcome.response_run_id, response_event_id)
+            deps.persist_response_event_id(outcome.response_run_id, response_event_id, delivered)
         except Exception:
             deps.logger.exception(
                 "Failed to persist response event linkage in run metadata",
