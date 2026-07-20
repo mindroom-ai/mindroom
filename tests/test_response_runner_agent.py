@@ -24,7 +24,6 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     TOOL_TRACE_CONTENT_KEY,
-    RuntimePaths,
 )
 from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import (
@@ -95,10 +94,10 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
     from pathlib import Path
 
-    from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
+    from mindroom.matrix.client import DeliveredMatrixEvent
     from mindroom.matrix.users import AgentMatrixUser
     from mindroom.post_response_effects import ResponseOutcome
     from mindroom.response_turn import ResponseTurnContext
@@ -1847,7 +1846,7 @@ class TestAgentBot(AgentBotTestBase):
         # model_prompt carries only model-side additions past the raw prompt.
         assert request.model_prompt == ""
         assert request.current_timestamp_ms == int(current_turn_time.timestamp() * 1000)
-        assert request.thread_history[0].body == "[2026-03-10 08:10 PDT] Earlier user question"
+        assert request.thread_history[0].body == "Earlier user question"
         assert request.thread_history[1].body == "Existing agent reply"
 
     @pytest.mark.asyncio
@@ -1970,8 +1969,8 @@ class TestAgentBot(AgentBotTestBase):
         # model_prompt carries only model-side additions past the raw prompt.
         assert request.model_prompt == ""
         assert request.current_timestamp_ms == int(current_turn_time.timestamp() * 1000)
-        assert request.thread_history[0].body == "[2026-03-10 08:10 PDT] Bob question"
-        assert request.thread_history[1].body == "[2026-03-10 08:12 PDT] Alice earlier"
+        assert request.thread_history[0].body == "Bob question"
+        assert request.thread_history[1].body == "Alice earlier"
         assert request.thread_history[2].body == "Existing agent reply"
 
         assert len(stored_calls) == 1
@@ -2078,17 +2077,6 @@ class TestAgentBot(AgentBotTestBase):
             await response_function(None)
             return "$response"
 
-        def passthrough_prepare_context(
-            prompt: str,
-            thread_history: Sequence[ResolvedVisibleMessage],
-            *,
-            config: Config,
-            runtime_paths: RuntimePaths,
-            model_prompt: str | None = None,
-        ) -> tuple[str, Sequence[ResolvedVisibleMessage], str, list[ResolvedVisibleMessage]]:
-            _ = config, runtime_paths
-            return prompt, thread_history, model_prompt or prompt, list(thread_history)
-
         stale_history = [
             _visible_message(
                 sender=mock_agent_user.user_id,
@@ -2150,7 +2138,6 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_get_thread_history,
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=False),
-                prepare_memory_and_model_context=passthrough_prepare_context,
                 reprioritize_auto_flush_sessions=MagicMock(),
                 apply_post_response_effects=AsyncMock(),
             ),

@@ -16,7 +16,11 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom.agent_storage import get_agent_session, get_team_session
-from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY, MINDROOM_LOCATION_MARKER_METADATA_KEY
+from mindroom.constants import (
+    MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
+    MINDROOM_LOCATION_MARKER_METADATA_KEY,
+    MINDROOM_REPLAY_PROSE_METADATA_KEY,
+)
 from mindroom.history.storage import new_scope_session
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.redaction import redact_sensitive_text
@@ -52,7 +56,8 @@ class InterruptedReplaySnapshot:
     completed_tools: tuple[ToolTraceEntry, ...]
     interrupted_tools: tuple[ToolTraceEntry, ...]
     run_metadata: dict[str, Any] = field(default_factory=dict)
-    # The Matrix event whose body ``user_message`` literally is; None for
+    # The Matrix event ``user_message`` resolves from (original body, accepted
+    # edit, or transcription); None for
     # synthetic prompts and structured batches carrying per-child identity.
     current_event_id: str | None = None
     original_status: RunStatus = RunStatus.cancelled
@@ -180,54 +185,49 @@ def _render_retained_tool_context(snapshot: InterruptedReplaySnapshot) -> str:
     return "\n".join(lines)
 
 
-def _render_interrupted_replay_content(snapshot: InterruptedReplaySnapshot) -> str:
-    """Render one interrupted snapshot into canonical assistant replay text."""
-    parts: list[str] = []
-    if snapshot.partial_text:
-        parts.append(snapshot.partial_text)
-    parts.append(_render_interruption_summary(snapshot))
+def _render_interrupted_replay_parts(snapshot: InterruptedReplaySnapshot) -> tuple[str, str]:
+    """Render one interrupted snapshot into (full replay text, synthetic prose).
+
+    The prose (status summary plus retained tool context) is returned
+    separately so it can ride run metadata as trusted structured provenance:
+    it was never part of any Matrix event, and post-delivery reconciliation
+    must keep it outside the event-tagged text without re-deriving it from
+    model-authored content.
+    """
+    prose_parts = [_render_interruption_summary(snapshot)]
     retained_tool_context = _render_retained_tool_context(snapshot)
     if retained_tool_context:
-        parts.append(retained_tool_context)
-    return "\n\n".join(parts)
+        prose_parts.append(retained_tool_context)
+    prose = "\n\n".join(prose_parts)
+    content = f"{snapshot.partial_text}\n\n{prose}" if snapshot.partial_text else prose
+    return content, prose
 
 
-def _interrupted_replay_metadata(snapshot: InterruptedReplaySnapshot) -> dict[str, Any]:
+def _interrupted_replay_metadata(snapshot: InterruptedReplaySnapshot, *, prose: str) -> dict[str, Any]:
     metadata = dict(snapshot.run_metadata)
     metadata.update(
         {
             _ORIGINAL_STATUS_KEY: snapshot.original_status.name,
             _INTERRUPTED_REPLAY_STATE_KEY: _INTERRUPTED_REPLAY_STATE,
+            MINDROOM_REPLAY_PROSE_METADATA_KEY: prose,
         },
     )
     return metadata
 
 
-def is_interrupted_replay_run_metadata(metadata: Mapping[str, object] | None) -> bool:
-    """Return whether run metadata marks one canonical interrupted replay run."""
-    return bool(metadata) and metadata.get(_INTERRUPTED_REPLAY_STATE_KEY) == _INTERRUPTED_REPLAY_STATE
-
-
-def interrupted_replay_prose(content: str) -> str:
-    """Return the synthetic interruption prose portion of one canonical replay body.
-
-    The prose (status summary plus retained tool context) was never part of any
-    Matrix event, so post-delivery reconciliation keeps it outside the
-    event-tagged text.
-    """
-    boundary = content.find("\n\n(turn ")
-    if boundary >= 0:
-        return content[boundary + 2 :]
-    if content.startswith("(turn "):
-        return content
-    return ""
+def interrupted_replay_prose_from_metadata(metadata: Mapping[str, object] | None) -> str:
+    """Return the synthetic interruption prose recorded for one replay run."""
+    if not metadata or metadata.get(_INTERRUPTED_REPLAY_STATE_KEY) != _INTERRUPTED_REPLAY_STATE:
+        return ""
+    prose = metadata.get(MINDROOM_REPLAY_PROSE_METADATA_KEY)
+    return prose if isinstance(prose, str) else ""
 
 
 def _wrapped_snapshot_user_message(snapshot: InterruptedReplaySnapshot) -> str:
     """Render the canonical interrupted user turn with its Matrix identity when known.
 
-    ``current_event_id`` is set only when the recorded prompt is literally one
-    Matrix event's body, so synthetic prompts and structured batches whose
+    ``current_event_id`` is set only when the recorded prompt is the body one
+    Matrix event resolves to for display, so synthetic prompts and structured batches whose
     children carry their own event identity are never wrapped. A recorded
     location-change marker is system-generated and lands outside the wrapped
     block (the marker alone when the prompt was empty), and interrupted
@@ -253,13 +253,13 @@ def _build_interrupted_replay_run(
     is_team: bool,
 ) -> RunOutput | TeamRunOutput:
     """Build one canonical replayable run for an interrupted top-level turn."""
-    content = _render_interrupted_replay_content(snapshot)
+    content, prose = _render_interrupted_replay_parts(snapshot)
     messages = []
     user_message = _wrapped_snapshot_user_message(snapshot)
     if user_message:
         messages.append(Message(role="user", content=user_message))
     messages.append(Message(role="assistant", content=content))
-    metadata = _interrupted_replay_metadata(snapshot)
+    metadata = _interrupted_replay_metadata(snapshot, prose=prose)
     if is_team:
         return TeamRunOutput(
             run_id=run_id,
@@ -299,8 +299,11 @@ def build_interrupted_replay_snapshot(
         metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = raw_response_event_id
     else:
         metadata.pop(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY, None)
+    raw_user_message = user_message or ""
     return InterruptedReplaySnapshot(
-        user_message=(user_message or "").strip(),
+        # A prompt bound to a real Matrix event keeps its exact body, including
+        # whitespace; only synthetic prompts normalize to their stripped form.
+        user_message=raw_user_message if current_event_id and raw_user_message else raw_user_message.strip(),
         partial_text=(partial_text or "").strip(),
         completed_tools=tuple(completed_tools),
         interrupted_tools=tuple(interrupted_tools),

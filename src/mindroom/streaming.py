@@ -454,6 +454,7 @@ class StreamingResponse:
     _last_delivered_tool_trace: list[ToolTraceEntry] = field(default_factory=list, init=False, repr=False)
     _last_placeholder_progress_sent: bool = field(default=False, init=False, repr=False)
     _last_committed_rendered_body: str | None = field(default=None, init=False, repr=False)
+    _last_delivered_canonical_body: str | None = field(default=None, init=False, repr=False)
     _last_committed_interactive_metadata: interactive.InteractiveMetadata | None = field(
         default=None,
         init=False,
@@ -825,7 +826,10 @@ class StreamingResponse:
         return StreamTransportOutcome(
             last_physical_stream_event_id=self.event_id,
             terminal_status=terminal_status,
-            rendered_body=attempted_rendered_body,
+            # The delivered payload is authoritative for the visible body:
+            # mention formatting and long-text sidecars can change it from the
+            # pre-delivery display text.
+            rendered_body=self._last_delivered_canonical_body or attempted_rendered_body,
             visible_body_state=attempted_visible_body_state,
             canonical_final_body_candidate=canonical_final_body_candidate,
             failure_reason=cancellation_failure_reason,
@@ -1049,6 +1053,7 @@ class StreamingResponse:
         if delivered is None:
             return False
         self.event_id = delivered.event_id
+        self._last_delivered_canonical_body = delivered.canonical_body or None
         if self.visible_event_id_callback is not None:
             self.visible_event_id_callback(delivered.event_id)
         await self._record_streaming_send(delivered.event_id, delivered.content_sent)
@@ -1074,6 +1079,7 @@ class StreamingResponse:
         )
         if delivered is None:
             return False
+        self._last_delivered_canonical_body = delivered.canonical_body or None
         await self._record_streaming_edit(delivered.event_id, content_sent=delivered.content_sent)
         self._mark_first_visible_reply_if_needed()
         return True

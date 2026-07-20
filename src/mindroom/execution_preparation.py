@@ -141,7 +141,8 @@ def _build_matrix_prompt_with_history(
 ) -> str:
     # System-generated additions (model-prompt tails, location deltas) land
     # after the event-tagged block: the tag's CDATA may only carry the body
-    # actually held by the Matrix event.
+    # the event resolves to for display (original body, accepted edit, or
+    # voice transcription).
     if current_sender is not None and not current_prompt_is_structured:
         current_block = render_msg_tag(sender=current_sender, body=prompt, event_id=current_event_id, ts=current_ts)
     else:
@@ -188,34 +189,34 @@ def _clean_partial_reply_body(body: str) -> str:
     return clean_partial_reply_text(body)
 
 
-def _message_speaker_label(
+def _trusted_relayed_original_sender(
     message: ResolvedVisibleMessage,
     *,
-    trusted_relay_sender_ids: Collection[str] = (),
-) -> str:
-    """Return the speaker label that should be shown for one visible Matrix message.
+    trusted_relay_sender_ids: Collection[str],
+) -> str | None:
+    """Return the trusted human original sender one managed account relayed for.
 
-    ``original_sender`` metadata is client-controlled, so it becomes the
-    authoritative ``<msg from>`` identity only when the real Matrix sender is a
-    managed MindRoom account relaying on a user's behalf — the same trust rule
-    ingress applies. Untrusted metadata falls back to the event's real sender.
+    ``original_sender`` metadata is client-controlled, so it is honored only
+    under the same membership grant ingress uses: the event's server-validated
+    sender must be a currently prepared MindRoom account, and the named
+    original sender must be human (never another managed account). Everything
+    else fails closed to the event's real sender. This single predicate drives
+    attribution, role selection, and chrome stripping so the decisions can
+    never diverge.
     """
     original_sender = message.content.get(ORIGINAL_SENDER_KEY)
-    if isinstance(original_sender, str) and original_sender and message.sender in trusted_relay_sender_ids:
-        return original_sender
-    return message.sender
-
-
-def _is_relayed_user_message(message: ResolvedVisibleMessage) -> bool:
-    """Return whether an internal Matrix sender is relaying a user-authored message."""
-    original_sender = message.content.get(ORIGINAL_SENDER_KEY)
-    return isinstance(original_sender, str) and bool(original_sender)
+    if not isinstance(original_sender, str) or not original_sender:
+        return None
+    if message.sender not in trusted_relay_sender_ids or original_sender in trusted_relay_sender_ids:
+        return None
+    return original_sender
 
 
 def _should_strip_visible_tool_markers(
     message: ResolvedVisibleMessage,
     *,
     response_sender_id: str | None,
+    trusted_relay_sender_ids: Collection[str],
 ) -> bool:
     """Return whether visible marker lines are known MindRoom display chrome."""
     if isinstance(message.content.get(TOOL_TRACE_CONTENT_KEY), dict):
@@ -223,7 +224,7 @@ def _should_strip_visible_tool_markers(
     return (
         response_sender_id is not None
         and message.sender == response_sender_id
-        and not _is_relayed_user_message(message)
+        and _trusted_relayed_original_sender(message, trusted_relay_sender_ids=trusted_relay_sender_ids) is None
     )
 
 
@@ -231,9 +232,14 @@ def _context_body_from_visible_message(
     message: ResolvedVisibleMessage,
     *,
     response_sender_id: str | None,
+    trusted_relay_sender_ids: Collection[str],
 ) -> str:
     """Return the model-facing body for one visible Matrix message."""
-    if _should_strip_visible_tool_markers(message, response_sender_id=response_sender_id):
+    if _should_strip_visible_tool_markers(
+        message,
+        response_sender_id=response_sender_id,
+        trusted_relay_sender_ids=trusted_relay_sender_ids,
+    ):
         return strip_visible_tool_markers(message.body)
     return message.body
 
@@ -267,27 +273,39 @@ def _context_message_from_visible_message(
     *,
     response_sender_id: str | None,
     trusted_relay_sender_ids: Collection[str] = (),
+    timestamp_timezone: str | None = None,
     missing_sender_label: str | None = None,
     body: str | None = None,
     attachment_records: Sequence[AttachmentRecord] = (),
 ) -> Message:
-    """Convert one visible Matrix message into a structured Agno message."""
+    """Convert one visible Matrix message into a structured Agno message.
+
+    The event-tagged CDATA carries only the body the event resolves to for
+    display; system-generated additions (attachment annotations) land after
+    the closing tag and user-turn timestamps ride the ``ts`` attribute.
+    """
     # Matrix bodies include human-facing tool markers like "🔧 `tool` [1]".
     # Those markers are display chrome, not conversation content; if we replay
     # them to the model it can continue the pattern as plain text with no trace.
-    body = _context_body_from_visible_message(message, response_sender_id=response_sender_id) if body is None else body
+    if body is None:
+        body = _context_body_from_visible_message(
+            message,
+            response_sender_id=response_sender_id,
+            trusted_relay_sender_ids=trusted_relay_sender_ids,
+        )
     annotation = format_attachment_annotation(list(attachment_records))
-    if annotation:
-        body = f"{body}\n{annotation}" if body else annotation
     event_id = message.event_id or None
-    if (
-        response_sender_id is not None
-        and message.sender == response_sender_id
-        and not _is_relayed_user_message(message)
-    ):
+    relayed_original_sender = _trusted_relayed_original_sender(
+        message,
+        trusted_relay_sender_ids=trusted_relay_sender_ids,
+    )
+    if response_sender_id is not None and message.sender == response_sender_id and relayed_original_sender is None:
         # Provider APIs reject media on assistant turns, so agent-sent
         # attachments surface through the annotation text only.
-        return Message(role="assistant", content=render_msg_tag(sender=message.sender, body=body, event_id=event_id))
+        content = render_msg_tag(sender=message.sender, body=body, event_id=event_id)
+        if annotation:
+            content = f"{content}\n{annotation}"
+        return Message(role="assistant", content=content)
     if message.sender in _PARTIAL_REPLY_GUIDANCE_LABELS and response_sender_id is not None:
         # The guidance label replaced the real sender during unseen-context
         # sanitization (a trusted substitution keyed on the event's own
@@ -296,10 +314,16 @@ def _context_message_from_visible_message(
         # addressable under the agent's identity.
         content = render_msg_tag(sender=response_sender_id, body=f"{message.sender}: {body}", event_id=event_id)
     else:
-        speaker_label = (
-            _message_speaker_label(message, trusted_relay_sender_ids=trusted_relay_sender_ids) or missing_sender_label
-        )
-        content = render_msg_tag(sender=speaker_label or message.sender, body=body, event_id=event_id)
+        ts = None
+        is_user_turn = relayed_original_sender is not None or message.sender not in trusted_relay_sender_ids
+        # Only real Matrix events carry a wall-clock attribute; synthetic
+        # history (e.g. OpenAI-compatible request messages) has no event time.
+        if is_user_turn and message.event_id and message.timestamp and timestamp_timezone is not None:
+            ts = format_timestamp_ms(message.timestamp, timezone=timestamp_timezone)
+        speaker_label = relayed_original_sender or message.sender or missing_sender_label
+        content = render_msg_tag(sender=speaker_label or message.sender, body=body, event_id=event_id, ts=ts)
+    if annotation:
+        content = f"{content}\n{annotation}"
     if not attachment_records:
         return Message(role="user", content=content)
     audio, images, files, videos = attachment_records_to_media(list(attachment_records))
@@ -318,6 +342,7 @@ def _context_messages_from_visible_messages(
     *,
     response_sender_id: str | None,
     trusted_relay_sender_ids: Collection[str] = (),
+    timestamp_timezone: str | None = None,
     max_messages: int | None = None,
     max_message_length: int | None = None,
     missing_sender_label: str | None = None,
@@ -329,7 +354,11 @@ def _context_messages_from_visible_messages(
     for message in visible_messages:
         # Strip before length capping so display-only markers do not consume the
         # model-context budget or leave marker-only turns behind.
-        body = _context_body_from_visible_message(message, response_sender_id=response_sender_id)
+        body = _context_body_from_visible_message(
+            message,
+            response_sender_id=response_sender_id,
+            trusted_relay_sender_ids=trusted_relay_sender_ids,
+        )
         attachment_records = attachment_context.records_for(message) if attachment_context is not None else []
         if not body and not attachment_records:
             continue
@@ -345,6 +374,7 @@ def _context_messages_from_visible_messages(
                 capped_message,
                 response_sender_id=response_sender_id,
                 trusted_relay_sender_ids=trusted_relay_sender_ids,
+                timestamp_timezone=timestamp_timezone,
                 missing_sender_label=missing_sender_label,
                 body=capped_body,
                 attachment_records=attachment_records,
@@ -482,6 +512,7 @@ def _build_unseen_context_messages(
     unseen_messages, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages_for_sender(
         thread_history,
         sender_id=response_sender_id,
+        trusted_relay_sender_ids=trusted_relay_sender_ids,
         seen_event_ids=seen_event_ids,
         current_event_id=reply_to_event_id,
         active_event_ids=active_event_ids,
@@ -490,6 +521,7 @@ def _build_unseen_context_messages(
         unseen_messages,
         response_sender_id=response_sender_id,
         trusted_relay_sender_ids=trusted_relay_sender_ids,
+        timestamp_timezone=config.timezone,
         attachment_context=attachment_context,
     )
     if partial_reply_kinds:
@@ -553,6 +585,7 @@ def _build_thread_history_messages(
         thread_history,
         response_sender_id=response_sender_id,
         trusted_relay_sender_ids=trusted_relay_sender_ids,
+        timestamp_timezone=config.timezone,
         max_messages=max_messages,
         max_message_length=max_message_length,
         missing_sender_label=missing_sender_label,
@@ -641,12 +674,14 @@ def _sanitize_thread_history_for_replay(
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
     response_sender_id: str | None,
+    trusted_relay_sender_ids: Collection[str],
     active_event_ids: Collection[str],
 ) -> tuple[ResolvedVisibleMessage, ...]:
     """Apply unseen-context sanitization before fallback full-thread replay."""
     sanitized, _, _ = _get_unseen_messages_for_sender(
         thread_history,
         sender_id=response_sender_id,
+        trusted_relay_sender_ids=trusted_relay_sender_ids,
         seen_event_ids=set(),
         current_event_id=None,
         active_event_ids=active_event_ids,
@@ -673,6 +708,7 @@ def _get_unseen_messages_for_sender(
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
     sender_id: str | None,
+    trusted_relay_sender_ids: Collection[str],
     seen_event_ids: set[str],
     current_event_id: str | None,
     active_event_ids: Collection[str],
@@ -691,7 +727,11 @@ def _get_unseen_messages_for_sender(
             continue
         if isinstance(content, dict) and COMPACTION_NOTICE_CONTENT_KEY in content:
             continue
-        if sender_id and sender == sender_id and not _is_relayed_user_message(msg):
+        if (
+            sender_id
+            and sender == sender_id
+            and _trusted_relayed_original_sender(msg, trusted_relay_sender_ids=trusted_relay_sender_ids) is None
+        ):
             partial_kind = _classify_partial_reply(
                 msg,
                 active_event_ids=active_event_ids,
@@ -976,6 +1016,7 @@ async def _prepare_execution_context_common(
             fallback_thread_history = _sanitize_thread_history_for_replay(
                 fallback_thread_history,
                 response_sender_id=response_sender_id,
+                trusted_relay_sender_ids=trusted_relay_sender_ids,
                 active_event_ids=active_event_ids,
             )
         replay_fallback_messages = _build_thread_history_messages(
@@ -1126,8 +1167,15 @@ async def prepare_agent_execution_context(
     )
 
 
-def _append_transient_additional_context(entity: Agent | Team, context_chunk: str) -> None:
-    """Append one current-turn context block without discarding existing system context."""
+def append_additional_context(entity: Agent | Team, context_chunk: str) -> None:
+    """Append one context block without discarding existing system context.
+
+    The single owner of additional-context mutation for agent, team, and
+    execution-preparation paths, so separator and ordering semantics cannot
+    diverge between them.
+    """
+    if not context_chunk:
+        return
     existing_context = entity.additional_context.strip() if entity.additional_context else ""
     entity.additional_context = f"{existing_context}\n\n{context_chunk}" if existing_context else context_chunk
 
@@ -1166,7 +1214,7 @@ async def _prepare_bound_team_execution_context(
         # detail rides the volatile additional-context tail instead; storage
         # strips system-role messages before durable persistence.
         for entity in (team, *agents):
-            _append_transient_additional_context(entity, location_block)
+            append_additional_context(entity, location_block)
     trusted_relay_sender_ids = ctx.trusted_relay_sender_ids
     static_token_estimator = team_static_token_estimator(team)
 

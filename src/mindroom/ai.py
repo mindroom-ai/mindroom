@@ -34,7 +34,11 @@ from mindroom.ai_run_metadata import (
 )
 from mindroom.constants import MINDROOM_LOCATION_MARKER_METADATA_KEY
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
+from mindroom.execution_preparation import (
+    append_additional_context,
+    prepare_agent_execution_context,
+    render_prepared_messages_text,
+)
 from mindroom.history.interrupted_replay import (
     persist_interrupted_replay,
     split_interrupted_tool_trace,
@@ -120,14 +124,6 @@ __all__ = [
     "stream_agent_response",
 ]
 AIStreamChunk = str | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
-
-
-def _append_additional_context(agent: Agent, context_chunk: str) -> None:
-    """Append one transient context block without discarding existing system context."""
-    if not context_chunk:
-        return
-    existing_context = agent.additional_context.strip() if agent.additional_context else ""
-    agent.additional_context = f"{existing_context}\n\n{context_chunk}" if existing_context else context_chunk
 
 
 def model_prompt_tail_after_raw_prompt(*, raw_prompt: str, model_prompt: str | None) -> str:
@@ -1167,9 +1163,9 @@ async def _prepare_agent_and_prompt(
         runtime_model, agent = await asyncio.to_thread(_resolve_model_and_build_agent)
         _mark_pipeline_timing(pipeline_timing, "agent_build_ready")
 
-    _append_additional_context(agent, prompt_parts.session_preamble)
+    append_additional_context(agent, prompt_parts.session_preamble)
     if ctx.system_enrichment_items:
-        _append_additional_context(
+        append_additional_context(
             agent,
             _render_system_enrichment_context(ctx.system_enrichment_items),
         )

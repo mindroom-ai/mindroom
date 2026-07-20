@@ -119,7 +119,6 @@ depends_on = [
     "mindroom.response_turn",
     "mindroom.timing",
     "mindroom.tool_system.events",
-    "mindroom.user_turn_time",
 ]
 
 [[modules]]
@@ -1328,7 +1327,6 @@ depends_on = [
     "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
-    "mindroom.user_turn_time",
 ]
 
 [[modules]]
@@ -1484,11 +1482,6 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.user_turn_time"
-depends_on = ["mindroom.memory", "mindroom.timestamp_formatting"]
-visibility = ["mindroom.ai", "mindroom.response_runner"]
-
-[[modules]]
 path = "mindroom.timestamp_formatting"
 depends_on = []
 visibility = [
@@ -1498,7 +1491,6 @@ visibility = [
     "mindroom.execution_preparation",
     "mindroom.handled_turns",
     "mindroom.turn_controller",
-    "mindroom.user_turn_time",
 ]
 
 [[modules]]
@@ -2055,7 +2047,10 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.matrix.client_delivery"
-depends_on = []
+depends_on = [
+    "mindroom.constants",
+    "mindroom.matrix.sidecar_content",
+]
 visibility = [
     "mindroom.approval_transport",
     "mindroom.conversation_resolver",
@@ -4266,8 +4261,7 @@ from = ["mindroom.oauth.service"]
 expose = [
     "InterruptedReplaySnapshot",
     "build_interrupted_replay_snapshot",
-    "interrupted_replay_prose",
-    "is_interrupted_replay_run_metadata",
+    "interrupted_replay_prose_from_metadata",
     "persist_interrupted_replay",
     "persist_interrupted_replay_snapshot",
     "split_interrupted_tool_trace",

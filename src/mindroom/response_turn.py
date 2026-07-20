@@ -217,7 +217,8 @@ class ResponseTurnContext:
     active_model_name: str | None = None
     active_event_ids: frozenset[str] = frozenset()
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
-    # The Matrix event whose body the current prompt literally is; None for
+    # The Matrix event the current prompt resolves from (original body,
+    # accepted edit, or transcription); None for
     # synthetic prompts and structured batches. Distinct from
     # ``reply_to_event_id``, which is the delivery/thread anchor.
     current_event_id: str | None = None

@@ -99,7 +99,7 @@ from .matrix.to_device import AuthenticatedToDeviceEvent
 from .media_inputs import MediaInputs
 from .redacted_turn_cleanup import RedactedTurnCleanup, RedactedTurnCleanupDeps
 from .response_payload_preparation import ResponsePayloadPreparer
-from .response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps, prepare_memory_and_model_context
+from .response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps
 from .scheduling import (
     cancel_all_running_scheduled_tasks,
     clear_deferred_overdue_tasks,
@@ -2147,16 +2147,6 @@ class TeamBot(AgentBot):
                 response_kind="team",
             )
         assert self.client is not None
-        memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
-            prepare_memory_and_model_context(
-                request.prompt,
-                request.thread_history,
-                config=self.config,
-                runtime_paths=self.runtime_paths,
-                model_prompt=request.model_prompt,
-            )
-        )
-
         configured_mode = TeamMode.COORDINATE if self.team_mode == "coordinate" else TeamMode.COLLABORATE
         availability = self._turn_policy.responder_availability()
         team_resolution = resolve_configured_team(
@@ -2201,13 +2191,13 @@ class TeamBot(AgentBot):
         with tool_execution_identity(execution_identity):
             create_background_task(
                 store_conversation_memory(
-                    memory_prompt,
+                    request.prompt,
                     agent_names,
                     self.storage_path,
                     session_id,
                     self.config,
                     self.runtime_paths,
-                    memory_thread_history,
+                    request.thread_history,
                     request.user_id,
                     execution_identity=execution_identity,
                 ),
@@ -2218,9 +2208,6 @@ class TeamBot(AgentBot):
         return await self._response_runner.generate_team_response_helper(
             replace(
                 request,
-                prompt=memory_prompt,
-                model_prompt=model_prompt_text,
-                thread_history=model_thread_history,
                 media=request.media or MediaInputs(),
                 user_id=request.user_id or "",
                 correlation_id=request.correlation_id or target.reply_to_event_id,

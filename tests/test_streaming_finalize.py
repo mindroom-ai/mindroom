@@ -947,3 +947,63 @@ async def test_finalize_streamed_response_restart_interruption_preserves_cancell
     assert outcome.mark_handled is True
     response_hooks.emit_after_response.assert_not_awaited()
     response_hooks.emit_cancelled_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unexpected_finalize_error_keeps_visible_stream_ownership(tmp_path: Path) -> None:
+    """A finalize crash after visible streaming keeps the delivered body owned by the run."""
+    config = _config(tmp_path)
+    envelope = _envelope()
+    response_hooks = SimpleNamespace(
+        apply_before_response=AsyncMock(),
+        apply_final_response_transform=AsyncMock(
+            return_value=SimpleNamespace(response_text="chunk", response_kind="ai", envelope=envelope),
+        ),
+        emit_after_response=AsyncMock(),
+        emit_cancelled_response=AsyncMock(),
+    )
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=SimpleNamespace(client=_client(), orchestrator=None, config=config, runtime_started_at=0.0),
+            runtime_paths=runtime_paths_for(config),
+            agent_name="code",
+            logger=get_logger("tests.delivery"),
+            redact_message_event=AsyncMock(return_value=True),
+            resolver=Mock(),
+            response_hooks=response_hooks,
+        ),
+    )
+
+    with patch(
+        "mindroom.delivery_gateway.interactive_response_for_visible_body",
+        side_effect=RuntimeError("boom"),
+    ):
+        outcome = await gateway.finalize_streamed_response(
+            FinalizeStreamedResponseRequest(
+                target=MessageTarget.resolve("!room:localhost", None, "$reply"),
+                stream_transport_outcome=StreamTransportOutcome(
+                    last_physical_stream_event_id="$streaming",
+                    terminal_status="completed",
+                    rendered_body="chunk",
+                    visible_body_state="visible_body",
+                ),
+                initial_delivery_kind="sent",
+                identity=ResponseIdentity(
+                    response_kind="ai",
+                    response_envelope=envelope,
+                    correlation_id="corr-finalize-crash",
+                ),
+                tool_trace=None,
+                extra_content=None,
+                existing_event_id=None,
+                existing_event_is_placeholder=False,
+            ),
+        )
+
+    assert outcome.terminal_status == "error"
+    assert outcome.failure_reason == "stream_finalize_failed"
+    assert outcome.final_visible_event_id == "$streaming"
+    assert outcome.final_visible_body == "chunk"
+    # The visible body is the run's own delivered output, so persistence must
+    # still wrap the assistant message with this event.
+    assert outcome.body_is_run_output is True

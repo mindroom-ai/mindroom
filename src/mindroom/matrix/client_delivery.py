@@ -15,11 +15,13 @@ from nio import crypto
 from nio.api import Api
 from nio.exceptions import OlmTrustError
 
+from mindroom.constants import STREAM_VISIBLE_BODY_KEY
 from mindroom.logging_config import get_logger
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.media import upload_content_uri, upload_media_bytes
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_matrix_edit_content
+from mindroom.matrix.sidecar_content import sidecar_mxc_url
 from mindroom.timing import emit_timing_event
 
 if TYPE_CHECKING:
@@ -40,6 +42,44 @@ class DeliveredMatrixEvent:
 
     event_id: str
     content_sent: dict[str, Any]
+    # The full logical plain body this event resolves to for display: the
+    # pre-truncation text when a complete long-text sidecar rode along,
+    # otherwise the exact wire body. Defaults to the wire body so callers that
+    # never pass logical content still get delivered truth.
+    canonical_body: str = ""
+
+    def __post_init__(self) -> None:  # noqa: D105
+        if not self.canonical_body:
+            object.__setattr__(self, "canonical_body", _visible_plain_body(self.content_sent))
+
+
+def _owning_text_content(content: dict[str, Any]) -> dict[str, Any]:
+    """Return the content dict that carries an event's authoritative plain body."""
+    new_content = content.get("m.new_content")
+    return new_content if isinstance(new_content, dict) else content
+
+
+def _visible_plain_body(content: dict[str, Any]) -> str:
+    """Return one content payload's visible plain body, excluding warmup chrome."""
+    owner = _owning_text_content(content)
+    visible = owner.get(STREAM_VISIBLE_BODY_KEY, owner.get("body"))
+    return visible if isinstance(visible, str) else ""
+
+
+def _canonical_delivered_body(content: dict[str, Any], content_sent: dict[str, Any]) -> str:
+    """Return the full logical body one delivered event resolves to for display.
+
+    ``prepare_large_message`` may replace the wire body with a truncated
+    preview; when the complete content rode a usable long-text sidecar, the
+    logical pre-truncation body is what MindRoom clients hydrate and display,
+    so it is the authoritative text for persistence. Without a usable sidecar
+    the wire body is all Matrix holds.
+    """
+    if content_sent is not content and sidecar_mxc_url(_owning_text_content(content_sent)) is not None:
+        logical_body = _visible_plain_body(content)
+        if logical_body:
+            return logical_body
+    return _visible_plain_body(content_sent)
 
 
 def _sanitized_delivery_error_message(error: Exception) -> str:
@@ -269,7 +309,11 @@ async def send_message_result(
             event_id=str(response.event_id),
             cache_bypass=cache_bypass,
         )
-        return DeliveredMatrixEvent(event_id=str(response.event_id), content_sent=content_sent)
+        return DeliveredMatrixEvent(
+            event_id=str(response.event_id),
+            content_sent=content_sent,
+            canonical_body=_canonical_delivered_body(content, content_sent),
+        )
     emit_timing_event(
         "Matrix send timing",
         phase="send_finish",

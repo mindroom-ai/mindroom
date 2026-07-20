@@ -813,8 +813,8 @@ def test_fallback_thread_history_pins_attachments_to_their_messages(tmp_path: Pa
     history_with_media = messages[0]
     assert history_with_media.role == "user"
     assert history_with_media.content == (
-        '<msg event_id="$img" from="@alice:localhost">'
-        '<![CDATA[look at this\n[attachments: att_car (image, "car.jpg")]]]></msg>'
+        '<msg event_id="$img" from="@alice:localhost"><![CDATA[look at this]]></msg>'
+        '\n[attachments: att_car (image, "car.jpg")]'
     )
     assert [image.id for image in (history_with_media.images or [])] == ["att_car"]
     assert messages[1].content == '<msg event_id="$text" from="@alice:localhost"><![CDATA[no attachments here]]></msg>'
@@ -854,8 +854,8 @@ def test_fallback_thread_history_maps_raw_media_events_to_attachments(tmp_path: 
     )
 
     assert messages[0].content == (
-        f'<msg event_id="$raw-img" from="@alice:localhost">'
-        f'<![CDATA[photo.png\n[attachments: {attachment_id} (image, "photo.png")]]]></msg>'
+        '<msg event_id="$raw-img" from="@alice:localhost"><![CDATA[photo.png]]></msg>'
+        f'\n[attachments: {attachment_id} (image, "photo.png")]'
     )
     assert [image.id for image in (messages[0].images or [])] == [attachment_id]
 
@@ -891,8 +891,8 @@ def test_fallback_thread_history_agent_attachments_annotate_without_media(tmp_pa
 
     assert messages[0].role == "assistant"
     assert messages[0].content == (
-        '<msg event_id="$agent-file" from="@mindroom_team:localhost">'
-        '<![CDATA[here is the report\n[attachments: att_report (file, "report.pdf")]]]></msg>'
+        '<msg event_id="$agent-file" from="@mindroom_team:localhost"><![CDATA[here is the report]]></msg>'
+        '\n[attachments: att_report (file, "report.pdf")]'
     )
     assert not messages[0].files
 
@@ -972,8 +972,8 @@ def test_fallback_thread_history_drops_cross_thread_attachments(tmp_path: Path) 
     )
 
     assert messages[0].content == (
-        '<msg event_id="$in-thread" from="@alice:localhost">'
-        '<![CDATA[see files\n[attachments: att_in_thread (file, "in-thread.txt")]]]></msg>'
+        '<msg event_id="$in-thread" from="@alice:localhost"><![CDATA[see files]]></msg>'
+        '\n[attachments: att_in_thread (file, "in-thread.txt")]'
     )
     assert [file.id for file in (messages[0].files or [])] == ["att_in_thread"]
 
@@ -1009,8 +1009,8 @@ def test_fallback_thread_history_matches_thread_root_attachments(tmp_path: Path)
     )
 
     assert messages[0].content == (
-        '<msg event_id="$root" from="@alice:localhost">'
-        '<![CDATA[root image\n[attachments: att_root (image, "root.png")]]]></msg>'
+        '<msg event_id="$root" from="@alice:localhost"><![CDATA[root image]]></msg>'
+        '\n[attachments: att_root (image, "root.png")]'
     )
     assert [image.id for image in (messages[0].images or [])] == ["att_root"]
 
@@ -1705,3 +1705,34 @@ async def test_team_forged_location_block_never_reaches_additional_context(
     assert kwargs["current_message_suffix"] == ""
     assert team.additional_context == "stable system context"
     assert member.additional_context is None
+
+
+def test_fallback_thread_history_keeps_raw_body_with_ts_attribute() -> None:
+    """History user turns keep their exact event body; the timestamp rides the ts attribute."""
+    config = _config()
+    config.timezone = "America/Los_Angeles"
+    messages = _build_thread_history_messages(
+        "Current request",
+        [
+            make_visible_message(
+                sender="@alice:localhost",
+                body="older text",
+                event_id="$older",
+                timestamp=1_774_018_800_000,
+            ),
+            make_visible_message(
+                sender="@mindroom_team:localhost",
+                body="agent reply",
+                event_id="$agent",
+                timestamp=1_774_018_860_000,
+            ),
+        ],
+        response_sender_id="@mindroom_team:localhost",
+        config=config,
+    )
+
+    assert messages[0].content == (
+        '<msg event_id="$older" from="@alice:localhost" ts="2026-03-20 08:00 PDT"><![CDATA[older text]]></msg>'
+    )
+    # The agent's own replies carry no ts attribute, matching prior behavior.
+    assert messages[1].content == '<msg event_id="$agent" from="@mindroom_team:localhost"><![CDATA[agent reply]]></msg>'

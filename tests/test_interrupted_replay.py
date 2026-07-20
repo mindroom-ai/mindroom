@@ -306,14 +306,15 @@ def test_build_interrupted_replay_run_tracks_replay_and_seen_event_metadata(orig
         is_team=False,
     )
 
+    summary = {RunStatus.cancelled: "stopped", RunStatus.error: "failed", RunStatus.paused: "paused"}[original_status]
     assert run.metadata == {
         "matrix_event_id": "e1",
         "matrix_response_event_id": "$reply",
         "matrix_seen_event_ids": ["e1", "e2"],
         "mindroom_original_status": original_status.name,
         "mindroom_replay_state": "interrupted",
+        "mindroom_replay_prose": f"(turn {summary} before completion)",
     }
-    summary = {RunStatus.cancelled: "stopped", RunStatus.error: "failed", RunStatus.paused: "paused"}[original_status]
     assert summary in _assistant_text(run)
 
 
@@ -349,6 +350,7 @@ def test_build_interrupted_replay_run_preserves_coalesced_source_metadata() -> N
         "matrix_source_event_prompts": {"$first": "first", "$anchor": "anchor"},
         "mindroom_original_status": "cancelled",
         "mindroom_replay_state": "interrupted",
+        "mindroom_replay_prose": "(turn stopped before completion)",
     }
 
 
@@ -710,3 +712,37 @@ def test_build_interrupted_replay_run_keeps_marker_baseline_for_empty_prompt() -
     # body, so the marker-only user turn is never wrapped.
     assert run.messages[0].role == "user"
     assert run.messages[0].content == "📍 Home"
+
+
+def test_snapshot_preserves_event_bound_whitespace() -> None:
+    """A prompt bound to a real Matrix event keeps its exact body, including whitespace."""
+    snapshot = build_interrupted_replay_snapshot(
+        user_message="  indented body\n",
+        partial_text="Half",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata={"requester_id": "@alice:localhost"},
+        current_event_id="$source",
+    )
+    assert snapshot.user_message == "  indented body\n"
+
+    run = _build_interrupted_replay_run(
+        snapshot=snapshot,
+        run_id="run-1",
+        scope_id="test_agent",
+        session_id="session-1",
+        is_team=False,
+    )
+    assert run.messages is not None
+    assert run.messages[0].content == (
+        '<msg event_id="$source" from="@alice:localhost"><![CDATA[  indented body\n]]></msg>'
+    )
+
+    synthetic = build_interrupted_replay_snapshot(
+        user_message="  indented body\n",
+        partial_text="Half",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata={},
+    )
+    assert synthetic.user_message == "indented body"

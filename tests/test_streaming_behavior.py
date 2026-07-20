@@ -42,7 +42,7 @@ from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import (
     InterruptedReplaySnapshot,
-    _render_interrupted_replay_content,
+    _render_interrupted_replay_parts,
 )
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -103,7 +103,7 @@ async def _aiter(*events: object) -> AsyncIterator[object]:
 
 
 def _render_cleaned_interrupted_replay(body: str) -> str:
-    return _render_interrupted_replay_content(
+    content, _prose = _render_interrupted_replay_parts(
         InterruptedReplaySnapshot(
             user_message="",
             partial_text=clean_partial_reply_text(body),
@@ -112,6 +112,7 @@ def _render_cleaned_interrupted_replay(body: str) -> str:
             run_metadata={},
         ),
     )
+    return content
 
 
 def _make_matrix_client_mock() -> AsyncMock:
@@ -1804,6 +1805,39 @@ class TestStreamingBehavior:
         final_body = mock_edit.await_args.args[3]["body"]
         assert final_body == _PROGRESS_PLACEHOLDER
         assert IN_PROGRESS_MARKER not in final_body
+
+    @pytest.mark.asyncio
+    async def test_finalize_reports_delivered_canonical_body(self) -> None:
+        """The terminal outcome carries the body the delivered edit resolved to, not pre-delivery text."""
+        mock_client = _make_matrix_client_mock()
+
+        streaming = StreamingResponse(
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+        )
+        streaming.event_id = "$stream_msg"
+        streaming.accumulated_text = "Ping @helper"
+
+        with patch(
+            "mindroom.streaming.edit_message_result",
+            new=AsyncMock(
+                return_value=DeliveredMatrixEvent(
+                    event_id="$edit",
+                    content_sent={
+                        "body": "* Ping @mindroom_helper:localhost",
+                        "m.new_content": {"body": "Ping @mindroom_helper:localhost"},
+                    },
+                ),
+            ),
+        ):
+            outcome = await streaming.finalize(mock_client)
+
+        assert outcome.terminal_status == "completed"
+        assert outcome.visible_body_state == "visible_body"
+        # Mention formatting changed the wire body; persistence must bind the
+        # event to the delivered form, not the accumulated model text.
+        assert outcome.rendered_body == "Ping @mindroom_helper:localhost"
 
     @pytest.mark.asyncio
     async def test_finalize_does_not_overwrite_existing_message_without_placeholder(self) -> None:

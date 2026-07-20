@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
-from xml.sax.saxutils import quoteattr as xml_quoteattr
+from typing import TYPE_CHECKING
 
 from agno.db.base import SessionType
 from agno.run.agent import RunOutput
@@ -13,7 +12,7 @@ from agno.run.team import TeamRunOutput
 from mindroom.agent_storage import create_session_storage, get_agent_session, get_team_session
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.history.interrupted_replay import interrupted_replay_prose, is_interrupted_replay_run_metadata
+from mindroom.history.interrupted_replay import interrupted_replay_prose_from_metadata
 from mindroom.history.runtime import create_scope_session_storage
 from mindroom.history.types import HistoryScope
 from mindroom.prompt_message_tags import render_msg_tag
@@ -195,26 +194,25 @@ def _wrap_final_assistant_message(
 
     The CDATA body is the delivered visible text with MindRoom display chrome
     stripped, matching how the same event renders through Matrix-fallback
-    history; rebuilding from that external body on every callback means a
-    repeated or changed callback can never nest tags. Canonical interrupted
-    runs keep their synthetic interruption prose outside the tag, since that
-    text was never part of the Matrix event. Returns whether a message changed.
+    history. The desired content is rebuilt from the authoritative callback
+    inputs on every call and compared whole, so a repeated callback is a no-op,
+    a changed body for the same event is refreshed, tags can never nest, and
+    model-authored text is never parsed to make the decision. Canonical
+    interrupted runs keep their synthetic interruption prose — carried as
+    trusted run metadata — outside the tag, since that text was never part of
+    the Matrix event. Returns whether a message changed.
     """
     message = _current_generation_assistant_message(run)
     if message is None:
-        return False
-    content = cast("str", message.content)
-    already_wrapped_prefix = f"<msg event_id={xml_quoteattr(response_event_id)} "
-    if content.startswith(already_wrapped_prefix):
         return False
     wrapped = render_msg_tag(
         sender=response_sender_id,
         body=delivered_body,
         event_id=response_event_id,
     )
-    if is_interrupted_replay_run_metadata(run.metadata):
-        prose = interrupted_replay_prose(content)
-        message.content = f"{wrapped}\n\n{prose}" if prose else wrapped
-    else:
-        message.content = wrapped
+    prose = interrupted_replay_prose_from_metadata(run.metadata)
+    desired_content = f"{wrapped}\n\n{prose}" if prose else wrapped
+    if message.content == desired_content:
+        return False
+    message.content = desired_content
     return True

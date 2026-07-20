@@ -1042,6 +1042,9 @@ MATRIX_HISTORY_SCOPE_METADATA_KEY = "matrix_history_scope"
 # Trusted short location marker recorded on the run whose persisted current
 # prompt carried a location change; the only provenance location dedup reads.
 MINDROOM_LOCATION_MARKER_METADATA_KEY = "mindroom_location_marker"
+# Synthetic interruption prose recorded on canonical interrupted replay runs;
+# trusted structured provenance so reconciliation never parses model text.
+MINDROOM_REPLAY_PROSE_METADATA_KEY = "mindroom_replay_prose"
 MATRIX_CONVERSATION_TARGET_METADATA_KEY = "matrix_conversation_target"
 MATRIX_SOURCE_EVENT_IDS_METADATA_KEY = "matrix_source_event_ids"
 MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY = "matrix_source_event_prompts"

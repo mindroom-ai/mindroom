@@ -48,7 +48,6 @@ from mindroom.response_runner import (
     _matrix_message_target_item,
     _ResponseGenerationOutcome,
     _with_matrix_target_item,
-    prepare_memory_and_model_context,
 )
 from mindroom.stop import StopManager
 from mindroom.streaming import StreamingDeliveryError
@@ -571,19 +570,11 @@ async def test_scheduled_history_limit_keeps_refreshed_history_for_payload_and_s
         scheduled_history_budget=ScheduledHistoryBudget(limit=2, source_event_id="$event1"),
     )
     prepared_request = await coordinator._prepare_request_after_lock(request)
-    _memory_prompt, memory_history, _model_prompt, _model_history = prepare_memory_and_model_context(
-        prepared_request.prompt,
-        prepared_request.thread_history,
-        config=coordinator.deps.runtime.config,
-        runtime_paths=coordinator.deps.runtime_paths,
-        model_prompt=prepared_request.model_prompt,
-    )
 
     assert len(prepared_histories) == 1
     assert prepared_histories == [refreshed]
     assert prepared_request.thread_history is refreshed
     assert prepared_request.scheduled_history_budget is request.scheduled_history_budget
-    assert memory_history is refreshed
     assert (
         thread_summary_message_count_hint(
             prepared_request.thread_history,
@@ -1660,3 +1651,35 @@ def test_with_matrix_target_item_drops_hook_provided_collisions() -> None:
     # Without an available matrix_message tool, collisions are still removed.
     stripped = _with_matrix_target_item(hook_items, None, logger=get_logger("tests.reserved_target"))
     assert [item.key for item in stripped] == ["weather"]
+
+
+@pytest.mark.asyncio
+async def test_finalize_locked_outcome_cancel_preserves_run_output_ownership(tmp_path: Path) -> None:
+    """A cancel during lifecycle finalization keeps the delivered outcome's body ownership."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    delivered = _completed_outcome("$response", body="delivered reply")
+    finalized_outcomes: list[FinalDeliveryOutcome] = []
+
+    async def fake_finalize(outcome: FinalDeliveryOutcome, **_kwargs: object) -> FinalDeliveryOutcome:
+        finalized_outcomes.append(outcome)
+        if len(finalized_outcomes) == 1:
+            raise asyncio.CancelledError
+        return outcome
+
+    lifecycle = MagicMock()
+    lifecycle.finalize = AsyncMock(side_effect=fake_finalize)
+
+    with pytest.raises(asyncio.CancelledError):
+        await coordinator._finalize_locked_outcome(
+            lifecycle,
+            delivered,
+            post_response_outcome=ResponseOutcome(),
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.finalize_cancel")),
+        )
+
+    assert len(finalized_outcomes) == 2
+    cancelled_outcome = finalized_outcomes[1]
+    assert cancelled_outcome.terminal_status == "cancelled"
+    assert cancelled_outcome.final_visible_body == "delivered reply"
+    assert cancelled_outcome.body_is_run_output is True

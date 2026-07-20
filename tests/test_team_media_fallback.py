@@ -41,7 +41,7 @@ from mindroom.execution_preparation import (
     _PreparedExecutionContext,
     prepare_bound_team_run_context,
 )
-from mindroom.history.interrupted_replay import _render_interrupted_replay_content
+from mindroom.history.interrupted_replay import _render_interrupted_replay_parts
 from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.history.turn_recorder import TurnRecorder
@@ -1635,7 +1635,7 @@ async def test_team_response_records_interrupted_snapshot_for_cancelled_runs() -
 
     snapshot = recorder.interrupted_snapshot()
     assert snapshot.user_message == "Analyze this."
-    assert _render_interrupted_replay_content(snapshot) == (
+    assert _render_interrupted_replay_parts(snapshot)[0] == (
         "**GeneralAgent**: Half done\n\n\n"
         "*No team consensus - showing individual responses only*\n\n"
         "(turn stopped before completion; 1 tool call(s) had finished)\n\n"
@@ -1705,7 +1705,7 @@ async def test_team_response_records_incomplete_cancelled_tools_as_interrupted()
 
     snapshot = recorder.interrupted_snapshot()
     assert snapshot.user_message == "Analyze this."
-    assert _render_interrupted_replay_content(snapshot) == (
+    assert _render_interrupted_replay_parts(snapshot)[0] == (
         "**GeneralAgent**: Half done\n\n\n"
         "*No team consensus - showing individual responses only*\n\n"
         "(turn stopped before completion; 1 tool call(s) were still running)\n\n"
@@ -2132,7 +2132,7 @@ async def test_team_response_stream_records_hidden_interrupted_tool_state() -> N
 
     snapshot = recorder.interrupted_snapshot()
     assert snapshot.user_message == "Analyze this."
-    assert _render_interrupted_replay_content(snapshot) == (
+    assert _render_interrupted_replay_parts(snapshot)[0] == (
         "**GeneralAgent**: Half done\n\n\n"
         "*No team consensus - showing individual responses only*\n\n"
         "(turn stopped before completion; 1 tool call(s) had finished)\n\n"
@@ -2371,7 +2371,7 @@ async def test_team_response_stream_records_interrupted_snapshot_after_external_
 
     snapshot = recorder.interrupted_snapshot()
     assert snapshot.user_message == "Analyze this."
-    assert _render_interrupted_replay_content(snapshot) == (
+    assert _render_interrupted_replay_parts(snapshot)[0] == (
         "**GeneralAgent**: Half done\n\n\n*No team consensus - showing individual responses only*\n\n"
         "(turn stopped before completion)"
     )
@@ -2559,7 +2559,7 @@ async def test_team_response_stream_preserves_pending_tool_identity_within_membe
 
     snapshot = recorder.interrupted_snapshot()
     assert snapshot.user_message == "Analyze this."
-    assert _render_interrupted_replay_content(snapshot) == (
+    assert _render_interrupted_replay_parts(snapshot)[0] == (
         "**GeneralAgent**: General started\n\n\n"
         "*No team consensus - showing individual responses only*\n\n"
         "(turn stopped before completion; "

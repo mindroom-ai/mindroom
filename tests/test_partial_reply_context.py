@@ -32,7 +32,7 @@ from mindroom.execution_preparation import (
 )
 from mindroom.history.interrupted_replay import (
     InterruptedReplaySnapshot,
-    _render_interrupted_replay_content,
+    _render_interrupted_replay_parts,
 )
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.client_thread_history import fetch_thread_history
@@ -83,6 +83,7 @@ def _get_unseen_messages(
     return _get_unseen_messages_for_sender(
         thread_history,
         sender_id=response_sender,
+        trusted_relay_sender_ids=frozenset({response_sender} if response_sender else ()),
         seen_event_ids=seen_event_ids,
         current_event_id=current_event_id,
         active_event_ids=active_event_ids,
@@ -90,7 +91,7 @@ def _get_unseen_messages(
 
 
 def _render_normalized_interrupted_replay(body: str) -> str:
-    return _render_interrupted_replay_content(
+    content, _prose = _render_interrupted_replay_parts(
         InterruptedReplaySnapshot(
             user_message="",
             partial_text=_clean_partial_reply_body(body),
@@ -99,6 +100,7 @@ def _render_normalized_interrupted_replay(body: str) -> str:
             run_metadata={},
         ),
     )
+    return content
 
 
 def _make_visible_message(
@@ -435,6 +437,7 @@ class TestUnseenMessagesPartialReplies:
                 _make_visible_message(event_id="e4", sender="@user:localhost", body="Follow-up"),
             ],
             response_sender_id=agent_id,
+            trusted_relay_sender_ids=frozenset({agent_id}),
             active_event_ids={"e3"},
         )
 

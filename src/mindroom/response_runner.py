@@ -25,7 +25,6 @@ from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
 from mindroom.background_tasks import create_background_task
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
-    ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
@@ -40,7 +39,6 @@ from mindroom.history.interrupted_replay import persist_interrupted_replay_snaps
 from mindroom.history.storage import has_pending_force_compaction_scope, read_scope_state
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem
-from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.presence import should_use_streaming
 from mindroom.matrix.typing import typing_indicator
 from mindroom.memory import (
@@ -79,7 +77,6 @@ from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import ToolDispatchContext, runtime_context_from_dispatch_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity, stream_with_tool_execution_identity
-from mindroom.user_turn_time import prefix_user_turn_time
 
 from .delivery_gateway import (
     CancelledVisibleNoteRequest,
@@ -248,55 +245,6 @@ def _with_matrix_target_item(
     return (*kept, matrix_target_item)
 
 
-def _timestamp_thread_history_user_turns(
-    thread_history: Sequence[ResolvedVisibleMessage],
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> list[ResolvedVisibleMessage]:
-    """Add local timestamps to user-authored thread history entries."""
-    timestamped_history: list[ResolvedVisibleMessage] = []
-    registry = entity_identity_registry(config, runtime_paths)
-    for message in thread_history:
-        is_user_turn = (
-            isinstance(message.content.get(ORIGINAL_SENDER_KEY), str)
-            or registry.current_entity_name_for_user_id(message.sender) is None
-        )
-        if not is_user_turn:
-            timestamped_history.append(message)
-            continue
-
-        timestamped_body = prefix_user_turn_time(
-            message.body,
-            timezone=config.timezone,
-            timestamp_ms=message.timestamp,
-        )
-        timestamped_history.append(replace_visible_message(message, body=timestamped_body))
-    return timestamped_history
-
-
-def prepare_memory_and_model_context(
-    prompt: str,
-    thread_history: Sequence[ResolvedVisibleMessage],
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    model_prompt: str | None = None,
-) -> tuple[str, Sequence[ResolvedVisibleMessage], str, list[ResolvedVisibleMessage]]:
-    """Return raw memory inputs, the model-only prompt tail, and timestamped context.
-
-    The tail is delivered outside the event-tagged current block so the
-    ``<msg event_id>`` CDATA carries only the source event's own body.
-    """
-    model_prompt_tail = model_prompt_tail_after_raw_prompt(raw_prompt=prompt, model_prompt=model_prompt)
-    model_thread_history = _timestamp_thread_history_user_turns(
-        thread_history,
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    return prompt, thread_history, model_prompt_tail, model_thread_history
-
-
 @dataclass(frozen=True)
 class ResponseRequest:
     """Typed carrier for one response lifecycle request."""
@@ -318,7 +266,8 @@ class ResponseRequest:
     scheduled_history_budget: ScheduledHistoryBudget | None = None
     payload_preparation: ResponsePayloadPreparation | None = None
     current_timestamp_ms: float | None = None
-    # The Matrix event whose body the current prompt literally is; None for
+    # The Matrix event the current prompt resolves from (original body,
+    # accepted edit, or transcription); None for
     # synthetic prompts (interactive selections, continuations) and structured
     # batches whose children carry their own event identity.
     current_event_id: str | None = None
@@ -1332,6 +1281,7 @@ class ResponseRunner:
                 event_id=final_delivery_outcome.final_visible_event_id,
                 is_visible_response=final_delivery_outcome.final_visible_event_id is not None,
                 final_visible_body=final_delivery_outcome.final_visible_body,
+                body_is_run_output=final_delivery_outcome.body_is_run_output,
                 failure_reason=failure_reason,
                 tool_trace=final_delivery_outcome.tool_trace,
                 extra_content=final_delivery_outcome.extra_content,
@@ -1579,14 +1529,9 @@ class ResponseRunner:
         request = prepared_request
         team_request = replace(team_request, request=request)
         requester_user_id = request.user_id or ""
-        _memory_prompt, _memory_thread_history, team_message_suffix, model_thread_history = (
-            prepare_memory_and_model_context(
-                request.prompt,
-                request.thread_history,
-                config=self.deps.runtime.config,
-                runtime_paths=self.deps.runtime_paths,
-                model_prompt=request.model_prompt,
-            )
+        team_message_suffix = model_prompt_tail_after_raw_prompt(
+            raw_prompt=request.prompt,
+            model_prompt=request.model_prompt,
         )
         model_name = select_model_for_team(
             self.deps.agent_name,
@@ -1616,11 +1561,7 @@ class ResponseRunner:
             ),
         )
         resolved_request = self._request_with_locked_target(
-            replace(
-                request,
-                thread_history=model_thread_history,
-                media=request.media or MediaInputs(),
-            ),
+            replace(request, media=request.media or MediaInputs()),
             resolved_target,
         )
         response_identity = self._response_identity(resolved_request, response_kind="team")
@@ -1765,7 +1706,7 @@ class ResponseRunner:
                             execution_identity=tool_dispatch.execution_identity,
                             ctx=team_turn_ctx,
                             mode=mode,
-                            thread_history=model_thread_history,
+                            thread_history=request.thread_history,
                             model_name=model_name,
                             media=resolved_request.media,
                             show_tool_calls=show_tool_calls,
@@ -1867,7 +1808,7 @@ class ResponseRunner:
                                     orchestrator=orchestrator,
                                     execution_identity=tool_dispatch.execution_identity,
                                     ctx=team_turn_ctx,
-                                    thread_history=model_thread_history,
+                                    thread_history=request.thread_history,
                                     model_name=model_name,
                                     media=resolved_request.media,
                                     run_id_callback=_note_attempt_run_id,
@@ -2043,8 +1984,6 @@ class ResponseRunner:
                     ),
                 ),
                 thread_summary_entity_name=self.deps.agent_name,
-                memory_prompt=_memory_prompt,
-                memory_thread_history=_memory_thread_history,
             )
 
         placeholder_state.settlement_started = True
@@ -2729,20 +2668,12 @@ class ResponseRunner:
         if prepared_request is None:
             return None
         request = prepared_request
-        memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
-            prepare_memory_and_model_context(
-                request.prompt,
-                request.thread_history,
-                config=self.deps.runtime.config,
-                runtime_paths=self.deps.runtime_paths,
-                model_prompt=request.model_prompt,
-            )
-        )
         normalized_request = replace(
             request,
-            prompt=memory_prompt,
-            model_prompt=model_prompt_text,
-            thread_history=model_thread_history,
+            model_prompt=model_prompt_tail_after_raw_prompt(
+                raw_prompt=request.prompt,
+                model_prompt=request.model_prompt,
+            ),
             media=request.media or MediaInputs(),
         )
 
@@ -2783,13 +2714,13 @@ class ResponseRunner:
             if self.deps.runtime.config.resolve_entity(self.deps.agent_name).memory_backend == "mem0":
                 create_background_task(
                     store_conversation_memory(
-                        memory_prompt,
+                        request.prompt,
                         self.deps.agent_name,
                         self.deps.storage_path,
                         session_id,
                         self.deps.runtime.config,
                         self.deps.runtime_paths,
-                        memory_thread_history,
+                        request.thread_history,
                         request.user_id,
                         execution_identity=execution_identity,
                     ),
@@ -2855,8 +2786,6 @@ class ResponseRunner:
                     ),
                 ),
                 thread_summary_entity_name=self.deps.agent_name,
-                memory_prompt=memory_prompt,
-                memory_thread_history=memory_thread_history,
             )
 
         placeholder_state.settlement_started = True

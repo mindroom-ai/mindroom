@@ -49,6 +49,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
     ThreadHistoryRenderLimits,
+    append_additional_context,
     prepare_bound_team_run_context,
     render_prepared_messages_text,
     render_prepared_team_messages_text,
@@ -178,11 +179,6 @@ _MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS = ThreadHistoryRenderLimits(
     max_message_length=_MAX_CONTEXT_MESSAGE_LENGTH,
     missing_sender_label="Unknown",
 )
-
-
-def _append_additional_context(entity: Agent | Team, context_chunk: str) -> None:
-    existing_context = entity.additional_context.strip() if entity.additional_context else ""
-    entity.additional_context = f"{existing_context}\n\n{context_chunk}" if existing_context else context_chunk
 
 
 class TeamMode(str, Enum):
@@ -1859,9 +1855,9 @@ async def prepare_materialized_team_execution(
     # the current full location block is appended only as its volatile tail.
     if ctx.system_enrichment_items:
         rendered_system_context = render_system_enrichment_block(ctx.system_enrichment_items)
-        _append_additional_context(team, rendered_system_context)
+        append_additional_context(team, rendered_system_context)
         for agent in agents:
-            _append_additional_context(agent, rendered_system_context)
+            append_additional_context(agent, rendered_system_context)
     prepared_execution = await prepare_bound_team_run_context(
         ctx,
         scope_context=scope_context,
