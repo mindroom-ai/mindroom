@@ -204,10 +204,14 @@ def _interrupted_replay_metadata(snapshot: InterruptedReplaySnapshot) -> dict[st
 
 
 def _snapshot_user_message_body(snapshot: InterruptedReplaySnapshot) -> str:
-    """Return the persisted user body, restoring a trusted location-change marker."""
+    """Return the persisted user body, restoring a trusted location-change marker.
+
+    An interrupted empty prompt with a recorded marker keeps its location
+    baseline as the marker alone, so later dedup and replay stay consistent.
+    """
     marker = snapshot.run_metadata.get(MINDROOM_LOCATION_MARKER_METADATA_KEY)
     if isinstance(marker, str) and marker:
-        return f"{snapshot.user_message}\n\n{marker}"
+        return f"{snapshot.user_message}\n\n{marker}" if snapshot.user_message else marker
     return snapshot.user_message
 
 
@@ -216,26 +220,15 @@ def _wrapped_snapshot_user_message(snapshot: InterruptedReplaySnapshot) -> str:
 
     ``current_event_id`` is set only when the recorded prompt is literally one
     Matrix event's body, so synthetic prompts and structured batches whose
-    children carry their own event identity are never wrapped.
+    children carry their own event identity are never wrapped. Interrupted
+    assistant content always stays unwrapped: delivery is not finalized when
+    this snapshot persists, so no visible event can be claimed for it.
     """
     body = _snapshot_user_message_body(snapshot)
     requester_id = snapshot.run_metadata.get("requester_id")
-    if snapshot.current_event_id and isinstance(requester_id, str) and requester_id:
+    if snapshot.current_event_id and snapshot.user_message and isinstance(requester_id, str) and requester_id:
         return render_msg_tag(sender=requester_id, body=body, event_id=snapshot.current_event_id)
     return body
-
-
-def _wrapped_snapshot_assistant_content(
-    snapshot: InterruptedReplaySnapshot,
-    content: str,
-    *,
-    response_sender_id: str | None,
-) -> str:
-    """Wrap the canonical interrupted assistant content when a visible event exists."""
-    response_event_id = snapshot.run_metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
-    if response_sender_id and isinstance(response_event_id, str) and response_event_id:
-        return render_msg_tag(sender=response_sender_id, body=content, event_id=response_event_id)
-    return content
 
 
 def _build_interrupted_replay_run(
@@ -245,19 +238,14 @@ def _build_interrupted_replay_run(
     scope_id: str,
     session_id: str,
     is_team: bool,
-    response_sender_id: str | None = None,
 ) -> RunOutput | TeamRunOutput:
     """Build one canonical replayable run for an interrupted top-level turn."""
     content = _render_interrupted_replay_content(snapshot)
     messages = []
-    if snapshot.user_message:
-        messages.append(Message(role="user", content=_wrapped_snapshot_user_message(snapshot)))
-    messages.append(
-        Message(
-            role="assistant",
-            content=_wrapped_snapshot_assistant_content(snapshot, content, response_sender_id=response_sender_id),
-        ),
-    )
+    user_message = _wrapped_snapshot_user_message(snapshot)
+    if user_message:
+        messages.append(Message(role="user", content=user_message))
+    messages.append(Message(role="assistant", content=content))
     metadata = _interrupted_replay_metadata(snapshot)
     if is_team:
         return TeamRunOutput(
@@ -318,7 +306,6 @@ def persist_interrupted_replay_snapshot(
     run_id: str,
     snapshot: InterruptedReplaySnapshot,
     is_team: bool,
-    response_sender_id: str | None = None,
 ) -> None:
     """Persist one canonical interrupted replay snapshot into session history."""
     persisted_session = _load_persisted_session(
@@ -340,7 +327,6 @@ def persist_interrupted_replay_snapshot(
         scope_id=scope_id,
         session_id=session_id,
         is_team=is_team,
-        response_sender_id=response_sender_id,
     )
     if is_team:
         assert isinstance(persisted_session, TeamSession)

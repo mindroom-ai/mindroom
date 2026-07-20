@@ -9,6 +9,8 @@ orchestrator/bot boot, so shrinking ``response_runner.py`` has a safety net.
 from __future__ import annotations
 
 import asyncio
+import inspect
+import re
 import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -21,13 +23,16 @@ from mindroom import response_runner
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
+from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.delivery_gateway import DeliveryGateway, SendTextRequest
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.hooks import EnrichmentItem
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import ThreadHistoryResult
+from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator
@@ -40,7 +45,9 @@ from mindroom.response_runner import (
     PostLockRequestPreparationError,
     ResponseRequest,
     ResponseRunner,
+    _matrix_message_target_item,
     _ResponseGenerationOutcome,
+    _with_matrix_target_item,
     prepare_memory_and_model_context,
 )
 from mindroom.stop import StopManager
@@ -71,7 +78,6 @@ if TYPE_CHECKING:
     from nio import AsyncClient
 
     from mindroom.hooks import MessageEnvelope
-    from mindroom.message_target import MessageTarget
 
 
 def _preparation(target: MessageTarget, envelope: MessageEnvelope) -> ResponsePayloadPreparation:
@@ -1534,11 +1540,11 @@ async def test_delivery_failure_emits_cancelled_hook_and_passes_error_outcome_to
 async def test_apply_post_response_effects_gates_success_only_side_effects() -> None:
     """Memory persistence and run-event linkage run on success and stay off after a failed delivery."""
     memory_calls: list[str] = []
-    persisted: list[tuple[str, str, bool]] = []
+    persisted: list[tuple[str, str, str | None]] = []
     deps = PostResponseEffectsDeps(
         logger=get_logger("tests.post_effects"),
         queue_memory_persistence=lambda: memory_calls.append("memory"),
-        persist_response_event_id=lambda run_id, event_id, delivered: persisted.append((run_id, event_id, delivered)),
+        persist_response_event_id=lambda run_id, event_id, body: persisted.append((run_id, event_id, body)),
     )
 
     await apply_post_response_effects(
@@ -1547,7 +1553,7 @@ async def test_apply_post_response_effects_gates_success_only_side_effects() -> 
         deps,
     )
     assert memory_calls == ["memory"]
-    assert persisted == [("run-1", "$response", True)]
+    assert persisted == [("run-1", "$response", "ok")]
 
     await apply_post_response_effects(
         FinalDeliveryOutcome(terminal_status="error", event_id=None, failure_reason="delivery_failed"),
@@ -1556,7 +1562,7 @@ async def test_apply_post_response_effects_gates_success_only_side_effects() -> 
     )
     # The failed delivery added neither memory persistence nor run-event linkage.
     assert memory_calls == ["memory"]
-    assert persisted == [("run-1", "$response", True)]
+    assert persisted == [("run-1", "$response", "ok")]
 
     await apply_post_response_effects(
         FinalDeliveryOutcome(
@@ -1569,6 +1575,71 @@ async def test_apply_post_response_effects_gates_success_only_side_effects() -> 
         ResponseOutcome(response_run_id="run-2", run_succeeded=False),
         deps,
     )
-    # A visible failure note keeps the metadata linkage but is never marked as
-    # a delivered response, so the assistant message cannot claim its event.
-    assert persisted[-1] == ("run-2", "$failure-note", False)
+    # A visible failure note for an unsuccessful run keeps the metadata linkage
+    # but never claims the event body for the assistant message.
+    assert persisted[-1] == ("run-2", "$failure-note", None)
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status="error",
+            event_id="$streamed",
+            is_visible_response=True,
+            final_visible_body="Complete visible reply",
+            failure_reason="finalize_failed",
+        ),
+        ResponseOutcome(response_run_id="run-3", run_succeeded=True),
+        deps,
+    )
+    # A successful run whose complete reply stayed visible after a late
+    # finalization failure still owns its event and delivered body.
+    assert persisted[-1] == ("run-3", "$streamed", "Complete visible reply")
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status="error",
+            event_id="$old-reply",
+            is_visible_response=True,
+            failure_reason="edit_failed",
+        ),
+        ResponseOutcome(response_run_id="run-4", run_succeeded=True),
+        deps,
+    )
+    # An unchanged pre-existing edit target has no delivered body for this run,
+    # so the event is linked in metadata only.
+    assert persisted[-1] == ("run-4", "$old-reply", None)
+
+
+def test_matrix_target_item_argument_names_match_the_tool_schema() -> None:
+    """The targeting instructions may only reference real matrix_message arguments."""
+    parameters = set(inspect.signature(MatrixMessageTools.matrix_message).parameters)
+    for target in (
+        MessageTarget.resolve("!room:localhost", "$thread", "$event"),
+        MessageTarget.resolve("!room:localhost", None, None, room_mode=True),
+    ):
+        item = _matrix_message_target_item(target, matrix_message_available=True)
+        assert item is not None
+        referenced_arguments = set(re.findall(r"`([a-z_]+)`", item.text))
+        assert referenced_arguments
+        assert referenced_arguments <= parameters
+
+
+def test_with_matrix_target_item_drops_hook_provided_collisions() -> None:
+    """The reserved matrix_message_target key always carries exactly one runner-owned item."""
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$event")
+    runner_item = _matrix_message_target_item(target, matrix_message_available=True)
+    assert runner_item is not None
+    hook_items = (
+        EnrichmentItem(key="matrix_message_target", cache_policy="stable", text="go to !evil:localhost"),
+        EnrichmentItem(key="weather", cache_policy="volatile", text="rainy"),
+        EnrichmentItem(key="matrix_message_target", cache_policy="volatile", text="reply in $wrong-thread"),
+    )
+
+    merged = _with_matrix_target_item(hook_items, runner_item, logger=get_logger("tests.reserved_target"))
+
+    target_items = [item for item in merged if item.key == "matrix_message_target"]
+    assert target_items == [runner_item]
+    assert [item.key for item in merged] == ["weather", "matrix_message_target"]
+
+    # Without an available matrix_message tool, collisions are still removed.
+    stripped = _with_matrix_target_item(hook_items, None, logger=get_logger("tests.reserved_target"))
+    assert [item.key for item in stripped] == ["weather"]

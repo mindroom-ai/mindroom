@@ -539,7 +539,7 @@ class _InertPostResponseEffects(PostResponseEffectsSupport):
         room_id: str,
         interactive_agent_name: str,
         queue_memory_persistence: Callable[[], None] | None = None,
-        persist_response_event_id: Callable[[str, str, bool], None] | None = None,
+        persist_response_event_id: Callable[[str, str, str | None], None] | None = None,
     ) -> PostResponseEffectsDeps:
         del room_id, interactive_agent_name, queue_memory_persistence, persist_response_event_id
         return PostResponseEffectsDeps(logger=self.logger)

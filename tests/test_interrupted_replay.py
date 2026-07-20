@@ -522,8 +522,13 @@ def test_persist_interrupted_replay_snapshot_keeps_minimal_interrupted_turn(tmp_
         storage.close()
 
 
-def test_build_interrupted_replay_run_wraps_known_matrix_identities() -> None:
-    """Known source and visible response identities wrap both canonical messages."""
+def test_build_interrupted_replay_run_wraps_user_and_keeps_assistant_bare() -> None:
+    """The known source identity wraps the user turn; interrupted assistant content never claims an event.
+
+    Delivery is not finalized when interrupted snapshots persist, and the
+    composite interruption text was never any event's body, so the assistant
+    side stays unwrapped even when a response event ID is known.
+    """
     snapshot = build_interrupted_replay_snapshot(
         user_message="What is the plan?",
         partial_text="Half an answer",
@@ -542,7 +547,6 @@ def test_build_interrupted_replay_run_wraps_known_matrix_identities() -> None:
         scope_id="test_agent",
         session_id="session-1",
         is_team=False,
-        response_sender_id="@mindroom_code:localhost",
     )
 
     assert run.messages is not None
@@ -551,11 +555,10 @@ def test_build_interrupted_replay_run_wraps_known_matrix_identities() -> None:
         '<msg event_id="$source" from="@alice:localhost"><![CDATA[What is the plan?]]></msg>'
     )
     assert run.messages[1].role == "assistant"
-    assert run.messages[1].content == (
-        '<msg event_id="$visible" from="@mindroom_code:localhost">'
-        "<![CDATA[Half an answer\n\n(turn stopped before completion)]]></msg>"
-    )
+    assert run.messages[1].content == "Half an answer\n\n(turn stopped before completion)"
     assert run.content == "Half an answer\n\n(turn stopped before completion)"
+    assert run.metadata is not None
+    assert run.metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] == "$visible"
 
 
 def test_build_interrupted_replay_run_stays_bare_without_matrix_identities() -> None:
@@ -581,38 +584,8 @@ def test_build_interrupted_replay_run_stays_bare_without_matrix_identities() -> 
     assert run.messages[1].content == "Half an answer\n\n(turn stopped before completion)"
 
 
-def test_build_interrupted_replay_run_wraps_only_the_side_with_known_identity() -> None:
-    """A missing response sender leaves the assistant bare while the source still wraps."""
-    snapshot = build_interrupted_replay_snapshot(
-        user_message="What is the plan?",
-        partial_text="Half an answer",
-        completed_tools=(),
-        interrupted_tools=(),
-        run_metadata={
-            "requester_id": "@alice:localhost",
-            MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$visible",
-        },
-        current_event_id="$source",
-    )
-
-    run = _build_interrupted_replay_run(
-        snapshot=snapshot,
-        run_id="run-1",
-        scope_id="test_agent",
-        session_id="session-1",
-        is_team=False,
-        response_sender_id=None,
-    )
-
-    assert run.messages is not None
-    assert run.messages[0].content == (
-        '<msg event_id="$source" from="@alice:localhost"><![CDATA[What is the plan?]]></msg>'
-    )
-    assert run.messages[1].content == "Half an answer\n\n(turn stopped before completion)"
-
-
-def test_persist_interrupted_replay_snapshot_passes_response_sender(tmp_path: Path) -> None:
-    """The persistence entry point forwards the response sender into the stored run."""
+def test_persist_interrupted_replay_snapshot_keeps_assistant_unwrapped(tmp_path: Path) -> None:
+    """End-to-end interrupted persistence links the event in metadata only."""
     storage = create_state_storage(
         "test_agent",
         tmp_path,
@@ -638,17 +611,15 @@ def test_persist_interrupted_replay_snapshot_passes_response_sender(tmp_path: Pa
                 current_event_id="$source",
             ),
             is_team=False,
-            response_sender_id="@mindroom_code:localhost",
         )
 
         persisted = get_agent_session(storage, "session-1")
         assert persisted is not None
         run = (persisted.runs or [])[0]
         assert isinstance(run, RunOutput)
-        assert _assistant_text(run) == (
-            '<msg event_id="$visible" from="@mindroom_code:localhost">'
-            "<![CDATA[Half an answer\n\n(turn stopped before completion)]]></msg>"
-        )
+        assert _assistant_text(run) == "Half an answer\n\n(turn stopped before completion)"
+        assert run.metadata is not None
+        assert run.metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] == "$visible"
     finally:
         storage.close()
 
@@ -710,3 +681,32 @@ def test_build_interrupted_replay_run_restores_location_marker_from_metadata() -
     )
     assert run.metadata is not None
     assert run.metadata[MINDROOM_LOCATION_MARKER_METADATA_KEY] == "📍 Home"
+
+
+def test_build_interrupted_replay_run_keeps_marker_baseline_for_empty_prompt() -> None:
+    """An interrupted empty prompt with a recorded marker keeps its location baseline."""
+    snapshot = build_interrupted_replay_snapshot(
+        user_message="",
+        partial_text="Half an answer",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata={
+            "requester_id": "@alice:localhost",
+            MINDROOM_LOCATION_MARKER_METADATA_KEY: "📍 Home",
+        },
+        current_event_id="$source",
+    )
+
+    run = _build_interrupted_replay_run(
+        snapshot=snapshot,
+        run_id="run-1",
+        scope_id="test_agent",
+        session_id="session-1",
+        is_team=False,
+    )
+
+    assert run.messages is not None
+    # The baseline persists as the marker alone; an empty prompt has no event
+    # body, so the marker-only user turn is never wrapped.
+    assert run.messages[0].role == "user"
+    assert run.messages[0].content == "📍 Home"

@@ -13,11 +13,13 @@ import pytest
 from agno.models.message import Message
 
 import mindroom.ai as ai_module
+import mindroom.execution_preparation as execution_preparation_module
 import mindroom.memory._file_backend as file_backend_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.history.types import PreparedHistoryState
+from mindroom.history.runtime import ScopeSessionContext
+from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory._file_backend import FileMemoryBackend
 from tests.conftest import bind_runtime_paths, make_turn_context, test_runtime_paths
@@ -289,3 +291,42 @@ async def test_file_memory_keyword_search_runs_off_event_loop(
 
     gate.set()
     assert (await search_task).results == []
+
+
+@pytest.mark.asyncio
+async def test_location_marker_lookup_runs_off_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The trusted-marker storage read must not stall the loop while SQLite blocks."""
+    gate = threading.Event()
+    read_started = threading.Event()
+
+    def gated_get_agent_session(_storage: object, _session_id: str) -> None:
+        read_started.set()
+        gate.wait()
+
+    monkeypatch.setattr(execution_preparation_module, "get_agent_session", gated_get_agent_session)
+    scope_context = ScopeSessionContext(
+        scope=HistoryScope(kind="agent", scope_id="general"),
+        storage=MagicMock(),
+        session=None,
+        session_id="session-1",
+    )
+
+    lookup_task = asyncio.get_running_loop().create_task(
+        execution_preparation_module._extract_current_location_context(
+            "Hi",
+            location_item_text="at_home: true",
+            scope_context=scope_context,
+        ),
+    )
+    await asyncio.to_thread(read_started.wait, 5.0)
+
+    # The storage read thread is parked on the gate; the loop must stay live.
+    await _assert_loop_heartbeats_while_pending(lookup_task)
+
+    gate.set()
+    persisted_prompt, location_block, marker = await lookup_task
+    assert persisted_prompt == "Hi\n\n📍 Home"
+    assert marker == "📍 Home"
+    assert '<item key="location"' in location_block

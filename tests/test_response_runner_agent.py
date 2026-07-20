@@ -171,7 +171,7 @@ class TestAgentBot(AgentBotTestBase):
         item = _single_matrix_target_item(mock_ai.call_args.args[0])
         assert item.cache_policy == "stable"
         assert "!test:localhost" in item.text
-        assert "do not pass thread_id" in item.text
+        assert "do not pass `thread_id`" in item.text
         assert "$event123" not in item.text
 
     @pytest.mark.asyncio
@@ -225,7 +225,7 @@ class TestAgentBot(AgentBotTestBase):
         assert "[Matrix metadata for tool calls]" not in mock_ai.call_args.kwargs["model_prompt"]
         item = _single_matrix_target_item(mock_ai.call_args.args[0])
         assert "!test:localhost" in item.text
-        assert "do not pass thread_id" in item.text
+        assert "do not pass `thread_id`" in item.text
 
     @pytest.mark.asyncio
     async def test_process_and_respond_streaming_includes_matrix_metadata_when_tool_enabled(
@@ -287,7 +287,7 @@ class TestAgentBot(AgentBotTestBase):
         item = _single_matrix_target_item(mock_stream_agent_response.call_args.args[0])
         assert item.cache_policy == "stable"
         assert "!test:localhost" in item.text
-        assert "do not pass thread_id" in item.text
+        assert "do not pass `thread_id`" in item.text
         assert "$event456" not in item.text
 
     @pytest.mark.asyncio
@@ -345,7 +345,7 @@ class TestAgentBot(AgentBotTestBase):
 
         item = _single_matrix_target_item(mock_ai.call_args.args[0])
         assert "thread $thread_root:localhost" in item.text
-        assert "reply_to_event_id" in item.text
+        assert "as `target`" in item.text
         assert "$reply_plain:localhost" not in item.text
 
     @pytest.mark.asyncio
@@ -403,7 +403,7 @@ class TestAgentBot(AgentBotTestBase):
 
         item = _single_matrix_target_item(mock_ai.call_args.args[0])
         assert "thread $thread_root:localhost" in item.text
-        assert "reply_to_event_id" in item.text
+        assert "as `target`" in item.text
 
     @pytest.mark.asyncio
     async def test_matrix_target_context_is_identical_across_source_events(

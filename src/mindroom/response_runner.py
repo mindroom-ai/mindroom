@@ -189,6 +189,9 @@ def _agent_has_matrix_messaging_tool(config: Config, agent_name: str, session_id
     return "matrix_message" in {entry.name for entry in surface.runtime_tool_configs}
 
 
+_MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY = "matrix_message_target"
+
+
 def _matrix_message_target_item(
     target: MessageTarget,
     *,
@@ -201,15 +204,39 @@ def _matrix_message_target_item(
     if thread_id:
         text = (
             f"You are responding in Matrix room {target.room_id}, in thread {thread_id}. "
-            "When calling matrix_message here, use this room_id and thread_id, and pass the "
-            "current or selected <msg event_id> as reply_to_event_id."
+            "When calling matrix_message here, use this `room_id` and `thread_id`, and pass the "
+            "current or selected <msg event_id> as `target` when reacting to or editing that message."
         )
     else:
         text = (
             f"You are responding in Matrix room {target.room_id}, outside any thread. "
-            "When calling matrix_message here, use this room_id and do not pass thread_id."
+            "When calling matrix_message here, use this `room_id` and do not pass `thread_id`; pass a "
+            "<msg event_id> as `target` when reacting to or editing that message."
         )
-    return EnrichmentItem(key="matrix_message_target", cache_policy="stable", text=text)
+    return EnrichmentItem(key=_MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY, cache_policy="stable", text=text)
+
+
+def _with_matrix_target_item(
+    items: Sequence[EnrichmentItem],
+    matrix_target_item: EnrichmentItem | None,
+    *,
+    logger: structlog.stdlib.BoundLogger,
+) -> tuple[EnrichmentItem, ...]:
+    """Return system enrichment with exactly one runner-owned Matrix target item.
+
+    ``matrix_message_target`` is a reserved key: hook-provided collisions are
+    dropped so the model never sees two authoritative target instructions.
+    """
+    items = tuple(items)
+    kept = tuple(item for item in items if item.key != _MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY)
+    if len(kept) != len(items):
+        logger.warning(
+            "Dropping hook-provided reserved matrix_message_target enrichment",
+            dropped_items=len(items) - len(kept),
+        )
+    if matrix_target_item is None:
+        return kept
+    return (*kept, matrix_target_item)
 
 
 def _timestamp_thread_history_user_turns(
@@ -594,7 +621,6 @@ class ResponseRunner:
                 run_id=recorder.run_id or run_id or str(uuid4()),
                 snapshot=recorder.interrupted_snapshot(),
                 is_team=is_team,
-                response_sender_id=self.deps.matrix_full_id,
             )
         finally:
             storage.close()
@@ -842,10 +868,14 @@ class ResponseRunner:
         session_id: str,
         session_type: SessionType,
         create_storage: Callable[[], BaseDb],
-    ) -> Callable[[str, str, bool], None]:
+    ) -> Callable[[str, str, str | None], None]:
         """Build the response-event persistence callback for one session-backed response."""
 
-        def persist_response_event_id(run_id: str, response_event_id: str, delivered: bool) -> None:
+        def persist_response_event_id(
+            run_id: str,
+            response_event_id: str,
+            delivered_visible_body: str | None,
+        ) -> None:
             storage = create_storage()
             try:
                 self.deps.state_writer.persist_response_event_id_in_session_run(
@@ -854,9 +884,8 @@ class ResponseRunner:
                     session_type=session_type,
                     run_id=run_id,
                     response_event_id=response_event_id,
-                    # Suppressed or failed deliveries keep the metadata linkage
-                    # but never claim the event for the assistant message.
-                    response_sender_id=self.deps.matrix_full_id if delivered else None,
+                    response_sender_id=self.deps.matrix_full_id,
+                    delivered_visible_body=delivered_visible_body,
                 )
             finally:
                 storage.close()
@@ -1033,9 +1062,11 @@ class ResponseRunner:
                 runtime.session_id,
             ),
         )
-        enrichment_items = tuple(system_enrichment_items)
-        if matrix_target_item is not None:
-            enrichment_items = (*enrichment_items, matrix_target_item)
+        enrichment_items = _with_matrix_target_item(
+            system_enrichment_items,
+            matrix_target_item,
+            logger=self.deps.logger,
+        )
         return ResponseTurnContext(
             entity_label=self.deps.agent_name,
             session_id=runtime.session_id,
@@ -1641,9 +1672,11 @@ class ResponseRunner:
         progress = _DeliveryProgress(tracked_event_id=request.existing_event_id)
         matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
         active_event_ids = self._active_response_event_ids(request.room_id)
-        team_system_enrichment_items = tuple(request.system_enrichment_items)
-        if matrix_target_item is not None:
-            team_system_enrichment_items = (*team_system_enrichment_items, matrix_target_item)
+        team_system_enrichment_items = _with_matrix_target_item(
+            request.system_enrichment_items,
+            matrix_target_item,
+            logger=self.deps.logger,
+        )
         # Team entries refine entity_label to the materialized team label and
         # append the knowledge-availability enrichment before the turn runs.
         team_turn_ctx = ResponseTurnContext(

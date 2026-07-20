@@ -2584,6 +2584,7 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.prompt_message_tags",
     "mindroom.runtime_protocols",
+    "mindroom.streaming",
     "mindroom.team_scope",
 ]
 

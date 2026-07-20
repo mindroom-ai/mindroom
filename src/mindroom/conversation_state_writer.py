@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -17,6 +16,7 @@ from mindroom.history.runtime import create_scope_session_storage
 from mindroom.history.types import HistoryScope
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.runtime_protocols import SupportsConfig  # noqa: TC001
+from mindroom.streaming import strip_visible_tool_markers
 from mindroom.team_scope import ad_hoc_team_scope_id
 
 if TYPE_CHECKING:
@@ -117,12 +117,14 @@ class ConversationStateWriter:
         session_type: SessionType,
         run_id: str,
         response_event_id: str,
-        response_sender_id: str | None,
+        response_sender_id: str,
+        delivered_visible_body: str | None,
     ) -> None:
         """Persist Matrix response linkage onto the run that produced it.
 
-        ``response_sender_id`` is set only when the run's output was actually
-        delivered unsuppressed at ``response_event_id``; suppressed or failed
+        ``delivered_visible_body`` is the authoritative visible body of
+        ``response_event_id`` and is set only when this run's output was
+        actually delivered there; suppressed, failed, or unchanged-target
         deliveries persist the metadata linkage without wrapping the assistant
         message with an event that never carried it.
         """
@@ -141,11 +143,12 @@ class ConversationStateWriter:
                 return
             metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = response_event_id
             run.metadata = metadata
-            if response_sender_id is not None:
+            if delivered_visible_body:
                 _wrap_final_assistant_message(
                     run,
                     response_sender_id=response_sender_id,
                     response_event_id=response_event_id,
+                    delivered_visible_body=delivered_visible_body,
                 )
             storage.upsert_session(session)
             return
@@ -156,34 +159,23 @@ def _wrap_final_assistant_message(
     *,
     response_sender_id: str,
     response_event_id: str,
+    delivered_visible_body: str,
 ) -> None:
-    """Wrap the run's final content-bearing assistant message with its visible event identity.
+    """Wrap the run's final content-bearing assistant message with its delivered event body.
 
-    Rebuilds from canonical ``run.content`` when available so a repeated or
-    changed callback can never nest tags; content-less runs fall back to the
-    final assistant message's own text. Tool-call stubs without string content
-    are never targeted, and runs without any eligible assistant message keep
-    response metadata only.
+    The CDATA body is the delivered visible text with MindRoom display chrome
+    stripped, matching how the same event renders through Matrix-fallback
+    history; rebuilding from that external body on every callback means a
+    repeated or changed callback can never nest tags. Tool-call stubs without
+    string content are never targeted, and runs without any eligible assistant
+    message keep response metadata only.
     """
     for message in reversed(run.messages or []):
         if message.role != "assistant" or not isinstance(message.content, str) or not message.content:
             continue
         message.content = render_msg_tag(
             sender=response_sender_id,
-            body=_canonical_assistant_body(run, message.content),
+            body=strip_visible_tool_markers(delivered_visible_body),
             event_id=response_event_id,
         )
         return
-
-
-_WRAPPED_MSG_RE = re.compile(r"^<msg [^>]*><!\[CDATA\[(.*)\]\]></msg>$", re.DOTALL)
-
-
-def _canonical_assistant_body(run: RunOutput | TeamRunOutput, message_content: str) -> str:
-    """Return the unwrapped assistant body so a changed callback never nests tags."""
-    if isinstance(run.content, str) and run.content:
-        return run.content
-    match = _WRAPPED_MSG_RE.fullmatch(message_content)
-    if match is not None:
-        return match.group(1).replace("]]]]><![CDATA[>", "]]>")
-    return message_content

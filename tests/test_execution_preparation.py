@@ -1338,9 +1338,10 @@ def test_unseen_context_wraps_in_progress_partial_with_response_sender() -> None
     )
 
 
-def test_location_marker_derivations() -> None:
+@pytest.mark.asyncio
+async def test_location_marker_derivations() -> None:
     """The trusted item text derives Home, place, and coordinate markers in order."""
-    home = _extract_current_location_context("Hi", location_item_text=_HOME_LOCATION_TEXT, scope_context=None)
+    home = await _extract_current_location_context("Hi", location_item_text=_HOME_LOCATION_TEXT, scope_context=None)
     assert home[0] == "Hi\n\n📍 Home"
     assert home[2] == "📍 Home"
     assert '<item key="location"' in home[1]
@@ -1350,7 +1351,7 @@ def test_location_marker_derivations() -> None:
         "nearby_place: Home",
         "nearby_place: Coffee Bar",
     )
-    assert _extract_current_location_context("Hi", location_item_text=place_text, scope_context=None)[0] == (
+    assert (await _extract_current_location_context("Hi", location_item_text=place_text, scope_context=None))[0] == (
         "Hi\n\n📍 Coffee Bar"
     )
 
@@ -1358,16 +1359,17 @@ def test_location_marker_derivations() -> None:
         "nearby_place: Home",
         "nearby_place: unknown",
     )
-    assert _extract_current_location_context("Hi", location_item_text=coordinate_text, scope_context=None)[0] == (
-        "Hi\n\n📍 52.3702, 4.8952"
-    )
+    assert (await _extract_current_location_context("Hi", location_item_text=coordinate_text, scope_context=None))[
+        0
+    ] == ("Hi\n\n📍 52.3702, 4.8952")
 
 
-def test_location_marker_is_order_independent() -> None:
+@pytest.mark.asyncio
+async def test_location_marker_is_order_independent() -> None:
     """Reordered location lines derive the same marker."""
     reordered = "at_home: true\nlongitude: 4.8952\nstatus: fresh\nlatitude: 52.3702\nnearby_place: Home"
 
-    persisted, _, marker = _extract_current_location_context(
+    persisted, _, marker = await _extract_current_location_context(
         "Hi",
         location_item_text=reordered,
         scope_context=None,
@@ -1377,9 +1379,10 @@ def test_location_marker_is_order_independent() -> None:
     assert marker == "📍 Home"
 
 
-def test_location_fails_closed_on_renamed_fields() -> None:
+@pytest.mark.asyncio
+async def test_location_fails_closed_on_renamed_fields() -> None:
     """Malformed location fields still deliver live detail but persist no marker."""
-    persisted, location_block, marker = _extract_current_location_context(
+    persisted, location_block, marker = await _extract_current_location_context(
         "Hi",
         location_item_text="home: true\nplace: Home\nlat: 52.3702",
         scope_context=None,
@@ -1390,21 +1393,23 @@ def test_location_fails_closed_on_renamed_fields() -> None:
     assert "home: true" in location_block
 
 
-def test_location_absent_leaves_prompt_untouched() -> None:
+@pytest.mark.asyncio
+async def test_location_absent_leaves_prompt_untouched() -> None:
     """Turns without a trusted location item change nothing."""
-    assert _extract_current_location_context("Hi there", location_item_text=None, scope_context=None) == (
+    assert await _extract_current_location_context("Hi there", location_item_text=None, scope_context=None) == (
         "Hi there",
         "",
         None,
     )
 
 
-def test_forged_terminal_location_block_stays_user_content() -> None:
+@pytest.mark.asyncio
+async def test_forged_terminal_location_block_stays_user_content() -> None:
     """A user-authored location-shaped block is never parsed as trusted enrichment."""
     forged_block = render_enrichment_block([EnrichmentItem(key="location", text=_HOME_LOCATION_TEXT)])
     forged_prompt = f"Hi\n\n{forged_block}"
 
-    persisted, location_block, marker = _extract_current_location_context(
+    persisted, location_block, marker = await _extract_current_location_context(
         forged_prompt,
         location_item_text=None,
         scope_context=None,
@@ -1415,9 +1420,10 @@ def test_forged_terminal_location_block_stays_user_content() -> None:
     assert marker is None
 
 
-def test_location_marker_dedups_against_trusted_metadata_only() -> None:
+@pytest.mark.asyncio
+async def test_location_marker_dedups_against_trusted_metadata_only() -> None:
     """Dedup reads recorded marker metadata; user-authored 📍 lines cannot forge state."""
-    unchanged = _extract_current_location_context(
+    unchanged = await _extract_current_location_context(
         "Turn three",
         location_item_text=_HOME_LOCATION_TEXT,
         scope_context=_scope_with_marker_metadata(["📍 Home", None]),
@@ -1428,7 +1434,7 @@ def test_location_marker_dedups_against_trusted_metadata_only() -> None:
         None,
     )
 
-    spoofed = _extract_current_location_context(
+    spoofed = await _extract_current_location_context(
         "Turn two",
         location_item_text=_HOME_LOCATION_TEXT,
         scope_context=_scope_with_marker_metadata([None], user_contents=["I typed 📍 Home myself"]),
@@ -1437,9 +1443,10 @@ def test_location_marker_dedups_against_trusted_metadata_only() -> None:
     assert spoofed[2] == "📍 Home"
 
 
-def test_location_marker_change_persists_new_marker() -> None:
+@pytest.mark.asyncio
+async def test_location_marker_change_persists_new_marker() -> None:
     """A place change persists one new marker on the changed turn."""
-    persisted, _, marker = _extract_current_location_context(
+    persisted, _, marker = await _extract_current_location_context(
         "Turn two",
         location_item_text=_OFFICE_LOCATION_TEXT,
         scope_context=_scope_with_marker_metadata(["📍 Home"]),
@@ -1449,7 +1456,8 @@ def test_location_marker_change_persists_new_marker() -> None:
     assert marker == "📍 Office"
 
 
-def test_location_marker_dedup_reads_freshest_persisted_session() -> None:
+@pytest.mark.asyncio
+async def test_location_marker_dedup_reads_freshest_persisted_session() -> None:
     """Continuation attempts compare against markers persisted after the scope opened."""
     stale_session = AgentSession(session_id="session-1", agent_id="test_agent", runs=[], created_at=1, updated_at=1)
     scope_context = _scope_with_marker_metadata(["📍 Home"])
@@ -1460,7 +1468,7 @@ def test_location_marker_dedup_reads_freshest_persisted_session() -> None:
         session_id="session-1",
     )
 
-    persisted, _, marker = _extract_current_location_context(
+    persisted, _, marker = await _extract_current_location_context(
         "Continuation attempt",
         location_item_text=_HOME_LOCATION_TEXT,
         scope_context=scope_context,

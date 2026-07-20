@@ -188,12 +188,12 @@ def _agent_session_with_run(*, content: str | None, with_assistant_message: bool
 
 
 def test_persist_response_event_id_wraps_final_assistant_message(tmp_path: Path) -> None:
-    """The visible response event wraps the run's final assistant message once."""
+    """The delivered visible body is what the tagged assistant message carries."""
     config, runtime_paths = _agent_config(tmp_path)
     writer = _writer(config, runtime_paths)
     storage = writer.create_storage(None)
     try:
-        storage.upsert_session(_agent_session_with_run(content="Final answer", with_assistant_message=True))
+        storage.upsert_session(_agent_session_with_run(content="Provider answer", with_assistant_message=True))
 
         writer.persist_response_event_id_in_session_run(
             storage=storage,
@@ -202,6 +202,7 @@ def test_persist_response_event_id_wraps_final_assistant_message(tmp_path: Path)
             run_id="run-1",
             response_event_id="$visible",
             response_sender_id="@mindroom_shared:localhost",
+            delivered_visible_body="Transformed delivered answer",
         )
 
         persisted = get_agent_session(storage, "session-1")
@@ -209,27 +210,61 @@ def test_persist_response_event_id_wraps_final_assistant_message(tmp_path: Path)
         run = cast("RunOutput", (persisted.runs or [])[0])
         assert run.metadata is not None
         assert run.metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] == "$visible"
-        assert run.content == "Final answer"
+        # run.content keeps the model-native output; the tag carries the body
+        # that is actually visible at the event.
+        assert run.content == "Provider answer"
         assert [(message.role, message.content) for message in run.messages or []] == [
             ("user", "question"),
             (
                 "assistant",
-                '<msg event_id="$visible" from="@mindroom_shared:localhost"><![CDATA[Final answer]]></msg>',
+                '<msg event_id="$visible" from="@mindroom_shared:localhost">'
+                "<![CDATA[Transformed delivered answer]]></msg>",
             ),
         ]
     finally:
         storage.close()
 
 
+def test_persist_response_event_id_strips_display_chrome_from_delivered_body(tmp_path: Path) -> None:
+    """Visible tool markers are display chrome and stay out of replayed tagged bodies."""
+    config, runtime_paths = _agent_config(tmp_path)
+    writer = _writer(config, runtime_paths)
+    storage = writer.create_storage(None)
+    try:
+        storage.upsert_session(_agent_session_with_run(content="Answer", with_assistant_message=True))
+
+        writer.persist_response_event_id_in_session_run(
+            storage=storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            run_id="run-1",
+            response_event_id="$visible",
+            response_sender_id="@mindroom_shared:localhost",
+            delivered_visible_body="Checking.\n\n🔧 `run_shell_command` [1]\n\nDone.",
+        )
+
+        persisted = get_agent_session(storage, "session-1")
+        assert persisted is not None
+        final_message = (cast("RunOutput", (persisted.runs or [])[0]).messages or [])[-1]
+        assert "🔧" not in cast("str", final_message.content)
+        assert "Done." in cast("str", final_message.content)
+    finally:
+        storage.close()
+
+
 def test_persist_response_event_id_is_idempotent_and_never_nests(tmp_path: Path) -> None:
-    """Repeated or changed callbacks rebuild the wrapper from canonical run content."""
+    """Repeated or changed callbacks rebuild the wrapper from the delivered body."""
     config, runtime_paths = _agent_config(tmp_path)
     writer = _writer(config, runtime_paths)
     storage = writer.create_storage(None)
     try:
         storage.upsert_session(_agent_session_with_run(content="Final answer", with_assistant_message=True))
 
-        for response_event_id in ("$visible", "$visible", "$edited"):
+        for response_event_id, delivered_body in (
+            ("$visible", "Final answer"),
+            ("$visible", "Final answer"),
+            ("$edited", "Edited final answer"),
+        ):
             writer.persist_response_event_id_in_session_run(
                 storage=storage,
                 session_id="session-1",
@@ -237,6 +272,7 @@ def test_persist_response_event_id_is_idempotent_and_never_nests(tmp_path: Path)
                 run_id="run-1",
                 response_event_id=response_event_id,
                 response_sender_id="@mindroom_shared:localhost",
+                delivered_visible_body=delivered_body,
             )
 
         persisted = get_agent_session(storage, "session-1")
@@ -246,7 +282,7 @@ def test_persist_response_event_id_is_idempotent_and_never_nests(tmp_path: Path)
         assert run.metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] == "$edited"
         final_message = (run.messages or [])[-1]
         assert final_message.content == (
-            '<msg event_id="$edited" from="@mindroom_shared:localhost"><![CDATA[Final answer]]></msg>'
+            '<msg event_id="$edited" from="@mindroom_shared:localhost"><![CDATA[Edited final answer]]></msg>'
         )
         assert cast("str", final_message.content).count("<msg ") == 1
     finally:
@@ -254,7 +290,7 @@ def test_persist_response_event_id_is_idempotent_and_never_nests(tmp_path: Path)
 
 
 def test_persist_response_event_id_keeps_metadata_only_runs_bare(tmp_path: Path) -> None:
-    """Runs without string content or a final assistant message persist metadata only."""
+    """Runs without a final assistant message persist metadata only."""
     config, runtime_paths = _agent_config(tmp_path)
     writer = _writer(config, runtime_paths)
     storage = writer.create_storage(None)
@@ -268,6 +304,7 @@ def test_persist_response_event_id_keeps_metadata_only_runs_bare(tmp_path: Path)
             run_id="run-1",
             response_event_id="$visible",
             response_sender_id="@mindroom_shared:localhost",
+            delivered_visible_body="Delivered",
         )
 
         persisted = get_agent_session(storage, "session-1")
@@ -280,8 +317,8 @@ def test_persist_response_event_id_keeps_metadata_only_runs_bare(tmp_path: Path)
         storage.close()
 
 
-def test_persist_response_event_id_wraps_team_session_run(tmp_path: Path) -> None:
-    """Team sessions wrap the final assistant message the same way."""
+def test_persist_response_event_id_wraps_team_session_run_with_delivered_body(tmp_path: Path) -> None:
+    """Team tags carry the formatted delivered body, not the bare consensus content."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -294,6 +331,7 @@ def test_persist_response_event_id_wraps_team_session_run(tmp_path: Path) -> Non
     runtime_paths = runtime_paths_for(config)
     writer = _writer(config, runtime_paths, agent_name="crew")
     storage = writer.create_storage(None)
+    delivered_body = "🤝 **Team Response** (Shared):\n\n**Shared**: Evidence\n\n**Team Consensus**: Consensus"
     try:
         session = TeamSession(
             session_id="session-1",
@@ -303,10 +341,10 @@ def test_persist_response_event_id_wraps_team_session_run(tmp_path: Path) -> Non
                     run_id="run-1",
                     team_id="crew",
                     status=RunStatus.completed,
-                    content="Team answer",
+                    content="Consensus",
                     messages=[
                         Message(role="user", content="question"),
-                        Message(role="assistant", content="Team answer"),
+                        Message(role="assistant", content="Consensus"),
                     ],
                 ),
             ],
@@ -322,6 +360,7 @@ def test_persist_response_event_id_wraps_team_session_run(tmp_path: Path) -> Non
             run_id="run-1",
             response_event_id="$team-visible",
             response_sender_id="@mindroom_crew:localhost",
+            delivered_visible_body=delivered_body,
         )
 
         persisted = get_team_session(storage, "session-1")
@@ -329,14 +368,15 @@ def test_persist_response_event_id_wraps_team_session_run(tmp_path: Path) -> Non
         run = cast("TeamRunOutput", (persisted.runs or [])[0])
         assert run.metadata is not None
         assert run.metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] == "$team-visible"
+        assert run.content == "Consensus"
         assert (run.messages or [])[-1].content == (
-            '<msg event_id="$team-visible" from="@mindroom_crew:localhost"><![CDATA[Team answer]]></msg>'
+            f'<msg event_id="$team-visible" from="@mindroom_crew:localhost"><![CDATA[{delivered_body}]]></msg>'
         )
     finally:
         storage.close()
 
 
-def test_persist_response_event_id_without_sender_keeps_metadata_only(tmp_path: Path) -> None:
+def test_persist_response_event_id_without_delivered_body_keeps_metadata_only(tmp_path: Path) -> None:
     """Undelivered outcomes link the event in metadata without claiming it for the assistant."""
     config, runtime_paths = _agent_config(tmp_path)
     writer = _writer(config, runtime_paths)
@@ -350,7 +390,8 @@ def test_persist_response_event_id_without_sender_keeps_metadata_only(tmp_path: 
             session_type=SessionType.AGENT,
             run_id="run-1",
             response_event_id="$failure-note",
-            response_sender_id=None,
+            response_sender_id="@mindroom_shared:localhost",
+            delivered_visible_body=None,
         )
 
         persisted = get_agent_session(storage, "session-1")
@@ -363,11 +404,12 @@ def test_persist_response_event_id_without_sender_keeps_metadata_only(tmp_path: 
         storage.close()
 
 
-def test_persist_response_event_id_wraps_contentless_run_from_assistant_message(tmp_path: Path) -> None:
-    """Content-less runs fall back to the final assistant message's own text."""
+def test_persist_response_event_id_wraps_literal_msg_shaped_output_without_unwrapping(tmp_path: Path) -> None:
+    """A legitimate assistant reply shaped like <msg> markup is wrapped literally, never stripped."""
     config, runtime_paths = _agent_config(tmp_path)
     writer = _writer(config, runtime_paths)
     storage = writer.create_storage(None)
+    literal_example = '<msg event_id="$example" from="@someone:hs"><![CDATA[docs example]]></msg>'
     try:
         session = AgentSession(
             session_id="session-1",
@@ -379,8 +421,8 @@ def test_persist_response_event_id_wraps_contentless_run_from_assistant_message(
                     status=RunStatus.completed,
                     content=None,
                     messages=[
-                        Message(role="user", content="question"),
-                        Message(role="assistant", content="Delivered team text"),
+                        Message(role="user", content="show me the msg format"),
+                        Message(role="assistant", content=literal_example),
                         Message(role="assistant", content=""),
                     ],
                 ),
@@ -398,17 +440,19 @@ def test_persist_response_event_id_wraps_contentless_run_from_assistant_message(
                 run_id="run-1",
                 response_event_id=response_event_id,
                 response_sender_id="@mindroom_shared:localhost",
+                delivered_visible_body=literal_example,
             )
 
         persisted = get_agent_session(storage, "session-1")
         assert persisted is not None
-        run = cast("RunOutput", (persisted.runs or [])[0])
-        messages = run.messages or []
-        # The tool-call-style empty assistant stub is never targeted, and a
-        # changed callback re-wraps from the recovered canonical body.
-        assert messages[1].content == (
-            '<msg event_id="$edited" from="@mindroom_shared:localhost"><![CDATA[Delivered team text]]></msg>'
-        )
+        messages = cast("RunOutput", (persisted.runs or [])[0]).messages or []
+        content = cast("str", messages[1].content)
+        # The delivered literal example survives inside the wrapper CDATA, and a
+        # changed callback rebuilds from the delivered body without nesting.
+        assert content.startswith('<msg event_id="$edited" from="@mindroom_shared:localhost"><![CDATA[')
+        assert "docs example" in content
+        assert content.count('from="@mindroom_shared:localhost"') == 1
+        # The empty tool-call-style stub is never targeted.
         assert messages[2].content == ""
     finally:
         storage.close()

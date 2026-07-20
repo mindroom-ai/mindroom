@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -708,19 +709,15 @@ def _location_marker_from_fields(item_text: str) -> str | None:
     return None
 
 
-def _last_persisted_location_marker(scope_context: ScopeSessionContext | None) -> str | None:
-    """Return the most recent trusted location marker recorded in stored run metadata.
-
-    Reloads the scope's session from storage so same-turn continuation attempts
-    see markers persisted by earlier attempts, and consults only the typed
-    metadata key so message text can never forge location state.
-    """
-    if scope_context is None or scope_context.session_id is None:
+def _read_last_persisted_location_marker(scope_context: ScopeSessionContext) -> str | None:
+    """Read the most recent trusted location marker from freshly loaded session storage."""
+    session_id = scope_context.session_id
+    if session_id is None:
         return None
     session = (
-        get_team_session(scope_context.storage, scope_context.session_id)
+        get_team_session(scope_context.storage, session_id)
         if scope_context.scope.kind == "team"
-        else get_agent_session(scope_context.storage, scope_context.session_id)
+        else get_agent_session(scope_context.storage, session_id)
     )
     if session is None:
         return None
@@ -733,7 +730,21 @@ def _last_persisted_location_marker(scope_context: ScopeSessionContext | None) -
     return None
 
 
-def _extract_current_location_context(
+async def _last_persisted_location_marker(scope_context: ScopeSessionContext | None) -> str | None:
+    """Return the most recent trusted location marker recorded in stored run metadata.
+
+    Reloads the scope's session from storage — off the event loop, since this
+    is a synchronous SQLite read on the async prepare path — so same-turn
+    continuation attempts see markers persisted by earlier attempts, and
+    consults only the typed metadata key so message text can never forge
+    location state.
+    """
+    if scope_context is None:
+        return None
+    return await asyncio.to_thread(_read_last_persisted_location_marker, scope_context)
+
+
+async def _extract_current_location_context(
     prompt: str,
     *,
     location_item_text: str | None,
@@ -751,7 +762,7 @@ def _extract_current_location_context(
         return prompt, "", None
     location_block = render_enrichment_block([EnrichmentItem(key="location", text=location_item_text)])
     marker = _location_marker_from_fields(location_item_text)
-    if marker is None or marker == _last_persisted_location_marker(scope_context):
+    if marker is None or marker == await _last_persisted_location_marker(scope_context):
         return prompt, location_block, None
     persisted_prompt = f"{prompt}\n\n{marker}" if prompt.strip() else marker
     return persisted_prompt, location_block, marker
@@ -972,7 +983,7 @@ async def prepare_agent_execution_context(
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedExecutionContext:
     """Prepare one agent's final prompt and replay plan for the current call."""
-    prompt, location_block, location_marker = _extract_current_location_context(
+    prompt, location_block, location_marker = await _extract_current_location_context(
         prompt,
         location_item_text=ctx.location_item_text,
         scope_context=scope_context,
@@ -1084,7 +1095,7 @@ async def _prepare_bound_team_execution_context(
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedExecutionContext:
     """Prepare one bound team scope for the current call."""
-    prompt, location_block, location_marker = _extract_current_location_context(
+    prompt, location_block, location_marker = await _extract_current_location_context(
         prompt,
         location_item_text=ctx.location_item_text,
         scope_context=scope_context,

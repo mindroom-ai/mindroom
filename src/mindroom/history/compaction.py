@@ -23,6 +23,7 @@ from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
     MINDROOM_COMPACTION_METADATA_KEY,
+    MINDROOM_LOCATION_MARKER_METADATA_KEY,
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
     prompt_roles_for_history_storage,
 )
@@ -68,6 +69,9 @@ _SUMMARY_METADATA_OMIT_KEYS = frozenset(
     {
         AI_RUN_METADATA_KEY,
         MINDROOM_COMPACTION_METADATA_KEY,
+        # The marker already appears as one line in the persisted user turn;
+        # serializing the trusted dedup metadata too would double every delta.
+        MINDROOM_LOCATION_MARKER_METADATA_KEY,
         MINDROOM_MATRIX_HISTORY_METADATA_KEY,
         "model_params",
         "tools_schema",

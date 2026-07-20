@@ -89,3 +89,29 @@ Dropped per triage: H6 (magic-string style). H7 (scan cost) is obsolete — dedu
 1. pytest: focused files green, then full suite `uv run pytest` exit 0 in nix-shell.
 2. `uv run tach check --dependencies --interfaces`: all modules validated (new edges: `execution_preparation` → `hooks`/`agent_storage`, `turn_policy` → `logging_config`, `ai` → `constants`; `agent_storage` visibility extended).
 3. pre-commit on all changed files: all hooks pass except the pre-existing `ty` macOS-import failure documented in round 1 (unchanged, reproduced on base).
+
+---
+
+# Round 3 — review-fix report
+
+Commit: "fix: address review findings round 2 (ISSUE-247)". All nine forwarded clusters were real; each is fixed at the boundary owning the violated invariant.
+
+## Triage and fixes
+
+1. **Event-ID binding vs delivery reality (A1, A2, B1, C2, E-partial, G1, G2).** Invariant restored: a `<msg event_id>` content tag may only carry the body actually visible at that event, bound only once delivery is known. Two boundary changes:
+   - *Normal path*: `apply_post_response_effects` now passes `FinalDeliveryOutcome.final_visible_body` through the persistence callback when the run succeeded and was not suppressed. The gateway already encodes ownership — `final_visible_body` is set only when the event holds this run's output; unchanged pre-existing edit targets return `is_visible_response=True` with no body. The writer wraps with that delivered body (team headers, before/final response transforms, and interactive formatting included), display chrome stripped exactly as the Matrix-fallback renderer does, keeping `run.content` as the model-native record. Visible replies that survived a late finalization failure (`terminal_status="error"`, body present, run succeeded) now retain their event identity (G1); undelivered/suppressed/unchanged outcomes persist metadata linkage only.
+   - *Interrupted path*: the assistant-side wrap is deleted entirely. Interrupted snapshots persist before finalization decides whether the event survives, and the composite partial+summary+tool prose was never any event's body, so interrupted assistant content is always unwrapped (user-side wrapping, bound at ingress and delivery-independent, stays). The `response_sender_id` parameter was removed from the interrupted persistence chain.
+2. **Nonexistent tool argument (C1).** `matrix_message` has no `reply_to_event_id`; both the system-context item and the prompts.py guidance now describe the real contract (`room_id`, `thread_id`, and `<msg event_id>` values passed as `target` for reactions/edits). A schema-validation test asserts every backticked argument in the generated instructions exists in `MatrixMessageTools.matrix_message`'s signature.
+3. **Conflicting authoritative targets (D2, E1).** `matrix_message_target` is now a reserved runner-owned key: `_with_matrix_target_item` drops hook-provided collisions (with a warning) before appending exactly one canonical item, used by both the agent and team context constructors; documented in `docs/hooks.md`.
+4. **Sync SQLite on the event loop (F2, G3).** The trusted-marker lookup now runs through `asyncio.to_thread` (`_extract_current_location_context` is async); a gated-storage heartbeat regression in `test_event_loop_offloading.py` proves the loop stays live while the read blocks.
+5. **Marker duplication in compaction (D1).** `MINDROOM_LOCATION_MARKER_METADATA_KEY` joined `_SUMMARY_METADATA_OMIT_KEYS`; the integration test restored exact-count assertions (each delta exactly once, metadata key absent).
+6. **Interrupted empty prompt loses baseline (E2).** The canonical user body is built first: an empty prompt with a recorded marker persists the marker alone as the user turn (unwrapped, since there is no event body), keeping the dedup timeline and replay consistent.
+7. **`<msg>`-shaped legitimate output corrupted (B2).** Fixed by the cluster-1 redesign: the wrap body always comes from the delivered text, so the unwrap heuristic (`_WRAPPED_MSG_RE`, `_canonical_assistant_body`) is deleted; a literal `<msg>`-example reply is wrapped literally and changed callbacks rebuild without nesting (regression added).
+8. **Team durable-storage verification + nested member runs (B3, E3, F1).** The storage sanitizer now recurses into `TeamRunOutput.member_responses` (detection and stripping, nested teams included) for both prompt-role messages and transient run inputs. A new integration test runs a real Agno `Team` (recording team model, fake member models) through real `prepare_materialized_team_execution` and `Team.arun` against the real sanitizing scope storage: the live model sees the full location block in system context, while the serialized `TeamSession` contains no coordinates, place fields, or enrichment markup and exactly one `📍 Home` in replayed content.
+9. **Docs drift (C3, D3).** The hook-guide walkthrough now uses a non-reserved key for the persist-as-rendered example, states the `location` exception explicitly in both the walkthrough and policy sections, shows a structured `add_metadata("location", ...)` example that actually produces the documented marker, and documents the reserved `matrix_message_target` key; mirrored skill references regenerate via the pre-commit hook.
+
+## Gate results (round 3)
+
+1. pytest: all focused files green; full suite `uv run pytest` exit 0 in nix-shell.
+2. `uv run tach check --dependencies --interfaces`: all modules validated (new edge: `conversation_state_writer` → `streaming`).
+3. pre-commit: all hooks pass except the pre-existing `ty` macOS-import failure documented in round 1 (unchanged, reproduced on base).
