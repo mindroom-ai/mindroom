@@ -21,6 +21,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
+from mindroom.history.interrupted_replay import _INTERRUPTED_REPLAY_STATE, _INTERRUPTED_REPLAY_STATE_KEY
 from mindroom.history.runtime import create_scope_session_storage, open_bound_scope_session_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
@@ -454,5 +455,151 @@ def test_persist_response_event_id_wraps_literal_msg_shaped_output_without_unwra
         assert content.count('from="@mindroom_shared:localhost"') == 1
         # The empty tool-call-style stub is never targeted.
         assert messages[2].content == ""
+    finally:
+        storage.close()
+
+
+def test_persist_response_event_id_with_chrome_only_body_keeps_model_reply(tmp_path: Path) -> None:
+    """A delivered body that is only display chrome never erases the model's reply."""
+    config, runtime_paths = _agent_config(tmp_path)
+    writer = _writer(config, runtime_paths)
+    storage = writer.create_storage(None)
+    try:
+        storage.upsert_session(_agent_session_with_run(content="Real model reply", with_assistant_message=True))
+
+        for delivered_body in ("", "🔧 `run_shell_command` [1]"):
+            writer.persist_response_event_id_in_session_run(
+                storage=storage,
+                session_id="session-1",
+                session_type=SessionType.AGENT,
+                run_id="run-1",
+                response_event_id="$visible",
+                response_sender_id="@mindroom_shared:localhost",
+                delivered_visible_body=delivered_body,
+            )
+
+        persisted = get_agent_session(storage, "session-1")
+        assert persisted is not None
+        run = cast("RunOutput", (persisted.runs or [])[0])
+        assert run.metadata is not None
+        assert run.metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] == "$visible"
+        assert (run.messages or [])[-1].content == "Real model reply"
+    finally:
+        storage.close()
+
+
+def test_persist_response_event_id_never_targets_prior_generation_context(tmp_path: Path) -> None:
+    """Assistant context replayed before the current user turn is never rebound to a new event."""
+    config, runtime_paths = _agent_config(tmp_path)
+    writer = _writer(config, runtime_paths)
+    storage = writer.create_storage(None)
+    try:
+        session = AgentSession(
+            session_id="session-1",
+            agent_id="shared",
+            runs=[
+                RunOutput(
+                    run_id="run-1",
+                    agent_id="shared",
+                    status=RunStatus.completed,
+                    content=None,
+                    messages=[
+                        Message(role="assistant", content="Older replayed answer"),
+                        Message(role="user", content="question"),
+                        Message(role="assistant", content=""),
+                    ],
+                ),
+            ],
+            created_at=1,
+            updated_at=1,
+        )
+        storage.upsert_session(session)
+
+        writer.persist_response_event_id_in_session_run(
+            storage=storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            run_id="run-1",
+            response_event_id="$visible",
+            response_sender_id="@mindroom_shared:localhost",
+            delivered_visible_body="Delivered",
+        )
+
+        persisted = get_agent_session(storage, "session-1")
+        assert persisted is not None
+        run = cast("RunOutput", (persisted.runs or [])[0])
+        assert run.metadata is not None
+        assert run.metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] == "$visible"
+        assert [(message.role, message.content) for message in run.messages or []] == [
+            ("assistant", "Older replayed answer"),
+            ("user", "question"),
+            ("assistant", ""),
+        ]
+    finally:
+        storage.close()
+
+
+def test_persist_response_event_id_upgrades_interrupted_run_after_delivery(tmp_path: Path) -> None:
+    """An interrupted run reconciled after delivery gains the wrap; the synthetic prose stays outside."""
+    config, runtime_paths = _agent_config(tmp_path)
+    writer = _writer(config, runtime_paths)
+    storage = writer.create_storage(None)
+    interrupted_content = "Half an answer\n\n(turn interrupted before completion)"
+    try:
+        session = AgentSession(
+            session_id="session-1",
+            agent_id="shared",
+            runs=[
+                RunOutput(
+                    run_id="run-1",
+                    agent_id="shared",
+                    status=RunStatus.cancelled,
+                    content="Half an answer",
+                    metadata={_INTERRUPTED_REPLAY_STATE_KEY: _INTERRUPTED_REPLAY_STATE},
+                    messages=[
+                        Message(role="user", content="question"),
+                        Message(role="assistant", content=interrupted_content),
+                    ],
+                ),
+            ],
+            created_at=1,
+            updated_at=1,
+        )
+        storage.upsert_session(session)
+
+        # The interrupt path links the event before the delivered body is known.
+        writer.persist_response_event_id_in_session_run(
+            storage=storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            run_id="run-1",
+            response_event_id="$partial",
+            response_sender_id="@mindroom_shared:localhost",
+            delivered_visible_body=None,
+        )
+        persisted = get_agent_session(storage, "session-1")
+        assert persisted is not None
+        assert (cast("RunOutput", (persisted.runs or [])[0]).messages or [])[-1].content == interrupted_content
+
+        # Terminal delivery reconciles the same event with its visible body.
+        writer.persist_response_event_id_in_session_run(
+            storage=storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            run_id="run-1",
+            response_event_id="$partial",
+            response_sender_id="@mindroom_shared:localhost",
+            delivered_visible_body="Half an answer",
+        )
+
+        persisted = get_agent_session(storage, "session-1")
+        assert persisted is not None
+        run = cast("RunOutput", (persisted.runs or [])[0])
+        assert run.metadata is not None
+        assert run.metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] == "$partial"
+        assert (run.messages or [])[-1].content == (
+            '<msg event_id="$partial" from="@mindroom_shared:localhost"><![CDATA[Half an answer]]></msg>'
+            "\n\n(turn interrupted before completion)"
+        )
     finally:
         storage.close()

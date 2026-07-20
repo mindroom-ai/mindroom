@@ -116,6 +116,7 @@ def _completed_outcome(event_id: str = "$response", body: str = "ok") -> FinalDe
         is_visible_response=True,
         final_visible_body=body,
         delivery_kind="sent",
+        body_is_run_output=True,
     )
 
 
@@ -1586,6 +1587,7 @@ async def test_apply_post_response_effects_gates_success_only_side_effects() -> 
             is_visible_response=True,
             final_visible_body="Complete visible reply",
             failure_reason="finalize_failed",
+            body_is_run_output=True,
         ),
         ResponseOutcome(response_run_id="run-3", run_succeeded=True),
         deps,
@@ -1607,6 +1609,21 @@ async def test_apply_post_response_effects_gates_success_only_side_effects() -> 
     # An unchanged pre-existing edit target has no delivered body for this run,
     # so the event is linked in metadata only.
     assert persisted[-1] == ("run-4", "$old-reply", None)
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status="error",
+            event_id="$placeholder",
+            is_visible_response=True,
+            final_visible_body="Something went wrong",
+            failure_reason="send_failed",
+        ),
+        ResponseOutcome(response_run_id="run-5", run_succeeded=True),
+        deps,
+    )
+    # A successful run whose delivery failed leaves only a placeholder failure
+    # notice visible; the notice never replaces the model's persisted reply.
+    assert persisted[-1] == ("run-5", "$placeholder", None)
 
 
 def test_matrix_target_item_argument_names_match_the_tool_schema() -> None:

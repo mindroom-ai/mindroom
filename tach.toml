@@ -1074,6 +1074,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.ai",
+    "mindroom.conversation_state_writer",
     "mindroom.history.turn_recorder",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.response_runner",
@@ -2580,6 +2581,7 @@ depends_on = [
     "mindroom.agent_storage",
     "mindroom.constants",
     "mindroom.entity_resolution",
+    "mindroom.history.interrupted_replay",
     "mindroom.history.runtime",
     "mindroom.history.types",
     "mindroom.prompt_message_tags",
@@ -3556,6 +3558,7 @@ expose = [
     "ResponseTurnContext",
     "build_matrix_run_metadata",
     "ai_response",
+    "model_prompt_tail_after_raw_prompt",
     "stream_agent_response",
 ]
 from = ["mindroom.ai"]
@@ -4263,6 +4266,8 @@ from = ["mindroom.oauth.service"]
 expose = [
     "InterruptedReplaySnapshot",
     "build_interrupted_replay_snapshot",
+    "interrupted_replay_prose",
+    "is_interrupted_replay_run_metadata",
     "persist_interrupted_replay",
     "persist_interrupted_replay_snapshot",
     "split_interrupted_tool_trace",

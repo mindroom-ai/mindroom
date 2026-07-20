@@ -224,6 +224,10 @@ class ResponseTurnContext:
     # Trusted text of the reserved ``key="location"`` enrichment item for this
     # turn; delivered current-turn-only by execution preparation.
     location_item_text: str | None = None
+    # Managed MindRoom account IDs whose relayed ``original_sender`` metadata
+    # is honored when replaying visible Matrix history; empty fails closed to
+    # the event's real sender.
+    trusted_relay_sender_ids: frozenset[str] = frozenset()
     # Set only for scheduled fires that carry a history limit; identifies the
     # prompt-owning event while capping this turn without changing authored config.
     scheduled_history_budget: ScheduledHistoryBudget | None = None

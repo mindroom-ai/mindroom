@@ -1016,8 +1016,8 @@ async def test_prepare_agent_and_prompt_timestamps_current_turn_without_duplicat
     }
     assert third_request[-1]["content"] == (
         'Current message:\n<msg from="@alice:localhost" ts="2026-03-20 08:17 PDT"><![CDATA['
-        "Third prompt\n\n"
-        "Available attachment IDs: att_3. Use tool calls to inspect or process them.]]></msg>"
+        "Third prompt]]></msg>\n\n"
+        "Available attachment IDs: att_3. Use tool calls to inspect or process them."
     )
     assert third_request[-1]["add_to_agent_memory"] is True
 
@@ -1100,6 +1100,10 @@ async def test_prepare_agent_and_prompt_persists_location_markers_only_on_change
     )
     assert replayed_contents.count("📍 Home") == 1
     assert replayed_contents.count("📍 Office") == 1
+    # The marker is system-generated, so it stays outside the event-tagged
+    # CDATA that mirrors the wire body.
+    assert "📍 Home]]></msg>" not in replayed_contents
+    assert replayed_contents.count("]]></msg>\n\n📍") == 2
     for turn_number in range(1, 6):
         assert f'event_id="$turn-{turn_number}"' in replayed_contents
     # The full location detail must not survive anywhere in the serialized

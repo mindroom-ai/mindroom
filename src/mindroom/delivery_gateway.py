@@ -29,7 +29,12 @@ from mindroom.hooks import (
     emit_final_response_transform,
     emit_transform,
 )
-from mindroom.matrix.client_delivery import build_threaded_edit_content, edit_message_result, send_message_result
+from mindroom.matrix.client_delivery import (
+    DeliveredMatrixEvent,
+    build_threaded_edit_content,
+    edit_message_result,
+    send_message_result,
+)
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
@@ -70,6 +75,22 @@ _PLACEHOLDER_DELIVERY_FAILURE_REASONS = frozenset(
         "terminal_update_failed",
     },
 )
+
+
+def _delivered_plain_body(delivered: DeliveredMatrixEvent, *, fallback: str) -> str:
+    """Return the exact plain body the Matrix event now carries.
+
+    Edits store the authoritative text under ``m.new_content``; sends store it
+    as the top-level body. Mention formatting and sidecar fallbacks can change
+    the wire body from the pre-delivery display text, so persistence must bind
+    event IDs to the delivered form.
+    """
+    content = delivered.content_sent
+    new_content = content.get("m.new_content")
+    if isinstance(new_content, dict) and isinstance(new_content.get("body"), str):
+        return new_content["body"]
+    body = content.get("body")
+    return body if isinstance(body, str) else fallback
 
 
 def _is_placeholder_delivery_failure(failure_reason: str) -> bool:
@@ -466,6 +487,11 @@ class DeliveryGateway:
 
     async def send_text(self, request: SendTextRequest) -> str | None:
         """Send one response message to a room."""
+        delivered = await self._send_text_delivered(request)
+        return delivered.event_id if delivered is not None else None
+
+    async def _send_text_delivered(self, request: SendTextRequest) -> DeliveredMatrixEvent | None:
+        """Send one response message and return the exact delivered event payload."""
         client = self._client()
         config = self.deps.runtime.config
         resolved_target = request.target
@@ -511,12 +537,16 @@ class DeliveryGateway:
                 delivered.content_sent,
             )
             self.deps.logger.info("Sent response", event_id=delivered.event_id, **resolved_target.log_context)
-            return delivered.event_id
+            return delivered
         self.deps.logger.error("Failed to send response to room", **resolved_target.log_context)
         return None
 
     async def edit_text(self, request: EditTextRequest) -> bool:
         """Edit one existing response message."""
+        return await self._edit_text_delivered(request) is not None
+
+    async def _edit_text_delivered(self, request: EditTextRequest) -> DeliveredMatrixEvent | None:
+        """Edit one existing response message and return the exact delivered payload."""
         client = self._client()
         config = self.deps.runtime.config
         target = request.target
@@ -568,14 +598,14 @@ class DeliveryGateway:
                 delivered.content_sent,
             )
             self.deps.logger.info("Edited message", event_id=request.event_id, **target.log_context)
-            return True
+            return delivered
         self.deps.logger.error(
             "Failed to edit message",
             event_id=request.event_id,
             error="edit_message_result returned None",
             **target.log_context,
         )
-        return False
+        return None
 
     async def deliver_final(  # noqa: C901, PLR0911, PLR0912
         self,
@@ -700,7 +730,7 @@ class DeliveryGateway:
         display_text = interactive_response.formatted_text
 
         if request.existing_event_id is not None:
-            edited = await self.edit_text(
+            edited = await self._edit_text_delivered(
                 EditTextRequest(
                     target=request.target,
                     event_id=request.existing_event_id,
@@ -709,12 +739,13 @@ class DeliveryGateway:
                     extra_content=draft.extra_content,
                 ),
             )
-            if edited:
+            if edited is not None:
                 return FinalDeliveryOutcome(
                     terminal_status="completed",
                     event_id=request.existing_event_id,
                     is_visible_response=True,
-                    final_visible_body=display_text,
+                    final_visible_body=_delivered_plain_body(edited, fallback=display_text),
+                    body_is_run_output=True,
                     delivery_kind="edited",
                     tool_trace=tuple(draft.tool_trace or ()),
                     extra_content=draft.extra_content,
@@ -740,7 +771,7 @@ class DeliveryGateway:
                 tool_trace=tuple(draft.tool_trace or ()),
                 extra_content=draft.extra_content,
             )
-        event_id = await self.send_text(
+        delivered = await self._send_text_delivered(
             SendTextRequest(
                 target=request.target,
                 response_text=display_text,
@@ -749,7 +780,7 @@ class DeliveryGateway:
                 extra_content=draft.extra_content,
             ),
         )
-        if event_id is None:
+        if delivered is None:
             return FinalDeliveryOutcome(
                 terminal_status="error",
                 event_id=None,
@@ -759,9 +790,10 @@ class DeliveryGateway:
             )
         return FinalDeliveryOutcome(
             terminal_status="completed",
-            event_id=event_id,
+            event_id=delivered.event_id,
             is_visible_response=True,
-            final_visible_body=display_text,
+            final_visible_body=_delivered_plain_body(delivered, fallback=display_text),
+            body_is_run_output=True,
             delivery_kind="sent",
             tool_trace=tuple(draft.tool_trace or ()),
             extra_content=draft.extra_content,
@@ -1027,7 +1059,7 @@ class DeliveryGateway:
             response_text,
             canonical_body_candidate=canonical_body_candidate,
         )
-        edited = await self.edit_text(
+        edited = await self._edit_text_delivered(
             EditTextRequest(
                 target=target,
                 event_id=event_id,
@@ -1036,13 +1068,14 @@ class DeliveryGateway:
                 extra_content=extra_content,
             ),
         )
-        if not edited:
+        if edited is None:
             return None
         return FinalDeliveryOutcome(
             terminal_status="completed",
             event_id=event_id,
             is_visible_response=True,
-            final_visible_body=interactive_response.formatted_text,
+            final_visible_body=_delivered_plain_body(edited, fallback=interactive_response.formatted_text),
+            body_is_run_output=True,
             delivery_kind="edited",
             failure_reason=failure_reason,
             tool_trace=tuple(tool_trace or ()),
@@ -1143,6 +1176,7 @@ class DeliveryGateway:
                         event_id=visible_stream_event_id,
                         is_visible_response=True,
                         final_visible_body=streamed_text or None,
+                        body_is_run_output=bool(streamed_text),
                         failure_reason=failure_reason,
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
@@ -1195,6 +1229,7 @@ class DeliveryGateway:
                         event_id=visible_stream_event_id,
                         is_visible_response=True,
                         final_visible_body=streamed_text or None,
+                        body_is_run_output=bool(streamed_text),
                         failure_reason=failure_reason,
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
@@ -1287,6 +1322,7 @@ class DeliveryGateway:
                         event_id=visible_stream_event_id,
                         is_visible_response=True,
                         final_visible_body=streamed_text or None,
+                        body_is_run_output=bool(streamed_text),
                         failure_reason=failure_reason,
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
@@ -1330,6 +1366,7 @@ class DeliveryGateway:
                         event_id=visible_stream_event_id,
                         is_visible_response=True,
                         final_visible_body=streamed_text,
+                        body_is_run_output=bool(streamed_text),
                         failure_reason=failure_reason,
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
@@ -1387,6 +1424,7 @@ class DeliveryGateway:
                 event_id=streamed_event_id,
                 is_visible_response=True,
                 final_visible_body=streamed_text or interactive_response.formatted_text,
+                body_is_run_output=True,
                 delivery_kind=request.initial_delivery_kind,
                 failure_reason=stream_outcome.failure_reason,
                 tool_trace=tuple(request.tool_trace or ()),
@@ -1403,6 +1441,7 @@ class DeliveryGateway:
                 terminal_status="cancelled",
                 event_id=event_id,
                 is_visible_response=event_id is not None,
+                body_is_run_output=bool(final_visible_body),
                 final_visible_body=final_visible_body,
                 failure_reason="stream_finalize_cancelled",
                 tool_trace=tuple(request.tool_trace or ()),

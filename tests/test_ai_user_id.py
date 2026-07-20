@@ -30,13 +30,13 @@ from agno.run.base import RunStatus
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import (
-    _compose_current_turn_prompt,
     _prepare_agent_and_prompt,
     _run_error_event_text,
     _stream_completed_without_visible_output,
     _StreamingAttemptState,
     ai_response,
     build_matrix_run_metadata,
+    model_prompt_tail_after_raw_prompt,
     stream_agent_response,
 )
 from mindroom.ai_run_metadata import _serialize_metrics, build_ai_run_metadata_content
@@ -261,34 +261,34 @@ async def test_stream_with_request_log_context_closes_wrapped_stream_on_early_cl
     assert closed is True
 
 
-def test_compose_current_turn_prompt_uses_normalized_tail_comparison() -> None:
+def test_model_prompt_tail_uses_normalized_tail_comparison() -> None:
     """Whitespace-normalized model prompts should not duplicate the raw turn."""
-    prompt = _compose_current_turn_prompt(
+    tail = model_prompt_tail_after_raw_prompt(
         raw_prompt=" report ",
         model_prompt="report\n\nAvailable attachment IDs: att_report.",
     )
 
-    assert prompt == " report \n\nAvailable attachment IDs: att_report."
+    assert tail == "Available attachment IDs: att_report."
 
 
-def test_compose_current_turn_prompt_strips_stale_model_timestamp_before_tail_comparison() -> None:
-    """Current-turn composition should not reuse timestamp text from model prompts."""
-    prompt = _compose_current_turn_prompt(
+def test_model_prompt_tail_strips_stale_model_timestamp_before_tail_comparison() -> None:
+    """Tail extraction should not reuse timestamp text from model prompts."""
+    tail = model_prompt_tail_after_raw_prompt(
         raw_prompt=" report ",
         model_prompt="[1999-01-01 00:00 UTC] report\n\nAvailable attachment IDs: att_report.",
     )
 
-    assert prompt == " report \n\nAvailable attachment IDs: att_report."
+    assert tail == "Available attachment IDs: att_report."
 
 
-def test_compose_current_turn_prompt_keeps_model_only_tail_without_timestamp() -> None:
-    """Model-only current turns should leave timestamp rendering to the message wrapper."""
-    prompt = _compose_current_turn_prompt(
+def test_model_prompt_tail_keeps_model_only_tail_without_timestamp() -> None:
+    """Model-only current turns surface their whole tail without timestamp text."""
+    tail = model_prompt_tail_after_raw_prompt(
         raw_prompt="",
         model_prompt="Available attachment IDs: att_report.",
     )
 
-    assert prompt == "Available attachment IDs: att_report."
+    assert tail == "Available attachment IDs: att_report."
 
 
 class TestUserIdPassthrough:
@@ -298,66 +298,70 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
     ) -> None:
-        """Short prompts must not disappear when they happen to occur inside attachment IDs."""
+        """A model prompt that does not extend the raw prompt is preserved whole as the tail."""
         config = _config()
         runtime_paths = _runtime_paths(tmp_path)
         persist_entity_accounts(config, runtime_paths)
 
-        memory_prompt, memory_thread_history, model_prompt, model_thread_history = prepare_memory_and_model_context(
-            "report",
-            [],
-            config=config,
-            runtime_paths=runtime_paths,
-            model_prompt="Available attachment IDs: att_report. Use tool calls to inspect or process them.",
+        memory_prompt, memory_thread_history, model_prompt_tail, model_thread_history = (
+            prepare_memory_and_model_context(
+                "report",
+                [],
+                config=config,
+                runtime_paths=runtime_paths,
+                model_prompt="Available attachment IDs: att_report. Use tool calls to inspect or process them.",
+            )
         )
 
         assert memory_prompt == "report"
         assert memory_thread_history == []
         assert model_thread_history == []
-        assert model_prompt.endswith(
-            "report\n\nAvailable attachment IDs: att_report. Use tool calls to inspect or process them.",
-        )
+        assert model_prompt_tail == ("Available attachment IDs: att_report. Use tool calls to inspect or process them.")
 
     def test_prepare_memory_and_model_context_keeps_existing_timestamped_merged_model_prompt(
         self,
         tmp_path: Path,
     ) -> None:
-        """Pre-merged timestamped model prompts should not duplicate the raw prompt on reuse."""
+        """Pre-merged timestamped model prompts reduce to their model-only tail on reuse."""
         config = _config()
         runtime_paths = _runtime_paths(tmp_path)
         persist_entity_accounts(config, runtime_paths)
 
         existing_model_prompt = "[2026-03-20 08:15 PDT] report\n\nAvailable attachment IDs: att_report."
 
-        _memory_prompt, _memory_thread_history, model_prompt, _model_thread_history = prepare_memory_and_model_context(
-            "report",
-            [],
-            config=config,
-            runtime_paths=runtime_paths,
-            model_prompt=existing_model_prompt,
+        _memory_prompt, _memory_thread_history, model_prompt_tail, _model_thread_history = (
+            prepare_memory_and_model_context(
+                "report",
+                [],
+                config=config,
+                runtime_paths=runtime_paths,
+                model_prompt=existing_model_prompt,
+            )
         )
 
-        assert model_prompt == existing_model_prompt
+        assert model_prompt_tail == "Available attachment IDs: att_report."
 
     def test_prepare_memory_and_model_context_leaves_current_turn_timestamp_structured(
         self,
         tmp_path: Path,
     ) -> None:
-        """Current-turn timestamping happens at final model prompt composition."""
+        """Plain text turns produce no model tail; timestamps ride the structured message wrapper."""
         config = _config()
         config.timezone = "America/Los_Angeles"
         runtime_paths = _runtime_paths(tmp_path)
         persist_entity_accounts(config, runtime_paths)
 
-        memory_prompt, _memory_thread_history, model_prompt, _model_thread_history = prepare_memory_and_model_context(
-            "plain text message",
-            [],
-            config=config,
-            runtime_paths=runtime_paths,
+        memory_prompt, _memory_thread_history, model_prompt_tail, _model_thread_history = (
+            prepare_memory_and_model_context(
+                "plain text message",
+                [],
+                config=config,
+                runtime_paths=runtime_paths,
+            )
         )
 
         assert memory_prompt == "plain text message"
-        assert model_prompt == "plain text message"
+        assert model_prompt_tail == ""
 
     def test_prepare_memory_and_model_context_timestamps_thread_history_user_turns(
         self,
@@ -751,7 +755,8 @@ class TestUserIdPassthrough:
         assert mock_build_prompt_parts.await_args is not None
         assert mock_build_prompt_parts.await_args.args[0] == "raw prompt"
         assert mock_prepare_execution.await_args is not None
-        assert mock_prepare_execution.await_args.kwargs["prompt"] == "raw prompt\n\nmodel metadata"
+        assert mock_prepare_execution.await_args.kwargs["prompt"] == "raw prompt"
+        assert mock_prepare_execution.await_args.kwargs["current_message_suffix"] == "model metadata"
         transient_messages = mock_prepare_execution.await_args.kwargs["transient_context_messages"]
         assert len(transient_messages) == 1
         assert transient_messages[0].role == "user"

@@ -666,6 +666,11 @@ def _merge_scope_seen_event_states(
     return merged
 
 
+def run_matches_scope(run: RunOutput | TeamRunOutput, scope: HistoryScope) -> bool:
+    """Return whether one stored run belongs to the given history scope."""
+    return _scope_for_run(run) == scope
+
+
 def _scope_for_run(run: RunOutput | TeamRunOutput) -> HistoryScope | None:
     if isinstance(run, TeamRunOutput):
         team_id = run.team_id

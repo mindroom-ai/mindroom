@@ -2073,7 +2073,7 @@ async def test_generate_response_preserves_model_prompt_in_persisted_session(
         model_prompt: str | None = None,
         **_kwargs: object,
     ) -> _PreparedAgentRun:
-        model_facing_prompt = model_prompt if model_prompt is not None else prompt
+        model_facing_prompt = f"{prompt}\n\n{model_prompt}" if model_prompt and model_prompt != prompt else prompt
         return _PreparedAgentRun(
             agent=MagicMock(),
             messages=(
@@ -2275,7 +2275,7 @@ async def test_generate_response_preserves_retry_model_prompt(tmp_path: Path) ->
         model_prompt: str | None = None,
         **_kwargs: object,
     ) -> _PreparedAgentRun:
-        model_facing_prompt = model_prompt if model_prompt is not None else prompt
+        model_facing_prompt = f"{prompt}\n\n{model_prompt}" if model_prompt and model_prompt != prompt else prompt
         return _prepared_prompt_result(MagicMock(), prompt=model_facing_prompt)
 
     async def fake_cached_agent_run(

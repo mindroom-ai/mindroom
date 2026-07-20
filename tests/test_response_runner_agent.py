@@ -1844,7 +1844,8 @@ class TestAgentBot(AgentBotTestBase):
 
         request = mock_process.await_args.args[0]
         assert request.prompt == "What time is it?"
-        assert request.model_prompt == "What time is it?"
+        # model_prompt carries only model-side additions past the raw prompt.
+        assert request.model_prompt == ""
         assert request.current_timestamp_ms == int(current_turn_time.timestamp() * 1000)
         assert request.thread_history[0].body == "[2026-03-10 08:10 PDT] Earlier user question"
         assert request.thread_history[1].body == "Existing agent reply"
@@ -1966,7 +1967,8 @@ class TestAgentBot(AgentBotTestBase):
 
         request = mock_process.await_args.args[0]
         assert request.prompt == "What time is it?"
-        assert request.model_prompt == "What time is it?"
+        # model_prompt carries only model-side additions past the raw prompt.
+        assert request.model_prompt == ""
         assert request.current_timestamp_ms == int(current_turn_time.timestamp() * 1000)
         assert request.thread_history[0].body == "[2026-03-10 08:10 PDT] Bob question"
         assert request.thread_history[1].body == "[2026-03-10 08:12 PDT] Alice earlier"

@@ -14,7 +14,13 @@ from agno.session.team import TeamSession
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
-from mindroom.ai import ResponseTurnContext, ai_response, build_matrix_run_metadata, stream_agent_response
+from mindroom.ai import (
+    ResponseTurnContext,
+    ai_response,
+    build_matrix_run_metadata,
+    model_prompt_tail_after_raw_prompt,
+    stream_agent_response,
+)
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
 from mindroom.background_tasks import create_background_task
 from mindroom.constants import (
@@ -24,7 +30,11 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
-from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
+from mindroom.entity_resolution import (
+    current_internal_sender_ids,
+    entity_identity_registry,
+    prepared_entity_user_ids,
+)
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.storage import has_pending_force_compaction_scope, read_scope_state
@@ -37,7 +47,6 @@ from mindroom.memory import (
     mark_auto_flush_dirty_session,
     reprioritize_auto_flush_sessions,
     store_conversation_memory,
-    strip_user_turn_time_prefix,
 )
 from mindroom.orchestration.runtime import (
     cancel_failure_reason,
@@ -274,27 +283,18 @@ def prepare_memory_and_model_context(
     runtime_paths: RuntimePaths,
     model_prompt: str | None = None,
 ) -> tuple[str, Sequence[ResolvedVisibleMessage], str, list[ResolvedVisibleMessage]]:
-    """Return raw memory inputs alongside timestamped model-facing context."""
-    model_prompt_content = model_prompt or prompt
-    if model_prompt is not None and prompt:
-        normalized_model_prompt = model_prompt.strip()
-        normalized_prompt = prompt.strip()
-        normalized_model_prompt_without_time = strip_user_turn_time_prefix(normalized_model_prompt)
-        if (
-            normalized_model_prompt == normalized_prompt
-            or normalized_model_prompt.startswith(f"{normalized_prompt}\n\n")
-            or normalized_model_prompt_without_time == normalized_prompt
-            or normalized_model_prompt_without_time.startswith(f"{normalized_prompt}\n\n")
-        ):
-            model_prompt_content = model_prompt
-        else:
-            model_prompt_content = f"{prompt}\n\n{model_prompt}"
+    """Return raw memory inputs, the model-only prompt tail, and timestamped context.
+
+    The tail is delivered outside the event-tagged current block so the
+    ``<msg event_id>`` CDATA carries only the source event's own body.
+    """
+    model_prompt_tail = model_prompt_tail_after_raw_prompt(raw_prompt=prompt, model_prompt=model_prompt)
     model_thread_history = _timestamp_thread_history_user_turns(
         thread_history,
         config=config,
         runtime_paths=runtime_paths,
     )
-    return prompt, thread_history, model_prompt_content, model_thread_history
+    return prompt, thread_history, model_prompt_tail, model_thread_history
 
 
 @dataclass(frozen=True)
@@ -1082,6 +1082,10 @@ class ResponseRunner:
             current_event_id=request.current_event_id,
             location_item_text=request.location_item_text,
             scheduled_history_budget=request.scheduled_history_budget,
+            trusted_relay_sender_ids=prepared_entity_user_ids(
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
+            ),
         )
 
     def _notify_sync_restart_cancelled(
@@ -1575,7 +1579,7 @@ class ResponseRunner:
         request = prepared_request
         team_request = replace(team_request, request=request)
         requester_user_id = request.user_id or ""
-        _memory_prompt, _memory_thread_history, prepared_prompt, model_thread_history = (
+        _memory_prompt, _memory_thread_history, team_message_suffix, model_thread_history = (
             prepare_memory_and_model_context(
                 request.prompt,
                 request.thread_history,
@@ -1694,6 +1698,10 @@ class ResponseRunner:
             current_event_id=request.current_event_id,
             location_item_text=request.location_item_text,
             scheduled_history_budget=request.scheduled_history_budget,
+            trusted_relay_sender_ids=prepared_entity_user_ids(
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
+            ),
         )
         team_turn_recorder = self._build_turn_recorder(
             user_message=request.prompt,
@@ -1751,7 +1759,8 @@ class ResponseRunner:
                     def build_response_stream() -> AsyncIterator[StreamInputChunk]:
                         return team_response_stream(
                             agent_ids=list(team_request.team_agents),
-                            message=prepared_prompt,
+                            message=request.prompt,
+                            current_message_suffix=team_message_suffix,
                             orchestrator=orchestrator,
                             execution_identity=tool_dispatch.execution_identity,
                             ctx=team_turn_ctx,
@@ -1853,7 +1862,8 @@ class ResponseRunner:
                                 return await team_response(
                                     agent_names=agent_names,
                                     mode=mode,
-                                    message=prepared_prompt,
+                                    message=request.prompt,
+                                    current_message_suffix=team_message_suffix,
                                     orchestrator=orchestrator,
                                     execution_identity=tool_dispatch.execution_identity,
                                     ctx=team_turn_ctx,

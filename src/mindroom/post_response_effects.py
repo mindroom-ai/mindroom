@@ -235,13 +235,14 @@ async def apply_post_response_effects(
         and response_event_id is not None
         and deps.persist_response_event_id is not None
     ):
-        # The gateway sets final_visible_body only when the event holds this
-        # run's output (unchanged edit targets leave it None), so a successful
-        # unsuppressed run with a body owns the event — including visible
-        # replies that survived a late finalization failure.
+        # body_is_run_output is the gateway's explicit ownership fact: True only
+        # when the event holds this run's delivered output. Failure notices,
+        # cancel notes, and unchanged edit targets stay metadata-only, while
+        # visible partials and replies that survived a late finalization
+        # failure keep their event identity even when the run did not succeed.
         delivered_visible_body = (
             final_delivery_outcome.final_visible_body
-            if outcome.run_succeeded and not final_delivery_outcome.suppressed
+            if final_delivery_outcome.body_is_run_output and not final_delivery_outcome.suppressed
             else None
         )
         try:

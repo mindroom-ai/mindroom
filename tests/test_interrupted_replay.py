@@ -677,7 +677,7 @@ def test_build_interrupted_replay_run_restores_location_marker_from_metadata() -
 
     assert run.messages is not None
     assert run.messages[0].content == (
-        '<msg event_id="$source" from="@alice:localhost"><![CDATA[Where am I?\n\n📍 Home]]></msg>'
+        '<msg event_id="$source" from="@alice:localhost"><![CDATA[Where am I?]]></msg>\n\n📍 Home'
     )
     assert run.metadata is not None
     assert run.metadata[MINDROOM_LOCATION_MARKER_METADATA_KEY] == "📍 Home"

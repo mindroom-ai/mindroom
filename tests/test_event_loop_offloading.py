@@ -139,7 +139,8 @@ async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_h
     async def prepare_history(*_args: object, **kwargs: object) -> SimpleNamespace:
         history_started.set()
         assert kwargs["agent"] is built_agent
-        assert kwargs["prompt"] == "raw prompt\n\nmodel metadata"
+        assert kwargs["prompt"] == "raw prompt"
+        assert kwargs["current_message_suffix"] == "model metadata"
         assert len(kwargs["transient_context_messages"]) == 1
         assert kwargs["transient_context_messages"][0].content == "turn memory"
         assert kwargs["transient_context_messages"][0].add_to_agent_memory is False
@@ -148,24 +149,29 @@ async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_h
             prepared_history=PreparedHistoryState(),
             replay_plan=None,
             unseen_event_ids=[],
-            messages=(Message(role="user", content=kwargs["prompt"]),),
+            messages=(
+                Message(
+                    role="user",
+                    content=f"{kwargs['prompt']}\n\n{kwargs['current_message_suffix']}",
+                ),
+            ),
             location_marker=None,
         )
 
-    original_compose = ai_module._compose_current_turn_prompt
+    original_tail = ai_module.model_prompt_tail_after_raw_prompt
 
     def compose_prompt(*, raw_prompt: str, model_prompt: str | None) -> str:
         assert memory_finished.is_set()
         assert agent_finished.is_set()
         prompt_composed.set()
-        return original_compose(
+        return original_tail(
             raw_prompt=raw_prompt,
             model_prompt=model_prompt,
         )
 
     monkeypatch.setattr(ai_module, "build_memory_prompt_parts", gated_memory)
     monkeypatch.setattr(ai_module, "create_agent", gated_create_agent)
-    monkeypatch.setattr(ai_module, "_compose_current_turn_prompt", compose_prompt)
+    monkeypatch.setattr(ai_module, "model_prompt_tail_after_raw_prompt", compose_prompt)
     monkeypatch.setattr(ai_module, "prepare_agent_execution_context", prepare_history)
 
     config = _prompt_preparation_config()
@@ -314,8 +320,7 @@ async def test_location_marker_lookup_runs_off_event_loop(
     )
 
     lookup_task = asyncio.get_running_loop().create_task(
-        execution_preparation_module._extract_current_location_context(
-            "Hi",
+        execution_preparation_module._resolve_current_location_context(
             location_item_text="at_home: true",
             scope_context=scope_context,
         ),
@@ -326,7 +331,6 @@ async def test_location_marker_lookup_runs_off_event_loop(
     await _assert_loop_heartbeats_while_pending(lookup_task)
 
     gate.set()
-    persisted_prompt, location_block, marker = await lookup_task
-    assert persisted_prompt == "Hi\n\n📍 Home"
+    location_block, marker = await lookup_task
     assert marker == "📍 Home"
     assert '<item key="location"' in location_block

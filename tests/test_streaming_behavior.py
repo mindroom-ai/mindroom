@@ -3899,7 +3899,16 @@ class TestStreamingBehavior:
                 response_hooks=response_hooks,
             ),
         )
-        object.__setattr__(gateway, "edit_text", AsyncMock(return_value=True))
+        object.__setattr__(
+            gateway,
+            "_edit_text_delivered",
+            AsyncMock(
+                return_value=DeliveredMatrixEvent(
+                    event_id="$streaming",
+                    content_sent={"m.new_content": {"body": "updated text"}},
+                ),
+            ),
+        )
 
         outcome = await gateway.finalize_streamed_response(
             FinalizeStreamedResponseRequest(
@@ -3927,8 +3936,8 @@ class TestStreamingBehavior:
         assert outcome.delivery_kind == "edited"
         response_hooks.apply_before_response.assert_not_awaited()
         response_hooks.apply_final_response_transform.assert_awaited_once()
-        gateway.edit_text.assert_awaited_once()
-        edited_request = gateway.edit_text.await_args.args[0]
+        gateway._edit_text_delivered.assert_awaited_once()
+        edited_request = gateway._edit_text_delivered.await_args.args[0]
         assert edited_request.event_id == "$streaming"
         assert edited_request.new_text == "updated text"
         lifecycle = ResponseLifecycle(

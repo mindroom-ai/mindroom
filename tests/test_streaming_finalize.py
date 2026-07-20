@@ -405,10 +405,16 @@ async def test_final_delivery_failure_replaces_placeholder_with_failure_update(t
             response_hooks=response_hooks,
         ),
     )
-    edit_outcomes = [False, True]
+    edit_outcomes: list[DeliveredMatrixEvent | None] = [
+        None,
+        DeliveredMatrixEvent(
+            event_id="$placeholder",
+            content_sent={"m.new_content": {"body": "Response delivery failed. Please retry."}},
+        ),
+    ]
     object.__setattr__(
         gateway,
-        "edit_text",
+        "_edit_text_delivered",
         AsyncMock(side_effect=lambda _request: edit_outcomes.pop(0)),
     )
 
@@ -433,8 +439,8 @@ async def test_final_delivery_failure_replaces_placeholder_with_failure_update(t
     assert outcome.final_visible_body == "Response delivery failed. Please retry."
     assert outcome.delivery_kind == "edited"
     assert outcome.failure_reason == "delivery_failed"
-    assert gateway.edit_text.await_count == 2
-    failure_update_request = gateway.edit_text.await_args_list[-1].args[0]
+    assert gateway._edit_text_delivered.await_count == 2
+    failure_update_request = gateway._edit_text_delivered.await_args_list[-1].args[0]
     assert failure_update_request.new_text == "Response delivery failed. Please retry."
     assert failure_update_request.extra_content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
 
@@ -463,7 +469,7 @@ async def test_streaming_placeholder_delivery_failure_stays_terminal_when_failur
             response_hooks=response_hooks,
         ),
     )
-    object.__setattr__(gateway, "edit_text", AsyncMock(return_value=False))
+    object.__setattr__(gateway, "_edit_text_delivered", AsyncMock(return_value=None))
 
     outcome = await gateway.finalize_streamed_response(
         FinalizeStreamedResponseRequest(
@@ -837,7 +843,7 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
             response_hooks=response_hooks,
         ),
     )
-    object.__setattr__(gateway, "edit_text", AsyncMock(return_value=False))
+    object.__setattr__(gateway, "_edit_text_delivered", AsyncMock(return_value=None))
 
     outcome = await gateway.finalize_streamed_response(
         FinalizeStreamedResponseRequest(
@@ -864,7 +870,7 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
     assert outcome.final_visible_body == "chunk"
     response_hooks.apply_before_response.assert_not_awaited()
     response_hooks.apply_final_response_transform.assert_awaited_once()
-    gateway.edit_text.assert_awaited_once()
+    gateway._edit_text_delivered.assert_awaited_once()
     lifecycle = ResponseLifecycle(
         ResponseLifecycleDeps(
             response_hooks=response_hooks,

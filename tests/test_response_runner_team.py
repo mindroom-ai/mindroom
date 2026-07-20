@@ -253,11 +253,11 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         assert _handled_response_event_id(resolution) == "$team"
-        prepared_message = mock_team_response.await_args.kwargs["message"]
-        assert "Summarize the latest invoice." in prepared_message
-        assert "Available attachment IDs: att_invoice." in prepared_message
-        assert prepared_message.index("Summarize the latest invoice.") < prepared_message.index(
-            "Available attachment IDs: att_invoice.",
+        assert mock_team_response.await_args.kwargs["message"] == "Summarize the latest invoice."
+        # Model-only additions ride the current-message suffix so the raw
+        # prompt stays the exact wire body of its event.
+        assert mock_team_response.await_args.kwargs["current_message_suffix"] == (
+            "Available attachment IDs: att_invoice. Use tool calls to inspect or process them."
         )
 
     @pytest.mark.asyncio
@@ -313,8 +313,9 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         assert _handled_response_event_id(resolution) == "$team"
-        prepared_message = mock_team_response.await_args.kwargs["message"]
-        assert prepared_message == timestamped_prompt
+        assert mock_team_response.await_args.kwargs["message"] == "What time is it?"
+        # A stale pre-merged timestamp is model chrome, never a suffix to replay.
+        assert mock_team_response.await_args.kwargs["current_message_suffix"] == ""
 
     @pytest.mark.asyncio
     async def test_generate_team_response_helper_uses_resolved_thread_root_for_placeholder_and_edit(

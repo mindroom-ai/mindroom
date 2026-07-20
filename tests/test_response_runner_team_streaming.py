@@ -105,9 +105,10 @@ async def test_generate_team_response_helper_preserves_raw_prompt_when_model_pro
             team_mode="coordinate",
         )
 
-    message = mock_team_response.await_args.kwargs["message"]
-    assert "Describe this image" in message
-    assert "Available attachment IDs: att_1" in message
+    assert mock_team_response.await_args.kwargs["message"] == "Describe this image"
+    assert mock_team_response.await_args.kwargs["current_message_suffix"] == (
+        "Available attachment IDs: att_1. Use tool calls to inspect or process them."
+    )
 
 
 @pytest.mark.asyncio
@@ -270,6 +271,8 @@ async def test_generate_team_response_preserves_model_prompt_in_persisted_sessio
 
     async def fake_team_response(*_args: object, **kwargs: object) -> str:
         model_message = cast("str", kwargs["message"])
+        if suffix := cast("str", kwargs.get("current_message_suffix") or ""):
+            model_message = f"{model_message}\n\n{suffix}"
         run_id = cast("str | None", kwargs.get("run_id"))
         storage.session = TeamSession(
             session_id="!test:localhost:$thread-root",
@@ -335,6 +338,8 @@ async def test_generate_team_response_preserves_retry_model_prompt(tmp_path: Pat
 
     async def fake_team_response(*_args: object, **kwargs: object) -> str:
         model_message = cast("str", kwargs["message"])
+        if suffix := cast("str", kwargs.get("current_message_suffix") or ""):
+            model_message = f"{model_message}\n\n{suffix}"
         cast("TurnRecorder", kwargs["turn_recorder"]).mark_completed()
         run_id = cast("str | None", kwargs["ctx"].run_id)
         seen_run_ids.append(run_id)
@@ -1550,9 +1555,10 @@ async def test_generate_team_response_helper_merges_raw_prompt_into_model_prompt
 
     assert _handled_response_event_id(resolution) == "$thinking"
     assert mock_team_response.await_args is not None
-    message = mock_team_response.await_args.kwargs["message"]
-    assert "What is in the image?" in message
-    assert "Available attachment IDs: att_img. Use tool calls to inspect or process them." in message
+    assert mock_team_response.await_args.kwargs["message"] == "What is in the image?"
+    assert mock_team_response.await_args.kwargs["current_message_suffix"] == (
+        "Available attachment IDs: att_img. Use tool calls to inspect or process them."
+    )
 
 
 @pytest.mark.asyncio

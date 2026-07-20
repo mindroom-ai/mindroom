@@ -203,31 +203,44 @@ def _interrupted_replay_metadata(snapshot: InterruptedReplaySnapshot) -> dict[st
     return metadata
 
 
-def _snapshot_user_message_body(snapshot: InterruptedReplaySnapshot) -> str:
-    """Return the persisted user body, restoring a trusted location-change marker.
+def is_interrupted_replay_run_metadata(metadata: Mapping[str, object] | None) -> bool:
+    """Return whether run metadata marks one canonical interrupted replay run."""
+    return bool(metadata) and metadata.get(_INTERRUPTED_REPLAY_STATE_KEY) == _INTERRUPTED_REPLAY_STATE
 
-    An interrupted empty prompt with a recorded marker keeps its location
-    baseline as the marker alone, so later dedup and replay stay consistent.
+
+def interrupted_replay_prose(content: str) -> str:
+    """Return the synthetic interruption prose portion of one canonical replay body.
+
+    The prose (status summary plus retained tool context) was never part of any
+    Matrix event, so post-delivery reconciliation keeps it outside the
+    event-tagged text.
     """
-    marker = snapshot.run_metadata.get(MINDROOM_LOCATION_MARKER_METADATA_KEY)
-    if isinstance(marker, str) and marker:
-        return f"{snapshot.user_message}\n\n{marker}" if snapshot.user_message else marker
-    return snapshot.user_message
+    boundary = content.find("\n\n(turn ")
+    if boundary >= 0:
+        return content[boundary + 2 :]
+    if content.startswith("(turn "):
+        return content
+    return ""
 
 
 def _wrapped_snapshot_user_message(snapshot: InterruptedReplaySnapshot) -> str:
-    """Wrap the canonical interrupted user message when its own Matrix event is known.
+    """Render the canonical interrupted user turn with its Matrix identity when known.
 
     ``current_event_id`` is set only when the recorded prompt is literally one
     Matrix event's body, so synthetic prompts and structured batches whose
-    children carry their own event identity are never wrapped. Interrupted
+    children carry their own event identity are never wrapped. A recorded
+    location-change marker is system-generated and lands outside the wrapped
+    block (the marker alone when the prompt was empty), and interrupted
     assistant content always stays unwrapped: delivery is not finalized when
     this snapshot persists, so no visible event can be claimed for it.
     """
-    body = _snapshot_user_message_body(snapshot)
+    body = snapshot.user_message
     requester_id = snapshot.run_metadata.get("requester_id")
-    if snapshot.current_event_id and snapshot.user_message and isinstance(requester_id, str) and requester_id:
-        return render_msg_tag(sender=requester_id, body=body, event_id=snapshot.current_event_id)
+    if snapshot.current_event_id and body and isinstance(requester_id, str) and requester_id:
+        body = render_msg_tag(sender=requester_id, body=body, event_id=snapshot.current_event_id)
+    marker = snapshot.run_metadata.get(MINDROOM_LOCATION_MARKER_METADATA_KEY)
+    if isinstance(marker, str) and marker:
+        return f"{body}\n\n{marker}" if body else marker
     return body
 
 

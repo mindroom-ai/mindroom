@@ -41,6 +41,7 @@ from mindroom.hooks.context import CancelledResponseInfo, HookContextSupport
 from mindroom.hooks.execution import emit
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
@@ -654,8 +655,8 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
 
     with (
         patch("mindroom.delivery_gateway.interactive.parse_and_format_interactive", return_value=parsed),
-        patch.object(DeliveryGateway, "edit_text", new=AsyncMock(return_value=False)),
-        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value=None)),
+        patch.object(DeliveryGateway, "_edit_text_delivered", new=AsyncMock(return_value=None)),
+        patch.object(DeliveryGateway, "_send_text_delivered", new=AsyncMock(return_value=None)),
     ):
         outcome = await gateway.deliver_final(
             FinalDeliveryRequest(
@@ -727,7 +728,16 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
             response_hooks=response_hooks,
         ),
     )
-    object.__setattr__(gateway, "edit_text", AsyncMock(return_value=True))
+    object.__setattr__(
+        gateway,
+        "_edit_text_delivered",
+        AsyncMock(
+            return_value=DeliveredMatrixEvent(
+                event_id="$thinking",
+                content_sent={"m.new_content": {"body": "hooked final body"}},
+            ),
+        ),
+    )
 
     outcome = await gateway.finalize_streamed_response(
         FinalizeStreamedResponseRequest(
@@ -768,9 +778,9 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
     assert after_seen == [("hooked final body", "edited")]
     assert cancelled_seen == []
     assert finalized.final_visible_body == "hooked final body"
-    gateway.edit_text.assert_awaited_once()
-    assert gateway.edit_text.await_args.args[0].event_id == "$thinking"
-    assert gateway.edit_text.await_args.args[0].new_text == "hooked final body"
+    gateway._edit_text_delivered.assert_awaited_once()
+    assert gateway._edit_text_delivered.await_args.args[0].event_id == "$thinking"
+    assert gateway._edit_text_delivered.await_args.args[0].new_text == "hooked final body"
 
 
 @pytest.mark.asyncio

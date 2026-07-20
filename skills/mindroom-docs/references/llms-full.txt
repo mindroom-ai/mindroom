@@ -12106,6 +12106,7 @@ ctx.add_metadata("location", "latitude: 52.3702\nlongitude: 4.8952\nnearby_place
 
 If none of those fields parse, the full detail is still delivered live but no marker is persisted (fail closed).
 When hooks return more than one `location` item, the first collected item is authoritative and the rest are dropped with a warning.
+When compaction removes the runs that carried the last marker, the next located turn intentionally re-establishes one fresh baseline line, since replayed history no longer shows the location.
 
 ### Reserved key: `matrix_message_target`
 

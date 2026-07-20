@@ -284,6 +284,21 @@ def current_entity_id(entity_name: str, runtime_paths: RuntimePaths) -> MatrixID
     return _persisted_entity_matrix_id(entity_name, _matrix_domain(runtime_paths), runtime_paths)
 
 
+def prepared_entity_user_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return persisted managed-entity user IDs, skipping accounts not yet prepared.
+
+    Unprepared entities are simply absent, which fails closed for trust checks
+    that treat membership as the grant.
+    """
+    domain = _matrix_domain(runtime_paths)
+    user_ids: set[str] = set()
+    for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]:
+        user_id = managed_account_user_id(managed_account_key(entity_name), domain, runtime_paths)
+        if user_id is not None:
+            user_ids.add(user_id)
+    return frozenset(user_ids)
+
+
 def _persisted_entity_id_map(config: Config, runtime_paths: RuntimePaths) -> dict[str, MatrixID]:
     domain = _matrix_domain(runtime_paths)
     return {

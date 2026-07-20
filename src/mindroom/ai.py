@@ -116,6 +116,7 @@ __all__ = [
     "ResponseTurnContext",
     "ai_response",
     "build_matrix_run_metadata",
+    "model_prompt_tail_after_raw_prompt",
     "stream_agent_response",
 ]
 AIStreamChunk = str | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
@@ -129,23 +130,7 @@ def _append_additional_context(agent: Agent, context_chunk: str) -> None:
     agent.additional_context = f"{existing_context}\n\n{context_chunk}" if existing_context else context_chunk
 
 
-def _compose_current_turn_prompt(
-    *,
-    raw_prompt: str,
-    model_prompt: str | None,
-) -> str:
-    """Build the persisted current-turn user message without transient context."""
-    prompt_chunks: list[str] = []
-    if raw_prompt:
-        prompt_chunks.append(raw_prompt)
-    model_prompt_tail = _model_prompt_tail_after_raw_prompt(raw_prompt=raw_prompt, model_prompt=model_prompt)
-    if model_prompt_tail:
-        prompt_chunks.append(model_prompt_tail)
-
-    return "\n\n".join(prompt_chunks)
-
-
-def _model_prompt_tail_after_raw_prompt(*, raw_prompt: str, model_prompt: str | None) -> str:
+def model_prompt_tail_after_raw_prompt(*, raw_prompt: str, model_prompt: str | None) -> str:
     """Return model-only additions after the raw user prompt prefix."""
     if not model_prompt:
         return ""
@@ -176,7 +161,7 @@ def _initial_agent_continuation(
         current_prompt_is_structured=current_prompt_is_structured,
         current_event_id=current_event_id,
         run_id=run_id,
-        continuation_model_prompt_tail=_model_prompt_tail_after_raw_prompt(
+        continuation_model_prompt_tail=model_prompt_tail_after_raw_prompt(
             raw_prompt=prompt,
             model_prompt=model_prompt,
         ),
@@ -1159,7 +1144,7 @@ async def _prepare_agent_and_prompt(
                 )
             finally:
                 _mark_pipeline_timing(pipeline_timing, "prompt_branches_ready")
-        current_turn_prompt = _compose_current_turn_prompt(
+        current_message_suffix = model_prompt_tail_after_raw_prompt(
             raw_prompt=prompt,
             model_prompt=model_prompt,
         )
@@ -1173,7 +1158,7 @@ async def _prepare_agent_and_prompt(
             runtime_paths,
             execution_identity=execution_identity,
         )
-        current_turn_prompt = _compose_current_turn_prompt(
+        current_message_suffix = model_prompt_tail_after_raw_prompt(
             raw_prompt=prompt,
             model_prompt=model_prompt,
         )
@@ -1193,7 +1178,7 @@ async def _prepare_agent_and_prompt(
         ctx,
         scope_context=scope_context,
         agent=agent,
-        prompt=current_turn_prompt,
+        prompt=prompt,
         transient_context_messages=(
             (
                 Message(
@@ -1214,6 +1199,7 @@ async def _prepare_agent_and_prompt(
         current_timestamp_ms=current_timestamp_ms,
         current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
+        current_message_suffix=current_message_suffix,
         include_openai_compat_guidance=include_openai_compat_guidance,
         pipeline_timing=pipeline_timing,
     )

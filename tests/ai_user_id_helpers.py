@@ -37,6 +37,7 @@ from mindroom.hooks import (
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.matrix.cache.thread_history_result import thread_history_result
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
@@ -437,6 +438,18 @@ def _build_response_runner(
     )
     _set_gateway_method(delivery_gateway, "edit_text", AsyncMock(return_value=True))
     _set_gateway_method(delivery_gateway, "send_text", AsyncMock(return_value="$thinking"))
+    # Final delivery reads the exact delivered payload through the private
+    # delivered variants; empty content falls back to the display text.
+    _set_gateway_method(
+        delivery_gateway,
+        "_edit_text_delivered",
+        AsyncMock(return_value=DeliveredMatrixEvent(event_id="$edited", content_sent={})),
+    )
+    _set_gateway_method(
+        delivery_gateway,
+        "_send_text_delivered",
+        AsyncMock(return_value=DeliveredMatrixEvent(event_id="$thinking", content_sent={})),
+    )
     tool_runtime = ToolRuntimeSupport(
         runtime=runtime,
         logger=bot.logger,

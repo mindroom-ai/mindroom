@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
+from xml.sax.saxutils import quoteattr as xml_quoteattr
 
 from agno.db.base import SessionType
 from agno.run.agent import RunOutput
@@ -12,6 +13,7 @@ from agno.run.team import TeamRunOutput
 from mindroom.agent_storage import create_session_storage, get_agent_session, get_team_session
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.history.interrupted_replay import interrupted_replay_prose, is_interrupted_replay_run_metadata
 from mindroom.history.runtime import create_scope_session_storage
 from mindroom.history.types import HistoryScope
 from mindroom.prompt_message_tags import render_msg_tag
@@ -22,6 +24,7 @@ from mindroom.team_scope import ad_hoc_team_scope_id
 if TYPE_CHECKING:
     import structlog
     from agno.db.base import BaseDb
+    from agno.models.message import Message
 
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
@@ -123,11 +126,18 @@ class ConversationStateWriter:
         """Persist Matrix response linkage onto the run that produced it.
 
         ``delivered_visible_body`` is the authoritative visible body of
-        ``response_event_id`` and is set only when this run's output was
-        actually delivered there; suppressed, failed, or unchanged-target
-        deliveries persist the metadata linkage without wrapping the assistant
-        message with an event that never carried it.
+        ``response_event_id`` and is set only when this run's own output was
+        actually delivered there; notices, suppressed or failed deliveries, and
+        unchanged edit targets persist the metadata linkage without wrapping
+        the assistant message with an event that never carried its text. A run
+        already linked to the same event is upgraded with the wrap when a
+        delivered body arrives later (e.g. an interrupted run reconciled after
+        terminal delivery).
         """
+        # Strip display chrome first: a body that is only tool-trace markers
+        # (or empty) must never erase the model's reply with an empty tag.
+        stripped_body = strip_visible_tool_markers(delivered_visible_body) if delivered_visible_body else ""
+        wrap_body = stripped_body if stripped_body.strip() else ""
         session = (
             get_team_session(storage, session_id)
             if session_type is SessionType.TEAM
@@ -139,19 +149,39 @@ class ConversationStateWriter:
             if not isinstance(run, (RunOutput, TeamRunOutput)) or run.run_id != run_id:
                 continue
             metadata = dict(run.metadata or {})
-            if metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY) == response_event_id:
+            already_linked = metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY) == response_event_id
+            if already_linked and not wrap_body:
                 return
             metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = response_event_id
             run.metadata = metadata
-            if delivered_visible_body:
-                _wrap_final_assistant_message(
-                    run,
-                    response_sender_id=response_sender_id,
-                    response_event_id=response_event_id,
-                    delivered_visible_body=delivered_visible_body,
-                )
+            wrapped = wrap_body and _wrap_final_assistant_message(
+                run,
+                response_sender_id=response_sender_id,
+                response_event_id=response_event_id,
+                delivered_body=wrap_body,
+            )
+            if not wrapped and already_linked:
+                # Nothing changed: the target already carries this event's tag
+                # (or no eligible message exists) and the link was in place.
+                return
             storage.upsert_session(session)
             return
+
+
+def _current_generation_assistant_message(run: RunOutput | TeamRunOutput) -> Message | None:
+    """Return the run's own final content-bearing assistant message.
+
+    Scanning stops at the first user-role message from the end: assistant
+    entries before it belong to replayed or fallback context, and rewriting
+    those would bind an older answer to the new event. Tool-call stubs without
+    string content are never targeted.
+    """
+    for message in reversed(run.messages or []):
+        if message.role == "user":
+            return None
+        if message.role == "assistant" and isinstance(message.content, str) and message.content:
+            return message
+    return None
 
 
 def _wrap_final_assistant_message(
@@ -159,23 +189,32 @@ def _wrap_final_assistant_message(
     *,
     response_sender_id: str,
     response_event_id: str,
-    delivered_visible_body: str,
-) -> None:
-    """Wrap the run's final content-bearing assistant message with its delivered event body.
+    delivered_body: str,
+) -> bool:
+    """Wrap the run's own final assistant message with its delivered event body.
 
     The CDATA body is the delivered visible text with MindRoom display chrome
     stripped, matching how the same event renders through Matrix-fallback
     history; rebuilding from that external body on every callback means a
-    repeated or changed callback can never nest tags. Tool-call stubs without
-    string content are never targeted, and runs without any eligible assistant
-    message keep response metadata only.
+    repeated or changed callback can never nest tags. Canonical interrupted
+    runs keep their synthetic interruption prose outside the tag, since that
+    text was never part of the Matrix event. Returns whether a message changed.
     """
-    for message in reversed(run.messages or []):
-        if message.role != "assistant" or not isinstance(message.content, str) or not message.content:
-            continue
-        message.content = render_msg_tag(
-            sender=response_sender_id,
-            body=strip_visible_tool_markers(delivered_visible_body),
-            event_id=response_event_id,
-        )
-        return
+    message = _current_generation_assistant_message(run)
+    if message is None:
+        return False
+    content = cast("str", message.content)
+    already_wrapped_prefix = f"<msg event_id={xml_quoteattr(response_event_id)} "
+    if content.startswith(already_wrapped_prefix):
+        return False
+    wrapped = render_msg_tag(
+        sender=response_sender_id,
+        body=delivered_body,
+        event_id=response_event_id,
+    )
+    if is_interrupted_replay_run_metadata(run.metadata):
+        prose = interrupted_replay_prose(content)
+        message.content = f"{wrapped}\n\n{prose}" if prose else wrapped
+    else:
+        message.content = wrapped
+    return True
