@@ -837,3 +837,190 @@ def test_persist_response_event_id_wraps_marker_only_model_output(tmp_path: Path
         )
     finally:
         storage.close()
+
+
+def test_persist_response_event_id_absorbs_subsumed_pre_tool_segments(tmp_path: Path) -> None:
+    """Text streamed alongside tool calls appears once: inside the delivered wrap."""
+    config, runtime_paths = _agent_config(tmp_path)
+    writer = _writer(config, runtime_paths)
+    storage = writer.create_storage(None)
+    delivered = "Let me check.\n\nDone: 42."
+    try:
+        session = AgentSession(
+            session_id="session-1",
+            agent_id="shared",
+            runs=[
+                RunOutput(
+                    run_id="run-1",
+                    agent_id="shared",
+                    status=RunStatus.completed,
+                    content="Done: 42.",
+                    messages=[
+                        Message(role="user", content="question"),
+                        Message(role="assistant", content="Let me check."),
+                        Message(role="tool", content="tool result"),
+                        Message(role="assistant", content="Done: 42."),
+                    ],
+                ),
+            ],
+            created_at=1,
+            updated_at=1,
+        )
+        storage.upsert_session(session)
+
+        for _ in range(2):  # The second callback must be a no-op.
+            writer.persist_response_event_id_in_session_run(
+                storage=storage,
+                session_id="session-1",
+                session_type=SessionType.AGENT,
+                run_id="run-1",
+                response_event_id="$visible",
+                response_sender_id="@mindroom_shared:localhost",
+                delivered_visible_body=delivered,
+            )
+
+        persisted = get_agent_session(storage, "session-1")
+        assert persisted is not None
+        run = cast("RunOutput", (persisted.runs or [])[0])
+        assert [(message.role, message.content) for message in run.messages or []] == [
+            ("user", "question"),
+            ("assistant", ""),
+            ("tool", "tool result"),
+            (
+                "assistant",
+                f'<msg event_id="$visible" from="@mindroom_shared:localhost"><![CDATA[{delivered}]]></msg>',
+            ),
+        ]
+    finally:
+        storage.close()
+
+
+def test_persist_response_event_id_preserves_non_subsumed_pre_tool_segments(tmp_path: Path) -> None:
+    """Segments the delivered body does not contain verbatim stay untouched (fail open)."""
+    config, runtime_paths = _agent_config(tmp_path)
+    writer = _writer(config, runtime_paths)
+    storage = writer.create_storage(None)
+    try:
+        session = AgentSession(
+            session_id="session-1",
+            agent_id="shared",
+            runs=[
+                RunOutput(
+                    run_id="run-1",
+                    agent_id="shared",
+                    status=RunStatus.completed,
+                    content="Final only.",
+                    messages=[
+                        Message(role="user", content="question"),
+                        Message(role="assistant", content="Different intermediate text."),
+                        Message(role="tool", content="tool result"),
+                        Message(role="assistant", content="Final only."),
+                    ],
+                ),
+            ],
+            created_at=1,
+            updated_at=1,
+        )
+        storage.upsert_session(session)
+
+        writer.persist_response_event_id_in_session_run(
+            storage=storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            run_id="run-1",
+            response_event_id="$visible",
+            response_sender_id="@mindroom_shared:localhost",
+            delivered_visible_body="Final only.",
+        )
+
+        persisted = get_agent_session(storage, "session-1")
+        assert persisted is not None
+        messages = cast("RunOutput", (persisted.runs or [])[0]).messages or []
+        assert messages[1].content == "Different intermediate text."
+    finally:
+        storage.close()
+
+
+def test_persist_response_event_id_stops_at_content_bearing_non_string_assistant(tmp_path: Path) -> None:
+    """A non-string content-bearing final assistant message is real output, never walked past."""
+    config, runtime_paths = _agent_config(tmp_path)
+    writer = _writer(config, runtime_paths)
+    storage = writer.create_storage(None)
+    try:
+        session = AgentSession(
+            session_id="session-1",
+            agent_id="shared",
+            runs=[
+                RunOutput(
+                    run_id="run-1",
+                    agent_id="shared",
+                    status=RunStatus.completed,
+                    content=None,
+                    messages=[
+                        Message(role="user", content="question"),
+                        Message(role="assistant", content="Intermediate text"),
+                        Message(role="assistant", content=[{"type": "text", "text": "structured final"}]),
+                    ],
+                ),
+            ],
+            created_at=1,
+            updated_at=1,
+        )
+        storage.upsert_session(session)
+
+        writer.persist_response_event_id_in_session_run(
+            storage=storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            run_id="run-1",
+            response_event_id="$visible",
+            response_sender_id="@mindroom_shared:localhost",
+            delivered_visible_body="Delivered",
+        )
+
+        persisted = get_agent_session(storage, "session-1")
+        assert persisted is not None
+        run = cast("RunOutput", (persisted.runs or [])[0])
+        assert run.metadata is not None
+        assert run.metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] == "$visible"
+        # The intermediate text segment is never rebound to the new event.
+        assert (run.messages or [])[1].content == "Intermediate text"
+    finally:
+        storage.close()
+
+
+def test_persist_response_event_id_logs_bodyless_relink_divergence(tmp_path: Path) -> None:
+    """Re-linking to a new event without a body records the wrap divergence."""
+    config, runtime_paths = _agent_config(tmp_path)
+    writer = _writer(config, runtime_paths)
+    storage = writer.create_storage(None)
+    try:
+        storage.upsert_session(_agent_session_with_run(content="Answer", with_assistant_message=True))
+
+        writer.persist_response_event_id_in_session_run(
+            storage=storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            run_id="run-1",
+            response_event_id="$first",
+            response_sender_id="@mindroom_shared:localhost",
+            delivered_visible_body="Answer",
+        )
+        writer.persist_response_event_id_in_session_run(
+            storage=storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            run_id="run-1",
+            response_event_id="$second",
+            response_sender_id="@mindroom_shared:localhost",
+            delivered_visible_body=None,
+        )
+
+        cast("MagicMock", writer.deps.logger).warning.assert_called_once()
+        persisted = get_agent_session(storage, "session-1")
+        assert persisted is not None
+        run = cast("RunOutput", (persisted.runs or [])[0])
+        assert run.metadata is not None
+        assert run.metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] == "$second"
+    finally:
+        storage.close()

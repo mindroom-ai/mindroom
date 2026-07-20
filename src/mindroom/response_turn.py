@@ -31,6 +31,7 @@ from mindroom.ai_turn_state import AITurnState
 from mindroom.cancellation import build_cancelled_error
 from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
+    MATRIX_REQUESTER_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
@@ -106,7 +107,7 @@ def build_matrix_run_metadata(
     if reply_to_event_id is not None:
         metadata["reply_to_event_id"] = reply_to_event_id
     if requester_id is not None:
-        metadata["requester_id"] = requester_id
+        metadata[MATRIX_REQUESTER_ID_METADATA_KEY] = requester_id
     if correlation_id is not None:
         metadata["correlation_id"] = correlation_id
     if tools_schema is not None:

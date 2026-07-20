@@ -1007,3 +1007,11 @@ def test_dynamic_prompt_splits_static_catalog_from_volatile_loaded_state(tmp_pat
         suffix_after == "Dynamic tools currently loaded for this session: shell, sleep\n"
         "Sticky initial dynamic tools that cannot be unloaded: shell"
     )
+
+
+def test_matrix_messaging_check_degrades_for_unresolvable_entity_names(tmp_path: Path) -> None:
+    """Unknown entities (router placeholder, registry-miss usernames, teams) degrade to False."""
+    config = _validated_config(tmp_path, _base_config_data())
+
+    assert not _agent_has_matrix_messaging_tool(config, "router", None)
+    assert not _agent_has_matrix_messaging_tool(config, "mindroom_ghost", "thread-a")

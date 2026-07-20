@@ -188,12 +188,14 @@ def _agent_has_matrix_messaging_tool(config: Config, agent_name: str, session_id
     Authored deferred tools count even while unloaded: a same-turn
     ``load_tool`` call can expose ``matrix_message`` in a dynamic
     continuation, and the stable target context must already be in place.
+    Unknown or unresolvable entity names (router placeholder, raw usernames
+    from a registry miss, team names) degrade to False instead of raising.
     """
-    if any(
-        entry.name == "matrix_message" for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs
-    ):
-        return True
     try:
+        if any(
+            entry.name == "matrix_message" for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs
+        ):
+            return True
         surface = visible_tool_surface(
             agent_name=agent_name,
             config=config,
@@ -650,14 +652,29 @@ class ResponseRunner:
             name="persist_interrupted_recorder",
             owner=self.deps.runtime,
         )
+        pending_cancel: asyncio.CancelledError | None = None
+        while not offload.done():
+            try:
+                await asyncio.shield(offload)
+            except asyncio.CancelledError as error:
+                if offload.cancelled():
+                    raise
+                # The worker rewrites a whole session row; a second cancel must
+                # not let it run detached where it could race the post-delivery
+                # linkage wrap of the same session.
+                pending_cancel = error
+            except Exception:  # noqa: S110 - surfaced via offload.result() below
+                pass
         try:
-            await asyncio.shield(offload)
+            offload.result()
         except Exception:
             # A snapshot-persist failure (e.g. sqlite locked) must not escape into
             # the streaming error arms: they classify the adopted placeholder as
             # pristine and would redact an already-delivered visible reply. Losing
             # the replay snapshot is the lesser harm.
             self.deps.logger.exception("Failed to persist interrupted replay state")
+        if pending_cancel is not None:
+            raise pending_cancel
 
     def _record_stream_delivery_error(
         self,

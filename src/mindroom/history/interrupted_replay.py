@@ -17,6 +17,7 @@ from agno.session.team import TeamSession
 
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.constants import (
+    MATRIX_REQUESTER_ID_METADATA_KEY,
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
     MINDROOM_LOCATION_MARKER_METADATA_KEY,
     MINDROOM_REPLAY_PROSE_METADATA_KEY,
@@ -240,7 +241,7 @@ def _wrapped_snapshot_user_message(snapshot: InterruptedReplaySnapshot) -> str:
     persists, so no visible event can be claimed for it.
     """
     body = snapshot.user_message
-    requester_id = snapshot.run_metadata.get("requester_id")
+    requester_id = snapshot.run_metadata.get(MATRIX_REQUESTER_ID_METADATA_KEY)
     if snapshot.current_event_id and body and isinstance(requester_id, str) and requester_id:
         body = render_msg_tag(
             sender=requester_id,
@@ -382,6 +383,8 @@ def persist_interrupted_replay(
     interrupted_tools: Sequence[ToolTraceEntry],
     run_metadata: Mapping[str, object] | None,
     is_team: bool,
+    current_event_id: str | None = None,
+    current_turn_ts: str | None = None,
     current_message_suffix: str = "",
     original_status: RunStatus = RunStatus.cancelled,
 ) -> None:
@@ -400,6 +403,8 @@ def persist_interrupted_replay(
             completed_tools=completed_tools,
             interrupted_tools=interrupted_tools,
             run_metadata=run_metadata,
+            current_event_id=current_event_id,
+            current_turn_ts=current_turn_ts,
             current_message_suffix=current_message_suffix,
             response_event_id=None,
             original_status=original_status,

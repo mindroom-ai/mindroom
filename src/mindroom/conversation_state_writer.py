@@ -159,9 +159,20 @@ class ConversationStateWriter:
             if not isinstance(run, (RunOutput, TeamRunOutput)) or run.run_id != run_id:
                 continue
             metadata = dict(run.metadata or {})
-            already_linked = metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY) == response_event_id
+            previous_event_id = metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
+            already_linked = previous_event_id == response_event_id
             if already_linked and not wrap_body:
                 return
+            if not wrap_body and previous_event_id is not None and not already_linked:
+                # The assistant message may still carry the previous event's
+                # wrap; without a delivered body there is nothing to rebuild
+                # from, so record the divergence instead of guessing.
+                self.deps.logger.warning(
+                    "Response event re-linked without a delivered body",
+                    run_id=run_id,
+                    previous_event_id=previous_event_id,
+                    response_event_id=response_event_id,
+                )
             metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = response_event_id
             run.metadata = metadata
             wrapped = wrap_body and _wrap_final_assistant_message(
@@ -190,8 +201,15 @@ def _current_generation_assistant_message(run: RunOutput | TeamRunOutput) -> Mes
     for message in reversed(run.messages or []):
         if message.role in {"user", "tool"}:
             return None
-        if message.role == "assistant" and isinstance(message.content, str) and message.content:
+        if message.role != "assistant":
+            continue
+        if isinstance(message.content, str) and message.content:
             return message
+        if message.content:
+            # Content-bearing non-string output (e.g. provider content blocks)
+            # is a real generation, not a stub; wrapping past it would bind
+            # the delivered body to the wrong slot.
+            return None
     return None
 
 
@@ -224,7 +242,44 @@ def _wrap_final_assistant_message(
     )
     prose = interrupted_replay_prose_from_metadata(run.metadata)
     desired_content = f"{wrapped}\n\n{prose}" if prose else wrapped
-    if message.content == desired_content:
-        return False
-    message.content = desired_content
-    return True
+    changed = _absorb_subsumed_prior_segments(run, final_message=message, delivered_body=delivered_body)
+    if message.content != desired_content:
+        message.content = desired_content
+        changed = True
+    return changed
+
+
+def _absorb_subsumed_prior_segments(
+    run: RunOutput | TeamRunOutput,
+    *,
+    final_message: Message,
+    delivered_body: str,
+) -> bool:
+    """Blank earlier same-generation assistant text the delivered body already carries.
+
+    Streamed turns accumulate every visible segment into one Matrix event, so
+    text the model emitted alongside tool calls appears both in its own
+    assistant message and inside the delivered body that wraps the final
+    message. Removing the verbatim-subsumed copies keeps each piece of model
+    text in replay exactly once; non-matching segments are preserved
+    (fail open), and the messages themselves stay for tool-call pairing.
+    """
+    changed = False
+    seen_final = False
+    for message in reversed(run.messages or []):
+        if message is final_message:
+            seen_final = True
+            continue
+        if not seen_final:
+            continue
+        if message.role == "user":
+            break
+        if (
+            message.role == "assistant"
+            and isinstance(message.content, str)
+            and message.content
+            and message.content in delivered_body
+        ):
+            message.content = ""
+            changed = True
+    return changed

@@ -184,10 +184,10 @@ def _sanitize_rendered_provenance_text(value: str) -> str:
     entity-escaped: no external field can form a system-looking tag.
     """
     sanitized = "".join(char for char in value if char.isprintable()).replace('"', "'").strip()
-    sanitized = sanitized.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     if len(sanitized) > _MAX_RENDERED_FILENAME_LENGTH:
         sanitized = f"{sanitized[: _MAX_RENDERED_FILENAME_LENGTH - 1]}…"
-    return sanitized
+    # Escape after truncation so the cut can never tear an entity apart.
+    return sanitized.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _attachment_provenance_line(record: AttachmentRecord) -> str:

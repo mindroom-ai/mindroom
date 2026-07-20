@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from mindroom import interactive
 from mindroom.background_tasks import create_background_task
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
+from mindroom.streaming import clean_partial_reply_text
 from mindroom.thread_summary import maybe_generate_thread_summary
 from mindroom.thread_summary import should_queue_thread_summary as should_queue_thread_summary_check
 from mindroom.timing import timed
@@ -216,6 +217,12 @@ async def _persist_response_event_linkage(
         if final_delivery_outcome.body_is_run_output and not final_delivery_outcome.suppressed
         else None
     )
+    if delivered_visible_body is not None and final_delivery_outcome.terminal_status != "completed":
+        # Cancel/error/restart terminals append a runtime-owned status note to
+        # the delivered partial; the canonical body is what the model said, and
+        # the interruption is recorded once via structured replay prose, so the
+        # note is stripped exactly like the Matrix-fallback projection does.
+        delivered_visible_body = clean_partial_reply_text(delivered_visible_body) or None
     assert deps.persist_response_event_id is not None
     persist_call = asyncio.ensure_future(
         asyncio.to_thread(

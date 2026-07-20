@@ -657,12 +657,17 @@ def _thread_history_before_current_event(
     *,
     excluded_event_ids: Collection[str] = (),
 ) -> Sequence[ResolvedVisibleMessage] | None:
-    """Return fallback history before the current event, minus current-turn source events."""
-    if not thread_history or current_event_id is None:
+    """Return fallback history before the current event, minus current-turn source events.
+
+    Source-event exclusion applies even without a reply anchor: a structured
+    batch dispatched anchor-less still embeds its source events in the current
+    block and must not replay them as history.
+    """
+    if not thread_history or (current_event_id is None and not excluded_event_ids):
         return thread_history
     preceding_messages: list[ResolvedVisibleMessage] = []
     for msg in thread_history:
-        if msg.event_id == current_event_id:
+        if current_event_id is not None and msg.event_id == current_event_id:
             return tuple(preceding_messages)
         if msg.event_id and msg.event_id in excluded_event_ids:
             continue

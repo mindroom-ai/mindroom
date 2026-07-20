@@ -1007,7 +1007,7 @@ async def test_cancelled_interrupted_persistence_offload_keeps_running(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A second cancellation should not cancel the in-flight persistence worker."""
+    """Cancellation waits for the in-flight session-rewriting worker to finish."""
     bot = _bot(tmp_path)
     coordinator = replace_response_runner_deps(bot)
     started = asyncio.Event()
@@ -1043,10 +1043,14 @@ async def test_cancelled_interrupted_persistence_offload_keeps_running(
     assert registered_tasks[0].get_name() == "persist_interrupted_recorder"
 
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    await asyncio.sleep(0.05)
+    # The worker rewrites a whole session row: cancellation must not settle
+    # (releasing the lifecycle) while the worker is still gated.
+    assert not task.done()
 
     release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
     await wait_for_background_tasks(timeout=1.0, owner=coordinator.deps.runtime)
 
     assert persisted == ["session"]
@@ -1793,3 +1797,48 @@ async def test_direct_runner_seam_records_model_only_tail_for_interrupted_replay
     # Replaying "Hello" twice would diverge from the prompt the model received.
     assert recorders[0].user_message == "Hello"
     assert recorders[0].current_message_suffix == "Available attachment IDs: att_1."
+
+
+@pytest.mark.asyncio
+async def test_persistence_body_drops_runtime_terminal_notes_for_interrupted_outcomes() -> None:
+    """The canonical body for a cancelled turn is the model's partial, not the status note."""
+    persisted: list[tuple[str, str, str | None]] = []
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status="cancelled",
+            event_id="$partial",
+            is_visible_response=True,
+            final_visible_body="Half an answer\n\n**[Response cancelled by user]**",
+            body_is_run_output=True,
+            failure_reason="stopped_by_user",
+        ),
+        ResponseOutcome(response_run_id="run-1", run_succeeded=False),
+        PostResponseEffectsDeps(
+            logger=get_logger("tests.note_strip"),
+            persist_response_event_id=lambda run_id, event_id, body, _trace: persisted.append(
+                (run_id, event_id, body),
+            ),
+        ),
+    )
+    assert persisted == [("run-1", "$partial", "Half an answer")]
+
+    persisted.clear()
+    # A note-only body has no model output left after the note is removed.
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status="cancelled",
+            event_id="$note",
+            is_visible_response=True,
+            final_visible_body="**[Response cancelled by user]**",
+            body_is_run_output=True,
+            failure_reason="stopped_by_user",
+        ),
+        ResponseOutcome(response_run_id="run-1", run_succeeded=False),
+        PostResponseEffectsDeps(
+            logger=get_logger("tests.note_strip"),
+            persist_response_event_id=lambda run_id, event_id, body, _trace: persisted.append(
+                (run_id, event_id, body),
+            ),
+        ),
+    )
+    assert persisted == [("run-1", "$note", None)]

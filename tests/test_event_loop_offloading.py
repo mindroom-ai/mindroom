@@ -114,7 +114,6 @@ async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_h
     agent_started = threading.Event()
     agent_release = threading.Event()
     agent_finished = threading.Event()
-    prompt_composed = asyncio.Event()
     history_started = asyncio.Event()
     context_marker = ContextVar("prompt_preparation_context", default="missing")
     context_token = context_marker.set("preserved")
@@ -161,20 +160,8 @@ async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_h
             location_marker=None,
         )
 
-    original_tail = ai_module.model_prompt_tail_after_raw_prompt
-
-    def compose_prompt(*, raw_prompt: str, model_prompt: str | None) -> str:
-        assert memory_finished.is_set()
-        assert agent_finished.is_set()
-        prompt_composed.set()
-        return original_tail(
-            raw_prompt=raw_prompt,
-            model_prompt=model_prompt,
-        )
-
     monkeypatch.setattr(ai_module, "build_memory_prompt_parts", gated_memory)
     monkeypatch.setattr(ai_module, "create_agent", gated_create_agent)
-    monkeypatch.setattr(ai_module, "model_prompt_tail_after_raw_prompt", compose_prompt)
     monkeypatch.setattr(ai_module, "prepare_agent_execution_context", prepare_history)
 
     config = _prompt_preparation_config()
@@ -198,7 +185,6 @@ async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_h
             agent_release.set()
             assert await asyncio.to_thread(agent_finished.wait, 1.0)
         await asyncio.sleep(0)
-        assert not prompt_composed.is_set()
         assert not history_started.is_set()
 
         memory_release.set()

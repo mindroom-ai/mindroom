@@ -1123,7 +1123,9 @@ class DeliveryGateway:
         The stream outcome's rendered body is the canonical delivered text and
         it reports whether that text contains the run's own output (a synthetic
         note-only terminal does not) — ownership is computed here once for
-        every arm instead of per constructor.
+        every arm instead of per constructor. ``visible_body`` state implies a
+        committed non-empty rendered body, so no pre-delivery formatted-text
+        fallback is needed here.
         """
         body = stream_outcome.visible_body_text or None
         return FinalDeliveryOutcome(

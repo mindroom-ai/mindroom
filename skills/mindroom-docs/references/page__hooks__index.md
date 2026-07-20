@@ -325,7 +325,8 @@ Use stable keys and deterministic hook output when you want later replays and ca
 The item key `location` is reserved and does not follow the persist-as-rendered contract above.
 A `key="location"` item is split out at the typed hook boundary and never enters the flattened prompt, so its full detail is current-turn-only: agents receive it as a non-persisted transient message directly before the current turn, and teams receive it through the volatile tail of `additional_context`.
 Persisted history instead records at most one short `📍 ...` line on the turn where the derived location changed, with the accepted marker stored in trusted run metadata for change detection; message text can never forge that state.
-The marker is derived from `key: value` lines in the item text, in this order: `at_home: true` yields `📍 Home`, a `nearby_place` that is neither empty nor `unknown` yields `📍 <nearby_place>`, and otherwise `latitude` plus `longitude` yield `📍 <latitude>, <longitude>`.
+The marker is derived from `key: value` lines in the item text: `at_home: true` yields `📍 Home`, and otherwise a finite in-range `latitude` plus `longitude` yield `📍 <latitude>, <longitude>` rendered to four decimal places.
+Free-form fields such as `nearby_place` are intentionally never persisted: they carry reverse-geocoder output — external-world text that could read as an instruction — so they only ride the current-turn-only full detail, and the durable marker accepts only those non-instructional canonical values.
 A location hook must therefore emit structured lines, for example:
 
 ```python
@@ -335,6 +336,7 @@ ctx.add_metadata("location", "latitude: 52.3702\nlongitude: 4.8952\nnearby_place
 If none of those fields parse, the full detail is still delivered live but no marker is persisted (fail closed).
 When hooks return more than one `location` item, the first collected item is authoritative and the rest are dropped with a warning.
 When compaction removes the runs that carried the last marker, the next located turn intentionally re-establishes one fresh baseline line, since replayed history no longer shows the location.
+Change detection scans all stored runs of the scope, so when the marker-bearing run merely scrolls out of the replayed history window without being compacted, no fresh line is emitted until the location actually changes; the live full detail still arrives on every located turn.
 
 ### Reserved key: `matrix_message_target`
 

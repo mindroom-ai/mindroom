@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -20,6 +21,7 @@ from mindroom.history.interrupted_replay import (
     InterruptedReplaySnapshot,
     _build_interrupted_replay_run,
     build_interrupted_replay_snapshot,
+    persist_interrupted_replay,
     persist_interrupted_replay_snapshot,
     split_interrupted_tool_trace,
 )
@@ -779,3 +781,45 @@ def test_snapshot_restores_model_only_suffix_and_timestamp() -> None:
         "Available attachment IDs: att_1. Use tool calls to inspect or process them.\n\n"
         "📍 Home"
     )
+
+
+def test_persist_interrupted_replay_carries_event_identity(tmp_path: Path) -> None:
+    """The standalone replay path wraps an event-bound prompt like the recorder path."""
+    storage = create_state_storage(
+        "test_agent",
+        tmp_path,
+        subdir="sessions",
+        session_table="test_agent_sessions",
+    )
+    scope_context = SimpleNamespace(
+        storage=storage,
+        session=None,
+        scope=SimpleNamespace(scope_id="test_agent"),
+    )
+    try:
+        persist_interrupted_replay(
+            scope_context=scope_context,
+            session_id="session-1",
+            run_id="run-1",
+            user_message="Where am I?",
+            partial_text="Half",
+            completed_tools=(),
+            interrupted_tools=(),
+            run_metadata={"requester_id": "@alice:localhost"},
+            is_team=False,
+            current_event_id="$source",
+            current_turn_ts="2026-03-20 08:15 PDT",
+            current_message_suffix="Available attachment IDs: att_1.",
+        )
+
+        persisted = get_agent_session(storage, "session-1")
+        assert persisted is not None
+        run = (persisted.runs or [])[0]
+        assert run.messages is not None
+        assert run.messages[0].content == (
+            '<msg event_id="$source" from="@alice:localhost" ts="2026-03-20 08:15 PDT">'
+            "<![CDATA[Where am I?]]></msg>\n\n"
+            "Available attachment IDs: att_1."
+        )
+    finally:
+        storage.close()

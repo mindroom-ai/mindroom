@@ -104,10 +104,10 @@ depends_on = [
     "mindroom.credentials_sync",
     "mindroom.error_handling",
     "mindroom.execution_preparation",
+    "mindroom.history.interrupted_replay",
     "mindroom.history.prompt_tokens",
     "mindroom.history.runtime",
     "mindroom.history.types",
-    "mindroom.history.interrupted_replay",
     "mindroom.hooks",
     "mindroom.llm_request_logging",
     "mindroom.logging_config",
@@ -117,6 +117,7 @@ depends_on = [
     "mindroom.metadata_merge",
     "mindroom.pre_model_preparation",
     "mindroom.response_turn",
+    "mindroom.timestamp_formatting",
     "mindroom.timing",
     "mindroom.tool_system.events",
 ]
@@ -1486,6 +1487,7 @@ depends_on = [
 path = "mindroom.timestamp_formatting"
 depends_on = []
 visibility = [
+    "mindroom.ai",
     "mindroom.bot",
     "mindroom.coalescing_batch",
     "mindroom.edit_regenerator",
@@ -3175,6 +3177,7 @@ depends_on = [
     "mindroom.delivery_gateway",
     "mindroom.matrix.conversation_cache",
     "mindroom.runtime_protocols",
+    "mindroom.streaming",
     "mindroom.thread_summary",
 ]
 

@@ -1036,6 +1036,8 @@ MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY = "matrix_turn_discovery_event_ids"
 MATRIX_TURN_REDACTED_SOURCE_EVENT_IDS_METADATA_KEY = "matrix_turn_redacted_source_event_ids"
 MATRIX_EVENT_ID_METADATA_KEY = "matrix_event_id"
 MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
+# Requester identity recorded on run metadata by build_matrix_run_metadata.
+MATRIX_REQUESTER_ID_METADATA_KEY = "requester_id"
 MATRIX_RESPONSE_OWNER_METADATA_KEY = "matrix_response_owner"
 MATRIX_SEEN_EVENT_IDS_METADATA_KEY = "matrix_seen_event_ids"
 MATRIX_HISTORY_SCOPE_METADATA_KEY = "matrix_history_scope"

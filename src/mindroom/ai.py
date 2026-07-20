@@ -89,6 +89,7 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
+from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
 from mindroom.tool_system.events import StreamingToolTracker, complete_pending_tool_block, format_tool_combined
 
@@ -348,6 +349,8 @@ def _build_agent_turn_callbacks(
     agent_name: str,
     prompt: str,
     model_prompt: str | None,
+    current_event_id: str | None,
+    current_turn_ts: str | None,
     session_id: str,
     runtime_paths: RuntimePaths,
     config: Config,
@@ -410,6 +413,8 @@ def _build_agent_turn_callbacks(
             interrupted_tools=snapshot.interrupted_tools,
             run_metadata=snapshot.run_metadata,
             is_team=False,
+            current_event_id=current_event_id,
+            current_turn_ts=current_turn_ts,
             current_message_suffix=model_prompt_tail_after_raw_prompt(
                 raw_prompt=prompt,
                 model_prompt=model_prompt,
@@ -1124,6 +1129,10 @@ async def _prepare_agent_and_prompt(
         return runtime_model, agent
 
     parallel_branches = config.resolve_entity(agent_name).memory_backend == "mem0"
+    current_message_suffix = model_prompt_tail_after_raw_prompt(
+        raw_prompt=prompt,
+        model_prompt=model_prompt,
+    )
     if pipeline_timing is not None:
         pipeline_timing.note(prompt_branches_parallel=parallel_branches)
     if parallel_branches:
@@ -1149,10 +1158,6 @@ async def _prepare_agent_and_prompt(
                 )
             finally:
                 _mark_pipeline_timing(pipeline_timing, "prompt_branches_ready")
-        current_message_suffix = model_prompt_tail_after_raw_prompt(
-            raw_prompt=prompt,
-            model_prompt=model_prompt,
-        )
     else:
         _mark_pipeline_timing(pipeline_timing, "memory_prepare_start")
         prompt_parts = await build_memory_prompt_parts(
@@ -1162,10 +1167,6 @@ async def _prepare_agent_and_prompt(
             config,
             runtime_paths,
             execution_identity=execution_identity,
-        )
-        current_message_suffix = model_prompt_tail_after_raw_prompt(
-            raw_prompt=prompt,
-            model_prompt=model_prompt,
         )
         _mark_pipeline_timing(pipeline_timing, "memory_prepare_ready")
         _mark_pipeline_timing(pipeline_timing, "agent_build_start")
@@ -1450,6 +1451,12 @@ async def ai_response(  # noqa: C901
         agent_name=agent_name,
         prompt=prompt,
         model_prompt=model_prompt,
+        current_event_id=ctx.current_event_id,
+        current_turn_ts=(
+            format_timestamp_ms(current_timestamp_ms, timezone=config.timezone)
+            if ctx.current_event_id is not None and current_timestamp_ms is not None
+            else None
+        ),
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
@@ -1895,6 +1902,12 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         agent_name=agent_name,
         prompt=prompt,
         model_prompt=model_prompt,
+        current_event_id=ctx.current_event_id,
+        current_turn_ts=(
+            format_timestamp_ms(current_timestamp_ms, timezone=config.timezone)
+            if ctx.current_event_id is not None and current_timestamp_ms is not None
+            else None
+        ),
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,

@@ -122,7 +122,10 @@ def strip_visible_tool_markers_for_trace(text: str, tool_trace: Sequence[ToolTra
 
     A line is dropped only when its tool name and 1-based index match one of
     the run's own trace entries, so model-authored marker-shaped text survives
-    canonical persistence untouched.
+    canonical persistence untouched. Same-turn continuation attempts restart
+    marker numbering while the turn trace concatenates, so a shifted marker
+    can fail to match — the failure direction is deliberately open: chrome is
+    preserved rather than model text over-stripped.
     """
     if not tool_trace:
         return text
@@ -688,16 +691,15 @@ class StreamingResponse:
             elif cancelled:
                 resolved_cancel_source = "user_stop"
         had_body_before_terminal = bool(self.accumulated_text.strip())
-        # Completed terminals always deliver run output (possibly final-only
-        # provider content); cancel/error terminals contain run output only
-        # when partial text existed before the synthetic note was appended.
-        terminal_body_is_run_output = False
         final_stream_status = self._prepare_terminal_text_and_status(
             cancelled=cancelled,
             restart_interrupted=restart_interrupted,
             cancel_source=cancel_source,
             error=error,
         )
+        # Completed terminals always deliver run output (possibly final-only
+        # provider content); cancel/error terminals contain run output only
+        # when partial text existed before the synthetic note was appended.
         terminal_body_is_run_output = final_stream_status == STREAM_STATUS_COMPLETED or had_body_before_terminal
         terminal_status = "cancelled" if resolved_cancel_source is not None else final_stream_status
         cancellation_failure_reason = (
