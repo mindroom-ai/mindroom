@@ -37,6 +37,7 @@ from mindroom.history.storage import (
 )
 from mindroom.history.summary_call import (
     DEFAULT_SUMMARY_RETRY_POLICY,
+    CompactionSummaryOutputLimitError,
     CompactionSummaryOversizedOutputError,
     SummaryRetryPolicy,
     generate_compaction_summary,
@@ -414,9 +415,10 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
             # summaries this loop persists, so only an inherited stored
             # summary — written before the check existed, or under a larger
             # model/budget — lands here. Condense the COMPLETE summary in its
-            # own provider-arbitrated request; every terminal verdict is
-            # durable (persisted summary-only progress or a one-shot unfit
-            # marker), so the attempt is never silently re-bought.
+            # own provider-arbitrated request; every deterministic terminal
+            # verdict is durable (persisted summary-only progress or a
+            # one-shot unfit marker), so the attempt is never silently
+            # re-bought for the same state.
             condensation = await _condense_carried_summary(
                 storage=storage,
                 persisted_session=persisted_session,
@@ -1296,6 +1298,58 @@ def _record_carried_summary_unfit(
     update_scope_state_on_latest(storage, persisted_session, scope, _with_marker)
 
 
+def _terminal_condensation_verdict(
+    exc: Exception,
+    *,
+    serving: _CompactionSizingContext,
+    session_id: str,
+    scope: HistoryScope,
+) -> tuple[str, str] | None:
+    """Return (marker reason, remedy message) when a condensation failure is durable.
+
+    Two failure shapes are deterministic for the complete-input backstop and
+    therefore worth a one-shot marker: a provider-verified input-context
+    rejection (typed or via the narrow terminal fragments), and an output-cap
+    truncation — with unchanged input the same overlong output re-purchases
+    near-deterministically (round-7 C4). Everything else returns None and
+    stays transient.
+    """
+    if isinstance(exc, CompactionSummaryOutputLimitError):
+        logger.warning(
+            "Compaction condensation hit the model output token limit",
+            session_id=session_id,
+            scope=scope.key,
+            model_name=serving.model_name,
+            summary_input_budget_tokens=serving.summary_input_budget,
+            error=str(exc) or type(exc).__name__,
+        )
+        return (
+            "condensation_output_limit",
+            "condensing the carried summary hit the compaction model's output token limit; "
+            "raise the compaction model's max_tokens, switch compaction.model to a model "
+            "with a larger output limit, or force a retry with the compact_context tool",
+        )
+    if is_context_window_rejection(exc):
+        # Provider-verified impossibility — typed or surfaced through the
+        # narrow terminal fragments: under the complete-input invariant no
+        # replacement can ever be produced by this profile.
+        logger.warning(
+            "Compaction condensation rejected by the provider context window",
+            session_id=session_id,
+            scope=scope.key,
+            model_name=serving.model_name,
+            summary_input_budget_tokens=serving.summary_input_budget,
+            error=str(exc) or type(exc).__name__,
+        )
+        return (
+            "provider_context_window_rejection",
+            "the carried summary exceeds the compaction model's context window; "
+            "raise the compaction model's context_window, switch compaction.model to a "
+            "larger-context model, or force a retry with the compact_context tool",
+        )
+    return None
+
+
 @dataclass(frozen=True)
 class _CondensationOutcome:
     """Result of one condensation backstop attempt.
@@ -1334,11 +1388,15 @@ async def _condense_carried_summary(  # noqa: C901
     The model always receives the COMPLETE previous summary (E1); acceptance
     gates only what is persisted. A safeguard refusal switches once to the
     configured fallback with the request bytes unchanged, and the fallback
-    then serves the rest of the backstop. Every terminal verdict is durable:
-    a fitting or strictly smaller output persists immediately as a
-    summary-only chunk, and a failure verdict writes a one-shot marker keyed
-    on (summary digest, ordered attempt set) so it is never automatically
-    re-purchased for the same state.
+    then serves the rest of the backstop. Every deterministic terminal
+    verdict is durable: a fitting or strictly smaller output persists
+    immediately as a summary-only chunk, and a failure verdict — a
+    context-window rejection, an output-cap truncation, a non-shrinking
+    output, or a strengthened refusal with no fallback configured — writes a
+    one-shot marker keyed on (summary digest, ordered attempt set) so it is
+    never automatically re-purchased for the same state. Refusals that
+    reached the fallback and generic provider failures stay transient: a
+    fresh turn may pass.
     """
     stored_digest = _summary_digest(previous_summary)
     marker = state.carried_summary_unfit
@@ -1465,28 +1523,12 @@ async def _condense_carried_summary(  # noqa: C901
                     return _CondensationOutcome(persisted_summary=None, serving=serving)
                 raise
     except Exception as exc:
-        if not is_context_window_rejection(exc):
+        verdict = _terminal_condensation_verdict(exc, serving=serving, session_id=session_id, scope=scope)
+        if verdict is None:
             raise
-        # Provider-verified impossibility — typed or surfaced through the
-        # named legacy message fragments: under the complete-input invariant
-        # no replacement can ever be produced by this profile, so record the
-        # verdict once and surface the remedies instead of re-buying the same
-        # rejection every turn.
-        _mark_unfit(stored_digest, "provider_context_window_rejection")
-        logger.warning(
-            "Compaction condensation rejected by the provider context window",
-            session_id=session_id,
-            scope=scope.key,
-            model_name=serving.model_name,
-            summary_input_budget_tokens=serving.summary_input_budget,
-            error=str(exc) or type(exc).__name__,
-        )
-        msg = (
-            "the carried summary exceeds the compaction model's context window; "
-            "raise the compaction model's context_window, switch compaction.model to a "
-            "larger-context model, or force a retry with the compact_context tool"
-        )
-        raise _CarriedSummaryUnfitError(msg) from exc
+        reason, remedy = verdict
+        _mark_unfit(stored_digest, reason)
+        raise _CarriedSummaryUnfitError(remedy) from exc
 
     candidate_block_size = _block_size(candidate.summary)
     previous_block_size = _block_size(previous_summary)

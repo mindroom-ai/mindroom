@@ -560,15 +560,6 @@ rules.not-subscriptable = "ignore"
 rules.too-many-positional-arguments = "ignore"
 rules.unresolved-attribute = "ignore"
 rules.unsupported-operator = "ignore"
-[[tool.ty.overrides]]
-# The desktop provider imports macOS-only AppKit/Quartz/ApplicationServices
-# frameworks that can never resolve on the Linux dev/CI baseline; the module
-# is only imported at runtime on macOS. The pre-existing inline ignores for
-# those imports become unused under this override, so that warning is
-# silenced here too instead of stripping directives macOS editing relies on.
-include = [ "src/mindroom/desktop/" ]
-rules.unresolved-import = "ignore"
-rules.unused-ignore-comment = "ignore"
 [tool.ty.rules]
 deprecated = "ignore"  # FastAPI on_event deprecation; refactor to lifespan separately
 [tool.ty.src]

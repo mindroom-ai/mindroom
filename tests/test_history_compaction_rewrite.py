@@ -3295,6 +3295,69 @@ async def test_condensation_timeout_gets_one_delayed_byte_identical_retry(
     assert read_scope_state(persisted, _SCOPE).carried_summary_unfit is None
 
 
+# --- ISSUE-246 review round 7 G7 (C4): the output-cap verdict is durable too ---
+
+
+@pytest.mark.asyncio
+async def test_condensation_output_cap_is_terminal_with_marker_and_remedies(tmp_path: Path) -> None:
+    """Round-7 G7 (C4): an output-cap truncation of the condensation is a durable verdict.
+
+    With unchanged complete input the same overlong output re-purchases
+    near-deterministically, so the marker lands with its own reason, the
+    raised error names the output-limit remedies, and the next pass is free.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    stored_summary = ("word " * 2_600) + "TAIL-FACT-MUST-SURVIVE"
+    working_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1")],
+        summary=SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC)),
+    )
+    storage.upsert_session(working_session)
+    output_cap = CompactionSummaryOutputLimitError(
+        "compaction summary hit configured output token limit; refusing to persist incomplete summary",
+    )
+
+    with (
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(side_effect=output_cap),
+        ) as generate_summary,
+        pytest.raises(_CarriedSummaryUnfitError, match="output token limit"),
+    ):
+        await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            summary_input_budget=2_100,
+        )
+
+    assert generate_summary.await_count == 1
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == stored_summary
+    persisted_state = read_scope_state(persisted, _SCOPE)
+    marker = persisted_state.carried_summary_unfit
+    assert marker is not None
+    assert marker.reason == "condensation_output_limit"
+    assert marker.summary_digest == _summary_digest(stored_summary)
+
+    # The verdict is durable: the next pass spends nothing on the same state.
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(),
+    ) as second_pass_summary:
+        second_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=persisted,
+            state=persisted_state,
+            summary_input_budget=2_100,
+        )
+    assert second_result is None
+    second_pass_summary.assert_not_awaited()
+
+
 # --- ISSUE-246 review round 7 G3: transient rejections never mint a durable verdict ---
 
 
