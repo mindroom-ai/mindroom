@@ -33,7 +33,7 @@ class MemoryPromptParts:
     """Stable and turn-local prompt fragments used by the AI layer."""
 
     session_preamble: str = ""
-    turn_context: str = ""
+    transient_turn_context: str = ""
 
 
 async def add_agent_memory(
@@ -246,10 +246,10 @@ async def build_memory_prompt_parts(
         if agent_memories
         else ""
     )
-    turn_context = "\n\n".join(part for part in (degradation_notice, memory_context) if part)
+    transient_turn_context = "\n\n".join(part for part in (degradation_notice, memory_context) if part)
     return MemoryPromptParts(
         session_preamble=session_preamble,
-        turn_context=turn_context,
+        transient_turn_context=transient_turn_context,
     )
 
 
@@ -270,7 +270,9 @@ async def build_memory_enhanced_prompt(
         runtime_paths,
         execution_identity=execution_identity,
     )
-    prompt_chunks = [chunk for chunk in (prompt_parts.session_preamble, prompt_parts.turn_context, prompt) if chunk]
+    prompt_chunks = [
+        chunk for chunk in (prompt_parts.session_preamble, prompt_parts.transient_turn_context, prompt) if chunk
+    ]
     return "\n\n".join(prompt_chunks)
 
 

@@ -49,7 +49,7 @@ class TestMemoryIntegration:
                 *_args: object,
                 **_kwargs: dict[str, object],
             ) -> MemoryPromptParts:
-                return MemoryPromptParts(turn_context=f"[Enhanced memory] {prompt}")
+                return MemoryPromptParts(transient_turn_context=f"[Enhanced memory] {prompt}")
 
             mock_build.side_effect = build_side_effect
             yield mock_build
@@ -104,9 +104,13 @@ class TestMemoryIntegration:
             # Verify enhanced prompt was used
             mock_agent_run.assert_called_once()
             call_args = mock_agent_run.call_args[0]
-            assert len(call_args[1]) == 1
+            assert len(call_args[1]) == 2
             assert call_args[1][0].role == "user"
-            assert call_args[1][0].content == "What is 2+2?\n\n[Enhanced memory] What is 2+2?"
+            assert call_args[1][0].content == "[Enhanced memory] What is 2+2?"
+            assert call_args[1][0].add_to_agent_memory is False
+            assert call_args[1][1].role == "user"
+            assert call_args[1][1].content == "What is 2+2?"
+            assert call_args[1][1].add_to_agent_memory is True
 
             # Note: Memory storage now happens at the bot level, not in ai_response
 

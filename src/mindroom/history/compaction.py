@@ -19,7 +19,13 @@ from agno.utils.message import filter_tool_calls
 from pydantic import BaseModel
 
 from mindroom.claude_prompt_cache import as_anthropic_claude
-from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS, prompt_roles_for_history_storage
+from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
+    MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
+    MINDROOM_COMPACTION_METADATA_KEY,
+    MINDROOM_MATRIX_HISTORY_METADATA_KEY,
+    prompt_roles_for_history_storage,
+)
 from mindroom.error_handling import is_model_safeguard_refusal
 from mindroom.history.storage import (
     compacted_run_ids_with,
@@ -60,6 +66,9 @@ _WRAPPER_OVERHEAD_TOKENS = 200
 _OVERSIZED_RUN_NOTE = "Run truncated to fit compaction budget."
 _SUMMARY_METADATA_OMIT_KEYS = frozenset(
     {
+        AI_RUN_METADATA_KEY,
+        MINDROOM_COMPACTION_METADATA_KEY,
+        MINDROOM_MATRIX_HISTORY_METADATA_KEY,
         "model_params",
         "tools_schema",
     },
