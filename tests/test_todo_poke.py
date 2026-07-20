@@ -234,7 +234,7 @@ async def test_scan_rejects_unsafe_assignee_identifiers_before_idle_check(tmp_pa
     )
 
     assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 1
-    assert idle_checks == ["code", "code"]
+    assert idle_checks == ["code"]
     assert "@code Todo work is ready" in sent[0][1]
     assert "unsafe" not in sent[0][1]
 
@@ -349,48 +349,6 @@ async def test_quiet_gate_allows_immediate_handoff_for_freshly_unblocked_old_ite
     assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=300), deps) == 1
     assert queried_rooms == ["!room:localhost"]
     assert "`ready`" in sent[0][1]
-
-
-@pytest.mark.asyncio
-async def test_scan_rechecks_idle_immediately_before_send(tmp_path: Path) -> None:
-    """A scope that becomes busy during schedule lookup must not receive a poke."""
-    todo_root = tmp_path / "todo"
-    _write_thread(todo_root, "scope")
-    idle_results = iter([True, False])
-    deps, queried_rooms, sent = _deps(todo_root, idle_check=lambda _agent_name: next(idle_results))
-
-    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 0
-    assert queried_rooms == ["!room:localhost"]
-    assert sent == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [("status", "done"), ("assigned_agent", "reviewer")],
-)
-async def test_scan_revalidates_scope_after_schedule_query(
-    tmp_path: Path,
-    field: str,
-    value: str,
-) -> None:
-    """Work completed or reassigned during schedule I/O must not receive a stale poke."""
-    todo_root = tmp_path / "todo"
-    path = _write_thread(todo_root, "scope")
-    deps, queried_rooms, sent = _deps(todo_root)
-
-    async def mutate_during_query(room_id: str) -> frozenset[str | None]:
-        queried_rooms.append(room_id)
-        state = json.loads(path.read_text(encoding="utf-8"))
-        state["items"][0][field] = value
-        path.write_text(json.dumps(state), encoding="utf-8")
-        return frozenset()
-
-    deps = replace(deps, schedule_query=mutate_during_query)
-
-    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 0
-    assert queried_rooms == ["!room:localhost"]
-    assert sent == []
 
 
 @pytest.mark.asyncio
@@ -636,22 +594,18 @@ async def test_invalid_persisted_poke_timestamp_does_not_wedge_scope(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("counter_name", "bad_value"),
+    "bad_value",
     [
-        pytest.param("unchanged_repoke_count", -1, id="unchanged-negative"),
-        pytest.param("unchanged_repoke_count", "3", id="unchanged-non-int"),
-        pytest.param("unchanged_repoke_count", 1_000_000, id="unchanged-absurd"),
-        pytest.param("send_failure_count", -1, id="send-failure-negative"),
-        pytest.param("send_failure_count", "3", id="send-failure-non-int"),
-        pytest.param("send_failure_count", 1_000_000, id="send-failure-absurd"),
+        pytest.param(-1, id="negative"),
+        pytest.param("3", id="non-int"),
+        pytest.param(1_000_000, id="absurd"),
     ],
 )
 async def test_invalid_persisted_poke_counter_is_recovered(
     tmp_path: Path,
-    counter_name: str,
     bad_value: object,
 ) -> None:
-    """Invalid persisted counters must be rejected and replaced by a valid record."""
+    """An invalid persisted counter must be rejected and replaced by a valid record."""
     todo_root = tmp_path / "todo"
     _write_thread(todo_root, "scope")
     deps, _queried_rooms, sent = _deps(todo_root)
@@ -661,23 +615,22 @@ async def test_invalid_persisted_poke_counter_is_recovered(
     poke_state_path = todo_root / "poke_state.json"
     poke_state = json.loads(poke_state_path.read_text(encoding="utf-8"))
     record = next(iter(poke_state["scopes"].values()))
-    record[counter_name] = bad_value
+    record["unchanged_repoke_count"] = bad_value
     poke_state_path.write_text(json.dumps(poke_state), encoding="utf-8")
 
     assert await scan_todo_pokes(policy, deps) == 1
     repaired_state = json.loads(poke_state_path.read_text(encoding="utf-8"))
     repaired_record = next(iter(repaired_state["scopes"].values()))
     assert repaired_record["unchanged_repoke_count"] == 0
-    assert repaired_record["send_failure_count"] == 0
     assert len(sent) == 2
 
 
 @pytest.mark.asyncio
-async def test_persist_failure_remembers_delivery_and_does_not_starve_later_scopes(
+async def test_persist_failure_keeps_session_dedup_and_later_scopes_continue(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A delivered poke stays memory-deduped while later scopes and persistence continue."""
+    """A delivered poke stays session-deduped even when its persistence fails."""
     todo_root = tmp_path / "todo"
     _write_thread(
         todo_root,
@@ -707,20 +660,19 @@ async def test_persist_failure_remembers_delivery_and_does_not_starve_later_scop
     remembered_pokes = {}
     policy = TodoPokePolicy(quiet_seconds=0)
 
-    assert await scan_todo_pokes(policy, deps, pending_poke_records=remembered_pokes) == 2
+    assert await scan_todo_pokes(policy, deps, session_poke_records=remembered_pokes) == 2
     assert len(sent) == 2
-    assert len(remembered_pokes) == 1
+    assert len(remembered_pokes) == 2
 
-    assert await scan_todo_pokes(policy, deps, pending_poke_records=remembered_pokes) == 0
+    assert await scan_todo_pokes(policy, deps, session_poke_records=remembered_pokes) == 0
     assert len(sent) == 2
-    assert remembered_pokes == {}
     poke_state = json.loads((todo_root / "poke_state.json").read_text(encoding="utf-8"))
-    assert len(poke_state["scopes"]) == 2
+    assert {record["room_id"] for record in poke_state["scopes"].values()} == {"!b:localhost"}
 
 
 @pytest.mark.asyncio
-async def test_delivery_cap_counts_attempts_and_persists_failed_send(tmp_path: Path) -> None:
-    """Failed sends consume the attempt cap and persist their bounded-retry state."""
+async def test_delivery_cap_counts_attempts_and_failed_send_waits_cooldown(tmp_path: Path) -> None:
+    """Failed sends consume the attempt cap and retry only after the cooldown."""
     todo_root = tmp_path / "todo"
     for index in range(5):
         _write_thread(
@@ -729,127 +681,60 @@ async def test_delivery_cap_counts_attempts_and_persists_failed_send(tmp_path: P
             room_id=f"!room-{index}:localhost",
             items=[_item(f"task-{index}", assigned_agent=f"agent_{index}")],
         )
-    deps, _queried_rooms, sent = _deps(
-        todo_root,
-        send_results=[None, "$event-1", "$event-2", "$event-3", "$event-4"],
-    )
-
-    delivered = await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0, max_pokes_per_scan=3), deps)
-
-    assert delivered == 2
-    assert len(sent) == 3
-    poke_state = json.loads((todo_root / "poke_state.json").read_text(encoding="utf-8"))
-    assert len(poke_state["scopes"]) == 3
-    failed_record = next(record for record in poke_state["scopes"].values() if record["room_id"] == "!room-0:localhost")
-    assert failed_record["send_failure_count"] == 1
-
-    retry_deps, _retry_queries, retry_sends = _deps(todo_root)
-    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0, max_pokes_per_scan=3), retry_deps) == 3
-    assert {entry[0] for entry in retry_sends} == {
-        "!room-0:localhost",
-        "!room-3:localhost",
-        "!room-4:localhost",
-    }
-
-
-@pytest.mark.asyncio
-async def test_consecutive_send_failures_are_bounded_and_reset(tmp_path: Path) -> None:
-    """One fingerprint gets three failed retries before a change and success reset it."""
-    todo_root = tmp_path / "todo"
-    source_path = _write_thread(todo_root, "scope")
-    deps, _queried_rooms, sent = _deps(
-        todo_root,
-        send_results=[None, None, None, None, None, "$event-success"],
-    )
-    policy = TodoPokePolicy(quiet_seconds=0)
-    poke_state_path = todo_root / "poke_state.json"
-
-    for failure_count in range(1, 5):
-        assert await scan_todo_pokes(policy, deps) == 0
-        poke_state = json.loads(poke_state_path.read_text(encoding="utf-8"))
-        record = next(iter(poke_state["scopes"].values()))
-        assert record["send_failure_count"] == failure_count
-
-    assert await scan_todo_pokes(policy, deps) == 0
-    assert len(sent) == 4
-
-    thread_state = json.loads(source_path.read_text(encoding="utf-8"))
-    thread_state["items"][0]["title"] = "Changed work"
-    source_path.write_text(json.dumps(thread_state), encoding="utf-8")
-
-    assert await scan_todo_pokes(policy, deps) == 0
-    poke_state = json.loads(poke_state_path.read_text(encoding="utf-8"))
-    record = next(iter(poke_state["scopes"].values()))
-    assert record["send_failure_count"] == 1
-
-    assert await scan_todo_pokes(policy, deps) == 1
-    poke_state = json.loads(poke_state_path.read_text(encoding="utf-8"))
-    record = next(iter(poke_state["scopes"].values()))
-    assert record["send_failure_count"] == 0
-    assert len(sent) == 6
-
-
-@pytest.mark.asyncio
-async def test_capped_send_failures_retry_after_backstop_window(tmp_path: Path) -> None:
-    """A temporary outage cannot permanently mute unchanged actionable work."""
-    todo_root = tmp_path / "todo"
     current_time = [_NOW]
     deps, _queried_rooms, sent = _deps(
         todo_root,
         clock=lambda: current_time[0],
-        send_results=[None, None, None, None, "$event-recovered"],
+        send_results=[None],
     )
-    _write_thread(todo_root, "scope")
-    policy = TodoPokePolicy(quiet_seconds=0)
+    policy = TodoPokePolicy(quiet_seconds=0, cooldown_seconds=300, max_pokes_per_scan=3)
 
-    for _attempt in range(4):
-        assert await scan_todo_pokes(policy, deps) == 0
-
-    current_time[0] = _NOW + timedelta(seconds=3599)
-    assert await scan_todo_pokes(policy, deps) == 0
-    assert len(sent) == 4
-
-    current_time[0] = _NOW + timedelta(hours=1)
-    assert await scan_todo_pokes(policy, deps) == 1
+    assert await scan_todo_pokes(policy, deps) == 2
+    assert len(sent) == 3
     poke_state = json.loads((todo_root / "poke_state.json").read_text(encoding="utf-8"))
-    record = next(iter(poke_state["scopes"].values()))
-    assert record["send_failure_count"] == 0
-    assert record["last_send_failed_at"] == 0
-    assert len(sent) == 5
+    assert len(poke_state["scopes"]) == 3
+    failed_record = next(record for record in poke_state["scopes"].values() if record["room_id"] == "!room-0:localhost")
+    assert failed_record["last_fingerprint"] == ""
+
+    assert await scan_todo_pokes(policy, deps) == 2
+    assert [room_id for room_id, _body, _thread_id in sent[3:]] == [
+        "!room-3:localhost",
+        "!room-4:localhost",
+    ]
+
+    current_time[0] = _NOW + timedelta(seconds=300)
+    assert await scan_todo_pokes(policy, deps) == 1
+    assert sent[-1][0] == "!room-0:localhost"
 
 
 @pytest.mark.asyncio
-async def test_failed_scopes_move_behind_fresh_scopes_on_later_scans(tmp_path: Path) -> None:
-    """Permanently failing sorted scopes must not starve healthy work behind the cap."""
+async def test_failed_send_retries_after_cooldown_and_keeps_repoke_budget(tmp_path: Path) -> None:
+    """A failed send waits out the cooldown and does not consume the unchanged-repoke budget."""
     todo_root = tmp_path / "todo"
-    for index in range(4):
-        _write_thread(
-            todo_root,
-            f"scope-{index}",
-            room_id=f"!room-{index}:localhost",
-            items=[_item(f"task-{index}", assigned_agent=f"agent_{index}")],
-        )
-    remembered_failures: set[str] = set()
-    first_deps, _first_queries, first_sends = _deps(
+    _write_thread(todo_root, "scope")
+    current_time = [_NOW]
+    deps, _queried_rooms, sent = _deps(
         todo_root,
-        send_results=[None, None, None],
+        clock=lambda: current_time[0],
+        send_results=[None, "$event-recovered"],
     )
-    policy = TodoPokePolicy(quiet_seconds=0, max_pokes_per_scan=3)
+    policy = TodoPokePolicy(quiet_seconds=0, cooldown_seconds=300)
+    poke_state_path = todo_root / "poke_state.json"
 
-    assert await scan_todo_pokes(policy, first_deps, failed_scope_keys=remembered_failures) == 0
-    assert [room_id for room_id, _body, _thread_id in first_sends] == [
-        "!room-0:localhost",
-        "!room-1:localhost",
-        "!room-2:localhost",
-    ]
+    assert await scan_todo_pokes(policy, deps) == 0
+    assert len(sent) == 1
+    record = next(iter(json.loads(poke_state_path.read_text(encoding="utf-8"))["scopes"].values()))
+    assert record["last_fingerprint"] == ""
 
-    second_deps, _second_queries, second_sends = _deps(todo_root)
-    assert await scan_todo_pokes(policy, second_deps, failed_scope_keys=remembered_failures) == 3
-    assert [room_id for room_id, _body, _thread_id in second_sends] == [
-        "!room-3:localhost",
-        "!room-0:localhost",
-        "!room-1:localhost",
-    ]
+    assert await scan_todo_pokes(policy, deps) == 0
+    assert len(sent) == 1
+
+    current_time[0] = _NOW + timedelta(seconds=300)
+    assert await scan_todo_pokes(policy, deps) == 1
+    record = next(iter(json.loads(poke_state_path.read_text(encoding="utf-8"))["scopes"].values()))
+    assert record["unchanged_repoke_count"] == 0
+    assert record["last_fingerprint"] != ""
+    assert len(sent) == 2
 
 
 @pytest.mark.asyncio
@@ -1055,7 +940,7 @@ async def test_scan_offloads_all_blocking_storage_phases(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Snapshot, dedup, revalidation, pruning, and persistence I/O run off the event loop."""
+    """Snapshot, dedup, pruning, and persistence I/O run off the event loop."""
     todo_root = tmp_path / "todo"
     _write_thread(todo_root, "scope")
     deps, _queried_rooms, _sent = _deps(todo_root)
@@ -1073,7 +958,6 @@ async def test_scan_offloads_all_blocking_storage_phases(
         "_read_thread_snapshots",
         "_prune_poke_state",
         "_read_poke_state",
-        "_read_thread_snapshot",
         "_persist_poke",
     ]
 
@@ -1160,9 +1044,7 @@ async def test_worker_sleeps_first_continues_after_failure_and_stops(
     await asyncio.wait_for(task, timeout=1)
 
     assert scan.await_count == 2
-    assert scan.await_args_list[0].kwargs["failed_scope_keys"] is worker._failed_scope_keys
-    assert scan.await_args_list[1].kwargs["failed_scope_keys"] is worker._failed_scope_keys
-    assert scan.await_args_list[0].kwargs["pending_poke_records"] is worker._pending_poke_records
-    assert scan.await_args_list[1].kwargs["pending_poke_records"] is worker._pending_poke_records
+    assert scan.await_args_list[0].kwargs["session_poke_records"] is worker._session_poke_records
+    assert scan.await_args_list[1].kwargs["session_poke_records"] is worker._session_poke_records
     assert scan.await_args_list[0].kwargs["seen_warning_keys"] is worker._seen_warning_keys
     assert scan.await_args_list[1].kwargs["seen_warning_keys"] is worker._seen_warning_keys

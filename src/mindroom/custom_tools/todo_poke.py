@@ -53,7 +53,6 @@ _POKE_STATE_FILENAME = "poke_state.json"
 _VISIBLE_ITEM_LIMIT = 5
 _RETRY_BACKSTOP_SECONDS = 60 * 60
 _MAX_UNCHANGED_REPOKES = 3
-_MAX_CONSECUTIVE_SEND_FAILURES = _MAX_UNCHANGED_REPOKES + 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,11 +115,11 @@ class _TodoPokeScope:
 
 @dataclass(frozen=True, slots=True)
 class _PokeRecord:
+    """Dedup state for one scope: `last_poked_at` is the last send attempt, `last_fingerprint` the last delivered work."""
+
     last_poked_at: float
-    last_send_failed_at: float
     last_fingerprint: str
     unchanged_repoke_count: int
-    send_failure_count: int
 
 
 def _env_seconds(
@@ -417,32 +416,22 @@ def _poke_record(state: Mapping[str, Any], scope: _TodoPokeScope) -> _PokeRecord
     if not isinstance(raw_record, dict):
         return None
     last_poked_at = raw_record.get("last_poked_at")
-    last_send_failed_at = raw_record.get("last_send_failed_at")
     last_fingerprint = raw_record.get("last_fingerprint")
     unchanged_repoke_count = raw_record.get("unchanged_repoke_count")
-    send_failure_count = raw_record.get("send_failure_count")
     if (
         isinstance(last_poked_at, bool)
         or not isinstance(last_poked_at, int | float)
         or not math.isfinite(last_poked_at)
-        or isinstance(last_send_failed_at, bool)
-        or not isinstance(last_send_failed_at, int | float)
-        or not math.isfinite(last_send_failed_at)
         or not isinstance(last_fingerprint, str)
         or isinstance(unchanged_repoke_count, bool)
         or not isinstance(unchanged_repoke_count, int)
         or not 0 <= unchanged_repoke_count <= _MAX_UNCHANGED_REPOKES
-        or isinstance(send_failure_count, bool)
-        or not isinstance(send_failure_count, int)
-        or not 0 <= send_failure_count <= _MAX_CONSECUTIVE_SEND_FAILURES
     ):
         return None
     return _PokeRecord(
         last_poked_at=float(last_poked_at),
-        last_send_failed_at=float(last_send_failed_at),
         last_fingerprint=last_fingerprint,
         unchanged_repoke_count=unchanged_repoke_count,
-        send_failure_count=send_failure_count,
     )
 
 
@@ -502,10 +491,8 @@ def _persist_poke(todo_root: Path, scope: _TodoPokeScope, record: _PokeRecord) -
             "room_id": scope.room_id,
             "thread_id": scope.thread_id,
             "last_poked_at": record.last_poked_at,
-            "last_send_failed_at": record.last_send_failed_at,
             "last_fingerprint": record.last_fingerprint,
             "unchanged_repoke_count": record.unchanged_repoke_count,
-            "send_failure_count": record.send_failure_count,
         }
 
     locked_update_json(path, update, recover_invalid=True)
@@ -515,7 +502,7 @@ async def _try_persist_poke(
     todo_root: Path,
     scope: _TodoPokeScope,
     record: _PokeRecord,
-) -> bool:
+) -> None:
     try:
         await asyncio.to_thread(_persist_poke, todo_root, scope, record)
     except (OSError, TypeError, ValueError) as exc:
@@ -527,8 +514,6 @@ async def _try_persist_poke(
             error=str(exc),
             exc_info=True,
         )
-        return False
-    return True
 
 
 def _literal_code_text(text: str) -> str:
@@ -610,26 +595,18 @@ async def _pending_schedules_by_room(
 def _dedup_allows_poke(
     scope: _TodoPokeScope,
     poke_state: Mapping[str, Any],
-    pending_poke_records: Mapping[str, _PokeRecord],
+    session_poke_records: Mapping[str, _PokeRecord],
     policy: TodoPokePolicy,
     now_timestamp: float,
 ) -> bool:
-    previous = pending_poke_records.get(_scope_key(scope)) or _poke_record(poke_state, scope)
+    previous = session_poke_records.get(_scope_key(scope)) or _poke_record(poke_state, scope)
     if previous is None:
         return True
     if previous.last_fingerprint != scope.fingerprint:
-        if previous.send_failure_count > 0:
-            return True
         return _period_elapsed(
             now_timestamp,
             previous.last_poked_at,
             policy.cooldown_seconds,
-        )
-    if previous.send_failure_count > 0:
-        return previous.send_failure_count < _MAX_CONSECUTIVE_SEND_FAILURES or _period_elapsed(
-            now_timestamp,
-            previous.last_send_failed_at,
-            _RETRY_BACKSTOP_SECONDS,
         )
     return previous.unchanged_repoke_count < _MAX_UNCHANGED_REPOKES and _period_elapsed(
         now_timestamp,
@@ -638,113 +615,28 @@ def _dedup_allows_poke(
     )
 
 
-def _record_after_delivery(
+def _record_after_attempt(
     scope: _TodoPokeScope,
     previous: _PokeRecord | None,
     now_timestamp: float,
+    *,
+    delivered: bool,
 ) -> _PokeRecord:
-    unchanged_repoke_count = (
-        previous.unchanged_repoke_count + 1
-        if previous is not None and previous.last_fingerprint == scope.fingerprint and previous.last_poked_at > 0
-        else 0
-    )
+    if not delivered:
+        # Keep the last delivered fingerprint so the retry is throttled by the cooldown, not the backstop.
+        return _PokeRecord(
+            last_poked_at=now_timestamp,
+            last_fingerprint=previous.last_fingerprint if previous is not None else "",
+            unchanged_repoke_count=previous.unchanged_repoke_count if previous is not None else 0,
+        )
     return _PokeRecord(
         last_poked_at=now_timestamp,
-        last_send_failed_at=0,
         last_fingerprint=scope.fingerprint,
-        unchanged_repoke_count=unchanged_repoke_count,
-        send_failure_count=0,
-    )
-
-
-def _record_after_send_failure(
-    scope: _TodoPokeScope,
-    previous: _PokeRecord | None,
-    now_timestamp: float,
-) -> _PokeRecord:
-    if previous is None or previous.last_fingerprint != scope.fingerprint:
-        return _PokeRecord(
-            last_poked_at=0,
-            last_send_failed_at=now_timestamp,
-            last_fingerprint=scope.fingerprint,
-            unchanged_repoke_count=0,
-            send_failure_count=1,
-        )
-    return _PokeRecord(
-        # Failed attempts do not advance the last successful-delivery time.
-        last_poked_at=previous.last_poked_at,
-        last_send_failed_at=now_timestamp,
-        last_fingerprint=scope.fingerprint,
-        unchanged_repoke_count=previous.unchanged_repoke_count,
-        send_failure_count=min(
-            previous.send_failure_count + 1,
-            _MAX_CONSECUTIVE_SEND_FAILURES,
+        unchanged_repoke_count=(
+            previous.unchanged_repoke_count + 1
+            if previous is not None and previous.last_fingerprint == scope.fingerprint
+            else 0
         ),
-    )
-
-
-async def _repair_pending_poke_records(
-    todo_root: Path,
-    scopes_by_key: Mapping[str, _TodoPokeScope],
-    pending_poke_records: dict[str, _PokeRecord],
-) -> None:
-    for scope_key in sorted(pending_poke_records.keys() & scopes_by_key.keys()):
-        record = pending_poke_records[scope_key]
-        if await _try_persist_poke(todo_root, scopes_by_key[scope_key], record):
-            pending_poke_records.pop(scope_key, None)
-
-
-async def _refreshed_scope_for_delivery(
-    scope: _TodoPokeScope,
-    seen_warning_keys: set[_StateWarningKey],
-) -> _TodoPokeScope | None:
-    try:
-        refreshed_snapshot = await asyncio.to_thread(
-            _read_thread_snapshot,
-            scope.source_path,
-            seen_warning_keys,
-        )
-    except OSError as exc:
-        _warn_state_once(
-            "todo_poke_state_file_skipped",
-            scope.source_path,
-            str(exc),
-            seen_warning_keys,
-        )
-        return None
-    if refreshed_snapshot is None:
-        return None
-    refreshed_scope = next(
-        (
-            candidate
-            for candidate in _poke_scopes([refreshed_snapshot], seen_warning_keys)
-            if _scope_key(candidate) == _scope_key(scope)
-        ),
-        None,
-    )
-    if refreshed_scope is None or refreshed_scope.fingerprint != scope.fingerprint:
-        return None
-    return refreshed_scope
-
-
-def _delivery_still_eligible(
-    scope: _TodoPokeScope,
-    poke_state: Mapping[str, Any],
-    policy: TodoPokePolicy,
-    deps: TodoPokeDeps,
-    pending_poke_records: Mapping[str, _PokeRecord],
-) -> bool:
-    now = deps.clock().astimezone(UTC)
-    return (
-        _quiet_period_elapsed(scope, now, policy.quiet_seconds)
-        and _dedup_allows_poke(
-            scope,
-            poke_state,
-            pending_poke_records,
-            policy,
-            now.timestamp(),
-        )
-        and deps.idle_check(scope.assigned_agent)
     )
 
 
@@ -755,9 +647,7 @@ async def _deliver_pokes(
     todo_root: Path,
     policy: TodoPokePolicy,
     deps: TodoPokeDeps,
-    failed_scope_keys: set[str],
-    pending_poke_records: dict[str, _PokeRecord],
-    seen_warning_keys: set[_StateWarningKey],
+    session_poke_records: dict[str, _PokeRecord],
 ) -> int:
     delivered = 0
     attempts = 0
@@ -770,45 +660,21 @@ async def _deliver_pokes(
         if scope.thread_id in pending_by_room[scope.room_id]:
             continue
 
-        refreshed_scope = await _refreshed_scope_for_delivery(scope, seen_warning_keys)
-        if refreshed_scope is None:
-            continue
-        if not _delivery_still_eligible(
-            refreshed_scope,
-            poke_state,
-            policy,
-            deps,
-            pending_poke_records,
-        ):
-            continue
-
         attempts += 1
-        refreshed_scope_key = _scope_key(refreshed_scope)
-        previous = pending_poke_records.get(refreshed_scope_key) or _poke_record(
-            poke_state,
-            refreshed_scope,
-        )
+        scope_key = _scope_key(scope)
+        previous = session_poke_records.get(scope_key) or _poke_record(poke_state, scope)
         event_id = await deps.sender(
-            refreshed_scope.room_id,
-            _format_poke_message(refreshed_scope),
-            refreshed_scope.thread_id,
+            scope.room_id,
+            _format_poke_message(scope),
+            scope.thread_id,
         )
         outcome_timestamp = deps.clock().astimezone(UTC).timestamp()
-        if event_id is None:
-            failed_scope_keys.add(refreshed_scope_key)
-            record = _record_after_send_failure(refreshed_scope, previous, outcome_timestamp)
-            pending_poke_records[refreshed_scope_key] = record
-            if await _try_persist_poke(todo_root, refreshed_scope, record):
-                pending_poke_records.pop(refreshed_scope_key, None)
-            continue
-
-        poked_agents.add(refreshed_scope.assigned_agent)
-        failed_scope_keys.discard(refreshed_scope_key)
-        record = _record_after_delivery(refreshed_scope, previous, outcome_timestamp)
-        pending_poke_records[refreshed_scope_key] = record
-        if await _try_persist_poke(todo_root, refreshed_scope, record):
-            pending_poke_records.pop(refreshed_scope_key, None)
-        delivered += 1
+        record = _record_after_attempt(scope, previous, outcome_timestamp, delivered=event_id is not None)
+        session_poke_records[scope_key] = record
+        await _try_persist_poke(todo_root, scope, record)
+        if event_id is not None:
+            poked_agents.add(scope.assigned_agent)
+            delivered += 1
     return delivered
 
 
@@ -816,25 +682,20 @@ async def scan_todo_pokes(
     policy: TodoPokePolicy,
     deps: TodoPokeDeps,
     *,
-    failed_scope_keys: set[str] | None = None,
-    pending_poke_records: dict[str, _PokeRecord] | None = None,
+    session_poke_records: dict[str, _PokeRecord] | None = None,
     seen_warning_keys: set[_StateWarningKey] | None = None,
 ) -> int:
     """Scan native todo state once and return the number of delivered pokes."""
-    remembered_failures = failed_scope_keys if failed_scope_keys is not None else set()
-    remembered_pokes = pending_poke_records if pending_poke_records is not None else {}
+    remembered_pokes = session_poke_records if session_poke_records is not None else {}
     remembered_warnings = seen_warning_keys if seen_warning_keys is not None else set()
     todo_root = deps.state_root()
     snapshot_batch = await asyncio.to_thread(_read_thread_snapshots, todo_root, remembered_warnings)
     all_scopes = _poke_scopes(list(snapshot_batch.snapshots), remembered_warnings)
     active_scope_keys = frozenset(_scope_key(scope) for scope in all_scopes)
-    scopes_by_key = {_scope_key(scope): scope for scope in all_scopes}
     if not snapshot_batch.had_io_failure:
-        remembered_failures.intersection_update(active_scope_keys)
         for stale_scope_key in remembered_pokes.keys() - active_scope_keys:
             del remembered_pokes[stale_scope_key]
         await asyncio.to_thread(_prune_poke_state, todo_root, active_scope_keys)
-    await _repair_pending_poke_records(todo_root, scopes_by_key, remembered_pokes)
     try:
         poke_state = await asyncio.to_thread(_read_poke_state, todo_root)
     except OSError as exc:
@@ -846,20 +707,17 @@ async def scan_todo_pokes(
         return 0
 
     eligibility_now = deps.clock().astimezone(UTC)
-    scopes = sorted(
-        (
-            scope
-            for scope in _idle_quiet_scopes(all_scopes, policy, deps, eligibility_now)
-            if _dedup_allows_poke(
-                scope,
-                poke_state,
-                remembered_pokes,
-                policy,
-                eligibility_now.timestamp(),
-            )
-        ),
-        key=lambda scope: _scope_key(scope) in remembered_failures,
-    )
+    scopes = [
+        scope
+        for scope in _idle_quiet_scopes(all_scopes, policy, deps, eligibility_now)
+        if _dedup_allows_poke(
+            scope,
+            poke_state,
+            remembered_pokes,
+            policy,
+            eligibility_now.timestamp(),
+        )
+    ]
     if not scopes:
         return 0
 
@@ -874,9 +732,7 @@ async def scan_todo_pokes(
         todo_root,
         policy,
         deps,
-        remembered_failures,
         remembered_pokes,
-        remembered_warnings,
     )
 
 
@@ -887,8 +743,7 @@ class TodoPokeWorker:
     policy: TodoPokePolicy
     deps: TodoPokeDeps
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
-    _failed_scope_keys: set[str] = field(default_factory=set, init=False)
-    _pending_poke_records: dict[str, _PokeRecord] = field(default_factory=dict, init=False)
+    _session_poke_records: dict[str, _PokeRecord] = field(default_factory=dict, init=False)
     _seen_warning_keys: set[_StateWarningKey] = field(default_factory=set, init=False)
 
     def stop(self) -> None:
@@ -911,8 +766,7 @@ class TodoPokeWorker:
                 await scan_todo_pokes(
                     self.policy,
                     self.deps,
-                    failed_scope_keys=self._failed_scope_keys,
-                    pending_poke_records=self._pending_poke_records,
+                    session_poke_records=self._session_poke_records,
                     seen_warning_keys=self._seen_warning_keys,
                 )
             except Exception:
