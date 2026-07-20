@@ -16,6 +16,7 @@ from mindroom.dispatch_source import (
     MEDIA_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
+    is_auto_resume_relay_body,
     is_visible_router_voice_echo_content,
     is_voice_event,
     source_kind_allows_self_authored_ingress,
@@ -199,6 +200,8 @@ class IngressValidator:
             return None
         content = event.source.get("content") if isinstance(event.source, dict) else None
         if not isinstance(content, dict):
+            return None
+        if is_auto_resume_relay_body(content.get("body")):
             return None
         relates_to = content.get("m.relates_to")
         if isinstance(relates_to, dict) and relates_to.get("is_falling_back") is True:
