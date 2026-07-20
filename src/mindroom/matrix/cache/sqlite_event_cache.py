@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import sqlite3
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -15,6 +16,7 @@ from mindroom.logging_config import get_logger
 
 from . import sqlite_event_cache_events, sqlite_event_cache_threads
 from .event_batching import group_lookup_events_by_room
+from .event_cache import EventCacheBackendUnavailableError
 from .event_normalization import normalize_event_source_for_cache
 from .sqlite_agent_message_snapshot import load_sqlite_agent_message_snapshot
 from .sqlite_cache_maintenance import (
@@ -52,6 +54,13 @@ _REQUIRED_EVENT_CACHE_TABLES = frozenset(_EVENT_CACHE_TABLES)
 _DEFAULT_PRINCIPAL_ID = "__mindroom_default_principal__"
 _PRINCIPAL_PURGE_LOCK_SCOPE = "__mindroom_principal_purge__"
 _T = TypeVar("_T")
+
+
+def _is_sqlite_lock_contention(exc: sqlite3.OperationalError) -> bool:
+    """Return whether SQLite rejected an operation because another writer owns the database."""
+    error_name = getattr(exc, "sqlite_errorname", None)
+    return isinstance(error_name, str) and error_name.startswith(("SQLITE_BUSY", "SQLITE_LOCKED"))
+
 
 logger = get_logger(__name__)
 
@@ -598,6 +607,7 @@ class SqliteEventCache:
             self._runtime.is_initialized
             and not self._runtime.is_disabled
             and not self._runtime.is_principal_disabled(self.principal_id)
+            and not self._runtime.has_pending_principal_purge(self.principal_id)
         )
 
     @property
@@ -690,7 +700,7 @@ class SqliteEventCache:
                 return disabled_result
             pending_principal_purge = self._runtime.has_pending_principal_purge(self.principal_id)
             try:
-                await db.execute("BEGIN IMMEDIATE")
+                await db.execute("BEGIN IMMEDIATE" if pending_principal_purge else "BEGIN")
                 if pending_principal_purge:
                     await sqlite_event_cache_events.purge_principal_locked(
                         db,
@@ -1067,32 +1077,46 @@ class SqliteEventCache:
 
     async def mark_thread_stale(self, room_id: str, thread_id: str, *, reason: str) -> None:
         """Persist one durable thread invalidation marker."""
-        await self._write_operation(
-            room_id,
-            operation="mark_thread_stale",
-            disabled_result=None,
-            writer=lambda db: sqlite_event_cache_threads.mark_thread_stale_locked(
-                db,
-                principal_id=self.principal_id,
-                room_id=room_id,
-                thread_id=thread_id,
-                reason=reason,
-            ),
-        )
+        try:
+            await self._write_operation(
+                room_id,
+                operation="mark_thread_stale",
+                disabled_result=None,
+                writer=lambda db: sqlite_event_cache_threads.mark_thread_stale_locked(
+                    db,
+                    principal_id=self.principal_id,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    reason=reason,
+                ),
+            )
+        except sqlite3.OperationalError as exc:
+            if not _is_sqlite_lock_contention(exc):
+                raise
+            self._runtime.record_pending_principal_purge(self.principal_id)
+            msg = "SQLite event cache unavailable while marking thread stale"
+            raise EventCacheBackendUnavailableError(msg) from exc
 
     async def mark_room_threads_stale(self, room_id: str, *, reason: str) -> None:
         """Persist a durable invalidate-and-refetch marker for every cached thread in one room."""
-        await self._write_operation(
-            room_id,
-            operation="mark_room_threads_stale",
-            disabled_result=None,
-            writer=lambda db: sqlite_event_cache_threads.mark_room_stale_locked(
-                db,
-                principal_id=self.principal_id,
-                room_id=room_id,
-                reason=reason,
-            ),
-        )
+        try:
+            await self._write_operation(
+                room_id,
+                operation="mark_room_threads_stale",
+                disabled_result=None,
+                writer=lambda db: sqlite_event_cache_threads.mark_room_stale_locked(
+                    db,
+                    principal_id=self.principal_id,
+                    room_id=room_id,
+                    reason=reason,
+                ),
+            )
+        except sqlite3.OperationalError as exc:
+            if not _is_sqlite_lock_contention(exc):
+                raise
+            self._runtime.record_pending_principal_purge(self.principal_id)
+            msg = "SQLite event cache unavailable while marking room stale"
+            raise EventCacheBackendUnavailableError(msg) from exc
 
     async def append_event(self, room_id: str, thread_id: str, event: dict[str, Any]) -> bool:
         """Append one event when the thread already has cached data."""

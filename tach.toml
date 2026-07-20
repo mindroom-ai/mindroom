@@ -1863,6 +1863,7 @@ path = "mindroom.matrix.cache.sqlite_event_cache"
 depends_on = [
     "mindroom.matrix.cache.event_batching",
     "mindroom.matrix.cache.cache_maintenance",
+    "mindroom.matrix.cache.event_cache",
     "mindroom.matrix.cache.event_normalization",
     "mindroom.matrix.cache.thread_cache_state",
     "mindroom.logging_config",

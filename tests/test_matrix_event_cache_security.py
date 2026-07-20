@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -23,6 +24,7 @@ from mindroom.matrix.cache import (
 )
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
+from mindroom.matrix.cache.thread_cache_invalidation import mark_thread_stale_fail_closed
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.sync_cache_trust import SyncCacheTrust
@@ -304,6 +306,56 @@ async def test_disabling_principal_view_does_not_disable_other_principals(
 
         assert bob.durable_writes_available is False
         assert await bob.get_event(room_id, "$bob") is None
+    finally:
+        await root.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_lock_contention_quarantines_then_heals_principal(tmp_path: Path) -> None:
+    """A transient SQLite writer must fence stale data without disabling the principal forever."""
+    root = SqliteEventCache(tmp_path / "event_cache.db")
+    await root.initialize()
+    alice = root.for_principal("@alice:localhost")
+    bob = root.for_principal("@bob:localhost")
+    room_id = "!room:localhost"
+    thread_id = "$thread"
+    alice_event = _event(thread_id, 1)
+    bob_event = _event("$bob", 2)
+    try:
+        await replace_thread_unconditionally(alice, room_id, thread_id, [alice_event])
+        await bob.store_event("$bob", room_id, bob_event)
+        await root._runtime.require_db().execute("PRAGMA busy_timeout=0")
+        blocker = sqlite3.connect(root.db_path, timeout=0)
+        blocker.execute("BEGIN IMMEDIATE")
+        try:
+            readable_state = await alice.get_thread_cache_state(room_id, thread_id)
+            assert readable_state is not None
+            await mark_thread_stale_fail_closed(
+                alice,
+                room_id=room_id,
+                thread_id=thread_id,
+                reason="outbound_thread_mutation",
+                logger=MagicMock(),
+            )
+        finally:
+            blocker.rollback()
+            blocker.close()
+
+        diagnostics = alice.runtime_diagnostics()
+        assert diagnostics["cache_sqlite_principal_disabled"] is False
+        assert diagnostics["cache_sqlite_pending_principal_purge"] is True
+        assert alice.durable_writes_available is False
+        assert alice.cache_generation is None
+
+        assert await alice.get_thread_cache_state(room_id, thread_id) is None
+        assert alice.runtime_diagnostics()["cache_sqlite_pending_principal_purge"] is False
+        assert await bob.get_event(room_id, "$bob") == bob_event
+
+        await replace_thread_unconditionally(alice, room_id, thread_id, [alice_event])
+        healed_state = await alice.get_thread_cache_state(room_id, thread_id)
+        assert healed_state is not None
+        assert healed_state.validated_at is not None
+        assert healed_state.invalidated_at is None
     finally:
         await root.close()
 

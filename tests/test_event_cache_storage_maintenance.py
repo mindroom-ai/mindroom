@@ -17,6 +17,7 @@ from psycopg.conninfo import make_conninfo
 from mindroom.matrix.cache import (
     ThreadCacheState,
     postgres_event_cache,
+    sqlite_cache_maintenance,
     sqlite_event_cache,
 )
 from mindroom.matrix.cache.postgres_cache_maintenance import migrate_postgres_schema
@@ -284,6 +285,38 @@ async def test_sqlite_unsupported_schema_reset_reports_destructive_reset(tmp_pat
         assert diagnostics["cache_event_rows"] == 0
     finally:
         await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_startup_report_does_not_retain_writer_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slow startup diagnostics must not block writes from the active cache runtime."""
+    db_path = tmp_path / "event_cache.db"
+    primary = SqliteEventCache(db_path)
+    await primary.initialize()
+    await primary._runtime.require_db().execute("PRAGMA busy_timeout=0")
+    report_started = asyncio.Event()
+    release_report = asyncio.Event()
+    collect_report = sqlite_cache_maintenance._collect_maintenance_report
+
+    async def held_report(*args: object, **kwargs: object) -> object:
+        report_started.set()
+        await release_report.wait()
+        return await collect_report(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite_cache_maintenance, "_collect_maintenance_report", held_report)
+    secondary = SqliteEventCache(db_path)
+    initialize_secondary = asyncio.create_task(secondary.initialize())
+    try:
+        await asyncio.wait_for(report_started.wait(), timeout=1)
+        await primary.mark_thread_stale(_ROOM_ID, _THREAD_ID, reason="concurrent_startup_report")
+    finally:
+        release_report.set()
+        await initialize_secondary
+        await secondary.close()
+        await primary.close()
 
 
 @pytest.mark.asyncio
