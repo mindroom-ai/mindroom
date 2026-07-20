@@ -959,9 +959,11 @@ async def test_generate_team_response_helper_preserves_structured_stream_cancel_
             "</messages>",
         ),
     )
+    persisted_prompt = f"{structured_prompt}\n\n<mindroom_message_context>persist me</mindroom_message_context>"
     request = replace(
         _response_request(
             prompt=structured_prompt,
+            model_prompt=persisted_prompt,
             user_id="@alice:localhost",
             thread_id="$thread-root",
         ),
@@ -1015,7 +1017,7 @@ async def test_generate_team_response_helper_preserves_structured_stream_cancel_
     persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
     assert persisted_run.messages is not None
     assert [message.role for message in persisted_run.messages] == ["user", "assistant"]
-    assert persisted_run.messages[0].content == structured_prompt
+    assert persisted_run.messages[0].content == persisted_prompt
     assistant_content = cast("str", persisted_run.messages[1].content)
     assert 'event_id="$team-msg"' in assistant_content
     assert "Team hello\n\n(turn failed before completion)" in assistant_content

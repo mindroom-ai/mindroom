@@ -879,7 +879,11 @@ async def test_streaming_midstream_failure_persists_partial_and_finalizes_error(
             typing_indicator=_noop_typing,
         ),
     ):
-        generation = await coordinator.process_and_respond_streaming(_plain_request(_target()))
+        request = replace(
+            _plain_request(_target()),
+            model_prompt="hello\n\n<mindroom_message_context>persist me</mindroom_message_context>",
+        )
+        generation = await coordinator.process_and_respond_streaming(request)
 
     # The failure does not propagate: it is logged and becomes a finalized error outcome.
     assert generation.delivery is error_outcome
@@ -889,6 +893,7 @@ async def test_streaming_midstream_failure_persists_partial_and_finalizes_error(
     # The partial reply was captured as an interrupted-replay snapshot exactly once.
     persist.assert_called_once()
     snapshot = persist.call_args.kwargs["snapshot"]
+    assert snapshot.user_message == "hello\n\n<mindroom_message_context>persist me</mindroom_message_context>"
     assert snapshot.partial_text == "partial body"
     assert snapshot.run_metadata["matrix_response_event_id"] == "$stream"
     assert persist.call_args.kwargs["is_team"] is False

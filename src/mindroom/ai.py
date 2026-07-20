@@ -1450,7 +1450,7 @@ async def ai_response(  # noqa: C901
     callbacks = _build_agent_turn_callbacks(
         holder,
         agent_name=agent_name,
-        prompt=prompt,
+        prompt=_compose_current_turn_prompt(raw_prompt=prompt, model_prompt=model_prompt),
         current_prompt_is_structured=current_prompt_is_structured,
         session_id=session_id,
         runtime_paths=runtime_paths,
@@ -1895,7 +1895,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     callbacks = _build_agent_turn_callbacks(
         holder,
         agent_name=agent_name,
-        prompt=prompt,
+        prompt=_compose_current_turn_prompt(raw_prompt=prompt, model_prompt=model_prompt),
         current_prompt_is_structured=current_prompt_is_structured,
         session_id=session_id,
         runtime_paths=runtime_paths,

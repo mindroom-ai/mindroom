@@ -3769,6 +3769,7 @@ class TestUserIdPassthrough:
             async for _chunk in stream_agent_response(
                 make_turn_context("general", session_id="session1", correlation_id="e1", reply_to_event_id="e1"),
                 prompt="test",
+                model_prompt="test\n\n<mindroom_message_context>persist me</mindroom_message_context>",
                 runtime_paths=_runtime_paths(tmp_path),
                 config=_config(),
                 show_tool_calls=False,
@@ -3797,7 +3798,7 @@ class TestUserIdPassthrough:
         assert persisted_run.status is RunStatus.completed
         assert persisted_run.messages is not None
         assert [(message.role, message.content) for message in persisted_run.messages] == [
-            ("user", "test"),
+            ("user", "test\n\n<mindroom_message_context>persist me</mindroom_message_context>"),
             ("assistant", "Half done\n\n(turn stopped before completion)"),
         ]
 

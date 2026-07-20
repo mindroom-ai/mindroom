@@ -1670,7 +1670,7 @@ class ResponseRunner:
             scheduled_history_budget=request.scheduled_history_budget,
         )
         team_turn_recorder = self._build_turn_recorder(
-            user_message=request.prompt,
+            user_message=prepared_prompt,
             user_message_is_structured=request.current_prompt_is_structured,
             reply_to_event_id=request.reply_to_event_id,
             requester_id=requester_user_id or execution_identity.requester_id,
@@ -2362,7 +2362,7 @@ class ResponseRunner:
         attempt_run_ids = attempt_run_id_collector if attempt_run_id_collector is not None else []
         active_event_ids = self._active_response_event_ids(request.room_id)
         turn_recorder = self._build_turn_recorder(
-            user_message=request.prompt,
+            user_message=runtime.model_prompt,
             user_message_is_structured=request.current_prompt_is_structured,
             reply_to_event_id=request.reply_to_event_id,
             requester_id=request.user_id,
@@ -2513,7 +2513,7 @@ class ResponseRunner:
         tool_trace: list[Any] = []
         transport_outcome: StreamTransportOutcome | None = None
         turn_recorder = self._build_turn_recorder(
-            user_message=request.prompt,
+            user_message=runtime.model_prompt,
             user_message_is_structured=request.current_prompt_is_structured,
             reply_to_event_id=request.reply_to_event_id,
             requester_id=request.user_id,
