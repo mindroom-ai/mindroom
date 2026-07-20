@@ -13,6 +13,7 @@ from nio.api import RelationshipType
 from mindroom.authorization import get_effective_sender_id_for_reply_permissions
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
+    SOURCE_KIND_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -23,6 +24,7 @@ from mindroom.constants import (
     STREAM_VISIBLE_BODY_KEY,
     STREAM_WARMUP_SUFFIX_KEY,
 )
+from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import (
     MissingManagedEntityAccountError,
     current_entity_id,
@@ -323,6 +325,14 @@ async def _auto_resume_interrupted_threads(
     resumed_count = 0
     delay_due = delay_before_first
     for interrupted_thread in candidate_threads:
+        if interrupted_thread.original_sender_id is None:
+            logger.warning(
+                "Skipping auto-resume because requester identity could not be resolved",
+                room_id=interrupted_thread.room_id,
+                thread_id=interrupted_thread.thread_id,
+                target_event_id=interrupted_thread.target_event_id,
+            )
+            continue
         if not await _interrupted_target_remains_latest_human_work(
             interrupted_thread,
             config=config,
@@ -1833,11 +1843,12 @@ def _build_auto_resume_content(
         )
         mentioned_user_ids = [target_user_id]
 
-    extra_content = (
-        {ORIGINAL_SENDER_KEY: interrupted_thread.original_sender_id}
-        if interrupted_thread.original_sender_id is not None
-        else None
-    )
+    extra_content = None
+    if interrupted_thread.original_sender_id is not None:
+        extra_content = {
+            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            ORIGINAL_SENDER_KEY: interrupted_thread.original_sender_id,
+        }
     return build_message_content(
         body=body,
         formatted_body=formatted_body,
