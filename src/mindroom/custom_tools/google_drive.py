@@ -247,7 +247,11 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
     def _resolve_upload_path(self, local_path: str) -> Path:
         requested_path = Path(local_path).expanduser()
         if requested_path.is_absolute():
-            return requested_path.resolve()
+            resolved_path = requested_path.resolve()
+            if self._workspace_root is not None and not resolved_path.is_relative_to(self._workspace_root.resolve()):
+                msg = f"Google Drive local_path must stay within the workspace root: {self._workspace_root.resolve()}"
+                raise ValueError(msg)
+            return resolved_path
         if self._workspace_root is None:
             msg = "Google Drive relative local_path requires an agent workspace"
             raise ValueError(msg)
@@ -313,6 +317,8 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         mime_type: str | None = None,
     ) -> str:
         """Upload one local file without blocking the async agent loop."""
+        if result := self._write_scope_upgrade_result():
+            return result
         return await asyncio.to_thread(
             self._upload_file,
             local_path,

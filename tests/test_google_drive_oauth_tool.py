@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
@@ -539,6 +540,43 @@ def test_google_drive_readonly_grant_keeps_reads_and_requires_reconnect_for_writ
     assert service.files_resource.create_kwargs is None
 
 
+def test_google_drive_readonly_grant_blocks_direct_async_write_methods(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths_with_google_drive_client(
+        tmp_path,
+        {"MINDROOM_PUBLIC_URL": "https://mindroom.example.test"},
+    )
+    credentials_manager = CredentialsManager(tmp_path / "credentials")
+    credentials_manager.save_credentials(
+        "google_drive_oauth",
+        {
+            "token": "access-token",
+            "refresh_token": "refresh-token",
+            "client_id": "client-id",
+            "scopes": list(GOOGLE_DRIVE_READ_OAUTH_SCOPES),
+            "expires_at": datetime(2035, 1, 1, tzinfo=UTC).timestamp(),
+            "_source": "oauth",
+        },
+    )
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+    service = _FakeDriveService()
+    tool.service = service
+
+    results = (
+        asyncio.run(tool._aupload_file("plan.txt")),
+        asyncio.run(tool.acreate_folder("Plans")),
+        asyncio.run(tool.amove_file("file-id", "parent-id")),
+        asyncio.run(tool.atrash_file("file-id")),
+    )
+
+    assert all(json.loads(result)["reason"] == "missing_write_scope" for result in results)
+    assert service.files_resource.create_kwargs is None
+    assert service.files_resource.update_kwargs is None
+
+
 def test_google_drive_rejects_stored_token_disallowed_by_new_identity_policy(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths_with_google_drive_client(
         tmp_path,
@@ -787,6 +825,20 @@ def test_google_drive_upload_rejects_workspace_escape(
     outside_path.write_text("private")
 
     result = json.loads(tool.upload_file("../outside.txt"))
+
+    assert "must stay within the workspace root" in result["error"]
+    assert service.files_resource.create_kwargs is None
+
+
+def test_google_drive_upload_rejects_absolute_workspace_escape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool, service, _workspace_root = _google_drive_write_tool(tmp_path, monkeypatch)
+    outside_path = tmp_path / "outside.txt"
+    outside_path.write_text("private")
+
+    result = json.loads(tool.upload_file(str(outside_path)))
 
     assert "must stay within the workspace root" in result["error"]
     assert service.files_resource.create_kwargs is None
