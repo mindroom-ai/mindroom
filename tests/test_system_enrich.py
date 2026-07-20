@@ -516,8 +516,8 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
 
 
 @pytest.mark.asyncio
-async def test_prepare_materialized_team_execution_returns_prompt_helpers(tmp_path: Path) -> None:
-    """Prepared team execution should expose prompt helpers without exporting its carrier type."""
+async def test_prepare_materialized_team_execution_returns_message_helpers(tmp_path: Path) -> None:
+    """Prepared team execution should expose message helpers without exporting its carrier type."""
     import mindroom.teams as teams_module  # noqa: PLC0415
 
     config = _config(tmp_path)
@@ -596,7 +596,7 @@ async def test_prepare_materialized_team_execution_returns_prompt_helpers(tmp_pa
             configured_team_name=None,
         )
 
-    assert prepared_execution.prepared_prompt == "prepared team prompt"
+    assert [message.content for message in prepared_execution.run_input] == ["prepared team prompt"]
     assert prepared_execution.context_messages == ()
 
 

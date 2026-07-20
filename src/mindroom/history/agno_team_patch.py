@@ -153,9 +153,8 @@ def _dedupe_run_messages_inline_media(run_messages: RunMessages) -> RunMessages:
 
     Accepted trade-off: when a user re-sends byte-identical content, the
     current turn's copy is stripped and the bytes stay at the earlier history
-    position. The model still sees the content exactly once, and exempting the
-    current message instead would double-send all history media for team runs,
-    which re-collect pinned history media onto their current turn.
+    position. The model still sees the content exactly once; exempting the
+    current message would leave duplicate media in the provider payload.
     """
     seen_images: set[tuple[str, ...]] = set()
     seen_audio: set[tuple[str, ...]] = set()

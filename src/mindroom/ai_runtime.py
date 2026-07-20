@@ -86,9 +86,8 @@ def attach_media_to_run_input(
 def media_inputs_from_run_input(run_input: ModelRunInput) -> MediaInputs:
     """Collect media attached to canonical run-input messages.
 
-    Agent paths read the collected ``kinds()`` to drive media-capability
-    routing; team runs also re-collect the media itself because Agno
-    flattens team context messages to text, dropping pinned history media.
+    Agent and team paths inspect the collected kinds for media-capability
+    routing while preserving media on its canonical message.
     """
     if isinstance(run_input, str):
         return MediaInputs()

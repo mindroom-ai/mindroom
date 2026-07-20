@@ -3427,7 +3427,6 @@ async def test_team_stream_raw_surfaces_setup_error_as_team_run_error_event() ->
 
     mock_team = _make_test_team()
     mock_team.arun = MagicMock(side_effect=Exception(media_validation_error))
-    audio_input = MagicMock(name="audio_input")
 
     fake_agent = _make_test_agent("GeneralAgent")
     with (
@@ -3440,7 +3439,6 @@ async def test_team_stream_raw_surfaces_setup_error_as_team_run_error_event() ->
             team=mock_team,
             team_members=team_members,
             prompt="Analyze this.",
-            media=MediaInputs(audio=[audio_input]),
         )
         events = [event async for event in raw_stream]
 

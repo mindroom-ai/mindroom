@@ -47,7 +47,6 @@ from mindroom.execution_preparation import (
     ThreadHistoryRenderLimits,
     prepare_bound_team_run_context,
     render_prepared_messages_text,
-    render_prepared_team_messages_text,
 )
 from mindroom.history.interrupted_replay import (
     split_interrupted_tool_trace,
@@ -199,11 +198,6 @@ class _PreparedMaterializedTeamExecution:
     # this snapshot instead of re-resolving, because the per-thread override
     # store can change mid-run (for example via the thread_model tool).
     runtime_model_name: str
-
-    @property
-    def prepared_prompt(self) -> str:
-        """Return the prompt-visible text derived from canonical live messages."""
-        return render_prepared_team_messages_text(self.messages)
 
     @property
     def run_input(self) -> list[Message]:
@@ -2340,7 +2334,6 @@ async def _team_response_stream_raw(
     team_members: ResolvedExactTeamMembers,
     prompt: ai_runtime.ModelRunInput,
     metadata: dict[str, Any] | None = None,
-    media: MediaInputs | None = None,
     session_id: str | None = None,
     run_id: str | None = None,
     user_id: str | None = None,
@@ -2359,7 +2352,6 @@ async def _team_response_stream_raw(
 
         return _empty()
 
-    media_inputs = media or MediaInputs()
     logger.info(
         "team_created",
         agent_count=len(agents),
@@ -2368,17 +2360,9 @@ async def _team_response_stream_raw(
     for agent in agents:
         logger.debug("team_member", agent=agent.name)
 
-    def _start_stream(
-        current_prompt: ai_runtime.ModelRunInput,
-        current_media_inputs: MediaInputs,
-    ) -> AsyncIterator[Any]:
-        prepared_input = (
-            ai_runtime.attach_media_to_run_input(current_prompt, current_media_inputs)
-            if current_media_inputs.has_any()
-            else ai_runtime.copy_run_input(current_prompt)
-        )
+    try:
         return team.arun(
-            prepared_input,
+            ai_runtime.copy_run_input(prompt),
             stream=True,
             stream_events=True,
             session_id=session_id,
@@ -2386,9 +2370,6 @@ async def _team_response_stream_raw(
             user_id=user_id,
             metadata=metadata,
         )
-
-    try:
-        return _start_stream(prompt, media_inputs)
     except Exception as e:
         logger.exception("team_streaming_failed", agents=team_members.display_names)
         error_text = str(e)
