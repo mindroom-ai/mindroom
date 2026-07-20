@@ -13,7 +13,7 @@ from agno.team.team import Team as AgnoTeam
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.custom_tools.todo import _thread_key
+from mindroom.custom_tools.todo_state import todos_path
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
 from mindroom.tool_schema_cache import process_function_schema_for_prompt
@@ -71,7 +71,7 @@ def _tool_context(
 
 
 def _todos_path(config: Config, *, room_id: str, thread_id: str) -> Path:
-    return runtime_paths_for(config).storage_root / "todo" / "threads" / _thread_key(room_id, thread_id) / "todos.json"
+    return todos_path(runtime_paths_for(config).storage_root / "todo", room_id, thread_id)
 
 
 def _read_todos(
@@ -201,6 +201,43 @@ def test_todo_defaults_to_member_agent_inside_team_context(tmp_path: Path) -> No
     assert by_title["Team item"]["title"] == "Team item"
     assert by_title["Team item"]["assigned_agent"] == "code"
     assert "dev_team" not in {item["assigned_agent"] for item in state["items"]}  # type: ignore[union-attr]
+
+
+def test_plan_default_and_template_explicit_assignee_precedence(tmp_path: Path) -> None:
+    """Plan and template defaults use the caller, while explicit template assignees win."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(display_name="Code", rooms=["!room:localhost"]),
+                "reviewer": AgentConfig(display_name="Reviewer", rooms=["!room:localhost"]),
+            },
+        ),
+        runtime_paths=test_runtime_paths(tmp_path),
+    )
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    _write_workspace_template(
+        config,
+        "assignee-precedence",
+        """name: assignee-precedence
+version: "1"
+description: Assignee precedence regression.
+todos:
+  - title: Default template item
+  - title: Explicit template item
+    assigned_agent: reviewer
+""",
+    )
+
+    with tool_runtime_context(_tool_context(config)):
+        tool.plan(agent=_agent(), tasks="Default plan item")
+        tool.apply_template(agent=_agent(), name="assignee-precedence", params={})
+
+    by_title = {item["title"]: item["assigned_agent"] for item in _read_todos(config)["items"]}  # type: ignore[index]
+    assert by_title == {
+        "Default plan item": "code",
+        "Default template item": "code",
+        "Explicit template item": "reviewer",
+    }
 
 
 def test_todo_team_object_default_assignee_is_unassigned(tmp_path: Path) -> None:
@@ -620,4 +657,40 @@ todos:
         result = tool.apply_template(agent=_agent(), name="bad-assignee", params={})
 
     assert "Unknown agent 'missing'" in result
+    assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()
+
+
+@pytest.mark.parametrize(
+    ("template_title", "params"),
+    [
+        ("   ", {}),
+        ("  {{ TITLE }}  ", {"TITLE": "   "}),
+    ],
+    ids=["literal-whitespace", "rendered-whitespace"],
+)
+def test_apply_template_rejects_empty_stripped_titles(
+    tmp_path: Path,
+    template_title: str,
+    params: dict[str, str],
+) -> None:
+    """Literal and rendered template titles must be nonempty before persistence."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    _write_workspace_template(
+        config,
+        "empty-title",
+        f"""name: empty-title
+version: "1"
+description: Invalid empty title.
+todos:
+  - title: "{template_title}"
+""",
+    )
+
+    with (
+        tool_runtime_context(_tool_context(config)),
+        pytest.raises(ValueError, match="Todo `title` must not be empty"),
+    ):
+        tool.apply_template(agent=_agent(), name="empty-title", params=params)
+
     assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()
