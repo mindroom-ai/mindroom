@@ -95,6 +95,31 @@ def test_invalidate_compacted_replay_clears_summary_and_rebuild_markers(tmp_path
     assert session.runs == []
 
 
+def test_invalidate_compacted_replay_preserves_force_generation_monotonicity(tmp_path: Path) -> None:
+    """Round-7 G1d: replay invalidation must never rewind the force generation.
+
+    Resetting it to zero would let a later request re-mint a generation an
+    in-flight attempt already read (ABA), and that attempt's
+    compare-by-generation clear would then consume the wrong, fresh request.
+    """
+    _config, _runtime_paths_value = _make_config(tmp_path)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    session = _session("session-1")
+    session.summary = SessionSummary(summary="stale summary")
+    state = HistoryScopeState(last_summary_model="summary-model")
+    state = set_force_compaction_state(session, scope, state, force=True)
+    state = set_force_compaction_state(session, scope, state, force=True)
+    assert state.force_compact_generation == 2
+
+    assert invalidate_compacted_replay(session, scope) is True
+
+    reset_state = read_scope_state(session, scope)
+    assert reset_state.force_compact_before_next_run is True
+    assert reset_state.force_compact_generation == 2
+    bumped = set_force_compaction_state(session, scope, reset_state, force=True)
+    assert bumped.force_compact_generation == 3
+
+
 def test_set_force_compaction_state_updates_flag_and_bumps_generation(tmp_path: Path) -> None:
     """Every force request bumps the generation (ISSUE-246 round-6 F4); clears keep it.
 

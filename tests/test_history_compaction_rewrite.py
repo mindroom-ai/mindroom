@@ -2840,3 +2840,171 @@ async def test_untyped_context_window_rejection_is_terminal_for_condensation(tmp
         )
     assert second_result is None
     second_pass_summary.assert_not_awaited()
+
+
+# --- ISSUE-246 review round 7: force consumption is one compare-by-generation transition ---
+
+
+def _write_fresh_force_request(storage: BaseDb, session_id: str = "session-1") -> int:
+    """Land a fresh manual force request on the durable row mid-attempt."""
+    latest = get_agent_session(storage, session_id)
+    assert latest is not None
+    bumped = set_force_compaction_state(latest, _SCOPE, read_scope_state(latest, _SCOPE), force=True)
+    storage.upsert_session(latest)
+    return bumped.force_compact_generation
+
+
+@pytest.mark.asyncio
+async def test_fresh_force_request_survives_successful_compaction_finalization(tmp_path: Path) -> None:
+    """Round-7 G1a: finalization must not merge stale control fields over a fresh force.
+
+    A fresh manual request lands on the durable row while the summary call is
+    in flight; the success-path chunk finalization and force consume must
+    leave that request (and its newer generation) intact while the run's own
+    audit fields still land.
+    """
+    session = _session("session-1", runs=[_completed_run("run-1"), _completed_run("run-2")])
+    config, runtime_paths, storage, _scope, runtime_context = _forced_compaction_context(tmp_path, session=session)
+    fresh_generation: int | None = None
+
+    async def summarize_and_force_again(**_kwargs: object) -> SessionSummary:
+        nonlocal fresh_generation
+        if fresh_generation is None:
+            fresh_generation = _write_fresh_force_request(storage)
+        return SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))
+
+    with (
+        tool_runtime_context(runtime_context),
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(side_effect=summarize_and_force_again),
+        ),
+    ):
+        prepared = await prepare_history_for_run_for_test(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    assert prepared.compaction_reply_outcome == "success"
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.runs == []
+    persisted_state = read_scope_state(persisted, _SCOPE)
+    assert persisted_state.force_compact_before_next_run is True
+    assert persisted_state.force_compact_generation == fresh_generation
+    assert persisted_state.last_compacted_run_count == 2
+
+
+@pytest.mark.asyncio
+async def test_fresh_force_request_survives_an_ordinary_provider_failure(tmp_path: Path) -> None:
+    """Round-7 G1b: the failure-path clear consumes only the generation it read."""
+    session = _session("session-1", runs=[_completed_run("run-1")])
+    config, runtime_paths, storage, _scope, runtime_context = _forced_compaction_context(tmp_path, session=session)
+    fresh_generation: int | None = None
+
+    async def fail_after_forcing_again(**_kwargs: object) -> SessionSummary:
+        nonlocal fresh_generation
+        if fresh_generation is None:
+            fresh_generation = _write_fresh_force_request(storage)
+        msg = "provider exploded"
+        raise RuntimeError(msg)
+
+    with (
+        tool_runtime_context(runtime_context),
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(side_effect=fail_after_forcing_again),
+        ),
+    ):
+        prepared = await prepare_history_for_run_for_test(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    assert prepared.compaction_reply_outcome == "failed"
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert [run.run_id for run in persisted.runs or []] == ["run-1"]
+    persisted_state = read_scope_state(persisted, _SCOPE)
+    assert persisted_state.force_compact_before_next_run is True
+    assert persisted_state.force_compact_generation == fresh_generation
+
+
+@pytest.mark.asyncio
+async def test_fresh_force_request_survives_terminal_context_rejection_end_to_end(tmp_path: Path) -> None:
+    """Round-7 G1c (C2's gap): the lifecycle failure frame must not wipe what the marker preserved.
+
+    The marker write's compare-by-generation clear keeps the fresh request,
+    and the one-frame-up failure clear in the lifecycle wrapper must apply the
+    exact same policy instead of wiping the flag unconditionally.
+    """
+    oversized_summary = ("word " * 15_000) + "TAIL-FACT-MUST-SURVIVE"
+    session = _session(
+        "session-1",
+        runs=[_completed_run("run-1")],
+        summary=SessionSummary(summary=oversized_summary, updated_at=datetime.now(UTC)),
+    )
+    config, runtime_paths, storage, _scope, runtime_context = _forced_compaction_context(tmp_path, session=session)
+    fresh_generation: int | None = None
+
+    async def reject_after_forcing_again(**_kwargs: object) -> SessionSummary:
+        nonlocal fresh_generation
+        if fresh_generation is None:
+            fresh_generation = _write_fresh_force_request(storage)
+        msg = "prompt is too long for this model"
+        raise ContextWindowExceededError(msg)
+
+    with (
+        tool_runtime_context(runtime_context),
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(side_effect=reject_after_forcing_again),
+        ),
+    ):
+        prepared = await prepare_history_for_run_for_test(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    assert prepared.compaction_reply_outcome == "failed"
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    persisted_state = read_scope_state(persisted, _SCOPE)
+    marker = persisted_state.carried_summary_unfit
+    assert marker is not None
+    assert marker.reason == "provider_context_window_rejection"
+    assert persisted_state.force_compact_before_next_run is True
+    assert persisted_state.force_compact_generation == fresh_generation

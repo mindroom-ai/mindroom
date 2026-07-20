@@ -34,12 +34,12 @@ from mindroom.history.policy import (
 from mindroom.history.prompt_tokens import estimate_agent_static_tokens, estimate_team_static_tokens
 from mindroom.history.storage import (
     clear_force_compaction_state,
+    consume_force_compaction_request,
     consume_pending_force_compaction_scope,
     new_scope_session,
     prune_reintroduced_runs,
     read_scope_state,
     set_force_compaction_state,
-    update_scope_state_on_latest,
 )
 from mindroom.history.types import (
     CompactionDecision,
@@ -195,22 +195,16 @@ def _clear_forced_compaction_after_failure(
     scope: HistoryScope,
     state: HistoryScopeState,
 ) -> None:
-    """Clear a consumed manual force marker after a compaction failure.
+    """Consume the force request that started a failed compaction attempt.
 
-    Clears against the freshest row unconditionally so a failing manual
-    compaction cannot retry-loop on every reply. This deliberately differs
-    from the no-candidates path (_persist_cleared_force_state_if_needed in
-    compaction.py), which refuses to clear when a concurrent write moved the
-    durable row, so a fresh manual request placed mid-run survives.
+    Uses the shared compare-by-generation transition every attempt exit uses:
+    the consumed request is cleared so a failing manual compaction cannot
+    retry-loop on every reply, while a fresh request written mid-attempt
+    carries a newer generation and survives the clear.
     """
-    if session is None or not state.force_compact_before_next_run:
+    if session is None:
         return
-    update_scope_state_on_latest(
-        storage,
-        session,
-        scope,
-        lambda latest: replace(latest, force_compact_before_next_run=False),
-    )
+    consume_force_compaction_request(storage, session, scope, state)
 
 
 @dataclass(frozen=True)

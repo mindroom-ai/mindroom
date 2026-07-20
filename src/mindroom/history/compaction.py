@@ -24,6 +24,8 @@ from mindroom.error_handling import is_model_safeguard_refusal
 from mindroom.history.policy import persistable_summary_limit, summary_budget_is_admissible
 from mindroom.history.storage import (
     compacted_run_ids_with,
+    consume_force_compaction_request,
+    consumed_force_cleared,
     is_model_history_visible_run,
     record_compaction_chunk,
     remove_runs_by_id,
@@ -119,25 +121,6 @@ class _GeneratedSummaryChunk:
     model_name: str
 
 
-def _persist_cleared_force_state_if_needed(
-    *,
-    storage: BaseDb,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    state: HistoryScopeState,
-) -> HistoryScopeState:
-    if not state.force_compact_before_next_run:
-        return state
-    return update_scope_state_on_latest(
-        storage,
-        session,
-        scope,
-        # Only clear when the durable row still matches the state this run read;
-        # a concurrent write (for example a fresh manual request) wins otherwise.
-        lambda latest: replace(latest, force_compact_before_next_run=False) if latest == state else latest,
-    )
-
-
 async def _emit_compaction_hook(
     *,
     event_name: str,
@@ -220,12 +203,7 @@ async def compact_scope_history(
         available_history_budget=available_history_budget,
     )
     if not compactable_runs:
-        _persist_cleared_force_state_if_needed(
-            storage=storage,
-            session=session,
-            scope=scope,
-            state=state,
-        )
+        consume_force_compaction_request(storage, session, scope, state)
         return None
     selected_run_ids = _stable_compaction_run_ids(
         compactable_runs,
@@ -233,12 +211,7 @@ async def compact_scope_history(
         scope=scope,
     )
     if not selected_run_ids:
-        _persist_cleared_force_state_if_needed(
-            storage=storage,
-            session=session,
-            scope=scope,
-            state=state,
-        )
+        consume_force_compaction_request(storage, session, scope, state)
         return None
 
     before_tokens = estimate_prompt_visible_history_tokens(
@@ -287,15 +260,14 @@ async def compact_scope_history(
         before_persist_callback=emit_before_persist,
     )
     if rewrite_result is None:
-        _persist_cleared_force_state_if_needed(
-            storage=storage,
-            session=session,
-            scope=scope,
-            state=state,
-        )
+        consume_force_compaction_request(storage, session, scope, state)
         return None
 
     compacted_at = _iso_utc_now()
+    # Audit fields only: record_compaction_chunk pins the compaction-control
+    # fields (force flag, generation, unfit marker) from the freshest durable
+    # row, and the force request this run consumed is cleared afterwards by
+    # the shared compare-by-generation transition.
     new_state = HistoryScopeState(
         last_compacted_at=compacted_at,
         last_summary_model=_model_identifier(rewrite_result.summary_model),
@@ -313,6 +285,7 @@ async def compact_scope_history(
         compacted_run_ids=rewrite_result.compacted_run_ids,
         sync_remaining_runs=True,
     )
+    consume_force_compaction_request(storage, session, scope, state)
     logger.info(
         "Compaction summary generated",
         session_id=session.session_id,
@@ -1201,22 +1174,14 @@ def _record_carried_summary_unfit(
 ) -> None:
     """Durably write the one-shot unfit marker (control state only; I3, I4).
 
-    Consumes only the force request that started this attempt: force writes
-    bump ``force_compact_generation``, so the flag is cleared only while the
-    persisted generation still equals the one this attempt read. A fresh
-    request recorded while the provider call was in flight carries a newer
-    generation and survives the clear.
+    Consumes only the force request that started this attempt, through the
+    shared compare-by-generation transition: a fresh request recorded while
+    the provider call was in flight carries a newer generation and survives
+    the clear.
     """
 
     def _with_marker(latest: HistoryScopeState) -> HistoryScopeState:
-        consumed_force = (
-            state.force_compact_before_next_run and latest.force_compact_generation == state.force_compact_generation
-        )
-        return replace(
-            latest,
-            carried_summary_unfit=marker,
-            force_compact_before_next_run=latest.force_compact_before_next_run and not consumed_force,
-        )
+        return replace(consumed_force_cleared(latest, state), carried_summary_unfit=marker)
 
     update_scope_state_on_latest(storage, persisted_session, scope, _with_marker)
 

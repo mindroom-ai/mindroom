@@ -171,6 +171,48 @@ def set_force_compaction_state(
     return next_state
 
 
+def consumed_force_cleared(
+    latest: HistoryScopeState,
+    consumed: HistoryScopeState,
+) -> HistoryScopeState:
+    """Return ``latest`` with exactly one consumed force request cleared.
+
+    The comparison is by generation: the flag clears only while the durable
+    generation still equals the one the finished attempt read, so a fresh
+    request written mid-attempt (which bumped the generation) survives every
+    attempt exit — success, failure, no-op, and marker write alike.
+    """
+    if not consumed.force_compact_before_next_run:
+        return latest
+    if not latest.force_compact_before_next_run:
+        return latest
+    if latest.force_compact_generation != consumed.force_compact_generation:
+        return latest
+    return replace(latest, force_compact_before_next_run=False)
+
+
+def consume_force_compaction_request(
+    storage: BaseDb,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    consumed_state: HistoryScopeState,
+) -> HistoryScopeState:
+    """Durably clear the force request one compaction attempt consumed.
+
+    This is the single force-consumption transition shared by every attempt
+    exit; it applies ``consumed_force_cleared`` against the freshest stored
+    row and never touches any other control or audit field.
+    """
+    if not consumed_state.force_compact_before_next_run:
+        return consumed_state
+    return update_scope_state_on_latest(
+        storage,
+        session,
+        scope,
+        lambda latest: consumed_force_cleared(latest, consumed_state),
+    )
+
+
 def add_pending_force_compaction_scope(
     session_state: dict[str, object] | None,
     scope: HistoryScope,
@@ -311,9 +353,14 @@ def invalidate_compacted_replay(
         changed = True
 
     state = read_scope_state(session, scope)
+    # The force generation must survive the reset: rewinding it to zero would
+    # let a later request re-mint a generation an in-flight attempt already
+    # read, and that attempt's compare-by-generation clear would then consume
+    # the wrong (fresh) request.
     reset_state = HistoryScopeState(
         compacted_run_ids=state.compacted_run_ids,
         force_compact_before_next_run=state.force_compact_before_next_run,
+        force_compact_generation=state.force_compact_generation,
     )
     if state != reset_state:
         write_scope_state(session, scope, reset_state)
@@ -564,7 +611,8 @@ def record_compaction_chunk(
     )
 
     target_session = _latest_persisted_session(storage, persisted_session)
-    preexisting_tombstones = read_scope_state(target_session, scope).compacted_run_ids
+    latest_control_state = read_scope_state(target_session, scope)
+    preexisting_tombstones = latest_control_state.compacted_run_ids
     target_session.summary = working_session.summary
     target_session.metadata = _metadata_with_merged_seen_event_ids(
         deep_merge_metadata(target_session.metadata, working_session.metadata),
@@ -577,6 +625,11 @@ def record_compaction_chunk(
     # survive, target_state carries the post-merge ids, and the explicit chunk_run_ids
     # guard against the generic metadata merge dropping the compaction key entirely.
     # _normalize_compacted_run_ids dedupes.
+    # The compaction-control fields are pinned from the pre-merge stored row:
+    # the working session's copies are as stale as its read, so letting the
+    # metadata merge carry them would revert a force request or unfit verdict
+    # recorded while this rewrite ran. Force consumption happens only through
+    # consume_force_compaction_request's compare-by-generation transition.
     write_scope_state(
         target_session,
         scope,
@@ -585,6 +638,9 @@ def record_compaction_chunk(
             compacted_run_ids=_normalize_compacted_run_ids(
                 [*preexisting_tombstones, *target_state.compacted_run_ids, *chunk_run_ids],
             ),
+            force_compact_before_next_run=latest_control_state.force_compact_before_next_run,
+            force_compact_generation=latest_control_state.force_compact_generation,
+            carried_summary_unfit=latest_control_state.carried_summary_unfit,
         ),
     )
     target_session.runs = remove_runs_by_id(target_session.runs or [], chunk_run_ids)
