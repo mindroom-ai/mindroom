@@ -125,7 +125,7 @@ class ConversationEventCache(Protocol):
         *,
         expected_membership_epoch: int | None = None,
     ) -> None:
-        """Insert or replace one individually cached Matrix event."""
+        """Insert or replace one event without replacing clear payloads with opaque ciphertext."""
 
     async def store_events_batch(
         self,
@@ -133,7 +133,7 @@ class ConversationEventCache(Protocol):
         *,
         expected_membership_epoch: int | None = None,
     ) -> None:
-        """Insert or replace a batch of individually cached Matrix events."""
+        """Insert or replace events without replacing clear payloads with opaque ciphertext."""
 
     async def store_mxc_text(
         self,
