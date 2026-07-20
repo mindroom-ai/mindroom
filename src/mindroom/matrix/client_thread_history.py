@@ -704,9 +704,6 @@ async def refresh_thread_history_from_source(
     except _UnresolvedOpaqueRoomHistoryError:
         await _mark_room_stale_for_opaque_history(event_cache, room_id=room_id)
         raise
-    except OpaqueEncryptedThreadHistoryError:
-        await _mark_thread_stale_for_opaque_history(event_cache, room_id=room_id, thread_id=thread_id)
-        raise
     except Exception as exc:
         if allow_stale_fallback:
             stale_history = await _load_stale_cached_thread_history(
