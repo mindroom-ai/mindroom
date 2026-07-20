@@ -1243,6 +1243,16 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.orchestration.todo_poke_runtime"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.custom_tools.todo_poke",
+    "mindroom.custom_tools.todo_state",
+    "mindroom.entity_resolution",
+    "mindroom.scheduling",
+]
+
+[[modules]]
 path = "mindroom.orchestration.runtime"
 depends_on = ["mindroom.cancellation", "mindroom.matrix.client_session", "mindroom.constants", "mindroom.matrix.users"]
 
@@ -1255,8 +1265,6 @@ depends_on = [
     "mindroom.bot",
     "mindroom.config.main",
     "mindroom.constants",
-    "mindroom.custom_tools.todo_poke",
-    "mindroom.custom_tools.todo_state",
     "mindroom.embedder_health",
     "mindroom.entity_resolution",
     "mindroom.hooks",
@@ -1277,8 +1285,8 @@ depends_on = [
     "mindroom.orchestration.config_lifecycle",
     "mindroom.orchestration.external_trigger_runtime",
     "mindroom.orchestration.runtime",
+    "mindroom.orchestration.todo_poke_runtime",
     "mindroom.runtime_support",
-    "mindroom.scheduling",
     "mindroom.scheduling_executor",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.skills",
