@@ -47,7 +47,7 @@ def test_builtin_oauth_registry_includes_google_docs() -> None:
 
     assert providers["google_docs"].credential_service == "google_docs_oauth"
     assert providers["google_docs"].tool_config_service == "google_docs"
-    assert providers["google_drive"].scopes[-1] == "https://www.googleapis.com/auth/drive.readonly"
+    assert providers["google_drive"].scopes[-1] == "https://www.googleapis.com/auth/drive"
 
 
 def test_load_oauth_provider_registry_caches_loaded_registry(

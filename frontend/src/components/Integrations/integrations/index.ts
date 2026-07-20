@@ -280,7 +280,8 @@ const googleDriveIntegration = new GenericOAuthIntegrationProvider(
   {
     id: "google_drive",
     name: "Google Drive",
-    description: "Search and read files from your connected Google Drive",
+    description:
+      "Search, read, upload, and organize files in your connected Google Drive",
     category: "productivity",
     icon: createElement(SiGoogledrive, {
       className: "h-5 w-5 text-green-600",

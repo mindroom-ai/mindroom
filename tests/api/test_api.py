@@ -1918,7 +1918,7 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
                 "openid",
                 "https://www.googleapis.com/auth/userinfo.email",
                 "https://www.googleapis.com/auth/userinfo.profile",
-                "https://www.googleapis.com/auth/drive.readonly",
+                "https://www.googleapis.com/auth/drive",
             ],
             "_source": "oauth",
         },

@@ -4055,7 +4055,7 @@
         },
         {
           "authored_override": true,
-          "default": false,
+          "default": true,
           "description": "Allow creating new spreadsheets",
           "label": "Enable Create Operations",
           "name": "create",
@@ -4067,7 +4067,7 @@
         },
         {
           "authored_override": true,
-          "default": false,
+          "default": true,
           "description": "Allow updating existing spreadsheets",
           "label": "Enable Update Operations",
           "name": "update",
@@ -7908,7 +7908,7 @@
         },
         {
           "authored_override": true,
-          "default": false,
+          "default": true,
           "description": "Allow the agent to create, update, and delete calendar events",
           "label": "Allow Updates",
           "name": "allow_update",
@@ -8076,6 +8076,18 @@
         },
         {
           "authored_override": true,
+          "default": true,
+          "description": "Allow uploading, creating folders, moving or renaming files, and trashing files.",
+          "label": "Allow Write Operations",
+          "name": "write",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
           "default": 10485760,
           "description": "Maximum non-Google-Workspace file size to read in bytes.",
           "label": "Max Read Size",
@@ -8087,7 +8099,7 @@
           "validation": null
         }
       ],
-      "consumes_workspace_paths": false,
+      "consumes_workspace_paths": true,
       "default_execution_target": "primary",
       "dependencies": [
         "google-api-python-client",
@@ -8095,14 +8107,18 @@
         "google-auth-httplib2",
         "google-auth-oauthlib"
       ],
-      "description": "Search and read files from the connected user's Google Drive",
+      "description": "Search, read, upload, and organize files in the connected user's Google Drive",
       "display_name": "Google Drive",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/google_drive",
       "function_names": [
         "google_drive_list_files",
         "google_drive_search_files",
         "google_drive_read_file",
-        "google_drive_download_file"
+        "google_drive_download_file",
+        "google_drive_upload_file",
+        "google_drive_create_folder",
+        "google_drive_move_file",
+        "google_drive_trash_file"
       ],
       "helper_text": null,
       "icon": "SiGoogledrive",

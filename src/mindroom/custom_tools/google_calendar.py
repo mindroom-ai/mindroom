@@ -43,7 +43,7 @@ class GoogleCalendarTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin,
         unified credential storage and passes them to the Agno GoogleCalendarTools.
         """
         provided_creds = kwargs.pop("creds", None)
-        allow_update = kwargs.get("allow_update") is True
+        allow_update = kwargs.get("allow_update", True) is True
         kwargs.update(
             {
                 "create_event": allow_update,

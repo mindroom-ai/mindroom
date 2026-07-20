@@ -57,7 +57,7 @@ if TYPE_CHECKING:
             label="Enable Create Operations",
             type="boolean",
             required=False,
-            default=False,
+            default=True,
             description="Allow creating new spreadsheets",
         ),
         ConfigField(
@@ -65,7 +65,7 @@ if TYPE_CHECKING:
             label="Enable Update Operations",
             type="boolean",
             required=False,
-            default=False,
+            default=True,
             description="Allow updating existing spreadsheets",
         ),
     ],

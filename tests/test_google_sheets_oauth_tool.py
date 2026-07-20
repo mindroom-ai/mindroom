@@ -135,6 +135,23 @@ def test_google_sheets_saved_dashboard_config_maps_to_upstream_init_args(tmp_pat
     ]
 
 
+def test_google_sheets_default_config_enables_read_and_write_methods(tmp_path: Path) -> None:
+    tool = get_tool_by_name(
+        "google_sheets",
+        _runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        worker_target=None,
+        disable_sandbox_proxy=True,
+    )
+
+    assert isinstance(tool, GoogleSheetsTools)
+    assert {registered.__name__ for registered in tool.tools} == {
+        "read_sheet",
+        "create_sheet",
+        "update_sheet",
+    }
+
+
 def test_google_sheets_provider_uses_sheets_scope_without_drive_scope() -> None:
     provider = google_sheets_oauth_provider()
 

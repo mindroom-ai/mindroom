@@ -9,7 +9,7 @@ Public, unpaired, and organization-managed deployments can configure their own G
 
 | Tool | Provider ID | Callback path | Token service | Client config service | Settings service | Scopes |
 | --- | --- | --- | --- | --- | --- | --- |
-| Google Drive | `google_drive` | `/api/oauth/google_drive/callback` | `google_drive_oauth` | `google_drive_oauth_client` | `google_drive` | Drive read-only plus OpenID email/profile |
+| Google Drive | `google_drive` | `/api/oauth/google_drive/callback` | `google_drive_oauth` | `google_drive_oauth_client` | `google_drive` | Full Drive access plus OpenID email/profile |
 | Google Docs | `google_docs` | `/api/oauth/google_docs/callback` | `google_docs_oauth` | `google_docs_oauth_client` | `google_docs` | Docs view/edit/create/delete plus OpenID email/profile |
 | Google Calendar | `google_calendar` | `/api/oauth/google_calendar/callback` | `google_calendar_oauth` | `google_calendar_oauth_client` | `google_calendar` | Calendar events, calendar-list read-only, free/busy, and settings read-only plus OpenID email/profile |
 | Google Sheets | `google_sheets` | `/api/oauth/google_sheets/callback` | `google_sheets_oauth` | `google_sheets_oauth_client` | `google_sheets` | Sheets read/write, plus OpenID email/profile |
@@ -19,7 +19,9 @@ Public, unpaired, and organization-managed deployments can configure their own G
 
 MindRoom requests only the scopes required by the operations currently exposed to agents.
 
-- `drive.readonly` lets an agent search, list, and read existing files across the connected account without granting Drive write access.
+- `drive` lets an agent search, read, upload, create folders, move or rename files, and move files to trash across the connected account.
+- Existing `drive.readonly` grants remain usable for reads, but Drive write tools ask the user to reconnect and grant full Drive access.
+  Full Drive scope also authorizes permanent deletion at the Google API layer, but MindRoom exposes only trashing and no permanent-delete tool.
   The narrower `drive.file` scope cannot preserve account-wide search because it is limited to files created by or explicitly shared with the app.
 - `documents` lets an agent create documents, read complete document structure and content, and apply text edits without granting access to non-Docs Drive files.
   The scope also authorizes document deletion across the connected account, although MindRoom's `google_docs` tool does not expose a delete operation.
