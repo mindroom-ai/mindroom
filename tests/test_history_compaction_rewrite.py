@@ -2515,11 +2515,13 @@ async def test_multi_profile_acceptance_rejects_candidate_failing_the_fallback_b
 
 @pytest.mark.asyncio
 async def test_fallback_served_chunks_use_the_fallback_budget_after_the_unchanged_resend(tmp_path: Path) -> None:
-    """Round-6 F1: only the immediate post-refusal resend keeps the primary-sized bytes.
+    """Round-6 F1: the post-refusal resend is byte-identical; later builds use the fallback budget.
 
     Every build, request, and log after the switch is capped by the
     fallback's own resolved budget, asserted on the captured build budgets
-    and the actual constructed request bytes.
+    and the actual constructed request bytes. (Since round-7 G4 the initial
+    chunk is also admitted against the fallback's budget, so the unchanged
+    resend already fits it.)
     """
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
@@ -2569,7 +2571,7 @@ async def test_fallback_served_chunks_use_the_fallback_budget_after_the_unchange
     assert rewrite_result.summary_model is fallback
     assert [model for model, _ in attempts] == [primary, fallback, fallback]
     # The immediate post-refusal resend is byte-identical (unchanged-input
-    # contract), so it deliberately keeps the primary-sized request.
+    # contract); G4 admission already sized those bytes for the fallback too.
     assert attempts[1][1] == attempts[0][1]
     # Every build after the switch is capped by the fallback's own budget.
     assert [call.kwargs["max_input_tokens"] for call in build_spy.call_args_list] == [6_000, 3_000]
@@ -3024,6 +3026,75 @@ async def test_changed_primary_with_retained_fallback_gets_its_fresh_attempt(
         assert persisted is not None
         assert persisted.summary is not None
         assert persisted.summary.summary == "merged TAIL-FACT-MUST-SURVIVE"
+
+
+# --- ISSUE-246 review round 7 G4: chunk admission fits ALL admitted serving profiles ---
+
+
+@pytest.mark.asyncio
+async def test_switch_boundary_resend_fits_a_fallback_that_genuinely_rejects_over_budget_input(
+    tmp_path: Path,
+) -> None:
+    """Round-7 G4 (A2): the initial chunk is admitted against primary AND fallback budgets.
+
+    The fallback here genuinely REJECTS any request over its own 3,000-unit
+    budget instead of accepting everything, so the byte-identical post-refusal
+    resend only succeeds because admission already sized the chunk for every
+    profile that can serve it. Compaction must complete instead of repeating
+    the refusal/rejection pair every turn.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    working_session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1", messages=[Message(role="user", content="RUN1-MARKER " + ("u" * 5_000))]),
+            _completed_run("run-2", messages=[Message(role="user", content="RUN2-MARKER " + ("v" * 2_000))]),
+        ],
+    )
+    storage.upsert_session(working_session)
+    primary = FakeModel(id="summary-model", provider="fake")
+    fallback = FakeModel(id="fallback-model-id", provider="fake")
+    capacity_by_model = {id(primary): 6_000, id(fallback): 3_000}
+    attempts: list[tuple[FakeModel, str]] = []
+
+    async def arbitrating_summary(*, model: FakeModel, summary_input: str, **_kwargs: object) -> SessionSummary:
+        attempts.append((model, summary_input))
+        if len(summary_input.encode("utf-8")) > capacity_by_model[id(model)]:
+            message = "prompt is too long for this model"
+            raise ContextWindowExceededError(message)
+        if len(attempts) == 1:
+            message = "provider-specific refusal wording"
+            raise ModelSafeguardRefusalError(message)
+        return SessionSummary(summary=f"chunk summary {len(attempts)}", updated_at=datetime.now(UTC))
+
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(side_effect=arbitrating_summary),
+    ):
+        rewrite_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            selected_run_ids=("run-1", "run-2"),
+            summary_input_budget=6_000,
+            summary_model=primary,
+            fallback_summary_model=fallback,
+            fallback_summary_model_name="fallback-model",
+            fallback_summary_input_budget=3_000,
+        )
+
+    assert rewrite_result is not None
+    assert rewrite_result.compacted_run_count == 2
+    assert [model for model, _ in attempts] == [primary, fallback, fallback]
+    # The switch-boundary resend is byte-identical AND fits the fallback's
+    # own resolved budget — the genuinely smaller-context fallback accepted it.
+    assert attempts[1][1] == attempts[0][1]
+    assert len(attempts[0][1].encode("utf-8")) <= 3_000
+    assert len(attempts[2][1].encode("utf-8")) <= 3_000
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.runs == []
 
 
 # --- ISSUE-246 review round 7 G3: transient rejections never mint a durable verdict ---

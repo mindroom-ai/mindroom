@@ -392,11 +392,14 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
 
         previous_summary = _current_summary_text(working_session)
         # Every build, retry, log, and backstop decision is sized by the
-        # ACTIVE serving context's own budget; only the immediate post-refusal
-        # fallback resend inside the retry wrapper keeps its already-built
-        # primary-sized bytes (the unchanged-input contract). The acceptance
-        # check's proof domain is the planner-admissible budget range: below
-        # the availability floor the degenerate-budget no-op contract applies.
+        # ACTIVE serving context's own budget, and while a fallback is still
+        # admitted every built request must ALSO fit the fallback's own
+        # estimator and budget (G4): the byte-identical post-refusal resend
+        # reaches it unchanged, so admission at build time is what keeps the
+        # unchanged-input contract satisfiable at the switch boundary. The
+        # acceptance check's proof domain is the planner-admissible budget
+        # range: below the availability floor the degenerate-budget no-op
+        # contract applies.
         enforce_acceptance = summary_budget_is_admissible(sizing.summary_input_budget)
         summary_input, included_runs = _build_summary_input(
             previous_summary=previous_summary,
@@ -404,6 +407,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
             history_settings=history_settings,
             max_input_tokens=sizing.summary_input_budget,
             token_estimator=sizing.token_estimator,
+            admission_contexts=(fallback_sizing,) if fallback_sizing is not None else (),
         )
         if not included_runs and previous_summary is not None and enforce_acceptance:
             # The acceptance check (I1) makes this corner unreachable from
@@ -459,6 +463,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
                     history_settings=history_settings,
                     max_input_tokens=sizing.summary_input_budget,
                     token_estimator=sizing.token_estimator,
+                    admission_contexts=(fallback_sizing,) if fallback_sizing is not None else (),
                 )
         if not included_runs:
             logger.warning(
@@ -946,6 +951,7 @@ async def _generate_compaction_summary_with_retry(
                     history_settings=history_settings,
                     max_input_tokens=retry_decision.budget,
                     token_estimator=sizing.token_estimator,
+                    admission_contexts=(fallback_sizing,) if fallback_sizing is not None else (),
                 )
                 if rebuilt_runs:
                     rebuilt_input_tokens = sizing.token_estimator(rebuilt_input)
@@ -986,21 +992,35 @@ def _build_summary_input(
     max_input_tokens: int,
     history_settings: ResolvedHistorySettings,
     token_estimator: Callable[[str], int],
+    admission_contexts: Sequence[_CompactionSizingContext] = (),
 ) -> tuple[str, list[RunOutput | TeamRunOutput]]:
+    """Build one summary request that fits EVERY profile that can serve it.
+
+    ``admission_contexts`` are the further admitted serving profiles beyond
+    the active (estimator, budget) pair: while a safeguard fallback is
+    admitted, the byte-identical post-refusal resend reaches it unchanged, so
+    a run is included only when it fits every profile under that profile's
+    own estimator and budget.
+    """
     summary_block = ""
     if previous_summary is not None and previous_summary.strip():
         summary_block = _previous_summary_block(previous_summary)
+    admission_pairs: tuple[tuple[Callable[[str], int], int], ...] = (
+        (token_estimator, max_input_tokens),
+        *((context.token_estimator, context.summary_input_budget) for context in admission_contexts),
+    )
 
     empty_input = _compose_summary_input(summary_block, "")
-    remaining = max_input_tokens - token_estimator(empty_input) - _WRAPPER_OVERHEAD_TOKENS
+    remaining_budgets = [
+        budget - estimator(empty_input) - _WRAPPER_OVERHEAD_TOKENS for estimator, budget in admission_pairs
+    ]
 
-    if remaining <= 0:
+    if min(remaining_budgets) <= 0:
         return _build_oversized_summary_input(
             previous_summary=previous_summary,
             compacted_runs=compacted_runs[:1],
             history_settings=history_settings,
-            max_input_tokens=max_input_tokens,
-            token_estimator=token_estimator,
+            admission_pairs=admission_pairs,
         )
 
     included_runs: list[RunOutput | TeamRunOutput] = []
@@ -1008,20 +1028,19 @@ def _build_summary_input(
     for index, run in enumerate(compacted_runs):
         serialized_run = _serialize_run(run, index, history_settings)
         separator = "\n\n" if serialized_runs else ""
-        run_tokens = token_estimator(f"{separator}{serialized_run}")
-        if run_tokens > remaining:
+        run_costs = [estimator(f"{separator}{serialized_run}") for estimator, _budget in admission_pairs]
+        if any(cost > remaining for cost, remaining in zip(run_costs, remaining_budgets, strict=True)):
             if not included_runs:
                 return _build_oversized_summary_input(
                     previous_summary=previous_summary,
                     compacted_runs=[run],
                     history_settings=history_settings,
-                    max_input_tokens=max_input_tokens,
-                    token_estimator=token_estimator,
+                    admission_pairs=admission_pairs,
                 )
             break
         included_runs.append(run)
         serialized_runs.append(serialized_run)
-        remaining -= run_tokens
+        remaining_budgets = [remaining - cost for remaining, cost in zip(remaining_budgets, run_costs, strict=True)]
 
     if not included_runs:
         return summary_block, []
@@ -1034,8 +1053,7 @@ def _build_oversized_summary_input(
     previous_summary: str | None,
     compacted_runs: Sequence[RunOutput | TeamRunOutput],
     history_settings: ResolvedHistorySettings,
-    max_input_tokens: int,
-    token_estimator: Callable[[str], int],
+    admission_pairs: tuple[tuple[Callable[[str], int], int], ...],
 ) -> tuple[str, list[RunOutput | TeamRunOutput]]:
     summary_block = (
         _previous_summary_block(previous_summary) if previous_summary is not None and previous_summary.strip() else ""
@@ -1043,12 +1061,12 @@ def _build_oversized_summary_input(
     if not compacted_runs:
         return summary_block, []
     first_run = compacted_runs[0]
+    empty_input = _compose_summary_input(summary_block, "")
     oversized_excerpt = _serialize_oversized_run_excerpt(
         first_run,
         index=0,
         history_settings=history_settings,
-        max_tokens=_remaining_excerpt_budget(max_input_tokens, summary_block, token_estimator),
-        token_estimator=token_estimator,
+        excerpt_budgets=tuple((estimator, budget - estimator(empty_input)) for estimator, budget in admission_pairs),
     )
     if oversized_excerpt is None:
         return summary_block, []
@@ -1082,26 +1100,29 @@ def _serialize_oversized_run_excerpt(
     *,
     index: int,
     history_settings: ResolvedHistorySettings,
-    max_tokens: int,
-    token_estimator: Callable[[str], int],
+    excerpt_budgets: tuple[tuple[Callable[[str], int], int], ...],
 ) -> str | None:
-    if max_tokens <= 0:
+    tightest_budget = min(max_tokens for _estimator, max_tokens in excerpt_budgets)
+    if tightest_budget <= 0:
         return None
 
+    def _fits_every_budget(text: str) -> bool:
+        return all(estimator(text) <= max_tokens for estimator, max_tokens in excerpt_budgets)
+
     full_run = _serialize_run(run, index, history_settings)
-    if token_estimator(full_run) <= max_tokens:
+    if _fits_every_budget(full_run):
         return full_run
 
     blocks = _excerpt_blocks(run, history_settings)
-    budget_chars = max_tokens * 4
+    budget_chars = tightest_budget * 4
     while budget_chars > 0:
         excerpt = _serialize_run_excerpt(run, index=index, blocks=blocks, content_budget_chars=budget_chars)
-        if token_estimator(excerpt) <= max_tokens:
+        if _fits_every_budget(excerpt):
             return excerpt
         budget_chars //= 2
 
     minimal_excerpt = _serialize_run_excerpt(run, index=index, blocks=blocks, content_budget_chars=0)
-    if token_estimator(minimal_excerpt) <= max_tokens:
+    if _fits_every_budget(minimal_excerpt):
         return minimal_excerpt
     return None
 
@@ -1170,14 +1191,6 @@ def _truncate_excerpt(text: str, max_chars: int) -> str:
     if max_chars == 1:
         return "…"
     return f"{text[: max_chars - 1].rstrip()}…"
-
-
-def _remaining_excerpt_budget(
-    max_input_tokens: int,
-    summary_block: str,
-    token_estimator: Callable[[str], int],
-) -> int:
-    return max_input_tokens - token_estimator(_compose_summary_input(summary_block, ""))
 
 
 def _compose_summary_input(summary_block: str, serialized_runs: str) -> str:
