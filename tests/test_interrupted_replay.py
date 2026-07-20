@@ -354,6 +354,7 @@ def test_build_interrupted_replay_run_preserves_coalesced_source_metadata() -> N
     """Interrupted replay runs should round-trip the same coalesced metadata as completed runs."""
     snapshot = build_interrupted_replay_snapshot(
         user_message="Please continue",
+        user_message_is_structured=False,
         partial_text="Text emitted before interruption",
         completed_tools=(),
         interrupted_tools=(),
@@ -418,6 +419,7 @@ def test_persist_interrupted_replay_snapshot_preserves_newer_persisted_runs(tmp_
 
         snapshot = build_interrupted_replay_snapshot(
             user_message="Please continue",
+            user_message_is_structured=False,
             partial_text="Text emitted before interruption",
             completed_tools=(),
             interrupted_tools=(),
@@ -550,6 +552,7 @@ def test_persist_interrupted_replay_snapshot_keeps_minimal_interrupted_turn(tmp_
     try:
         snapshot = build_interrupted_replay_snapshot(
             user_message="Please continue",
+            user_message_is_structured=False,
             partial_text="",
             completed_tools=(),
             interrupted_tools=(),

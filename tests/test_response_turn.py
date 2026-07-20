@@ -145,6 +145,7 @@ def _continuation(prompt: str = "hello") -> DynamicContinuationRunState:
         model_prompt=None,
         current_timestamp_ms=None,
         current_prompt_is_structured=False,
+        current_event_id=None,
         run_id="run-1",
         continuation_model_prompt_tail="",
     )

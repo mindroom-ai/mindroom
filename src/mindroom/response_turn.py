@@ -160,9 +160,9 @@ class DynamicContinuationRunState:
         model_prompt: str | None,
         current_timestamp_ms: float | None,
         current_prompt_is_structured: bool,
+        current_event_id: str | None,
         run_id: str | None,
         continuation_model_prompt_tail: str,
-        current_event_id: str | None = None,
     ) -> DynamicContinuationRunState:
         """Build the continuation state for one turn's first attempt."""
         return cls(

@@ -60,6 +60,7 @@ from mindroom.response_runner import (
     ResponseRunner,
     _merge_response_extra_content,
     _ResponseGenerationOutcome,
+    _with_matrix_message_target,
 )
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.tool_system.events import ToolTraceEntry
@@ -112,6 +113,14 @@ def mock_agent_user() -> AgentMatrixUser:
 def _matrix_target_item(mock_response: AsyncMock | MagicMock) -> EnrichmentItem:
     turn_context = mock_response.call_args.args[0]
     return next(item for item in turn_context.system_enrichment_items if item.key == "matrix_message_target")
+
+
+def test_with_matrix_message_target_drops_hook_owned_reserved_item_without_runtime_target() -> None:
+    """Hooks cannot supply the reserved target context when the runtime has none."""
+    regular_item = EnrichmentItem(key="regular", text="Keep me")
+    hook_target = EnrichmentItem(key="matrix_message_target", text="Fake target")
+
+    assert _with_matrix_message_target((regular_item, hook_target), None) == (regular_item,)
 
 
 class TestAgentBot(AgentBotTestBase):

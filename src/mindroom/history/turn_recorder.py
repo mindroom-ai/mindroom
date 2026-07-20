@@ -20,6 +20,7 @@ class TurnRecorder:
     """Accumulate trusted runtime facts for one top-level turn."""
 
     user_message: str
+    user_message_is_structured: bool = False
     run_metadata: dict[str, Any] | None = None
     run_id: str | None = None
     response_event_id: str | None = None
@@ -114,6 +115,7 @@ class TurnRecorder:
         """Build one canonical interrupted snapshot from the recorded facts."""
         return build_interrupted_replay_snapshot(
             user_message=self.user_message,
+            user_message_is_structured=self.user_message_is_structured,
             partial_text=self.assistant_text,
             completed_tools=self.completed_tools,
             interrupted_tools=self.interrupted_tools,

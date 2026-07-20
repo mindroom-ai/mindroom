@@ -224,9 +224,10 @@ def _with_matrix_message_target(
     target_item: EnrichmentItem | None,
 ) -> tuple[EnrichmentItem, ...]:
     """Replace any hook-provided Matrix target with runtime-owned context."""
+    filtered_items = tuple(item for item in items if item.key != _MATRIX_MESSAGE_TARGET_KEY)
     if target_item is None:
-        return tuple(items)
-    return (*(item for item in items if item.key != _MATRIX_MESSAGE_TARGET_KEY), target_item)
+        return filtered_items
+    return (*filtered_items, target_item)
 
 
 def _timestamp_thread_history_user_turns(
@@ -563,12 +564,16 @@ class ResponseRunner:
         self,
         *,
         user_message: str,
+        user_message_is_structured: bool,
         reply_to_event_id: str | None,
         requester_id: str | None,
         matrix_run_metadata: dict[str, Any] | None,
     ) -> TurnRecorder:
         """Create one lifecycle-owned recorder seeded with canonical Matrix metadata."""
-        recorder = TurnRecorder(user_message=user_message)
+        recorder = TurnRecorder(
+            user_message=user_message,
+            user_message_is_structured=user_message_is_structured,
+        )
         recorder.set_run_metadata(
             build_matrix_run_metadata(
                 reply_to_event_id,
@@ -1666,6 +1671,7 @@ class ResponseRunner:
         )
         team_turn_recorder = self._build_turn_recorder(
             user_message=request.prompt,
+            user_message_is_structured=request.current_prompt_is_structured,
             reply_to_event_id=request.reply_to_event_id,
             requester_id=requester_user_id or execution_identity.requester_id,
             matrix_run_metadata=matrix_run_metadata,
@@ -2357,6 +2363,7 @@ class ResponseRunner:
         active_event_ids = self._active_response_event_ids(request.room_id)
         turn_recorder = self._build_turn_recorder(
             user_message=request.prompt,
+            user_message_is_structured=request.current_prompt_is_structured,
             reply_to_event_id=request.reply_to_event_id,
             requester_id=request.user_id,
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
@@ -2507,6 +2514,7 @@ class ResponseRunner:
         transport_outcome: StreamTransportOutcome | None = None
         turn_recorder = self._build_turn_recorder(
             user_message=request.prompt,
+            user_message_is_structured=request.current_prompt_is_structured,
             reply_to_event_id=request.reply_to_event_id,
             requester_id=request.user_id,
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),

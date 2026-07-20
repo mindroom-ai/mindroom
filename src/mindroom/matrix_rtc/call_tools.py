@@ -183,6 +183,7 @@ class _CallResponseTracker:
                 session_id=state.session_id,
                 run_id=state.run_id,
                 user_message=state.user_message,
+                user_message_is_structured=False,
                 partial_text=spoken_text,
                 completed_tools=state.completed_tools,
                 interrupted_tools=state.interrupted_tools,

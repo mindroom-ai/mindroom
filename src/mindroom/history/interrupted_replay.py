@@ -52,6 +52,7 @@ class InterruptedReplaySnapshot:
     completed_tools: tuple[ToolTraceEntry, ...]
     interrupted_tools: tuple[ToolTraceEntry, ...]
     run_metadata: dict[str, Any] = field(default_factory=dict)
+    user_message_is_structured: bool = False
     original_status: RunStatus = RunStatus.cancelled
 
 
@@ -216,7 +217,13 @@ def _build_interrupted_replay_run(
         requester_id = snapshot.run_metadata.get("requester_id")
         source_event_id = snapshot.run_metadata.get(MATRIX_EVENT_ID_METADATA_KEY)
         user_content = snapshot.user_message
-        if isinstance(requester_id, str) and requester_id and isinstance(source_event_id, str) and source_event_id:
+        if (
+            not snapshot.user_message_is_structured
+            and isinstance(requester_id, str)
+            and requester_id
+            and isinstance(source_event_id, str)
+            and source_event_id
+        ):
             user_content = render_msg_tag(sender=requester_id, body=user_content, event_id=source_event_id)
         messages.append(Message(role="user", content=user_content))
     response_event_id = snapshot.run_metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
@@ -253,6 +260,7 @@ def _build_interrupted_replay_run(
 def build_interrupted_replay_snapshot(
     *,
     user_message: str | None,
+    user_message_is_structured: bool,
     partial_text: str | None,
     completed_tools: Sequence[ToolTraceEntry],
     interrupted_tools: Sequence[ToolTraceEntry],
@@ -273,6 +281,7 @@ def build_interrupted_replay_snapshot(
         completed_tools=tuple(completed_tools),
         interrupted_tools=tuple(interrupted_tools),
         run_metadata=metadata,
+        user_message_is_structured=user_message_is_structured,
         original_status=original_status,
     )
 
@@ -327,6 +336,7 @@ def persist_interrupted_replay(
     session_id: str,
     run_id: str,
     user_message: str | None,
+    user_message_is_structured: bool,
     partial_text: str | None,
     completed_tools: Sequence[ToolTraceEntry],
     interrupted_tools: Sequence[ToolTraceEntry],
@@ -345,6 +355,7 @@ def persist_interrupted_replay(
         run_id=run_id,
         snapshot=build_interrupted_replay_snapshot(
             user_message=user_message,
+            user_message_is_structured=user_message_is_structured,
             partial_text=partial_text,
             completed_tools=completed_tools,
             interrupted_tools=interrupted_tools,

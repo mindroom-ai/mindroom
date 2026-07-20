@@ -505,6 +505,7 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
             "session_id": "!room:example.org:call:one",
             "run_id": "call-run-1",
             "user_message": "What is the weather?",
+            "user_message_is_structured": False,
             "partial_text": "It is",
             "completed_tools": tuple(completed_tools),
             "interrupted_tools": (),

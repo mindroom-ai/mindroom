@@ -2188,6 +2188,7 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_interrupted_
             _build_interrupted_replay_run(
                 snapshot=build_interrupted_replay_snapshot(
                     user_message="original question",
+                    user_message_is_structured=False,
                     partial_text="Half done",
                     completed_tools=[],
                     interrupted_tools=[],
@@ -2332,6 +2333,7 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
             _build_interrupted_replay_run(
                 snapshot=build_interrupted_replay_snapshot(
                     user_message="first\nanchor",
+                    user_message_is_structured=False,
                     partial_text="Half done",
                     completed_tools=[],
                     interrupted_tools=[],
@@ -2489,6 +2491,7 @@ async def test_team_handle_message_edit_uses_persisted_interrupted_response_even
             _build_interrupted_replay_run(
                 snapshot=build_interrupted_replay_snapshot(
                     user_message="@test_team original question",
+                    user_message_is_structured=False,
                     partial_text="## Worker\n\nHalf done",
                     completed_tools=[],
                     interrupted_tools=[],

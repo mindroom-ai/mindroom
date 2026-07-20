@@ -32,6 +32,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.message_target import MessageTarget
+from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.response_runner import (
     ResponseRunner,
 )
@@ -950,6 +951,22 @@ async def test_generate_team_response_helper_preserves_structured_stream_cancel_
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
     storage = _SessionStorage()
+    structured_prompt = "\n".join(
+        (
+            "<messages>",
+            render_msg_tag(sender="@alice:localhost", body="First", event_id="$first"),
+            render_msg_tag(sender="@alice:localhost", body="Hello", event_id="$user_msg"),
+            "</messages>",
+        ),
+    )
+    request = replace(
+        _response_request(
+            prompt=structured_prompt,
+            user_id="@alice:localhost",
+            thread_id="$thread-root",
+        ),
+        current_prompt_is_structured=True,
+    )
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
@@ -986,7 +1003,7 @@ async def test_generate_team_response_helper_preserves_structured_stream_cancel_
         )
 
         resolution = await coordinator.generate_team_response_helper(
-            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            request,
             team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
             team_mode="coordinate",
         )
@@ -996,11 +1013,12 @@ async def test_generate_team_response_helper_preserves_structured_stream_cancel_
     assert persisted_session is not None
     assert persisted_session.runs is not None
     persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
-    _assert_tagged_interrupted_messages(
-        persisted_run,
-        response_event_id="$team-msg",
-        assistant_body="Team hello\n\n(turn failed before completion)",
-    )
+    assert persisted_run.messages is not None
+    assert [message.role for message in persisted_run.messages] == ["user", "assistant"]
+    assert persisted_run.messages[0].content == structured_prompt
+    assistant_content = cast("str", persisted_run.messages[1].content)
+    assert 'event_id="$team-msg"' in assistant_content
+    assert "Team hello\n\n(turn failed before completion)" in assistant_content
 
 
 @pytest.mark.asyncio
