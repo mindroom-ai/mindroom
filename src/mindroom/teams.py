@@ -2116,7 +2116,7 @@ async def team_response(  # noqa: C901, PLR0915
                         entity_name=configured_team_name or team_name,
                     )
                     attempt_run_input = ai_runtime.append_inline_media_fallback_to_run_input(
-                        run_input,
+                        attempt_run_input,
                         fallback_prompt=inline_media_fallback_prompt,
                         removed_kinds=retry_decision.removed_kinds,
                     )
@@ -2157,7 +2157,7 @@ async def team_response(  # noqa: C901, PLR0915
                         entity_name=configured_team_name or team_name,
                     )
                     attempt_run_input = ai_runtime.append_inline_media_fallback_to_run_input(
-                        run_input,
+                        attempt_run_input,
                         fallback_prompt=inline_media_fallback_prompt,
                         removed_kinds=retry_decision.removed_kinds,
                     )
@@ -2844,7 +2844,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                                 entity_name=configured_team_name or team_label,
                             )
                             attempt_run_input = ai_runtime.append_inline_media_fallback_to_run_input(
-                                run_input,
+                                attempt_run_input,
                                 fallback_prompt=inline_media_fallback_prompt,
                                 removed_kinds=retry_decision.removed_kinds,
                             )
@@ -2953,7 +2953,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                             entity_name=configured_team_name or team_label,
                         )
                         attempt_run_input = ai_runtime.append_inline_media_fallback_to_run_input(
-                            run_input,
+                            attempt_run_input,
                             fallback_prompt=inline_media_fallback_prompt,
                             removed_kinds=retry_decision.removed_kinds,
                         )

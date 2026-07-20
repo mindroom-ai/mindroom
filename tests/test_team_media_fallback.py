@@ -313,6 +313,72 @@ async def test_team_response_retries_without_inline_media_on_validation_error() 
 
 
 @pytest.mark.asyncio
+async def test_team_response_media_retry_keeps_route_filtered_kinds_removed() -> None:
+    """A retry must not restore media already excluded by the route cache."""
+    reset_model_media_capability_cache()
+    config = _build_test_config()
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    mock_team = _make_test_team()
+    audio_input = MagicMock(name="audio_input")
+    image_input = MagicMock(name="image_input")
+    fake_agent = _make_test_agent("GeneralAgent")
+    try:
+        with (
+            patch("mindroom.teams.create_agent", return_value=fake_agent),
+            patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+            patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        ):
+            mock_team.arun = AsyncMock(
+                side_effect=[
+                    Exception("Error code: 400 - audio unsupported"),
+                    TeamRunOutput(content="Learned audio fallback"),
+                ],
+            )
+            await team_response(
+                agent_names=["general"],
+                mode=TeamMode.COORDINATE,
+                message="Analyze audio.",
+                turn_recorder=_team_turn_recorder("Analyze audio."),
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id=None),
+                media=MediaInputs(audio=[audio_input]),
+            )
+
+            mock_team.arun = AsyncMock(
+                side_effect=[
+                    Exception("Error code: 400 - image unsupported"),
+                    TeamRunOutput(content="Recovered team response"),
+                ],
+            )
+            response = await team_response(
+                agent_names=["general"],
+                mode=TeamMode.COORDINATE,
+                message="Analyze both.",
+                turn_recorder=_team_turn_recorder("Analyze both."),
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id=None),
+                media=MediaInputs(audio=[audio_input], images=[image_input]),
+            )
+
+        assert "Recovered team response" in response
+        first_attempt = mock_team.arun.await_args_list[0].args[0]
+        retry_attempt = mock_team.arun.await_args_list[1].args[0]
+        assert first_attempt[-1].audio is None
+        assert first_attempt[-1].images == [image_input]
+        assert retry_attempt[-1].audio is None
+        assert retry_attempt[-1].images is None
+    finally:
+        reset_model_media_capability_cache()
+
+
+@pytest.mark.asyncio
 async def test_team_response_surfaces_stringified_safeguard_refusal_without_media_retry() -> None:
     """An errored team output must retain refusal handling and stop fallback."""
     config = _build_test_config()
