@@ -25,6 +25,9 @@ HOOK_DISPATCH_SOURCE_KIND = "hook_dispatch"
 EXTERNAL_TRIGGER_SOURCE_KIND = "external_trigger"
 ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND = "active_thread_follow_up"
 TRUSTED_INTERNAL_RELAY_SOURCE_KIND = "trusted_internal_relay"
+AUTO_RESUME_MESSAGE = (
+    "[System: Previous response was interrupted by service restart. Please continue where you left off.]"
+)
 _KNOWN_SOURCE_KINDS: frozenset[str] = frozenset(
     {
         MESSAGE_SOURCE_KIND,
@@ -183,6 +186,11 @@ def is_visible_router_voice_echo_content(content: object) -> bool:
     if not isinstance(content, Mapping):
         return False
     return cast("Mapping[str, object]", content).get(VISIBLE_ROUTER_VOICE_ECHO_KEY) is True
+
+
+def is_auto_resume_relay_body(body: object) -> bool:
+    """Return whether one message body is the restart auto-resume relay."""
+    return isinstance(body, str) and AUTO_RESUME_MESSAGE in body
 
 
 def _trusted_source_kind_from_event_content(
