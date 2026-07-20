@@ -377,7 +377,9 @@ async def test_prepare_agent_and_prompt_prefers_explicit_turn_model_over_room_mo
 
 
 @pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_uses_thread_history_when_persisted_replay_is_disabled(tmp_path: Path) -> None:
+async def test_prepare_agent_and_prompt_uses_thread_history_and_transient_memory_when_replay_is_disabled(
+    tmp_path: Path,
+) -> None:
     config, runtime_paths = _make_config(tmp_path)
     live_agent = _agent()
     thread_history = [
@@ -387,7 +389,14 @@ async def test_prepare_agent_and_prompt_uses_thread_history_when_persisted_repla
 
     with (
         patch("mindroom.ai.create_agent", return_value=live_agent),
-        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+        patch(
+            "mindroom.ai.build_memory_prompt_parts",
+            new=AsyncMock(
+                return_value=MemoryPromptParts(
+                    transient_turn_context="Retrieved memory for this turn",
+                ),
+            ),
+        ),
         patch(
             "mindroom.execution_preparation.prepare_scope_history",
             new=AsyncMock(return_value=MagicMock()),
@@ -410,7 +419,16 @@ async def test_prepare_agent_and_prompt_uses_thread_history_when_persisted_repla
     prepared = prepared_run.prepared_history
     assert prepared_agent is live_agent
     assert prepared.replays_persisted_history is False
-    assert full_prompt == "alice: Earlier context\n\nbob: More context\n\nCurrent prompt"
+    assert [message.content for message in prepared_run.messages] == [
+        "alice: Earlier context",
+        "bob: More context",
+        "Retrieved memory for this turn",
+        "Current prompt",
+    ]
+    assert [message.add_to_agent_memory for message in prepared_run.messages] == [True, True, False, True]
+    assert full_prompt == (
+        "alice: Earlier context\n\nbob: More context\n\nRetrieved memory for this turn\n\nCurrent prompt"
+    )
 
 
 @pytest.mark.asyncio
