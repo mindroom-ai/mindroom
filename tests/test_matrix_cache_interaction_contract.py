@@ -182,10 +182,15 @@ def _edit_source(
     )
 
 
-def _sync_response(events: Sequence[nio.Event], *, room_id: str = _ROOM_ID) -> _SyncEnvelope:
+def _sync_response(
+    events: Sequence[nio.Event],
+    *,
+    room_id: str = _ROOM_ID,
+    limited: bool = False,
+) -> _SyncEnvelope:
     return _SyncEnvelope(
         rooms=_SyncRooms(
-            join={room_id: _RoomSync(timeline=_Timeline(events=list(events)))},
+            join={room_id: _RoomSync(timeline=_Timeline(events=list(events), limited=limited))},
         ),
     )
 
@@ -1057,6 +1062,30 @@ async def test_opaque_encrypted_thread_child_leaves_only_its_thread_stale(
     other_state = await event_cache.get_thread_cache_state(_ROOM_ID, _OTHER_THREAD_ID)
     assert other_state is not None
     assert thread_cache_rejection_reason(other_state) is None
+
+
+@pytest.mark.asyncio
+async def test_limited_sync_with_opaque_child_preserves_both_fail_closed_reasons(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A partial encrypted window must retain its room gap and opaque-thread evidence."""
+    await _seed_thread(event_cache)
+    opaque_child = _encrypted_source("$opaque-child", timestamp=60, relation=_thread_relation())
+
+    result = await _build_sync_harness(event_cache).policy.cache_sync_timeline_for_certification(
+        cast("nio.SyncResponse", _sync_response([raw_nio_event(opaque_child)], limited=True)),
+    )
+
+    assert result.complete is False
+    assert result.limited_room_ids == (_ROOM_ID,)
+    assert result.errors == ()
+    assert await event_cache.get_event(_ROOM_ID, "$opaque-child") == opaque_child
+    assert await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID) is not None
+    state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    assert state is not None
+    assert state.invalidation_reason == "sync_opaque_encrypted_event"
+    assert state.room_invalidation_reason == "limited_sync_timeline"
+    assert thread_cache_rejection_reason(state) is not None
 
 
 @pytest.mark.asyncio
