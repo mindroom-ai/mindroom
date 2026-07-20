@@ -53,6 +53,8 @@ _EVENT_CACHE_TABLES = (
 _REQUIRED_EVENT_CACHE_TABLES = frozenset(_EVENT_CACHE_TABLES)
 _DEFAULT_PRINCIPAL_ID = "__mindroom_default_principal__"
 _PRINCIPAL_PURGE_LOCK_SCOPE = "__mindroom_principal_purge__"
+_DEFAULT_BUSY_TIMEOUT = "PRAGMA busy_timeout=5000"
+_FAIL_FAST_BUSY_TIMEOUT = "PRAGMA busy_timeout=0"
 _T = TypeVar("_T")
 
 
@@ -95,6 +97,15 @@ async def _rollback_sqlite_connection_best_effort(db: aiosqlite.Connection, *, o
         )
 
 
+async def _begin_immediate_read(db: aiosqlite.Connection) -> None:
+    """Reserve the writer without waiting, then restore the normal write timeout."""
+    await db.execute(_FAIL_FAST_BUSY_TIMEOUT)
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+    finally:
+        await db.execute(_DEFAULT_BUSY_TIMEOUT)
+
+
 async def _initialize_event_cache_db(
     db_path: Path,
 ) -> tuple[aiosqlite.Connection, CacheMaintenanceReport, str]:
@@ -103,7 +114,7 @@ async def _initialize_event_cache_db(
     db = await aiosqlite.connect(db_path)
     try:
         await db.execute("PRAGMA journal_mode=WAL")
-        await db.execute("PRAGMA busy_timeout=5000")
+        await db.execute(_DEFAULT_BUSY_TIMEOUT)
         await db.execute("BEGIN IMMEDIATE")
         (
             migrated_from_schema_version,
@@ -411,6 +422,7 @@ class _SqliteEventCacheRuntime:
         self._pending_principal_purges: set[str] = set()
         self._departed_rooms: set[tuple[str, str]] = set()
         self._room_departure_epochs: dict[tuple[str, str], int] = {}
+        self._read_contention_count = 0
 
     @property
     def db_path(self) -> Path:
@@ -446,6 +458,15 @@ class _SqliteEventCacheRuntime:
     def certification_generation(self) -> str | None:
         """Return the durable generation bound to certified sync checkpoints."""
         return self._certification_generation
+
+    @property
+    def read_contention_count(self) -> int:
+        """Return the number of reads rejected because another writer owned storage."""
+        return self._read_contention_count
+
+    def record_read_contention(self) -> None:
+        """Record one fail-closed read miss caused by SQLite lock contention."""
+        self._read_contention_count += 1
 
     def disable(self, reason: str) -> None:
         """Disable the advisory cache for the rest of the runtime."""
@@ -638,6 +659,7 @@ class SqliteEventCache:
                 self.principal_id,
             ),
             "cache_sqlite_departed_room_count": len(self._runtime.departed_room_ids(self.principal_id)),
+            "cache_sqlite_read_contention_count": self._runtime.read_contention_count,
             "cache_certification_generation_present": self.cache_generation is not None,
         }
         if self._runtime.disabled_reason is not None:
@@ -700,7 +722,7 @@ class SqliteEventCache:
                 return disabled_result
             pending_principal_purge = self._runtime.has_pending_principal_purge(self.principal_id)
             try:
-                await db.execute("BEGIN IMMEDIATE")
+                await _begin_immediate_read(db)
                 if pending_principal_purge:
                     await sqlite_event_cache_events.purge_principal_locked(
                         db,
@@ -718,6 +740,7 @@ class SqliteEventCache:
             except sqlite3.OperationalError as exc:
                 await _rollback_sqlite_connection_best_effort(db, operation=operation)
                 if _is_sqlite_lock_contention(exc):
+                    self._runtime.record_read_contention()
                     return disabled_result
                 raise
             except BaseException:

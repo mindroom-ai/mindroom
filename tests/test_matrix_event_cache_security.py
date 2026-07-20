@@ -324,12 +324,19 @@ async def test_sqlite_lock_contention_quarantines_then_heals_principal(tmp_path:
     try:
         await replace_thread_unconditionally(alice, room_id, thread_id, [alice_event])
         await bob.store_event("$bob", room_id, bob_event)
-        await root._runtime.require_db().execute("PRAGMA busy_timeout=0")
+        db = root._runtime.require_db()
         blocker = sqlite3.connect(root.db_path, timeout=0)
         blocker.execute("BEGIN IMMEDIATE")
         try:
-            readable_state = await alice.get_thread_cache_state(room_id, thread_id)
+            readable_state = await asyncio.wait_for(
+                alice.get_thread_cache_state(room_id, thread_id),
+                timeout=0.5,
+            )
             assert readable_state is None
+            timeout_cursor = await db.execute("PRAGMA busy_timeout")
+            assert await timeout_cursor.fetchone() == (5000,)
+            await timeout_cursor.close()
+            await db.execute("PRAGMA busy_timeout=0")
             await mark_thread_stale_fail_closed(
                 alice,
                 room_id=room_id,
@@ -344,6 +351,7 @@ async def test_sqlite_lock_contention_quarantines_then_heals_principal(tmp_path:
         diagnostics = alice.runtime_diagnostics()
         assert diagnostics["cache_sqlite_principal_disabled"] is False
         assert diagnostics["cache_sqlite_pending_principal_purge"] is True
+        assert diagnostics["cache_sqlite_read_contention_count"] == 1
         assert alice.durable_writes_available is False
         assert alice.cache_generation is None
 
