@@ -36,6 +36,7 @@ from mindroom.history.storage import (
     update_scope_seen_event_ids,
 )
 from mindroom.history.types import HistoryScope, PreparedHistoryState
+from mindroom.hooks import render_transient_context
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
@@ -423,7 +424,7 @@ async def test_prepare_agent_and_prompt_uses_thread_history_and_transient_memory
     assert [message.content for message in prepared_run.messages] == [
         render_msg_tag(sender="alice", body="Earlier context", event_id="$earlier"),
         render_msg_tag(sender="bob", body="More context", event_id="$more"),
-        "Retrieved memory for this turn",
+        render_transient_context(("Retrieved memory for this turn",)),
         "Current prompt",
     ]
     assert [message.add_to_agent_memory for message in prepared_run.messages] == [True, True, False, True]
@@ -431,7 +432,7 @@ async def test_prepare_agent_and_prompt_uses_thread_history_and_transient_memory
         (
             render_msg_tag(sender="alice", body="Earlier context", event_id="$earlier"),
             render_msg_tag(sender="bob", body="More context", event_id="$more"),
-            "Retrieved memory for this turn",
+            render_transient_context(("Retrieved memory for this turn",)),
             "Current prompt",
         ),
     )
@@ -890,14 +891,14 @@ async def test_prepare_agent_and_prompt_keeps_transient_memory_out_of_replay_and
     session_preamble = "[File memory entrypoint (agent)]\nStable MEMORY.md"
     assert [message["content"] for message in recorded_requests[0]] == [
         session_preamble,
-        "turn context one",
+        render_transient_context(("turn context one",)),
         "First prompt",
     ]
     assert [message["content"] for message in second_request] == [
         session_preamble,
         "First prompt",
         "ok",
-        "turn context two",
+        render_transient_context(("turn context two",)),
         "Second prompt",
     ]
     assert [message["content"] for message in third_request] == [
@@ -906,7 +907,7 @@ async def test_prepare_agent_and_prompt_keeps_transient_memory_out_of_replay_and
         "ok",
         "Second prompt",
         "ok",
-        "turn context three",
+        render_transient_context(("turn context three",)),
         "Third prompt",
     ]
     assert third_request[-2]["add_to_agent_memory"] is False
@@ -1019,7 +1020,7 @@ async def test_prepare_agent_and_prompt_timestamps_current_turn_without_duplicat
     assert stable_serialize(second_request[:-2]) == stable_serialize(third_request[: len(second_request) - 2])
     assert third_request[-2] == {
         "role": "user",
-        "content": "turn context three",
+        "content": render_transient_context(("turn context three",)),
         "add_to_agent_memory": False,
     }
     assert third_request[-1]["content"] == (

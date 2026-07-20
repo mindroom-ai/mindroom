@@ -12076,7 +12076,8 @@ The `message:enrich` event injects structured context into the current turn and 
     </mindroom_message_context>
     ```
 
-3. **AI sees it**: The model receives persisted items in the current user message and all `persist=False` items in one separate non-persisted user-context message immediately before it.
+3. **AI sees it**: The model receives persisted items in the current user message and all `persist=False` items in one separate non-persisted current-turn context message.
+For Claude requests, MindRoom places that transient block after the cacheable user content so the growing conversation prefix remains reusable.
 4. **Replay sees persisted items**: MindRoom keeps only persisted enrichment in session history.
 
 ### Enrichment policy

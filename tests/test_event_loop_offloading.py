@@ -18,6 +18,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.history.types import PreparedHistoryState
+from mindroom.hooks import render_transient_context
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory._file_backend import FileMemoryBackend
 from tests.conftest import bind_runtime_paths, make_turn_context, test_runtime_paths
@@ -138,7 +139,7 @@ async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_h
         assert kwargs["agent"] is built_agent
         assert kwargs["prompt"] == "raw prompt\n\nmodel metadata"
         assert len(kwargs["transient_context_messages"]) == 1
-        assert kwargs["transient_context_messages"][0].content == "turn memory"
+        assert kwargs["transient_context_messages"][0].content == render_transient_context(("turn memory",))
         assert kwargs["transient_context_messages"][0].add_to_agent_memory is False
         assert kwargs["resolved_runtime_model"].model_name == "default"
         return SimpleNamespace(

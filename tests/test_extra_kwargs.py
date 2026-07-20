@@ -34,6 +34,7 @@ from mindroom.claude_prompt_cache import (
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.hooks import render_transient_context
 from mindroom.model_loading import get_model_instance
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude, _strip_vertex_claude_tool_strict
@@ -759,30 +760,48 @@ def test_prompt_cache_ladder_marks_newest_tool_result_prior_user_and_tools() -> 
     assert _count_cache_markers(prepared) == _MAX_CACHE_MARKERS
 
 
-def test_prompt_cache_ladder_keeps_transient_context_in_current_turn_suffix() -> None:
-    """Transient context must not split the stable history cache prefix."""
-    transient_context = "<mindroom_message_context>Current location: Amsterdam</mindroom_message_context>"
-    chat_messages, _system_message = format_messages(
+def test_prompt_cache_ladder_preserves_adjacent_turn_prefix_with_transient_context() -> None:
+    """Transient context must follow the cacheable user block across turns."""
+    transient_context = render_transient_context(
+        ("<mindroom_message_context>Current location: Amsterdam</mindroom_message_context>",),
+    )
+    first_turn_messages, _system_message = format_messages(
         [
-            Message(role="user", content="Earlier question"),
-            Message(role="assistant", content="Earlier answer"),
             Message(role="user", content=transient_context, add_to_agent_memory=False),
-            Message(role="user", content="Current question"),
+            Message(role="user", content="Question one"),
         ],
     )
-    request_kwargs = {
+    second_turn_messages, _system_message = format_messages(
+        [
+            Message(role="user", content="Question one"),
+            Message(role="assistant", content="Answer one"),
+            Message(role="user", content=transient_context, add_to_agent_memory=False),
+            Message(role="user", content="Question two"),
+        ],
+    )
+    first_request = {
         "system": [{"type": "text", "text": "Stable system", "cache_control": {"type": "ephemeral"}}],
-        "messages": chat_messages,
+        "messages": first_turn_messages,
+    }
+    second_request = {
+        "system": [{"type": "text", "text": "Stable system", "cache_control": {"type": "ephemeral"}}],
+        "messages": second_turn_messages,
     }
 
-    prepared = _request_kwargs_with_prompt_cache_ladder(request_kwargs, _prompt_cache_control())
+    first_prepared = _request_kwargs_with_prompt_cache_ladder(first_request, _prompt_cache_control())
+    second_prepared = _request_kwargs_with_prompt_cache_ladder(second_request, _prompt_cache_control())
 
-    current_turn = prepared["messages"][-1]
-    assert [block["text"] for block in current_turn["content"]] == [transient_context, "Current question"]
-    assert "cache_control" not in current_turn["content"][0]
-    assert current_turn["content"][1]["cache_control"] == {"type": "ephemeral"}
-    assert prepared["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
-    assert prepared["system"][0]["cache_control"] == {"type": "ephemeral"}
+    first_current_turn = first_prepared["messages"][0]
+    second_replayed_turn = second_prepared["messages"][0]
+    second_current_turn = second_prepared["messages"][-1]
+
+    assert [block["text"] for block in first_current_turn["content"]] == ["Question one", transient_context]
+    assert first_current_turn["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in first_current_turn["content"][1]
+    assert first_current_turn["content"][:1] == second_replayed_turn["content"]
+    assert [block["text"] for block in second_current_turn["content"]] == ["Question two", transient_context]
+    assert second_current_turn["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in second_current_turn["content"][1]
 
 
 def test_prompt_cache_ladder_does_not_double_count_existing_message_markers() -> None:

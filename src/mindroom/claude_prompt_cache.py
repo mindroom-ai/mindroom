@@ -52,6 +52,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.hooks.enrichment import is_transient_context
 from mindroom.llm_request_logging import record_llm_request_tools
 from mindroom.model_defaults import TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES
 from mindroom.model_instance_checks import isinstance_of_loaded
@@ -125,6 +126,11 @@ def _block_has_cache_marker(block: object) -> bool:
     return block_dict is not None and block_dict.get("cache_control") is not None
 
 
+def _is_transient_context_block(block: object) -> bool:
+    block_dict = _as_dict(block)
+    return block_dict is not None and block_dict.get("type") == "text" and is_transient_context(block_dict.get("text"))
+
+
 def _is_markable_block(block: object) -> bool:
     """Return whether a wire-format content block may carry cache_control."""
     block_dict = _as_dict(block)
@@ -136,10 +142,31 @@ def _is_markable_block(block: object) -> bool:
     if block_type not in _MARKABLE_BLOCK_TYPES:
         return False
     if block_type == "text":
-        return bool(block_dict.get("text"))
+        return bool(block_dict.get("text")) and not _is_transient_context_block(block)
     if block_type == "tool_result":
         return bool(block_dict.get("content"))
     return True
+
+
+def _move_transient_context_to_user_suffix(messages: list[Any]) -> list[Any]:
+    """Move generated transient context after cacheable content in each user turn."""
+    prepared_messages = list(messages)
+    for message_index, message in enumerate(prepared_messages):
+        message_dict = _as_dict(message)
+        content = message_dict.get("content") if message_dict is not None else None
+        if message_dict is None or message_dict.get("role") != "user" or not isinstance(content, list):
+            continue
+        transient_blocks = [block for block in content if _is_transient_context_block(block)]
+        if not transient_blocks:
+            continue
+        durable_blocks = [block for block in content if not _is_transient_context_block(block)]
+        reordered_content = [*durable_blocks, *transient_blocks]
+        if reordered_content == content:
+            continue
+        prepared_message = dict(message_dict)
+        prepared_message["content"] = reordered_content
+        prepared_messages[message_index] = prepared_message
+    return prepared_messages
 
 
 def _count_cache_markers(request_kwargs: dict[str, Any]) -> int:
@@ -424,10 +451,17 @@ def _request_kwargs_with_prompt_cache_ladder(
     cache_control: dict[str, str],
 ) -> dict[str, Any]:
     """Return request kwargs with ladder breakpoints added within the API budget."""
-    marker_budget = _MAX_CACHE_MARKERS - _count_cache_markers(request_kwargs)
+    prepared_kwargs = request_kwargs
+    messages = request_kwargs.get("messages")
+    if isinstance(messages, list) and messages:
+        reordered_messages = _move_transient_context_to_user_suffix(messages)
+        if reordered_messages != messages:
+            prepared_kwargs = {**request_kwargs, "messages": reordered_messages}
+
+    marker_budget = _MAX_CACHE_MARKERS - _count_cache_markers(prepared_kwargs)
     if marker_budget <= 0:
-        return request_kwargs
-    prepared_kwargs = dict(request_kwargs)
+        return prepared_kwargs
+    prepared_kwargs = dict(prepared_kwargs)
 
     messages = prepared_kwargs.get("messages")
     if isinstance(messages, list) and messages:

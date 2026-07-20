@@ -57,7 +57,7 @@ from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import PreparedHistoryState
-from mindroom.hooks import EnrichmentItem, render_enrichment_block
+from mindroom.hooks import EnrichmentItem, render_enrichment_block, render_transient_context
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.llm_request_logging import install_llm_request_logging, stream_with_llm_request_log_context
@@ -752,7 +752,7 @@ class TestUserIdPassthrough:
         transient_messages = mock_prepare_execution.await_args.kwargs["transient_context_messages"]
         assert len(transient_messages) == 1
         assert transient_messages[0].role == "user"
-        assert transient_messages[0].content == "turn context"
+        assert transient_messages[0].content == render_transient_context(("turn context",))
         assert transient_messages[0].add_to_agent_memory is False
         assert mock_agent.additional_context == "existing context\n\nsession preamble\n\nsystem enrichment"
 

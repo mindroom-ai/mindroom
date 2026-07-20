@@ -62,7 +62,7 @@ from mindroom.history.runtime import (
     resolve_bound_team_scope_context,
 )
 from mindroom.history.storage import update_scope_seen_event_ids
-from mindroom.hooks import render_enrichment_block, render_system_enrichment_block
+from mindroom.hooks import render_enrichment_block, render_system_enrichment_block, render_transient_context
 from mindroom.knowledge import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
 from mindroom.llm_request_logging import (
     bind_llm_request_log_context,
@@ -1857,7 +1857,9 @@ async def prepare_materialized_team_execution(
         _append_additional_context(team, rendered_system_context)
         for agent in agents:
             _append_additional_context(agent, rendered_system_context)
-    transient_turn_context = render_enrichment_block(list(ctx.transient_enrichment_items))
+    transient_turn_context = render_transient_context(
+        (render_enrichment_block(list(ctx.transient_enrichment_items)),),
+    )
     prepared_execution = await prepare_bound_team_run_context(
         ctx,
         scope_context=scope_context,

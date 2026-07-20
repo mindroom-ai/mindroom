@@ -14,6 +14,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.hooks import render_transient_context
 from mindroom.memory import MemoryPromptParts
 from tests.conftest import make_turn_context
 from tests.identity_helpers import persist_entity_accounts
@@ -106,7 +107,7 @@ class TestMemoryIntegration:
             call_args = mock_agent_run.call_args[0]
             assert len(call_args[1]) == 2
             assert call_args[1][0].role == "user"
-            assert call_args[1][0].content == "[Enhanced memory] What is 2+2?"
+            assert call_args[1][0].content == render_transient_context(("[Enhanced memory] What is 2+2?",))
             assert call_args[1][0].add_to_agent_memory is False
             assert call_args[1][1].role == "user"
             assert call_args[1][1].content == "What is 2+2?"
