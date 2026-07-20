@@ -1,30 +1,26 @@
 """Tests for prepare_agent_and_prompt integration and native Agno history replay."""
-# ruff: noqa: D103, TC003
+# ruff: noqa: D103, TC002, TC003
 
 from __future__ import annotations
 
-import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.agent import Agent
 from agno.models.message import Message
-from agno.run.agent import RunInput, RunOutput
+from agno.run.agent import RunOutput
 from agno.session.summary import SessionSummary
-from agno.team import Team
 from defusedxml.ElementTree import fromstring
 
-from mindroom.agent_storage import create_session_storage, get_agent_session, get_team_session
+from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.agents import create_agent
 from mindroom.ai import _prepare_agent_and_prompt
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
-from mindroom.constants import MINDROOM_LOCATION_MARKER_METADATA_KEY
 from mindroom.execution_preparation import (
     _build_matrix_prompt_with_history,
     _PreparedExecutionContext,
@@ -34,7 +30,6 @@ from mindroom.history.prompt_tokens import (
     estimate_agent_static_tokens,
 )
 from mindroom.history.runtime import (
-    open_bound_scope_session_context,
     open_scope_session_context,
 )
 from mindroom.history.storage import (
@@ -42,14 +37,13 @@ from mindroom.history.storage import (
 )
 from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.memory import MemoryPromptParts
-from mindroom.teams import prepare_materialized_team_execution
+from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from tests.conftest import (
     FakeModel,
     bind_runtime_paths,
     make_turn_context,
     make_visible_message,
-    test_runtime_paths,
 )
 from tests.history_helpers import (  # noqa: F401
     _ALL_HISTORY_SETTINGS,
@@ -390,8 +384,8 @@ async def test_prepare_agent_and_prompt_uses_thread_history_and_transient_memory
     config, runtime_paths = _make_config(tmp_path)
     live_agent = _agent()
     thread_history = [
-        make_visible_message(sender="alice", body="Earlier context", event_id="$earlier"),
-        make_visible_message(sender="bob", body="More context", event_id="$more"),
+        make_visible_message(event_id="$earlier", sender="alice", body="Earlier context"),
+        make_visible_message(event_id="$more", sender="bob", body="More context"),
     ]
 
     with (
@@ -427,16 +421,19 @@ async def test_prepare_agent_and_prompt_uses_thread_history_and_transient_memory
     assert prepared_agent is live_agent
     assert prepared.replays_persisted_history is False
     assert [message.content for message in prepared_run.messages] == [
-        '<msg event_id="$earlier" from="alice"><![CDATA[Earlier context]]></msg>',
-        '<msg event_id="$more" from="bob"><![CDATA[More context]]></msg>',
+        render_msg_tag(sender="alice", body="Earlier context", event_id="$earlier"),
+        render_msg_tag(sender="bob", body="More context", event_id="$more"),
         "Retrieved memory for this turn",
         "Current prompt",
     ]
     assert [message.add_to_agent_memory for message in prepared_run.messages] == [True, True, False, True]
-    assert full_prompt == (
-        '<msg event_id="$earlier" from="alice"><![CDATA[Earlier context]]></msg>\n\n'
-        '<msg event_id="$more" from="bob"><![CDATA[More context]]></msg>\n\n'
-        "Retrieved memory for this turn\n\nCurrent prompt"
+    assert full_prompt == "\n\n".join(
+        (
+            render_msg_tag(sender="alice", body="Earlier context", event_id="$earlier"),
+            render_msg_tag(sender="bob", body="More context", event_id="$more"),
+            "Retrieved memory for this turn",
+            "Current prompt",
+        ),
     )
 
 
@@ -445,12 +442,12 @@ async def test_prepare_agent_and_prompt_caps_thread_fallback_to_active_window(tm
     config, runtime_paths = _make_config(
         tmp_path,
         defaults_compaction=CompactionConfig(reserve_tokens=0),
-        context_window=32,
+        context_window=16,
     )
     live_agent = _agent()
     thread_history = [
-        make_visible_message(sender="alice", body="Old context " + ("o" * 120), event_id="$old"),
-        make_visible_message(sender="bob", body="Recent context", event_id="$recent"),
+        make_visible_message(event_id="$old", sender="alice", body="Old context " + ("o" * 120)),
+        make_visible_message(event_id="$recent", sender="bob", body="Recent context"),
     ]
 
     class FakeAgentStaticTokenEstimator:
@@ -481,10 +478,8 @@ async def test_prepare_agent_and_prompt_caps_thread_fallback_to_active_window(tm
             thread_history=thread_history,
         )
 
-    assert prepared_run.prompt_text == (
-        '<msg event_id="$recent" from="bob"><![CDATA[Recent context]]></msg>\n\nCurrent prompt'
-    )
-    assert estimate_text_tokens(prepared_run.prompt_text) <= 32
+    assert prepared_run.prompt_text == "Current prompt"
+    assert estimate_text_tokens(prepared_run.prompt_text) <= 16
 
 
 @pytest.mark.asyncio
@@ -523,14 +518,17 @@ async def test_prepare_agent_and_prompt_uses_full_thread_fallback_for_threaded_m
             runtime_paths=runtime_paths,
             config=config,
             thread_history=thread_history,
+            current_event_id="$current",
         )
 
     assert prepared_run.prepared_history.replays_persisted_history is False
-    assert prepared_run.prompt_text == (
-        '<msg event_id="$root" from="@alice:localhost"><![CDATA[Original question]]></msg>\n\n'
-        '<msg event_id="$agent-reply" from="@bot:localhost"><![CDATA[Prior diagnosis]]></msg>\n\n'
-        "Current message:\n"
-        '<msg from="@alice:localhost"><![CDATA[What was that?]]></msg>'
+    assert prepared_run.prompt_text == "\n\n".join(
+        (
+            render_msg_tag(sender="@alice:localhost", body="Original question", event_id="$root"),
+            render_msg_tag(sender="@bot:localhost", body="Prior diagnosis", event_id="$agent-reply"),
+            "Current message:\n"
+            + render_msg_tag(sender="@alice:localhost", body="What was that?", event_id="$current"),
+        ),
     )
     assert "Later reaction" not in prepared_run.prompt_text
 
@@ -801,7 +799,11 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
 
     unseen_user_message = recording_model.seen_messages[-2]
     assert unseen_user_message.role == "user"
-    assert unseen_user_message.content == '<msg event_id="event-2" from="alice"><![CDATA[Fresh follow-up]]></msg>'
+    assert unseen_user_message.content == render_msg_tag(
+        sender="alice",
+        body="Fresh follow-up",
+        event_id="event-2",
+    )
 
     final_user_message = recording_model.seen_messages[-1]
     assert final_user_message.role == "user"
@@ -1016,252 +1018,7 @@ async def test_prepare_agent_and_prompt_timestamps_current_turn_without_duplicat
     }
     assert third_request[-1]["content"] == (
         'Current message:\n<msg from="@alice:localhost" ts="2026-03-20 08:17 PDT"><![CDATA['
-        "Third prompt]]></msg>\n\n"
-        "Available attachment IDs: att_3. Use tool calls to inspect or process them."
+        "Third prompt\n\n"
+        "Available attachment IDs: att_3. Use tool calls to inspect or process them.]]></msg>"
     )
     assert third_request[-1]["add_to_agent_memory"] is True
-
-
-_HOME_LOCATION_TEXT = "status: fresh\nlatitude: 52.3702\nlongitude: 4.8952\nnearby_place: Home\nat_home: true"
-_OFFICE_LOCATION_TEXT = (
-    _HOME_LOCATION_TEXT.replace("nearby_place: Home", "nearby_place: Office")
-    .replace("at_home: true", "at_home: false")
-    .replace("latitude: 52.3702", "latitude: 52.3800")
-)
-
-
-@pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_persists_location_markers_only_on_change(tmp_path: Path) -> None:
-    config, runtime_paths = _make_config(tmp_path, num_history_runs=10)
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    recording_model = RecordingModel(id="recording-model", provider="fake")
-    live_agent = _agent(model=recording_model, db=storage, num_history_runs=10)
-    recorded_requests: list[list[dict[str, object]]] = []
-    recorded_markers: list[str | None] = []
-
-    turns: list[tuple[str, str | None, str]] = [
-        ("First prompt", _HOME_LOCATION_TEXT, "$turn-1"),
-        ("Second prompt", _HOME_LOCATION_TEXT, "$turn-2"),
-        ("Third prompt", None, "$turn-3"),
-        ("Fourth prompt", _HOME_LOCATION_TEXT, "$turn-4"),
-        ("Fifth prompt", _OFFICE_LOCATION_TEXT, "$turn-5"),
-    ]
-
-    with (
-        patch("mindroom.ai.create_agent", return_value=live_agent),
-        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-    ):
-        for prompt, location_item_text, event_id in turns:
-            with open_scope_session_context(
-                agent=live_agent,
-                agent_name="test_agent",
-                session_id="session-1",
-                runtime_paths=runtime_paths,
-                config=config,
-                execution_identity=None,
-            ) as scope_context:
-                prepared_run = await _prepare_agent_and_prompt(
-                    make_turn_context(
-                        "test_agent",
-                        session_id="session-1",
-                        requester_id="@alice:localhost",
-                        location_item_text=location_item_text,
-                    ),
-                    prompt=prompt,
-                    runtime_paths=runtime_paths,
-                    config=config,
-                    scope_context=scope_context,
-                    current_event_id=event_id,
-                )
-            recorded_markers.append(prepared_run.location_marker)
-            # The ai layer merges the accepted marker into the run metadata that
-            # Agno persists with the run; mirror that seam here.
-            run_metadata = (
-                {MINDROOM_LOCATION_MARKER_METADATA_KEY: prepared_run.location_marker}
-                if prepared_run.location_marker is not None
-                else None
-            )
-            await prepared_run.agent.arun(prepared_run.run_input, session_id="session-1", metadata=run_metadata)
-            recorded_requests.append(
-                [
-                    {
-                        "content": str(message.content),
-                        "add_to_agent_memory": message.add_to_agent_memory,
-                    }
-                    for message in recording_model.seen_messages
-                ],
-            )
-
-    assert recorded_markers == ["📍 Home", None, None, None, "📍 52.3800, 4.8952"]
-
-    persisted = get_agent_session(storage, "session-1")
-    assert persisted is not None
-    replayed_contents = "\n".join(
-        str(message.content) for run in persisted.runs or [] for message in run.messages or []
-    )
-    assert replayed_contents.count("📍 Home") == 1
-    assert replayed_contents.count("📍 52.3800, 4.8952") == 1
-    # The marker is system-generated, so it stays outside the event-tagged
-    # CDATA that mirrors the wire body.
-    assert "📍 Home]]></msg>" not in replayed_contents
-    assert replayed_contents.count("]]></msg>\n\n📍") == 2
-    for turn_number in range(1, 6):
-        assert f'event_id="$turn-{turn_number}"' in replayed_contents
-    # The full location detail must not survive anywhere in the serialized
-    # session, including the persisted run input Agno captures.
-    serialized_session = json.dumps(persisted.to_dict(), ensure_ascii=False, default=str)
-    for full_detail_fragment in ("latitude", "longitude", "nearby_place", "at_home", "mindroom_message_context"):
-        assert full_detail_fragment not in serialized_session
-    assert "[Matrix metadata for tool calls]" not in serialized_session
-
-    for turn_index in (0, 1, 3, 4):
-        transient_message = recorded_requests[turn_index][-2]
-        assert transient_message["add_to_agent_memory"] is False
-        assert '<item key="location"' in cast("str", transient_message["content"])
-    assert all('<item key="location"' not in cast("str", message["content"]) for message in recorded_requests[2])
-
-    summary_input, _ = _build_summary_input(
-        previous_summary=None,
-        compacted_runs=list(persisted.runs or []),
-        max_input_tokens=100_000,
-        history_settings=_ALL_HISTORY_SETTINGS,
-    )
-    # The trusted marker metadata is omitted from compaction input, so each
-    # location delta appears exactly once, and never the full detail.
-    assert summary_input.count("📍 Home") == 1
-    assert summary_input.count("📍 52.3800, 4.8952") == 1
-    assert "latitude" not in summary_input
-    assert "nearby_place" not in summary_input
-    assert MINDROOM_LOCATION_MARKER_METADATA_KEY not in summary_input
-
-
-def test_session_storage_scrubs_transient_run_input(tmp_path: Path) -> None:
-    """Current-turn-only messages never survive in the persisted run input."""
-    config, runtime_paths = _make_config(tmp_path)
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    run = _completed_run(
-        "run-1",
-        messages=[
-            Message(role="user", content="user request"),
-            Message(role="assistant", content="assistant answer"),
-        ],
-    )
-    run.input = RunInput(
-        input_content=[
-            Message(role="user", content="user request"),
-            Message(role="user", content="latitude: 52.3702", add_to_agent_memory=False),
-        ],
-    )
-
-    storage.upsert_session(_session("session-1", runs=[run]))
-
-    persisted = get_agent_session(storage, "session-1")
-    assert persisted is not None
-    assert persisted.runs is not None
-    serialized = json.dumps(persisted.to_dict(), ensure_ascii=False, default=str)
-    assert "latitude" not in serialized
-    assert "user request" in serialized
-    # The caller's in-memory run keeps its live transient input untouched.
-    assert run.input is not None
-    assert isinstance(run.input.input_content, list)
-    assert len(run.input.input_content) == 2
-
-
-@pytest.mark.asyncio
-async def test_team_location_detail_stays_current_turn_only_in_durable_storage(tmp_path: Path) -> None:
-    """A real team run sees full location live while durable state keeps only the marker."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config.model_validate(
-            {
-                "agents": {
-                    "code": {"display_name": "CodeAgent", "role": "Write code"},
-                    "research": {"display_name": "ResearchAgent", "role": "Do research"},
-                },
-                "models": {"default": {"provider": "ollama", "id": "test-model"}},
-            },
-        ),
-        runtime_paths,
-    )
-    persist_entity_accounts(config, runtime_paths)
-    team_model = RecordingModel(id="team-recording-model", provider="fake")
-    member_agents = [
-        Agent(id="code", name="CodeAgent", model=FakeModel(id="fake-model", provider="fake")),
-        Agent(id="research", name="ResearchAgent", model=FakeModel(id="fake-model", provider="fake")),
-    ]
-
-    with open_bound_scope_session_context(
-        agents=member_agents,
-        session_id="session-1",
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=None,
-    ) as scope_context:
-        assert scope_context is not None
-        team = Team(
-            id="team-code-research",
-            name="Code + Research",
-            members=member_agents,
-            model=team_model,
-            db=scope_context.storage,
-            store_history_messages=False,
-        )
-        prepared = await prepare_materialized_team_execution(
-            make_turn_context(
-                "team-code-research",
-                session_id="session-1",
-                requester_id="@alice:localhost",
-                current_event_id="$turn-1",
-                location_item_text=_HOME_LOCATION_TEXT,
-            ),
-            scope_context=scope_context,
-            agents=member_agents,
-            team=team,
-            message="Where am I?",
-            thread_history=[],
-            config=config,
-            runtime_paths=runtime_paths,
-            runtime_model=config.resolve_runtime_model(entity_name=None),
-            response_sender_id="@mindroom_code:localhost",
-            current_sender_id="@alice:localhost",
-            configured_team_name=None,
-        )
-
-        assert prepared.location_marker == "📍 Home"
-        assert prepared.run_metadata is not None
-        assert prepared.run_metadata[MINDROOM_LOCATION_MARKER_METADATA_KEY] == "📍 Home"
-        flattened_input = prepared.prepared_prompt
-        assert "📍 Home" in flattened_input
-        assert "latitude" not in flattened_input
-
-        response = await team.arun(
-            flattened_input,
-            session_id="session-1",
-            metadata=prepared.run_metadata,
-        )
-        assert response is not None
-
-        # The live model saw the full detail through the volatile system tail.
-        live_system_messages = "\n".join(
-            str(message.content) for message in team_model.seen_messages if message.role == "system"
-        )
-        assert '<item key="location"' in live_system_messages
-        assert "latitude: 52.3702" in live_system_messages
-
-        persisted = get_team_session(cast("Any", scope_context.storage), "session-1")
-        assert persisted is not None
-        serialized_session = json.dumps(persisted.to_dict(), ensure_ascii=False, default=str)
-        # Durable team state keeps only the short marker: no coordinates, no
-        # enrichment markup, in the team run, member responses, or run input.
-        for full_detail_fragment in (
-            "latitude",
-            "longitude",
-            "nearby_place",
-            "at_home",
-            "mindroom_message_context",
-        ):
-            assert full_detail_fragment not in serialized_session
-        replayed_contents = "\n".join(
-            str(message.content) for run in persisted.runs or [] for message in run.messages or []
-        )
-        assert replayed_contents.count("📍 Home") == 1

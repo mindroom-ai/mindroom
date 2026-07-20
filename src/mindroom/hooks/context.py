@@ -437,9 +437,10 @@ class MessageEnrichContext(HookContext):
         text: str,
         *,
         cache_policy: EnrichmentCachePolicy = "volatile",
+        persist: bool = True,
     ) -> None:
         """Append one enrichment item for this hook."""
-        self._items.append(EnrichmentItem(key=key, text=text, cache_policy=cache_policy))
+        self._items.append(EnrichmentItem(key=key, text=text, cache_policy=cache_policy, persist=persist))
 
 
 @dataclass(slots=True)

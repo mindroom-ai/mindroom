@@ -28,7 +28,6 @@ from mindroom.delivery_gateway import (
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.hooks import MessageEnvelope, ResponseDraft
 from mindroom.logging_config import get_logger, setup_logging
-from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from tests.conftest import (
@@ -528,13 +527,7 @@ async def test_delivery_gateway_deliver_final_uses_send_text_for_new_messages(tm
     parsed.options_list = None
 
     with (
-        patch.object(
-            DeliveryGateway,
-            "_send_text_delivered",
-            new=AsyncMock(
-                return_value=DeliveredMatrixEvent(event_id="$response", content_sent={"body": "formatted response"}),
-            ),
-        ) as mock_send_text,
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$response")) as mock_send_text,
         patch("mindroom.delivery_gateway.interactive.parse_and_format_interactive", return_value=parsed),
     ):
         result = await gateway.deliver_final(
@@ -576,13 +569,7 @@ async def test_delivery_gateway_deliver_final_uses_edit_text_for_existing_messag
     parsed.options_list = None
 
     with (
-        patch.object(
-            DeliveryGateway,
-            "_edit_text_delivered",
-            new=AsyncMock(
-                return_value=DeliveredMatrixEvent(event_id="$existing", content_sent={"body": "formatted response"}),
-            ),
-        ) as mock_edit_text,
+        patch.object(DeliveryGateway, "edit_text", new=AsyncMock(return_value=True)) as mock_edit_text,
         patch("mindroom.delivery_gateway.interactive.parse_and_format_interactive", return_value=parsed),
     ):
         result = await gateway.deliver_final(

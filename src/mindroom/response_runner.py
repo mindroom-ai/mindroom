@@ -14,37 +14,30 @@ from agno.session.team import TeamSession
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
-from mindroom.ai import (
-    ResponseTurnContext,
-    ai_response,
-    build_matrix_run_metadata,
-    model_prompt_tail_after_raw_prompt,
-    stream_agent_response,
-)
+from mindroom.ai import ResponseTurnContext, ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
 from mindroom.background_tasks import create_background_task
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
+    ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
-from mindroom.entity_resolution import (
-    current_internal_sender_ids,
-    entity_identity_registry,
-    prepared_entity_user_ids,
-)
+from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.storage import has_pending_force_compaction_scope, read_scope_state
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem
+from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.presence import should_use_streaming
 from mindroom.matrix.typing import typing_indicator
 from mindroom.memory import (
     mark_auto_flush_dirty_session,
     reprioritize_auto_flush_sessions,
     store_conversation_memory,
+    strip_user_turn_time_prefix,
 )
 from mindroom.orchestration.runtime import (
     cancel_failure_reason,
@@ -73,11 +66,11 @@ from mindroom.streaming import (
 from mindroom.sync_restart_retry import interrupted_source_needs_retry
 from mindroom.teams import TeamMode, select_model_for_team, team_response, team_response_stream
 from mindroom.thread_summary import thread_summary_message_count_hint
-from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import ToolDispatchContext, runtime_context_from_dispatch_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity, stream_with_tool_execution_identity
+from mindroom.user_turn_time import prefix_user_turn_time
 
 from .delivery_gateway import (
     CancelledVisibleNoteRequest,
@@ -183,19 +176,8 @@ def _materialize_matrix_run_metadata(
 
 
 def _agent_has_matrix_messaging_tool(config: Config, agent_name: str, session_id: str | None) -> bool:
-    """Return whether one agent can issue Matrix message actions this turn.
-
-    Authored deferred tools count even while unloaded: a same-turn
-    ``load_tool`` call can expose ``matrix_message`` in a dynamic
-    continuation, and the stable target context must already be in place.
-    Unknown or unresolvable entity names (router placeholder, raw usernames
-    from a registry miss, team names) degrade to False instead of raising.
-    """
+    """Return whether one agent can issue Matrix message actions."""
     try:
-        if any(
-            entry.name == "matrix_message" for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs
-        ):
-            return True
         surface = visible_tool_surface(
             agent_name=agent_name,
             config=config,
@@ -207,7 +189,7 @@ def _agent_has_matrix_messaging_tool(config: Config, agent_name: str, session_id
     return "matrix_message" in {entry.name for entry in surface.runtime_tool_configs}
 
 
-_MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY = "matrix_message_target"
+_MATRIX_MESSAGE_TARGET_KEY = "matrix_message_target"
 
 
 def _matrix_message_target_item(
@@ -215,46 +197,94 @@ def _matrix_message_target_item(
     *,
     matrix_message_available: bool,
 ) -> EnrichmentItem | None:
-    """Build the stable Matrix-target system context when matrix_message is available."""
+    """Build stable Matrix targeting context when the tool is available."""
     if not matrix_message_available:
         return None
     thread_id = target.resolved_thread_id
-    if thread_id:
+    if thread_id is None:
         text = (
-            f"You are responding in Matrix room {target.room_id}, in thread {thread_id}. "
-            "When calling matrix_message here, use this `room_id` and `thread_id`, and pass the "
-            "current or selected <msg event_id> as `target` when reacting to or editing that message."
+            f"You are responding in Matrix room {target.room_id}, outside any thread. "
+            "When calling matrix_message here, use this room_id and do not pass thread_id."
         )
     else:
         text = (
-            f"You are responding in Matrix room {target.room_id}, outside any thread. "
-            "When calling matrix_message here, use this `room_id` and do not pass `thread_id`; pass a "
-            "<msg event_id> as `target` when reacting to or editing that message."
+            f"You are responding in Matrix room {target.room_id}, in thread {thread_id}. "
+            "When calling matrix_message here, use this room_id and thread_id."
         )
-    return EnrichmentItem(key=_MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY, cache_policy="stable", text=text)
+    text += " Use a current or selected <msg event_id> as target for reactions and edits."
+    return EnrichmentItem(
+        key=_MATRIX_MESSAGE_TARGET_KEY,
+        text=text,
+        cache_policy="stable",
+    )
 
 
-def _with_matrix_target_item(
+def _with_matrix_message_target(
     items: Sequence[EnrichmentItem],
-    matrix_target_item: EnrichmentItem | None,
-    *,
-    logger: structlog.stdlib.BoundLogger,
+    target_item: EnrichmentItem | None,
 ) -> tuple[EnrichmentItem, ...]:
-    """Return system enrichment with exactly one runner-owned Matrix target item.
+    """Replace any hook-provided Matrix target with runtime-owned context."""
+    if target_item is None:
+        return tuple(items)
+    return (*(item for item in items if item.key != _MATRIX_MESSAGE_TARGET_KEY), target_item)
 
-    ``matrix_message_target`` is a reserved key: hook-provided collisions are
-    dropped so the model never sees two authoritative target instructions.
-    """
-    items = tuple(items)
-    kept = tuple(item for item in items if item.key != _MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY)
-    if len(kept) != len(items):
-        logger.warning(
-            "Dropping hook-provided reserved matrix_message_target enrichment",
-            dropped_items=len(items) - len(kept),
+
+def _timestamp_thread_history_user_turns(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[ResolvedVisibleMessage]:
+    """Add local timestamps to user-authored thread history entries."""
+    timestamped_history: list[ResolvedVisibleMessage] = []
+    registry = entity_identity_registry(config, runtime_paths)
+    for message in thread_history:
+        is_user_turn = (
+            isinstance(message.content.get(ORIGINAL_SENDER_KEY), str)
+            or registry.current_entity_name_for_user_id(message.sender) is None
         )
-    if matrix_target_item is None:
-        return kept
-    return (*kept, matrix_target_item)
+        if not is_user_turn:
+            timestamped_history.append(message)
+            continue
+
+        timestamped_body = prefix_user_turn_time(
+            message.body,
+            timezone=config.timezone,
+            timestamp_ms=message.timestamp,
+        )
+        timestamped_history.append(replace_visible_message(message, body=timestamped_body))
+    return timestamped_history
+
+
+def prepare_memory_and_model_context(
+    prompt: str,
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    model_prompt: str | None = None,
+) -> tuple[str, Sequence[ResolvedVisibleMessage], str, list[ResolvedVisibleMessage]]:
+    """Return raw memory inputs alongside timestamped model-facing context."""
+    model_prompt_content = model_prompt or prompt
+    if model_prompt is not None and prompt:
+        normalized_model_prompt = model_prompt.strip()
+        normalized_prompt = prompt.strip()
+        normalized_model_prompt_without_time = strip_user_turn_time_prefix(normalized_model_prompt)
+        if (
+            normalized_model_prompt == normalized_prompt
+            or normalized_model_prompt.startswith(f"{normalized_prompt}\n\n")
+            or normalized_model_prompt_without_time == normalized_prompt
+            or normalized_model_prompt_without_time.startswith(f"{normalized_prompt}\n\n")
+        ):
+            model_prompt_content = model_prompt
+        else:
+            model_prompt_content = f"{prompt}\n\n{model_prompt}"
+    model_thread_history = _timestamp_thread_history_user_turns(
+        thread_history,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    return prompt, thread_history, model_prompt_content, model_thread_history
 
 
 @dataclass(frozen=True)
@@ -273,16 +303,10 @@ class ResponseRequest:
     correlation_id: str | None = None
     matrix_run_metadata: Mapping[str, Any] | None = None
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
-    location_item_text: str | None = None
     requires_model_history_refresh: bool = False
     scheduled_history_budget: ScheduledHistoryBudget | None = None
     payload_preparation: ResponsePayloadPreparation | None = None
     current_timestamp_ms: float | None = None
-    # The Matrix event the current prompt resolves from (original body,
-    # accepted edit, or transcription); None for
-    # synthetic prompts (interactive selections, continuations) and structured
-    # batches whose children carry their own event identity.
-    current_event_id: str | None = None
     current_prompt_is_structured: bool = False
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
     prepare_source_turn: Callable[[], bool] | None = None
@@ -540,24 +564,11 @@ class ResponseRunner:
         *,
         user_message: str,
         reply_to_event_id: str | None,
-        current_event_id: str | None,
-        current_message_suffix: str = "",
-        current_timestamp_ms: float | None = None,
         requester_id: str | None,
         matrix_run_metadata: dict[str, Any] | None,
     ) -> TurnRecorder:
         """Create one lifecycle-owned recorder seeded with canonical Matrix metadata."""
-        current_turn_ts = (
-            format_timestamp_ms(current_timestamp_ms, timezone=self.deps.runtime.config.timezone)
-            if current_event_id is not None and current_timestamp_ms is not None
-            else None
-        )
-        recorder = TurnRecorder(
-            user_message=user_message,
-            current_event_id=current_event_id,
-            current_message_suffix=current_message_suffix,
-            current_turn_ts=current_turn_ts,
-        )
+        recorder = TurnRecorder(user_message=user_message)
         recorder.set_run_metadata(
             build_matrix_run_metadata(
                 reply_to_event_id,
@@ -594,6 +605,7 @@ class ResponseRunner:
                 run_id=recorder.run_id or run_id or str(uuid4()),
                 snapshot=recorder.interrupted_snapshot(),
                 is_team=is_team,
+                response_sender_id=self.deps.matrix_full_id,
             )
         finally:
             storage.close()
@@ -652,29 +664,14 @@ class ResponseRunner:
             name="persist_interrupted_recorder",
             owner=self.deps.runtime,
         )
-        pending_cancel: asyncio.CancelledError | None = None
-        while not offload.done():
-            try:
-                await asyncio.shield(offload)
-            except asyncio.CancelledError as error:
-                if offload.cancelled():
-                    raise
-                # The worker rewrites a whole session row; a second cancel must
-                # not let it run detached where it could race the post-delivery
-                # linkage wrap of the same session.
-                pending_cancel = error
-            except Exception:  # noqa: S110 - surfaced via offload.result() below
-                pass
         try:
-            offload.result()
+            await asyncio.shield(offload)
         except Exception:
             # A snapshot-persist failure (e.g. sqlite locked) must not escape into
             # the streaming error arms: they classify the adopted placeholder as
             # pristine and would redact an already-delivered visible reply. Losing
             # the replay snapshot is the lesser harm.
             self.deps.logger.exception("Failed to persist interrupted replay state")
-        if pending_cancel is not None:
-            raise pending_cancel
 
     def _record_stream_delivery_error(
         self,
@@ -856,15 +853,10 @@ class ResponseRunner:
         session_id: str,
         session_type: SessionType,
         create_storage: Callable[[], BaseDb],
-    ) -> Callable[[str, str, str | None, tuple[ToolTraceEntry, ...]], None]:
+    ) -> Callable[[str, str], None]:
         """Build the response-event persistence callback for one session-backed response."""
 
-        def persist_response_event_id(
-            run_id: str,
-            response_event_id: str,
-            delivered_visible_body: str | None,
-            delivered_body_tool_trace: tuple[ToolTraceEntry, ...],
-        ) -> None:
+        def persist_response_event_id(run_id: str, response_event_id: str) -> None:
             storage = create_storage()
             try:
                 self.deps.state_writer.persist_response_event_id_in_session_run(
@@ -874,8 +866,6 @@ class ResponseRunner:
                     run_id=run_id,
                     response_event_id=response_event_id,
                     response_sender_id=self.deps.matrix_full_id,
-                    delivered_visible_body=delivered_visible_body,
-                    delivered_body_tool_trace=delivered_body_tool_trace,
                 )
             finally:
                 storage.close()
@@ -1052,11 +1042,6 @@ class ResponseRunner:
                 runtime.session_id,
             ),
         )
-        enrichment_items = _with_matrix_target_item(
-            system_enrichment_items,
-            matrix_target_item,
-            logger=self.deps.logger,
-        )
         return ResponseTurnContext(
             entity_label=self.deps.agent_name,
             session_id=runtime.session_id,
@@ -1068,14 +1053,8 @@ class ResponseRunner:
             requester_id=request.user_id,
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
             active_event_ids=frozenset(active_event_ids),
-            system_enrichment_items=enrichment_items,
-            current_event_id=request.current_event_id,
-            location_item_text=request.location_item_text,
+            system_enrichment_items=_with_matrix_message_target(system_enrichment_items, matrix_target_item),
             scheduled_history_budget=request.scheduled_history_budget,
-            trusted_relay_sender_ids=prepared_entity_user_ids(
-                self.deps.runtime.config,
-                self.deps.runtime_paths,
-            ),
         )
 
     def _notify_sync_restart_cancelled(
@@ -1322,7 +1301,6 @@ class ResponseRunner:
                 event_id=final_delivery_outcome.final_visible_event_id,
                 is_visible_response=final_delivery_outcome.final_visible_event_id is not None,
                 final_visible_body=final_delivery_outcome.final_visible_body,
-                body_is_run_output=final_delivery_outcome.body_is_run_output,
                 failure_reason=failure_reason,
                 tool_trace=final_delivery_outcome.tool_trace,
                 extra_content=final_delivery_outcome.extra_content,
@@ -1570,9 +1548,14 @@ class ResponseRunner:
         request = prepared_request
         team_request = replace(team_request, request=request)
         requester_user_id = request.user_id or ""
-        team_message_suffix = model_prompt_tail_after_raw_prompt(
-            raw_prompt=request.prompt,
-            model_prompt=request.model_prompt,
+        _memory_prompt, _memory_thread_history, prepared_prompt, model_thread_history = (
+            prepare_memory_and_model_context(
+                request.prompt,
+                request.thread_history,
+                config=self.deps.runtime.config,
+                runtime_paths=self.deps.runtime_paths,
+                model_prompt=request.model_prompt,
+            )
         )
         model_name = select_model_for_team(
             self.deps.agent_name,
@@ -1602,7 +1585,11 @@ class ResponseRunner:
             ),
         )
         resolved_request = self._request_with_locked_target(
-            replace(request, media=request.media or MediaInputs()),
+            replace(
+                request,
+                thread_history=model_thread_history,
+                media=request.media or MediaInputs(),
+            ),
             resolved_target,
         )
         response_identity = self._response_identity(resolved_request, response_kind="team")
@@ -1658,11 +1645,6 @@ class ResponseRunner:
         progress = _DeliveryProgress(tracked_event_id=request.existing_event_id)
         matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
         active_event_ids = self._active_response_event_ids(request.room_id)
-        team_system_enrichment_items = _with_matrix_target_item(
-            request.system_enrichment_items,
-            matrix_target_item,
-            logger=self.deps.logger,
-        )
         # Team entries refine entity_label to the materialized team label and
         # append the knowledge-availability enrichment before the turn runs.
         team_turn_ctx = ResponseTurnContext(
@@ -1676,21 +1658,15 @@ class ResponseRunner:
             requester_id=requester_user_id or execution_identity.requester_id,
             matrix_run_metadata=matrix_run_metadata,
             active_event_ids=frozenset(active_event_ids),
-            system_enrichment_items=team_system_enrichment_items,
-            current_event_id=request.current_event_id,
-            location_item_text=request.location_item_text,
-            scheduled_history_budget=request.scheduled_history_budget,
-            trusted_relay_sender_ids=prepared_entity_user_ids(
-                self.deps.runtime.config,
-                self.deps.runtime_paths,
+            system_enrichment_items=_with_matrix_message_target(
+                request.system_enrichment_items,
+                matrix_target_item,
             ),
+            scheduled_history_budget=request.scheduled_history_budget,
         )
         team_turn_recorder = self._build_turn_recorder(
             user_message=request.prompt,
             reply_to_event_id=request.reply_to_event_id,
-            current_event_id=request.current_event_id,
-            current_message_suffix=team_message_suffix,
-            current_timestamp_ms=request.current_timestamp_ms,
             requester_id=requester_user_id or execution_identity.requester_id,
             matrix_run_metadata=matrix_run_metadata,
         )
@@ -1743,13 +1719,12 @@ class ResponseRunner:
                     def build_response_stream() -> AsyncIterator[StreamInputChunk]:
                         return team_response_stream(
                             agent_ids=list(team_request.team_agents),
-                            message=request.prompt,
-                            current_message_suffix=team_message_suffix,
+                            message=prepared_prompt,
                             orchestrator=orchestrator,
                             execution_identity=tool_dispatch.execution_identity,
                             ctx=team_turn_ctx,
                             mode=mode,
-                            thread_history=request.thread_history,
+                            thread_history=model_thread_history,
                             model_name=model_name,
                             media=resolved_request.media,
                             show_tool_calls=show_tool_calls,
@@ -1846,12 +1821,11 @@ class ResponseRunner:
                                 return await team_response(
                                     agent_names=agent_names,
                                     mode=mode,
-                                    message=request.prompt,
-                                    current_message_suffix=team_message_suffix,
+                                    message=prepared_prompt,
                                     orchestrator=orchestrator,
                                     execution_identity=tool_dispatch.execution_identity,
                                     ctx=team_turn_ctx,
-                                    thread_history=request.thread_history,
+                                    thread_history=model_thread_history,
                                     model_name=model_name,
                                     media=resolved_request.media,
                                     run_id_callback=_note_attempt_run_id,
@@ -2027,6 +2001,8 @@ class ResponseRunner:
                     ),
                 ),
                 thread_summary_entity_name=self.deps.agent_name,
+                memory_prompt=_memory_prompt,
+                memory_thread_history=_memory_thread_history,
             )
 
         placeholder_state.settlement_started = True
@@ -2382,12 +2358,6 @@ class ResponseRunner:
         turn_recorder = self._build_turn_recorder(
             user_message=request.prompt,
             reply_to_event_id=request.reply_to_event_id,
-            current_event_id=request.current_event_id,
-            current_message_suffix=model_prompt_tail_after_raw_prompt(
-                raw_prompt=request.prompt,
-                model_prompt=request.model_prompt,
-            ),
-            current_timestamp_ms=request.current_timestamp_ms,
             requester_id=request.user_id,
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
         )
@@ -2538,12 +2508,6 @@ class ResponseRunner:
         turn_recorder = self._build_turn_recorder(
             user_message=request.prompt,
             reply_to_event_id=request.reply_to_event_id,
-            current_event_id=request.current_event_id,
-            current_message_suffix=model_prompt_tail_after_raw_prompt(
-                raw_prompt=request.prompt,
-                model_prompt=request.model_prompt,
-            ),
-            current_timestamp_ms=request.current_timestamp_ms,
             requester_id=request.user_id,
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
         )
@@ -2721,12 +2685,20 @@ class ResponseRunner:
         if prepared_request is None:
             return None
         request = prepared_request
+        memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
+            prepare_memory_and_model_context(
+                request.prompt,
+                request.thread_history,
+                config=self.deps.runtime.config,
+                runtime_paths=self.deps.runtime_paths,
+                model_prompt=request.model_prompt,
+            )
+        )
         normalized_request = replace(
             request,
-            model_prompt=model_prompt_tail_after_raw_prompt(
-                raw_prompt=request.prompt,
-                model_prompt=request.model_prompt,
-            ),
+            prompt=memory_prompt,
+            model_prompt=model_prompt_text,
+            thread_history=model_thread_history,
             media=request.media or MediaInputs(),
         )
 
@@ -2767,13 +2739,13 @@ class ResponseRunner:
             if self.deps.runtime.config.resolve_entity(self.deps.agent_name).memory_backend == "mem0":
                 create_background_task(
                     store_conversation_memory(
-                        request.prompt,
+                        memory_prompt,
                         self.deps.agent_name,
                         self.deps.storage_path,
                         session_id,
                         self.deps.runtime.config,
                         self.deps.runtime_paths,
-                        request.thread_history,
+                        memory_thread_history,
                         request.user_id,
                         execution_identity=execution_identity,
                     ),
@@ -2839,6 +2811,8 @@ class ResponseRunner:
                     ),
                 ),
                 thread_summary_entity_name=self.deps.agent_name,
+                memory_prompt=memory_prompt,
+                memory_thread_history=memory_thread_history,
             )
 
         placeholder_state.settlement_started = True

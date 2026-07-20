@@ -268,9 +268,6 @@ class EditRegenerator:
                 correlation_id=event.event_id,
                 matrix_run_metadata=regeneration_matrix_run_metadata,
                 current_timestamp_ms=normalize_timestamp_ms(event.server_timestamp),
-                # A rebuilt coalesced prompt spans several source events, so only a
-                # plain single-message regeneration is literally the edited event.
-                current_event_id=None if regeneration_turn_record.is_coalesced else original_event_id,
                 current_prompt_is_structured=current_prompt_is_structured,
                 on_lifecycle_lock_acquired=lambda: self.deps.turn_store.remove_stale_runs_for_edit(
                     turn_record=regeneration_turn_record,

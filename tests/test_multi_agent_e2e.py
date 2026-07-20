@@ -544,7 +544,8 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             assert ai_kwargs["model_prompt"] == f"@mindroom_calculator:{domain} What about 20% of 300?"
             assert ai_kwargs["current_timestamp_ms"] == 1234567890.0
             assert ai_ctx.session_id == f"{test_room_id}:{thread_root_id}"
-            assert ai_kwargs["thread_history"][0].body == "What's 10% of 100?"
+            assert ai_kwargs["thread_history"][0].body.startswith("[")
+            assert ai_kwargs["thread_history"][0].body.endswith("What's 10% of 100?")
             assert ai_kwargs["thread_history"][1].body == "10% of 100 is 10"
             assert ai_kwargs["thread_history"][2].body == "I can also help"
             assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root

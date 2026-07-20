@@ -32,12 +32,13 @@ from mindroom.execution_preparation import (
 )
 from mindroom.history.interrupted_replay import (
     InterruptedReplaySnapshot,
-    _render_interrupted_replay_parts,
+    _render_interrupted_replay_content,
 )
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.client_thread_history import fetch_thread_history
 from mindroom.matrix.client_visible_messages import _stream_status_from_content
 from mindroom.message_target import MessageTarget
+from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.streaming import (
     _CANCELLED_RESPONSE_NOTE,
     _INTERRUPTED_RESPONSE_NOTE,
@@ -83,15 +84,14 @@ def _get_unseen_messages(
     return _get_unseen_messages_for_sender(
         thread_history,
         sender_id=response_sender,
-        trusted_relay_sender_ids=frozenset({response_sender} if response_sender else ()),
         seen_event_ids=seen_event_ids,
-        excluded_event_ids={current_event_id} if current_event_id else (),
+        current_event_id=current_event_id,
         active_event_ids=active_event_ids,
     )
 
 
 def _render_normalized_interrupted_replay(body: str) -> str:
-    content, _prose = _render_interrupted_replay_parts(
+    return _render_interrupted_replay_content(
         InterruptedReplaySnapshot(
             user_message="",
             partial_text=_clean_partial_reply_body(body),
@@ -100,7 +100,6 @@ def _render_normalized_interrupted_replay(body: str) -> str:
             run_metadata={},
         ),
     )
-    return content
 
 
 def _make_visible_message(
@@ -392,7 +391,7 @@ class TestUnseenMessagesPartialReplies:
             "Answer the new question.",
             thread_history,
             seen_event_ids={"e1"},
-            excluded_event_ids={"e3"},
+            current_event_id="e3",
             active_event_ids={"e2"},
             response_sender_id=agent_id,
             config=config,
@@ -402,9 +401,10 @@ class TestUnseenMessagesPartialReplies:
         assert [message.role for message in context_messages] == ["user", "user", "user"]
         assert "Your previous response is still being delivered." in str(context_messages[0].content)
         assert "Do NOT repeat or redo that work." in str(context_messages[0].content)
-        assert context_messages[1].content == (
-            '<msg event_id="e2" from="@mindroom_helper:localhost">'
-            "<![CDATA[You (reply still streaming): Partial reply]]></msg>"
+        assert context_messages[1].content == render_msg_tag(
+            sender=agent_id,
+            body="You (reply still streaming): Partial reply",
+            event_id="e2",
         )
         assert context_messages[2].content == "Answer the new question."
 
@@ -437,7 +437,6 @@ class TestUnseenMessagesPartialReplies:
                 _make_visible_message(event_id="e4", sender="@user:localhost", body="Follow-up"),
             ],
             response_sender_id=agent_id,
-            trusted_relay_sender_ids=frozenset({agent_id}),
             active_event_ids={"e3"},
         )
 
@@ -465,7 +464,7 @@ class TestUnseenMessagesPartialReplies:
             "Continue.",
             thread_history,
             seen_event_ids=set(),
-            excluded_event_ids={"e2"},
+            current_event_id="e2",
             active_event_ids=set(),
             response_sender_id=agent_id,
             config=config,

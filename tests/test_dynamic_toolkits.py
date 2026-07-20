@@ -792,24 +792,17 @@ def test_scope_incompatible_deferred_tools_reject_at_config_and_runtime(tmp_path
     assert get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a") == []
 
 
-def test_matrix_metadata_injection_counts_deferred_matrix_message(tmp_path: Path) -> None:
-    """Authored deferred matrix_message counts before loading.
-
-    A same-turn ``load_tool`` call can expose the tool in a dynamic
-    continuation without rebuilding the turn context, so the stable target
-    context must already be in place while the tool is still unloaded.
-    """
+def test_matrix_metadata_injection_is_loaded_state_aware(tmp_path: Path) -> None:
+    """Matrix prompt metadata should appear only when matrix_message is loaded."""
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = [{"matrix_message": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    assert _agent_has_matrix_messaging_tool(config, "code", "thread-a")
-
-    raw = _base_config_data()
-    raw["agents"]["code"]["tools"] = ["file"]  # type: ignore[index]
-    config = _validated_config(tmp_path, raw)
-
     assert not _agent_has_matrix_messaging_tool(config, "code", "thread-a")
+
+    save_loaded_tools_for_session(agent_name="code", session_id="thread-a", loaded_tools=["matrix_message"])
+
+    assert _agent_has_matrix_messaging_tool(config, "code", "thread-a")
 
 
 def test_openclaw_compat_implies_matrix_messaging_tool(tmp_path: Path) -> None:
@@ -1007,11 +1000,3 @@ def test_dynamic_prompt_splits_static_catalog_from_volatile_loaded_state(tmp_pat
         suffix_after == "Dynamic tools currently loaded for this session: shell, sleep\n"
         "Sticky initial dynamic tools that cannot be unloaded: shell"
     )
-
-
-def test_matrix_messaging_check_degrades_for_unresolvable_entity_names(tmp_path: Path) -> None:
-    """Unknown entities (router placeholder, registry-miss usernames, teams) degrade to False."""
-    config = _validated_config(tmp_path, _base_config_data())
-
-    assert not _agent_has_matrix_messaging_tool(config, "router", None)
-    assert not _agent_has_matrix_messaging_tool(config, "mindroom_ghost", "thread-a")

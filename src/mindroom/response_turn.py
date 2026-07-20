@@ -31,7 +31,6 @@ from mindroom.ai_turn_state import AITurnState
 from mindroom.cancellation import build_cancelled_error
 from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
-    MATRIX_REQUESTER_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
@@ -107,7 +106,7 @@ def build_matrix_run_metadata(
     if reply_to_event_id is not None:
         metadata["reply_to_event_id"] = reply_to_event_id
     if requester_id is not None:
-        metadata[MATRIX_REQUESTER_ID_METADATA_KEY] = requester_id
+        metadata["requester_id"] = requester_id
     if correlation_id is not None:
         metadata["correlation_id"] = correlation_id
     if tools_schema is not None:
@@ -161,9 +160,9 @@ class DynamicContinuationRunState:
         model_prompt: str | None,
         current_timestamp_ms: float | None,
         current_prompt_is_structured: bool,
-        current_event_id: str | None,
         run_id: str | None,
         continuation_model_prompt_tail: str,
+        current_event_id: str | None = None,
     ) -> DynamicContinuationRunState:
         """Build the continuation state for one turn's first attempt."""
         return cls(
@@ -184,7 +183,6 @@ class DynamicContinuationRunState:
         previous_run_id: str | None,
     ) -> DynamicContinuationRunState:
         """Return the continuation state for one more same-turn attempt."""
-        # A synthetic continuation prompt must not claim the source Matrix event.
         return replace(
             self,
             active_prompt=continuation_prompt,
@@ -218,18 +216,6 @@ class ResponseTurnContext:
     active_model_name: str | None = None
     active_event_ids: frozenset[str] = frozenset()
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
-    # The Matrix event the current prompt resolves from (original body,
-    # accepted edit, or transcription); None for
-    # synthetic prompts and structured batches. Distinct from
-    # ``reply_to_event_id``, which is the delivery/thread anchor.
-    current_event_id: str | None = None
-    # Trusted text of the reserved ``key="location"`` enrichment item for this
-    # turn; delivered current-turn-only by execution preparation.
-    location_item_text: str | None = None
-    # Managed MindRoom account IDs whose relayed ``original_sender`` metadata
-    # is honored when replaying visible Matrix history; empty fails closed to
-    # the event's real sender.
-    trusted_relay_sender_ids: frozenset[str] = frozenset()
     # Set only for scheduled fires that carry a history limit; identifies the
     # prompt-owning event while capping this turn without changing authored config.
     scheduled_history_budget: ScheduledHistoryBudget | None = None

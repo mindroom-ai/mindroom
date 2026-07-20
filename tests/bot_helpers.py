@@ -385,7 +385,6 @@ def _response_request(
     correlation_id: str | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: tuple[EnrichmentItem, ...] = (),
-    current_event_id: str | None = None,
 ) -> ResponseRequest:
     """Build one response request for direct bot seam tests."""
     target = response_envelope.target
@@ -405,7 +404,6 @@ def _response_request(
         user_id=user_id,
         media=media,
         attachment_ids=tuple(attachment_ids) if attachment_ids is not None else None,
-        current_event_id=current_event_id,
         response_envelope=response_envelope,
         correlation_id=correlation_id,
         matrix_run_metadata=matrix_run_metadata,

@@ -40,16 +40,11 @@ from mindroom.ai_run_metadata import (
     build_prepared_history_metadata_content,
 )
 from mindroom.authorization import get_available_responders_in_room
-from mindroom.constants import (
-    MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
-    MINDROOM_LOCATION_MARKER_METADATA_KEY,
-    ROUTER_AGENT_NAME,
-)
+from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
     ThreadHistoryRenderLimits,
-    append_additional_context,
     prepare_bound_team_run_context,
     render_prepared_messages_text,
     render_prepared_team_messages_text,
@@ -181,6 +176,11 @@ _MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS = ThreadHistoryRenderLimits(
 )
 
 
+def _append_additional_context(entity: Agent | Team, context_chunk: str) -> None:
+    existing_context = entity.additional_context.strip() if entity.additional_context else ""
+    entity.additional_context = f"{existing_context}\n\n{context_chunk}" if existing_context else context_chunk
+
+
 class TeamMode(str, Enum):
     """Team collaboration modes."""
 
@@ -200,8 +200,6 @@ class _PreparedMaterializedTeamExecution:
     # this snapshot instead of re-resolving, because the per-thread override
     # store can change mid-run (for example via the thread_model tool).
     runtime_model_name: str
-    # Location-change marker recorded in this run's trusted metadata.
-    location_marker: str | None = None
 
     @property
     def prepared_prompt(self) -> str:
@@ -1845,19 +1843,16 @@ async def prepare_materialized_team_execution(
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
     current_event_id: str | None = None,
-    current_message_suffix: str = "",
     compaction_lifecycle: CompactionLifecycle | None = None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedMaterializedTeamExecution:
     """Prepare one materialized team for execution."""
-    # Stable system enrichment lands before the execution-preparation call so
-    # the current full location block is appended only as its volatile tail.
     if ctx.system_enrichment_items:
         rendered_system_context = render_system_enrichment_block(ctx.system_enrichment_items)
-        append_additional_context(team, rendered_system_context)
+        _append_additional_context(team, rendered_system_context)
         for agent in agents:
-            append_additional_context(agent, rendered_system_context)
+            _append_additional_context(agent, rendered_system_context)
     prepared_execution = await prepare_bound_team_run_context(
         ctx,
         scope_context=scope_context,
@@ -1875,7 +1870,6 @@ async def prepare_materialized_team_execution(
         current_timestamp_ms=current_timestamp_ms,
         current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
-        current_message_suffix=current_message_suffix,
         compaction_lifecycle=compaction_lifecycle,
         thread_history_render_limits=thread_history_render_limits,
         pipeline_timing=pipeline_timing,
@@ -1885,11 +1879,6 @@ async def prepare_materialized_team_execution(
         pipeline_timing.mark("history_ready")
         note_prepared_history_timing(pipeline_timing, prepared_history)
     run_extra_content = build_prepared_history_metadata_content(prepared_history)
-    if prepared_execution.location_marker is not None:
-        run_extra_content = {
-            **(run_extra_content or {}),
-            MINDROOM_LOCATION_MARKER_METADATA_KEY: prepared_execution.location_marker,
-        }
     run_metadata = build_matrix_run_metadata(
         ctx.reply_to_event_id,
         prepared_execution.unseen_event_ids,
@@ -1907,7 +1896,6 @@ async def prepare_materialized_team_execution(
         unseen_event_ids=prepared_execution.unseen_event_ids,
         prepared_history=prepared_history,
         runtime_model_name=runtime_model.model_name,
-        location_marker=prepared_execution.location_marker,
     )
 
 
@@ -1919,7 +1907,6 @@ async def team_response(  # noqa: C901, PLR0915
     execution_identity: ToolExecutionIdentity | None,
     ctx: ResponseTurnContext,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
-    current_message_suffix: str = "",
     model_name: str | None = None,
     media: MediaInputs | None = None,
     run_id_callback: Callable[[str], None] | None = None,
@@ -2034,7 +2021,6 @@ async def team_response(  # noqa: C901, PLR0915
             current_timestamp_ms=continuation_state.active_current_timestamp_ms,
             current_event_id=continuation_state.active_current_event_id,
             current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
-            current_message_suffix=current_message_suffix,
             compaction_lifecycle=compaction_lifecycle,
             configured_team_name=configured_team_name,
             thread_history_render_limits=_MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
@@ -2331,7 +2317,7 @@ async def team_response(  # noqa: C901, PLR0915
             message=message,
             current_timestamp_ms=current_timestamp_ms,
             current_prompt_is_structured=current_prompt_is_structured,
-            current_event_id=ctx.current_event_id,
+            current_event_id=ctx.reply_to_event_id,
             run_id=ctx.run_id,
         ),
     )
@@ -2413,7 +2399,6 @@ async def team_response_stream(  # noqa: C901, PLR0915
     user_id: str | None = None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
-    current_message_suffix: str = "",
     response_sender_id: str | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     run_metadata_collector: dict[str, Any] | None = None,
@@ -2527,7 +2512,6 @@ async def team_response_stream(  # noqa: C901, PLR0915
             current_timestamp_ms=continuation_state.active_current_timestamp_ms,
             current_event_id=continuation_state.active_current_event_id,
             current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
-            current_message_suffix=current_message_suffix,
             compaction_lifecycle=compaction_lifecycle,
             configured_team_name=configured_team_name,
             thread_history_render_limits=_MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
@@ -3212,7 +3196,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             message=message,
             current_timestamp_ms=current_timestamp_ms,
             current_prompt_is_structured=current_prompt_is_structured,
-            current_event_id=ctx.current_event_id,
+            current_event_id=ctx.reply_to_event_id,
             run_id=ctx.run_id,
         ),
     )

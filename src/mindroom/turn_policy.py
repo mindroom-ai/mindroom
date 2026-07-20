@@ -26,7 +26,6 @@ from mindroom.hooks import (
     render_enrichment_block,
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload
-from mindroom.logging_config import get_logger
 from mindroom.responder_availability import (
     filter_materializable_responders,
     live_responder_entity_names,
@@ -62,8 +61,6 @@ if TYPE_CHECKING:
     from mindroom.dispatch_handoff import DispatchEvent, MediaDispatchEvent, TextDispatchEvent
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
-
-logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -124,9 +121,6 @@ class _PreparedHookedPayload:
     payload: DispatchPayload
     envelope: MessageEnvelope
     system_enrichment_items: tuple[EnrichmentItem, ...]
-    # Trusted text of the reserved ``key="location"`` enrichment item, split out
-    # at this typed boundary so it is never flattened into user-visible prompts.
-    location_item_text: str | None = None
 
 
 @dataclass
@@ -168,6 +162,7 @@ class IngressHookRunner:
         started = time.monotonic()
         hook_registered = self.hook_context.registry.has_hooks(EVENT_MESSAGE_ENRICH)
         item_count = 0
+        system_enrichment_items: tuple[EnrichmentItem, ...] = ()
 
         envelope = MessageEnvelope(
             source_event_id=dispatch.envelope.source_event_id,
@@ -186,7 +181,6 @@ class IngressHookRunner:
             origin=dispatch.envelope.origin,
         )
         model_prompt = payload.model_prompt
-        location_item_text: str | None = None
         if hook_registered:
             context = MessageEnrichContext(
                 **self.hook_context.base_kwargs(EVENT_MESSAGE_ENRICH, dispatch.correlation_id),
@@ -196,22 +190,10 @@ class IngressHookRunner:
             )
             items = await emit_collect(self.hook_context.registry, EVENT_MESSAGE_ENRICH, context)
             item_count = len(items)
-            # The reserved ``location`` key stays out of the flattened prompt so
-            # its full detail is current-turn-only; the first item is
-            # authoritative when hooks return duplicates.
-            location_items = [item for item in items if item.key == "location"]
-            rendered_items = [item for item in items if item.key != "location"]
-            if location_items:
-                location_item_text = location_items[0].text
-                if len(location_items) > 1:
-                    logger.warning(
-                        "Dropping duplicate location enrichment items",
-                        room_id=dispatch.envelope.room_id,
-                        target_entity_name=target_entity_name,
-                        dropped_location_items=len(location_items) - 1,
-                    )
-            if rendered_items:
-                enrichment_block = render_enrichment_block(rendered_items)
+            persisted_items = [item for item in items if item.persist]
+            system_enrichment_items = tuple(item for item in items if not item.persist)
+            if persisted_items:
+                enrichment_block = render_enrichment_block(persisted_items)
                 base_model_prompt = payload.model_prompt if payload.model_prompt is not None else payload.prompt
                 model_prompt = f"{base_model_prompt.rstrip()}\n\n{enrichment_block}"
 
@@ -231,8 +213,7 @@ class IngressHookRunner:
                 attachment_ids=payload.attachment_ids,
             ),
             envelope=envelope,
-            system_enrichment_items=(),
-            location_item_text=location_item_text,
+            system_enrichment_items=system_enrichment_items,
         )
 
     async def apply_system_enrichment(

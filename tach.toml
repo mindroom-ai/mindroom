@@ -99,15 +99,14 @@ depends_on = [
     "mindroom.agents",
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
-    "mindroom.constants",
     "mindroom.credentials",
     "mindroom.credentials_sync",
     "mindroom.error_handling",
     "mindroom.execution_preparation",
-    "mindroom.history.interrupted_replay",
     "mindroom.history.prompt_tokens",
     "mindroom.history.runtime",
     "mindroom.history.types",
+    "mindroom.history.interrupted_replay",
     "mindroom.hooks",
     "mindroom.llm_request_logging",
     "mindroom.logging_config",
@@ -117,9 +116,9 @@ depends_on = [
     "mindroom.metadata_merge",
     "mindroom.pre_model_preparation",
     "mindroom.response_turn",
-    "mindroom.timestamp_formatting",
     "mindroom.timing",
     "mindroom.tool_system.events",
+    "mindroom.user_turn_time",
 ]
 
 [[modules]]
@@ -246,7 +245,6 @@ depends_on = [
 visibility = [
     "mindroom.agents",
     "mindroom.conversation_state_writer",
-    "mindroom.execution_preparation",
     "mindroom.history.interrupted_replay",
     "mindroom.history.runtime",
     "mindroom.memory.auto_flush",
@@ -966,7 +964,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.execution_preparation"
 depends_on = [
-    "mindroom.agent_storage",
     "mindroom.ai_runtime",
     "mindroom.attachment_media",
     "mindroom.attachments",
@@ -977,7 +974,6 @@ depends_on = [
     "mindroom.history.runtime",
     "mindroom.history.storage",
     "mindroom.history.types",
-    "mindroom.hooks",
     "mindroom.matrix.client_visible_messages",
     "mindroom.prompt_message_tags",
     "mindroom.streaming",
@@ -1074,7 +1070,6 @@ depends_on = [
 ]
 visibility = [
     "mindroom.ai",
-    "mindroom.conversation_state_writer",
     "mindroom.history.turn_recorder",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.response_runner",
@@ -1309,10 +1304,10 @@ depends_on = [
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.entity_resolution",
-    "mindroom.history.interrupted_replay",
     "mindroom.history.storage",
-    "mindroom.history.turn_recorder",
     "mindroom.history.types",
+    "mindroom.history.interrupted_replay",
+    "mindroom.history.turn_recorder",
     "mindroom.hooks",
     "mindroom.matrix.client_visible_messages",
     "mindroom.memory",
@@ -1325,10 +1320,10 @@ depends_on = [
     "mindroom.sync_restart_retry",
     "mindroom.teams",
     "mindroom.thread_summary",
-    "mindroom.timestamp_formatting",
     "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
+    "mindroom.user_turn_time",
 ]
 
 [[modules]]
@@ -1484,17 +1479,21 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.user_turn_time"
+depends_on = ["mindroom.memory", "mindroom.timestamp_formatting"]
+visibility = ["mindroom.ai", "mindroom.response_runner"]
+
+[[modules]]
 path = "mindroom.timestamp_formatting"
 depends_on = []
 visibility = [
-    "mindroom.ai",
     "mindroom.bot",
     "mindroom.coalescing_batch",
     "mindroom.edit_regenerator",
     "mindroom.execution_preparation",
-    "mindroom.response_runner",
     "mindroom.handled_turns",
     "mindroom.turn_controller",
+    "mindroom.user_turn_time",
 ]
 
 [[modules]]
@@ -2051,10 +2050,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.matrix.client_delivery"
-depends_on = [
-    "mindroom.constants",
-    "mindroom.matrix.sidecar_content",
-]
+depends_on = []
 visibility = [
     "mindroom.approval_transport",
     "mindroom.conversation_resolver",
@@ -2580,12 +2576,10 @@ depends_on = [
     "mindroom.agent_storage",
     "mindroom.constants",
     "mindroom.entity_resolution",
-    "mindroom.history.interrupted_replay",
     "mindroom.history.runtime",
     "mindroom.history.types",
     "mindroom.prompt_message_tags",
     "mindroom.runtime_protocols",
-    "mindroom.streaming",
     "mindroom.team_scope",
 ]
 
@@ -3177,7 +3171,6 @@ depends_on = [
     "mindroom.delivery_gateway",
     "mindroom.matrix.conversation_cache",
     "mindroom.runtime_protocols",
-    "mindroom.streaming",
     "mindroom.thread_summary",
 ]
 
@@ -3319,7 +3312,6 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
-    "mindroom.logging_config",
     "mindroom.matrix.identity",
     "mindroom.responder_availability",
     "mindroom.runtime_protocols",
@@ -3558,7 +3550,6 @@ expose = [
     "ResponseTurnContext",
     "build_matrix_run_metadata",
     "ai_response",
-    "model_prompt_tail_after_raw_prompt",
     "stream_agent_response",
 ]
 from = ["mindroom.ai"]
@@ -3629,6 +3620,7 @@ expose = [
     "reprioritize_auto_flush_sessions",
     "search_agent_memories",
     "store_conversation_memory",
+    "strip_user_turn_time_prefix",
     "update_agent_memory",
 ]
 from = ["mindroom.memory"]
@@ -4265,7 +4257,6 @@ from = ["mindroom.oauth.service"]
 expose = [
     "InterruptedReplaySnapshot",
     "build_interrupted_replay_snapshot",
-    "interrupted_replay_prose_from_metadata",
     "persist_interrupted_replay",
     "persist_interrupted_replay_snapshot",
     "split_interrupted_tool_trace",

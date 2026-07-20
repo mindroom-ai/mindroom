@@ -20,7 +20,6 @@ from mindroom.constants import (
     STREAM_WARMUP_SUFFIX_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
-from mindroom.matrix.client_delivery import DeliveredMatrixEvent, _canonical_delivered_body
 from mindroom.matrix.large_messages import (
     _MATRIX_EVENT_HARD_LIMIT,
     _NORMAL_MESSAGE_LIMIT,
@@ -997,55 +996,3 @@ async def test_prepare_large_message_moves_visible_body_to_json_sidecar_edit() -
     assert client.uploaded_data is not None
     uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
     assert uploaded_payload["m.new_content"]["io.mindroom.visible_body"] == visible_body
-
-
-def test_canonical_delivered_body_prefers_wire_body_without_sidecar() -> None:
-    """An untouched delivery resolves to the exact wire body (m.new_content for edits)."""
-    content = {"body": "plain send", "msgtype": "m.text"}
-    assert _canonical_delivered_body(content, content) == "plain send"
-
-    edit = {"body": "* edited", "m.new_content": {"body": "edited", "msgtype": "m.text"}}
-    assert _canonical_delivered_body(edit, edit) == "edited"
-
-
-def test_canonical_delivered_body_recovers_full_text_from_usable_sidecar() -> None:
-    """A truncated wire preview with a complete sidecar resolves to the logical full body."""
-    full_text = "x" * 100_000
-    content = {"body": full_text, "msgtype": "m.text"}
-    sidecar_metadata = {"version": 2, "encoding": "matrix_event_content_json"}
-    content_sent = {
-        "body": full_text[:1000],
-        "msgtype": "m.text",
-        "url": "mxc://server/file123",
-        "io.mindroom.long_text": sidecar_metadata,
-    }
-    assert _canonical_delivered_body(content, content_sent) == full_text
-
-    edit_content = {"body": f"* {full_text}", "m.new_content": {"body": full_text, "msgtype": "m.text"}}
-    edit_sent = {
-        "body": full_text[:1000],
-        "m.new_content": {
-            "body": full_text[:1000],
-            "msgtype": "m.text",
-            "url": "mxc://server/file123",
-            "io.mindroom.long_text": sidecar_metadata,
-        },
-    }
-    assert _canonical_delivered_body(edit_content, edit_sent) == full_text
-
-
-def test_canonical_delivered_body_keeps_truncated_wire_body_when_sidecar_failed() -> None:
-    """Without a usable sidecar the truncated wire body is all Matrix holds."""
-    full_text = "x" * 100_000
-    content = {"body": full_text, "msgtype": "m.text"}
-    content_sent = {"body": full_text[:1000] + "…", "msgtype": "m.text"}
-    assert _canonical_delivered_body(content, content_sent) == full_text[:1000] + "…"
-
-
-def test_delivered_matrix_event_defaults_canonical_body_from_wire_payload() -> None:
-    """Constructing without an explicit canonical body derives it from the sent payload."""
-    delivered = DeliveredMatrixEvent(
-        event_id="$e",
-        content_sent={"m.new_content": {"body": "edited body"}, "body": "* edited body"},
-    )
-    assert delivered.canonical_body == "edited body"

@@ -57,6 +57,7 @@ from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeReso
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.memory import MemoryPromptParts
+from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode
@@ -184,7 +185,6 @@ def _prepared_team_execution_context(
         compaction_reply_outcome="none",
         prepared_context_tokens=prepared_context_tokens,
         prepared_history=prepared_context.prepared_history,
-        location_marker=None,
     )
 
 
@@ -2054,10 +2054,9 @@ class TestMessageConversion:
         ]
         prompt, history = _convert_messages(messages)
         assert prompt == "How are you?"
-        # Synthetic request history has no Matrix identity, so no event IDs.
         assert history == [
-            ResolvedVisibleMessage.synthetic(sender="user", body="Hi", event_id="", timestamp=1),
-            ResolvedVisibleMessage.synthetic(sender="assistant", body="Hello!", event_id="", timestamp=2),
+            ResolvedVisibleMessage.synthetic(sender="user", body="Hi", event_id="$openai-1", timestamp=1),
+            ResolvedVisibleMessage.synthetic(sender="assistant", body="Hello!", event_id="$openai-2", timestamp=2),
         ]
 
     def test_system_message_prepended(self) -> None:
@@ -2692,8 +2691,8 @@ class TestAutoRouting:
             assert call_args[0][0] == "Write code"  # prompt
             thread_history = call_args[0][4]
             assert thread_history == [
-                ResolvedVisibleMessage.synthetic(sender="user", body="Hi", event_id="", timestamp=1),
-                ResolvedVisibleMessage.synthetic(sender="assistant", body="Hello!", event_id="", timestamp=2),
+                ResolvedVisibleMessage.synthetic(sender="user", body="Hi", event_id="$openai-1", timestamp=1),
+                ResolvedVisibleMessage.synthetic(sender="assistant", body="Hello!", event_id="$openai-2", timestamp=2),
             ]
 
     def test_auto_streaming(self, app_client: TestClient) -> None:
@@ -4346,10 +4345,13 @@ class TestTeamCompletion:
 
         assert response.status_code == 200
         prompt = mock_team.arun.call_args.args[0]
-        assert prompt == (
-            '<msg from="user"><![CDATA[Start]]></msg>\n\n<msg from="assistant"><![CDATA[Ack]]></msg>\n\nFollow-up'
+        assert prompt == "\n\n".join(
+            (
+                render_msg_tag(sender="user", body="Start", event_id="$openai-1"),
+                render_msg_tag(sender="assistant", body="Ack", event_id="$openai-2"),
+                "Follow-up",
+            ),
         )
-        assert "event_id=" not in prompt
 
     def test_team_non_streaming_preserves_full_request_history_for_ad_hoc_team_runs(
         self,
@@ -4387,9 +4389,8 @@ class TestTeamCompletion:
 
         assert response.status_code == 200
         run_input = mock_team.arun.call_args.args[0]
-        assert '<msg from="user"><![CDATA[msg 0]]></msg>' in run_input
-        assert f'<msg from="assistant"><![CDATA[{long_body}]]></msg>' in run_input
-        assert "event_id=" not in run_input
+        assert render_msg_tag(sender="user", body="msg 0", event_id="$openai-1") in run_input
+        assert render_msg_tag(sender="assistant", body=long_body, event_id="$openai-2") in run_input
         assert run_input.endswith("Final prompt")
 
     def test_team_non_streaming_prefers_persisted_history_over_thread_history(

@@ -13,18 +13,13 @@ import pytest
 from agno.models.message import Message
 
 import mindroom.ai as ai_module
-import mindroom.execution_preparation as execution_preparation_module
 import mindroom.memory._file_backend as file_backend_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.history.runtime import ScopeSessionContext
-from mindroom.history.types import HistoryScope, PreparedHistoryState
-from mindroom.logging_config import get_logger
+from mindroom.history.types import PreparedHistoryState
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory._file_backend import FileMemoryBackend
-from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from tests.conftest import bind_runtime_paths, make_turn_context, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -72,7 +67,6 @@ async def test_prepare_agent_and_prompt_builds_agent_off_event_loop(
         replay_plan=None,
         unseen_event_ids=(),
         messages=[],
-        location_marker=None,
     )
     monkeypatch.setattr(
         ai_module,
@@ -114,6 +108,7 @@ async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_h
     agent_started = threading.Event()
     agent_release = threading.Event()
     agent_finished = threading.Event()
+    prompt_composed = asyncio.Event()
     history_started = asyncio.Event()
     context_marker = ContextVar("prompt_preparation_context", default="missing")
     context_token = context_marker.set("preserved")
@@ -141,8 +136,7 @@ async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_h
     async def prepare_history(*_args: object, **kwargs: object) -> SimpleNamespace:
         history_started.set()
         assert kwargs["agent"] is built_agent
-        assert kwargs["prompt"] == "raw prompt"
-        assert kwargs["current_message_suffix"] == "model metadata"
+        assert kwargs["prompt"] == "raw prompt\n\nmodel metadata"
         assert len(kwargs["transient_context_messages"]) == 1
         assert kwargs["transient_context_messages"][0].content == "turn memory"
         assert kwargs["transient_context_messages"][0].add_to_agent_memory is False
@@ -151,17 +145,23 @@ async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_h
             prepared_history=PreparedHistoryState(),
             replay_plan=None,
             unseen_event_ids=[],
-            messages=(
-                Message(
-                    role="user",
-                    content=f"{kwargs['prompt']}\n\n{kwargs['current_message_suffix']}",
-                ),
-            ),
-            location_marker=None,
+            messages=(Message(role="user", content=kwargs["prompt"]),),
+        )
+
+    original_compose = ai_module._compose_current_turn_prompt
+
+    def compose_prompt(*, raw_prompt: str, model_prompt: str | None) -> str:
+        assert memory_finished.is_set()
+        assert agent_finished.is_set()
+        prompt_composed.set()
+        return original_compose(
+            raw_prompt=raw_prompt,
+            model_prompt=model_prompt,
         )
 
     monkeypatch.setattr(ai_module, "build_memory_prompt_parts", gated_memory)
     monkeypatch.setattr(ai_module, "create_agent", gated_create_agent)
+    monkeypatch.setattr(ai_module, "_compose_current_turn_prompt", compose_prompt)
     monkeypatch.setattr(ai_module, "prepare_agent_execution_context", prepare_history)
 
     config = _prompt_preparation_config()
@@ -185,6 +185,7 @@ async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_h
             agent_release.set()
             assert await asyncio.to_thread(agent_finished.wait, 1.0)
         await asyncio.sleep(0)
+        assert not prompt_composed.is_set()
         assert not history_started.is_set()
 
         memory_release.set()
@@ -228,7 +229,6 @@ async def test_prepare_agent_and_prompt_keeps_file_memory_before_agent_build(
             replay_plan=None,
             unseen_event_ids=[],
             messages=(Message(role="user", content="hello"),),
-            location_marker=None,
         ),
     )
     monkeypatch.setattr(
@@ -286,78 +286,3 @@ async def test_file_memory_keyword_search_runs_off_event_loop(
 
     gate.set()
     assert (await search_task).results == []
-
-
-@pytest.mark.asyncio
-async def test_location_marker_lookup_runs_off_event_loop(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The trusted-marker storage read must not stall the loop while SQLite blocks."""
-    gate = threading.Event()
-    read_started = threading.Event()
-
-    def gated_get_agent_session(_storage: object, _session_id: str) -> None:
-        read_started.set()
-        gate.wait()
-
-    monkeypatch.setattr(execution_preparation_module, "get_agent_session", gated_get_agent_session)
-    scope_context = ScopeSessionContext(
-        scope=HistoryScope(kind="agent", scope_id="general"),
-        storage=MagicMock(),
-        session=None,
-        session_id="session-1",
-    )
-
-    lookup_task = asyncio.get_running_loop().create_task(
-        execution_preparation_module._resolve_current_location_context(
-            location_item_text="at_home: true",
-            scope_context=scope_context,
-        ),
-    )
-    await asyncio.to_thread(read_started.wait, 5.0)
-
-    # The storage read thread is parked on the gate; the loop must stay live.
-    await _assert_loop_heartbeats_while_pending(lookup_task)
-
-    gate.set()
-    location_block, marker = await lookup_task
-    assert marker == "📍 Home"
-    assert '<item key="location"' in location_block
-
-
-@pytest.mark.asyncio
-async def test_response_event_persistence_runs_off_event_loop() -> None:
-    """The post-delivery wrap loads and rewrites a whole session; SQLite must not stall the loop."""
-    gate = threading.Event()
-    persist_started = threading.Event()
-    persisted: list[tuple[str, str, str | None]] = []
-
-    def blocking_persist(run_id: str, event_id: str, body: str | None, _trace: tuple[object, ...]) -> None:
-        persist_started.set()
-        gate.wait()
-        persisted.append((run_id, event_id, body))
-
-    effects_task = asyncio.get_running_loop().create_task(
-        apply_post_response_effects(
-            FinalDeliveryOutcome(
-                terminal_status="completed",
-                event_id="$response",
-                is_visible_response=True,
-                final_visible_body="ok",
-                body_is_run_output=True,
-            ),
-            ResponseOutcome(response_run_id="run-1", run_succeeded=True),
-            PostResponseEffectsDeps(
-                logger=get_logger("tests.persist_offload"),
-                persist_response_event_id=blocking_persist,
-            ),
-        ),
-    )
-    await asyncio.to_thread(persist_started.wait, 5.0)
-
-    # The persistence thread is parked on the gate; the loop must stay live.
-    await _assert_loop_heartbeats_while_pending(effects_task)
-
-    gate.set()
-    await effects_task
-    assert persisted == [("run-1", "$response", "ok")]

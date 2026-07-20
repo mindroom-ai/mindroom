@@ -405,16 +405,10 @@ async def test_final_delivery_failure_replaces_placeholder_with_failure_update(t
             response_hooks=response_hooks,
         ),
     )
-    edit_outcomes: list[DeliveredMatrixEvent | None] = [
-        None,
-        DeliveredMatrixEvent(
-            event_id="$placeholder",
-            content_sent={"m.new_content": {"body": "Response delivery failed. Please retry."}},
-        ),
-    ]
+    edit_outcomes = [False, True]
     object.__setattr__(
         gateway,
-        "_edit_text_delivered",
+        "edit_text",
         AsyncMock(side_effect=lambda _request: edit_outcomes.pop(0)),
     )
 
@@ -439,8 +433,8 @@ async def test_final_delivery_failure_replaces_placeholder_with_failure_update(t
     assert outcome.final_visible_body == "Response delivery failed. Please retry."
     assert outcome.delivery_kind == "edited"
     assert outcome.failure_reason == "delivery_failed"
-    assert gateway._edit_text_delivered.await_count == 2
-    failure_update_request = gateway._edit_text_delivered.await_args_list[-1].args[0]
+    assert gateway.edit_text.await_count == 2
+    failure_update_request = gateway.edit_text.await_args_list[-1].args[0]
     assert failure_update_request.new_text == "Response delivery failed. Please retry."
     assert failure_update_request.extra_content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
 
@@ -469,7 +463,7 @@ async def test_streaming_placeholder_delivery_failure_stays_terminal_when_failur
             response_hooks=response_hooks,
         ),
     )
-    object.__setattr__(gateway, "_edit_text_delivered", AsyncMock(return_value=None))
+    object.__setattr__(gateway, "edit_text", AsyncMock(return_value=False))
 
     outcome = await gateway.finalize_streamed_response(
         FinalizeStreamedResponseRequest(
@@ -843,7 +837,7 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
             response_hooks=response_hooks,
         ),
     )
-    object.__setattr__(gateway, "_edit_text_delivered", AsyncMock(return_value=None))
+    object.__setattr__(gateway, "edit_text", AsyncMock(return_value=False))
 
     outcome = await gateway.finalize_streamed_response(
         FinalizeStreamedResponseRequest(
@@ -870,7 +864,7 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
     assert outcome.final_visible_body == "chunk"
     response_hooks.apply_before_response.assert_not_awaited()
     response_hooks.apply_final_response_transform.assert_awaited_once()
-    gateway._edit_text_delivered.assert_awaited_once()
+    gateway.edit_text.assert_awaited_once()
     lifecycle = ResponseLifecycle(
         ResponseLifecycleDeps(
             response_hooks=response_hooks,
@@ -947,63 +941,3 @@ async def test_finalize_streamed_response_restart_interruption_preserves_cancell
     assert outcome.mark_handled is True
     response_hooks.emit_after_response.assert_not_awaited()
     response_hooks.emit_cancelled_response.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_unexpected_finalize_error_keeps_visible_stream_ownership(tmp_path: Path) -> None:
-    """A finalize crash after visible streaming keeps the delivered body owned by the run."""
-    config = _config(tmp_path)
-    envelope = _envelope()
-    response_hooks = SimpleNamespace(
-        apply_before_response=AsyncMock(),
-        apply_final_response_transform=AsyncMock(
-            return_value=SimpleNamespace(response_text="chunk", response_kind="ai", envelope=envelope),
-        ),
-        emit_after_response=AsyncMock(),
-        emit_cancelled_response=AsyncMock(),
-    )
-    gateway = DeliveryGateway(
-        DeliveryGatewayDeps(
-            runtime=SimpleNamespace(client=_client(), orchestrator=None, config=config, runtime_started_at=0.0),
-            runtime_paths=runtime_paths_for(config),
-            agent_name="code",
-            logger=get_logger("tests.delivery"),
-            redact_message_event=AsyncMock(return_value=True),
-            resolver=Mock(),
-            response_hooks=response_hooks,
-        ),
-    )
-
-    with patch(
-        "mindroom.delivery_gateway.interactive_response_for_visible_body",
-        side_effect=RuntimeError("boom"),
-    ):
-        outcome = await gateway.finalize_streamed_response(
-            FinalizeStreamedResponseRequest(
-                target=MessageTarget.resolve("!room:localhost", None, "$reply"),
-                stream_transport_outcome=StreamTransportOutcome(
-                    last_physical_stream_event_id="$streaming",
-                    terminal_status="completed",
-                    rendered_body="chunk",
-                    visible_body_state="visible_body",
-                ),
-                initial_delivery_kind="sent",
-                identity=ResponseIdentity(
-                    response_kind="ai",
-                    response_envelope=envelope,
-                    correlation_id="corr-finalize-crash",
-                ),
-                tool_trace=None,
-                extra_content=None,
-                existing_event_id=None,
-                existing_event_is_placeholder=False,
-            ),
-        )
-
-    assert outcome.terminal_status == "error"
-    assert outcome.failure_reason == "stream_finalize_failed"
-    assert outcome.final_visible_event_id == "$streaming"
-    assert outcome.final_visible_body == "chunk"
-    # The visible body is the run's own delivered output, so persistence must
-    # still wrap the assistant message with this event.
-    assert outcome.body_is_run_output is True

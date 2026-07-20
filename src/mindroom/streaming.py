@@ -46,7 +46,7 @@ from mindroom.tool_system.events import (
 from mindroom.tool_system.runtime_context import worker_progress_pump_scope
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Sequence
+    from collections.abc import AsyncIterator, Callable
 
     import nio
 
@@ -79,7 +79,6 @@ __all__ = [
     "is_interrupted_partial_reply",
     "send_streaming_response",
     "strip_visible_tool_markers",
-    "strip_visible_tool_markers_for_trace",
 ]
 
 _PROGRESS_PLACEHOLDER = "Thinking..."
@@ -90,7 +89,7 @@ _INTERRUPTED_RESPONSE_NOTE = INTERRUPTED_RESPONSE_NOTE
 RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _TerminalStreamStatus = Literal["completed", "cancelled", "error"]
-_VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `([^`]+)` \[(\d+)\](?: ⏳)?\s*$")
+_VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
 _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN = re.compile(r"^\s{0,3}---\s*$")
 
 StreamInputChunk = (
@@ -114,41 +113,15 @@ class _StreamDeliveryShutdownTimeoutError(TimeoutError):
 
 def strip_visible_tool_markers(text: str) -> str:
     """Remove display-only tool marker lines before text re-enters model context."""
-    return _strip_marker_lines(text, lambda _name, _index: True)
-
-
-def strip_visible_tool_markers_for_trace(text: str, tool_trace: Sequence[ToolTraceEntry]) -> str:
-    """Remove exactly the marker lines MindRoom injected for this run's tool trace.
-
-    A line is dropped only when its tool name and 1-based index match one of
-    the run's own trace entries, so model-authored marker-shaped text survives
-    canonical persistence untouched. Same-turn continuation attempts restart
-    marker numbering while the turn trace concatenates, so a shifted marker
-    can fail to match — the failure direction is deliberately open: chrome is
-    preserved rather than model text over-stripped.
-    """
-    if not tool_trace:
-        return text
-    injected = {(entry.tool_name, index) for index, entry in enumerate(tool_trace, start=1)}
-    return _strip_marker_lines(text, lambda name, index: (name, index) in injected)
-
-
-def _strip_marker_lines(text: str, should_strip: Callable[[str, int], bool]) -> str:
-    """Walk marker-shaped lines, dropping those the predicate claims plus their separators."""
-
-    def _stripped_marker(line: str) -> bool:
-        match = _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line)
-        return match is not None and should_strip(match.group(1), int(match.group(2)))
-
     lines = text.splitlines()
-    if not any(_stripped_marker(line) for line in lines):
+    if not any(_VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line) for line in lines):
         return text
 
     filtered_lines: list[str] = []
     index = 0
     while index < len(lines):
         line = lines[index]
-        if not _stripped_marker(line):
+        if not _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line):
             filtered_lines.append(line)
             index += 1
             continue
@@ -481,7 +454,6 @@ class StreamingResponse:
     _last_delivered_tool_trace: list[ToolTraceEntry] = field(default_factory=list, init=False, repr=False)
     _last_placeholder_progress_sent: bool = field(default=False, init=False, repr=False)
     _last_committed_rendered_body: str | None = field(default=None, init=False, repr=False)
-    _last_delivered_canonical_body: str | None = field(default=None, init=False, repr=False)
     _last_committed_interactive_metadata: interactive.InteractiveMetadata | None = field(
         default=None,
         init=False,
@@ -697,10 +669,6 @@ class StreamingResponse:
             cancel_source=cancel_source,
             error=error,
         )
-        # Completed terminals always deliver run output (possibly final-only
-        # provider content); cancel/error terminals contain run output only
-        # when partial text existed before the synthetic note was appended.
-        terminal_body_is_run_output = final_stream_status == STREAM_STATUS_COMPLETED or had_body_before_terminal
         terminal_status = "cancelled" if resolved_cancel_source is not None else final_stream_status
         cancellation_failure_reason = (
             cancel_failure_reason(resolved_cancel_source) if resolved_cancel_source is not None else None
@@ -857,12 +825,8 @@ class StreamingResponse:
         return StreamTransportOutcome(
             last_physical_stream_event_id=self.event_id,
             terminal_status=terminal_status,
-            # The delivered payload is authoritative for the visible body:
-            # mention formatting and long-text sidecars can change it from the
-            # pre-delivery display text.
-            rendered_body=self._last_delivered_canonical_body or attempted_rendered_body,
+            rendered_body=attempted_rendered_body,
             visible_body_state=attempted_visible_body_state,
-            visible_body_is_run_output=terminal_body_is_run_output,
             canonical_final_body_candidate=canonical_final_body_candidate,
             failure_reason=cancellation_failure_reason,
             interactive_metadata=response.interactive_metadata,
@@ -1022,10 +986,7 @@ class StreamingResponse:
         self._last_delivered_text = committed_state.accumulated_text
         self._last_delivered_tool_trace = deepcopy(committed_state.tool_trace)
         self._last_placeholder_progress_sent = committed_state.placeholder_progress_sent
-        # The delivered payload is authoritative: large-message fallback can
-        # truncate the wire body after this pre-delivery rendering was frozen,
-        # and terminal-failure outcomes must report only confirmed content.
-        self._last_committed_rendered_body = self._last_delivered_canonical_body or committed_state.rendered_body
+        self._last_committed_rendered_body = committed_state.rendered_body
         self._last_committed_visible_body_state = committed_state.visible_body_state
         self._last_committed_interactive_metadata = committed_state.interactive_metadata
         self.placeholder_progress_sent = committed_state.placeholder_progress_sent
@@ -1088,7 +1049,6 @@ class StreamingResponse:
         if delivered is None:
             return False
         self.event_id = delivered.event_id
-        self._last_delivered_canonical_body = delivered.canonical_body or None
         if self.visible_event_id_callback is not None:
             self.visible_event_id_callback(delivered.event_id)
         await self._record_streaming_send(delivered.event_id, delivered.content_sent)
@@ -1114,7 +1074,6 @@ class StreamingResponse:
         )
         if delivered is None:
             return False
-        self._last_delivered_canonical_body = delivered.canonical_body or None
         await self._record_streaming_edit(delivered.event_id, content_sent=delivered.content_sent)
         self._mark_first_visible_reply_if_needed()
         return True

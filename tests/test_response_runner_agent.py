@@ -24,6 +24,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     TOOL_TRACE_CONTENT_KEY,
+    RuntimePaths,
 )
 from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import (
@@ -94,13 +95,12 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
     from pathlib import Path
 
-    from mindroom.matrix.client import DeliveredMatrixEvent
+    from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
     from mindroom.matrix.users import AgentMatrixUser
     from mindroom.post_response_effects import ResponseOutcome
-    from mindroom.response_turn import ResponseTurnContext
 
 
 @pytest.fixture
@@ -109,11 +109,9 @@ def mock_agent_user() -> AgentMatrixUser:
     return make_mock_agent_user()
 
 
-def _single_matrix_target_item(ctx: ResponseTurnContext) -> EnrichmentItem:
-    """Return the single stable Matrix-target item carried by one turn context."""
-    items = [item for item in ctx.system_enrichment_items if item.key == "matrix_message_target"]
-    assert len(items) == 1
-    return items[0]
+def _matrix_target_item(mock_response: AsyncMock | MagicMock) -> EnrichmentItem:
+    turn_context = mock_response.call_args.args[0]
+    return next(item for item in turn_context.system_enrichment_items if item.key == "matrix_message_target")
 
 
 class TestAgentBot(AgentBotTestBase):
@@ -125,7 +123,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Agents with matrix_message should receive one stable Matrix-target system item."""
+        """Agents with matrix_message should receive stable Matrix targeting context."""
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -166,12 +164,12 @@ class TestAgentBot(AgentBotTestBase):
 
         assert generation.delivery.event_id == "$response"
         assert mock_ai.call_args.kwargs["prompt"] == "Please send an update"
-        assert "[Matrix metadata for tool calls]" not in mock_ai.call_args.kwargs["model_prompt"]
-        item = _single_matrix_target_item(mock_ai.call_args.args[0])
-        assert item.cache_policy == "stable"
-        assert "!test:localhost" in item.text
-        assert "do not pass `thread_id`" in item.text
-        assert "$event123" not in item.text
+        model_prompt = mock_ai.call_args.kwargs["model_prompt"]
+        assert "[Matrix metadata for tool calls]" not in model_prompt
+        target_item = _matrix_target_item(mock_ai)
+        assert target_item.cache_policy == "stable"
+        assert "!test:localhost" in target_item.text
+        assert "outside any thread" in target_item.text
 
     @pytest.mark.asyncio
     async def test_process_and_respond_includes_matrix_metadata_when_openclaw_compat_enabled(
@@ -179,7 +177,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """openclaw_compat agents should receive room/thread/event ids in the model prompt."""
+        """openclaw_compat agents should receive stable Matrix targeting context."""
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -221,10 +219,9 @@ class TestAgentBot(AgentBotTestBase):
 
         assert generation.delivery.event_id == "$response"
         assert mock_ai.call_args.kwargs["prompt"] == "Please send an update"
-        assert "[Matrix metadata for tool calls]" not in mock_ai.call_args.kwargs["model_prompt"]
-        item = _single_matrix_target_item(mock_ai.call_args.args[0])
-        assert "!test:localhost" in item.text
-        assert "do not pass `thread_id`" in item.text
+        model_prompt = mock_ai.call_args.kwargs["model_prompt"]
+        assert "[Matrix metadata for tool calls]" not in model_prompt
+        assert "!test:localhost" in _matrix_target_item(mock_ai).text
 
     @pytest.mark.asyncio
     async def test_process_and_respond_streaming_includes_matrix_metadata_when_tool_enabled(
@@ -232,7 +229,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Streaming path should inject Matrix ids for agents with matrix messaging tools."""
+        """Streaming path should inject stable Matrix targeting context."""
 
         async def mock_streaming_response() -> AsyncGenerator[str, None]:
             yield "chunk"
@@ -282,12 +279,9 @@ class TestAgentBot(AgentBotTestBase):
 
         assert generation.delivery.event_id == "$response"
         assert mock_stream_agent_response.call_args.kwargs["prompt"] == "Please reply in thread"
-        assert "[Matrix metadata for tool calls]" not in mock_stream_agent_response.call_args.kwargs["model_prompt"]
-        item = _single_matrix_target_item(mock_stream_agent_response.call_args.args[0])
-        assert item.cache_policy == "stable"
-        assert "!test:localhost" in item.text
-        assert "do not pass `thread_id`" in item.text
-        assert "$event456" not in item.text
+        model_prompt = mock_stream_agent_response.call_args.kwargs["model_prompt"]
+        assert "[Matrix metadata for tool calls]" not in model_prompt
+        assert "!test:localhost" in _matrix_target_item(mock_stream_agent_response).text
 
     @pytest.mark.asyncio
     async def test_process_and_respond_uses_safe_thread_root_for_prompt_metadata(
@@ -342,10 +336,9 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             )
 
-        item = _single_matrix_target_item(mock_ai.call_args.args[0])
-        assert "thread $thread_root:localhost" in item.text
-        assert "as `target`" in item.text
-        assert "$reply_plain:localhost" not in item.text
+        target_text = _matrix_target_item(mock_ai).text
+        assert "$thread_root:localhost" in target_text
+        assert "$reply_plain:localhost" not in target_text
 
     @pytest.mark.asyncio
     async def test_process_and_respond_keeps_thread_root_metadata_when_reply_anchor_is_root(
@@ -400,68 +393,8 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             )
 
-        item = _single_matrix_target_item(mock_ai.call_args.args[0])
-        assert "thread $thread_root:localhost" in item.text
-        assert "as `target`" in item.text
-
-    @pytest.mark.asyncio
-    async def test_matrix_target_context_is_identical_across_source_events(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Two turns with different source events must produce byte-identical target text."""
-        config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(
-                        display_name="CalculatorAgent",
-                        rooms=["!test:localhost"],
-                        tools=["matrix_message"],
-                        include_default_tools=False,
-                    ),
-                },
-            ),
-            tmp_path,
-        )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
-        bot.client.room_send.return_value = _room_send_response("$response")
-        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
-        mock_ai = AsyncMock(return_value="Handled")
-
-        with patch_response_runner_module(
-            typing_indicator=_noop_typing_indicator,
-            ai_response=mock_ai,
-        ):
-            for reply_to_event_id in ("$first_event:localhost", "$second_event:localhost"):
-                target = MessageTarget.resolve(
-                    room_id="!test:localhost",
-                    thread_id=None,
-                    reply_to_event_id=reply_to_event_id,
-                    thread_start_root_event_id="$thread_root:localhost",
-                )
-                await bot._response_runner.process_and_respond(
-                    _response_request(
-                        room_id="!test:localhost",
-                        prompt="Continue",
-                        reply_to_event_id=reply_to_event_id,
-                        thread_history=[],
-                        user_id="@user:localhost",
-                        response_envelope=request_envelope(
-                            room_id="!test:localhost",
-                            reply_to_event_id=reply_to_event_id,
-                            prompt="Continue",
-                            user_id="@user:localhost",
-                            target=target,
-                        ),
-                    ),
-                )
-
-        first_item, second_item = (_single_matrix_target_item(call.args[0]) for call in mock_ai.call_args_list)
-        assert first_item.text == second_item.text
-        assert "$first_event:localhost" not in first_item.text
-        assert "$second_event:localhost" not in second_item.text
+        target_text = _matrix_target_item(mock_ai).text
+        assert "$thread_root:localhost" in target_text
 
     @pytest.mark.asyncio
     async def test_process_and_respond_streaming_resolves_knowledge_once(
@@ -1843,10 +1776,9 @@ class TestAgentBot(AgentBotTestBase):
 
         request = mock_process.await_args.args[0]
         assert request.prompt == "What time is it?"
-        # model_prompt carries only model-side additions past the raw prompt.
-        assert request.model_prompt == ""
+        assert request.model_prompt == "What time is it?"
         assert request.current_timestamp_ms == int(current_turn_time.timestamp() * 1000)
-        assert request.thread_history[0].body == "Earlier user question"
+        assert request.thread_history[0].body == "[2026-03-10 08:10 PDT] Earlier user question"
         assert request.thread_history[1].body == "Existing agent reply"
 
     @pytest.mark.asyncio
@@ -1966,11 +1898,10 @@ class TestAgentBot(AgentBotTestBase):
 
         request = mock_process.await_args.args[0]
         assert request.prompt == "What time is it?"
-        # model_prompt carries only model-side additions past the raw prompt.
-        assert request.model_prompt == ""
+        assert request.model_prompt == "What time is it?"
         assert request.current_timestamp_ms == int(current_turn_time.timestamp() * 1000)
-        assert request.thread_history[0].body == "Bob question"
-        assert request.thread_history[1].body == "Alice earlier"
+        assert request.thread_history[0].body == "[2026-03-10 08:10 PDT] Bob question"
+        assert request.thread_history[1].body == "[2026-03-10 08:12 PDT] Alice earlier"
         assert request.thread_history[2].body == "Existing agent reply"
 
         assert len(stored_calls) == 1
@@ -2077,6 +2008,17 @@ class TestAgentBot(AgentBotTestBase):
             await response_function(None)
             return "$response"
 
+        def passthrough_prepare_context(
+            prompt: str,
+            thread_history: Sequence[ResolvedVisibleMessage],
+            *,
+            config: Config,
+            runtime_paths: RuntimePaths,
+            model_prompt: str | None = None,
+        ) -> tuple[str, Sequence[ResolvedVisibleMessage], str, list[ResolvedVisibleMessage]]:
+            _ = config, runtime_paths
+            return prompt, thread_history, model_prompt or prompt, list(thread_history)
+
         stale_history = [
             _visible_message(
                 sender=mock_agent_user.user_id,
@@ -2138,6 +2080,7 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_get_thread_history,
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=False),
+                prepare_memory_and_model_context=passthrough_prepare_context,
                 reprioritize_auto_flush_sessions=MagicMock(),
                 apply_post_response_effects=AsyncMock(),
             ),

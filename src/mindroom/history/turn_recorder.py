@@ -20,15 +20,6 @@ class TurnRecorder:
     """Accumulate trusted runtime facts for one top-level turn."""
 
     user_message: str
-    # The Matrix event whose body ``user_message`` literally is; None for
-    # synthetic prompts and structured batches carrying per-child identity.
-    current_event_id: str | None = None
-    # Model-only current-turn additions (attachment guidance, enrichment tails)
-    # rendered after the event-tagged block; preserved so interrupted replay
-    # keeps the prompt the model actually received.
-    current_message_suffix: str = ""
-    # Preformatted local send time for the current event's ``ts`` attribute.
-    current_turn_ts: str | None = None
     run_metadata: dict[str, Any] | None = None
     run_id: str | None = None
     response_event_id: str | None = None
@@ -72,7 +63,8 @@ class TurnRecorder:
         interrupted_tools: Sequence[ToolTraceEntry],
     ) -> None:
         """Refresh the latest observed streaming state without deciding the final outcome."""
-        self.set_run_metadata(dict(run_metadata) if run_metadata is not None else None)
+        if run_metadata is not None:
+            self.set_run_metadata(dict(run_metadata))
         self.set_assistant_text(assistant_text)
         self.set_completed_tools(list(completed_tools))
         self.set_interrupted_tools(list(interrupted_tools))
@@ -85,7 +77,8 @@ class TurnRecorder:
         completed_tools: Sequence[ToolTraceEntry],
     ) -> None:
         """Record one completed top-level turn."""
-        self.set_run_metadata(dict(run_metadata) if run_metadata is not None else None)
+        if run_metadata is not None:
+            self.set_run_metadata(dict(run_metadata))
         self.set_assistant_text(assistant_text)
         self.set_completed_tools(list(completed_tools))
         self.set_interrupted_tools([])
@@ -101,7 +94,8 @@ class TurnRecorder:
         original_status: RunStatus = RunStatus.cancelled,
     ) -> None:
         """Record one interrupted top-level turn."""
-        self.set_run_metadata(dict(run_metadata) if run_metadata is not None else None)
+        if run_metadata is not None:
+            self.set_run_metadata(dict(run_metadata))
         self.set_assistant_text(assistant_text)
         self.set_completed_tools(list(completed_tools))
         self.set_interrupted_tools(list(interrupted_tools))
@@ -124,9 +118,6 @@ class TurnRecorder:
             completed_tools=self.completed_tools,
             interrupted_tools=self.interrupted_tools,
             run_metadata=self.run_metadata,
-            current_event_id=self.current_event_id,
-            current_message_suffix=self.current_message_suffix,
-            current_turn_ts=self.current_turn_ts,
             response_event_id=self.response_event_id,
             original_status=self.original_status or RunStatus.cancelled,
         )

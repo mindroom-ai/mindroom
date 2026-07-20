@@ -30,6 +30,7 @@ from mindroom.hooks import (
     AfterResponseContext,
     AgentLifecycleContext,
     BeforeResponseContext,
+    EnrichmentItem,
     HookContext,
     HookMessageSender,
     HookRegistry,
@@ -925,6 +926,37 @@ async def test_apply_message_enrichment_preserves_hook_chain_metadata(tmp_path: 
 
     assert prepared.envelope.hook_source == "origin-plugin:message:received"
     assert prepared.envelope.message_received_depth == 1
+
+
+@pytest.mark.asyncio
+async def test_message_enrichment_can_stay_out_of_history(tmp_path: Path) -> None:
+    """Transient plugin context should use the existing system-enrichment path."""
+    bot = _agent_bot(tmp_path)
+    dispatch = PreparedDispatch(
+        requester_user_id="@user:localhost",
+        context=_dispatch_context(bot),
+        target=MessageTarget.resolve("!room:localhost", "$thread", "$hook-event"),
+        correlation_id="corr-enrich",
+        envelope=_synthetic_envelope(),
+    )
+
+    @hook(EVENT_MESSAGE_ENRICH)
+    async def message_enrich(context: MessageEnrichContext) -> None:
+        context.add_metadata("profile", "persisted profile")
+        context.add_metadata("location", "current location", persist=False)
+
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("enrich-plugin", [message_enrich])])
+
+    prepared = await bot._ingress_hook_runner.apply_message_enrichment(
+        dispatch,
+        DispatchPayload(prompt="hello"),
+        target_entity_name="code",
+        target_member_names=None,
+    )
+
+    assert "persisted profile" in (prepared.payload.model_prompt or "")
+    assert "current location" not in (prepared.payload.model_prompt or "")
+    assert prepared.system_enrichment_items == (EnrichmentItem(key="location", text="current location", persist=False),)
 
 
 @pytest.mark.asyncio
@@ -2054,102 +2086,3 @@ async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(
     turn_store.record_turn.assert_called_once_with(
         TurnRecord.create([event.event_id]),
     )
-
-
-@pytest.mark.asyncio
-async def test_apply_message_enrichment_splits_reserved_location_item(tmp_path: Path) -> None:
-    """The trusted location item leaves the flattened prompt and rides the typed channel."""
-    bot = _agent_bot(tmp_path)
-    dispatch = PreparedDispatch(
-        requester_user_id="@user:localhost",
-        context=_dispatch_context(bot),
-        target=MessageTarget.resolve("!room:localhost", "$thread", "$hook-event"),
-        correlation_id="corr-location",
-        envelope=_synthetic_envelope(),
-    )
-
-    @hook(EVENT_MESSAGE_ENRICH)
-    async def location_enrich(context: MessageEnrichContext) -> None:
-        context.add_metadata("location", "at_home: true\nlatitude: 52.3702")
-        context.add_metadata("weather", "12C and windy")
-
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("location-plugin", [location_enrich])])
-
-    prepared = await bot._ingress_hook_runner.apply_message_enrichment(
-        dispatch,
-        DispatchPayload(prompt="hello"),
-        target_entity_name="code",
-        target_member_names=None,
-    )
-
-    assert prepared.location_item_text == "at_home: true\nlatitude: 52.3702"
-    model_prompt = prepared.payload.model_prompt or ""
-    assert '<item key="weather"' in model_prompt
-    assert '<item key="location"' not in model_prompt
-    assert "latitude" not in model_prompt
-
-
-@pytest.mark.asyncio
-async def test_apply_message_enrichment_drops_duplicate_location_items(tmp_path: Path) -> None:
-    """Only the first location item is authoritative; no duplicate reaches any prompt."""
-    bot = _agent_bot(tmp_path)
-    dispatch = PreparedDispatch(
-        requester_user_id="@user:localhost",
-        context=_dispatch_context(bot),
-        target=MessageTarget.resolve("!room:localhost", "$thread", "$hook-event"),
-        correlation_id="corr-location-dup",
-        envelope=_synthetic_envelope(),
-    )
-
-    @hook(EVENT_MESSAGE_ENRICH)
-    async def first_location(context: MessageEnrichContext) -> None:
-        context.add_metadata("location", "at_home: true")
-
-    @hook(EVENT_MESSAGE_ENRICH)
-    async def second_location(context: MessageEnrichContext) -> None:
-        context.add_metadata("location", "latitude: 52.3702\nlongitude: 4.8952")
-
-    bot.hook_registry = HookRegistry.from_plugins(
-        [_plugin("location-plugin", [first_location, second_location])],
-    )
-
-    prepared = await bot._ingress_hook_runner.apply_message_enrichment(
-        dispatch,
-        DispatchPayload(prompt="hello"),
-        target_entity_name="code",
-        target_member_names=None,
-    )
-
-    assert prepared.location_item_text == "at_home: true"
-    model_prompt = prepared.payload.model_prompt or prepared.payload.prompt
-    assert "latitude" not in model_prompt
-    assert '<item key="location"' not in model_prompt
-
-
-@pytest.mark.asyncio
-async def test_apply_message_enrichment_location_only_leaves_prompt_untouched(tmp_path: Path) -> None:
-    """A location-only enrichment turn appends no block to the model prompt at all."""
-    bot = _agent_bot(tmp_path)
-    dispatch = PreparedDispatch(
-        requester_user_id="@user:localhost",
-        context=_dispatch_context(bot),
-        target=MessageTarget.resolve("!room:localhost", "$thread", "$hook-event"),
-        correlation_id="corr-location-only",
-        envelope=_synthetic_envelope(),
-    )
-
-    @hook(EVENT_MESSAGE_ENRICH)
-    async def location_enrich(context: MessageEnrichContext) -> None:
-        context.add_metadata("location", "at_home: true")
-
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("location-plugin", [location_enrich])])
-
-    prepared = await bot._ingress_hook_runner.apply_message_enrichment(
-        dispatch,
-        DispatchPayload(prompt="hello"),
-        target_entity_name="code",
-        target_member_names=None,
-    )
-
-    assert prepared.location_item_text == "at_home: true"
-    assert prepared.payload.model_prompt is None

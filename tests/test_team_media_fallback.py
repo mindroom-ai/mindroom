@@ -41,7 +41,7 @@ from mindroom.execution_preparation import (
     _PreparedExecutionContext,
     prepare_bound_team_run_context,
 )
-from mindroom.history.interrupted_replay import _render_interrupted_replay_parts
+from mindroom.history.interrupted_replay import _render_interrupted_replay_content
 from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.history.turn_recorder import TurnRecorder
@@ -54,6 +54,7 @@ from mindroom.media_fallback import (
     unsupported_media_kinds_for_route,
 )
 from mindroom.media_inputs import MediaInputs
+from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
@@ -1185,17 +1186,26 @@ async def test_prepare_bound_team_execution_context_uses_team_renderer_for_trimm
             ),
         )
 
-    wrapped_team_reply = (
-        '<msg event_id="event-2" from="@mindroom_team:example.org"><![CDATA[Previous team reply]]></msg>'
-    )
     assert tuple((message.role, message.content) for message in prepared.messages) == (
-        ("assistant", wrapped_team_reply),
+        (
+            "assistant",
+            render_msg_tag(
+                sender="@mindroom_team:example.org",
+                body="Previous team reply",
+                event_id="event-2",
+            ),
+        ),
         ("user", "Analyze this."),
+    )
+    tagged_reply = render_msg_tag(
+        sender="@mindroom_team:example.org",
+        body="Previous team reply",
+        event_id="event-2",
     )
     assert captured_prompts == [
         ("Analyze this.", None),
         ("Analyze this.", None),
-        (f"assistant: {wrapped_team_reply}\n\nAnalyze this.", None),
+        (f"assistant: {tagged_reply}\n\nAnalyze this.", None),
     ]
 
 
@@ -1233,8 +1243,14 @@ async def test_prepare_bound_team_execution_context_truncates_long_fallback_mess
     )
 
     assert tuple((message.role, message.content) for message in prepared.messages) == (
-        ("user", f'<msg event_id="event-1" from="alice"><![CDATA[{"x" * 199}…]]></msg>'),
-        ("user", f'<msg event_id="event-2" from="bob"><![CDATA[{exact_limit_body}]]></msg>'),
+        (
+            "user",
+            render_msg_tag(sender="alice", body=f"{'x' * 199}…", event_id="event-1"),
+        ),
+        (
+            "user",
+            render_msg_tag(sender="bob", body=exact_limit_body, event_id="event-2"),
+        ),
         ("user", "Analyze this."),
     )
 
@@ -1635,7 +1651,7 @@ async def test_team_response_records_interrupted_snapshot_for_cancelled_runs() -
 
     snapshot = recorder.interrupted_snapshot()
     assert snapshot.user_message == "Analyze this."
-    assert _render_interrupted_replay_parts(snapshot)[0] == (
+    assert _render_interrupted_replay_content(snapshot) == (
         "**GeneralAgent**: Half done\n\n\n"
         "*No team consensus - showing individual responses only*\n\n"
         "(turn stopped before completion; 1 tool call(s) had finished)\n\n"
@@ -1705,7 +1721,7 @@ async def test_team_response_records_incomplete_cancelled_tools_as_interrupted()
 
     snapshot = recorder.interrupted_snapshot()
     assert snapshot.user_message == "Analyze this."
-    assert _render_interrupted_replay_parts(snapshot)[0] == (
+    assert _render_interrupted_replay_content(snapshot) == (
         "**GeneralAgent**: Half done\n\n\n"
         "*No team consensus - showing individual responses only*\n\n"
         "(turn stopped before completion; 1 tool call(s) were still running)\n\n"
@@ -2132,7 +2148,7 @@ async def test_team_response_stream_records_hidden_interrupted_tool_state() -> N
 
     snapshot = recorder.interrupted_snapshot()
     assert snapshot.user_message == "Analyze this."
-    assert _render_interrupted_replay_parts(snapshot)[0] == (
+    assert _render_interrupted_replay_content(snapshot) == (
         "**GeneralAgent**: Half done\n\n\n"
         "*No team consensus - showing individual responses only*\n\n"
         "(turn stopped before completion; 1 tool call(s) had finished)\n\n"
@@ -2371,7 +2387,7 @@ async def test_team_response_stream_records_interrupted_snapshot_after_external_
 
     snapshot = recorder.interrupted_snapshot()
     assert snapshot.user_message == "Analyze this."
-    assert _render_interrupted_replay_parts(snapshot)[0] == (
+    assert _render_interrupted_replay_content(snapshot) == (
         "**GeneralAgent**: Half done\n\n\n*No team consensus - showing individual responses only*\n\n"
         "(turn stopped before completion)"
     )
@@ -2559,7 +2575,7 @@ async def test_team_response_stream_preserves_pending_tool_identity_within_membe
 
     snapshot = recorder.interrupted_snapshot()
     assert snapshot.user_message == "Analyze this."
-    assert _render_interrupted_replay_parts(snapshot)[0] == (
+    assert _render_interrupted_replay_content(snapshot) == (
         "**GeneralAgent**: General started\n\n\n"
         "*No team consensus - showing individual responses only*\n\n"
         "(turn stopped before completion; "

@@ -29,12 +29,7 @@ from mindroom.hooks import (
     emit_final_response_transform,
     emit_transform,
 )
-from mindroom.matrix.client_delivery import (
-    DeliveredMatrixEvent,
-    build_threaded_edit_content,
-    edit_message_result,
-    send_message_result,
-)
+from mindroom.matrix.client_delivery import build_threaded_edit_content, edit_message_result, send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
@@ -62,7 +57,6 @@ if TYPE_CHECKING:
         CompactionOutcome,
     )
     from mindroom.hooks import MessageEnvelope
-    from mindroom.interactive import InteractiveMetadata
     from mindroom.message_target import MessageTarget
     from mindroom.streaming import StreamInputChunk
     from mindroom.timing import DispatchPipelineTiming
@@ -472,11 +466,6 @@ class DeliveryGateway:
 
     async def send_text(self, request: SendTextRequest) -> str | None:
         """Send one response message to a room."""
-        delivered = await self._send_text_delivered(request)
-        return delivered.event_id if delivered is not None else None
-
-    async def _send_text_delivered(self, request: SendTextRequest) -> DeliveredMatrixEvent | None:
-        """Send one response message and return the exact delivered event payload."""
         client = self._client()
         config = self.deps.runtime.config
         resolved_target = request.target
@@ -522,16 +511,12 @@ class DeliveryGateway:
                 delivered.content_sent,
             )
             self.deps.logger.info("Sent response", event_id=delivered.event_id, **resolved_target.log_context)
-            return delivered
+            return delivered.event_id
         self.deps.logger.error("Failed to send response to room", **resolved_target.log_context)
         return None
 
     async def edit_text(self, request: EditTextRequest) -> bool:
         """Edit one existing response message."""
-        return await self._edit_text_delivered(request) is not None
-
-    async def _edit_text_delivered(self, request: EditTextRequest) -> DeliveredMatrixEvent | None:
-        """Edit one existing response message and return the exact delivered payload."""
         client = self._client()
         config = self.deps.runtime.config
         target = request.target
@@ -583,14 +568,14 @@ class DeliveryGateway:
                 delivered.content_sent,
             )
             self.deps.logger.info("Edited message", event_id=request.event_id, **target.log_context)
-            return delivered
+            return True
         self.deps.logger.error(
             "Failed to edit message",
             event_id=request.event_id,
             error="edit_message_result returned None",
             **target.log_context,
         )
-        return None
+        return False
 
     async def deliver_final(  # noqa: C901, PLR0911, PLR0912
         self,
@@ -715,7 +700,7 @@ class DeliveryGateway:
         display_text = interactive_response.formatted_text
 
         if request.existing_event_id is not None:
-            edited = await self._edit_text_delivered(
+            edited = await self.edit_text(
                 EditTextRequest(
                     target=request.target,
                     event_id=request.existing_event_id,
@@ -724,13 +709,12 @@ class DeliveryGateway:
                     extra_content=draft.extra_content,
                 ),
             )
-            if edited is not None:
+            if edited:
                 return FinalDeliveryOutcome(
                     terminal_status="completed",
                     event_id=request.existing_event_id,
                     is_visible_response=True,
-                    final_visible_body=edited.canonical_body or display_text,
-                    body_is_run_output=True,
+                    final_visible_body=display_text,
                     delivery_kind="edited",
                     tool_trace=tuple(draft.tool_trace or ()),
                     extra_content=draft.extra_content,
@@ -756,7 +740,7 @@ class DeliveryGateway:
                 tool_trace=tuple(draft.tool_trace or ()),
                 extra_content=draft.extra_content,
             )
-        delivered = await self._send_text_delivered(
+        event_id = await self.send_text(
             SendTextRequest(
                 target=request.target,
                 response_text=display_text,
@@ -765,7 +749,7 @@ class DeliveryGateway:
                 extra_content=draft.extra_content,
             ),
         )
-        if delivered is None:
+        if event_id is None:
             return FinalDeliveryOutcome(
                 terminal_status="error",
                 event_id=None,
@@ -775,10 +759,9 @@ class DeliveryGateway:
             )
         return FinalDeliveryOutcome(
             terminal_status="completed",
-            event_id=delivered.event_id,
+            event_id=event_id,
             is_visible_response=True,
-            final_visible_body=delivered.canonical_body or display_text,
-            body_is_run_output=True,
+            final_visible_body=display_text,
             delivery_kind="sent",
             tool_trace=tuple(draft.tool_trace or ()),
             extra_content=draft.extra_content,
@@ -1044,7 +1027,7 @@ class DeliveryGateway:
             response_text,
             canonical_body_candidate=canonical_body_candidate,
         )
-        edited = await self._edit_text_delivered(
+        edited = await self.edit_text(
             EditTextRequest(
                 target=target,
                 event_id=event_id,
@@ -1053,14 +1036,13 @@ class DeliveryGateway:
                 extra_content=extra_content,
             ),
         )
-        if edited is None:
+        if not edited:
             return None
         return FinalDeliveryOutcome(
             terminal_status="completed",
             event_id=event_id,
             is_visible_response=True,
-            final_visible_body=edited.canonical_body or interactive_response.formatted_text,
-            body_is_run_output=True,
+            final_visible_body=interactive_response.formatted_text,
             delivery_kind="edited",
             failure_reason=failure_reason,
             tool_trace=tuple(tool_trace or ()),
@@ -1104,69 +1086,6 @@ class DeliveryGateway:
             identity=request.identity,
             failure_reason=failure_reason,
             tool_trace=request.tool_trace,
-            extra_content=request.extra_content,
-        )
-
-    @staticmethod
-    def _visible_stream_outcome(
-        request: FinalizeStreamedResponseRequest,
-        stream_outcome: StreamTransportOutcome,
-        *,
-        terminal_status: Literal["completed", "cancelled", "error"],
-        event_id: str,
-        failure_reason: str | None,
-        delivery_kind: Literal["sent", "edited"] | None = None,
-        interactive_metadata: InteractiveMetadata | None = None,
-    ) -> FinalDeliveryOutcome:
-        """Build the terminal outcome for a stream whose own body is visible at ``event_id``.
-
-        The stream outcome's rendered body is the canonical delivered text and
-        it reports whether that text contains the run's own output (a synthetic
-        note-only terminal does not) — ownership is computed here once for
-        every arm instead of per constructor. ``visible_body`` state implies a
-        committed non-empty rendered body, so no pre-delivery formatted-text
-        fallback is needed here.
-        """
-        body = stream_outcome.visible_body_text or None
-        return FinalDeliveryOutcome(
-            terminal_status=terminal_status,
-            event_id=event_id,
-            is_visible_response=True,
-            final_visible_body=body,
-            body_is_run_output=bool(body) and stream_outcome.visible_body_is_run_output,
-            delivery_kind=delivery_kind,
-            failure_reason=failure_reason,
-            tool_trace=tuple(request.tool_trace or ()),
-            extra_content=request.extra_content,
-            interactive_metadata=interactive_metadata,
-        )
-
-    @staticmethod
-    def _late_finalize_outcome(
-        request: FinalizeStreamedResponseRequest,
-        stream_outcome: StreamTransportOutcome,
-        *,
-        terminal_status: Literal["cancelled", "error"],
-        failure_reason: str,
-    ) -> FinalDeliveryOutcome:
-        """Build the terminal outcome when finalization died after streaming settled visibility.
-
-        A body is claimed only when the visible event is the stream's own; a
-        pre-existing edit target left unchanged is linked without one.
-        """
-        visible_event_id = stream_outcome.visible_event_id
-        event_id = visible_event_id
-        if event_id is None and request.existing_event_id is not None and not request.existing_event_is_placeholder:
-            event_id = request.existing_event_id
-        body = (stream_outcome.visible_body_text or None) if visible_event_id is not None else None
-        return FinalDeliveryOutcome(
-            terminal_status=terminal_status,
-            event_id=event_id,
-            is_visible_response=event_id is not None,
-            final_visible_body=body,
-            body_is_run_output=bool(body) and stream_outcome.visible_body_is_run_output,
-            failure_reason=failure_reason,
-            tool_trace=tuple(request.tool_trace or ()),
             extra_content=request.extra_content,
         )
 
@@ -1219,12 +1138,14 @@ class DeliveryGateway:
 
                 visible_stream_event_id = stream_outcome.visible_event_id
                 if visible_stream_event_id is not None:
-                    return self._visible_stream_outcome(
-                        request,
-                        stream_outcome,
+                    return FinalDeliveryOutcome(
                         terminal_status="cancelled",
                         event_id=visible_stream_event_id,
+                        is_visible_response=True,
+                        final_visible_body=streamed_text or None,
                         failure_reason=failure_reason,
+                        tool_trace=tuple(request.tool_trace or ()),
+                        extra_content=request.extra_content,
                     )
                 if request.existing_event_id is not None and not request.existing_event_is_placeholder:
                     return FinalDeliveryOutcome(
@@ -1269,12 +1190,14 @@ class DeliveryGateway:
 
                 visible_stream_event_id = stream_outcome.visible_event_id
                 if visible_stream_event_id is not None:
-                    return self._visible_stream_outcome(
-                        request,
-                        stream_outcome,
+                    return FinalDeliveryOutcome(
                         terminal_status="error",
                         event_id=visible_stream_event_id,
+                        is_visible_response=True,
+                        final_visible_body=streamed_text or None,
                         failure_reason=failure_reason,
+                        tool_trace=tuple(request.tool_trace or ()),
+                        extra_content=request.extra_content,
                     )
                 if request.existing_event_id is not None and not request.existing_event_is_placeholder:
                     return FinalDeliveryOutcome(
@@ -1358,6 +1281,16 @@ class DeliveryGateway:
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
                     )
+                if visible_stream_event_id is not None:
+                    return FinalDeliveryOutcome(
+                        terminal_status="error",
+                        event_id=visible_stream_event_id,
+                        is_visible_response=True,
+                        final_visible_body=streamed_text or None,
+                        failure_reason=failure_reason,
+                        tool_trace=tuple(request.tool_trace or ()),
+                        extra_content=request.extra_content,
+                    )
                 return FinalDeliveryOutcome(
                     terminal_status="error",
                     event_id=None,
@@ -1391,24 +1324,15 @@ class DeliveryGateway:
                 )
             try:
                 if stream_outcome.failure_reason is not None:
-                    if visible_stream_event_id is None:
-                        self.deps.logger.error(
-                            "Visible stream failure outcome missing its event id",
-                            correlation_id=request.identity.correlation_id,
-                        )
-                        return FinalDeliveryOutcome(
-                            terminal_status="error",
-                            event_id=None,
-                            failure_reason=stream_outcome.failure_reason or "terminal_update_failed",
-                            tool_trace=tuple(request.tool_trace or ()),
-                            extra_content=request.extra_content,
-                        )
-                    return self._visible_stream_outcome(
-                        request,
-                        stream_outcome,
+                    failure_reason = stream_outcome.failure_reason or "terminal_update_failed"
+                    return FinalDeliveryOutcome(
                         terminal_status="error",
                         event_id=visible_stream_event_id,
-                        failure_reason=stream_outcome.failure_reason or "terminal_update_failed",
+                        is_visible_response=True,
+                        final_visible_body=streamed_text,
+                        failure_reason=failure_reason,
+                        tool_trace=tuple(request.tool_trace or ()),
+                        extra_content=request.extra_content,
                     )
                 final_transform_draft = await self.deps.response_hooks.apply_final_response_transform(
                     identity=request.identity,
@@ -1452,47 +1376,54 @@ class DeliveryGateway:
                     correlation_id=request.identity.correlation_id,
                 )
 
-            if streamed_event_id is None:
-                self.deps.logger.error(
-                    "Completed visible stream missing its event id",
-                    correlation_id=request.identity.correlation_id,
-                )
-                return FinalDeliveryOutcome(
-                    terminal_status="error",
-                    event_id=None,
-                    failure_reason="stream_completed_without_visible_body",
-                    tool_trace=tuple(request.tool_trace or ()),
-                    extra_content=request.extra_content,
-                )
+            assert streamed_event_id is not None
             interactive_response = interactive_response_for_visible_body(
                 streamed_text,
                 canonical_body_candidate=final_body_candidate,
                 stream_interactive_metadata=stream_outcome.interactive_metadata,
             )
-            return self._visible_stream_outcome(
-                request,
-                stream_outcome,
+            return FinalDeliveryOutcome(
                 terminal_status="completed",
                 event_id=streamed_event_id,
-                failure_reason=stream_outcome.failure_reason,
+                is_visible_response=True,
+                final_visible_body=streamed_text or interactive_response.formatted_text,
                 delivery_kind=request.initial_delivery_kind,
+                failure_reason=stream_outcome.failure_reason,
+                tool_trace=tuple(request.tool_trace or ()),
+                extra_content=request.extra_content,
                 interactive_metadata=interactive_response.interactive_metadata,
             )
         except asyncio.CancelledError:
-            return self._late_finalize_outcome(
-                request,
-                stream_outcome,
+            visible_event_id = stream_outcome.visible_event_id
+            event_id = visible_event_id
+            if event_id is None and request.existing_event_id is not None and not request.existing_event_is_placeholder:
+                event_id = request.existing_event_id
+            final_visible_body = stream_outcome.visible_body_text if visible_event_id is not None else None
+            return FinalDeliveryOutcome(
                 terminal_status="cancelled",
+                event_id=event_id,
+                is_visible_response=event_id is not None,
+                final_visible_body=final_visible_body,
                 failure_reason="stream_finalize_cancelled",
+                tool_trace=tuple(request.tool_trace or ()),
+                extra_content=request.extra_content,
             )
         except Exception:
             self.deps.logger.exception(
                 "Unexpected error in finalize_streamed_response",
                 correlation_id=request.identity.correlation_id,
             )
-            return self._late_finalize_outcome(
-                request,
-                stream_outcome,
+            visible_event_id = stream_outcome.visible_event_id
+            event_id = visible_event_id
+            if event_id is None and request.existing_event_id is not None and not request.existing_event_is_placeholder:
+                event_id = request.existing_event_id
+            final_visible_body = stream_outcome.visible_body_text if visible_event_id is not None else None
+            return FinalDeliveryOutcome(
                 terminal_status="error",
+                event_id=event_id,
+                is_visible_response=event_id is not None,
+                final_visible_body=final_visible_body,
                 failure_reason="stream_finalize_failed",
+                tool_trace=tuple(request.tool_trace or ()),
+                extra_content=request.extra_content,
             )

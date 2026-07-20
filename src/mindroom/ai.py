@@ -32,13 +32,8 @@ from mindroom.ai_run_metadata import (
     build_prepared_history_metadata_content,
     empty_request_metric_totals,
 )
-from mindroom.constants import MINDROOM_LOCATION_MARKER_METADATA_KEY
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.execution_preparation import (
-    append_additional_context,
-    prepare_agent_execution_context,
-    render_prepared_messages_text,
-)
+from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
 from mindroom.history.interrupted_replay import (
     persist_interrupted_replay,
     split_interrupted_tool_trace,
@@ -70,7 +65,7 @@ from mindroom.media_fallback import (
     unsupported_media_kinds_for_route,
 )
 from mindroom.media_inputs import MediaInputs, MediaKind
-from mindroom.memory import build_memory_prompt_parts
+from mindroom.memory import build_memory_prompt_parts, strip_user_turn_time_prefix
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.pre_model_preparation import prepare_mem0_prompt_branches
 from mindroom.response_turn import (
@@ -89,7 +84,6 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
-from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
 from mindroom.tool_system.events import StreamingToolTracker, complete_pending_tool_block, format_tool_combined
 
@@ -121,28 +115,47 @@ __all__ = [
     "ResponseTurnContext",
     "ai_response",
     "build_matrix_run_metadata",
-    "model_prompt_tail_after_raw_prompt",
     "stream_agent_response",
 ]
 AIStreamChunk = str | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 
 
-def model_prompt_tail_after_raw_prompt(*, raw_prompt: str, model_prompt: str | None) -> str:
-    """Return model-only additions after the raw user prompt prefix.
+def _append_additional_context(agent: Agent, context_chunk: str) -> None:
+    """Append one transient context block without discarding existing system context."""
+    if not context_chunk:
+        return
+    existing_context = agent.additional_context.strip() if agent.additional_context else ""
+    agent.additional_context = f"{existing_context}\n\n{context_chunk}" if existing_context else context_chunk
 
-    Prompts are compared verbatim apart from whitespace normalization: user
-    text that merely looks like a timestamp prefix is never parsed away, since
-    runtime timestamps ride the ``<msg ts="...">`` attribute.
-    """
+
+def _compose_current_turn_prompt(
+    *,
+    raw_prompt: str,
+    model_prompt: str | None,
+) -> str:
+    """Build the persisted current-turn user message without transient context."""
+    prompt_chunks: list[str] = []
+    if raw_prompt:
+        prompt_chunks.append(raw_prompt)
+    model_prompt_tail = _model_prompt_tail_after_raw_prompt(raw_prompt=raw_prompt, model_prompt=model_prompt)
+    if model_prompt_tail:
+        prompt_chunks.append(model_prompt_tail)
+
+    return "\n\n".join(prompt_chunks)
+
+
+def _model_prompt_tail_after_raw_prompt(*, raw_prompt: str, model_prompt: str | None) -> str:
+    """Return model-only additions after the raw user prompt prefix."""
     if not model_prompt:
         return ""
+    model_prompt_tail = strip_user_turn_time_prefix(model_prompt)
     normalized_raw_prompt = raw_prompt.strip()
-    normalized_model_prompt = model_prompt.strip()
-    if raw_prompt and normalized_model_prompt == normalized_raw_prompt:
+    normalized_model_prompt_tail = model_prompt_tail.strip()
+    if raw_prompt and normalized_model_prompt_tail == normalized_raw_prompt:
         return ""
-    if raw_prompt and normalized_model_prompt.startswith(f"{normalized_raw_prompt}\n\n"):
-        return normalized_model_prompt[len(normalized_raw_prompt) + 2 :].lstrip()
-    return model_prompt
+    if raw_prompt and normalized_model_prompt_tail.startswith(f"{normalized_raw_prompt}\n\n"):
+        return normalized_model_prompt_tail[len(normalized_raw_prompt) + 2 :].lstrip()
+    return model_prompt_tail
 
 
 def _initial_agent_continuation(
@@ -162,7 +175,7 @@ def _initial_agent_continuation(
         current_prompt_is_structured=current_prompt_is_structured,
         current_event_id=current_event_id,
         run_id=run_id,
-        continuation_model_prompt_tail=model_prompt_tail_after_raw_prompt(
+        continuation_model_prompt_tail=_model_prompt_tail_after_raw_prompt(
             raw_prompt=prompt,
             model_prompt=model_prompt,
         ),
@@ -181,8 +194,6 @@ class _PreparedAgentRun:
     # this snapshot instead of re-resolving, because the per-thread override
     # store can change mid-run (for example via the thread_model tool).
     runtime_model_name: str
-    # Location-change marker to record in this run's trusted metadata.
-    location_marker: str | None = None
 
     @property
     def prompt_text(self) -> str:
@@ -348,9 +359,6 @@ def _build_agent_turn_callbacks(
     *,
     agent_name: str,
     prompt: str,
-    model_prompt: str | None,
-    current_event_id: str | None,
-    current_turn_ts: str | None,
     session_id: str,
     runtime_paths: RuntimePaths,
     config: Config,
@@ -413,12 +421,6 @@ def _build_agent_turn_callbacks(
             interrupted_tools=snapshot.interrupted_tools,
             run_metadata=snapshot.run_metadata,
             is_team=False,
-            current_event_id=current_event_id,
-            current_turn_ts=current_turn_ts,
-            current_message_suffix=model_prompt_tail_after_raw_prompt(
-                raw_prompt=prompt,
-                model_prompt=model_prompt,
-            ),
             original_status=snapshot.original_status,
         )
 
@@ -1129,10 +1131,6 @@ async def _prepare_agent_and_prompt(
         return runtime_model, agent
 
     parallel_branches = config.resolve_entity(agent_name).memory_backend == "mem0"
-    current_message_suffix = model_prompt_tail_after_raw_prompt(
-        raw_prompt=prompt,
-        model_prompt=model_prompt,
-    )
     if pipeline_timing is not None:
         pipeline_timing.note(prompt_branches_parallel=parallel_branches)
     if parallel_branches:
@@ -1158,6 +1156,10 @@ async def _prepare_agent_and_prompt(
                 )
             finally:
                 _mark_pipeline_timing(pipeline_timing, "prompt_branches_ready")
+        current_turn_prompt = _compose_current_turn_prompt(
+            raw_prompt=prompt,
+            model_prompt=model_prompt,
+        )
     else:
         _mark_pipeline_timing(pipeline_timing, "memory_prepare_start")
         prompt_parts = await build_memory_prompt_parts(
@@ -1168,14 +1170,18 @@ async def _prepare_agent_and_prompt(
             runtime_paths,
             execution_identity=execution_identity,
         )
+        current_turn_prompt = _compose_current_turn_prompt(
+            raw_prompt=prompt,
+            model_prompt=model_prompt,
+        )
         _mark_pipeline_timing(pipeline_timing, "memory_prepare_ready")
         _mark_pipeline_timing(pipeline_timing, "agent_build_start")
         runtime_model, agent = await asyncio.to_thread(_resolve_model_and_build_agent)
         _mark_pipeline_timing(pipeline_timing, "agent_build_ready")
 
-    append_additional_context(agent, prompt_parts.session_preamble)
+    _append_additional_context(agent, prompt_parts.session_preamble)
     if ctx.system_enrichment_items:
-        append_additional_context(
+        _append_additional_context(
             agent,
             _render_system_enrichment_context(ctx.system_enrichment_items),
         )
@@ -1184,7 +1190,7 @@ async def _prepare_agent_and_prompt(
         ctx,
         scope_context=scope_context,
         agent=agent,
-        prompt=prompt,
+        prompt=current_turn_prompt,
         transient_context_messages=(
             (
                 Message(
@@ -1205,7 +1211,6 @@ async def _prepare_agent_and_prompt(
         current_timestamp_ms=current_timestamp_ms,
         current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
-        current_message_suffix=current_message_suffix,
         include_openai_compat_guidance=include_openai_compat_guidance,
         pipeline_timing=pipeline_timing,
     )
@@ -1226,7 +1231,6 @@ async def _prepare_agent_and_prompt(
         unseen_event_ids=unseen_event_ids,
         prepared_history=prepared_history,
         runtime_model_name=runtime_model.model_name,
-        location_marker=prepared_execution.location_marker,
     )
 
 
@@ -1292,11 +1296,6 @@ async def _prepare_agent_run_context(
         )
 
     run_extra_content = build_prepared_history_metadata_content(prepared_run.prepared_history)
-    if prepared_run.location_marker is not None:
-        run_extra_content = {
-            **(run_extra_content or {}),
-            MINDROOM_LOCATION_MARKER_METADATA_KEY: prepared_run.location_marker,
-        }
     metadata = build_matrix_run_metadata(
         ctx.reply_to_event_id,
         prepared_run.unseen_event_ids,
@@ -1450,13 +1449,6 @@ async def ai_response(  # noqa: C901
         holder,
         agent_name=agent_name,
         prompt=prompt,
-        model_prompt=model_prompt,
-        current_event_id=ctx.current_event_id,
-        current_turn_ts=(
-            format_timestamp_ms(current_timestamp_ms, timezone=config.timezone)
-            if ctx.current_event_id is not None and current_timestamp_ms is not None
-            else None
-        ),
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
@@ -1601,7 +1593,7 @@ async def ai_response(  # noqa: C901
             model_prompt=model_prompt,
             current_timestamp_ms=current_timestamp_ms,
             current_prompt_is_structured=current_prompt_is_structured,
-            current_event_id=ctx.current_event_id,
+            current_event_id=ctx.reply_to_event_id,
             run_id=ctx.run_id,
         ),
     )
@@ -1901,13 +1893,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         holder,
         agent_name=agent_name,
         prompt=prompt,
-        model_prompt=model_prompt,
-        current_event_id=ctx.current_event_id,
-        current_turn_ts=(
-            format_timestamp_ms(current_timestamp_ms, timezone=config.timezone)
-            if ctx.current_event_id is not None and current_timestamp_ms is not None
-            else None
-        ),
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
@@ -2175,7 +2160,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             model_prompt=model_prompt,
             current_timestamp_ms=current_timestamp_ms,
             current_prompt_is_structured=current_prompt_is_structured,
-            current_event_id=ctx.current_event_id,
+            current_event_id=ctx.reply_to_event_id,
             run_id=ctx.run_id,
         ),
     )

@@ -148,13 +148,10 @@ def convert_messages(
             if text:
                 synthetic_index += 1
                 conversation.append(
-                    # Synthetic request history has no Matrix event identity;
-                    # an empty event_id keeps it out of model-facing <msg
-                    # event_id> attributes, which are for real events only.
                     ResolvedVisibleMessage.synthetic(
                         sender=msg.role,
                         body=text,
-                        event_id="",
+                        event_id=f"$openai-{synthetic_index}",
                         timestamp=synthetic_index,
                     ),
                 )

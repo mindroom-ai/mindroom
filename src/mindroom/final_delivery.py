@@ -20,10 +20,6 @@ class StreamTransportOutcome:  # noqa: D101
     terminal_status: _TerminalStatus
     rendered_body: str | None
     visible_body_state: VisibleBodyState
-    # False when the visible body is only a synthetic terminal note (cancel,
-    # restart, error) with no model output; committed pre-terminal bodies are
-    # always model output, so the default is True.
-    visible_body_is_run_output: bool = True
     canonical_final_body_candidate: str | None = None
     failure_reason: str | None = None
     interactive_metadata: InteractiveMetadata | None = None
@@ -47,10 +43,6 @@ class FinalDeliveryOutcome:  # noqa: D101
     event_id: str | None
     is_visible_response: bool = False
     final_visible_body: str | None = None
-    # True only when ``final_visible_body`` is this run's own delivered output;
-    # failure notices, cancel notes, and unchanged pre-existing events keep it
-    # False so persistence never binds an event to text the run did not deliver.
-    body_is_run_output: bool = False
     delivery_kind: _VisibleDeliveryKind | None = None
     failure_reason: str | None = None
     suppressed: bool = False

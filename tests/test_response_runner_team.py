@@ -253,20 +253,20 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         assert _handled_response_event_id(resolution) == "$team"
-        assert mock_team_response.await_args.kwargs["message"] == "Summarize the latest invoice."
-        # Model-only additions ride the current-message suffix so the raw
-        # prompt stays the exact wire body of its event.
-        assert mock_team_response.await_args.kwargs["current_message_suffix"] == (
-            "Available attachment IDs: att_invoice. Use tool calls to inspect or process them."
+        prepared_message = mock_team_response.await_args.kwargs["message"]
+        assert "Summarize the latest invoice." in prepared_message
+        assert "Available attachment IDs: att_invoice." in prepared_message
+        assert prepared_message.index("Summarize the latest invoice.") < prepared_message.index(
+            "Available attachment IDs: att_invoice.",
         )
 
     @pytest.mark.asyncio
-    async def test_generate_team_response_helper_never_parses_timestamp_like_user_text(
+    async def test_generate_team_response_helper_does_not_duplicate_already_timestamped_prompt(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """User text that merely looks like a timestamp prefix is compared verbatim."""
+        """Team helper should treat an already timestamped prompt as the same user turn."""
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
@@ -279,7 +279,7 @@ class TestAgentBot(AgentBotTestBase):
         )
         matrix_ids = entity_ids(config, runtime_paths_for(config))
         mock_team_response = AsyncMock(return_value="Team reply")
-        timestamped_prompt = "[2026-03-20 08:15 PDT] deploy now"
+        timestamped_prompt = "[2026-03-20 08:15 PDT] What time is it?"
 
         with (
             patch(
@@ -300,7 +300,7 @@ class TestAgentBot(AgentBotTestBase):
                 ResponseRequest(
                     thread_history=[],
                     user_id="@user:localhost",
-                    prompt=timestamped_prompt,
+                    prompt="What time is it?",
                     model_prompt=timestamped_prompt,
                     response_envelope=_hook_envelope(
                         body="What time is it?",
@@ -313,9 +313,8 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         assert _handled_response_event_id(resolution) == "$team"
-        assert mock_team_response.await_args.kwargs["message"] == timestamped_prompt
-        # Timestamp-looking user text is never stripped or echoed as a suffix.
-        assert mock_team_response.await_args.kwargs["current_message_suffix"] == ""
+        prepared_message = mock_team_response.await_args.kwargs["message"]
+        assert prepared_message == timestamped_prompt
 
     @pytest.mark.asyncio
     async def test_generate_team_response_helper_uses_resolved_thread_root_for_placeholder_and_edit(

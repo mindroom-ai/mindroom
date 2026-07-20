@@ -37,7 +37,6 @@ from mindroom.hooks import (
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.matrix.cache.thread_history_result import thread_history_result
-from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
@@ -67,7 +66,6 @@ if TYPE_CHECKING:
 
     from mindroom.matrix.identity import MatrixID
     from mindroom.media_inputs import MediaInputs
-    from mindroom.tool_system.events import ToolTraceEntry
 
 
 T = TypeVar("T")
@@ -224,12 +222,10 @@ def _open_agent_scope_context(
     *,
     scope_id: str = "general",
 ) -> Generator[ScopeSessionContext, None, None]:
-    session = storage.session
     yield ScopeSessionContext(
         scope=HistoryScope(kind="agent", scope_id=scope_id),
         storage=storage.open(),
-        session=session,
-        session_id=session.session_id if session is not None else None,
+        session=storage.session,
     )
 
 
@@ -239,12 +235,10 @@ def _open_team_scope_context(
     *,
     scope_id: str = "ultimate",
 ) -> Generator[ScopeSessionContext, None, None]:
-    session = storage.session
     yield ScopeSessionContext(
         scope=HistoryScope(kind="team", scope_id=scope_id),
         storage=storage.open(),
-        session=session,
-        session_id=session.session_id if session is not None else None,
+        session=storage.session,
     )
 
 
@@ -439,18 +433,6 @@ def _build_response_runner(
     )
     _set_gateway_method(delivery_gateway, "edit_text", AsyncMock(return_value=True))
     _set_gateway_method(delivery_gateway, "send_text", AsyncMock(return_value="$thinking"))
-    # Final delivery reads the exact delivered payload through the private
-    # delivered variants; empty content falls back to the display text.
-    _set_gateway_method(
-        delivery_gateway,
-        "_edit_text_delivered",
-        AsyncMock(return_value=DeliveredMatrixEvent(event_id="$edited", content_sent={})),
-    )
-    _set_gateway_method(
-        delivery_gateway,
-        "_send_text_delivered",
-        AsyncMock(return_value=DeliveredMatrixEvent(event_id="$thinking", content_sent={})),
-    )
     tool_runtime = ToolRuntimeSupport(
         runtime=runtime,
         logger=bot.logger,
@@ -496,9 +478,6 @@ def _build_response_runner(
     )
 
 
-_USE_REPLY_ANCHOR = object()
-
-
 def _response_request(
     *,
     room_id: str = "!test:localhost",
@@ -509,16 +488,8 @@ def _response_request(
     media: MediaInputs | None = None,
     user_id: str | None = None,
     correlation_id: str | None = None,
-    current_event_id: str | None | object = _USE_REPLY_ANCHOR,
-    location_item_text: str | None = None,
 ) -> ResponseRequest:
-    """Build one response request for direct bot seam tests.
-
-    Mirrors direct-message ingress by default: the prompt is the reply-anchor
-    event's body, so ``current_event_id`` defaults to ``reply_to_event_id``.
-    Pass ``current_event_id=None`` to model synthetic prompts.
-    """
-    resolved_current_event_id = reply_to_event_id if current_event_id is _USE_REPLY_ANCHOR else current_event_id
+    """Build one response request for direct bot seam tests."""
     return ResponseRequest(
         thread_history=(),
         prompt=prompt,
@@ -533,8 +504,6 @@ def _response_request(
         media=media,
         user_id=user_id,
         correlation_id=correlation_id,
-        current_event_id=cast("str | None", resolved_current_event_id),
-        location_item_text=location_item_text,
     )
 
 
@@ -553,7 +522,7 @@ class _InertPostResponseEffects(PostResponseEffectsSupport):
         room_id: str,
         interactive_agent_name: str,
         queue_memory_persistence: Callable[[], None] | None = None,
-        persist_response_event_id: Callable[[str, str, str | None, tuple[ToolTraceEntry, ...]], None] | None = None,
+        persist_response_event_id: Callable[[str, str], None] | None = None,
     ) -> PostResponseEffectsDeps:
         del room_id, interactive_agent_name, queue_memory_persistence, persist_response_event_id
         return PostResponseEffectsDeps(logger=self.logger)

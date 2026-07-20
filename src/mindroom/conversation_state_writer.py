@@ -12,24 +12,18 @@ from agno.run.team import TeamRunOutput
 from mindroom.agent_storage import create_session_storage, get_agent_session, get_team_session
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.history.interrupted_replay import interrupted_replay_prose_from_metadata
 from mindroom.history.runtime import create_scope_session_storage
 from mindroom.history.types import HistoryScope
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.runtime_protocols import SupportsConfig  # noqa: TC001
-from mindroom.streaming import strip_visible_tool_markers_for_trace
 from mindroom.team_scope import ad_hoc_team_scope_id
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     import structlog
     from agno.db.base import BaseDb
-    from agno.models.message import Message
 
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
-    from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -123,31 +117,8 @@ class ConversationStateWriter:
         run_id: str,
         response_event_id: str,
         response_sender_id: str,
-        delivered_visible_body: str | None,
-        delivered_body_tool_trace: Sequence[ToolTraceEntry] = (),
     ) -> None:
-        """Persist Matrix response linkage onto the run that produced it.
-
-        ``delivered_visible_body`` is the authoritative visible body of
-        ``response_event_id`` and is set only when this run's own output was
-        actually delivered there; notices, suppressed or failed deliveries, and
-        unchanged edit targets persist the metadata linkage without wrapping
-        the assistant message with an event that never carried its text. A run
-        already linked to the same event is upgraded with the wrap when a
-        delivered body arrives later (e.g. an interrupted run reconciled after
-        terminal delivery).
-        """
-        # Remove exactly the display chrome MindRoom injected for this run's
-        # own tool trace: the canonical body is what the model said as
-        # delivered, so model-authored marker-shaped text is preserved, while
-        # a body that is only injected markers (or empty) must never erase the
-        # model's reply with an empty tag.
-        stripped_body = (
-            strip_visible_tool_markers_for_trace(delivered_visible_body, delivered_body_tool_trace)
-            if delivered_visible_body
-            else ""
-        )
-        wrap_body = stripped_body if stripped_body.strip() else ""
+        """Persist Matrix response linkage onto the run that produced it."""
         session = (
             get_team_session(storage, session_id)
             if session_type is SessionType.TEAM
@@ -159,58 +130,17 @@ class ConversationStateWriter:
             if not isinstance(run, (RunOutput, TeamRunOutput)) or run.run_id != run_id:
                 continue
             metadata = dict(run.metadata or {})
-            previous_event_id = metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
-            already_linked = previous_event_id == response_event_id
-            if already_linked and not wrap_body:
+            if metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY) == response_event_id:
                 return
-            if not wrap_body and previous_event_id is not None and not already_linked:
-                # The assistant message may still carry the previous event's
-                # wrap; without a delivered body there is nothing to rebuild
-                # from, so record the divergence instead of guessing.
-                self.deps.logger.warning(
-                    "Response event re-linked without a delivered body",
-                    run_id=run_id,
-                    previous_event_id=previous_event_id,
-                    response_event_id=response_event_id,
-                )
             metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = response_event_id
             run.metadata = metadata
-            wrapped = wrap_body and _wrap_final_assistant_message(
+            _wrap_final_assistant_message(
                 run,
                 response_sender_id=response_sender_id,
                 response_event_id=response_event_id,
-                delivered_body=wrap_body,
             )
-            if not wrapped and already_linked:
-                # Nothing changed: the target already carries this event's tag
-                # (or no eligible message exists) and the link was in place.
-                return
             storage.upsert_session(session)
             return
-
-
-def _current_generation_assistant_message(run: RunOutput | TeamRunOutput) -> Message | None:
-    """Return the run's own final content-bearing assistant message.
-
-    Scanning stops at the first user- or tool-role message from the end:
-    assistant entries before a user turn belong to replayed or fallback
-    context, and assistant segments before a tool result are intermediate
-    generations — rewriting either would bind older text to the new event.
-    Tool-call stubs without string content are never targeted.
-    """
-    for message in reversed(run.messages or []):
-        if message.role in {"user", "tool"}:
-            return None
-        if message.role != "assistant":
-            continue
-        if isinstance(message.content, str) and message.content:
-            return message
-        if message.content:
-            # Content-bearing non-string output (e.g. provider content blocks)
-            # is a real generation, not a stub; wrapping past it would bind
-            # the delivered body to the wrong slot.
-            return None
-    return None
 
 
 def _wrap_final_assistant_message(
@@ -218,68 +148,15 @@ def _wrap_final_assistant_message(
     *,
     response_sender_id: str,
     response_event_id: str,
-    delivered_body: str,
-) -> bool:
-    """Wrap the run's own final assistant message with its delivered event body.
-
-    The CDATA body is the delivered visible text with MindRoom display chrome
-    stripped, matching how the same event renders through Matrix-fallback
-    history. The desired content is rebuilt from the authoritative callback
-    inputs on every call and compared whole, so a repeated callback is a no-op,
-    a changed body for the same event is refreshed, tags can never nest, and
-    model-authored text is never parsed to make the decision. Canonical
-    interrupted runs keep their synthetic interruption prose — carried as
-    trusted run metadata — outside the tag, since that text was never part of
-    the Matrix event. Returns whether a message changed.
-    """
-    message = _current_generation_assistant_message(run)
-    if message is None:
-        return False
-    wrapped = render_msg_tag(
-        sender=response_sender_id,
-        body=delivered_body,
-        event_id=response_event_id,
-    )
-    prose = interrupted_replay_prose_from_metadata(run.metadata)
-    desired_content = f"{wrapped}\n\n{prose}" if prose else wrapped
-    changed = _absorb_subsumed_prior_segments(run, final_message=message, delivered_body=delivered_body)
-    if message.content != desired_content:
-        message.content = desired_content
-        changed = True
-    return changed
-
-
-def _absorb_subsumed_prior_segments(
-    run: RunOutput | TeamRunOutput,
-    *,
-    final_message: Message,
-    delivered_body: str,
-) -> bool:
-    """Blank earlier same-generation assistant text the delivered body already carries.
-
-    Streamed turns accumulate every visible segment into one Matrix event, so
-    text the model emitted alongside tool calls appears both in its own
-    assistant message and inside the delivered body that wraps the final
-    message. Removing the verbatim-subsumed copies keeps each piece of model
-    text in replay exactly once; non-matching segments are preserved
-    (fail open), and the messages themselves stay for tool-call pairing.
-    """
-    changed = False
-    seen_final = False
+) -> None:
+    """Attach visible Matrix identity to the persisted assistant message."""
+    if not isinstance(run.content, str) or not run.content:
+        return
     for message in reversed(run.messages or []):
-        if message is final_message:
-            seen_final = True
-            continue
-        if not seen_final:
-            continue
-        if message.role == "user":
-            break
-        if (
-            message.role == "assistant"
-            and isinstance(message.content, str)
-            and message.content
-            and message.content in delivered_body
-        ):
-            message.content = ""
-            changed = True
-    return changed
+        if message.role == "assistant":
+            message.content = render_msg_tag(
+                sender=response_sender_id,
+                body=run.content,
+                event_id=response_event_id,
+            )
+            return
