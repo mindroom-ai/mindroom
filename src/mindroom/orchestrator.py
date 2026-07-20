@@ -95,7 +95,6 @@ from .logging_config import get_logger, setup_logging
 from .orchestration.config_lifecycle import ConfigReloadLifecycle
 from .orchestration.config_updates import configured_entity_names
 from .orchestration.external_trigger_runtime import ExternalTriggerRuntimeCoordinator
-from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 from .orchestration.plugin_watch import PluginWatchState, watch_plugins_task
 from .orchestration.rooms import get_authorized_user_ids_to_invite, get_root_space_user_ids_to_invite
 from .orchestration.runtime import (
@@ -114,6 +113,7 @@ from .orchestration.runtime import (
     sync_forever_with_restart,
     wait_for_matrix_homeserver,
 )
+from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 from .runtime_support import (
     OwnedRuntimeSupport,
     build_owned_runtime_support,

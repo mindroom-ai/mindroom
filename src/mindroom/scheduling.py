@@ -614,7 +614,8 @@ async def get_pending_schedule_thread_ids_for_room(
     response = await client.room_get_state(room_id)
     if not isinstance(response, nio.RoomGetStateResponse):
         msg = f"Failed to get scheduled task state for room {room_id}: {response}"
-        raise RuntimeError(msg)
+        # nio signals read failures through the response type; this is I/O, not input validation.
+        raise RuntimeError(msg)  # noqa: TRY004
     tasks = _parse_task_records_from_state(room_id, response, include_non_pending=False)
     return frozenset(
         None if task.workflow.thread_id in {None, "main"} else task.workflow.thread_id
