@@ -119,6 +119,17 @@ def _is_same_budget_transient(error: Exception) -> bool:
     return error.status_code == 502 and _has_typed_network_cause(error)
 
 
+def _is_timeout_failure(error: Exception) -> bool:
+    """Return whether a failure is a timeout, typed or via the named fragment.
+
+    Covers provider ``TimeoutError`` and MindRoom's own chunk-timeout
+    ``RuntimeError("compaction summary timed out ...")``.
+    """
+    if isinstance(error, TimeoutError):
+        return True
+    return _TIMEOUT_PROVIDER_ERROR_FRAGMENT in str(error).lower()
+
+
 # Explicit INPUT-context rejection phrases and provider error codes. This set
 # feeds DURABLE terminal verdicts, so it is deliberately narrower than
 # _SHRINKABLE_PROVIDER_ERROR_FRAGMENTS: wording that TPM rate limits, output
@@ -213,7 +224,10 @@ class SummaryRetryPolicy:
     same configured budget.
     ``shrink_allowed=False`` disables the shrink branch entirely for callers
     whose input is indivisible under the complete-input invariant (the
-    carried-summary condensation backstop); transient same-budget retries stay.
+    carried-summary condensation backstop); transient same-budget retries
+    stay, and timeouts (typed ``TimeoutError`` or the named fragment,
+    including MindRoom's own chunk timeout) count as same-budget transient
+    there because an indivisible input cannot shrink its way past them.
     Once ``max_attempts`` is reached or no retry applies, the error propagates.
     """
 
@@ -263,6 +277,13 @@ class SummaryRetryPolicy:
             if smaller_budget < input_tokens:
                 return SummaryRetryDecision(budget=smaller_budget, kind="shrink")
         if _is_same_budget_transient(error):
+            return SummaryRetryDecision(budget=budget, kind="same-budget-transient")
+        if not self.shrink_allowed and _is_timeout_failure(error):
+            # An indivisible input cannot shrink its way past a timeout, but
+            # the documented delayed byte-identical retry still applies: a
+            # typed provider TimeoutError or MindRoom's own chunk timeout is
+            # as transient as a 503 for an unchanged request. The shrinkable
+            # path keeps its existing timeout classification.
             return SummaryRetryDecision(budget=budget, kind="same-budget-transient")
         return None
 

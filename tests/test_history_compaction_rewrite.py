@@ -3232,6 +3232,69 @@ async def test_strengthened_condensation_refusal_without_fallback_converges_dura
     second_pass_summary.assert_not_awaited()
 
 
+# --- ISSUE-246 review round 7 G6: timeouts get the same-budget transient retry in condensation ---
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "timeout_error",
+    [
+        pytest.param(TimeoutError("provider timed out"), id="typed-provider-timeout"),
+        pytest.param(RuntimeError("compaction summary timed out after 240s"), id="mindroom-chunk-timeout"),
+    ],
+)
+async def test_condensation_timeout_gets_one_delayed_byte_identical_retry(
+    tmp_path: Path,
+    timeout_error: Exception,
+) -> None:
+    """Round-7 G6 (B5): both timeout forms retry the unchanged condensation request once.
+
+    With shrink structurally disabled, a timeout used to abort condensation
+    after the first call; it must instead get the documented delayed
+    byte-identical retry, then bounded exhaustion with no marker.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    stored_summary = ("word " * 2_600) + "TAIL-FACT-MUST-SURVIVE"
+    working_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1")],
+        summary=SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC)),
+    )
+    storage.upsert_session(working_session)
+    summary_inputs: list[str] = []
+
+    async def timing_out_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+        summary_inputs.append(summary_input)
+        raise timeout_error
+
+    retry_sleep = AsyncMock()
+    with (
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(side_effect=timing_out_summary),
+        ) as generate_summary,
+        patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
+        pytest.raises(type(timeout_error), match="timed out"),
+    ):
+        await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            summary_input_budget=2_100,
+        )
+
+    assert generate_summary.await_count == 2
+    retry_sleep.assert_awaited_once_with(DEFAULT_SUMMARY_RETRY_POLICY.same_input_retry_delay_seconds)
+    # The retry is byte-identical: no shrink was granted for indivisible input.
+    assert summary_inputs[1] == summary_inputs[0]
+    assert stored_summary in summary_inputs[0]
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == stored_summary
+    assert read_scope_state(persisted, _SCOPE).carried_summary_unfit is None
+
+
 # --- ISSUE-246 review round 7 G3: transient rejections never mint a durable verdict ---
 
 

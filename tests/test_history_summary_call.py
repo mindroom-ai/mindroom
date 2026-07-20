@@ -26,7 +26,12 @@ from mindroom.history.storage import (
     read_scope_state,
     write_scope_state,
 )
-from mindroom.history.summary_call import generate_compaction_summary, is_context_window_rejection
+from mindroom.history.summary_call import (
+    SummaryRetryDecision,
+    SummaryRetryPolicy,
+    generate_compaction_summary,
+    is_context_window_rejection,
+)
 from mindroom.history.types import (
     HistoryPolicy,
     HistoryScope,
@@ -782,3 +787,44 @@ def test_is_context_window_rejection_is_narrow(error: Exception, expected: bool)
     body-size limits, and 5xx never mint a durable wrong diagnosis.
     """
     assert is_context_window_rejection(error) is expected
+
+
+# --- ISSUE-246 review round 7 G6: timeouts are same-budget transient for indivisible input ---
+
+
+def test_retry_policy_timeouts_are_same_budget_transient_only_when_shrink_disabled() -> None:
+    """Round-7 G6 (B5): with shrink disabled, both timeout forms get the delayed unchanged retry.
+
+    The shrinkable path keeps its existing classification: a timeout there
+    still shrinks the input instead of retrying it unchanged.
+    """
+    indivisible = SummaryRetryPolicy(shrink_allowed=False)
+    for timeout_error in (TimeoutError("provider timed out"), RuntimeError("compaction summary timed out after 240s")):
+        decision = indivisible.retry_budget(
+            attempt=1,
+            budget=2_100,
+            input_tokens=13_000,
+            minimum_progress_input_tokens=0,
+            error=timeout_error,
+        )
+        assert decision == SummaryRetryDecision(budget=2_100, kind="same-budget-transient")
+        assert (
+            indivisible.retry_budget(
+                attempt=2,
+                budget=2_100,
+                input_tokens=13_000,
+                minimum_progress_input_tokens=0,
+                error=timeout_error,
+            )
+            is None
+        )
+
+    shrinkable_decision = SummaryRetryPolicy().retry_budget(
+        attempt=1,
+        budget=13_000,
+        input_tokens=13_000,
+        minimum_progress_input_tokens=0,
+        error=TimeoutError("provider timed out"),
+    )
+    assert shrinkable_decision is not None
+    assert shrinkable_decision.kind == "shrink"
