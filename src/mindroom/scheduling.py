@@ -200,6 +200,15 @@ def _raise_schedule_edit_error(message: str) -> typing.NoReturn:
     raise ValueError(message)
 
 
+def _cron_validation_error(cron_expression: str) -> str | None:
+    """Return the validation error for a cron that can never fire (e.g. Feb 31), if any."""
+    try:
+        croniter(cron_expression, datetime.now(UTC)).get_next(datetime)
+    except (ValueError, CroniterError) as e:
+        return f"Invalid cron expression: {e!s}"
+    return None
+
+
 def build_scheduled_task_read_model(
     task: ScheduledTaskRecord,
     current_time: datetime | None = None,
@@ -274,10 +283,9 @@ def build_edited_scheduled_workflow(  # noqa: C901
                 _raise_schedule_edit_error(
                     "Invalid cron expression: Cron expression must have exactly 5 fields: minute hour day month weekday",
                 )
-            try:
-                croniter(raw_expression, datetime.now(UTC))
-            except (ValueError, CroniterError) as e:
-                _raise_schedule_edit_error(f"Invalid cron expression: {e!s}")
+            cron_error = _cron_validation_error(raw_expression)
+            if cron_error is not None:
+                _raise_schedule_edit_error(cron_error)
             minute, hour, day, month, weekday = fields
             cron_schedule = CronSchedule(minute=minute, hour=hour, day=day, month=month, weekday=weekday)
         if cron_schedule is None:
@@ -381,6 +389,13 @@ def _validate_parsed_workflow(workflow: ScheduledWorkflow) -> _WorkflowParseErro
             error="Could not determine the recurring schedule.",
             suggestion='Include an explicit cadence like "daily at 9am".',
         )
+    if workflow.schedule_type == "cron" and workflow.cron_schedule:
+        cron_error = _cron_validation_error(workflow.cron_schedule.to_cron_string())
+        if cron_error is not None:
+            return _WorkflowParseError(
+                error=cron_error,
+                suggestion='Use a schedule that maps to real dates, like "daily at 9am".',
+            )
     return _validate_conditional_workflow(workflow)
 
 
