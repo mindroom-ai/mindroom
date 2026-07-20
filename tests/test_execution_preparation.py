@@ -291,11 +291,16 @@ def test_scheduled_limit_does_not_widen_a_run_limited_plan() -> None:
 
 @pytest.mark.asyncio
 async def test_scheduled_history_limit_shares_budget_between_inline_and_persisted_history() -> None:
-    """Inline context consumes the scheduled budget before persisted replay is capped."""
+    """Persisted inline context consumes the budget while transient turn context does not."""
 
     async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
         return _prepared_scope_with_persisted_replay()
 
+    transient_context = Message(
+        role="user",
+        content="Retrieved memory for this turn",
+        add_to_agent_memory=False,
+    )
     prepared = await _prepare_execution_context_common(
         make_turn_context(
             reply_to_event_id="$current",
@@ -303,6 +308,7 @@ async def test_scheduled_history_limit_shares_budget_between_inline_and_persiste
         ),
         scope_context=None,
         prompt="Current request",
+        transient_context_messages=(transient_context,),
         thread_history=[
             make_visible_message(sender="@alice:localhost", body="older context", event_id="$older"),
             make_visible_message(sender="@alice:localhost", body="Current request", event_id="$current"),
@@ -324,6 +330,8 @@ async def test_scheduled_history_limit_shares_budget_between_inline_and_persiste
     assert prepared.prepared_history.replays_persisted_history is True
     assert len(prepared.context_messages) == 1
     assert len(prepared.context_messages) + replay_plan.num_history_messages == 3
+    assert prepared.messages[-2].content == "Retrieved memory for this turn"
+    assert prepared.messages[-2].add_to_agent_memory is False
 
 
 @pytest.mark.asyncio
