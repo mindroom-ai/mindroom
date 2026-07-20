@@ -406,7 +406,7 @@ Each item still carries a `cache_policy`, but system enrichment uses it to contr
 - `"stable"`: Sorted first by key so long-lived instructions stay grouped at the front of the block.
 - `"volatile"` (default): Sorted last by key so frequently changing instructions stay grouped at the end of the block.
 
-The `matrix_message_target` key is runtime-owned and carries stable room and thread targeting instructions for agents that can use `matrix_message`.
+The `matrix_message_target` key is runtime-owned and carries stable room- and thread-targeting instructions for agents that can use `matrix_message`.
 Hook-provided items with that key are replaced by the runtime value.
 
 ### Key differences from `message:enrich`
