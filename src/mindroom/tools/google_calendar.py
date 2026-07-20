@@ -42,7 +42,7 @@ if TYPE_CHECKING:
             label="Allow Updates",
             type="boolean",
             required=False,
-            default=False,
+            default=True,
             description="Allow the agent to create, update, and delete calendar events",
         ),
     ],

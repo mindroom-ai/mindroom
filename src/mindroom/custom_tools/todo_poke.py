@@ -443,7 +443,7 @@ def _read_poke_state(todo_root: Path) -> dict[str, Any]:
     if not isinstance(raw_state, dict):
         logger.warning("todo_poke_dedup_state_reset", path=str(path), error="state root must be an object")
         return {}
-    return cast("dict[str, Any]", raw_state)
+    return raw_state
 
 
 def _prune_poke_state(todo_root: Path, active_scope_keys: frozenset[str]) -> None:

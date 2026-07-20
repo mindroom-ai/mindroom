@@ -20,7 +20,7 @@ from mindroom.oauth.providers import (
 from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Collection, Mapping
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -79,6 +79,7 @@ __all__ = [
     "oauth_connect_url",
     "oauth_credential_target_payload",
     "oauth_credentials_have_required_scopes",
+    "oauth_credentials_have_scopes",
     "oauth_credentials_match_client_id",
     "oauth_credentials_satisfy_identity_policy",
     "oauth_credentials_usable",
@@ -530,8 +531,11 @@ def oauth_credentials_match_client_id(
     return isinstance(stored_client_id, str) and stored_client_id.strip() == client_config.client_id
 
 
-def oauth_credentials_have_required_scopes(provider: OAuthProvider, credentials: dict[str, object]) -> bool:
-    """Return whether stored credentials include every provider-required scope."""
+def oauth_credentials_have_scopes(
+    credentials: Mapping[str, object],
+    required_scopes: Collection[str],
+) -> bool:
+    """Return whether stored credentials include every requested scope."""
     granted_scopes: set[str] = set()
     raw_scopes = credentials.get("scopes")
     if isinstance(raw_scopes, list):
@@ -542,7 +546,12 @@ def oauth_credentials_have_required_scopes(provider: OAuthProvider, credentials:
     expanded_granted_scopes = set(granted_scopes)
     for scope in granted_scopes:
         expanded_granted_scopes.update(_SCOPE_IMPLICATIONS.get(scope, ()))
-    return set(provider.scopes).issubset(expanded_granted_scopes)
+    return set(required_scopes).issubset(expanded_granted_scopes)
+
+
+def oauth_credentials_have_required_scopes(provider: OAuthProvider, credentials: dict[str, object]) -> bool:
+    """Return whether stored credentials include every provider-required scope."""
+    return oauth_credentials_have_scopes(credentials, provider.scopes)
 
 
 def oauth_credentials_satisfy_identity_policy(

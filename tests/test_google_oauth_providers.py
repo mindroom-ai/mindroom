@@ -89,7 +89,7 @@ GOOGLE_NARROW_EXTRA_AUTH_PARAMS = {
                 "credential_service": "google_drive_oauth",
                 "tool_config_service": "google_drive",
                 "client_config_services": ("google_drive_oauth_client",),
-                "status_capabilities": ("Drive file search", "Drive file read"),
+                "status_capabilities": ("Drive file search and read", "Drive file upload and organization"),
             },
         ),
         (

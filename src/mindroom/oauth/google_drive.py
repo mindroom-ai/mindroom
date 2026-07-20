@@ -9,9 +9,14 @@ import mindroom.oauth.google as google_oauth
 if TYPE_CHECKING:
     from mindroom.oauth.providers import OAuthProvider
 
-_GOOGLE_DRIVE_OAUTH_SCOPES = (
+GOOGLE_DRIVE_READ_OAUTH_SCOPES = (
     *google_oauth.GOOGLE_IDENTITY_SCOPES,
     "https://www.googleapis.com/auth/drive.readonly",
+)
+GOOGLE_DRIVE_WRITE_SCOPE = "https://www.googleapis.com/auth/drive"
+_GOOGLE_DRIVE_OAUTH_SCOPES = (
+    *google_oauth.GOOGLE_IDENTITY_SCOPES,
+    GOOGLE_DRIVE_WRITE_SCOPE,
 )
 
 
@@ -25,7 +30,7 @@ def google_drive_oauth_provider() -> OAuthProvider:
         tool_config_service="google_drive",
         client_config_services=("google_drive_oauth_client",),
         status_capabilities=(
-            "Drive file search",
-            "Drive file read",
+            "Drive file search and read",
+            "Drive file upload and organization",
         ),
     )

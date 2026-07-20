@@ -102,7 +102,7 @@ def test_google_calendar_loads_tokens_from_oauth_service(tmp_path: Path) -> None
     assert "calendar_id" not in token_data
 
 
-def test_google_calendar_default_config_disables_write_methods(tmp_path: Path) -> None:
+def test_google_calendar_default_config_enables_write_methods(tmp_path: Path) -> None:
     tool = get_tool_by_name(
         "google_calendar",
         _runtime_paths(tmp_path),
@@ -112,12 +112,12 @@ def test_google_calendar_default_config_disables_write_methods(tmp_path: Path) -
     )
 
     assert isinstance(tool, GoogleCalendarTools)
-    assert "create_event" not in tool.functions
-    assert "update_event" not in tool.functions
-    assert "delete_event" not in tool.functions
-    assert "quick_add_event" not in tool.functions
-    assert "move_event" not in tool.functions
-    assert "respond_to_event" not in tool.functions
+    assert "create_event" in tool.functions
+    assert "update_event" in tool.functions
+    assert "delete_event" in tool.functions
+    assert "quick_add_event" in tool.functions
+    assert "move_event" in tool.functions
+    assert "respond_to_event" in tool.functions
     # Agno validates its own broad scope marker during toolkit construction.
     # MindRoom injects pre-authorized credentials carrying the granular provider scopes below.
     assert "https://www.googleapis.com/auth/calendar" in tool.scopes

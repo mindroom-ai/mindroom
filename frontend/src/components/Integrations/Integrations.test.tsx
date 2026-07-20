@@ -214,7 +214,8 @@ vi.mock("./integrations/index", () => ({
         integration: {
           id: "google_drive",
           name: "Google Drive",
-          description: "Search and read files from your connected Google Drive",
+          description:
+            "Search, read, upload, and organize files in your connected Google Drive",
           category: "productivity",
           icon: <span>Google Drive Icon</span>,
           status: "available",
@@ -285,7 +286,8 @@ vi.mock("./integrations/index", () => ({
         integration: {
           id: "google_drive",
           name: "Google Drive",
-          description: "Search and read files from your connected Google Drive",
+          description:
+            "Search, read, upload, and organize files in your connected Google Drive",
           category: "productivity",
           icon: <span>Google Drive Icon</span>,
           status: "available",
@@ -498,7 +500,7 @@ describe("Integrations", () => {
       expect(screen.getByText("Google Drive")).toBeInTheDocument();
       expect(
         screen.getByText(
-          "Search and read files from your connected Google Drive",
+          "Search, read, upload, and organize files in your connected Google Drive",
         ),
       ).toBeInTheDocument();
       expect(screen.getByText("Spotify")).toBeInTheDocument();
@@ -834,7 +836,7 @@ describe("Integrations", () => {
     // But the elements might still be in the DOM, just hidden
     // So let's check for visibility instead
     const googleElement = screen.queryByText(
-      "Search and read files from your connected Google Drive",
+      "Search, read, upload, and organize files in your connected Google Drive",
     );
     if (googleElement) {
       // Check if it's hidden (parent tab panel might be hidden)
@@ -1292,7 +1294,7 @@ describe("Integrations", () => {
       {
         name: "google_drive",
         display_name: "Google Drive",
-        description: "Search and read files from Google Drive",
+        description: "Search, read, upload, and organize files in Google Drive",
         icon: "SiGoogledrive",
         icon_color: "text-green-600",
         category: "productivity",

@@ -491,7 +491,7 @@ Below is a representative selection:
 - **gmail** - Gmail integration (requires Google OAuth)
 - **google_calendar** - Calendar management (requires Google OAuth)
 - **google_docs** - Google Docs creation, reading, and text editing (requires Google OAuth)
-- **google_drive** - Google Drive file search and reading (requires Google OAuth)
+- **google_drive** - Google Drive file reading and management (requires Google OAuth)
 - **google_sheets** - Spreadsheet operations (requires Google OAuth)
 - **homeassistant** - Home Assistant device control (requires OAuth or long-lived access token)
 - **spotify** - Spotify playback and library (requires OAuth)

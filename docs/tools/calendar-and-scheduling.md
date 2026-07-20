@@ -37,7 +37,7 @@ MindRoom also includes `scheduler` in `defaults.tools` by default on this branch
 `google_calendar` exposes `list_events()`, `fetch_all_events()`, `find_available_slots()`, `list_calendars()`, `create_event()`, `update_event()`, and `delete_event()`.
 MindRoom loads the connected Google account from its unified credential store instead of relying on a per-process `token.json`.
 The OAuth provider requests narrowly targeted scopes for event access, calendar listing, availability, and working-hours settings, while MindRoom gates write methods with the `allow_update` setting.
-Write calls are still part of the tool surface, but they are only exposed when `allow_update: true` is configured.
+Write calls are enabled by default and can be removed from the tool surface with `allow_update: false`.
 When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnectionRequired` instead of falling back to Agno's local token flow.
 `find_available_slots()` derives openings from the user's current calendar events plus working-hours settings inferred from Google Calendar settings and locale.
 
@@ -46,7 +46,7 @@ When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnec
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `calendar_id` | `text` | `no` | `primary` | Google Calendar ID to query or update. |
-| `allow_update` | `boolean` | `no` | `false` | Expose create, update, and delete operations. |
+| `allow_update` | `boolean` | `no` | `true` | Expose create, update, and delete operations. |
 
 ### Example
 
