@@ -1777,6 +1777,14 @@ path = "mindroom.matrix.cache.thread_cache_helpers"
 depends_on = []
 
 [[modules]]
+path = "mindroom.matrix.cache.thread_cache_invalidation"
+depends_on = ["mindroom.matrix.cache.event_cache"]
+visibility = [
+    "mindroom.matrix.cache.thread_write_cache_ops",
+    "mindroom.matrix.client_thread_history",
+]
+
+[[modules]]
 path = "mindroom.matrix.cache.thread_cache_state"
 depends_on = ["mindroom.matrix.cache.event_cache"]
 visibility = [
@@ -1794,6 +1802,7 @@ depends_on = []
 path = "mindroom.matrix.cache.thread_write_cache_ops"
 depends_on = [
     "mindroom.matrix.cache.event_cache",
+    "mindroom.matrix.cache.thread_cache_invalidation",
     "mindroom.matrix.thread_bookkeeping",
 ]
 
@@ -2277,6 +2286,7 @@ depends_on = []
 path = "mindroom.matrix.client_thread_history"
 depends_on = [
     "mindroom.matrix.cache",
+    "mindroom.matrix.cache.thread_cache_invalidation",
     "mindroom.matrix.cache.thread_history_result",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.event_info",
@@ -3620,6 +3630,7 @@ expose = [
     "SharedConversationEventCache",
     "ThreadCacheState",
     "ThreadHistoryResult",
+    "is_opaque_encrypted_event_source",
     "normalize_nio_event_for_cache",
     "thread_cache_rejection_reason",
     "thread_cache_state_is_usable",
@@ -3728,6 +3739,7 @@ from = ["mindroom.matrix.conversation_cache"]
 expose = [
     "EventInfo",
     "event_type_supports_thread_relations",
+    "is_thread_affecting_relation",
     "origin_server_ts_from_event_source",
     "reply_to_event_id_from_content",
 ]

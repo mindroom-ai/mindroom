@@ -33,7 +33,7 @@ The following treatment is covered against both SQLite and PostgreSQL backends b
 | Member, name, topic, avatar, power, join-rule, history-visibility, guest-access, alias, encryption, and pin state | Retained when delivered in the joined timeline | Not visible | These families remain room-level |
 | Call invite, candidates, answer, select-answer, reject, negotiate, and hangup | Retained | Not visible | These families remain room-level |
 | RTC membership, focus, and notification events | Retained | Not visible | These families remain room-level |
-| Encrypted relation-bearing events | Retained as opaque events | Not visible until decryption supplies message content | Thread, reply, edit, and message-reference relations are indexed and invalidate the known thread |
+| Encrypted relation-bearing events | Retained as opaque events | Not visible until decryption supplies message content | Thread, reply, edit, and message-reference relations mark the known thread stale fail-closed; explicit relations stay point-indexed, the opaque payload never enters the snapshot, and the marker survives incremental appends until a decryption-capable refresh replaces the snapshot |
 
 Relation names such as `m.reference` and `m.thread` are reused by non-message families.
 
@@ -91,9 +91,15 @@ Authoritative membership handling separately fences and purges retained history 
 
 A durable thread snapshot is usable only when its state row exists, `validated_at` is set, and no thread or room invalidation is at least as new as that validation.
 
-A snapshot without its thread root is rejected.
+A snapshot without its thread root or one still containing opaque `m.room.encrypted` payloads is rejected.
 
 A rejected or absent snapshot causes an authoritative homeserver room-history scan and guarded cache refill.
+
+A refill whose reconstruction contains still-opaque encrypted evidence for the requested thread, or whose scan holds an opaque relation with unresolved thread impact, marks the thread stale and fails the read instead of certifying incomplete history.
+
+Relation-less ciphertext and opaque annotations are excluded from that rejection because they cannot change any visible thread snapshot.
+
+The opaque-history trust upgrade clears only previously certified thread snapshots and their state, preserves point and relation indexes, rotates the durable certification generation, and records a one-time storage marker transactionally.
 
 A second unchanged read is served from cache and performs no homeserver scan.
 
@@ -172,11 +178,11 @@ Membership-loss cleanup is not owned by this contract track.
 
 A deterministic reproduction is to cache a joined-room event, deliver the same room under `rooms.leave`, and observe that the point row remains while no new leave-timeline event is admitted.
 
-Encrypted revalidation policy is not owned by this contract track.
+Opaque encrypted thread evidence is owned by this contract track and fails closed.
 
-A deterministic reproduction is to seed a validated thread snapshot, ingest an opaque `m.room.encrypted` child with a clear `m.thread` relation, and observe that the relation can append and revalidate while visible projection still omits the undecryptable child.
+An opaque `m.room.encrypted` child with a clear thread-affecting relation marks only its thread stale under a non-incremental reason, a later clear incremental event cannot weaken that reason, and thread-history refresh rejects reconstructions that still contain the opaque evidence.
 
-Those gaps require coordinated lifecycle or E2EE policy changes rather than an overlapping cache-contract workaround.
+The remaining gap requires coordinated lifecycle changes rather than an overlapping cache-contract workaround.
 
 Thread snapshot replacement currently owns point-row deletion through the duplicated storage layout, which belongs to the storage normalization track.
 
