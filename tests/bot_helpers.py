@@ -384,6 +384,7 @@ def _response_request(
     response_envelope: MessageEnvelope,
     correlation_id: str | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
+    transient_enrichment_items: tuple[EnrichmentItem, ...] = (),
     system_enrichment_items: tuple[EnrichmentItem, ...] = (),
 ) -> ResponseRequest:
     """Build one response request for direct bot seam tests."""
@@ -407,6 +408,7 @@ def _response_request(
         response_envelope=response_envelope,
         correlation_id=correlation_id,
         matrix_run_metadata=matrix_run_metadata,
+        transient_enrichment_items=transient_enrichment_items,
         system_enrichment_items=system_enrichment_items,
     )
 

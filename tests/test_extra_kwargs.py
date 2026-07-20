@@ -759,6 +759,32 @@ def test_prompt_cache_ladder_marks_newest_tool_result_prior_user_and_tools() -> 
     assert _count_cache_markers(prepared) == _MAX_CACHE_MARKERS
 
 
+def test_prompt_cache_ladder_keeps_transient_context_in_current_turn_suffix() -> None:
+    """Transient context must not split the stable history cache prefix."""
+    transient_context = "<mindroom_message_context>Current location: Amsterdam</mindroom_message_context>"
+    chat_messages, _system_message = format_messages(
+        [
+            Message(role="user", content="Earlier question"),
+            Message(role="assistant", content="Earlier answer"),
+            Message(role="user", content=transient_context, add_to_agent_memory=False),
+            Message(role="user", content="Current question"),
+        ],
+    )
+    request_kwargs = {
+        "system": [{"type": "text", "text": "Stable system", "cache_control": {"type": "ephemeral"}}],
+        "messages": chat_messages,
+    }
+
+    prepared = _request_kwargs_with_prompt_cache_ladder(request_kwargs, _prompt_cache_control())
+
+    current_turn = prepared["messages"][-1]
+    assert [block["text"] for block in current_turn["content"]] == [transient_context, "Current question"]
+    assert "cache_control" not in current_turn["content"][0]
+    assert current_turn["content"][1]["cache_control"] == {"type": "ephemeral"}
+    assert prepared["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert prepared["system"][0]["cache_control"] == {"type": "ephemeral"}
+
+
 def test_prompt_cache_ladder_does_not_double_count_existing_message_markers() -> None:
     """A pre-existing message marker must consume budget once, not twice."""
     request_kwargs = {

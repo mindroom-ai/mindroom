@@ -11,9 +11,9 @@ bodies as injected callables.
 
 ``ResponseTurnContext`` is the per-turn identity carrier built once by the
 caller that owns the turn: the drivers consume its Matrix-identity fields,
-while ``active_event_ids`` and ``system_enrichment_items`` ride along for the
-entity prepare chains. Mutable per-turn state (collectors, recorders,
-callbacks) stays out of it and crosses via ``TurnSinks`` or the adapters.
+while ``active_event_ids`` and enrichment items ride along for the entity
+prepare chains. Mutable per-turn state (collectors, recorders, callbacks) stays
+out of it and crosses via ``TurnSinks`` or the adapters.
 """
 
 from __future__ import annotations
@@ -215,6 +215,7 @@ class ResponseTurnContext:
     matrix_run_metadata: dict[str, Any] | None
     active_model_name: str | None = None
     active_event_ids: frozenset[str] = frozenset()
+    transient_enrichment_items: tuple[EnrichmentItem, ...] = ()
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     # Set only for scheduled fires that carry a history limit; identifies the
     # prompt-owning event while capping this turn without changing authored config.

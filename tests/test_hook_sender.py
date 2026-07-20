@@ -930,7 +930,7 @@ async def test_apply_message_enrichment_preserves_hook_chain_metadata(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_message_enrichment_can_stay_out_of_history(tmp_path: Path) -> None:
-    """Transient plugin context should use the existing system-enrichment path."""
+    """Transient plugin context should use non-persisted user context."""
     bot = _agent_bot(tmp_path)
     dispatch = PreparedDispatch(
         requester_user_id="@user:localhost",
@@ -956,7 +956,9 @@ async def test_message_enrichment_can_stay_out_of_history(tmp_path: Path) -> Non
 
     assert "persisted profile" in (prepared.payload.model_prompt or "")
     assert "current location" not in (prepared.payload.model_prompt or "")
-    assert prepared.system_enrichment_items == (EnrichmentItem(key="location", text="current location", persist=False),)
+    assert prepared.transient_enrichment_items == (
+        EnrichmentItem(key="location", text="current location", persist=False),
+    )
 
 
 @pytest.mark.asyncio

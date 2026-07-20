@@ -2151,7 +2151,7 @@ async def test_generate_response_preserves_model_prompt_in_persisted_session(
 
 @pytest.mark.asyncio
 async def test_generate_response_appends_matrix_tool_prompt_context(tmp_path: Path) -> None:
-    """Matrix targeting context should reach the model through system enrichment."""
+    """Matrix targeting context should reach the model through transient enrichment."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_matrix_message(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
@@ -2162,7 +2162,7 @@ async def test_generate_response_appends_matrix_tool_prompt_context(tmp_path: Pa
         model_prompts.append(cast("str", kwargs["model_prompt"]))
         turn_context = args[0]
         target_contexts.extend(
-            item.text for item in turn_context.system_enrichment_items if item.key == "matrix_message_target"
+            item.text for item in turn_context.transient_enrichment_items if item.key == "matrix_message_target"
         )
         return "Hello"
 

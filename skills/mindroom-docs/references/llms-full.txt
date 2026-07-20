@@ -11810,7 +11810,7 @@ plugins:
       dawarich_url: http://dawarich.local
 ```
 
-When any agent receives a message, this hook runs concurrently with other enrichment hooks and injects the user's location into current-turn system context.
+When any agent receives a message, this hook runs concurrently with other enrichment hooks and injects the user's location into non-persisted current-turn context.
 The `persist=False` option keeps it out of session history.
 
 ## Hook types
@@ -12076,7 +12076,7 @@ The `message:enrich` event injects structured context into the current turn and 
     </mindroom_message_context>
     ```
 
-3. **AI sees it**: The model receives persisted items in the current user message and `persist=False` items in current-turn system context.
+3. **AI sees it**: The model receives persisted items in the current user message and all `persist=False` items in one separate non-persisted user-context message immediately before it.
 4. **Replay sees persisted items**: MindRoom keeps only persisted enrichment in session history.
 
 ### Enrichment policy
@@ -12091,7 +12091,7 @@ Use stable keys and deterministic hook output when you want later replays and ca
 
 Message enrichment is persisted by default.
 Set `persist=False` for live context that should be visible only during the current turn, such as location, weather, or other frequently changing external state.
-Transient items use the existing system-enrichment channel and do not require a key-specific core integration.
+Transient items stay out of the system prompt and replayable history so provider prompt caches can reuse their stable prefixes.
 
 ### Adding enrichment items
 
@@ -12178,7 +12178,10 @@ Each item still carries a `cache_policy`, but system enrichment uses it to contr
 - `"stable"`: Sorted first by key so long-lived instructions stay grouped at the front of the block.
 - `"volatile"` (default): Sorted last by key so frequently changing instructions stay grouped at the end of the block.
 
-The `matrix_message_target` key is runtime-owned and carries stable room- and thread-targeting instructions for agents that can use `matrix_message`.
+System enrichment changes the system prompt, so use it only when context needs system-level priority.
+Use `message:enrich` with `persist=False` for live data so the stable system and history prefixes remain reusable.
+
+The `matrix_message_target` key is runtime-owned and travels with non-persisted current-turn context for agents that can use `matrix_message`.
 Hook-provided items with that key are replaced by the runtime value.
 
 ### Key differences from `message:enrich`

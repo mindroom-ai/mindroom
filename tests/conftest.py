@@ -1106,6 +1106,7 @@ def make_turn_context(
     requester_id: str | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
     active_event_ids: frozenset[str] = frozenset(),
+    transient_enrichment_items: tuple[EnrichmentItem, ...] = (),
     system_enrichment_items: tuple[EnrichmentItem, ...] = (),
     scheduled_history_budget: ScheduledHistoryBudget | None = None,
 ) -> ResponseTurnContext:
@@ -1121,6 +1122,7 @@ def make_turn_context(
         requester_id=requester_id,
         matrix_run_metadata=matrix_run_metadata,
         active_event_ids=active_event_ids,
+        transient_enrichment_items=transient_enrichment_items,
         system_enrichment_items=system_enrichment_items,
         scheduled_history_budget=scheduled_history_budget,
     )
@@ -1457,6 +1459,7 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
             media=request.media,
             attachment_ids=attachment_ids,
             model_prompt=request.model_prompt,
+            transient_enrichment_items=request.transient_enrichment_items,
             system_enrichment_items=request.system_enrichment_items,
             response_envelope=request.response_envelope,
             correlation_id=request.correlation_id,

@@ -365,6 +365,53 @@ async def test_prepare_agent_and_prompt_applies_system_enrichment_to_agent_addit
 
 
 @pytest.mark.asyncio
+async def test_prepare_agent_keeps_transient_enrichment_out_of_system_prompt(
+    tmp_path: Path,
+) -> None:
+    """Transient context should share one non-persisted user message after the cacheable prefix."""
+    config = _config(tmp_path)
+    prepared_agent = _agent("code", "CodeAgent")
+    transient_items = (EnrichmentItem(key="location", text="Current location: Amsterdam", persist=False),)
+
+    async def fake_prepare_agent_execution_context(
+        _ctx: object,
+        **kwargs: object,
+    ) -> _PreparedExecutionContext:
+        transient_messages = kwargs["transient_context_messages"]
+        assert len(transient_messages) == 1
+        assert transient_messages[0].add_to_agent_memory is False
+        assert "Retrieved memory" in transient_messages[0].content
+        assert "Current location: Amsterdam" in transient_messages[0].content
+        return _PreparedExecutionContext(
+            messages=(*transient_messages, Message(role="user", content="prepared prompt")),
+            unseen_event_ids=[],
+            prepared_history=PreparedHistoryState(),
+        )
+
+    with (
+        patch(
+            "mindroom.ai.build_memory_prompt_parts",
+            new=AsyncMock(return_value=MemoryPromptParts(transient_turn_context="Retrieved memory")),
+        ),
+        patch("mindroom.ai.create_agent", return_value=prepared_agent),
+        patch(
+            "mindroom.ai.prepare_agent_execution_context",
+            new=AsyncMock(side_effect=fake_prepare_agent_execution_context),
+        ),
+    ):
+        prepared_run = await _prepare_agent_and_prompt(
+            make_turn_context("code", transient_enrichment_items=transient_items),
+            prompt="prompt",
+            runtime_paths=runtime_paths_for(config),
+            config=config,
+        )
+
+    system_message = _agent_system_message(prepared_run.agent)
+    assert "Current location: Amsterdam" not in system_message
+    assert "Retrieved memory" not in system_message
+
+
+@pytest.mark.asyncio
 async def test_prepare_materialized_team_execution_applies_system_enrichment_to_team_and_members(
     tmp_path: Path,
 ) -> None:
@@ -389,6 +436,7 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
         EnrichmentItem(key="a", text="stable", cache_policy="stable"),
         EnrichmentItem(key="b", text="volatile", cache_policy="volatile"),
     )
+    transient_items = (EnrichmentItem(key="location", text="Current location", persist=False),)
     rendered = render_system_enrichment_block(system_items)
 
     async def fake_prepare_bound_team_execution_context(
@@ -400,6 +448,10 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
         assert isinstance(team, Team)
         assert team.additional_context == rendered
         assert all(agent.additional_context == rendered for agent in agents)
+        transient_messages = kwargs["transient_context_messages"]
+        assert len(transient_messages) == 1
+        assert transient_messages[0].add_to_agent_memory is False
+        assert "Current location" in transient_messages[0].content
         return _PreparedExecutionContext(
             messages=(Message(role="user", content="prepared team prompt"),),
             unseen_event_ids=[],
@@ -440,6 +492,7 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
                 correlation_id="$event",
                 reply_to_event_id="$event",
                 active_event_ids=frozenset(),
+                transient_enrichment_items=transient_items,
                 system_enrichment_items=system_items,
             ),
             scope_context=scope_context,

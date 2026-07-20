@@ -2096,11 +2096,11 @@ class TestStreamingBehavior:
         pipeline_timing = DispatchPipelineTiming(source_event_id="$request", room_id="!test:localhost")
 
         async def fake_stream_agent_response(*args: object, **_kwargs: object) -> AsyncIterator[str]:
-            system_enrichment_items = args[0].system_enrichment_items
-            assert len(system_enrichment_items) == 1
+            transient_enrichment_items = args[0].transient_enrichment_items
+            assert len(transient_enrichment_items) == 1
             assert (
                 f"Knowledge base `{base_id}` is initializing and unavailable for semantic search this turn."
-                in system_enrichment_items[0].text
+                in transient_enrichment_items[0].text
             )
             yield "stream chunk"
 
@@ -2163,9 +2163,9 @@ class TestStreamingBehavior:
         )
 
         async def fake_ai_response(*args: object, **_kwargs: object) -> str:
-            system_enrichment_items = args[0].system_enrichment_items
-            assert len(system_enrichment_items) == 1
-            assert "Knowledge base `fresh_turn_docs` is initializing" in system_enrichment_items[0].text
+            transient_enrichment_items = args[0].transient_enrichment_items
+            assert len(transient_enrichment_items) == 1
+            assert "Knowledge base `fresh_turn_docs` is initializing" in transient_enrichment_items[0].text
             return "handled"
 
         with (

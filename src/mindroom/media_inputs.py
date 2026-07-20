@@ -55,16 +55,3 @@ class MediaInputs:
         if self.videos:
             kinds.add("video")
         return frozenset(kinds)
-
-    def merge(self, other: MediaInputs) -> MediaInputs:
-        """Concatenate two media-input sets preserving order."""
-        if not self.has_any():
-            return other
-        if not other.has_any():
-            return self
-        return MediaInputs(
-            audio=(*self.audio, *other.audio),
-            images=(*self.images, *other.images),
-            files=(*self.files, *other.files),
-            videos=(*self.videos, *other.videos),
-        )

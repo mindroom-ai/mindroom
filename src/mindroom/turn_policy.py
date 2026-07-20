@@ -120,7 +120,7 @@ class _PreparedHookedPayload:
 
     payload: DispatchPayload
     envelope: MessageEnvelope
-    system_enrichment_items: tuple[EnrichmentItem, ...]
+    transient_enrichment_items: tuple[EnrichmentItem, ...]
 
 
 @dataclass
@@ -162,7 +162,7 @@ class IngressHookRunner:
         started = time.monotonic()
         hook_registered = self.hook_context.registry.has_hooks(EVENT_MESSAGE_ENRICH)
         item_count = 0
-        system_enrichment_items: tuple[EnrichmentItem, ...] = ()
+        transient_enrichment_items: tuple[EnrichmentItem, ...] = ()
 
         envelope = MessageEnvelope(
             source_event_id=dispatch.envelope.source_event_id,
@@ -191,7 +191,7 @@ class IngressHookRunner:
             items = await emit_collect(self.hook_context.registry, EVENT_MESSAGE_ENRICH, context)
             item_count = len(items)
             persisted_items = [item for item in items if item.persist]
-            system_enrichment_items = tuple(item for item in items if not item.persist)
+            transient_enrichment_items = tuple(item for item in items if not item.persist)
             if persisted_items:
                 enrichment_block = render_enrichment_block(persisted_items)
                 base_model_prompt = payload.model_prompt if payload.model_prompt is not None else payload.prompt
@@ -213,7 +213,7 @@ class IngressHookRunner:
                 attachment_ids=payload.attachment_ids,
             ),
             envelope=envelope,
-            system_enrichment_items=system_enrichment_items,
+            transient_enrichment_items=transient_enrichment_items,
         )
 
     async def apply_system_enrichment(

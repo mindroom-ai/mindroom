@@ -113,7 +113,7 @@ def mock_agent_user() -> AgentMatrixUser:
 
 def _matrix_target_item(mock_response: AsyncMock | MagicMock) -> EnrichmentItem:
     turn_context = mock_response.call_args.args[0]
-    return next(item for item in turn_context.system_enrichment_items if item.key == "matrix_message_target")
+    return next(item for item in turn_context.transient_enrichment_items if item.key == "matrix_message_target")
 
 
 def test_with_matrix_message_target_drops_hook_owned_reserved_item_without_runtime_target() -> None:
@@ -143,7 +143,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Agents with matrix_message should receive stable Matrix targeting context."""
+        """Agents with matrix_message should receive transient Matrix targeting context."""
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -200,7 +200,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """openclaw_compat agents should receive stable Matrix targeting context."""
+        """openclaw_compat agents should receive transient Matrix targeting context."""
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -254,7 +254,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Streaming path should inject stable Matrix targeting context."""
+        """Streaming path should inject transient Matrix targeting context."""
 
         async def mock_streaming_response() -> AsyncGenerator[str, None]:
             yield "chunk"

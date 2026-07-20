@@ -209,7 +209,7 @@ def _matrix_message_target_item(
     matrix_message_available: bool,
     runtime: BotRuntimeView,
 ) -> EnrichmentItem | None:
-    """Build stable Matrix targeting context when the tool is available."""
+    """Build transient Matrix targeting context when the tool is available."""
     if not matrix_message_available:
         return None
     room_display_name = _cached_room_display_name(runtime, target.room_id)
@@ -230,6 +230,7 @@ def _matrix_message_target_item(
         key=_MATRIX_MESSAGE_TARGET_KEY,
         text=text,
         cache_policy="stable",
+        persist=False,
     )
 
 
@@ -317,6 +318,7 @@ class ResponseRequest:
     attachment_ids: tuple[str, ...] | None = None
     correlation_id: str | None = None
     matrix_run_metadata: Mapping[str, Any] | None = None
+    transient_enrichment_items: tuple[EnrichmentItem, ...] = ()
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     requires_model_history_refresh: bool = False
     scheduled_history_budget: ScheduledHistoryBudget | None = None
@@ -1050,6 +1052,7 @@ class ResponseRunner:
         runtime: _PreparedResponseRuntime,
         run_id: str | None,
         active_event_ids: set[str],
+        transient_enrichment_items: Sequence[EnrichmentItem],
         system_enrichment_items: Sequence[EnrichmentItem],
     ) -> ResponseTurnContext:
         """Build the per-turn identity context for one agent response."""
@@ -1073,7 +1076,11 @@ class ResponseRunner:
             requester_id=request.user_id,
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
             active_event_ids=frozenset(active_event_ids),
-            system_enrichment_items=_with_matrix_message_target(system_enrichment_items, matrix_target_item),
+            transient_enrichment_items=_with_matrix_message_target(
+                transient_enrichment_items,
+                matrix_target_item,
+            ),
+            system_enrichment_items=tuple(system_enrichment_items),
             scheduled_history_budget=request.scheduled_history_budget,
         )
 
@@ -1679,10 +1686,11 @@ class ResponseRunner:
             requester_id=requester_user_id or execution_identity.requester_id,
             matrix_run_metadata=matrix_run_metadata,
             active_event_ids=frozenset(active_event_ids),
-            system_enrichment_items=_with_matrix_message_target(
-                request.system_enrichment_items,
+            transient_enrichment_items=_with_matrix_message_target(
+                request.transient_enrichment_items,
                 matrix_target_item,
             ),
+            system_enrichment_items=request.system_enrichment_items,
             scheduled_history_budget=request.scheduled_history_budget,
         )
         team_turn_recorder = self._build_turn_recorder(
@@ -2160,8 +2168,8 @@ class ResponseRunner:
                 self.deps.agent_name,
                 execution_identity=runtime.tool_dispatch.execution_identity,
             )
-            system_enrichment_items = append_knowledge_availability_enrichment(
-                request.system_enrichment_items,
+            transient_enrichment_items = append_knowledge_availability_enrichment(
+                request.transient_enrichment_items,
                 knowledge_resolution.unavailable,
             )
             return await ai_response(
@@ -2170,7 +2178,8 @@ class ResponseRunner:
                     runtime=runtime,
                     run_id=run_id,
                     active_event_ids=active_event_ids,
-                    system_enrichment_items=system_enrichment_items,
+                    transient_enrichment_items=transient_enrichment_items,
+                    system_enrichment_items=request.system_enrichment_items,
                 ),
                 prompt=request.prompt,
                 runtime_paths=self.deps.runtime_paths,
@@ -2252,8 +2261,8 @@ class ResponseRunner:
             self.deps.agent_name,
             execution_identity=runtime.tool_dispatch.execution_identity,
         )
-        system_enrichment_items = append_knowledge_availability_enrichment(
-            request.system_enrichment_items,
+        transient_enrichment_items = append_knowledge_availability_enrichment(
+            request.transient_enrichment_items,
             knowledge_resolution.unavailable,
         )
         response_stream = stream_agent_response(
@@ -2262,7 +2271,8 @@ class ResponseRunner:
                 runtime=runtime,
                 run_id=run_id,
                 active_event_ids=active_event_ids,
-                system_enrichment_items=system_enrichment_items,
+                transient_enrichment_items=transient_enrichment_items,
+                system_enrichment_items=request.system_enrichment_items,
             ),
             prompt=request.prompt,
             runtime_paths=self.deps.runtime_paths,

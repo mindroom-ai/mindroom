@@ -120,7 +120,7 @@ class DelegateTools(Toolkit):
                 refresh_scheduler=self._refresh_scheduler,
                 execution_identity=execution_identity,
             )
-            system_enrichment_items = append_knowledge_availability_enrichment(
+            transient_enrichment_items = append_knowledge_availability_enrichment(
                 (),
                 knowledge_resolution.unavailable,
             )
@@ -155,7 +155,7 @@ class DelegateTools(Toolkit):
                 thread_id=None,
                 requester_id=execution_identity.requester_id if execution_identity is not None else None,
                 matrix_run_metadata=None,
-                system_enrichment_items=tuple(system_enrichment_items),
+                transient_enrichment_items=tuple(transient_enrichment_items),
             )
             with tool_runtime_context(delegated_runtime_context):
                 response = await ai_response(

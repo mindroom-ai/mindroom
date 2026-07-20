@@ -122,7 +122,7 @@ async def test_generate_team_response_helper_preserves_raw_prompt_when_model_pro
 
 @pytest.mark.asyncio
 async def test_generate_team_response_appends_matrix_tool_prompt_context(tmp_path: Path) -> None:
-    """Team Matrix targeting context should reach the model through system enrichment."""
+    """Team Matrix targeting context should reach the model through transient enrichment."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team_matrix_message(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
@@ -133,7 +133,7 @@ async def test_generate_team_response_appends_matrix_tool_prompt_context(tmp_pat
         model_messages.append(cast("str", kwargs["message"]))
         turn_context = kwargs["ctx"]
         target_contexts.extend(
-            item.text for item in turn_context.system_enrichment_items if item.key == "matrix_message_target"
+            item.text for item in turn_context.transient_enrichment_items if item.key == "matrix_message_target"
         )
         return "Team answer"
 
@@ -1223,7 +1223,7 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
     storage = _SessionStorage()
-    model_prompts: list[str] = []
+    model_prompts: list[list[Message]] = []
 
     async def fake_run_cancellable_response(**kwargs: object) -> str:
         response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
@@ -1261,7 +1261,7 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
             orchestrator=orchestrator,
         )
 
-        async def fake_team_arun(prompt: str, **kwargs: object) -> TeamRunOutput:
+        async def fake_team_arun(prompt: list[Message], **kwargs: object) -> TeamRunOutput:
             model_prompts.append(prompt)
             return TeamRunOutput(
                 run_id=cast("str | None", kwargs.get("run_id")),
@@ -1282,9 +1282,9 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
 
     assert resolution == "$thinking"
     assert model_prompts
-    assert model_prompts[0] != "Hello"
-    assert 'Current message:\n<msg event_id="$user_msg" from="@alice:localhost">' in model_prompts[0]
-    assert "Hello" in model_prompts[0]
+    assert model_prompts[0][-1].content != "Hello"
+    assert 'Current message:\n<msg event_id="$user_msg" from="@alice:localhost">' in model_prompts[0][-1].content
+    assert "Hello" in model_prompts[0][-1].content
     persisted_session = cast("TeamSession", storage.session)
     assert persisted_session is not None
     assert persisted_session.runs is not None

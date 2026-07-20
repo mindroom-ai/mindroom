@@ -48,7 +48,7 @@ from mindroom.history.runtime import (
     open_resolved_scope_session_context,
 )
 from mindroom.history.types import HistoryScope, PreparedHistoryState
-from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
+from mindroom.hooks import EnrichmentItem, render_enrichment_block, render_system_enrichment_block
 from mindroom.llm_request_logging import (
     bind_llm_request_log_context,
     build_llm_request_log_context,
@@ -1187,6 +1187,14 @@ async def _prepare_agent_and_prompt(
             agent,
             _render_system_enrichment_context(ctx.system_enrichment_items),
         )
+    transient_turn_context = "\n\n".join(
+        part
+        for part in (
+            prompt_parts.transient_turn_context,
+            render_enrichment_block(list(ctx.transient_enrichment_items)),
+        )
+        if part
+    )
 
     prepared_execution = await prepare_agent_execution_context(
         ctx,
@@ -1197,11 +1205,11 @@ async def _prepare_agent_and_prompt(
             (
                 Message(
                     role="user",
-                    content=prompt_parts.transient_turn_context,
+                    content=transient_turn_context,
                     add_to_agent_memory=False,
                 ),
             )
-            if prompt_parts.transient_turn_context
+            if transient_turn_context
             else ()
         ),
         thread_history=thread_history,

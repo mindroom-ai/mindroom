@@ -57,10 +57,7 @@ from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import PreparedHistoryState
-from mindroom.hooks import (
-    EnrichmentItem,
-    render_system_enrichment_block,
-)
+from mindroom.hooks import EnrichmentItem, render_enrichment_block
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.llm_request_logging import install_llm_request_logging, stream_with_llm_request_log_context
@@ -223,8 +220,8 @@ def test_ai_run_metadata_context_regression_cached_prefix_sample() -> None:
 
 
 def test_append_knowledge_availability_notice_rendering() -> None:
-    """Knowledge availability notices should render as transient system enrichment."""
-    rendered_context = render_system_enrichment_block(
+    """Knowledge availability notices should render as transient message enrichment."""
+    rendered_context = render_enrichment_block(
         append_knowledge_availability_enrichment(
             (),
             {

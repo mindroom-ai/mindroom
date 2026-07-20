@@ -62,7 +62,7 @@ from mindroom.history.runtime import (
     resolve_bound_team_scope_context,
 )
 from mindroom.history.storage import update_scope_seen_event_ids
-from mindroom.hooks import render_system_enrichment_block
+from mindroom.hooks import render_enrichment_block, render_system_enrichment_block
 from mindroom.knowledge import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
 from mindroom.llm_request_logging import (
     bind_llm_request_log_context,
@@ -73,7 +73,6 @@ from mindroom.llm_request_logging import (
 from mindroom.logging_config import get_logger
 from mindroom.media_fallback import (
     MediaRetryDecision,
-    append_inline_media_fallback_prompt,
     build_model_media_route,
     filter_media_inputs_for_route,
     retry_media_inputs_after_failure,
@@ -205,6 +204,11 @@ class _PreparedMaterializedTeamExecution:
     def prepared_prompt(self) -> str:
         """Return the prompt-visible text derived from canonical live messages."""
         return render_prepared_team_messages_text(self.messages)
+
+    @property
+    def run_input(self) -> list[Message]:
+        """Return roleful live messages with persistence flags intact."""
+        return ai_runtime.copy_run_input(self.messages)
 
     @property
     def context_messages(self) -> tuple[Message, ...]:
@@ -1853,12 +1857,18 @@ async def prepare_materialized_team_execution(
         _append_additional_context(team, rendered_system_context)
         for agent in agents:
             _append_additional_context(agent, rendered_system_context)
+    transient_turn_context = render_enrichment_block(list(ctx.transient_enrichment_items))
     prepared_execution = await prepare_bound_team_run_context(
         ctx,
         scope_context=scope_context,
         agents=agents,
         team=team,
         prompt=message,
+        transient_context_messages=(
+            (Message(role="user", content=transient_turn_context, add_to_agent_memory=False),)
+            if transient_turn_context
+            else ()
+        ),
         thread_history=thread_history,
         runtime_paths=runtime_paths,
         config=config,
@@ -1961,8 +1971,8 @@ async def team_response(  # noqa: C901, PLR0915
     ctx = replace(
         ctx,
         entity_label=team_name,
-        system_enrichment_items=append_knowledge_availability_enrichment(
-            ctx.system_enrichment_items,
+        transient_enrichment_items=append_knowledge_availability_enrichment(
+            ctx.transient_enrichment_items,
             unavailable_bases,
         ),
     )
@@ -2026,40 +2036,37 @@ async def team_response(  # noqa: C901, PLR0915
             thread_history_render_limits=_MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
             pipeline_timing=pipeline_timing,
         )
-        prompt = prepared_execution.prepared_prompt
+        run_input = prepared_execution.run_input
         run.unseen_event_ids = prepared_execution.unseen_event_ids
         run.run_metadata = prepared_execution.run_metadata
         run_metadata = run.run_metadata
         turn_recorder.set_run_metadata(run_metadata)
-        # Team runs flatten context messages to text, so media pinned to
-        # thread-history messages is re-collected onto the current turn.
-        context_media_inputs = ai_runtime.media_inputs_from_run_input(prepared_execution.messages)
-        media_inputs = context_media_inputs.merge(base_media_inputs)
+        if base_media_inputs.has_any():
+            run_input = ai_runtime.attach_media_to_run_input(run_input, base_media_inputs)
+        media_inputs = ai_runtime.media_inputs_from_run_input(run_input)
         logger.info("executing_team_response", agent_count=len(agents), mode=mode.value)
-        logger.info("team_prompt_preview", agents=agent_list, prompt_preview=prompt[:500])
+        logger.info(
+            "team_prompt_preview",
+            agents=agent_list,
+            prompt_preview=_team_run_input_text(run_input)[:500],
+        )
 
         async def _run(
-            current_prompt: str,
-            current_media_inputs: MediaInputs,
+            current_run_input: Sequence[Message],
             current_run_id: str | None,
         ) -> object:
             ai_runtime.note_attempt_run_id(run_id_callback, current_run_id)
-            prepared_input = (
-                ai_runtime.attach_media_to_run_input(current_prompt, current_media_inputs)
-                if current_media_inputs.has_any()
-                else current_prompt
-            )
             with bind_llm_request_log_context(
                 **_team_request_log_context(
                     ctx,
                     team_name=configured_team_name or team_name,
                     prompt=continuation_state.active_prompt,
-                    run_input=prepared_input,
+                    run_input=list(current_run_input),
                     metadata=run_metadata,
                 ),
             ):
                 return await team.arun(
-                    prepared_input,
+                    list(current_run_input),
                     session_id=ctx.session_id,
                     run_id=current_run_id,
                     user_id=user_id,
@@ -2072,13 +2079,14 @@ async def team_response(  # noqa: C901, PLR0915
         inline_media_fallback_prompt = config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT")
         media_route = build_model_media_route(team.model) if media_inputs.has_any() else None
         media_filter = filter_media_inputs_for_route(media_route, media_inputs)
-        attempt_prompt = (
-            append_inline_media_fallback_prompt(
-                prompt,
+        attempt_run_input = (
+            ai_runtime.append_inline_media_fallback_to_run_input(
+                run_input,
                 fallback_prompt=inline_media_fallback_prompt,
+                removed_kinds=media_filter.removed_kinds,
             )
             if media_filter.removed_kinds
-            else prompt
+            else ai_runtime.copy_run_input(run_input)
         )
         attempt_media_inputs = media_filter.media_inputs
         holder.attempt_started = True
@@ -2087,7 +2095,7 @@ async def team_response(  # noqa: C901, PLR0915
             response = None
             holder.last_response = None
             try:
-                response = await _run(attempt_prompt, attempt_media_inputs, attempt_run_id)
+                response = await _run(attempt_run_input, attempt_run_id)
             except Exception as e:
                 retry_decision = retry_media_inputs_after_failure(
                     media_route,
@@ -2105,9 +2113,10 @@ async def team_response(  # noqa: C901, PLR0915
                         scope_context=run.scope_context,
                         entity_name=configured_team_name or team_name,
                     )
-                    attempt_prompt = append_inline_media_fallback_prompt(
-                        prompt,
+                    attempt_run_input = ai_runtime.append_inline_media_fallback_to_run_input(
+                        run_input,
                         fallback_prompt=inline_media_fallback_prompt,
+                        removed_kinds=retry_decision.removed_kinds,
                     )
                     attempt_media_inputs = retry_decision.media_inputs
                     attempt_run_id = ai_runtime.next_retry_run_id(continuation_state.active_run_id)
@@ -2145,9 +2154,10 @@ async def team_response(  # noqa: C901, PLR0915
                         scope_context=run.scope_context,
                         entity_name=configured_team_name or team_name,
                     )
-                    attempt_prompt = append_inline_media_fallback_prompt(
-                        prompt,
+                    attempt_run_input = ai_runtime.append_inline_media_fallback_to_run_input(
+                        run_input,
                         fallback_prompt=inline_media_fallback_prompt,
+                        removed_kinds=retry_decision.removed_kinds,
                     )
                     attempt_media_inputs = retry_decision.media_inputs
                     attempt_run_id = ai_runtime.next_retry_run_id(continuation_state.active_run_id)
@@ -2326,7 +2336,7 @@ async def team_response(  # noqa: C901, PLR0915
 async def _team_response_stream_raw(
     team: Team,
     team_members: ResolvedExactTeamMembers,
-    prompt: str,
+    prompt: ai_runtime.ModelRunInput,
     metadata: dict[str, Any] | None = None,
     media: MediaInputs | None = None,
     session_id: str | None = None,
@@ -2356,11 +2366,14 @@ async def _team_response_stream_raw(
     for agent in agents:
         logger.debug("team_member", agent=agent.name)
 
-    def _start_stream(current_prompt: str, current_media_inputs: MediaInputs) -> AsyncIterator[Any]:
+    def _start_stream(
+        current_prompt: ai_runtime.ModelRunInput,
+        current_media_inputs: MediaInputs,
+    ) -> AsyncIterator[Any]:
         prepared_input = (
             ai_runtime.attach_media_to_run_input(current_prompt, current_media_inputs)
             if current_media_inputs.has_any()
-            else current_prompt
+            else ai_runtime.copy_run_input(current_prompt)
         )
         return team.arun(
             prepared_input,
@@ -2452,8 +2465,8 @@ async def team_response_stream(  # noqa: C901, PLR0915
     ctx = replace(
         ctx,
         entity_label=team_label,
-        system_enrichment_items=append_knowledge_availability_enrichment(
-            ctx.system_enrichment_items,
+        transient_enrichment_items=append_knowledge_availability_enrichment(
+            ctx.transient_enrichment_items,
             unavailable_bases,
         ),
     )
@@ -2517,27 +2530,27 @@ async def team_response_stream(  # noqa: C901, PLR0915
             thread_history_render_limits=_MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
             pipeline_timing=pipeline_timing,
         )
-        prepared_prompt = prepared_execution.prepared_prompt
+        run_input = prepared_execution.run_input
         run.unseen_event_ids = prepared_execution.unseen_event_ids
         run.run_metadata = prepared_execution.run_metadata
         run_metadata = run.run_metadata
         unseen_event_ids = run.unseen_event_ids
         turn_recorder.set_run_metadata(run_metadata)
         logger.info("team_streaming_setup", agents=agent_names, display_names=display_names)
-        # Team runs flatten context messages to text, so media pinned to
-        # thread-history messages is re-collected onto the current turn.
-        context_media_inputs = ai_runtime.media_inputs_from_run_input(prepared_execution.messages)
-        media_inputs = context_media_inputs.merge(base_media_inputs)
+        if base_media_inputs.has_any():
+            run_input = ai_runtime.attach_media_to_run_input(run_input, base_media_inputs)
+        media_inputs = ai_runtime.media_inputs_from_run_input(run_input)
         inline_media_fallback_prompt = config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT")
         media_route = build_model_media_route(team.model) if media_inputs.has_any() else None
         media_filter = filter_media_inputs_for_route(media_route, media_inputs)
-        attempt_prompt = (
-            append_inline_media_fallback_prompt(
-                prepared_prompt,
+        attempt_run_input = (
+            ai_runtime.append_inline_media_fallback_to_run_input(
+                run_input,
                 fallback_prompt=inline_media_fallback_prompt,
+                removed_kinds=media_filter.removed_kinds,
             )
             if media_filter.removed_kinds
-            else prepared_prompt
+            else ai_runtime.copy_run_input(run_input)
         )
         attempt_media_inputs = media_filter.media_inputs
         attempt_run_id = continuation_state.active_run_id
@@ -2751,17 +2764,11 @@ async def team_response_stream(  # noqa: C901, PLR0915
             raw_stream = await _team_response_stream_raw(
                 team=team,
                 team_members=attempt_members,
-                prompt=attempt_prompt,
+                prompt=attempt_run_input,
                 metadata=run_metadata,
-                media=attempt_media_inputs,
                 session_id=ctx.session_id,
                 run_id=attempt_run_id,
                 user_id=user_id,
-            )
-            stream_run_input = (
-                ai_runtime.attach_media_to_run_input(attempt_prompt, attempt_media_inputs)
-                if attempt_media_inputs.has_any()
-                else attempt_prompt
             )
             raw_stream = _capture_stream_interrupt(
                 stream_with_llm_request_log_context(
@@ -2770,7 +2777,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         ctx,
                         team_name=configured_team_name or team_label,
                         prompt=continuation_state.active_prompt,
-                        run_input=stream_run_input,
+                        run_input=attempt_run_input,
                         metadata=run_metadata,
                     ),
                 ),
@@ -2834,9 +2841,10 @@ async def team_response_stream(  # noqa: C901, PLR0915
                                 scope_context=run.scope_context,
                                 entity_name=configured_team_name or team_label,
                             )
-                            attempt_prompt = append_inline_media_fallback_prompt(
-                                prepared_prompt,
+                            attempt_run_input = ai_runtime.append_inline_media_fallback_to_run_input(
+                                run_input,
                                 fallback_prompt=inline_media_fallback_prompt,
+                                removed_kinds=retry_decision.removed_kinds,
                             )
                             attempt_media_inputs = retry_decision.media_inputs
                             attempt_run_id = ai_runtime.next_retry_run_id(continuation_state.active_run_id)
@@ -2942,9 +2950,10 @@ async def team_response_stream(  # noqa: C901, PLR0915
                             scope_context=run.scope_context,
                             entity_name=configured_team_name or team_label,
                         )
-                        attempt_prompt = append_inline_media_fallback_prompt(
-                            prepared_prompt,
+                        attempt_run_input = ai_runtime.append_inline_media_fallback_to_run_input(
+                            run_input,
                             fallback_prompt=inline_media_fallback_prompt,
+                            removed_kinds=retry_decision.removed_kinds,
                         )
                         attempt_media_inputs = retry_decision.media_inputs
                         attempt_run_id = ai_runtime.next_retry_run_id(continuation_state.active_run_id)

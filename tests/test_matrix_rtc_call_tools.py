@@ -878,11 +878,10 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
     assert all(call["execution_identity"] is execution_identity for call in resolver_calls)
     assert ai_calls[0][1]["knowledge"] is None
     assert ai_calls[1][1]["knowledge"] is ready_knowledge
-    assert [item.key for item in ai_calls[0][0].system_enrichment_items] == [
-        "voice_call",
-        "knowledge_availability",
-    ]
+    assert [item.key for item in ai_calls[0][0].system_enrichment_items] == ["voice_call"]
+    assert [item.key for item in ai_calls[0][0].transient_enrichment_items] == ["knowledge_availability"]
     assert [item.key for item in ai_calls[1][0].system_enrichment_items] == ["voice_call"]
+    assert ai_calls[1][0].transient_enrichment_items == ()
 
 
 @pytest.mark.asyncio

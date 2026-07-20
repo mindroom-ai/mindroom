@@ -106,8 +106,8 @@ async def test_team_response_continues_after_member_dynamic_tool_load() -> None:
     # The continuation rebuilds member agents so the loaded tool's schema is baked in.
     assert mock_create.call_count == 2
     second_prompt = mock_team.arun.await_args_list[1].args[0]
-    assert "DYNAMIC TOOL CALL COMPLETED" in second_prompt
-    assert "Continue the same task" in second_prompt
+    assert "DYNAMIC TOOL CALL COMPLETED" in second_prompt[-1].content
+    assert "Continue the same task" in second_prompt[-1].content
     assert run_ids[0] == "run-1"
     assert len(run_ids) == 2
     assert run_ids[1] != "run-1"
@@ -179,7 +179,7 @@ async def test_team_response_stream_continues_after_terminal_dynamic_tool_output
     # The streamed continuation rebuilds member agents like the blocking path.
     assert mock_create.call_count == 2
     second_prompt = mock_team.arun.call_args_list[1].args[0]
-    assert "DYNAMIC TOOL CALL COMPLETED" in second_prompt
+    assert "DYNAMIC TOOL CALL COMPLETED" in second_prompt[-1].content
     rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
     assert "Used the loaded tool." in rendered
     # The superseded first attempt's fallback document must not leak.
@@ -231,7 +231,7 @@ async def test_team_response_stream_continues_after_streamed_member_dynamic_tool
     assert mock_instance.call_args_list[0].kwargs["agents"] == [first_agent]
     assert mock_instance.call_args_list[1].kwargs["agents"] == [second_agent]
     second_prompt = mock_team.arun.call_args_list[1].args[0]
-    assert "DYNAMIC TOOL CALL COMPLETED" in second_prompt
+    assert "DYNAMIC TOOL CALL COMPLETED" in second_prompt[-1].content
     rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
     assert "Used the loaded tool." in rendered
     assert recorder.outcome == "completed"

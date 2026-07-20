@@ -236,18 +236,3 @@ def test_run_input_media_helpers_cover_pinned_history_media() -> None:
     assert "[Inline media unavailable for this model]" in str(stripped[-1].content)
     # The original run input stays untouched for later retries.
     assert history.images == [image]
-
-
-def test_media_inputs_merge_concatenates_preserving_order() -> None:
-    """Merging media inputs keeps left-then-right (chronological) order per kind."""
-    history_image = Image(content=b"\x89PNG\r\n\x1a\nhistory")
-    current_image = Image(content=b"\x89PNG\r\n\x1a\ncurrent")
-    history = MediaInputs(images=(history_image,))
-    current = MediaInputs(images=(current_image,), audio=(Audio(content=b"audio-bytes", mime_type="audio/ogg"),))
-
-    merged = history.merge(current)
-
-    assert list(merged.images) == [history_image, current_image]
-    assert merged.kinds() == frozenset({"image", "audio"})
-    assert MediaInputs().merge(current) == current
-    assert history.merge(MediaInputs()) == history
