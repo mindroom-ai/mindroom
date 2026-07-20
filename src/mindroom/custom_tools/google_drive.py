@@ -245,16 +245,16 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         return google_service_account_configured(self.service_account_path, self._runtime_paths)
 
     def _resolve_upload_path(self, local_path: str) -> Path:
+        if self._workspace_root is None:
+            msg = "Google Drive local_path requires an agent workspace"
+            raise ValueError(msg)
         requested_path = Path(local_path).expanduser()
         if requested_path.is_absolute():
             resolved_path = requested_path.resolve()
-            if self._workspace_root is not None and not resolved_path.is_relative_to(self._workspace_root.resolve()):
+            if not resolved_path.is_relative_to(self._workspace_root.resolve()):
                 msg = f"Google Drive local_path must stay within the workspace root: {self._workspace_root.resolve()}"
                 raise ValueError(msg)
             return resolved_path
-        if self._workspace_root is None:
-            msg = "Google Drive relative local_path requires an agent workspace"
-            raise ValueError(msg)
         return resolve_workspace_relative_path(
             self._workspace_root,
             requested_path,

@@ -844,6 +844,28 @@ def test_google_drive_upload_rejects_absolute_workspace_escape(
     assert service.files_resource.create_kwargs is None
 
 
+def test_google_drive_upload_requires_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("mindroom.custom_tools.google_drive.MediaFileUpload", _FakeMediaFileUpload)
+    outside_path = tmp_path / "outside.txt"
+    outside_path.write_text("private")
+    tool = GoogleDriveTools(
+        runtime_paths=_runtime_paths_with_google_drive_client(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=_ValidCredentials(),
+        tool_output_workspace_root=None,
+    )
+    service = _FakeDriveService()
+    tool.service = service
+
+    result = json.loads(tool.upload_file(str(outside_path)))
+
+    assert result["error"] == "Google Drive local_path requires an agent workspace"
+    assert service.files_resource.create_kwargs is None
+
+
 def test_google_drive_create_folder_uses_optional_parent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
