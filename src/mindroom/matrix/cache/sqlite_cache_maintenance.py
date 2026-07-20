@@ -107,9 +107,10 @@ async def run_startup_maintenance(
     destructive_reset: bool,
     normalized_legacy_thread_payload_rows: int,
 ) -> CacheMaintenanceReport:
-    """Repair atomically, then recount without retaining the SQLite writer."""
+    """Repair atomically, then recount from one nonblocking read snapshot."""
     repaired_counts = await _repair_orphan_derived_rows(db)
     await db.commit()
+    await db.execute("BEGIN")
     return await _collect_maintenance_report(
         db,
         schema_version=schema_version,

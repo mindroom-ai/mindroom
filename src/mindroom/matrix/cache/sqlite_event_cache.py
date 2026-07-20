@@ -1234,9 +1234,6 @@ class SqliteEventCache:
         """Remove a departure fence only after any pending purge commits."""
         if self.room_departure_epoch(room_id) != expected_departure_epoch:
             return
-        if not self.durable_writes_available:
-            return
-
         if self._runtime.has_pending_room_purge(self.principal_id, room_id):
             await self._write_operation(
                 room_id,
@@ -1245,6 +1242,8 @@ class SqliteEventCache:
                 writer=_noop_write,
                 allow_departed=True,
             )
+        if not self.durable_writes_available:
+            return
         if self._runtime.has_pending_room_purge(self.principal_id, room_id):
             return
 

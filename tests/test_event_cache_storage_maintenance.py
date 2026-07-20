@@ -288,25 +288,31 @@ async def test_sqlite_unsupported_schema_reset_reports_destructive_reset(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_sqlite_startup_report_does_not_retain_writer_lock(
+async def test_sqlite_startup_report_uses_nonblocking_read_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Slow startup diagnostics must not block writes from the active cache runtime."""
+    """Startup diagnostics must stay coherent without blocking active cache writes."""
     db_path = tmp_path / "event_cache.db"
     primary = SqliteEventCache(db_path)
     await primary.initialize()
     await primary._runtime.require_db().execute("PRAGMA busy_timeout=0")
     report_started = asyncio.Event()
     release_report = asyncio.Event()
-    collect_report = sqlite_cache_maintenance._collect_maintenance_report
+    scalar_count = sqlite_cache_maintenance._scalar_count
 
-    async def held_report(*args: object, **kwargs: object) -> object:
-        report_started.set()
-        await release_report.wait()
-        return await collect_report(*args, **kwargs)
+    async def held_first_count(
+        db: aiosqlite.Connection,
+        query: str,
+        parameters: tuple[object, ...] = (),
+    ) -> int:
+        result = await scalar_count(db, query, parameters)
+        if query == "SELECT COUNT(*) FROM events":
+            report_started.set()
+            await release_report.wait()
+        return result
 
-    monkeypatch.setattr(sqlite_cache_maintenance, "_collect_maintenance_report", held_report)
+    monkeypatch.setattr(sqlite_cache_maintenance, "_scalar_count", held_first_count)
     secondary = SqliteEventCache(db_path)
     initialize_secondary = asyncio.create_task(secondary.initialize())
     try:
@@ -315,8 +321,14 @@ async def test_sqlite_startup_report_does_not_retain_writer_lock(
     finally:
         release_report.set()
         await initialize_secondary
+        diagnostics = secondary.runtime_diagnostics()
         await secondary.close()
         await primary.close()
+
+    assert diagnostics["cache_event_rows"] == 0
+    assert diagnostics["cache_thread_state_rows"] == 0
+    assert diagnostics["cache_room_state_rows"] == 0
+    assert diagnostics["cache_stale_thread_markers"] == 0
 
 
 @pytest.mark.asyncio

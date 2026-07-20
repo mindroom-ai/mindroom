@@ -361,6 +361,33 @@ async def test_sqlite_lock_contention_quarantines_then_heals_principal(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_sqlite_pending_principal_purge_does_not_strand_rejoined_room(tmp_path: Path) -> None:
+    """A rejoin must flush a pending principal purge before lifting its departure fence."""
+    root = SqliteEventCache(tmp_path / "event_cache.db")
+    await root.initialize()
+    alice = root.for_principal("@alice:localhost")
+    room_id = "!room:localhost"
+    event_id = "$event"
+    event = _event(event_id, 1)
+    try:
+        await alice.store_event(event_id, room_id, event)
+        departure_epoch = alice.mark_room_departed(room_id)
+        root._runtime.record_pending_principal_purge(alice.principal_id)
+
+        await alice.mark_room_joined(room_id, expected_departure_epoch=departure_epoch)
+
+        diagnostics = alice.runtime_diagnostics()
+        assert diagnostics["cache_sqlite_pending_principal_purge"] is False
+        assert diagnostics["cache_sqlite_departed_room_count"] == 0
+        assert alice.durable_writes_available is True
+        assert await alice.get_event(room_id, event_id) is None
+        await alice.store_event(event_id, room_id, event)
+        assert await alice.get_event(room_id, event_id) == event
+    finally:
+        await root.close()
+
+
+@pytest.mark.asyncio
 async def test_failed_room_purge_blocks_reads_until_recovery(
     event_cache_factory: Callable[[], ConversationEventCache],
     monkeypatch: pytest.MonkeyPatch,
