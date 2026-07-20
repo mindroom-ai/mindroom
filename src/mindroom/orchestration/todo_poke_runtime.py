@@ -44,7 +44,7 @@ class TodoPokeRuntimeCoordinator:
         worker = TodoPokeWorker(
             policy=policy,
             deps=TodoPokeDeps(
-                state_root=lambda: todo_state_root(self.runtime_paths),
+                state_root=todo_state_root(self.runtime_paths),
                 schedule_query=self._schedule_query,
                 idle_check=self._agent_is_idle,
                 sender=self._send_poke,

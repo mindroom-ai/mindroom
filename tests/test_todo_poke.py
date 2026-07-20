@@ -108,7 +108,7 @@ def _deps(
 
     return (
         TodoPokeDeps(
-            state_root=lambda: todo_root,
+            state_root=todo_root,
             schedule_query=schedule_query,
             idle_check=idle_check,
             sender=sender,
@@ -564,48 +564,22 @@ async def test_unchanged_fingerprint_retries_are_bounded_and_reset_after_change(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "bad_timestamp",
+    ("field", "bad_value"),
     [
-        pytest.param(float("nan"), id="nan"),
-        pytest.param(float("inf"), id="infinity"),
-        pytest.param(True, id="bool"),
+        pytest.param("last_poked_at", float("nan"), id="timestamp-nan"),
+        pytest.param("last_poked_at", float("inf"), id="timestamp-infinity"),
+        pytest.param("last_poked_at", True, id="timestamp-bool"),
+        pytest.param("unchanged_repoke_count", -1, id="counter-negative"),
+        pytest.param("unchanged_repoke_count", "3", id="counter-non-int"),
+        pytest.param("unchanged_repoke_count", 1_000_000, id="counter-absurd"),
     ],
 )
-async def test_invalid_persisted_poke_timestamp_does_not_wedge_scope(
+async def test_invalid_persisted_record_field_is_treated_as_absent(
     tmp_path: Path,
-    bad_timestamp: float | bool,
-) -> None:
-    """Non-finite and boolean dedup timestamps must be treated as absent records."""
-    todo_root = tmp_path / "todo"
-    _write_thread(todo_root, "scope")
-    deps, _queried_rooms, sent = _deps(todo_root)
-    policy = TodoPokePolicy(quiet_seconds=0)
-
-    assert await scan_todo_pokes(policy, deps) == 1
-    poke_state_path = todo_root / "poke_state.json"
-    poke_state = json.loads(poke_state_path.read_text(encoding="utf-8"))
-    record = next(iter(poke_state["scopes"].values()))
-    record["last_poked_at"] = bad_timestamp
-    poke_state_path.write_text(json.dumps(poke_state), encoding="utf-8")
-
-    assert await scan_todo_pokes(policy, deps) == 1
-    assert len(sent) == 2
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "bad_value",
-    [
-        pytest.param(-1, id="negative"),
-        pytest.param("3", id="non-int"),
-        pytest.param(1_000_000, id="absurd"),
-    ],
-)
-async def test_invalid_persisted_poke_counter_is_recovered(
-    tmp_path: Path,
+    field: str,
     bad_value: object,
 ) -> None:
-    """An invalid persisted counter must be rejected and replaced by a valid record."""
+    """An invalid persisted field must invalidate the record and be replaced by a valid one."""
     todo_root = tmp_path / "todo"
     _write_thread(todo_root, "scope")
     deps, _queried_rooms, sent = _deps(todo_root)
@@ -615,13 +589,13 @@ async def test_invalid_persisted_poke_counter_is_recovered(
     poke_state_path = todo_root / "poke_state.json"
     poke_state = json.loads(poke_state_path.read_text(encoding="utf-8"))
     record = next(iter(poke_state["scopes"].values()))
-    record["unchanged_repoke_count"] = bad_value
+    record[field] = bad_value
     poke_state_path.write_text(json.dumps(poke_state), encoding="utf-8")
 
     assert await scan_todo_pokes(policy, deps) == 1
-    repaired_state = json.loads(poke_state_path.read_text(encoding="utf-8"))
-    repaired_record = next(iter(repaired_state["scopes"].values()))
+    repaired_record = next(iter(json.loads(poke_state_path.read_text(encoding="utf-8"))["scopes"].values()))
     assert repaired_record["unchanged_repoke_count"] == 0
+    assert repaired_record["last_poked_at"] == _NOW.timestamp()
     assert len(sent) == 2
 
 
@@ -667,7 +641,7 @@ async def test_persist_failure_keeps_session_dedup_and_later_scopes_continue(
     assert await scan_todo_pokes(policy, deps, session_poke_records=remembered_pokes) == 0
     assert len(sent) == 2
     poke_state = json.loads((todo_root / "poke_state.json").read_text(encoding="utf-8"))
-    assert {record["room_id"] for record in poke_state["scopes"].values()} == {"!b:localhost"}
+    assert list(poke_state["scopes"]) == ['["agent_b","!b:localhost","$thread"]']
 
 
 @pytest.mark.asyncio
@@ -693,7 +667,7 @@ async def test_delivery_cap_counts_attempts_and_failed_send_waits_cooldown(tmp_p
     assert len(sent) == 3
     poke_state = json.loads((todo_root / "poke_state.json").read_text(encoding="utf-8"))
     assert len(poke_state["scopes"]) == 3
-    failed_record = next(record for record in poke_state["scopes"].values() if record["room_id"] == "!room-0:localhost")
+    failed_record = next(record for key, record in poke_state["scopes"].items() if "!room-0:localhost" in key)
     assert failed_record["last_fingerprint"] == ""
 
     assert await scan_todo_pokes(policy, deps) == 2
@@ -735,6 +709,40 @@ async def test_failed_send_retries_after_cooldown_and_keeps_repoke_budget(tmp_pa
     assert record["unchanged_repoke_count"] == 0
     assert record["last_fingerprint"] != ""
     assert len(sent) == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_attempt_preserves_delivered_fingerprint_lineage(tmp_path: Path) -> None:
+    """A failed attempt after deliveries keeps the delivered fingerprint and repoke count."""
+    todo_root = tmp_path / "todo"
+    _write_thread(todo_root, "scope")
+    current_time = [_NOW]
+    deps, _queried_rooms, sent = _deps(
+        todo_root,
+        clock=lambda: current_time[0],
+        send_results=["$event-1", "$event-2", None],
+    )
+    policy = TodoPokePolicy(quiet_seconds=0, cooldown_seconds=300)
+    poke_state_path = todo_root / "poke_state.json"
+
+    assert await scan_todo_pokes(policy, deps) == 1
+    current_time[0] = _NOW + timedelta(hours=1)
+    assert await scan_todo_pokes(policy, deps) == 1
+
+    current_time[0] = _NOW + timedelta(hours=2)
+    assert await scan_todo_pokes(policy, deps) == 0
+    record = next(iter(json.loads(poke_state_path.read_text(encoding="utf-8"))["scopes"].values()))
+    assert record["last_fingerprint"] != ""
+    assert record["unchanged_repoke_count"] == 1
+
+    current_time[0] = _NOW + timedelta(hours=2, seconds=300)
+    assert await scan_todo_pokes(policy, deps) == 0
+
+    current_time[0] = _NOW + timedelta(hours=3)
+    assert await scan_todo_pokes(policy, deps) == 1
+    record = next(iter(json.loads(poke_state_path.read_text(encoding="utf-8"))["scopes"].values()))
+    assert record["unchanged_repoke_count"] == 2
+    assert len(sent) == 4
 
 
 @pytest.mark.asyncio
@@ -798,7 +806,29 @@ async def test_scan_prunes_poke_records_without_current_actionable_scope(tmp_pat
     assert await scan_todo_pokes(policy, deps) == 0
     assert queried_rooms == ["!a:localhost", "!b:localhost"]
     poke_state = json.loads((todo_root / "poke_state.json").read_text(encoding="utf-8"))
-    assert {record["room_id"] for record in poke_state["scopes"].values()} == {"!b:localhost"}
+    assert list(poke_state["scopes"]) == ['["agent_b","!b:localhost","$thread"]']
+
+
+@pytest.mark.asyncio
+async def test_unreadable_threads_directory_preserves_poke_records(tmp_path: Path) -> None:
+    """A transient directory-enumeration failure must not wipe dedup state and re-arm pokes."""
+    todo_root = tmp_path / "todo"
+    _write_thread(todo_root, "scope")
+    deps, _queried_rooms, sent = _deps(todo_root)
+    policy = TodoPokePolicy(quiet_seconds=0)
+
+    assert await scan_todo_pokes(policy, deps) == 1
+    threads_root = todo_root / "threads"
+    threads_root.chmod(0o000)
+    try:
+        assert await scan_todo_pokes(policy, deps) == 0
+    finally:
+        threads_root.chmod(0o755)
+    poke_state = json.loads((todo_root / "poke_state.json").read_text(encoding="utf-8"))
+    assert len(poke_state["scopes"]) == 1
+
+    assert await scan_todo_pokes(policy, deps) == 0
+    assert len(sent) == 1
 
 
 @pytest.mark.asyncio

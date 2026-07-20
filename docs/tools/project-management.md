@@ -90,7 +90,7 @@ Built-in templates live with the package, and agents can add workspace-local tem
 ### Native Auto-Poke
 
 MindRoom scans native todo state in the background and wakes an idle configured agent when that agent has assigned, open, dependency-unblocked work.
-The scanner waits for the quiet period measured from the actionable item's last update, but an older item that becomes actionable when a dependency completes is eligible immediately for handoff.
+The scanner waits for the quiet period measured from the newest update among the agent's actionable items in the thread; an item unblocked by a completed dependency keeps its old timestamp, so it becomes eligible as soon as the rest of that agent's actionable work in the thread is quiet.
 Future item timestamps beyond one quiet window are treated as already quiet so clock skew cannot disable a scope indefinitely.
 A pending schedule for the same room and existing thread suppresses the poke, while schedules that create a new thread do not suppress room-main work.
 Work fingerprints are persisted under `mindroom_data/todo/poke_state.json`, so changed work observes a cooldown and unchanged work receives at most three one-hour anti-stall retries.

@@ -69,7 +69,7 @@ class TodoPokePolicy:
 class TodoPokeDeps:
     """Runtime collaborators injected into the todo poke scanner."""
 
-    state_root: Callable[[], Path]
+    state_root: Path
     schedule_query: _TodoScheduleQuery
     idle_check: Callable[[str], bool]
     sender: _TodoPokeSender
@@ -104,7 +104,6 @@ class _TodoSnapshotBatch:
 
 @dataclass(frozen=True, slots=True)
 class _TodoPokeScope:
-    source_path: Path
     assigned_agent: str
     room_id: str
     thread_id: str | None
@@ -309,31 +308,32 @@ def _parse_thread_snapshot(
     )
 
 
-def _read_thread_snapshot(
-    path: Path,
-    seen_warning_keys: set[_StateWarningKey],
-) -> _TodoThreadSnapshot | None:
-    try:
-        return _parse_thread_snapshot(read_json(path), path, seen_warning_keys)
-    except (KeyError, TypeError, ValueError) as exc:
-        _warn_state_once("todo_poke_state_file_skipped", path, str(exc), seen_warning_keys)
-        return None
-
-
 def _read_thread_snapshots(
     todo_root: Path,
     seen_warning_keys: set[_StateWarningKey],
 ) -> _TodoSnapshotBatch:
+    threads_root = todo_root / "threads"
+    # Enumerate explicitly: Path.glob would swallow enumeration OSErrors and report an empty store,
+    # which downstream pruning would treat as "all scopes completed" and wipe the dedup state.
+    try:
+        thread_dirs = sorted(entry for entry in threads_root.iterdir() if entry.is_dir())
+    except FileNotFoundError:
+        return _TodoSnapshotBatch((), had_io_failure=False)
+    except OSError as exc:
+        _warn_state_once("todo_poke_state_dir_unreadable", threads_root, str(exc), seen_warning_keys)
+        return _TodoSnapshotBatch((), had_io_failure=True)
+
     snapshots: list[_TodoThreadSnapshot] = []
     had_io_failure = False
-    for path in sorted((todo_root / "threads").glob("*/todos.json")):
+    for path in (thread_dir / "todos.json" for thread_dir in thread_dirs):
         try:
-            snapshot = _read_thread_snapshot(path, seen_warning_keys)
+            snapshot = _parse_thread_snapshot(read_json(path), path, seen_warning_keys)
         except OSError as exc:
             _warn_state_once("todo_poke_state_file_skipped", path, str(exc), seen_warning_keys)
             had_io_failure = True
-            continue
-        if snapshot is not None:
+        except (KeyError, TypeError, ValueError) as exc:
+            _warn_state_once("todo_poke_state_file_skipped", path, str(exc), seen_warning_keys)
+        else:
             snapshots.append(snapshot)
     return _TodoSnapshotBatch(tuple(snapshots), had_io_failure)
 
@@ -388,7 +388,6 @@ def _poke_scopes(
             actionable_items = tuple(items_by_agent[assigned_agent])
             scopes.append(
                 _TodoPokeScope(
-                    source_path=snapshot.source_path,
                     assigned_agent=assigned_agent,
                     room_id=snapshot.room_id,
                     thread_id=snapshot.thread_id,
@@ -401,11 +400,10 @@ def _poke_scopes(
 
 
 def _scope_key(scope: _TodoPokeScope) -> str:
-    canonical = json.dumps(
+    return json.dumps(
         [scope.assigned_agent, scope.room_id, scope.thread_id],
         separators=(",", ":"),
     )
-    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def _poke_record(state: Mapping[str, Any], scope: _TodoPokeScope) -> _PokeRecord | None:
@@ -435,27 +433,17 @@ def _poke_record(state: Mapping[str, Any], scope: _TodoPokeScope) -> _PokeRecord
     )
 
 
-def _validated_poke_state(raw_state: object) -> dict[str, Any]:
-    if not isinstance(raw_state, dict):
-        msg = "todo poke state root must be an object"
-        raise TypeError(msg)
-    state = cast("dict[str, Any]", raw_state)
-    scopes = state.get("scopes")
-    if scopes is not None and not isinstance(scopes, dict):
-        msg = "todo poke scopes state must be an object"
-        raise TypeError(msg)
-    return state
-
-
 def _read_poke_state(todo_root: Path) -> dict[str, Any]:
     path = todo_root / _POKE_STATE_FILENAME
     try:
-        state = _validated_poke_state(read_json(path))
-    except (TypeError, ValueError) as exc:
+        raw_state: object = read_json(path)
+    except ValueError as exc:
         logger.warning("todo_poke_dedup_state_reset", path=str(path), error=str(exc))
         return {}
-    else:
-        return state
+    if not isinstance(raw_state, dict):
+        logger.warning("todo_poke_dedup_state_reset", path=str(path), error="state root must be an object")
+        return {}
+    return cast("dict[str, Any]", raw_state)
 
 
 def _prune_poke_state(todo_root: Path, active_scope_keys: frozenset[str]) -> None:
@@ -487,9 +475,6 @@ def _persist_poke(todo_root: Path, scope: _TodoPokeScope, record: _PokeRecord) -
             msg = "todo poke scopes state must be an object"
             raise TypeError(msg)
         scopes[_scope_key(scope)] = {
-            "assigned_agent": scope.assigned_agent,
-            "room_id": scope.room_id,
-            "thread_id": scope.thread_id,
             "last_poked_at": record.last_poked_at,
             "last_fingerprint": record.last_fingerprint,
             "unchanged_repoke_count": record.unchanged_repoke_count,
@@ -546,27 +531,6 @@ def _period_elapsed(now_timestamp: float, previous_timestamp: float, period_seco
     elapsed_seconds = now_timestamp - previous_timestamp
     # Future skew beyond the period is not a trustworthy activity signal.
     return elapsed_seconds >= period_seconds or elapsed_seconds <= -period_seconds
-
-
-def _quiet_period_elapsed(scope: _TodoPokeScope, now: datetime, quiet_seconds: float) -> bool:
-    return _period_elapsed(
-        now.timestamp(),
-        scope.latest_actionable_update.timestamp(),
-        quiet_seconds,
-    )
-
-
-def _idle_quiet_scopes(
-    scopes: list[_TodoPokeScope],
-    policy: TodoPokePolicy,
-    deps: TodoPokeDeps,
-    now: datetime,
-) -> list[_TodoPokeScope]:
-    return [
-        scope
-        for scope in scopes
-        if _quiet_period_elapsed(scope, now, policy.quiet_seconds) and deps.idle_check(scope.assigned_agent)
-    ]
 
 
 async def _pending_schedules_by_room(
@@ -688,7 +652,7 @@ async def scan_todo_pokes(
     """Scan native todo state once and return the number of delivered pokes."""
     remembered_pokes = session_poke_records if session_poke_records is not None else {}
     remembered_warnings = seen_warning_keys if seen_warning_keys is not None else set()
-    todo_root = deps.state_root()
+    todo_root = deps.state_root
     snapshot_batch = await asyncio.to_thread(_read_thread_snapshots, todo_root, remembered_warnings)
     all_scopes = _poke_scopes(list(snapshot_batch.snapshots), remembered_warnings)
     active_scope_keys = frozenset(_scope_key(scope) for scope in all_scopes)
@@ -706,17 +670,13 @@ async def scan_todo_pokes(
         )
         return 0
 
-    eligibility_now = deps.clock().astimezone(UTC)
+    now_timestamp = deps.clock().astimezone(UTC).timestamp()
     scopes = [
         scope
-        for scope in _idle_quiet_scopes(all_scopes, policy, deps, eligibility_now)
-        if _dedup_allows_poke(
-            scope,
-            poke_state,
-            remembered_pokes,
-            policy,
-            eligibility_now.timestamp(),
-        )
+        for scope in all_scopes
+        if _period_elapsed(now_timestamp, scope.latest_actionable_update.timestamp(), policy.quiet_seconds)
+        and deps.idle_check(scope.assigned_agent)
+        and _dedup_allows_poke(scope, poke_state, remembered_pokes, policy, now_timestamp)
     ]
     if not scopes:
         return 0
