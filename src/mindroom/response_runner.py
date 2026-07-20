@@ -192,23 +192,37 @@ def _agent_has_matrix_messaging_tool(config: Config, agent_name: str, session_id
 _MATRIX_MESSAGE_TARGET_KEY = "matrix_message_target"
 
 
+def _cached_room_display_name(runtime: BotRuntimeView, room_id: str) -> str | None:
+    """Return the room name already present in the synced Matrix cache."""
+    client = runtime.client
+    if client is None:
+        return None
+    room = client.rooms.get(room_id)
+    if room is None or not room.display_name:
+        return None
+    return room.display_name
+
+
 def _matrix_message_target_item(
     target: MessageTarget,
     *,
     matrix_message_available: bool,
+    runtime: BotRuntimeView,
 ) -> EnrichmentItem | None:
     """Build stable Matrix targeting context when the tool is available."""
     if not matrix_message_available:
         return None
+    room_display_name = _cached_room_display_name(runtime, target.room_id)
+    room_label = f"{room_display_name!r} (room ID {target.room_id})" if room_display_name else target.room_id
     thread_id = target.resolved_thread_id
     if thread_id is None:
         text = (
-            f"You are responding in Matrix room {target.room_id}, outside any thread. "
+            f"You are responding in Matrix room {room_label}, outside any thread. "
             "When calling matrix_message here, use this room_id and do not pass thread_id."
         )
     else:
         text = (
-            f"You are responding in Matrix room {target.room_id}, in thread {thread_id}. "
+            f"You are responding in Matrix room {room_label}, in thread {thread_id}. "
             "When calling matrix_message here, use this room_id and thread_id."
         )
     text += " Use a current or selected <msg event_id> as target for reactions and edits."
@@ -1046,6 +1060,7 @@ class ResponseRunner:
                 self.deps.agent_name,
                 runtime.session_id,
             ),
+            runtime=self.deps.runtime,
         )
         return ResponseTurnContext(
             entity_label=self.deps.agent_name,
@@ -1588,6 +1603,7 @@ class ResponseRunner:
                 _agent_has_matrix_messaging_tool(self.deps.runtime.config, name, resolved_target.session_id)
                 for name in agent_names
             ),
+            runtime=self.deps.runtime,
         )
         resolved_request = self._request_with_locked_target(
             replace(

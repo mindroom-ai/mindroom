@@ -266,6 +266,7 @@ def _make_bot(
     bot.stop_manager.add_stop_button = AsyncMock()
     bot.stop_manager.remove_stop_button = AsyncMock()
     bot.client = AsyncMock()
+    bot.client.rooms = {}
     bot.agent_name = agent_name
     bot.storage_path = tmp_path
     bot.config = config
