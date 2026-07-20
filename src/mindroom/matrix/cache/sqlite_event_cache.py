@@ -700,7 +700,7 @@ class SqliteEventCache:
                 return disabled_result
             pending_principal_purge = self._runtime.has_pending_principal_purge(self.principal_id)
             try:
-                await db.execute("BEGIN IMMEDIATE" if pending_principal_purge else "BEGIN")
+                await db.execute("BEGIN IMMEDIATE")
                 if pending_principal_purge:
                     await sqlite_event_cache_events.purge_principal_locked(
                         db,
@@ -715,6 +715,11 @@ class SqliteEventCache:
                     )
                     result = disabled_result if membership_state != "joined" else await reader(db)
                 await db.commit()
+            except sqlite3.OperationalError as exc:
+                await _rollback_sqlite_connection_best_effort(db, operation=operation)
+                if _is_sqlite_lock_contention(exc):
+                    return disabled_result
+                raise
             except BaseException:
                 await _rollback_sqlite_connection_best_effort(db, operation=operation)
                 raise

@@ -329,7 +329,7 @@ async def test_sqlite_lock_contention_quarantines_then_heals_principal(tmp_path:
         blocker.execute("BEGIN IMMEDIATE")
         try:
             readable_state = await alice.get_thread_cache_state(room_id, thread_id)
-            assert readable_state is not None
+            assert readable_state is None
             await mark_thread_stale_fail_closed(
                 alice,
                 room_id=room_id,
@@ -515,10 +515,14 @@ async def test_sqlite_cleanup_in_another_runtime_serializes_with_inflight_read( 
     event = _event(event_id, 1, sidecar_url=mxc_url)
     read_obtained_result = asyncio.Event()
     release_read = asyncio.Event()
+    cleanup_write_attempted = asyncio.Event()
+    cleanup_write_acquired = asyncio.Event()
     sqlite_loader = (
         sqlite_event_cache_events.load_event if lookup_kind == "event" else sqlite_event_cache_events.load_mxc_text
     )
     original_loader = cast("Callable[..., Awaitable[object]]", sqlite_loader)
+    departure_db = departure_root._runtime.require_db()
+    original_execute = departure_db.execute
 
     async def pause_after_read(*args: object, **kwargs: object) -> object:
         result = await original_loader(*args, **kwargs)
@@ -526,9 +530,18 @@ async def test_sqlite_cleanup_in_another_runtime_serializes_with_inflight_read( 
         await release_read.wait()
         return result
 
+    async def signal_cleanup_write(sql: str, *args: object, **kwargs: object) -> Cursor:
+        if sql != "BEGIN IMMEDIATE":
+            return await original_execute(sql, *args, **kwargs)
+        cleanup_write_attempted.set()
+        cursor = await original_execute(sql, *args, **kwargs)
+        cleanup_write_acquired.set()
+        return cursor
+
     try:
         await read_cache.store_event(event_id, room_id, event)
         assert await read_cache.store_mxc_text(room_id, event_id, mxc_url, "plaintext")
+        monkeypatch.setattr(departure_db, "execute", signal_cleanup_write)
         if lookup_kind == "event":
             monkeypatch.setattr(sqlite_event_cache_events, "load_event", pause_after_read)
             read_task = asyncio.create_task(read_cache.get_event(room_id, event_id))
@@ -553,8 +566,9 @@ async def test_sqlite_cleanup_in_another_runtime_serializes_with_inflight_read( 
                 )
 
         cleanup_task = asyncio.create_task(cleanup_room())
-        await asyncio.sleep(0)
-        assert not cleanup_task.done()
+        await asyncio.wait_for(cleanup_write_attempted.wait(), timeout=1)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(cleanup_write_acquired.wait(), timeout=0.25)
         release_read.set()
 
         assert await read_task == (event if lookup_kind == "event" else "plaintext")

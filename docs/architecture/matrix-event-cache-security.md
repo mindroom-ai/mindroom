@@ -93,6 +93,10 @@ SQLite write operations begin with `BEGIN IMMEDIATE`, so tombstone and MXC-owner
 
 SQLite content writes establish a durable room-membership row, and reads use `BEGIN IMMEDIATE` so they are ordered strictly before or after departure, principal cleanup, redaction, and other content mutations committed through another connection.
 
+An SQLite read that cannot reserve the writer returns a cache miss instead of falling back to a snapshot concurrent with an unknown content mutation.
+
+If `SQLITE_BUSY` or `SQLITE_LOCKED` prevents a durable stale marker, that principal's cache generation and durable writes remain unavailable until a later transaction purges its cached content.
+
 SQLite write results are reauthorized after commit while the operation lock is still held, so a concurrent leave cannot expose plaintext written before the fence.
 
 SQLite schema version 12 resets predecessor and older advisory cache contents inside one rollback-safe transaction because those rows have no provable principal owner, and it creates a new durable database-generation identifier.
