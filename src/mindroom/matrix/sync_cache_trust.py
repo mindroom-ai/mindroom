@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from mindroom.matrix.sync_certification import (
@@ -34,6 +34,7 @@ class SyncCacheTrust:
     logger: structlog.stdlib.BoundLogger
     state: SyncTrustState = SyncTrustState.COLD
     checkpoint: SyncCheckpoint | None = None
+    _awaiting_initial_window: bool = field(default=False, init=False, repr=False)
 
     async def prepare_startup(self) -> str | None:
         """Initialize cache trust, then restore a valid checkpoint or start cold."""
@@ -53,6 +54,7 @@ class SyncCacheTrust:
 
         self.state = SyncTrustState.PENDING if loaded is not None else SyncTrustState.COLD
         self.checkpoint = None
+        self._awaiting_initial_window = loaded is None
         return loaded.token if loaded is not None else None
 
     def _load_valid_checkpoint(self) -> SyncCheckpoint | None:
@@ -126,12 +128,20 @@ class SyncCacheTrust:
             cache_result=cache_result,
             first_sync=first_sync,
         )
+        limited_timeline = bool(cache_result.limited_room_ids)
+        if limited_timeline and not self._awaiting_initial_window:
+            decision = replace(decision, reset_client_token=True)
+        if decision.reset_client_token:
+            self._awaiting_initial_window = True
+        elif limited_timeline or decision.state is SyncTrustState.CERTIFIED:
+            self._awaiting_initial_window = False
         self._apply_decision(decision, cache_result=cache_result)
         return decision
 
     def reject_unknown_pos(self) -> SyncCertificationDecision:
         """Invalidate a checkpoint rejected by the homeserver."""
         decision = handle_unknown_pos()
+        self._awaiting_initial_window = True
         self._apply_decision(decision)
         return decision
 

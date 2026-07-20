@@ -110,6 +110,131 @@ def test_callback_failure_blocks_later_certification(tmp_path: Path) -> None:
     assert load_sync_checkpoint(tmp_path, "code") is None
 
 
+def test_positioned_limited_response_resets_sync_continuity(tmp_path: Path) -> None:
+    """A limited response after a position must force one since-less replay."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    trust.state = SyncTrustState.CERTIFIED
+    trust.save(SyncCheckpoint("s_before_gap"))
+
+    decision = trust.certify_response(
+        next_batch="s_partial",
+        cache_result=SyncCacheWriteResult(
+            complete=False,
+            limited_room_ids=("!room:localhost",),
+        ),
+        first_sync=False,
+    )
+
+    assert decision.reset_client_token is True
+    assert decision.reason == "limited_sync_timeline"
+    assert trust.state is SyncTrustState.UNCERTAIN
+    assert trust.checkpoint is None
+    assert load_sync_checkpoint(tmp_path, "code") is None
+
+
+def test_limited_recovery_window_is_consumed_once_then_complete_delta_certifies(tmp_path: Path) -> None:
+    """Recovery must avoid reset loops and certify only after a complete delta."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    trust.state = SyncTrustState.CERTIFIED
+
+    positioned = trust.certify_response(
+        next_batch="s_partial",
+        cache_result=SyncCacheWriteResult(
+            complete=False,
+            limited_room_ids=("!room:localhost",),
+        ),
+        first_sync=False,
+    )
+    initial = trust.certify_response(
+        next_batch="s_initial",
+        cache_result=SyncCacheWriteResult(
+            complete=False,
+            limited_room_ids=("!room:localhost",),
+        ),
+        first_sync=False,
+    )
+    complete = trust.certify_response(
+        next_batch="s_complete",
+        cache_result=SyncCacheWriteResult(complete=True),
+        first_sync=False,
+    )
+
+    assert positioned.reset_client_token is True
+    assert initial.reset_client_token is False
+    assert initial.state is SyncTrustState.UNCERTAIN
+    assert complete.state is SyncTrustState.CERTIFIED
+    assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
+        token="s_complete",  # noqa: S106
+        cache_generation=_GENERATION,
+    )
+
+
+@pytest.mark.asyncio
+async def test_cold_limited_initial_window_does_not_reset_again(tmp_path: Path) -> None:
+    """A since-less startup window may be limited without replaying itself forever."""
+    trust, _cache, _runtime = _trust(tmp_path)
+
+    assert await trust.prepare_startup() is None
+    decision = trust.certify_response(
+        next_batch="s_initial",
+        cache_result=SyncCacheWriteResult(
+            complete=False,
+            limited_room_ids=("!room:localhost",),
+        ),
+        first_sync=True,
+    )
+
+    assert decision.reset_client_token is False
+    assert trust.state is SyncTrustState.UNCERTAIN
+
+
+def test_callback_failure_preserves_pending_limited_recovery(tmp_path: Path) -> None:
+    """A callback failure after rewind must not make the initial window rewind again."""
+    trust, _cache, runtime = _trust(tmp_path)
+    trust.state = SyncTrustState.CERTIFIED
+
+    reset = trust.certify_response(
+        next_batch="s_partial",
+        cache_result=SyncCacheWriteResult(
+            complete=False,
+            limited_room_ids=("!room:localhost",),
+        ),
+        first_sync=False,
+    )
+    trust.mark_callback_failed()
+    initial = trust.certify_response(
+        next_batch="s_initial",
+        cache_result=SyncCacheWriteResult(
+            complete=False,
+            limited_room_ids=("!room:localhost",),
+        ),
+        first_sync=False,
+    )
+
+    assert reset.reset_client_token is True
+    assert runtime.callback_failure_count == 1
+    assert initial.reset_client_token is False
+    assert trust.state is SyncTrustState.UNCERTAIN
+
+
+def test_unknown_position_marks_next_limited_window_as_initial(tmp_path: Path) -> None:
+    """M_UNKNOWN_POS recovery consumes the next since-less limited window."""
+    trust, _cache, _runtime = _trust(tmp_path)
+
+    unknown = trust.reject_unknown_pos()
+    initial = trust.certify_response(
+        next_batch="s_initial",
+        cache_result=SyncCacheWriteResult(
+            complete=False,
+            limited_room_ids=("!room:localhost",),
+        ),
+        first_sync=False,
+    )
+
+    assert unknown.reset_client_token is True
+    assert initial.reset_client_token is False
+
+
 @pytest.mark.asyncio
 async def test_clear_failure_disables_cache_and_skips_cold_cleanup(tmp_path: Path) -> None:
     """Failed deletion preserves rows and disables cache use for safe replay."""
