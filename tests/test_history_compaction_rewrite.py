@@ -3097,6 +3097,141 @@ async def test_switch_boundary_resend_fits_a_fallback_that_genuinely_rejects_ove
     assert persisted.runs == []
 
 
+# --- ISSUE-246 review round 7 G5: the strengthened condensation attempt can reach the fallback ---
+
+
+@pytest.mark.asyncio
+async def test_strengthened_condensation_refusal_reaches_the_fallback(tmp_path: Path) -> None:
+    """Round-7 G5 (A6): a refused strengthened request is resent unchanged to the fallback.
+
+    The single-attempt strengthened policy no longer starves the one allowed
+    safeguard switch: the fallback receives the byte-identical strengthened
+    request, its fitting output persists, and it serves the rest of the pass.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    stored_summary = ("word " * 2_600) + "TAIL-FACT-MUST-SURVIVE"
+    working_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1", messages=[Message(role="user", content="RUN1-MARKER payload")])],
+        summary=SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC)),
+    )
+    storage.upsert_session(working_session)
+    primary = FakeModel(id="summary-model", provider="fake")
+    fallback = FakeModel(id="fallback-model-id", provider="fake")
+    attempts: list[tuple[FakeModel, str]] = []
+
+    async def scripted_summary(*, model: FakeModel, summary_input: str, **_kwargs: object) -> SessionSummary:
+        attempts.append((model, summary_input))
+        if len(attempts) == 1:
+            # The initial condensation fails to compress.
+            return SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC))
+        if len(attempts) == 2:
+            message = "provider-specific refusal wording"
+            raise ModelSafeguardRefusalError(message)
+        if len(attempts) == 3:
+            return SessionSummary(summary="condensed TAIL-FACT-MUST-SURVIVE", updated_at=datetime.now(UTC))
+        return SessionSummary(summary="merged TAIL-FACT-MUST-SURVIVE", updated_at=datetime.now(UTC))
+
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(side_effect=scripted_summary),
+    ):
+        rewrite_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            summary_input_budget=2_100,
+            summary_model=primary,
+            fallback_summary_model=fallback,
+            fallback_summary_model_name="fallback-model",
+        )
+
+    assert rewrite_result is not None
+    assert [model for model, _ in attempts] == [primary, primary, fallback, fallback]
+    # The strengthened request (numeric target included) reaches the fallback
+    # byte-identical.
+    assert "MUST stay under" in attempts[1][1]
+    assert attempts[2][1] == attempts[1][1]
+    assert rewrite_result.summary_model is fallback
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "merged TAIL-FACT-MUST-SURVIVE"
+    assert read_scope_state(persisted, _SCOPE).carried_summary_unfit is None
+
+
+@pytest.mark.asyncio
+async def test_strengthened_condensation_refusal_without_fallback_converges_durably(tmp_path: Path) -> None:
+    """Round-7 G5 (A6): with no fallback, the strengthened refusal writes a one-shot marker.
+
+    Otherwise the exact (non-shrinking output -> strengthened refusal) pair
+    would re-purchase two provider calls every turn with no convergence.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    stored_summary = ("word " * 2_600) + "TAIL-FACT-MUST-SURVIVE"
+    working_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1")],
+        summary=SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC)),
+    )
+    storage.upsert_session(working_session)
+    call_count = 0
+
+    async def echo_then_refuse(**_kwargs: object) -> SessionSummary:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC))
+        message = "provider-specific refusal wording"
+        raise ModelSafeguardRefusalError(message)
+
+    with (
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(side_effect=echo_then_refuse),
+        ) as generate_summary,
+        capture_logs() as logs,
+    ):
+        rewrite_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            summary_input_budget=2_100,
+        )
+
+    assert rewrite_result is None
+    assert generate_summary.await_count == 2
+    refusal_warnings = [
+        entry
+        for entry in logs
+        if entry["event"] == "Compaction condensation strengthened retry was refused with no fallback configured"
+    ]
+    assert len(refusal_warnings) == 1
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == stored_summary
+    persisted_state = read_scope_state(persisted, _SCOPE)
+    marker = persisted_state.carried_summary_unfit
+    assert marker is not None
+    assert marker.reason == "strengthened_condensation_refused"
+    assert marker.summary_digest == _summary_digest(stored_summary)
+
+    # Durable convergence: the next pass spends zero model calls.
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(),
+    ) as second_pass_summary:
+        second_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=persisted,
+            state=persisted_state,
+            summary_input_budget=2_100,
+        )
+    assert second_result is None
+    second_pass_summary.assert_not_awaited()
+
+
 # --- ISSUE-246 review round 7 G3: transient rejections never mint a durable verdict ---
 
 

@@ -858,10 +858,11 @@ async def _generate_compaction_summary_with_retry(
     ``fallback_sizing``, keeping the ``summary_prompt`` and ``summary_input``
     bytes, included runs, and budget unchanged (only the target model and its
     sizing labels differ); a refusal or failure from the fallback propagates.
-    The switch shares the retry policy's attempt bound, so a refusal after an
-    earlier shrink or transient retry propagates without a fallback call. All
-    other failures keep the existing shrink and transient same-input retry
-    behavior.
+    The switch is not counted against the retry policy's attempt bound —
+    consuming ``fallback_sizing`` already bounds it to once per call, so even
+    a single-attempt policy can reach a configured fallback and total spend
+    stays bounded at ``max_attempts + 1``. All other failures keep the
+    existing shrink and transient same-input retry behavior.
     """
     summary_input = initial_summary_input
     included_runs = initial_included_runs
@@ -914,10 +915,13 @@ async def _generate_compaction_summary_with_retry(
                 duration_ms=duration_ms,
                 error=str(exc) or type(exc).__name__,
             )
-            # The attempt bound covers the fallback call too: a refusal after an
-            # earlier shrink or transient retry propagates instead of issuing a
-            # third provider call.
-            if fallback_sizing is not None and attempt < retry_policy.max_attempts and is_model_safeguard_refusal(exc):
+            # The one allowed safeguard-fallback switch is deliberately NOT
+            # counted against the retry policy's attempt bound: consuming
+            # fallback_sizing bounds it to once per wrapper call, so even a
+            # single-attempt policy (the strengthened condensation retry) can
+            # reach a configured fallback, and total spend per wrapper call
+            # stays bounded at max_attempts + 1.
+            if fallback_sizing is not None and is_model_safeguard_refusal(exc):
                 logger.info(
                     "Compaction summary refused; switching to fallback model",
                     session_id=session_id,
@@ -1435,10 +1439,31 @@ async def _condense_carried_summary(  # noqa: C901
         if _block_size(candidate.summary) >= _block_size(previous_summary):
             # The model failed to compress; one strengthened retry with the
             # explicit numeric target, then a terminal marker (I4).
-            candidate = await _condense_once(
-                word_target=word_target,
-                retry_policy=_CONDENSATION_STRENGTHENED_RETRY_POLICY,
-            )
+            try:
+                candidate = await _condense_once(
+                    word_target=word_target,
+                    retry_policy=_CONDENSATION_STRENGTHENED_RETRY_POLICY,
+                )
+            except Exception as strengthened_exc:
+                if fallback_sizing is None and is_model_safeguard_refusal(strengthened_exc):
+                    # No fallback is admitted for this attempt-set, so the
+                    # exact (non-shrinking output -> strengthened refusal)
+                    # pair would re-purchase two provider calls every turn;
+                    # converge durably instead. With a fallback configured the
+                    # retry wrapper switches to it, and a refusal of both
+                    # models stays transient (a fresh turn may pass
+                    # safeguards).
+                    _mark_unfit(stored_digest, "strengthened_condensation_refused")
+                    logger.warning(
+                        "Compaction condensation strengthened retry was refused with no fallback configured",
+                        session_id=session_id,
+                        scope=scope.key,
+                        model_name=serving.model_name,
+                        summary_input_budget_tokens=serving.summary_input_budget,
+                        error=str(strengthened_exc) or type(strengthened_exc).__name__,
+                    )
+                    return _CondensationOutcome(persisted_summary=None, serving=serving)
+                raise
     except Exception as exc:
         if not is_context_window_rejection(exc):
             raise

@@ -1648,14 +1648,23 @@ async def test_retry_helper_propagates_fallback_refusal_or_failure(fallback_erro
 
 
 @pytest.mark.asyncio
-async def test_retry_helper_refusal_after_transient_retry_propagates_within_attempt_bound() -> None:
-    """A refusal on the bounded second attempt propagates instead of issuing a third fallback call."""
+async def test_retry_helper_refusal_after_transient_retry_still_reaches_the_fallback() -> None:
+    """Round-7 G5: the one allowed switch is not counted against the attempt bound.
+
+    A refusal on the bounded second attempt still switches once to the
+    configured fallback with the request bytes unchanged; total spend stays
+    bounded at max_attempts + 1 because the switch consumes the fallback.
+    """
     run = _completed_run("run-1")
     primary = FakeModel(id="summary-model", provider="fake")
     fallback = FakeModel(id="fallback-model-id", provider="fake")
     refusal = ModelSafeguardRefusalError("provider-specific refusal wording")
     generate_summary = AsyncMock(
-        side_effect=[ModelProviderError("temporary provider failure", status_code=503), refusal],
+        side_effect=[
+            ModelProviderError("temporary provider failure", status_code=503),
+            refusal,
+            SessionSummary(summary="fallback summary", updated_at=datetime.now(UTC)),
+        ],
     )
     retry_sleep = AsyncMock()
 
@@ -1669,9 +1678,8 @@ async def test_retry_helper_refusal_after_transient_retry_propagates_within_atte
     with (
         patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
         patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
-        pytest.raises(ModelSafeguardRefusalError) as raised,
     ):
-        await _generate_compaction_summary_with_retry(
+        chunk = await _generate_compaction_summary_with_retry(
             sizing=sizing,
             acceptance_contexts=(sizing, fallback_sizing),
             previous_summary=None,
@@ -1686,9 +1694,10 @@ async def test_retry_helper_refusal_after_transient_retry_propagates_within_atte
             fallback_sizing=fallback_sizing,
         )
 
-    assert raised.value is refusal
-    assert generate_summary.await_count == 2
-    assert [call.kwargs["model"] for call in generate_summary.await_args_list] == [primary, primary]
+    assert chunk.model is fallback
+    assert generate_summary.await_count == 3
+    assert [call.kwargs["model"] for call in generate_summary.await_args_list] == [primary, primary, fallback]
+    assert [call.kwargs["summary_input"] for call in generate_summary.await_args_list] == ["original request"] * 3
     retry_sleep.assert_awaited_once_with(DEFAULT_SUMMARY_RETRY_POLICY.same_input_retry_delay_seconds)
 
 
