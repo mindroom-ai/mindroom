@@ -19,6 +19,7 @@ from mindroom.matrix.cache import (
     SharedConversationEventCache,
     postgres_event_cache_events,
     postgres_event_cache_threads,
+    sqlite_event_cache,
     sqlite_event_cache_events,
     sqlite_event_cache_threads,
 )
@@ -311,7 +312,10 @@ async def test_disabling_principal_view_does_not_disable_other_principals(
 
 
 @pytest.mark.asyncio
-async def test_sqlite_lock_contention_quarantines_then_heals_principal(tmp_path: Path) -> None:
+async def test_sqlite_lock_contention_quarantines_then_heals_principal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A transient SQLite writer must fence stale data without disabling the principal forever."""
     root = SqliteEventCache(tmp_path / "event_cache.db")
     await root.initialize()
@@ -325,6 +329,8 @@ async def test_sqlite_lock_contention_quarantines_then_heals_principal(tmp_path:
         await replace_thread_unconditionally(alice, room_id, thread_id, [alice_event])
         await bob.store_event("$bob", room_id, bob_event)
         db = root._runtime.require_db()
+        read_logger = MagicMock()
+        monkeypatch.setattr(sqlite_event_cache, "logger", read_logger)
         blocker = sqlite3.connect(root.db_path, timeout=0)
         blocker.execute("BEGIN IMMEDIATE")
         try:
@@ -333,6 +339,10 @@ async def test_sqlite_lock_contention_quarantines_then_heals_principal(tmp_path:
                 timeout=0.5,
             )
             assert readable_state is None
+            read_logger.debug.assert_called_once_with(
+                "SQLite event cache read skipped because another writer owns storage",
+                operation="get_thread_cache_state",
+            )
             timeout_cursor = await db.execute("PRAGMA busy_timeout")
             assert await timeout_cursor.fetchone() == (5000,)
             await timeout_cursor.close()

@@ -741,6 +741,10 @@ class SqliteEventCache:
                 await _rollback_sqlite_connection_best_effort(db, operation=operation)
                 if _is_sqlite_lock_contention(exc):
                     self._runtime.record_read_contention()
+                    logger.debug(
+                        "SQLite event cache read skipped because another writer owns storage",
+                        operation=operation,
+                    )
                     return disabled_result
                 raise
             except BaseException:
