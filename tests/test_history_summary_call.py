@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from agno.exceptions import ContextWindowExceededError, ModelProviderError, ModelRateLimitError
 from agno.media import Image
 from agno.models.message import Message
 from agno.models.response import ModelResponse
@@ -25,7 +26,7 @@ from mindroom.history.storage import (
     read_scope_state,
     write_scope_state,
 )
-from mindroom.history.summary_call import generate_compaction_summary
+from mindroom.history.summary_call import generate_compaction_summary, is_context_window_rejection
 from mindroom.history.types import (
     HistoryPolicy,
     HistoryScope,
@@ -711,3 +712,73 @@ def test_build_summary_input_honors_tool_call_history_limit() -> None:
     assert "first result" not in summary_input
     assert "call-2" in summary_input
     assert "second result" in summary_input
+
+
+# --- ISSUE-246 review round 7 G3: the durable context-window classifier is narrow ---
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        pytest.param(
+            ModelRateLimitError(
+                "Request too large for gpt-4o in organization org-x on tokens per min (TPM): "
+                "Limit 30000, Requested 62051. Visit platform.openai.com to learn more.",
+                status_code=429,
+            ),
+            False,
+            id="tpm-rate-limit-is-never-terminal",
+        ),
+        pytest.param(
+            ModelProviderError("max_tokens is too large: 300000 > 128000", status_code=400),
+            False,
+            id="output-max-tokens-validation-not-terminal",
+        ),
+        pytest.param(
+            ModelProviderError("413 Request Entity Too Large", status_code=413),
+            False,
+            id="proxy-body-size-not-terminal",
+        ),
+        pytest.param(
+            ModelProviderError("upstream timeout while checking maximum context length", status_code=503),
+            False,
+            id="transient-5xx-wins-over-fragment",
+        ),
+        pytest.param(
+            ModelProviderError("request too large", status_code=400),
+            False,
+            id="broad-shrink-fragment-alone-not-terminal",
+        ),
+        pytest.param(
+            ContextWindowExceededError("prompt is too long for this model"),
+            True,
+            id="typed-context-window-error",
+        ),
+        pytest.param(
+            ModelProviderError(
+                "Input validation failed: prompt exceeds the maximum context length of this model",
+                status_code=400,
+            ),
+            True,
+            id="explicit-input-context-phrase",
+        ),
+        pytest.param(
+            ModelProviderError("error code: context_length_exceeded", status_code=400),
+            True,
+            id="provider-input-context-error-code",
+        ),
+        pytest.param(
+            ModelProviderError("prompt is too long: 210000 tokens > 200000 maximum"),
+            True,
+            id="unclassified-default-status-with-explicit-phrase",
+        ),
+    ],
+)
+def test_is_context_window_rejection_is_narrow(error: Exception, expected: bool) -> None:
+    """Round-7 G3: only typed errors and explicit input-context wording are terminal.
+
+    Transient shapes (rate-limit types, retryable status codes) classify
+    before any message matching, so TPM 429s, output-cap validation, proxy
+    body-size limits, and 5xx never mint a durable wrong diagnosis.
+    """
+    assert is_context_window_rejection(error) is expected

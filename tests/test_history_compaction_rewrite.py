@@ -3026,6 +3026,74 @@ async def test_changed_primary_with_retained_fallback_gets_its_fresh_attempt(
         assert persisted.summary.summary == "merged TAIL-FACT-MUST-SURVIVE"
 
 
+# --- ISSUE-246 review round 7 G3: transient rejections never mint a durable verdict ---
+
+
+@pytest.mark.asyncio
+async def test_condensation_tpm_rate_limit_is_transient_not_terminal(tmp_path: Path) -> None:
+    """Round-7 G3 (C's live repro): a TPM 429 saying "request too large" writes NO marker.
+
+    The rate limit gets its one delayed same-budget retry, then propagates as
+    itself — not as the terminal unfit error — leaving no marker, so the next
+    turn's attempt runs and succeeds.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    stored_summary = ("word " * 2_600) + "TAIL-FACT-MUST-SURVIVE"
+    working_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1")],
+        summary=SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC)),
+    )
+    storage.upsert_session(working_session)
+    tpm_rejection = ModelRateLimitError(
+        "Request too large for gpt-4o in organization org-x on tokens per min (TPM): Limit 30000, Requested 62051.",
+        status_code=429,
+    )
+
+    retry_sleep = AsyncMock()
+    with (
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(side_effect=tpm_rejection),
+        ) as generate_summary,
+        patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
+        pytest.raises(ModelRateLimitError, match="tokens per min"),
+    ):
+        await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            summary_input_budget=2_100,
+        )
+
+    assert generate_summary.await_count == 2
+    retry_sleep.assert_awaited_once()
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == stored_summary
+    persisted_state = read_scope_state(persisted, _SCOPE)
+    assert persisted_state.carried_summary_unfit is None
+
+    # The verdict was NOT durable: the next turn's attempt runs and succeeds.
+    summaries = [
+        SessionSummary(summary="condensed TAIL-FACT-MUST-SURVIVE", updated_at=datetime.now(UTC)),
+        SessionSummary(summary="merged TAIL-FACT-MUST-SURVIVE", updated_at=datetime.now(UTC)),
+    ]
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(side_effect=summaries),
+    ) as second_pass_summary:
+        second_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=persisted,
+            state=persisted_state,
+            summary_input_budget=2_100,
+        )
+    assert second_result is not None
+    assert second_pass_summary.await_count == 2
+
+
 # --- ISSUE-246 review round 7: force consumption is one compare-by-generation transition ---
 
 

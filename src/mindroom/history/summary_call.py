@@ -46,7 +46,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Literal
 
 import httpx
-from agno.exceptions import ContextWindowExceededError, ModelProviderError
+from agno.exceptions import ContextWindowExceededError, ModelProviderError, ModelRateLimitError
 from agno.models.message import Message
 from agno.session.summary import SessionSummary
 
@@ -119,23 +119,52 @@ def _is_same_budget_transient(error: Exception) -> bool:
     return error.status_code == 502 and _has_typed_network_cause(error)
 
 
-def is_context_window_rejection(error: Exception) -> bool:
-    """Return whether a provider failure is a context-window rejection.
+# Explicit INPUT-context rejection phrases and provider error codes. This set
+# feeds DURABLE terminal verdicts, so it is deliberately narrower than
+# _SHRINKABLE_PROVIDER_ERROR_FRAGMENTS: wording that TPM rate limits, output
+# max_tokens validation, or gateway body-size limits also use ("too large",
+# "max tokens", "request too large", ...) must never mint a terminal verdict.
+_TERMINAL_INPUT_CONTEXT_FRAGMENTS = (
+    "context_length_exceeded",
+    "maximum context length",
+    "context window",
+    "prompt is too long",
+    "input is too long",
+    "input token count exceeds",
+    "exceeds the maximum number of tokens allowed",
+    "exceeds the available context size",
+)
 
-    Covers the typed ``ContextWindowExceededError`` and provider errors whose
-    message matches the named legacy context-length fragments, because
-    classification is not exhaustive and some providers surface the rejection
-    untyped. On the shrinkable chunk path these fragments keep their
-    shrink-retry meaning; the condensation backstop uses this predicate
-    because its complete-summary input is indivisible, making such a
-    rejection a terminal unfit verdict rather than a shrink trigger.
+
+def is_context_window_rejection(error: Exception) -> bool:
+    """Return whether a provider failure is a DURABLE input-context rejection.
+
+    This classifier mints terminal verdicts (the condensation backstop's
+    one-shot unfit marker), so it accepts only the typed
+    ``ContextWindowExceededError`` and explicit input-context phrases or
+    provider error codes, and it classifies transient shapes — rate-limit
+    types and retryable status codes — BEFORE any message matching: a TPM 429
+    that happens to say "request too large" retries on a later turn instead
+    of writing a durable wrong diagnosis. The broad shrink fragments keep
+    their existing meaning for non-durable shrink-retry decisions only.
     """
     if isinstance(error, ContextWindowExceededError):
         return True
     if not isinstance(error, ModelProviderError):
         return False
+    if isinstance(error, ModelRateLimitError):
+        return False
+    status_code = error.status_code
+    if status_code == 502:
+        # agno's default for unclassified errors: only a proven network cause
+        # makes it transient; otherwise the message may still carry a genuine
+        # input-context rejection.
+        if _has_typed_network_cause(error):
+            return False
+    elif status_code in TRANSIENT_PROVIDER_STATUS_CODES or (isinstance(status_code, int) and status_code >= 500):
+        return False
     message = str(error).lower()
-    return any(fragment in message for fragment in _SHRINKABLE_PROVIDER_ERROR_FRAGMENTS)
+    return any(fragment in message for fragment in _TERMINAL_INPUT_CONTEXT_FRAGMENTS)
 
 
 class CompactionSummaryOutputLimitError(RuntimeError):
