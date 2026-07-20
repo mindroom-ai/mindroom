@@ -103,18 +103,23 @@ class CarriedSummaryUnfitMarker:
 
     Control state only: it never touches the summary or runs. It matches — and
     suppresses further automatic condensation attempts — only while the stored
-    summary digest, the serving-profile fingerprint (provider/model class,
-    model id, endpoint-trust classification, and estimator kind), and the
-    summary input budget all equal the values recorded here; changing any of
-    the three implicitly re-enables exactly one fresh attempt, and a forced
-    compaction bypasses it outright. Markers persisted under the pre-
-    fingerprint key shape parse as absent, which likewise grants one fresh
+    summary digest and ``attempt_profiles`` — the full ordered attempt set the
+    failing attempt could traverse, each entry a serving-profile fingerprint
+    (provider/model class, model id, endpoint-trust classification, estimator
+    kind, and non-secret endpoint/routing identity) plus its summary input
+    budget — equal the values recorded here. Changing any member of the set
+    (a new primary above a retained fallback included) implicitly re-enables
+    exactly one fresh attempt, and a forced compaction bypasses it outright.
+    ``serving_profile`` and ``summary_input_budget`` record which member
+    actually served the terminal verdict, for audit only. Markers persisted
+    under an older key shape parse as absent, which likewise grants one fresh
     attempt.
     """
 
     summary_digest: str
     serving_profile: str
     summary_input_budget: int
+    attempt_profiles: tuple[str, ...]
     failed_at: str
     reason: str
 

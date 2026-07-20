@@ -410,8 +410,9 @@ def _parse_state(raw_state: dict[str, Any]) -> HistoryScopeState:
 def _parse_carried_summary_unfit(raw_marker: object) -> CarriedSummaryUnfitMarker | None:
     """Parse one persisted unfit marker.
 
-    Markers written under an older key shape (for example the pre-fingerprint
-    ``model_identifier`` field) parse as absent, which deliberately grants one
+    Markers written under an older key shape (the pre-fingerprint
+    ``model_identifier`` field, or the round-6 shape without
+    ``attempt_profiles``) parse as absent, which deliberately grants one
     fresh condensation attempt instead of migrating the record.
     """
     if not isinstance(raw_marker, dict):
@@ -420,6 +421,7 @@ def _parse_carried_summary_unfit(raw_marker: object) -> CarriedSummaryUnfitMarke
     summary_digest = marker_data.get("summary_digest")
     serving_profile = marker_data.get("serving_profile")
     summary_input_budget = marker_data.get("summary_input_budget")
+    raw_attempt_profiles = marker_data.get("attempt_profiles")
     failed_at = marker_data.get("failed_at")
     reason = marker_data.get("reason")
     if (
@@ -428,6 +430,9 @@ def _parse_carried_summary_unfit(raw_marker: object) -> CarriedSummaryUnfitMarke
         or not isinstance(serving_profile, str)
         or not serving_profile
         or not isinstance(summary_input_budget, int)
+        or not isinstance(raw_attempt_profiles, list)
+        or not raw_attempt_profiles
+        or not all(isinstance(profile, str) and profile for profile in raw_attempt_profiles)
         or not isinstance(failed_at, str)
         or not isinstance(reason, str)
     ):
@@ -436,6 +441,7 @@ def _parse_carried_summary_unfit(raw_marker: object) -> CarriedSummaryUnfitMarke
         summary_digest=summary_digest,
         serving_profile=serving_profile,
         summary_input_budget=summary_input_budget,
+        attempt_profiles=tuple(raw_attempt_profiles),
         failed_at=failed_at,
         reason=reason,
     )
@@ -460,6 +466,7 @@ def _state_to_metadata(state: HistoryScopeState) -> dict[str, object]:
             "summary_digest": state.carried_summary_unfit.summary_digest,
             "serving_profile": state.carried_summary_unfit.serving_profile,
             "summary_input_budget": state.carried_summary_unfit.summary_input_budget,
+            "attempt_profiles": list(state.carried_summary_unfit.attempt_profiles),
             "failed_at": state.carried_summary_unfit.failed_at,
             "reason": state.carried_summary_unfit.reason,
         }

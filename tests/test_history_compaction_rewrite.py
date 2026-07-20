@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from agno.exceptions import ContextWindowExceededError, ModelProviderError, ModelRateLimitError
 from agno.models.message import Message
@@ -2256,14 +2257,15 @@ async def test_marker_invalidates_when_any_key_dimension_changes(tmp_path: Path,
         summary=SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC)),
     )
     storage.upsert_session(working_session)
+    marker_profile = (
+        _fake_summary_model_profile(model_id="other-model") if mismatch == "profile" else _fake_summary_model_profile()
+    )
+    marker_budget = 4_000 if mismatch == "budget" else 2_100
     marker = CarriedSummaryUnfitMarker(
         summary_digest=_summary_digest("some other summary" if mismatch == "digest" else stored_summary),
-        serving_profile=(
-            _fake_summary_model_profile(model_id="other-model")
-            if mismatch == "profile"
-            else _fake_summary_model_profile()
-        ),
-        summary_input_budget=4_000 if mismatch == "budget" else 2_100,
+        serving_profile=marker_profile,
+        summary_input_budget=marker_budget,
+        attempt_profiles=(f"{marker_profile}|budget={marker_budget}",),
         failed_at="2026-07-19T00:00:00Z",
         reason="condensation_not_smaller",
     )
@@ -2307,6 +2309,7 @@ async def test_matching_marker_skips_condensation_without_model_calls(tmp_path: 
         summary_digest=_summary_digest(stored_summary),
         serving_profile=_fake_summary_model_profile(),
         summary_input_budget=2_100,
+        attempt_profiles=(f"{_fake_summary_model_profile()}|budget=2100",),
         failed_at="2026-07-19T00:00:00Z",
         reason="condensation_not_smaller",
     )
@@ -2679,14 +2682,16 @@ async def test_marker_matches_the_serving_profile_not_the_bare_model_id(
         marker_profile_model: FakeModel | OpenAIChat = FakeModel(id="gpt-4o", provider="fake")
     else:
         marker_profile_model = OpenAIChat(id="gpt-4o")
+    marker_profile = _resolve_compaction_sizing_context(
+        marker_profile_model,
+        "summary-model",
+        2_100,
+    ).serving_profile
     marker = CarriedSummaryUnfitMarker(
         summary_digest=_summary_digest(stored_summary),
-        serving_profile=_resolve_compaction_sizing_context(
-            marker_profile_model,
-            "summary-model",
-            2_100,
-        ).serving_profile,
+        serving_profile=marker_profile,
         summary_input_budget=2_100,
+        attempt_profiles=(f"{marker_profile}|budget=2100",),
         failed_at="2026-07-19T00:00:00Z",
         reason="condensation_not_smaller",
     )
@@ -2840,6 +2845,185 @@ async def test_untyped_context_window_rejection_is_terminal_for_condensation(tmp
         )
     assert second_result is None
     second_pass_summary.assert_not_awaited()
+
+
+# --- ISSUE-246 review round 7: fingerprint routing identity + ordered attempt-set match ---
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["endpoint-change", "same-endpoint-control"])
+async def test_marker_distinguishes_custom_endpoints_with_the_same_model_id(
+    tmp_path: Path,
+    scenario: str,
+) -> None:
+    """Round-7 G2: two custom endpoints serving the same model id never share a fingerprint.
+
+    A marker recorded against endpoint A must not suppress the promised fresh
+    attempt after switching to endpoint B, while an unchanged endpoint keeps
+    suppressing it.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    stored_summary = ("word " * 2_600) + "TAIL-FACT-MUST-SURVIVE"
+    working_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1", messages=[Message(role="user", content="RUN1-MARKER payload")])],
+        summary=SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC)),
+    )
+    storage.upsert_session(working_session)
+    marker_profile = _resolve_compaction_sizing_context(
+        OpenAIChat(id="gpt-4o", base_url="https://endpoint-a.example/v1"),
+        "summary-model",
+        2_100,
+    ).serving_profile
+    marker = CarriedSummaryUnfitMarker(
+        summary_digest=_summary_digest(stored_summary),
+        serving_profile=marker_profile,
+        summary_input_budget=2_100,
+        attempt_profiles=(f"{marker_profile}|budget=2100",),
+        failed_at="2026-07-19T00:00:00Z",
+        reason="condensation_not_smaller",
+    )
+    current_base_url = (
+        "https://endpoint-b.example/v1" if scenario == "endpoint-change" else "https://endpoint-a.example/v1"
+    )
+    summaries = [
+        SessionSummary(summary="condensed TAIL-FACT-MUST-SURVIVE", updated_at=datetime.now(UTC)),
+        SessionSummary(summary="merged TAIL-FACT-MUST-SURVIVE", updated_at=datetime.now(UTC)),
+    ]
+
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(side_effect=summaries),
+    ) as generate_summary:
+        rewrite_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            state=HistoryScopeState(carried_summary_unfit=marker),
+            summary_input_budget=2_100,
+            summary_model=OpenAIChat(id="gpt-4o", base_url=current_base_url),
+        )
+
+    if scenario == "same-endpoint-control":
+        assert rewrite_result is None
+        generate_summary.assert_not_awaited()
+    else:
+        assert rewrite_result is not None
+        assert generate_summary.await_count == 2
+        persisted = get_agent_session(storage, "session-1")
+        assert persisted is not None
+        assert persisted.summary is not None
+        assert persisted.summary.summary == "merged TAIL-FACT-MUST-SURVIVE"
+
+
+def test_serving_profile_fingerprint_covers_client_params_and_prebuilt_client_routing() -> None:
+    """Round-7 G2: routing via client_params or a prebuilt client changes the fingerprint.
+
+    Identical routing on fresh instances must produce the identical
+    fingerprint (marker matching depends on cross-process stability), while
+    any routing change must produce a different one.
+    """
+
+    def profile_of(model: OpenAIChat) -> str:
+        return _resolve_compaction_sizing_context(model, "summary-model", 2_100).serving_profile
+
+    params_a = profile_of(OpenAIChat(id="gpt-4o", client_params={"base_url": "https://endpoint-a.example/v1"}))
+    params_a_again = profile_of(OpenAIChat(id="gpt-4o", client_params={"base_url": "https://endpoint-a.example/v1"}))
+    params_b = profile_of(OpenAIChat(id="gpt-4o", client_params={"base_url": "https://endpoint-b.example/v1"}))
+    assert params_a == params_a_again
+    assert params_a != params_b
+
+    client_a = profile_of(OpenAIChat(id="gpt-4o", http_client=httpx.Client(base_url="https://endpoint-a.example/v1")))
+    client_a_again = profile_of(
+        OpenAIChat(id="gpt-4o", http_client=httpx.Client(base_url="https://endpoint-a.example/v1")),
+    )
+    client_b = profile_of(OpenAIChat(id="gpt-4o", http_client=httpx.Client(base_url="https://endpoint-b.example/v1")))
+    assert client_a == client_a_again
+    assert client_a != client_b
+
+    default_profile = profile_of(OpenAIChat(id="gpt-4o"))
+    assert default_profile.endswith("|endpoint=default")
+    assert default_profile not in {params_a, client_a}
+
+
+def test_serving_profile_fingerprint_never_contains_endpoint_secrets() -> None:
+    """Round-7 G2: credentials in URLs or client params never reach the persisted fingerprint."""
+    model = OpenAIChat(
+        id="gpt-4o",
+        base_url="https://user:hunter2@secret-endpoint.example/v1?api-key=sk-url-secret",
+        client_params={"api_key": "sk-param-secret", "default_headers": {"Authorization": "Bearer sk-header-secret"}},
+    )
+    fingerprint = _resolve_compaction_sizing_context(model, "summary-model", 2_100).serving_profile
+    for secret in ("hunter2", "sk-url-secret", "sk-param-secret", "sk-header-secret", "user:"):
+        assert secret not in fingerprint
+    # The URL itself is hashed, not embedded, and the identity is stable.
+    assert "secret-endpoint.example" not in fingerprint
+    again = _resolve_compaction_sizing_context(model, "summary-model", 2_100).serving_profile
+    assert fingerprint == again
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["changed-primary", "unchanged-control"])
+async def test_changed_primary_with_retained_fallback_gets_its_fresh_attempt(
+    tmp_path: Path,
+    scenario: str,
+) -> None:
+    """Round-7 G2 (B2): suppression requires the FULL ordered attempt set unchanged.
+
+    A marker recorded under (old primary, fallback) must not suppress the
+    attempt after the primary changes, even though the retained fallback still
+    matches; the unchanged pair keeps suppressing it.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    stored_summary = ("word " * 2_600) + "TAIL-FACT-MUST-SURVIVE"
+    working_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1", messages=[Message(role="user", content="RUN1-MARKER payload")])],
+        summary=SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC)),
+    )
+    storage.upsert_session(working_session)
+    old_primary_profile = _fake_summary_model_profile(model_id="old-primary")
+    fallback = FakeModel(id="fallback-model-id", provider="fake")
+    fallback_profile = _resolve_compaction_sizing_context(fallback, "fallback-model", 2_100).serving_profile
+    marker = CarriedSummaryUnfitMarker(
+        summary_digest=_summary_digest(stored_summary),
+        serving_profile=fallback_profile,
+        summary_input_budget=2_100,
+        attempt_profiles=(f"{old_primary_profile}|budget=2100", f"{fallback_profile}|budget=2100"),
+        failed_at="2026-07-19T00:00:00Z",
+        reason="provider_context_window_rejection",
+    )
+    current_primary_id = "new-primary" if scenario == "changed-primary" else "old-primary"
+    summaries = [
+        SessionSummary(summary="condensed TAIL-FACT-MUST-SURVIVE", updated_at=datetime.now(UTC)),
+        SessionSummary(summary="merged TAIL-FACT-MUST-SURVIVE", updated_at=datetime.now(UTC)),
+    ]
+
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(side_effect=summaries),
+    ) as generate_summary:
+        rewrite_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            state=HistoryScopeState(carried_summary_unfit=marker),
+            summary_input_budget=2_100,
+            summary_model=FakeModel(id=current_primary_id, provider="fake"),
+            fallback_summary_model=fallback,
+            fallback_summary_model_name="fallback-model",
+        )
+
+    if scenario == "unchanged-control":
+        assert rewrite_result is None
+        generate_summary.assert_not_awaited()
+    else:
+        assert rewrite_result is not None
+        assert generate_summary.await_count == 2
+        persisted = get_agent_session(storage, "session-1")
+        assert persisted is not None
+        assert persisted.summary is not None
+        assert persisted.summary.summary == "merged TAIL-FACT-MUST-SURVIVE"
 
 
 # --- ISSUE-246 review round 7: force consumption is one compare-by-generation transition ---

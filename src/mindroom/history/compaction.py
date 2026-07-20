@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from functools import partial
 from html import escape
 from typing import TYPE_CHECKING, cast
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from agno.run.agent import RunOutput
@@ -580,6 +581,82 @@ class _CompactionSizingContext:
     serving_profile: str
 
 
+_CREDENTIAL_PARAM_KEY_FRAGMENTS = ("key", "token", "secret", "password", "auth", "header", "credential")
+
+
+def _sanitized_url_identity(raw_url: object) -> str | None:
+    """Return the hashed, non-secret canonical identity of one endpoint URL.
+
+    Userinfo, query, and fragment are dropped before hashing — they are where
+    credentials live in URLs — and only a digest of the remainder is ever
+    persisted, so no part of the URL itself can leak through the marker.
+    """
+    url_text = str(raw_url).strip()
+    if not url_text:
+        return None
+    parsed = urlsplit(url_text)
+    if parsed.scheme and parsed.netloc:
+        host_port = parsed.netloc.rpartition("@")[2].lower()
+        canonical = f"{parsed.scheme}://{host_port}{parsed.path.rstrip('/')}"
+    else:
+        canonical = url_text
+    return hashlib.sha256(canonical.encode("utf-8", errors="surrogatepass")).hexdigest()[:16]
+
+
+def _client_params_identity(client_params: dict[str, object]) -> str | None:
+    """Return the hashed identity of the routing-relevant client params.
+
+    Credential-named keys are dropped entirely and non-primitive values are
+    reduced to their type name, so the digest is stable across process
+    restarts and provably free of secrets.
+    """
+    routing_params = {
+        key: value if value is None or isinstance(value, (str, int, float, bool)) else type(value).__name__
+        for key, value in client_params.items()
+        if not any(fragment in key.lower() for fragment in _CREDENTIAL_PARAM_KEY_FRAGMENTS)
+    }
+    if not routing_params:
+        return None
+    serialized = stable_serialize(routing_params)
+    return hashlib.sha256(serialized.encode("utf-8", errors="surrogatepass")).hexdigest()[:16]
+
+
+def _serving_routing_identity(summary_model: Model) -> str:
+    """Return the stable, non-secret endpoint/routing identity of one loaded model.
+
+    The agno ``Model`` base deliberately leaves routing to provider classes,
+    which share the field names probed here (``base_url``, ``client_params``,
+    and the prebuilt ``client``/``async_client``/``http_client`` instances) —
+    the same sources the genuine-endpoint check inspects — so ``getattr`` with
+    a None default is the honest access pattern, not a weakened interface.
+    Each present source contributes a sanitized/hashed component; a model with
+    none reports the distinct default-endpoint identity, so two profiles that
+    differ only in where their requests are routed can never share a
+    fingerprint.
+    """
+    parts: list[str] = []
+    base_url = getattr(summary_model, "base_url", None)
+    if base_url is not None:
+        url_identity = _sanitized_url_identity(base_url)
+        if url_identity is not None:
+            parts.append(f"url:{url_identity}")
+    client_params = getattr(summary_model, "client_params", None)
+    if isinstance(client_params, dict) and client_params:
+        params_identity = _client_params_identity(cast("dict[str, object]", client_params))
+        if params_identity is not None:
+            parts.append(f"params:{params_identity}")
+    for attr_name in ("client", "async_client", "http_client"):
+        prebuilt_client = getattr(summary_model, attr_name, None)
+        if prebuilt_client is None:
+            continue
+        client_url = getattr(prebuilt_client, "base_url", None)
+        client_identity = _sanitized_url_identity(client_url) if client_url is not None else None
+        parts.append(f"{attr_name}:{client_identity or 'opaque'}")
+    if not parts:
+        return "default"
+    return ",".join(parts)
+
+
 def _serving_profile_fingerprint(
     summary_model: Model,
     *,
@@ -594,6 +671,7 @@ def _serving_profile_fingerprint(
         f"|id={summary_model.id or ''}"
         f"|genuine_openai_endpoint={genuine_openai_endpoint}"
         f"|estimate_kind={estimate_kind}"
+        f"|endpoint={_serving_routing_identity(summary_model)}"
     )
 
 
@@ -1140,6 +1218,21 @@ def _summary_digest(summary_text: str) -> str:
     return hashlib.sha256(summary_text.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
+def _condensation_attempt_profile(context: _CompactionSizingContext) -> str:
+    """Return one attempt-set entry: the serving-profile fingerprint plus its budget."""
+    return f"{context.serving_profile}|budget={context.summary_input_budget}"
+
+
+def _condensation_attempt_profiles(
+    sizing: _CompactionSizingContext,
+    fallback_sizing: _CompactionSizingContext | None,
+) -> tuple[str, ...]:
+    """Return the full ordered attempt set one condensation attempt can traverse."""
+    if fallback_sizing is None:
+        return (_condensation_attempt_profile(sizing),)
+    return (_condensation_attempt_profile(sizing), _condensation_attempt_profile(fallback_sizing))
+
+
 def _persist_summary_only_chunk(
     *,
     storage: BaseDb,
@@ -1227,28 +1320,25 @@ async def _condense_carried_summary(  # noqa: C901
     then serves the rest of the backstop. Every terminal verdict is durable:
     a fitting or strictly smaller output persists immediately as a
     summary-only chunk, and a failure verdict writes a one-shot marker keyed
-    on (summary digest, serving profile, budget) so it is never automatically
+    on (summary digest, ordered attempt set) so it is never automatically
     re-purchased for the same state.
     """
     stored_digest = _summary_digest(previous_summary)
     marker = state.carried_summary_unfit
+    attempt_profiles = _condensation_attempt_profiles(sizing, fallback_sizing)
 
-    def _marker_matches(profile: _CompactionSizingContext) -> bool:
-        return (
-            marker is not None
-            and marker.summary_digest == stored_digest
-            and marker.serving_profile == profile.serving_profile
-            and marker.summary_input_budget == profile.summary_input_budget
-        )
-
-    # The marker suppresses the attempt when it matches ANY profile that
-    # could serve this attempt-set: after a refusal-switched terminal verdict
-    # the marker carries the fallback's profile, and re-running the set would
-    # re-purchase the primary's refusal plus the fallback's known verdict.
-    if not state.force_compact_before_next_run and (
-        _marker_matches(sizing) or (fallback_sizing is not None and _marker_matches(fallback_sizing))
+    # The marker suppresses the attempt only while the FULL ordered attempt
+    # set — primary plus admitted fallback, each with its budget — is
+    # unchanged since the recorded verdict: re-running an identical set would
+    # re-purchase the same terminal outcome, while changing any member (a
+    # newly configured primary above a retained fallback included) promises
+    # exactly one fresh attempt.
+    if (
+        not state.force_compact_before_next_run
+        and marker is not None
+        and marker.summary_digest == stored_digest
+        and marker.attempt_profiles == attempt_profiles
     ):
-        assert marker is not None
         logger.info(
             "Compaction condensation skipped by carried-summary unfit marker",
             session_id=session_id,
@@ -1276,6 +1366,10 @@ async def _condense_carried_summary(  # noqa: C901
                 summary_digest=summary_digest,
                 serving_profile=serving.serving_profile,
                 summary_input_budget=serving.summary_input_budget,
+                # The ORIGINAL ordered attempt set, not the post-switch
+                # remainder: the next turn resolves the same (primary,
+                # fallback) pair, and suppression compares against that.
+                attempt_profiles=attempt_profiles,
                 failed_at=_iso_utc_now(),
                 reason=reason,
             ),
