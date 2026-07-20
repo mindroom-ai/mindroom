@@ -125,56 +125,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         wait_for_prior_room_updates.assert_awaited_once_with("!test:localhost")
 
     @pytest.mark.asyncio
-    async def test_get_event_persists_lookup_inline_inside_room_write_barrier(self) -> None:
-        """A lookup fill inside the active barrier must not queue a write behind itself."""
-        event_cache = _runtime_event_cache()
-        event_cache.get_event = AsyncMock(return_value=None)
-        event_cache.store_event = AsyncMock()
-        coordinator = _runtime_write_coordinator()
-        client = _make_client_mock()
-        response = nio.RoomGetEventResponse.from_dict(
-            {
-                "content": {"body": "hello", "msgtype": "m.text"},
-                "event_id": "$event:localhost",
-                "sender": "@user:localhost",
-                "origin_server_ts": 1234567890,
-                "room_id": "!test:localhost",
-                "type": "m.room.message",
-            },
-        )
-        client.room_get_event = AsyncMock(return_value=response)
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(
-                client=client,
-                event_cache=event_cache,
-                coordinator=coordinator,
-            ),
-        )
-
-        async def lookup_inside_barrier() -> object:
-            return await access.get_event("!test:localhost", "$event:localhost")
-
-        try:
-            update_task = coordinator.queue_room_update(
-                "!test:localhost",
-                lookup_inside_barrier,
-                name="lookup_inside_room_barrier",
-            )
-            result = await asyncio.wait_for(update_task, timeout=1.0)
-        finally:
-            await coordinator.close()
-
-        assert isinstance(result, nio.RoomGetEventResponse)
-        assert result.event.event_id == "$event:localhost"
-        event_cache.store_event.assert_awaited_once_with(
-            "$event:localhost",
-            "!test:localhost",
-            response.event.source,
-            expected_membership_epoch=0,
-        )
-
-    @pytest.mark.asyncio
     async def test_local_bot_redaction_ignores_cache_failure_after_successful_redact(self, bot: AgentBot) -> None:
         """A successful local redact should delegate advisory bookkeeping through the cache facade."""
         bot.client = AsyncMock(spec=nio.AsyncClient)

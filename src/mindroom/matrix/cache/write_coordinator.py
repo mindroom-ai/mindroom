@@ -548,18 +548,6 @@ class EventCacheWriteCoordinator:
             return False
         return self._thread_update_tasks.get((room_id, thread_id)) is None
 
-    def current_task_holds_room_barrier(self, room_id: str) -> bool:
-        """Return whether the caller is already executing inside this room's write barrier."""
-        current_task = asyncio.current_task()
-        if current_task is None:
-            return False
-        state = self._room_states.get(room_id)
-        if state is None:
-            return False
-        if state.active_room is not None and state.active_room.task is current_task:
-            return True
-        return any(entry.task is current_task for entry in state.active_threads.values())
-
     def _fallback_thread_tasks(self, room_id: str, thread_id: str) -> tuple[_UpdateTask, ...]:
         pending_tasks: list[_UpdateTask] = []
         room_task = self._room_update_tasks.get(room_id)
