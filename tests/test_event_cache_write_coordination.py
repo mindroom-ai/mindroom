@@ -81,6 +81,50 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         mock_queue.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_same_turn_point_cache_hit_skips_room_write_barrier(self) -> None:
+        """A memoized point read should not wait behind unrelated room writes."""
+        event_cache = _runtime_event_cache()
+        coordinator = _runtime_write_coordinator()
+        response = nio.RoomGetEventResponse.from_dict(
+            {
+                "content": {"body": "hello", "msgtype": "m.text"},
+                "event_id": "$event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(
+                client=_make_client_mock(),
+                event_cache=event_cache,
+                coordinator=coordinator,
+            ),
+        )
+
+        with (
+            patch(
+                "mindroom.matrix.conversation_cache._cached_room_get_event",
+                new=AsyncMock(return_value=(response, None)),
+            ) as get_event,
+            patch.object(
+                coordinator,
+                "wait_for_prior_room_updates",
+                new=AsyncMock(),
+            ) as wait_for_prior_room_updates,
+        ):
+            async with access.turn_scope():
+                first = await access.get_event("!test:localhost", "$event:localhost")
+                second = await access.get_event("!test:localhost", "$event:localhost")
+
+        assert first is response
+        assert second is response
+        get_event.assert_awaited_once()
+        wait_for_prior_room_updates.assert_awaited_once_with("!test:localhost")
+
+    @pytest.mark.asyncio
     async def test_local_bot_redaction_ignores_cache_failure_after_successful_redact(self, bot: AgentBot) -> None:
         """A successful local redact should delegate advisory bookkeeping through the cache facade."""
         bot.client = AsyncMock(spec=nio.AsyncClient)
@@ -1040,6 +1084,117 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert [message.body for message in history] == ["Root"]
         release_other_thread_update.set()
         await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
+
+    @pytest.mark.asyncio
+    async def test_point_read_barrier_does_not_wait_for_later_room_update(self) -> None:
+        """A point read must wait for predecessors without being extended by later writes."""
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        second_started = asyncio.Event()
+        release_second = asyncio.Event()
+        coordinator = _runtime_write_coordinator()
+
+        async def first_update() -> None:
+            first_started.set()
+            await release_first.wait()
+
+        async def second_update() -> None:
+            second_started.set()
+            await release_second.wait()
+
+        first_task = coordinator.queue_room_update(
+            "!test:localhost",
+            first_update,
+            name="first_room_update",
+        )
+        await first_started.wait()
+        read_barrier = asyncio.create_task(
+            coordinator.wait_for_prior_room_updates("!test:localhost"),
+        )
+        await asyncio.sleep(0)
+        second_task = coordinator.queue_room_update(
+            "!test:localhost",
+            second_update,
+            name="later_room_update",
+        )
+
+        try:
+            release_first.set()
+            await second_started.wait()
+            await asyncio.wait_for(read_barrier, timeout=1.0)
+            assert second_task.done() is False
+        finally:
+            release_first.set()
+            release_second.set()
+            await asyncio.gather(first_task, second_task, return_exceptions=True)
+            await coordinator.close()
+
+    @pytest.mark.asyncio
+    async def test_point_read_barrier_waits_for_queued_predecessor(self) -> None:
+        """The point-read fence includes prior thread writes but excludes later room writes."""
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        queued_predecessor_started = asyncio.Event()
+        release_queued_predecessor = asyncio.Event()
+        later_started = asyncio.Event()
+        release_later = asyncio.Event()
+        coordinator = _runtime_write_coordinator()
+
+        async def first_update() -> None:
+            first_started.set()
+            await release_first.wait()
+
+        async def queued_predecessor() -> None:
+            queued_predecessor_started.set()
+            await release_queued_predecessor.wait()
+
+        async def later_update() -> None:
+            later_started.set()
+            await release_later.wait()
+
+        first_task = coordinator.queue_room_update(
+            "!test:localhost",
+            first_update,
+            name="first_room_update",
+        )
+        await first_started.wait()
+        queued_predecessor_task = coordinator.queue_thread_update(
+            "!test:localhost",
+            "$thread:localhost",
+            queued_predecessor,
+            name="queued_predecessor",
+        )
+        read_barrier = asyncio.create_task(
+            coordinator.wait_for_prior_room_updates("!test:localhost"),
+        )
+        await asyncio.sleep(0)
+        later_task = coordinator.queue_room_update(
+            "!test:localhost",
+            later_update,
+            name="later_room_update",
+        )
+
+        try:
+            release_first.set()
+            await queued_predecessor_started.wait()
+            await asyncio.sleep(0)
+            assert read_barrier.done() is False
+
+            release_queued_predecessor.set()
+            await later_started.wait()
+            await asyncio.wait_for(read_barrier, timeout=1.0)
+            assert later_task.done() is False
+        finally:
+            release_first.set()
+            release_queued_predecessor.set()
+            release_later.set()
+            await asyncio.gather(
+                first_task,
+                queued_predecessor_task,
+                later_task,
+                return_exceptions=True,
+            )
+            await coordinator.close()
 
     @pytest.mark.asyncio
     async def test_wait_for_thread_idle_ignores_cancelled_room_fence_for_unrelated_thread(self) -> None:

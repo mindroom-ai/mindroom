@@ -248,7 +248,6 @@ async def _apply_thread_redaction_mutation(
     impact: MutationThreadImpact,
     context: MutationWriteContext,
     allow_room_invalidation: bool = True,
-    redact_room_level_event: bool = True,
     raise_on_cache_write_failure: bool = False,
 ) -> bool:
     redact_failure_message = {
@@ -256,13 +255,6 @@ async def _apply_thread_redaction_mutation(
         "live": "Failed to apply live redaction to cache",
         "sync": "Failed to apply sync redaction to cache",
     }[context]
-    if impact.state is MutationThreadImpactState.ROOM_LEVEL and not redact_room_level_event:
-        cache_ops.logger.debug(
-            "Skipping outbound thread cache bookkeeping for non-threaded redaction",
-            room_id=room_id,
-            redacted_event_id=redacted_event_id,
-        )
-        return False
     redacted = await cache_ops.redact_cached_event(
         room_id,
         redacted_event_id,
@@ -335,6 +327,12 @@ class ThreadOutboundWritePolicy:
             event_id=event_id,
             context="outbound",
         )
+        if impact.state is not MutationThreadImpactState.THREADED:
+            await self._cache_ops.store_events_batch(
+                room_id,
+                [(event_id, room_id, event_source)],
+                failure_message="Failed to persist outbound event lookup to cache",
+            )
         await _apply_thread_message_mutation(
             cache_ops=self._cache_ops,
             room_id=room_id,
@@ -405,6 +403,20 @@ class ThreadOutboundWritePolicy:
                 event_info,
                 event_type=event_type,
             ):
+                persisted_batch = [(event_id, room_id, normalized_event_source)]
+                self._schedule_fail_open_room_update(
+                    room_id,
+                    lambda: self._cache_ops.store_events_batch(
+                        room_id,
+                        persisted_batch,
+                        failure_message="Failed to persist outbound event lookup to cache",
+                    ),
+                    name="matrix_cache_notify_outbound_event",
+                    cancelled_message="Ignoring cancelled outbound cache bookkeeping after successful send",
+                    failure_message="Ignoring outbound cache bookkeeping failure after successful send",
+                    log_context={"event_id": event_id},
+                    emit_timing=emit_timing,
+                )
                 return
             thread_id = event_info.thread_id or event_info.thread_id_from_edit
             if thread_id is not None:
@@ -484,7 +496,7 @@ class ThreadOutboundWritePolicy:
         event_id: str | None,
         content: dict[str, Any],
     ) -> None:
-        """Schedule advisory bookkeeping for one locally sent threaded message or edit."""
+        """Schedule advisory bookkeeping for one locally sent message or edit."""
         if not self._cache_ops.cache_runtime_available():
             return
         if not isinstance(event_id, str) or not event_id:
@@ -541,7 +553,6 @@ class ThreadOutboundWritePolicy:
             redacted_event_id=redacted_event_id,
             impact=impact,
             context="outbound",
-            redact_room_level_event=False,
         )
 
     def notify_outbound_redaction(
@@ -549,7 +560,7 @@ class ThreadOutboundWritePolicy:
         room_id: str,
         redacted_event_id: str,
     ) -> None:
-        """Schedule advisory bookkeeping for one locally redacted threaded message."""
+        """Schedule advisory bookkeeping for one locally redacted message."""
         try:
             if not redacted_event_id or not self._cache_ops.cache_runtime_available():
                 return
