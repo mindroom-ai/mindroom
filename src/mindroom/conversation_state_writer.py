@@ -17,16 +17,19 @@ from mindroom.history.runtime import create_scope_session_storage
 from mindroom.history.types import HistoryScope
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.runtime_protocols import SupportsConfig  # noqa: TC001
-from mindroom.streaming import strip_visible_tool_markers
+from mindroom.streaming import strip_visible_tool_markers_for_trace
 from mindroom.team_scope import ad_hoc_team_scope_id
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     import structlog
     from agno.db.base import BaseDb
     from agno.models.message import Message
 
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
+    from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -121,6 +124,7 @@ class ConversationStateWriter:
         response_event_id: str,
         response_sender_id: str,
         delivered_visible_body: str | None,
+        delivered_body_tool_trace: Sequence[ToolTraceEntry] = (),
     ) -> None:
         """Persist Matrix response linkage onto the run that produced it.
 
@@ -133,9 +137,16 @@ class ConversationStateWriter:
         delivered body arrives later (e.g. an interrupted run reconciled after
         terminal delivery).
         """
-        # Strip display chrome first: a body that is only tool-trace markers
-        # (or empty) must never erase the model's reply with an empty tag.
-        stripped_body = strip_visible_tool_markers(delivered_visible_body) if delivered_visible_body else ""
+        # Remove exactly the display chrome MindRoom injected for this run's
+        # own tool trace: the canonical body is what the model said as
+        # delivered, so model-authored marker-shaped text is preserved, while
+        # a body that is only injected markers (or empty) must never erase the
+        # model's reply with an empty tag.
+        stripped_body = (
+            strip_visible_tool_markers_for_trace(delivered_visible_body, delivered_body_tool_trace)
+            if delivered_visible_body
+            else ""
+        )
         wrap_body = stripped_body if stripped_body.strip() else ""
         session = (
             get_team_session(storage, session_id)

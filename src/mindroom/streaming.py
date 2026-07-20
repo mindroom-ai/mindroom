@@ -46,7 +46,7 @@ from mindroom.tool_system.events import (
 from mindroom.tool_system.runtime_context import worker_progress_pump_scope
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Sequence
 
     import nio
 
@@ -79,6 +79,7 @@ __all__ = [
     "is_interrupted_partial_reply",
     "send_streaming_response",
     "strip_visible_tool_markers",
+    "strip_visible_tool_markers_for_trace",
 ]
 
 _PROGRESS_PLACEHOLDER = "Thinking..."
@@ -89,7 +90,7 @@ _INTERRUPTED_RESPONSE_NOTE = INTERRUPTED_RESPONSE_NOTE
 RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _TerminalStreamStatus = Literal["completed", "cancelled", "error"]
-_VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
+_VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `([^`]+)` \[(\d+)\](?: ⏳)?\s*$")
 _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN = re.compile(r"^\s{0,3}---\s*$")
 
 StreamInputChunk = (
@@ -113,15 +114,38 @@ class _StreamDeliveryShutdownTimeoutError(TimeoutError):
 
 def strip_visible_tool_markers(text: str) -> str:
     """Remove display-only tool marker lines before text re-enters model context."""
+    return _strip_marker_lines(text, lambda _name, _index: True)
+
+
+def strip_visible_tool_markers_for_trace(text: str, tool_trace: Sequence[ToolTraceEntry]) -> str:
+    """Remove exactly the marker lines MindRoom injected for this run's tool trace.
+
+    A line is dropped only when its tool name and 1-based index match one of
+    the run's own trace entries, so model-authored marker-shaped text survives
+    canonical persistence untouched.
+    """
+    if not tool_trace:
+        return text
+    injected = {(entry.tool_name, index) for index, entry in enumerate(tool_trace, start=1)}
+    return _strip_marker_lines(text, lambda name, index: (name, index) in injected)
+
+
+def _strip_marker_lines(text: str, should_strip: Callable[[str, int], bool]) -> str:
+    """Walk marker-shaped lines, dropping those the predicate claims plus their separators."""
+
+    def _stripped_marker(line: str) -> bool:
+        match = _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line)
+        return match is not None and should_strip(match.group(1), int(match.group(2)))
+
     lines = text.splitlines()
-    if not any(_VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line) for line in lines):
+    if not any(_stripped_marker(line) for line in lines):
         return text
 
     filtered_lines: list[str] = []
     index = 0
     while index < len(lines):
         line = lines[index]
-        if not _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line):
+        if not _stripped_marker(line):
             filtered_lines.append(line)
             index += 1
             continue

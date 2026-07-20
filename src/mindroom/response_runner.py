@@ -183,7 +183,16 @@ def _materialize_matrix_run_metadata(
 
 
 def _agent_has_matrix_messaging_tool(config: Config, agent_name: str, session_id: str | None) -> bool:
-    """Return whether one agent can issue Matrix message actions."""
+    """Return whether one agent can issue Matrix message actions this turn.
+
+    Authored deferred tools count even while unloaded: a same-turn
+    ``load_tool`` call can expose ``matrix_message`` in a dynamic
+    continuation, and the stable target context must already be in place.
+    """
+    if any(
+        entry.name == "matrix_message" for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs
+    ):
+        return True
     try:
         surface = visible_tool_surface(
             agent_name=agent_name,
@@ -830,13 +839,14 @@ class ResponseRunner:
         session_id: str,
         session_type: SessionType,
         create_storage: Callable[[], BaseDb],
-    ) -> Callable[[str, str, str | None], None]:
+    ) -> Callable[[str, str, str | None, tuple[ToolTraceEntry, ...]], None]:
         """Build the response-event persistence callback for one session-backed response."""
 
         def persist_response_event_id(
             run_id: str,
             response_event_id: str,
             delivered_visible_body: str | None,
+            delivered_body_tool_trace: tuple[ToolTraceEntry, ...],
         ) -> None:
             storage = create_storage()
             try:
@@ -848,6 +858,7 @@ class ResponseRunner:
                     response_event_id=response_event_id,
                     response_sender_id=self.deps.matrix_full_id,
                     delivered_visible_body=delivered_visible_body,
+                    delivered_body_tool_trace=delivered_body_tool_trace,
                 )
             finally:
                 storage.close()
@@ -2355,7 +2366,10 @@ class ResponseRunner:
             user_message=request.prompt,
             reply_to_event_id=request.reply_to_event_id,
             current_event_id=request.current_event_id,
-            current_message_suffix=request.model_prompt or "",
+            current_message_suffix=model_prompt_tail_after_raw_prompt(
+                raw_prompt=request.prompt,
+                model_prompt=request.model_prompt,
+            ),
             current_timestamp_ms=request.current_timestamp_ms,
             requester_id=request.user_id,
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
@@ -2508,7 +2522,10 @@ class ResponseRunner:
             user_message=request.prompt,
             reply_to_event_id=request.reply_to_event_id,
             current_event_id=request.current_event_id,
-            current_message_suffix=request.model_prompt or "",
+            current_message_suffix=model_prompt_tail_after_raw_prompt(
+                raw_prompt=request.prompt,
+                model_prompt=request.model_prompt,
+            ),
             current_timestamp_ms=request.current_timestamp_ms,
             requester_id=request.user_id,
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),

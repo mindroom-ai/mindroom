@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.message_target import MessageTarget
+    from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -60,7 +61,7 @@ class PostResponseEffectsDeps:
     # (run_id, response_event_id, delivered_visible_body): the body is set only
     # when this run's output is actually visible at that event; None persists
     # the metadata linkage without claiming the event for the assistant message.
-    persist_response_event_id: Callable[[str, str, str | None], None] | None = None
+    persist_response_event_id: Callable[[str, str, str | None, tuple[ToolTraceEntry, ...]], None] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
     queue_thread_summary: Callable[[str, str, str | None], None] | None = None
 
@@ -163,7 +164,7 @@ class PostResponseEffectsSupport:
         room_id: str,
         interactive_agent_name: str,
         queue_memory_persistence: Callable[[], None] | None = None,
-        persist_response_event_id: Callable[[str, str, str | None], None] | None = None,
+        persist_response_event_id: Callable[[str, str, str | None, tuple[ToolTraceEntry, ...]], None] | None = None,
     ) -> PostResponseEffectsDeps:
         """Build the per-response post-effect dependency surface."""
 
@@ -190,13 +191,89 @@ class PostResponseEffectsSupport:
         )
 
 
+async def _persist_response_event_linkage(
+    final_delivery_outcome: FinalDeliveryOutcome,
+    outcome: ResponseOutcome,
+    deps: PostResponseEffectsDeps,
+    *,
+    response_event_id: str,
+    run_id: str,
+) -> None:
+    """Persist the response-event linkage off-loop without racing cancellation.
+
+    ``to_thread`` work cannot be interrupted and the callback rewrites a whole
+    session row, so a cancel arriving mid-write must not let the lifecycle
+    lock release while the worker can still write a stale session snapshot:
+    the worker is awaited to completion first, then cancellation re-raises.
+    """
+    # body_is_run_output is the gateway's explicit ownership fact: True only
+    # when the event holds this run's delivered output. Failure notices,
+    # cancel notes, and unchanged edit targets stay metadata-only, while
+    # visible partials and replies that survived a late finalization
+    # failure keep their event identity even when the run did not succeed.
+    delivered_visible_body = (
+        final_delivery_outcome.final_visible_body
+        if final_delivery_outcome.body_is_run_output and not final_delivery_outcome.suppressed
+        else None
+    )
+    assert deps.persist_response_event_id is not None
+    persist_call = asyncio.ensure_future(
+        asyncio.to_thread(
+            deps.persist_response_event_id,
+            run_id,
+            response_event_id,
+            delivered_visible_body,
+            tuple(final_delivery_outcome.tool_trace or ()),
+        ),
+    )
+    pending_cancel: asyncio.CancelledError | None = None
+    while not persist_call.done():
+        try:
+            await asyncio.shield(persist_call)
+        except asyncio.CancelledError as error:
+            if persist_call.cancelled():
+                raise
+            pending_cancel = error
+        except Exception:  # noqa: S110 - surfaced via persist_call.result() below
+            pass
+    try:
+        persist_call.result()
+    except Exception:
+        deps.logger.exception(
+            "Failed to persist response event linkage in run metadata",
+            session_id=outcome.session_id,
+            run_id=run_id,
+            response_event_id=response_event_id,
+        )
+    if pending_cancel is not None:
+        raise pending_cancel
+
+
 async def apply_post_response_effects(
     final_delivery_outcome: FinalDeliveryOutcome,
     outcome: ResponseOutcome,
     deps: PostResponseEffectsDeps,
 ) -> None:
-    """Apply the shared side effects that happen after response delivery is known."""
+    """Apply the shared side effects that happen after response delivery is known.
+
+    The response-event persistence invariant runs first: interactive
+    registration is a best-effort, network-bound UI effect and its failure
+    must never suppress the canonical event linkage.
+    """
     response_event_id = final_delivery_outcome.final_visible_event_id
+    if (
+        outcome.response_run_id is not None
+        and response_event_id is not None
+        and deps.persist_response_event_id is not None
+    ):
+        await _persist_response_event_linkage(
+            final_delivery_outcome,
+            outcome,
+            deps,
+            response_event_id=response_event_id,
+            run_id=outcome.response_run_id,
+        )
+
     if (
         response_event_id is not None
         and deps.register_interactive is not None
@@ -206,11 +283,17 @@ async def apply_post_response_effects(
         and final_delivery_outcome.interactive_metadata is not None
         and outcome.interactive_target is not None
     ):
-        await deps.register_interactive(
-            response_event_id,
-            outcome.interactive_target,
-            final_delivery_outcome.interactive_metadata,
-        )
+        try:
+            await deps.register_interactive(
+                response_event_id,
+                outcome.interactive_target,
+                final_delivery_outcome.interactive_metadata,
+            )
+        except Exception:
+            deps.logger.exception(
+                "Failed to register interactive response delivery",
+                response_event_id=response_event_id,
+            )
     else:  # noqa: PLR5501, RUF100
         if response_event_id is not None and (
             "React with an emoji or type the number to respond." in (final_delivery_outcome.final_visible_body or "")
@@ -226,38 +309,6 @@ async def apply_post_response_effects(
                 option_map_empty=not bool(final_delivery_outcome.interactive_metadata),
                 options_list_empty=not bool(final_delivery_outcome.interactive_metadata),
                 interactive_target_is_none=outcome.interactive_target is None,
-            )
-
-    if (
-        outcome.response_run_id is not None
-        and response_event_id is not None
-        and deps.persist_response_event_id is not None
-    ):
-        # body_is_run_output is the gateway's explicit ownership fact: True only
-        # when the event holds this run's delivered output. Failure notices,
-        # cancel notes, and unchanged edit targets stay metadata-only, while
-        # visible partials and replies that survived a late finalization
-        # failure keep their event identity even when the run did not succeed.
-        delivered_visible_body = (
-            final_delivery_outcome.final_visible_body
-            if final_delivery_outcome.body_is_run_output and not final_delivery_outcome.suppressed
-            else None
-        )
-        try:
-            # The callback loads, rewrites, and upserts a whole session row;
-            # run it off-loop so large sessions cannot stall the event loop.
-            await asyncio.to_thread(
-                deps.persist_response_event_id,
-                outcome.response_run_id,
-                response_event_id,
-                delivered_visible_body,
-            )
-        except Exception:
-            deps.logger.exception(
-                "Failed to persist response event linkage in run metadata",
-                session_id=outcome.session_id,
-                run_id=outcome.response_run_id,
-                response_event_id=response_event_id,
             )
 
     if outcome.run_succeeded and deps.queue_memory_persistence is not None:

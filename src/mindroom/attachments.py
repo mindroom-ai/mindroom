@@ -176,13 +176,14 @@ def attachment_records_for_visible_message(
 _MAX_RENDERED_FILENAME_LENGTH = 80
 
 
-def _sanitize_rendered_filename(filename: str) -> str:
-    """Neutralize markup and quote injection from attacker-controlled filenames.
+def _sanitize_rendered_provenance_text(value: str) -> str:
+    """Neutralize markup and quote injection from externally sourced provenance text.
 
-    Annotations render outside ``<msg>`` CDATA, so XML-significant characters
-    are entity-escaped: a filename can never form a second system-looking tag.
+    Filenames, sender IDs, and source event IDs all come from Matrix events
+    and render outside ``<msg>`` CDATA, so XML-significant characters are
+    entity-escaped: no external field can form a system-looking tag.
     """
-    sanitized = "".join(char for char in filename if char.isprintable()).replace('"', "'").strip()
+    sanitized = "".join(char for char in value if char.isprintable()).replace('"', "'").strip()
     sanitized = sanitized.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     if len(sanitized) > _MAX_RENDERED_FILENAME_LENGTH:
         sanitized = f"{sanitized[: _MAX_RENDERED_FILENAME_LENGTH - 1]}…"
@@ -192,14 +193,14 @@ def _sanitize_rendered_filename(filename: str) -> str:
 def _attachment_provenance_line(record: AttachmentRecord) -> str:
     details: list[str] = [record.kind]
     if record.filename:
-        details.append(f'"{_sanitize_rendered_filename(record.filename)}"')
+        details.append(f'"{_sanitize_rendered_provenance_text(record.filename)}"')
     if record.sender:
-        details.append(f"from {record.sender}")
+        details.append(f"from {_sanitize_rendered_provenance_text(record.sender)}")
     if record.event_timestamp is not None:
         timestamp = datetime.fromtimestamp(record.event_timestamp / 1000, UTC)
         details.append(f"sent {timestamp.strftime('%Y-%m-%d %H:%M UTC')}")
     if record.source_event_id:
-        details.append(f"event {record.source_event_id}")
+        details.append(f"event {_sanitize_rendered_provenance_text(record.source_event_id)}")
     return f"- {record.attachment_id} ({', '.join(details)})"
 
 
@@ -239,7 +240,7 @@ def format_attachment_annotation(attachment_records: list[AttachmentRecord]) -> 
     if not attachment_records:
         return None
     parts = [
-        f'{record.attachment_id} ({record.kind}, "{_sanitize_rendered_filename(record.filename)}")'
+        f'{record.attachment_id} ({record.kind}, "{_sanitize_rendered_provenance_text(record.filename)}")'
         if record.filename
         else f"{record.attachment_id} ({record.kind})"
         for record in attachment_records

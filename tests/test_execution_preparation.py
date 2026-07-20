@@ -21,6 +21,7 @@ from mindroom.config.main import Config, ResolvedRuntimeModel
 from mindroom.config.models import CompactionConfig
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
+    MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     MINDROOM_LOCATION_MARKER_METADATA_KEY,
     ORIGINAL_SENDER_KEY,
     STREAM_STATUS_KEY,
@@ -32,6 +33,7 @@ from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.execution_preparation import (
     _build_thread_history_messages,
     _build_unseen_context_messages,
+    _current_turn_source_event_ids,
     _fallback_static_token_budget,
     _messages_with_current_prompt,
     _prepare_execution_context_common,
@@ -1134,7 +1136,7 @@ def test_unseen_context_ignores_forged_original_sender_from_untrusted_sender() -
         "What happened?",
         thread_history,
         seen_event_ids=set(),
-        reply_to_event_id="$question",
+        excluded_event_ids={"$question"},
         active_event_ids=(),
         response_sender_id="@mindroom_code:localhost",
         trusted_relay_sender_ids=frozenset({"@mindroom_code:localhost"}),
@@ -1171,7 +1173,7 @@ def test_unseen_context_forged_guidance_label_never_claims_agent_identity() -> N
         "What happened?",
         thread_history,
         seen_event_ids=set(),
-        reply_to_event_id="$question",
+        excluded_event_ids={"$question"},
         active_event_ids=(),
         response_sender_id="@mindroom_code:localhost",
         trusted_relay_sender_ids=frozenset({"@mindroom_code:localhost"}),
@@ -1208,7 +1210,7 @@ def test_unseen_context_keeps_self_sent_relayed_user_message() -> None:
         "What happened?",
         thread_history,
         seen_event_ids=set(),
-        reply_to_event_id="$question",
+        excluded_event_ids={"$question"},
         active_event_ids=(),
         response_sender_id="@mindroom_code:localhost",
         trusted_relay_sender_ids=frozenset({"@mindroom_code:localhost"}),
@@ -1243,7 +1245,7 @@ def test_unseen_context_keeps_unpersisted_self_sent_message() -> None:
         "What happened?",
         thread_history,
         seen_event_ids=set(),
-        reply_to_event_id="$question",
+        excluded_event_ids={"$question"},
         active_event_ids=(),
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
@@ -1277,7 +1279,7 @@ def test_unseen_context_skips_persisted_self_sent_response_event() -> None:
         "What next?",
         thread_history,
         seen_event_ids={"$answer"},
-        reply_to_event_id="$question",
+        excluded_event_ids={"$question"},
         active_event_ids=(),
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
@@ -1290,9 +1292,10 @@ def test_unseen_context_skips_persisted_self_sent_response_event() -> None:
 
 
 _HOME_LOCATION_TEXT = "status: fresh\nlatitude: 52.3702\nlongitude: 4.8952\nnearby_place: Home\nat_home: true"
-_OFFICE_LOCATION_TEXT = _HOME_LOCATION_TEXT.replace("nearby_place: Home", "nearby_place: Office").replace(
-    "at_home: true",
-    "at_home: false",
+_OFFICE_LOCATION_TEXT = (
+    _HOME_LOCATION_TEXT.replace("nearby_place: Home", "nearby_place: Office")
+    .replace("at_home: true", "at_home: false")
+    .replace("latitude: 52.3702", "latitude: 52.3800")
 )
 
 
@@ -1397,7 +1400,7 @@ def test_unseen_context_wraps_in_progress_partial_with_response_sender() -> None
         "What next?",
         thread_history,
         seen_event_ids=set(),
-        reply_to_event_id="$question",
+        excluded_event_ids={"$question"},
         active_event_ids={"$partial"},
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
@@ -1424,12 +1427,14 @@ async def test_location_marker_derivations() -> None:
     assert '<item key="location"' in block
     assert "latitude: 52.3702" in block
 
+    # Free-form place names are external geocoder text and are never
+    # persisted; away-from-home markers are always canonical coordinates.
     place_text = _HOME_LOCATION_TEXT.replace("at_home: true", "at_home: false").replace(
         "nearby_place: Home",
         "nearby_place: Coffee Bar",
     )
     assert (await _resolve_current_location_context(location_item_text=place_text, scope_context=None))[1] == (
-        "📍 Coffee Bar"
+        "📍 52.3702, 4.8952"
     )
 
     coordinate_text = _HOME_LOCATION_TEXT.replace("at_home: true", "at_home: false").replace(
@@ -1493,7 +1498,7 @@ async def test_location_marker_change_persists_new_marker() -> None:
         scope_context=_scope_with_marker_metadata(["📍 Home"]),
     )
 
-    assert marker == "📍 Office"
+    assert marker == "📍 52.3800, 4.8952"
 
 
 @pytest.mark.asyncio
@@ -1820,3 +1825,64 @@ def test_attachment_annotation_filenames_cannot_forge_message_markup(tmp_path: P
     assert content.count("<msg ") == 1
     assert content.count("</msg>") == 1
     assert "&lt;/msg&gt;" in content
+
+
+def test_current_turn_source_event_ids_cover_structured_batches() -> None:
+    """Every source event embedded in the current turn is excluded from history replay."""
+    event_ids = _current_turn_source_event_ids(
+        {MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$child-1", "$anchor", 7, ""]},
+        reply_to_event_id="$anchor",
+        current_event_id=None,
+    )
+    assert event_ids == frozenset({"$anchor", "$child-1"})
+
+    assert _current_turn_source_event_ids(None, reply_to_event_id="$anchor", current_event_id="$anchor") == (
+        frozenset({"$anchor"})
+    )
+
+
+def test_unseen_context_excludes_all_current_turn_source_events() -> None:
+    """Structured batch members never replay as history while the batch is the current turn."""
+    thread_history = [
+        make_visible_message(sender="@alice:localhost", body="earlier", event_id="$earlier"),
+        make_visible_message(sender="@alice:localhost", body="first batched", event_id="$child-1"),
+        make_visible_message(sender="@alice:localhost", body="second batched", event_id="$anchor"),
+    ]
+
+    messages, unseen_event_ids = _build_unseen_context_messages(
+        "<messages>batched turn</messages>",
+        thread_history,
+        seen_event_ids=set(),
+        excluded_event_ids=frozenset({"$anchor", "$child-1"}),
+        active_event_ids=(),
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        current_prompt_is_structured=True,
+        config=_config(),
+    )
+
+    rendered = "\n".join(str(message.content) for message in messages)
+    assert unseen_event_ids == ["$earlier"]
+    assert rendered.count("$earlier") == 1
+    # The batched source events appear only inside the structured current
+    # block, never again as replayed history messages.
+    assert 'event_id="$child-1"' not in rendered
+    assert 'event_id="$anchor"' not in rendered
+
+
+def test_fallback_history_drops_current_turn_source_events() -> None:
+    """The fallback cut removes batched source events preceding the anchor."""
+    thread_history = [
+        make_visible_message(sender="@alice:localhost", body="earlier", event_id="$earlier"),
+        make_visible_message(sender="@alice:localhost", body="first batched", event_id="$child-1"),
+        make_visible_message(sender="@alice:localhost", body="second batched", event_id="$anchor"),
+    ]
+
+    fallback = execution_preparation._thread_history_before_current_event(
+        thread_history,
+        "$anchor",
+        excluded_event_ids=frozenset({"$anchor", "$child-1"}),
+    )
+
+    assert fallback is not None
+    assert [message.event_id for message in fallback] == ["$earlier"]

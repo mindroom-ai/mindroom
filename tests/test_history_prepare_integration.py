@@ -1023,9 +1023,10 @@ async def test_prepare_agent_and_prompt_timestamps_current_turn_without_duplicat
 
 
 _HOME_LOCATION_TEXT = "status: fresh\nlatitude: 52.3702\nlongitude: 4.8952\nnearby_place: Home\nat_home: true"
-_OFFICE_LOCATION_TEXT = _HOME_LOCATION_TEXT.replace("nearby_place: Home", "nearby_place: Office").replace(
-    "at_home: true",
-    "at_home: false",
+_OFFICE_LOCATION_TEXT = (
+    _HOME_LOCATION_TEXT.replace("nearby_place: Home", "nearby_place: Office")
+    .replace("at_home: true", "at_home: false")
+    .replace("latitude: 52.3702", "latitude: 52.3800")
 )
 
 
@@ -1091,7 +1092,7 @@ async def test_prepare_agent_and_prompt_persists_location_markers_only_on_change
                 ],
             )
 
-    assert recorded_markers == ["📍 Home", None, None, None, "📍 Office"]
+    assert recorded_markers == ["📍 Home", None, None, None, "📍 52.3800, 4.8952"]
 
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
@@ -1099,7 +1100,7 @@ async def test_prepare_agent_and_prompt_persists_location_markers_only_on_change
         str(message.content) for run in persisted.runs or [] for message in run.messages or []
     )
     assert replayed_contents.count("📍 Home") == 1
-    assert replayed_contents.count("📍 Office") == 1
+    assert replayed_contents.count("📍 52.3800, 4.8952") == 1
     # The marker is system-generated, so it stays outside the event-tagged
     # CDATA that mirrors the wire body.
     assert "📍 Home]]></msg>" not in replayed_contents
@@ -1128,7 +1129,7 @@ async def test_prepare_agent_and_prompt_persists_location_markers_only_on_change
     # The trusted marker metadata is omitted from compaction input, so each
     # location delta appears exactly once, and never the full detail.
     assert summary_input.count("📍 Home") == 1
-    assert summary_input.count("📍 Office") == 1
+    assert summary_input.count("📍 52.3800, 4.8952") == 1
     assert "latitude" not in summary_input
     assert "nearby_place" not in summary_input
     assert MINDROOM_LOCATION_MARKER_METADATA_KEY not in summary_input

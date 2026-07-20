@@ -16,6 +16,7 @@ from mindroom.attachment_media import attachment_records_to_media
 from mindroom.attachments import attachment_records_for_visible_message, format_attachment_annotation
 from mindroom.constants import (
     COMPACTION_NOTICE_CONTENT_KEY,
+    MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     MINDROOM_LOCATION_MARKER_METADATA_KEY,
     ORIGINAL_SENDER_KEY,
     STREAM_STATUS_CANCELLED,
@@ -50,7 +51,7 @@ from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Sequence
+    from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
     from pathlib import Path
 
     from agno.agent import Agent
@@ -72,7 +73,6 @@ _PARTIAL_REPLY_SENDER_LABELS = {
 _PARTIAL_REPLY_GUIDANCE_LABELS = frozenset({*_PARTIAL_REPLY_SENDER_LABELS.values(), "You (partial reply)"})
 
 _LOCATION_MARKER_PREFIX = "📍 "
-_LOCATION_MARKER_MAX_PLACE_CHARS = 80
 
 
 class _PartialReplyKind(str, Enum):
@@ -498,7 +498,7 @@ def _build_unseen_context_messages(
     *,
     transient_context_messages: Sequence[Message] = (),
     seen_event_ids: set[str],
-    reply_to_event_id: str,
+    excluded_event_ids: Collection[str],
     active_event_ids: Collection[str],
     response_sender_id: str | None,
     trusted_relay_sender_ids: Collection[str] = (),
@@ -516,7 +516,7 @@ def _build_unseen_context_messages(
         sender_id=response_sender_id,
         trusted_relay_sender_ids=trusted_relay_sender_ids,
         seen_event_ids=seen_event_ids,
-        current_event_id=reply_to_event_id,
+        excluded_event_ids=excluded_event_ids,
         active_event_ids=active_event_ids,
     )
     context_messages = _context_messages_from_visible_messages(
@@ -632,17 +632,40 @@ def _fallback_static_token_budget(*, context_window: int | None, reserve_tokens:
     return context_budget_after_reserve(context_window, reserve_tokens)
 
 
+def _current_turn_source_event_ids(
+    matrix_run_metadata: Mapping[str, object] | None,
+    *,
+    reply_to_event_id: str | None,
+    current_event_id: str | None,
+) -> frozenset[str]:
+    """Return every Matrix event whose body is already part of the current turn.
+
+    Structured coalesced and queued turns embed all of their source events in
+    the current block, so none of them may replay again as history context;
+    the runner-authored source-event metadata is the typed record of that set.
+    """
+    event_ids = {event_id for event_id in (reply_to_event_id, current_event_id) if event_id}
+    source_event_ids = (matrix_run_metadata or {}).get(MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
+    if isinstance(source_event_ids, list):
+        event_ids.update(event_id for event_id in source_event_ids if isinstance(event_id, str) and event_id)
+    return frozenset(event_ids)
+
+
 def _thread_history_before_current_event(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     current_event_id: str | None,
+    *,
+    excluded_event_ids: Collection[str] = (),
 ) -> Sequence[ResolvedVisibleMessage] | None:
-    """Return full-context fallback history up to, but not including, the current event."""
+    """Return fallback history before the current event, minus current-turn source events."""
     if not thread_history or current_event_id is None:
         return thread_history
     preceding_messages: list[ResolvedVisibleMessage] = []
     for msg in thread_history:
         if msg.event_id == current_event_id:
             return tuple(preceding_messages)
+        if msg.event_id and msg.event_id in excluded_event_ids:
+            continue
         preceding_messages.append(msg)
     return tuple(preceding_messages)
 
@@ -685,7 +708,7 @@ def _sanitize_thread_history_for_replay(
         sender_id=response_sender_id,
         trusted_relay_sender_ids=trusted_relay_sender_ids,
         seen_event_ids=set(),
-        current_event_id=None,
+        excluded_event_ids=(),
         active_event_ids=active_event_ids,
     )
     return tuple(sanitized)
@@ -712,7 +735,7 @@ def _get_unseen_messages_for_sender(
     sender_id: str | None,
     trusted_relay_sender_ids: Collection[str],
     seen_event_ids: set[str],
-    current_event_id: str | None,
+    excluded_event_ids: Collection[str],
     active_event_ids: Collection[str],
 ) -> tuple[list[ResolvedVisibleMessage], set[_PartialReplyKind], set[str]]:
     """Filter thread_history to unseen messages for one Matrix sender."""
@@ -723,9 +746,7 @@ def _get_unseen_messages_for_sender(
         event_id = msg.event_id
         sender = msg.sender
         content = msg.content
-        if event_id and event_id in seen_event_ids:
-            continue
-        if current_event_id and event_id == current_event_id:
+        if event_id and (event_id in seen_event_ids or event_id in excluded_event_ids):
             continue
         if isinstance(content, dict) and COMPACTION_NOTICE_CONTENT_KEY in content:
             continue
@@ -766,22 +787,6 @@ def _scope_seen_event_ids(scope_context: ScopeSessionContext | None) -> set[str]
     return read_scope_seen_event_ids(scope_context.session, scope_context.scope)
 
 
-def _location_marker_place(nearby_place: str) -> str | None:
-    """Return a marker-safe place name, or None when the value fails validation.
-
-    The marker is durable and rendered outside ``<msg>`` CDATA, so the place —
-    external reverse-geocoder output — must stay short, printable, and unable
-    to form markup. Invalid values fail closed instead of truncating
-    potentially sensitive provider output.
-    """
-    place = " ".join(nearby_place.split())
-    if not place or place.lower() == "unknown" or len(place) > _LOCATION_MARKER_MAX_PLACE_CHARS:
-        return None
-    if not place.isprintable() or any(char in place for char in "<>&"):
-        return None
-    return place
-
-
 def _location_marker_coordinates(latitude: str, longitude: str) -> str | None:
     """Return canonical bounded coordinates, or None for non-geographic values."""
     try:
@@ -799,8 +804,11 @@ def _location_marker_coordinates(latitude: str, longitude: str) -> str | None:
 def _location_marker_from_fields(item_text: str) -> str | None:
     """Derive the short persisted location marker from one trusted location item.
 
-    Every arm is bounded and markup-safe; anything else fails closed to no
-    marker while the full location block still rides the current turn.
+    The marker is durable bare user-role text, so it may only carry
+    non-instructional canonical values: the literal ``Home`` state or bounded
+    numeric coordinates. Free-form place names are reverse-geocoder output —
+    external-world text that could read as an instruction — and stay in the
+    current-turn-only location block. Anything else fails closed to no marker.
     """
     fields: dict[str, str] = {}
     for line in item_text.splitlines():
@@ -809,9 +817,6 @@ def _location_marker_from_fields(item_text: str) -> str | None:
             fields[key.strip()] = value.strip()
     if fields.get("at_home", "").lower() == "true":
         return f"{_LOCATION_MARKER_PREFIX}Home"
-    place = _location_marker_place(fields.get("nearby_place", ""))
-    if place is not None:
-        return f"{_LOCATION_MARKER_PREFIX}{place}"
     coordinates = _location_marker_coordinates(fields.get("latitude", ""), fields.get("longitude", ""))
     if coordinates is not None:
         return f"{_LOCATION_MARKER_PREFIX}{coordinates}"
@@ -959,6 +964,11 @@ async def _prepare_execution_context_common(
     reply_to_event_id = ctx.reply_to_event_id
     active_event_ids = ctx.active_event_ids
     seen_event_ids = _scope_seen_event_ids(scope_context)
+    current_source_event_ids = _current_turn_source_event_ids(
+        ctx.matrix_run_metadata,
+        reply_to_event_id=reply_to_event_id,
+        current_event_id=current_event_id,
+    )
     scheduled_history_budget = ctx.scheduled_history_budget
     if scheduled_history_budget is not None:
         thread_history = _thread_history_with_scheduled_budget(
@@ -984,7 +994,7 @@ async def _prepare_execution_context_common(
             thread_history,
             transient_context_messages=transient_context_messages,
             seen_event_ids=seen_event_ids,
-            reply_to_event_id=reply_to_event_id,
+            excluded_event_ids=current_source_event_ids,
             active_event_ids=active_event_ids,
             response_sender_id=response_sender_id,
             trusted_relay_sender_ids=trusted_relay_sender_ids,
@@ -1015,7 +1025,7 @@ async def _prepare_execution_context_common(
             thread_history,
             transient_context_messages=transient_context_messages,
             seen_event_ids=_scope_seen_event_ids(scope_context),
-            reply_to_event_id=reply_to_event_id,
+            excluded_event_ids=current_source_event_ids,
             active_event_ids=active_event_ids,
             response_sender_id=response_sender_id,
             trusted_relay_sender_ids=trusted_relay_sender_ids,
@@ -1046,7 +1056,11 @@ async def _prepare_execution_context_common(
     if pipeline_timing is not None:
         pipeline_timing.mark("prompt_assembly_start")
     if not prepared_history.replays_persisted_history and thread_history:
-        fallback_thread_history = _thread_history_before_current_event(thread_history, reply_to_event_id)
+        fallback_thread_history = _thread_history_before_current_event(
+            thread_history,
+            reply_to_event_id,
+            excluded_event_ids=current_source_event_ids,
+        )
         if fallback_thread_history is not None:
             fallback_thread_history = _sanitize_thread_history_for_replay(
                 fallback_thread_history,

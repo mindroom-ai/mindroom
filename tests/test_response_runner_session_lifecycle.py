@@ -2366,8 +2366,8 @@ def test_persist_response_event_id_effect_passes_bot_matrix_identity(tmp_path: P
         session_type=SessionType.AGENT,
         create_storage=lambda: storage,
     )
-    effect("run-1", "$visible", "Delivered body")
-    effect("run-2", "$failure-note", None)
+    effect("run-1", "$visible", "Delivered body", ())
+    effect("run-2", "$failure-note", None, ())
 
     persist_mock = cast("MagicMock", coordinator.deps.state_writer.persist_response_event_id_in_session_run)
     delivered_call, undelivered_call = persist_mock.call_args_list

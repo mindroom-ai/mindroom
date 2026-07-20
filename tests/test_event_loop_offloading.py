@@ -346,7 +346,7 @@ async def test_response_event_persistence_runs_off_event_loop() -> None:
     persist_started = threading.Event()
     persisted: list[tuple[str, str, str | None]] = []
 
-    def blocking_persist(run_id: str, event_id: str, body: str | None) -> None:
+    def blocking_persist(run_id: str, event_id: str, body: str | None, _trace: tuple[object, ...]) -> None:
         persist_started.set()
         gate.wait()
         persisted.append((run_id, event_id, body))

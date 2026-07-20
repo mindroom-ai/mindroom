@@ -23,6 +23,7 @@ from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY, MINDROOM_R
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from mindroom.history.interrupted_replay import _INTERRUPTED_REPLAY_STATE, _INTERRUPTED_REPLAY_STATE_KEY
 from mindroom.history.runtime import create_scope_session_storage, open_bound_scope_session_context
+from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import entity_ids, persist_entity_accounts
@@ -242,6 +243,7 @@ def test_persist_response_event_id_strips_display_chrome_from_delivered_body(tmp
             response_event_id="$visible",
             response_sender_id="@mindroom_shared:localhost",
             delivered_visible_body="Checking.\n\n🔧 `run_shell_command` [1]\n\nDone.",
+            delivered_body_tool_trace=(ToolTraceEntry(type="tool_call_completed", tool_name="run_shell_command"),),
         )
 
         persisted = get_agent_session(storage, "session-1")
@@ -476,6 +478,7 @@ def test_persist_response_event_id_with_chrome_only_body_keeps_model_reply(tmp_p
                 response_event_id="$visible",
                 response_sender_id="@mindroom_shared:localhost",
                 delivered_visible_body=delivered_body,
+                delivered_body_tool_trace=(ToolTraceEntry(type="tool_call_completed", tool_name="run_shell_command"),),
             )
 
         persisted = get_agent_session(storage, "session-1")
@@ -771,5 +774,66 @@ def test_persist_response_event_id_never_crosses_tool_boundaries(tmp_path: Path)
             ("tool", "tool result"),
             ("assistant", ""),
         ]
+    finally:
+        storage.close()
+
+
+def test_persist_response_event_id_preserves_model_authored_marker_text(tmp_path: Path) -> None:
+    """Only chrome proven by the run's own tool trace is stripped from the canonical body."""
+    config, runtime_paths = _agent_config(tmp_path)
+    writer = _writer(config, runtime_paths)
+    storage = writer.create_storage(None)
+    marker_text = "Here is the format:\n\n🔧 `run_shell_command` [1]\n\nThat line is documentation."
+    try:
+        storage.upsert_session(_agent_session_with_run(content=marker_text, with_assistant_message=True))
+
+        # No tool trace for this run: the marker-shaped line is model output.
+        writer.persist_response_event_id_in_session_run(
+            storage=storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            run_id="run-1",
+            response_event_id="$visible",
+            response_sender_id="@mindroom_shared:localhost",
+            delivered_visible_body=marker_text,
+            delivered_body_tool_trace=(),
+        )
+
+        persisted = get_agent_session(storage, "session-1")
+        assert persisted is not None
+        final_message = (cast("RunOutput", (persisted.runs or [])[0]).messages or [])[-1]
+        assert "🔧 `run_shell_command` [1]" in cast("str", final_message.content)
+    finally:
+        storage.close()
+
+
+def test_persist_response_event_id_wraps_marker_only_model_output(tmp_path: Path) -> None:
+    """A reply consisting only of marker-shaped model text is still wrapped as delivered."""
+    config, runtime_paths = _agent_config(tmp_path)
+    writer = _writer(config, runtime_paths)
+    storage = writer.create_storage(None)
+    marker_only = "🔧 `made_up_tool` [7]"
+    try:
+        storage.upsert_session(_agent_session_with_run(content=marker_only, with_assistant_message=True))
+
+        # The run's trace names a different tool, so the delivered line is
+        # model-authored and must survive.
+        writer.persist_response_event_id_in_session_run(
+            storage=storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            run_id="run-1",
+            response_event_id="$visible",
+            response_sender_id="@mindroom_shared:localhost",
+            delivered_visible_body=marker_only,
+            delivered_body_tool_trace=(ToolTraceEntry(type="tool_call_completed", tool_name="run_shell_command"),),
+        )
+
+        persisted = get_agent_session(storage, "session-1")
+        assert persisted is not None
+        final_message = (cast("RunOutput", (persisted.runs or [])[0]).messages or [])[-1]
+        assert final_message.content == (
+            f'<msg event_id="$visible" from="@mindroom_shared:localhost"><![CDATA[{marker_only}]]></msg>'
+        )
     finally:
         storage.close()

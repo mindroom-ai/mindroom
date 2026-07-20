@@ -85,7 +85,7 @@ def _get_unseen_messages(
         sender_id=response_sender,
         trusted_relay_sender_ids=frozenset({response_sender} if response_sender else ()),
         seen_event_ids=seen_event_ids,
-        current_event_id=current_event_id,
+        excluded_event_ids={current_event_id} if current_event_id else (),
         active_event_ids=active_event_ids,
     )
 
@@ -392,7 +392,7 @@ class TestUnseenMessagesPartialReplies:
             "Answer the new question.",
             thread_history,
             seen_event_ids={"e1"},
-            reply_to_event_id="e3",
+            excluded_event_ids={"e3"},
             active_event_ids={"e2"},
             response_sender_id=agent_id,
             config=config,
@@ -465,7 +465,7 @@ class TestUnseenMessagesPartialReplies:
             "Continue.",
             thread_history,
             seen_event_ids=set(),
-            reply_to_event_id="e2",
+            excluded_event_ids={"e2"},
             active_event_ids=set(),
             response_sender_id=agent_id,
             config=config,

@@ -30,6 +30,7 @@ from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem
+from mindroom.interactive import InteractiveMetadata
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
@@ -1536,7 +1537,7 @@ async def test_apply_post_response_effects_gates_success_only_side_effects() -> 
     deps = PostResponseEffectsDeps(
         logger=get_logger("tests.post_effects"),
         queue_memory_persistence=lambda: memory_calls.append("memory"),
-        persist_response_event_id=lambda run_id, event_id, body: persisted.append((run_id, event_id, body)),
+        persist_response_event_id=lambda run_id, event_id, body, _trace: persisted.append((run_id, event_id, body)),
     )
 
     await apply_post_response_effects(
@@ -1683,3 +1684,112 @@ async def test_finalize_locked_outcome_cancel_preserves_run_output_ownership(tmp
     assert cancelled_outcome.terminal_status == "cancelled"
     assert cancelled_outcome.final_visible_body == "delivered reply"
     assert cancelled_outcome.body_is_run_output is True
+
+
+@pytest.mark.asyncio
+async def test_persist_effect_survives_cancellation_and_blocks_lock_release() -> None:
+    """A cancel during blocked persistence waits for the worker before re-raising."""
+    gate = threading.Event()
+    persist_started = threading.Event()
+    persisted: list[tuple[str, str, str | None]] = []
+
+    def blocking_persist(run_id: str, event_id: str, body: str | None, _trace: tuple[object, ...]) -> None:
+        persist_started.set()
+        gate.wait()
+        persisted.append((run_id, event_id, body))
+
+    effects_task = asyncio.get_running_loop().create_task(
+        apply_post_response_effects(
+            _completed_outcome("$response", body="ok"),
+            ResponseOutcome(response_run_id="run-1", run_succeeded=False),
+            PostResponseEffectsDeps(
+                logger=get_logger("tests.persist_cancel"),
+                persist_response_event_id=blocking_persist,
+            ),
+        ),
+    )
+    await asyncio.to_thread(persist_started.wait, 5.0)
+
+    effects_task.cancel()
+    await asyncio.sleep(0.05)
+    # The lifecycle must not observe completion while the session rewrite is
+    # still running in the worker thread.
+    assert not effects_task.done()
+
+    gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await effects_task
+    assert persisted == [("run-1", "$response", "ok")]
+
+
+@pytest.mark.asyncio
+async def test_interactive_registration_failure_never_suppresses_persistence() -> None:
+    """Response-event persistence runs before, and independent of, interactive registration."""
+    persisted: list[tuple[str, str, str | None]] = []
+    register_calls: list[str] = []
+
+    async def failing_register(event_id: str, _target: object, _metadata: object) -> None:
+        register_calls.append(event_id)
+        msg = "matrix unreachable"
+        raise RuntimeError(msg)
+
+    outcome = replace(
+        _completed_outcome("$response", body="Pick one"),
+        interactive_metadata=InteractiveMetadata(
+            question_text="Pick one",
+            option_map={"1": "a"},
+            option_labels={"1": "a"},
+            options_list=({"key": "1", "label": "a"},),
+        ),
+    )
+    await apply_post_response_effects(
+        outcome,
+        ResponseOutcome(
+            response_run_id="run-1",
+            run_succeeded=False,
+            interactive_target=_target(),
+        ),
+        PostResponseEffectsDeps(
+            logger=get_logger("tests.persist_isolation"),
+            register_interactive=failing_register,
+            persist_response_event_id=lambda run_id, event_id, body, _trace: persisted.append(
+                (run_id, event_id, body),
+            ),
+        ),
+    )
+
+    assert persisted == [("run-1", "$response", "Pick one")]
+    assert register_calls == ["$response"]
+
+
+@pytest.mark.asyncio
+async def test_direct_runner_seam_records_model_only_tail_for_interrupted_replay(tmp_path: Path) -> None:
+    """process_and_respond normalizes an expanded model prompt before seeding the recorder."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    recorders: list[TurnRecorder] = []
+    original_build = ResponseRunner._build_turn_recorder
+
+    def spy_build(self: ResponseRunner, **kwargs: object) -> TurnRecorder:
+        recorder = original_build(self, **kwargs)
+        recorders.append(recorder)
+        return recorder
+
+    request = replace(
+        _plain_request(_target()),
+        prompt="Hello",
+        model_prompt="Hello\n\nAvailable attachment IDs: att_1.",
+    )
+    with (
+        patch.object(ResponseRunner, "_build_turn_recorder", spy_build),
+        patch_response_runner_module(
+            ai_response=AsyncMock(return_value="ok"),
+            should_use_streaming=AsyncMock(return_value=False),
+        ),
+    ):
+        await coordinator.process_and_respond(request)
+
+    assert len(recorders) == 1
+    # Replaying "Hello" twice would diverge from the prompt the model received.
+    assert recorders[0].user_message == "Hello"
+    assert recorders[0].current_message_suffix == "Available attachment IDs: att_1."
