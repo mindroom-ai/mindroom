@@ -290,7 +290,7 @@ async def test_sqlite_unsupported_schema_reset_reports_destructive_reset(tmp_pat
 async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphans(
     postgres_event_cache_url: str,
 ) -> None:
-    """PostgreSQL migration normalizes only the initializing namespace and reports repairs."""
+    """PostgreSQL migration and trust reset affect only the initializing namespace."""
     namespace = f"tenant_{uuid.uuid4().hex}"
     other_namespace = f"tenant_{uuid.uuid4().hex}"
     async with _isolated_postgres_database(postgres_event_cache_url) as database_url:
@@ -310,15 +310,12 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
             assert diagnostics["cache_orphan_edit_indexes_after"] == 0
             assert diagnostics["cache_orphan_thread_indexes_after"] == 0
             assert diagnostics["cache_repaired_edit_indexes"] == 1
-            assert diagnostics["cache_repaired_thread_indexes"] == 1
+            assert diagnostics["cache_repaired_thread_indexes"] == 2
             assert diagnostics["cache_normalized_legacy_thread_payload_rows"] == 2
             assert diagnostics["cache_storage_bytes"] > 0
-            assert cached_thread == [_message_event(_CHILD_ID, thread_id=_THREAD_ID)]
-            assert stale_state is not None
-            assert stale_state.validated_at is None
-            assert stale_state.invalidated_at == _FUTURE_INVALIDATED_AT
-            assert stale_state.invalidation_reason == "preexisting_newer_invalidation"
-            assert await cache.get_thread_id_for_event(_ROOM_ID, _THREAD_ID) == _THREAD_ID
+            assert cached_thread is None
+            assert stale_state is None
+            assert await cache.get_thread_id_for_event(_ROOM_ID, _THREAD_ID) is None
 
             db = cache._runtime.require_db()
             cursor = await db.execute(
@@ -332,9 +329,9 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
             )
             rows = await cursor.fetchall()
             await cursor.close()
-            assert rows == sorted(
-                [(namespace, None), (other_namespace, json.dumps(_message_event(_CHILD_ID, thread_id=_THREAD_ID)))],
-            )
+            assert rows == [
+                (other_namespace, json.dumps(_message_event(_CHILD_ID, thread_id=_THREAD_ID))),
+            ]
             cursor = await db.execute(
                 "SELECT value FROM mindroom_event_cache_metadata WHERE key = 'schema_version'",
             )
@@ -356,13 +353,11 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
                 """,
                 (other_namespace, _CHILD_ID),
             )
-            assert await cursor.fetchone() == (None,)
+            assert await cursor.fetchone() is None
             await cursor.close()
-            assert await other_cache.get_thread_events(_ROOM_ID, _THREAD_ID) == [
-                _message_event(_CHILD_ID, thread_id=_THREAD_ID),
-            ]
+            assert await other_cache.get_thread_events(_ROOM_ID, _THREAD_ID) is None
             other_stale_state = await other_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
-            _assert_missing_source_state(other_stale_state)
+            assert other_stale_state is None
         finally:
             await other_cache.close()
 
