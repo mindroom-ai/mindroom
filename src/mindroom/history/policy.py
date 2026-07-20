@@ -100,11 +100,11 @@ def _resolve_fallback_summary_input_budget(
 ) -> int | None:
     """Resolve the safeguard fallback's own summary-input budget, or None.
 
-    None when no fallback is configured, its context window is unknown, or its
-    budget fails the same availability floor as the primary — in each of those
-    cases no fallback-served next attempt can exist under its own plan, so
-    summary acceptance sizes the fallback profile with the primary's budget
-    instead.
+    None means the fallback is UNAVAILABLE for compaction: no fallback is
+    configured, its context window is unknown, or its budget fails the same
+    availability floor as the primary. An unavailable fallback is never
+    admitted — the runtime owner continues without a fallback rather than
+    letting it serve requests its own plan could not admit.
     """
     if fallback_model_name is None:
         return None
@@ -201,6 +201,28 @@ def classify_compaction_decision(  # noqa: PLR0911
     )
 
 
+def summary_budget_is_admissible(summary_input_budget: int) -> bool:
+    """Return whether one summary input budget clears the planner's availability floor.
+
+    The single source for the floor predicate: plan availability, the
+    acceptance-check domain, and the condensation backstop guard all share it.
+    """
+    return summary_input_budget > 2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS
+
+
+def persistable_summary_limit(budget: int) -> int:
+    """Return the acceptance limit for one persisted summary block under one input budget.
+
+    A summary may be persisted only when the active estimator sizes its
+    escaped-and-wrapped ``<previous_summary>`` block at or below this limit.
+    The reserved headroom ``max(retry floor, budget // 4)`` guarantees that the
+    next compaction request under the same budget always fits at least one run
+    (at worst a minimal excerpt) beside the carried summary, so the zero-run
+    corner is unreachable from summaries MindRoom wrote itself.
+    """
+    return budget - max(COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS, budget // 4)
+
+
 def manual_compaction_unavailable_message(plan: ResolvedHistoryExecutionPlan) -> str | None:
     """Return the user-facing error for an unavailable manual compaction request."""
     description = describe_compaction_unavailability(plan)
@@ -253,7 +275,7 @@ def _resolve_summary_input_budget(
         summary_input_budget_tokens = min(summary_input_budget_tokens, replay_window_tokens)
     if summary_input_budget_tokens <= 0:
         return summary_input_budget_tokens, "non_positive_summary_input_budget"
-    if summary_input_budget_tokens <= 2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS:
+    if not summary_budget_is_admissible(summary_input_budget_tokens):
         return summary_input_budget_tokens, "summary_input_budget_without_retry_headroom"
     return summary_input_budget_tokens, None
 

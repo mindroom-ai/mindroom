@@ -119,6 +119,25 @@ def _is_same_budget_transient(error: Exception) -> bool:
     return error.status_code == 502 and _has_typed_network_cause(error)
 
 
+def is_context_window_rejection(error: Exception) -> bool:
+    """Return whether a provider failure is a context-window rejection.
+
+    Covers the typed ``ContextWindowExceededError`` and provider errors whose
+    message matches the named legacy context-length fragments, because
+    classification is not exhaustive and some providers surface the rejection
+    untyped. On the shrinkable chunk path these fragments keep their
+    shrink-retry meaning; the condensation backstop uses this predicate
+    because its complete-summary input is indivisible, making such a
+    rejection a terminal unfit verdict rather than a shrink trigger.
+    """
+    if isinstance(error, ContextWindowExceededError):
+        return True
+    if not isinstance(error, ModelProviderError):
+        return False
+    message = str(error).lower()
+    return any(fragment in message for fragment in _SHRINKABLE_PROVIDER_ERROR_FRAGMENTS)
+
+
 class CompactionSummaryOutputLimitError(RuntimeError):
     """Raised when the summary response reaches the configured output-token cap."""
 

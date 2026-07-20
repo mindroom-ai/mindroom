@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from agno.exceptions import ContextWindowExceededError, ModelProviderError, ModelRateLimitError
 from agno.models.message import Message
+from agno.models.openai.chat import OpenAIChat
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.summary import SessionSummary
@@ -29,15 +30,18 @@ from mindroom.history.compaction import (
     _CarriedSummaryUnfitError,
     _emit_compaction_hook,
     _previous_summary_block,
+    _resolve_compaction_sizing_context,
     _rewrite_working_session_for_compaction,
     _strip_stale_anthropic_replay_fields,
     _summary_digest,
     compact_scope_history,
     estimate_prompt_visible_history_tokens,
 )
+from mindroom.history.policy import persistable_summary_limit
 from mindroom.history.storage import (
     read_scope_state,
     record_compaction_chunk,
+    set_force_compaction_state,
     write_scope_state,
 )
 from mindroom.history.summary_call import (
@@ -65,7 +69,7 @@ from mindroom.hooks import (
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.message_target import MessageTarget
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
-from mindroom.token_budget import estimate_text_tokens, persistable_summary_limit
+from mindroom.token_budget import estimate_text_tokens
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
     FakeModel,
@@ -91,6 +95,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from agno.db.base import BaseDb
+    from agno.models.base import Model
     from agno.session.agent import AgentSession
 
     from mindroom.history.compaction import _CompactionRewriteResult
@@ -102,13 +107,15 @@ async def _rewrite_single_run(
     working_session: AgentSession,
     selected_run_ids: tuple[str, ...] = ("run-1",),
     summary_input_budget: int = 8_000,
-    summary_model: FakeModel | None = None,
-    fallback_summary_model: FakeModel | None = None,
+    summary_model: Model | None = None,
+    fallback_summary_model: Model | None = None,
     fallback_summary_model_name: str | None = None,
     fallback_summary_input_budget: int | None = None,
     state: HistoryScopeState | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
 ) -> _CompactionRewriteResult | None:
+    if fallback_summary_model is not None and fallback_summary_input_budget is None:
+        fallback_summary_input_budget = summary_input_budget
     return await _rewrite_working_session_for_compaction(
         storage=storage,
         persisted_session=working_session,
@@ -1894,6 +1901,15 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
 _SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
 
 
+def _fake_summary_model_profile(budget: int = 2_100, model_id: str = "summary-model") -> str:
+    """Return the serving-profile fingerprint the default test summary model resolves to."""
+    return _resolve_compaction_sizing_context(
+        FakeModel(id=model_id, provider="fake"),
+        "summary-model",
+        budget,
+    ).serving_profile
+
+
 def test_acceptance_limit_guarantees_next_build_includes_a_run() -> None:
     """I1 property test (redesign test 1), pinned to the rebuild path.
 
@@ -2014,7 +2030,14 @@ async def test_condensation_that_cannot_shrink_writes_marker_and_next_pass_is_fr
     assert marker is not None
     assert marker.reason == "condensation_not_smaller"
     assert marker.summary_digest == _summary_digest(stored_summary)
-    assert marker.model_identifier == "summary-model"
+    assert (
+        marker.serving_profile
+        == _resolve_compaction_sizing_context(
+            FakeModel(id="summary-model", provider="fake"),
+            "summary-model",
+            2_100,
+        ).serving_profile
+    )
     assert marker.summary_input_budget == 2_100
     # The consumed force flag was cleared in the same durable write.
     assert persisted_state.force_compact_before_next_run is False
@@ -2221,9 +2244,9 @@ async def test_condensation_smaller_but_unfit_output_persists_with_marker_on_new
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mismatch", ["digest", "model", "budget"])
+@pytest.mark.parametrize("mismatch", ["digest", "profile", "budget"])
 async def test_marker_invalidates_when_any_key_dimension_changes(tmp_path: Path, mismatch: str) -> None:
-    """Redesign test 9: changing digest, model, or budget re-enables one fresh attempt."""
+    """Redesign test 9: changing digest, serving profile, or budget re-enables one fresh attempt."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     stored_summary = ("word " * 2_600) + "TAIL-FACT-MUST-SURVIVE"
@@ -2235,7 +2258,11 @@ async def test_marker_invalidates_when_any_key_dimension_changes(tmp_path: Path,
     storage.upsert_session(working_session)
     marker = CarriedSummaryUnfitMarker(
         summary_digest=_summary_digest("some other summary" if mismatch == "digest" else stored_summary),
-        model_identifier="other-model" if mismatch == "model" else "summary-model",
+        serving_profile=(
+            _fake_summary_model_profile(model_id="other-model")
+            if mismatch == "profile"
+            else _fake_summary_model_profile()
+        ),
         summary_input_budget=4_000 if mismatch == "budget" else 2_100,
         failed_at="2026-07-19T00:00:00Z",
         reason="condensation_not_smaller",
@@ -2278,7 +2305,7 @@ async def test_matching_marker_skips_condensation_without_model_calls(tmp_path: 
     storage.upsert_session(working_session)
     marker = CarriedSummaryUnfitMarker(
         summary_digest=_summary_digest(stored_summary),
-        model_identifier="summary-model",
+        serving_profile=_fake_summary_model_profile(),
         summary_input_budget=2_100,
         failed_at="2026-07-19T00:00:00Z",
         reason="condensation_not_smaller",
@@ -2478,3 +2505,338 @@ async def test_multi_profile_acceptance_rejects_candidate_failing_the_fallback_b
     assert control_persisted is not None
     assert control_persisted.summary is not None
     assert control_persisted.summary.summary == candidate
+
+
+# --- ISSUE-246 review round 6: fallback-budget, fallback condensation, marker fidelity ---
+
+
+@pytest.mark.asyncio
+async def test_fallback_served_chunks_use_the_fallback_budget_after_the_unchanged_resend(tmp_path: Path) -> None:
+    """Round-6 F1: only the immediate post-refusal resend keeps the primary-sized bytes.
+
+    Every build, request, and log after the switch is capped by the
+    fallback's own resolved budget, asserted on the captured build budgets
+    and the actual constructed request bytes.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    working_session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1", messages=[Message(role="user", content="RUN1-MARKER " + ("u" * 5_000))]),
+            _completed_run("run-2", messages=[Message(role="user", content="RUN2-MARKER " + ("v" * 2_000))]),
+        ],
+    )
+    storage.upsert_session(working_session)
+    primary = FakeModel(id="summary-model", provider="fake")
+    fallback = FakeModel(id="fallback-model-id", provider="fake")
+    attempts: list[tuple[FakeModel, str]] = []
+
+    async def flaky_summary(*, model: FakeModel, summary_input: str, **_kwargs: object) -> SessionSummary:
+        attempts.append((model, summary_input))
+        if len(attempts) == 1:
+            message = "provider-specific refusal wording"
+            raise ModelSafeguardRefusalError(message)
+        return SessionSummary(summary=f"chunk summary {len(attempts)}", updated_at=datetime.now(UTC))
+
+    with (
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(side_effect=flaky_summary),
+        ),
+        patch(
+            "mindroom.history.compaction._build_summary_input",
+            wraps=_build_summary_input,
+        ) as build_spy,
+        capture_logs() as logs,
+    ):
+        rewrite_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            selected_run_ids=("run-1", "run-2"),
+            summary_input_budget=6_000,
+            summary_model=primary,
+            fallback_summary_model=fallback,
+            fallback_summary_model_name="fallback-model",
+            fallback_summary_input_budget=3_000,
+        )
+
+    assert rewrite_result is not None
+    assert rewrite_result.compacted_run_count == 2
+    assert rewrite_result.summary_model is fallback
+    assert [model for model, _ in attempts] == [primary, fallback, fallback]
+    # The immediate post-refusal resend is byte-identical (unchanged-input
+    # contract), so it deliberately keeps the primary-sized request.
+    assert attempts[1][1] == attempts[0][1]
+    # Every build after the switch is capped by the fallback's own budget.
+    assert [call.kwargs["max_input_tokens"] for call in build_spy.call_args_list] == [6_000, 3_000]
+    assert len(attempts[2][1].encode("utf-8")) <= 3_000
+    assert "RUN2-MARKER" in attempts[2][1]
+    request_events = [entry for entry in logs if entry["event"] == "Compaction summary chunk request"]
+    assert [entry["summary_input_budget_tokens"] for entry in request_events] == [6_000, 6_000, 3_000]
+    assert [entry["model_name"] for entry in request_events] == ["summary-model", "fallback-model", "fallback-model"]
+
+
+@pytest.mark.asyncio
+async def test_condensation_switches_to_the_fallback_which_serves_the_rest_of_the_pass(tmp_path: Path) -> None:
+    """Round-6 F2: the condensation backstop honors the configured safeguard fallback.
+
+    A primary refusal resends the unchanged condensation request once to the
+    fallback; its fitting output persists as a summary-only chunk, and the
+    fallback then serves the remaining chunks, audit state, and outcome.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    stored_summary = ("word " * 2_600) + "TAIL-FACT-MUST-SURVIVE"
+    working_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1", messages=[Message(role="user", content="RUN1-MARKER payload")])],
+        summary=SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC)),
+    )
+    storage.upsert_session(working_session)
+    primary = FakeModel(id="summary-model", provider="fake")
+    fallback = FakeModel(id="fallback-model-id", provider="fake")
+    attempts: list[tuple[FakeModel, str]] = []
+    outputs = [
+        SessionSummary(summary="condensed TAIL-FACT-MUST-SURVIVE", updated_at=datetime.now(UTC)),
+        SessionSummary(summary="merged TAIL-FACT-MUST-SURVIVE", updated_at=datetime.now(UTC)),
+    ]
+
+    async def flaky_summary(*, model: FakeModel, summary_input: str, **_kwargs: object) -> SessionSummary:
+        attempts.append((model, summary_input))
+        if len(attempts) == 1:
+            message = "provider-specific refusal wording"
+            raise ModelSafeguardRefusalError(message)
+        return outputs[len(attempts) - 2]
+
+    persisted_chunks: list[tuple[str, ...]] = []
+
+    def record_and_snapshot(**kwargs: object) -> None:
+        record_compaction_chunk(**kwargs)  # type: ignore[arg-type]
+        persisted_chunks.append(tuple(kwargs["compacted_run_ids"]))  # type: ignore[arg-type]
+
+    with (
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(side_effect=flaky_summary),
+        ),
+        patch(
+            "mindroom.history.compaction.record_compaction_chunk",
+            side_effect=record_and_snapshot,
+        ),
+    ):
+        rewrite_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            summary_input_budget=2_100,
+            summary_model=primary,
+            fallback_summary_model=fallback,
+            fallback_summary_model_name="fallback-model",
+        )
+
+    assert rewrite_result is not None
+    assert rewrite_result.compacted_run_count == 1
+    assert [model for model, _ in attempts] == [primary, fallback, fallback]
+    # The refused condensation request is resent to the fallback unchanged.
+    assert attempts[1][1] == attempts[0][1]
+    assert stored_summary in attempts[0][1]
+    # Summary-only persistence lands before the fallback-served run chunk.
+    assert persisted_chunks == [(), ("run-1",)]
+    assert rewrite_result.summary_model is fallback
+    assert rewrite_result.summary_model_name == "fallback-model"
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "merged TAIL-FACT-MUST-SURVIVE"
+    assert persisted.runs == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["compat-to-genuine", "trust-flip", "same-profile-control"])
+async def test_marker_matches_the_serving_profile_not_the_bare_model_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+) -> None:
+    """Round-6 F3: with the model ID and budget fixed, a profile change invalidates the marker.
+
+    An OpenAI-compatible endpoint and genuine OpenAI can both expose gpt-4o;
+    switching between them (or flipping endpoint trust via OPENAI_BASE_URL)
+    changes the serving profile and must re-enable exactly one fresh attempt,
+    while an unchanged profile keeps suppressing it.
+    """
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    stored_summary = ("word " * 2_600) + "TAIL-FACT-MUST-SURVIVE"
+    working_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1", messages=[Message(role="user", content="RUN1-MARKER payload")])],
+        summary=SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC)),
+    )
+    storage.upsert_session(working_session)
+    if scenario == "compat-to-genuine":
+        marker_profile_model: FakeModel | OpenAIChat = FakeModel(id="gpt-4o", provider="fake")
+    else:
+        marker_profile_model = OpenAIChat(id="gpt-4o")
+    marker = CarriedSummaryUnfitMarker(
+        summary_digest=_summary_digest(stored_summary),
+        serving_profile=_resolve_compaction_sizing_context(
+            marker_profile_model,
+            "summary-model",
+            2_100,
+        ).serving_profile,
+        summary_input_budget=2_100,
+        failed_at="2026-07-19T00:00:00Z",
+        reason="condensation_not_smaller",
+    )
+    if scenario == "trust-flip":
+        # Same class, same ID, same budget — only the endpoint-trust
+        # classification (and with it the estimator kind) changes.
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:9292/v1")
+    summaries = [
+        SessionSummary(summary="condensed TAIL-FACT-MUST-SURVIVE", updated_at=datetime.now(UTC)),
+        SessionSummary(summary="merged TAIL-FACT-MUST-SURVIVE", updated_at=datetime.now(UTC)),
+    ]
+
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(side_effect=summaries),
+    ) as generate_summary:
+        rewrite_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            state=HistoryScopeState(carried_summary_unfit=marker),
+            summary_input_budget=2_100,
+            summary_model=OpenAIChat(id="gpt-4o"),
+        )
+
+    if scenario == "same-profile-control":
+        assert rewrite_result is None
+        generate_summary.assert_not_awaited()
+        assert working_session.summary is not None
+        assert working_session.summary.summary == stored_summary
+    else:
+        assert rewrite_result is not None
+        assert generate_summary.await_count == 2
+        persisted = get_agent_session(storage, "session-1")
+        assert persisted is not None
+        assert persisted.summary is not None
+        assert persisted.summary.summary == "merged TAIL-FACT-MUST-SURVIVE"
+
+
+@pytest.mark.asyncio
+async def test_fresh_force_request_written_mid_attempt_survives_the_marker_write(tmp_path: Path) -> None:
+    """Round-6 F4: the marker write consumes only the force request that started the attempt.
+
+    A new force request recorded while the condensation call was in flight
+    carries a newer generation and must survive the marker's force clear.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    stored_summary = ("word " * 2_600) + "TAIL-FACT-MUST-SURVIVE"
+    working_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1")],
+        summary=SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC)),
+    )
+    forced_state = set_force_compaction_state(
+        working_session,
+        _SCOPE,
+        read_scope_state(working_session, _SCOPE),
+        force=True,
+    )
+    storage.upsert_session(working_session)
+    call_count = 0
+
+    async def echo_and_force_again(**_kwargs: object) -> SessionSummary:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # A fresh manual request lands on the durable row while the
+            # provider call is still in flight.
+            latest = get_agent_session(storage, "session-1")
+            assert latest is not None
+            set_force_compaction_state(latest, _SCOPE, read_scope_state(latest, _SCOPE), force=True)
+            storage.upsert_session(latest)
+        return SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC))
+
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(side_effect=echo_and_force_again),
+    ) as generate_summary:
+        rewrite_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            state=forced_state,
+            summary_input_budget=2_100,
+        )
+
+    assert rewrite_result is None
+    assert generate_summary.await_count == 2
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    persisted_state = read_scope_state(persisted, _SCOPE)
+    assert persisted_state.carried_summary_unfit is not None
+    # The fresh request survives; only the consumed generation was cleared.
+    assert persisted_state.force_compact_before_next_run is True
+    assert persisted_state.force_compact_generation == forced_state.force_compact_generation + 1
+
+
+@pytest.mark.asyncio
+async def test_untyped_context_window_rejection_is_terminal_for_condensation(tmp_path: Path) -> None:
+    """Round-6 F5: fragment-matched context rejections are terminal like the typed error.
+
+    A provider that surfaces the rejection as an untyped message must still
+    produce the durable marker, so the doomed request is never re-purchased.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    stored_summary = ("word " * 2_600) + "TAIL-FACT-MUST-SURVIVE"
+    working_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1")],
+        summary=SessionSummary(summary=stored_summary, updated_at=datetime.now(UTC)),
+    )
+    storage.upsert_session(working_session)
+    untyped_rejection = ModelProviderError(
+        "Input validation failed: prompt exceeds the maximum context length of this model",
+        status_code=400,
+    )
+
+    with (
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(side_effect=untyped_rejection),
+        ) as generate_summary,
+        pytest.raises(_CarriedSummaryUnfitError, match="raise the compaction model's context_window"),
+    ):
+        await _rewrite_single_run(
+            storage=storage,
+            working_session=working_session,
+            summary_input_budget=2_100,
+        )
+
+    assert generate_summary.await_count == 1
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == stored_summary
+    persisted_state = read_scope_state(persisted, _SCOPE)
+    marker = persisted_state.carried_summary_unfit
+    assert marker is not None
+    assert marker.reason == "provider_context_window_rejection"
+
+    # The verdict is durable: the next pass spends nothing on the same state.
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(),
+    ) as second_pass_summary:
+        second_result = await _rewrite_single_run(
+            storage=storage,
+            working_session=persisted,
+            state=persisted_state,
+            summary_input_budget=2_100,
+        )
+    assert second_result is None
+    second_pass_summary.assert_not_awaited()

@@ -18,6 +18,7 @@ from openai import AsyncOpenAI, OpenAI
 
 from mindroom.history.compaction import _build_summary_input
 from mindroom.model_instance_checks import is_genuine_openai_endpoint
+from mindroom.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses
 from mindroom.token_budget import (
     approximate_o200k_tokens,
     compaction_estimate_kind,
@@ -208,6 +209,28 @@ def test_genuine_openai_endpoint_rejects_openai_like_and_foreign_models(monkeypa
     assert is_genuine_openai_endpoint(OpenAILike(id="gpt-4o")) is False
     assert is_genuine_openai_endpoint(OpenResponses(id="gpt-4o")) is False
     assert is_genuine_openai_endpoint(FakeModel(id="gpt-4o", provider="fake")) is False
+
+
+def test_genuine_openai_endpoint_trusts_only_the_exact_allowlisted_types(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ISSUE-246 round-6 F6: exact-type allowlist makes fail-closed literally true.
+
+    MindRoom's routing-neutral production wrappers are trusted; ANY other
+    subclass is untrusted by construction because it could redirect the
+    endpoint inside an overridden client builder without touching the
+    instance fields this check inspects.
+    """
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    assert is_genuine_openai_endpoint(MindRoomOpenAIChat(id="gpt-4o")) is True
+    assert is_genuine_openai_endpoint(MindRoomOpenAIResponses(id="gpt-4o")) is True
+
+    class RedirectingChat(OpenAIChat):
+        """A clean-looking subclass that a plugin could point anywhere."""
+
+    class RedirectingMindRoomChat(MindRoomOpenAIChat):
+        """Subclassing the trusted wrapper is equally unrecognized customization."""
+
+    assert is_genuine_openai_endpoint(RedirectingChat(id="gpt-4o")) is False
+    assert is_genuine_openai_endpoint(RedirectingMindRoomChat(id="gpt-4o")) is False
 
 
 def test_genuine_openai_endpoint_rejects_client_params(monkeypatch: pytest.MonkeyPatch) -> None:

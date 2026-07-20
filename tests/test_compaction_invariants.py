@@ -48,6 +48,7 @@ from mindroom.history.compaction import (
     _generate_compaction_summary_with_retry,
     compact_scope_history,
 )
+from mindroom.history.policy import persistable_summary_limit
 from mindroom.history.storage import (
     compacted_run_ids_with,
     prune_reintroduced_runs,
@@ -77,7 +78,6 @@ from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.token_budget import (
     approximate_o200k_tokens,
     compaction_payload_token_upper_bound,
-    persistable_summary_limit,
 )
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 from tests.conftest import FakeModel, bind_runtime_paths, prepare_history_for_run_for_test
@@ -102,6 +102,7 @@ def _sizing_context(
         estimate_kind="utf8_bytes_token_upper_bound",
         summary_input_budget=budget,
         acceptance_limit=persistable_summary_limit(budget),
+        serving_profile=f"test|id={model.id}|budgeted",
     )
 
 
@@ -1734,6 +1735,7 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             fallback_summary_model=fallback,
             fallback_summary_model_name="fallback-model",
+            fallback_summary_input_budget=10_000,
         )
 
     assert outcome is not None

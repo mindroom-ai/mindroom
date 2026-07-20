@@ -47,8 +47,11 @@ async def _rewrite_with_summary_model(
     summary_model: Model | None = None,
     fallback_summary_model: Model | None = None,
     fallback_summary_model_name: str | None = None,
+    fallback_summary_input_budget: int | None = None,
     selected_run_ids: tuple[str, ...] = ("run-1",),
 ) -> _CompactionRewriteResult | None:
+    if fallback_summary_model is not None and fallback_summary_input_budget is None:
+        fallback_summary_input_budget = summary_input_budget
     return await _rewrite_working_session_for_compaction(
         storage=storage,
         persisted_session=working_session,
@@ -57,6 +60,7 @@ async def _rewrite_with_summary_model(
         summary_model_name="summary-model",
         fallback_summary_model=fallback_summary_model,
         fallback_summary_model_name=fallback_summary_model_name,
+        fallback_summary_input_budget=fallback_summary_input_budget,
         session_id=working_session.session_id,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         state=HistoryScopeState(force_compact_before_next_run=True),

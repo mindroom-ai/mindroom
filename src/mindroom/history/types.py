@@ -103,14 +103,17 @@ class CarriedSummaryUnfitMarker:
 
     Control state only: it never touches the summary or runs. It matches — and
     suppresses further automatic condensation attempts — only while the stored
-    summary digest, the serving compaction model identity, and the summary
-    input budget all equal the values recorded here; changing any of the three
-    implicitly re-enables exactly one fresh attempt, and a forced compaction
-    bypasses it outright.
+    summary digest, the serving-profile fingerprint (provider/model class,
+    model id, endpoint-trust classification, and estimator kind), and the
+    summary input budget all equal the values recorded here; changing any of
+    the three implicitly re-enables exactly one fresh attempt, and a forced
+    compaction bypasses it outright. Markers persisted under the pre-
+    fingerprint key shape parse as absent, which likewise grants one fresh
+    attempt.
     """
 
     summary_digest: str
-    model_identifier: str
+    serving_profile: str
     summary_input_budget: int
     failed_at: str
     reason: str
@@ -124,7 +127,11 @@ class HistoryScopeState:
     summary; they let the state owner prune runs that a stale session write
     reintroduced after compaction progress was persisted.
     ``carried_summary_unfit`` bounds spend on inherited oversized summaries to
-    one condensation attempt-set per distinct (summary, model, budget) state.
+    one condensation attempt-set per distinct (summary, profile, budget) state.
+    ``force_compact_generation`` increments on every new force request, so a
+    consumer that read generation G clears only the request it consumed: a
+    fresh request written while an attempt was in flight carries G+1 and
+    survives the clear.
     """
 
     last_compacted_at: str | None = None
@@ -132,6 +139,7 @@ class HistoryScopeState:
     last_compacted_run_count: int | None = None
     compacted_run_ids: tuple[str, ...] = ()
     force_compact_before_next_run: bool = False
+    force_compact_generation: int = 0
     carried_summary_unfit: CarriedSummaryUnfitMarker | None = None
 
 

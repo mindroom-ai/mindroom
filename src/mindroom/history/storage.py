@@ -156,8 +156,17 @@ def set_force_compaction_state(
     *,
     force: bool,
 ) -> HistoryScopeState:
-    """Set the next-run force flag in one session scope."""
-    next_state = replace(state, force_compact_before_next_run=force)
+    """Set the next-run force flag in one session scope.
+
+    Every force request bumps ``force_compact_generation``, so a consumer that
+    clears the flag can distinguish the request it consumed from a fresh one
+    written while its attempt was in flight.
+    """
+    next_state = replace(
+        state,
+        force_compact_before_next_run=force,
+        force_compact_generation=state.force_compact_generation + 1 if force else state.force_compact_generation,
+    )
     write_scope_state(session, scope, next_state)
     return next_state
 
@@ -337,6 +346,7 @@ def _parse_state(raw_state: dict[str, Any]) -> HistoryScopeState:
     compacted_run_count = raw_state.get("last_compacted_run_count")
     compacted_run_ids = raw_state.get("compacted_run_ids")
     force_flag = raw_state.get("force_compact_before_next_run")
+    force_generation = raw_state.get("force_compact_generation")
     return HistoryScopeState(
         last_compacted_at=compacted_at if isinstance(compacted_at, str) else None,
         last_summary_model=summary_model if isinstance(summary_model, str) else None,
@@ -345,24 +355,31 @@ def _parse_state(raw_state: dict[str, Any]) -> HistoryScopeState:
             _normalize_compacted_run_ids(compacted_run_ids) if isinstance(compacted_run_ids, list) else ()
         ),
         force_compact_before_next_run=bool(force_flag),
+        force_compact_generation=force_generation if isinstance(force_generation, int) else 0,
         carried_summary_unfit=_parse_carried_summary_unfit(raw_state.get("carried_summary_unfit")),
     )
 
 
 def _parse_carried_summary_unfit(raw_marker: object) -> CarriedSummaryUnfitMarker | None:
+    """Parse one persisted unfit marker.
+
+    Markers written under an older key shape (for example the pre-fingerprint
+    ``model_identifier`` field) parse as absent, which deliberately grants one
+    fresh condensation attempt instead of migrating the record.
+    """
     if not isinstance(raw_marker, dict):
         return None
     marker_data = cast("dict[str, Any]", raw_marker)
     summary_digest = marker_data.get("summary_digest")
-    model_identifier = marker_data.get("model_identifier")
+    serving_profile = marker_data.get("serving_profile")
     summary_input_budget = marker_data.get("summary_input_budget")
     failed_at = marker_data.get("failed_at")
     reason = marker_data.get("reason")
     if (
         not isinstance(summary_digest, str)
         or not summary_digest
-        or not isinstance(model_identifier, str)
-        or not model_identifier
+        or not isinstance(serving_profile, str)
+        or not serving_profile
         or not isinstance(summary_input_budget, int)
         or not isinstance(failed_at, str)
         or not isinstance(reason, str)
@@ -370,7 +387,7 @@ def _parse_carried_summary_unfit(raw_marker: object) -> CarriedSummaryUnfitMarke
         return None
     return CarriedSummaryUnfitMarker(
         summary_digest=summary_digest,
-        model_identifier=model_identifier,
+        serving_profile=serving_profile,
         summary_input_budget=summary_input_budget,
         failed_at=failed_at,
         reason=reason,
@@ -389,10 +406,12 @@ def _state_to_metadata(state: HistoryScopeState) -> dict[str, object]:
         payload["last_compacted_run_count"] = state.last_compacted_run_count
     if state.compacted_run_ids:
         payload["compacted_run_ids"] = list(_normalize_compacted_run_ids(state.compacted_run_ids))
+    if state.force_compact_generation:
+        payload["force_compact_generation"] = state.force_compact_generation
     if state.carried_summary_unfit is not None:
         payload["carried_summary_unfit"] = {
             "summary_digest": state.carried_summary_unfit.summary_digest,
-            "model_identifier": state.carried_summary_unfit.model_identifier,
+            "serving_profile": state.carried_summary_unfit.serving_profile,
             "summary_input_budget": state.carried_summary_unfit.summary_input_budget,
             "failed_at": state.carried_summary_unfit.failed_at,
             "reason": state.carried_summary_unfit.reason,
@@ -407,6 +426,7 @@ def _state_is_empty(state: HistoryScopeState) -> bool:
         and state.last_compacted_run_count is None
         and not state.compacted_run_ids
         and not state.force_compact_before_next_run
+        and state.force_compact_generation == 0
         and state.carried_summary_unfit is None
     )
 

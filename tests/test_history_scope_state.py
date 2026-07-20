@@ -95,7 +95,13 @@ def test_invalidate_compacted_replay_clears_summary_and_rebuild_markers(tmp_path
     assert session.runs == []
 
 
-def test_set_force_compaction_state_updates_only_force_flag(tmp_path: Path) -> None:
+def test_set_force_compaction_state_updates_flag_and_bumps_generation(tmp_path: Path) -> None:
+    """Every force request bumps the generation (ISSUE-246 round-6 F4); clears keep it.
+
+    The generation lets a consumer distinguish the request it consumed from a
+    fresh one written while its attempt was in flight; audit fields stay
+    untouched either way.
+    """
     _config, _runtime_paths_value = _make_config(tmp_path)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     session = _session("session-1")
@@ -110,6 +116,7 @@ def test_set_force_compaction_state_updates_only_force_flag(tmp_path: Path) -> N
         last_summary_model="summary-model",
         last_compacted_run_count=3,
         force_compact_before_next_run=True,
+        force_compact_generation=1,
     )
     assert read_scope_state(session, scope) == forced_state
 
@@ -119,8 +126,14 @@ def test_set_force_compaction_state_updates_only_force_flag(tmp_path: Path) -> N
         last_summary_model="summary-model",
         last_compacted_run_count=3,
         force_compact_before_next_run=False,
+        force_compact_generation=1,
     )
     assert read_scope_state(session, scope) == cleared_state
+
+    reforced_state = set_force_compaction_state(session, scope, cleared_state, force=True)
+
+    assert reforced_state.force_compact_generation == 2
+    assert reforced_state.force_compact_before_next_run is True
 
 
 def test_scope_seen_event_ids_include_persisted_response_event_ids(tmp_path: Path) -> None:
