@@ -19,6 +19,7 @@ from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
 from mindroom.background_tasks import create_background_task
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
+    MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     STREAM_STATUS_KEY,
@@ -189,9 +190,6 @@ def _agent_has_matrix_messaging_tool(config: Config, agent_name: str, session_id
     return "matrix_message" in {entry.name for entry in surface.runtime_tool_configs}
 
 
-_MATRIX_MESSAGE_TARGET_KEY = "matrix_message_target"
-
-
 def _cached_room_display_name(runtime: BotRuntimeView, room_id: str) -> str | None:
     """Return the room name already present in the synced Matrix cache."""
     client = runtime.client
@@ -227,7 +225,7 @@ def _matrix_message_target_item(
         )
     text += " Use a current or selected <msg event_id> as target for reactions and edits."
     return EnrichmentItem(
-        key=_MATRIX_MESSAGE_TARGET_KEY,
+        key=MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
         text=text,
         cache_policy="stable",
         persist=False,
@@ -239,7 +237,7 @@ def _with_matrix_message_target(
     target_item: EnrichmentItem | None,
 ) -> tuple[EnrichmentItem, ...]:
     """Replace any hook-provided Matrix target with runtime-owned context."""
-    filtered_items = tuple(item for item in items if item.key != _MATRIX_MESSAGE_TARGET_KEY)
+    filtered_items = tuple(item for item in items if item.key != MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY)
     if target_item is None:
         return filtered_items
     return (*filtered_items, target_item)

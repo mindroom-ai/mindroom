@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.authorization import is_sender_allowed_for_agent_reply, responder_candidate_entities_for_room
-from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
+from mindroom.constants import MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY, ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import (
@@ -61,6 +61,10 @@ if TYPE_CHECKING:
     from mindroom.dispatch_handoff import DispatchEvent, MediaDispatchEvent, TextDispatchEvent
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
+
+
+def _without_runtime_owned_enrichment(items: list[EnrichmentItem]) -> list[EnrichmentItem]:
+    return [item for item in items if item.key != MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY]
 
 
 @dataclass(frozen=True)
@@ -188,7 +192,9 @@ class IngressHookRunner:
                 target_entity_name=target_entity_name,
                 target_member_names=target_member_names,
             )
-            items = await emit_collect(self.hook_context.registry, EVENT_MESSAGE_ENRICH, context)
+            items = _without_runtime_owned_enrichment(
+                await emit_collect(self.hook_context.registry, EVENT_MESSAGE_ENRICH, context),
+            )
             item_count = len(items)
             persisted_items = [item for item in items if item.persist]
             transient_enrichment_items = tuple(item for item in items if not item.persist)
@@ -247,7 +253,11 @@ class IngressHookRunner:
             target_entity_name=target_entity_name,
             target_member_names=target_member_names,
         )
-        return finish(await emit_collect(self.hook_context.registry, EVENT_SYSTEM_ENRICH, context))
+        return finish(
+            _without_runtime_owned_enrichment(
+                await emit_collect(self.hook_context.registry, EVENT_SYSTEM_ENRICH, context),
+            ),
+        )
 
 
 @dataclass(frozen=True)
