@@ -476,18 +476,19 @@ async def write_lookup_index_rows(
     cached_at: float,
     thread_id: str | None = None,
 ) -> None:
-    """Persist point-lookup, edit-index, and thread-index rows for cached events."""
+    """Persist point-lookup, edit-index, and thread-index rows for cached events.
+
+    Point payload quality is monotonic per event ID: clear content may replace a stored opaque
+    ``m.room.encrypted`` payload, but an opaque payload never replaces stored clear content.
+    Payload-derived indexes use only accepted payloads; explicit snapshots always record their
+    authoritative event-to-thread membership.
+    """
     if not serialized_events:
         return
-    event_ids = [event.event_id for event in serialized_events]
-    previous_mxc_urls = await _mxc_urls_for_events(
-        db,
-        namespace,
-        room_id,
-        event_ids=event_ids,
-    )
+    accepted_events: list[SerializedCachedEvent] = []
     for event in serialized_events:
-        await db.execute(
+        accepted_row = await fetchone(
+            db,
             """
             INSERT INTO mindroom_event_cache_events(namespace, event_id, room_id, origin_server_ts, event_json, cached_at)
             VALUES (%s, %s, %s, %s, %s, %s)
@@ -496,6 +497,9 @@ async def write_lookup_index_rows(
                 event_json = excluded.event_json,
                 cached_at = excluded.cached_at,
                 write_seq = nextval('mindroom_event_cache_write_seq')
+            WHERE mindroom_event_cache_events.event_json::jsonb ->> 'type' = 'm.room.encrypted'
+                OR excluded.event_json::jsonb ->> 'type' <> 'm.room.encrypted'
+            RETURNING event_id
             """,
             (
                 namespace,
@@ -506,15 +510,24 @@ async def write_lookup_index_rows(
                 cached_at,
             ),
         )
+        if accepted_row is not None:
+            accepted_events.append(event)
 
+    accepted_event_ids = [event.event_id for event in accepted_events]
+    previous_mxc_urls = await _mxc_urls_for_events(
+        db,
+        namespace,
+        room_id,
+        event_ids=accepted_event_ids,
+    )
     await db.execute(
         """
         DELETE FROM mindroom_event_cache_event_mxc_references
         WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
         """,
-        (namespace, room_id, event_ids),
+        (namespace, room_id, accepted_event_ids),
     )
-    for event in serialized_events:
+    for event in accepted_events:
         for mxc_url in event_mxc_urls(event.event):
             await db.execute(
                 """
@@ -533,9 +546,9 @@ async def write_lookup_index_rows(
         DELETE FROM mindroom_event_cache_event_edits
         WHERE namespace = %s AND room_id = %s AND edit_event_id = ANY(%s)
         """,
-        (namespace, room_id, event_ids),
+        (namespace, room_id, accepted_event_ids),
     )
-    edit_rows = event_edit_rows(room_id, serialized_events)
+    edit_rows = event_edit_rows(room_id, accepted_events)
     for row in edit_rows:
         await db.execute(
             """
@@ -548,19 +561,21 @@ async def write_lookup_index_rows(
             (namespace, row.edit_event_id, row.room_id, row.original_event_id, row.origin_server_ts),
         )
 
+    thread_index_events = serialized_events if thread_id is not None else accepted_events
+    thread_index_event_ids = [event.event_id for event in thread_index_events]
     previous_thread_ids = await _thread_ids_for_events(
         db,
         namespace,
         room_id,
-        event_ids=event_ids,
+        event_ids=thread_index_event_ids,
     )
-    thread_rows = event_thread_rows(room_id, serialized_events, thread_id=thread_id)
+    thread_rows = event_thread_rows(room_id, thread_index_events, thread_id=thread_id)
     await db.execute(
         """
         DELETE FROM mindroom_event_cache_event_threads
         WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
         """,
-        (namespace, room_id, event_ids),
+        (namespace, room_id, thread_index_event_ids),
     )
     if thread_rows:
         for row in thread_rows:

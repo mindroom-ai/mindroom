@@ -54,33 +54,6 @@ class SyncCertificationDecision:
     reason: str | None = None
 
 
-@dataclass(frozen=True)
-class _SyncCertificationStart:
-    """Initial runtime sync-token trust state."""
-
-    state: SyncTrustState
-    sync_token: str | None
-
-
-def start_from_loaded_token(loaded: SyncCheckpoint | None) -> _SyncCertificationStart:
-    """Build initial certifier state from a generation-bound checkpoint."""
-    if loaded is None:
-        return _SyncCertificationStart(
-            state=SyncTrustState.COLD,
-            sync_token=None,
-        )
-    token = normalize_sync_token(loaded.token)
-    if token is None:
-        return _SyncCertificationStart(
-            state=SyncTrustState.COLD,
-            sync_token=None,
-        )
-    return _SyncCertificationStart(
-        state=SyncTrustState.PENDING,
-        sync_token=token,
-    )
-
-
 def _uncertain_decision(
     *,
     reason: str,
