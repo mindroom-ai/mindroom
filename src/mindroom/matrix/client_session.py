@@ -6,7 +6,7 @@ import os
 import ssl as ssl_module
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 import nio
 
@@ -51,8 +51,22 @@ class PermanentMatrixStartupError(PermanentStartupError):
     """Raised for Matrix startup failures that should not be retried."""
 
 
+@runtime_checkable
+class _AsyncRequestHeaders(Protocol):
+    async def prepare(self) -> None:
+        """Prepare dynamic headers without blocking the event loop."""
+        ...
+
+
 class _MindRoomAsyncClient(nio.AsyncClient):
     """Matrix client for MindRoom-specific encrypted event behavior."""
+
+    async def _send(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        """Prepare dynamic request headers before nio copies them."""
+        headers = self.config.custom_headers
+        if isinstance(headers, _AsyncRequestHeaders):
+            await headers.prepare()
+        return await super()._send(*args, **kwargs)
 
     def encrypt(
         self,

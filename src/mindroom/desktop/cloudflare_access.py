@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import shutil
 import subprocess
+import threading
 import time
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
@@ -24,8 +26,12 @@ class CloudflareAccessError(RuntimeError):
 
 
 class _TokenProvider(Protocol):
+    def current_token(self) -> str | None:
+        """Return the cached token when it remains safe to send."""
+        ...
+
     def token(self) -> str:
-        """Return one current Access token."""
+        """Refresh if needed, then return one current Access token."""
         ...
 
 
@@ -38,6 +44,7 @@ class CloudflareAccessTokenProvider:
     clock: Callable[[], float] = time.time
     _token: str | None = field(default=None, init=False, repr=False)
     _expires_at: float = field(default=0, init=False, repr=False)
+    _refresh_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     @classmethod
     def create(cls, app_url: str) -> CloudflareAccessTokenProvider:
@@ -53,20 +60,28 @@ class CloudflareAccessTokenProvider:
 
     def token(self) -> str:
         """Return a current Access JWT, opening browser login only when needed."""
-        if self._token is not None and self._expires_at > self.clock():
-            return self._token
+        with self._refresh_lock:
+            current = self.current_token()
+            if current is not None:
+                return current
 
-        token = self._read_token()
-        if token is not None and self._remember_if_current(token):
+            token = self._read_token()
+            if token is not None and self._remember_if_current(token):
+                return token
+
+            self._login()
+            token = self._read_token(required=True)
+            assert token is not None
+            if not self._remember_if_current(token):
+                msg = "cloudflared returned an expired Cloudflare Access token after login."
+                raise CloudflareAccessError(msg)
             return token
 
-        self._login()
-        token = self._read_token(required=True)
-        assert token is not None
-        if not self._remember_if_current(token):
-            msg = "cloudflared returned an expired Cloudflare Access token after login."
-            raise CloudflareAccessError(msg)
-        return token
+    def current_token(self) -> str | None:
+        """Return the cached token until its documented expiry."""
+        if self._token is None or self._expires_at <= self.clock():
+            return None
+        return self._token
 
     def _remember_if_current(self, token: str) -> bool:
         expires_at = _access_token_expiration(token)
@@ -97,7 +112,7 @@ class CloudflareAccessTokenProvider:
             return token
         if not required:
             return None
-        detail = completed.stderr.strip() or completed.stdout.strip() or f"exit {completed.returncode}"
+        detail = completed.stderr.strip() or f"exit {completed.returncode}"
         msg = f"cloudflared access token failed after login: {detail}"
         raise CloudflareAccessError(msg)
 
@@ -131,9 +146,18 @@ class CloudflareAccessHeaders(Mapping[str, str]):
 
     def __getitem__(self, name: str) -> str:
         """Return one static header or the current interactive token."""
-        if name == _ACCESS_HEADER:
-            return self._provider.token()
+        if name.lower() == _ACCESS_HEADER:
+            token = self._provider.current_token()
+            if token is None:
+                msg = "Cloudflare Access headers were used before asynchronous token preparation."
+                raise CloudflareAccessError(msg)
+            return token
         return self._static_headers[name]
+
+    async def prepare(self) -> None:
+        """Refresh the token off the event loop before nio copies request headers."""
+        if self._provider.current_token() is None:
+            await asyncio.to_thread(self._provider.token)
 
     def __iter__(self) -> Iterator[str]:
         """Yield static header names followed by the Access header."""
