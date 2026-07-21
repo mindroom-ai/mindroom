@@ -84,7 +84,8 @@ The Matrix homeserver can observe routing metadata, timing, and encrypted media 
 
 ## Requirements
 
-Use a dedicated Matrix account for the local desktop bridge.
+Use a dedicated Matrix account for password login whenever your homeserver permits one.
+On an SSO-only homeserver, the bridge instead adds a dedicated device to the account selected in the browser.
 The desktop account and the cloud MindRoom entity must use the same Matrix federation environment and must be able to exchange to-device events and media.
 Install the optional local desktop dependency on the computer being controlled:
 
@@ -102,14 +103,32 @@ Chrome and Brave are supported by the local command through an explicit browser 
 
 ## 1. Create the Local Desktop Device
 
-Create a dedicated Matrix user such as `@my-laptop:example.org` using your normal Matrix administration or registration flow.
-Run the one-time login on the local computer and enter that account's password at the hidden prompt:
+For password login, create a dedicated Matrix user such as `@my-laptop:example.org` using your normal Matrix administration or registration flow.
+By default, the login command checks the homeserver's advertised methods.
+It uses password login when available and otherwise opens Matrix SSO in your browser.
+
+For password login, pass the dedicated user ID and enter its password at the hidden prompt:
 
 ```bash
 mindroom desktop login \
   --user-id @my-laptop:example.org \
   --homeserver https://matrix.example.org
 ```
+
+For an SSO-only homeserver, omit `--user-id` and complete authentication in the browser:
+
+```bash
+mindroom desktop login \
+  --homeserver https://matrix.example.org
+```
+
+You may still pass `--user-id` during SSO as an identity check; MindRoom attempts to revoke and always rejects a newly issued session if SSO returns a different Matrix user.
+Use `--login-method sso` to force SSO when the homeserver also advertises password login.
+If the homeserver exposes multiple SSO providers, pass its provider ID with `--sso-idp ID` to select one directly.
+Use `--no-open-browser` to print a URL that you can open in the browser of your choice.
+The browser returns a short-lived, single-use Matrix login token to an unguessable callback path on `127.0.0.1`.
+MindRoom exchanges that token immediately and never writes it to disk or terminal logs.
+It does not create or replace account-level cross-signing keys for an SSO account; the bridge authenticates this transport by pinning the exact device ID and Ed25519 key shown after login.
 
 The command saves only the reusable Matrix access token and device identifiers under the selected MindRoom storage directory.
 On Unix, the session file is forced to mode `0600`, and the bridge refuses to load it if group or other users can read it.
@@ -125,7 +144,7 @@ Copy these exact public identity values to the cloud MindRoom configuration.
 
 ### Homeservers Behind an Identity-Aware Proxy
 
-A command-line Matrix client cannot reuse an interactive browser login cookie.
+A command-line Matrix client cannot reuse an interactive browser proxy cookie.
 If an identity-aware proxy requires machine credentials, put its required request headers in a separate JSON file:
 
 ```json
@@ -151,6 +170,7 @@ MindRoom refuses group-readable or world-readable header files on Unix.
 The headers apply to every Matrix request made by the desktop client, including login, sync, encryption-key, and media requests.
 They are not copied into the saved Matrix session.
 Set `MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE` to the file path instead of repeating the option on both commands.
+During Matrix SSO, the browser handles any interactive proxy authentication while the header file authenticates the CLI's login-method discovery, token exchange, and later Matrix requests.
 Configure the proxy to accept these machine credentials only for the Matrix endpoints the desktop device needs, while keeping normal Matrix authentication enabled.
 
 ## 2. Configure the Cloud Agent

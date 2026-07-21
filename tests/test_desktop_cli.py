@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -14,6 +14,7 @@ from typer.testing import CliRunner
 
 import mindroom.cli.desktop as desktop_cli
 from mindroom.cli.desktop import desktop_app
+from mindroom.desktop.login_method import DesktopLoginMethod
 from mindroom.desktop.session import DesktopMatrixSession, DesktopSessionError
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 
@@ -43,6 +44,8 @@ def test_desktop_login_accepts_explicit_homeserver(monkeypatch: pytest.MonkeyPat
             "@laptop:example.org",
             "--homeserver",
             "https://matrix.example.org",
+            "--login-method",
+            "password",
             "--matrix-http-headers-file",
             str(headers_path),
         ],
@@ -51,6 +54,75 @@ def test_desktop_login_accepts_explicit_homeserver(monkeypatch: pytest.MonkeyPat
     assert result.exit_code == 0, result.output
     assert login.await_args.kwargs["homeserver"] == "https://matrix.example.org"
     assert login.await_args.kwargs["http_headers"] == {"X-Access-Client": "test-secret"}
+    assert login.await_args.kwargs["password"] == "test-password"  # noqa: S105 - Test-only password.
+    assert login.await_args.kwargs["login_token"] is None
+
+
+def test_desktop_login_uses_browser_sso_without_password_or_user_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """SSO-only homeservers open a browser and persist the returned Matrix session."""
+    runtime_paths = SimpleNamespace(storage_root=tmp_path)
+    login = AsyncMock()
+    discover = AsyncMock(return_value=DesktopLoginMethod.SSO)
+
+    def receive_token(*_args: object, **_kwargs: object) -> str:
+        return "short-lived-token"
+
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
+    monkeypatch.setattr("mindroom.desktop.session.resolve_desktop_login_method", discover)
+    monkeypatch.setattr("mindroom.desktop.sso.receive_sso_login_token", receive_token)
+    monkeypatch.setattr(desktop_cli, "_login_and_save", login)
+
+    result = runner.invoke(
+        desktop_app,
+        ["login", "--homeserver", "https://matrix.example.org"],
+    )
+
+    assert result.exit_code == 0, result.output
+    discover.assert_awaited_once()
+    assert login.await_args.kwargs["user_id"] is None
+    assert login.await_args.kwargs["password"] is None
+    assert login.await_args.kwargs["login_token"] == "short-lived-token"  # noqa: S105 - Test-only token.
+
+
+def test_desktop_login_sso_idp_selects_sso_and_reaches_browser(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A named IdP selects SSO and is forwarded to the browser redirect."""
+    runtime_paths = SimpleNamespace(storage_root=tmp_path)
+    login = AsyncMock()
+    discover = AsyncMock(return_value=DesktopLoginMethod.SSO)
+    receive_token = MagicMock(return_value="short-lived-token")
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
+    monkeypatch.setattr("mindroom.desktop.session.resolve_desktop_login_method", discover)
+    monkeypatch.setattr("mindroom.desktop.sso.receive_sso_login_token", receive_token)
+    monkeypatch.setattr(desktop_cli, "_login_and_save", login)
+
+    result = runner.invoke(
+        desktop_app,
+        ["login", "--homeserver", "https://matrix.example.org", "--sso-idp", "company-sso"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert discover.await_args.args[0] is DesktopLoginMethod.SSO
+    assert receive_token.call_args.kwargs["idp_id"] == "company-sso"
+
+
+def test_desktop_password_login_requires_user_id(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Explicit password mode fails before prompting when its identity is missing."""
+    runtime_paths = SimpleNamespace(storage_root=tmp_path)
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
+
+    result = runner.invoke(
+        desktop_app,
+        ["login", "--homeserver", "https://matrix.example.org", "--login-method", "password"],
+    )
+
+    assert result.exit_code == 1
+    assert "--user-id is required" in result.output
 
 
 def test_desktop_run_loads_matrix_http_headers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -145,7 +217,15 @@ def test_login_command_preserves_unexpected_environment_errors(
 
     result = runner.invoke(
         desktop_app,
-        ["login", "--user-id", "@laptop:example.org", "--homeserver", "https://matrix.example.org"],
+        [
+            "login",
+            "--user-id",
+            "@laptop:example.org",
+            "--homeserver",
+            "https://matrix.example.org",
+            "--login-method",
+            "password",
+        ],
     )
 
     assert isinstance(result.exception, PermissionError)

@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from mindroom.desktop.session import (
+    DesktopLoginMethod,
     DesktopMatrixSession,
     DesktopSessionError,
     _prepare_crypto,
@@ -18,6 +19,7 @@ from mindroom.desktop.session import (
     load_desktop_session,
     login_desktop_client,
     open_desktop_client,
+    resolve_desktop_login_method,
     save_desktop_session,
 )
 from mindroom.matrix.client_session import PermanentMatrixStartupError
@@ -121,6 +123,71 @@ def test_http_headers_file_requires_string_mapping(tmp_path: Path, payload: str)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("flows", "expected"),
+    [
+        (("m.login.password", "m.login.sso"), DesktopLoginMethod.PASSWORD),
+        (("m.login.token", "m.login.sso"), DesktopLoginMethod.SSO),
+    ],
+)
+async def test_auto_login_method_uses_advertised_matrix_flows(
+    monkeypatch: pytest.MonkeyPatch,
+    flows: tuple[str, ...],
+    expected: DesktopLoginMethod,
+) -> None:
+    """Auto preserves password compatibility and falls back to SSO-only homeservers."""
+    query = AsyncMock(return_value=flows)
+    monkeypatch.setattr("mindroom.desktop.session.login_flows", query)
+    runtime_paths = SimpleNamespace()
+
+    resolved = await resolve_desktop_login_method(
+        DesktopLoginMethod.AUTO,
+        homeserver="https://matrix.example.org",
+        runtime_paths=runtime_paths,
+        http_headers={"X-Access-Client": "test-secret"},
+    )
+
+    assert resolved is expected
+    query.assert_awaited_once_with(
+        "https://matrix.example.org",
+        runtime_paths,
+        http_headers={"X-Access-Client": "test-secret"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_explicit_login_method_skips_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Operators can force SSO when a homeserver also advertises password login."""
+    query = AsyncMock()
+    monkeypatch.setattr("mindroom.desktop.session.login_flows", query)
+
+    resolved = await resolve_desktop_login_method(
+        DesktopLoginMethod.SSO,
+        homeserver="https://matrix.example.org",
+        runtime_paths=SimpleNamespace(),
+    )
+
+    assert resolved is DesktopLoginMethod.SSO
+    query.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_login_method_rejects_unsupported_flows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Application-service-only servers produce a clear local setup error."""
+    monkeypatch.setattr(
+        "mindroom.desktop.session.login_flows",
+        AsyncMock(return_value=("m.login.application_service",)),
+    )
+
+    with pytest.raises(DesktopSessionError, match=r"m\.login\.application_service"):
+        await resolve_desktop_login_method(
+            DesktopLoginMethod.AUTO,
+            homeserver="https://matrix.example.org",
+            runtime_paths=SimpleNamespace(),
+        )
+
+
+@pytest.mark.asyncio
 async def test_initial_crypto_sync_does_not_announce_bridge_online() -> None:
     """Presence stays offline until the command callback is registered and sync-forever starts."""
     client = SimpleNamespace(
@@ -160,6 +227,49 @@ async def test_login_translates_expected_matrix_authentication_failure(monkeypat
         runtime_paths,
         http_headers={"X-Access-Client": "test-secret"},
     )
+
+
+@pytest.mark.asyncio
+async def test_sso_login_uses_returned_identity_without_password(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SSO token exchange owns user identity and still prepares one encrypted device."""
+    client = SimpleNamespace(
+        user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        access_token="matrix-access-token",  # noqa: S106 - Test-only access token.
+        close=AsyncMock(),
+    )
+    token_login = AsyncMock(return_value=client)
+    prepare = AsyncMock()
+    cross_sign = AsyncMock()
+    monkeypatch.setattr("mindroom.desktop.session.login_with_token", token_login)
+    monkeypatch.setattr("mindroom.desktop.session._prepare_crypto", prepare)
+    monkeypatch.setattr("mindroom.desktop.session.ensure_agent_cross_signing", cross_sign)
+    runtime_paths = SimpleNamespace()
+
+    returned_client, session = await login_desktop_client(
+        homeserver="https://matrix.example.org",
+        user_id=None,
+        login_token="short-lived-token",  # noqa: S106 - Test-only login token.
+        runtime_paths=runtime_paths,
+        http_headers={"X-Access-Client": "test-secret"},
+    )
+
+    assert returned_client is client
+    assert session == DesktopMatrixSession(
+        homeserver="https://matrix.example.org",
+        user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        access_token="matrix-access-token",  # noqa: S106 - Test-only access token.
+    )
+    token_login.assert_awaited_once_with(
+        "https://matrix.example.org",
+        "short-lived-token",
+        runtime_paths,
+        expected_user_id=None,
+        http_headers={"X-Access-Client": "test-secret"},
+    )
+    prepare.assert_awaited_once_with(client)
+    cross_sign.assert_not_awaited()
 
 
 @pytest.mark.asyncio
