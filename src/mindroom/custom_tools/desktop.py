@@ -226,7 +226,7 @@ class DesktopTools(Toolkit):
                 session_id=self._command_session_id,
                 sequence=next(self._command_sequences),
                 issued_at_ms=now_ms,
-                expires_at_ms=now_ms + round(self._timeout_seconds * 1000),
+                expires_at_ms=now_ms + round(configuration.timeout_seconds * 1000),
                 action=action,  # ty: ignore[invalid-argument-type] - validated by _action_parameters.
                 requester_id=context.requester_id,
                 agent_name=context.agent_name,

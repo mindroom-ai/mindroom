@@ -238,7 +238,7 @@ async def _desktop_agent_for_room(
         return None
     agent_name, agent_user_id = eligible[0]
     expected_members = {requester_user_id, room.own_user_id, agent_user_id}
-    if set(room.users) != expected_members or room.member_count != len(expected_members):
+    if set(room.users) != expected_members:
         return None
     return agent_name
 
