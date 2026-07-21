@@ -8,6 +8,12 @@ from threading import Barrier
 from typing import TYPE_CHECKING
 
 import pytest
+from agno.agent import Agent
+from agno.agent._tools import parse_tools
+from agno.models.openai import OpenAIChat
+from agno.run import RunContext
+from agno.session import AgentSession
+from agno.tools import Toolkit
 
 from mindroom.agents import (
     _build_dynamic_tooling_instruction_block,
@@ -20,6 +26,7 @@ from mindroom.claude_prompt_cache import _DEFERRED_TOOL_NAMES_ATTR
 from mindroom.config.main import Config
 from mindroom.config.models import EffectiveToolConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.custom_tools import update_awareness
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.openai_tool_search import _DEFERRED_TOOL_NAMES_ATTR as _OPENAI_DEFERRED_TOOL_NAMES_ATTR
@@ -28,6 +35,7 @@ from mindroom.tool_system import dynamic_toolkits as dynamic_toolkits_module
 from mindroom.tool_system.dynamic_toolkits import (
     get_loaded_tools_for_session,
     save_loaded_tools_for_session,
+    suppress_fully_deferred_toolkit_instructions,
     visible_tool_surface,
 )
 from tests.identity_helpers import persist_entity_accounts
@@ -84,6 +92,32 @@ def _validated_config(tmp_path: Path, raw: dict[str, object]) -> Config:
 
 def _tool_payload(result: str) -> dict[str, object]:
     return json.loads(result)
+
+
+def _render_system_prompt(agent: Agent) -> str:
+    model = agent.model
+    assert model is not None
+    assert not isinstance(model, str)
+    parse_tools(agent, agent.tools or [], model)
+    message = agent.get_system_message(
+        session=AgentSession(session_id="session", agent_id=agent.id),
+        run_context=RunContext(run_id="run", session_id="session", session_state={}),
+        tools=None,
+        add_session_state_to_context=False,
+    )
+    assert message is not None
+    return str(message.content)
+
+
+def _install_update_awareness_status(monkeypatch: pytest.MonkeyPatch) -> str:
+    status = update_awareness._MindRoomReleaseStatus(
+        current_version="1.0.0",
+        latest_version="1.0.0",
+        update_available=False,
+        release_check_succeeded=True,
+    )
+    monkeypatch.setattr(update_awareness, "_mindroom_release_status", lambda _runtime_paths: status)
+    return "<mindroom_update_awareness>"
 
 
 def _runtime_tool_configs(
@@ -836,6 +870,86 @@ def test_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machi
     assert not any(block.startswith("## Dynamic Tools") for block in agent.instructions)
     assert not any("Dynamic tools currently loaded" in block for block in agent.instructions)
     assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
+
+
+def test_native_tool_search_omits_fully_deferred_toolkit_instructions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A native-search toolkit should not describe functions that are all deferred."""
+    instruction_marker = _install_update_awareness_status(monkeypatch)
+    raw = _base_config_data()
+    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-4-8"}  # type: ignore[index]
+    raw["agents"]["code"]["model"] = "claude"  # type: ignore[index]
+    raw["agents"]["code"]["tools"] = [{"update_awareness": {"defer": True}}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+    toolkit = next(tool for tool in agent.tools if tool.name == "update_awareness")
+
+    assert toolkit.instructions is not None
+    assert instruction_marker in toolkit.instructions
+    assert toolkit.add_instructions is False
+    assert instruction_marker not in _render_system_prompt(agent)
+    assert vars(agent.model)[_DEFERRED_TOOL_NAMES_ATTR] == frozenset({"get_mindroom_update_status"})
+
+
+def test_partially_deferred_toolkit_keeps_instructions_inline() -> None:
+    """A toolkit with any active function should retain its shared instructions."""
+
+    def active_tool() -> str:
+        return "active"
+
+    def deferred_tool() -> str:
+        return "deferred"
+
+    instruction_marker = "MIXED_TOOLKIT_INSTRUCTIONS"
+    toolkit = Toolkit(
+        name="mixed",
+        tools=[active_tool, deferred_tool],
+        instructions=instruction_marker,
+        add_instructions=True,
+    )
+    suppress_fully_deferred_toolkit_instructions([toolkit], {"deferred_tool"})
+    agent = Agent(id="mixed-agent", model=OpenAIChat(id="test"), tools=[toolkit])
+
+    assert toolkit.add_instructions is True
+    assert instruction_marker in _render_system_prompt(agent)
+
+
+def test_homegrown_load_tool_makes_toolkit_instructions_available(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rebuilding load path should add a deferred toolkit's instructions after load."""
+    instruction_marker = _install_update_awareness_status(monkeypatch)
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"update_awareness": {"defer": True}}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+    runtime_paths = _runtime_paths(tmp_path)
+
+    unloaded_agent = create_agent(
+        "code",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        session_id="thread-a",
+    )
+    manager = next(tool for tool in unloaded_agent.tools if tool.name == "dynamic_tools")
+    assert instruction_marker not in _render_system_prompt(unloaded_agent)
+    assert _tool_payload(manager.load_tool("update_awareness"))["status"] == "loaded"
+
+    loaded_agent = create_agent(
+        "code",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        session_id="thread-a",
+    )
+    loaded_toolkit = next(tool for tool in loaded_agent.tools if tool.name == "update_awareness")
+
+    assert loaded_toolkit.add_instructions is True
+    assert instruction_marker in _render_system_prompt(loaded_agent)
 
 
 @pytest.mark.parametrize(("provider", "model_id"), [("codex", "gpt-5.6"), ("openai", "gpt-5.6")])

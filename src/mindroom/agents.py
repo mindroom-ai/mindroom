@@ -46,6 +46,7 @@ from mindroom.tool_system.dynamic_toolkits import (
     deferred_tool_catalog_entries,
     has_deferred_tools,
     resolve_dynamic_tool_selection,
+    suppress_fully_deferred_toolkit_instructions,
     visible_tool_surface,
 )
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
@@ -1388,6 +1389,7 @@ def _assemble_agent_toolkits(
                 agent=agent_name,
                 error=str(exc),
             )
+    suppress_fully_deferred_toolkit_instructions(tools, deferred_wire_tool_names)
     return _AgentToolAssembly(
         tools=tools,
         loaded_tools=loaded_tools,

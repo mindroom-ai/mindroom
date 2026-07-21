@@ -11,7 +11,9 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_system.catalog import TOOL_METADATA, validate_authored_tool_entry_overrides
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Collection
+
+    from agno.tools import Toolkit
 
     from mindroom.config.main import Config
 
@@ -149,6 +151,18 @@ def _normalize_effective_tool_config_overrides(
 def has_deferred_tools(config: Config, agent_name: str) -> bool:
     """Return whether one agent has at least one authored deferred tool."""
     return bool(config.resolve_entity(agent_name).authored_deferred_tool_configs)
+
+
+def suppress_fully_deferred_toolkit_instructions(
+    toolkits: Collection[Toolkit],
+    deferred_function_names: Collection[str],
+) -> None:
+    """Keep toolkit instructions inline only when at least one function is active."""
+    deferred_names = frozenset(deferred_function_names)
+    for toolkit in toolkits:
+        function_names = frozenset((*toolkit.get_functions(), *toolkit.get_async_functions()))
+        if function_names and function_names <= deferred_names:
+            toolkit.add_instructions = False
 
 
 def _special_tool_names(
