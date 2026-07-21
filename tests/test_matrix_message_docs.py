@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
 from typing import TYPE_CHECKING
+
+import markdown
 
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
 
@@ -63,6 +66,15 @@ def test_matrix_message_docstring_stays_within_hard_cap() -> None:
 
     assert docstring is not None
     assert len(docstring) <= 2_500
+
+
+def test_matrix_message_reference_renders_section_and_argument_lists() -> None:
+    """The published long-form reference should render its seven lists."""
+    reference_path = Path(__file__).resolve().parents[1] / "docs" / "tools" / "matrix-message.md"
+    rendered = markdown.markdown(reference_path.read_text(encoding="utf-8"))
+
+    assert rendered.count("<ul>") == 7
+    assert "<li><code>action</code> (<code>str</code>):" in rendered
 
 
 def test_matrix_message_parameter_descriptions_are_exposed() -> None:
