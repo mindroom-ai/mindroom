@@ -34,6 +34,8 @@ class DesktopSsoError(RuntimeError):
 class _SsoCallbackServer(HTTPServer):
     """One-process loopback receiver carrying an unguessable callback path."""
 
+    # Match BaseServer.serve_forever's polling interval so Windows can dispatch Ctrl-C.
+    timeout = 0.5
     callback_path: str
     login_token: str | None
     callback_error: str | None
