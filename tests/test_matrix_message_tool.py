@@ -409,21 +409,6 @@ async def test_matrix_message_rejects_invalid_message_extras() -> None:
     mock_send.assert_not_awaited()
 
 
-def test_matrix_message_tool_description_documents_message_extras() -> None:
-    """The model-facing tool description should briefly explain extras with an example."""
-    description = MatrixMessageTools.matrix_message.__doc__
-
-    assert description is not None
-    assert "message_extras" in description
-    assert "text/plain" in description
-    assert "text/markdown" in description
-    assert "text/html" in description
-    assert "sanitized rich fragments" in description
-    assert "tables" in description
-    assert "Do not include scripts" in description
-    assert '"title": "Evidence"' in description
-
-
 @pytest.mark.asyncio
 async def test_matrix_message_send_room_sentinel_stays_room_level() -> None:
     """thread_id='room' should disable thread metadata for sends."""

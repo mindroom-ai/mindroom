@@ -73,6 +73,7 @@ matrix_message(action="react", target="$event123", message="✅")
 
 ### Notes
 
+- See [Matrix Message Full Semantics](https://docs.mindroom.chat/tools/matrix-message/) for the complete long-form method reference relocated from the model-facing description.
 - `ignore_mentions` defaults to `True`, which writes `com.mindroom.skip_mentions=True` so visible mentions do not wake other agents accidentally.
 - Set `ignore_mentions=False` only for deliberate self-handoffs or cross-agent dispatch, because the tool will preserve normal mention handling and record `com.mindroom.original_sender` for human requesters.
 - Use `action="context"` before a follow-up write when you want to inspect the resolved `room_id`, `thread_id`, and `reply_to_event_id`.

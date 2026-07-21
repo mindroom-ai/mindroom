@@ -333,20 +333,16 @@ class MatrixVoiceMessageTools(Toolkit):
         caption: str | None = None,
         companion_message: str | None = None,
     ) -> str:
-        """Generate and send a Matrix voice message from text using configured text-to-speech.
+        """Generate and send a Matrix voice message using configured text-to-speech.
 
-        The tool sends one `m.audio` Matrix event with voice-message metadata.
-        It defaults to the current room and current thread.
-        Pass `thread_id="room"` to force a room-level voice message instead of inheriting the active thread.
-        Pass `companion_message` to send a normal Matrix text event to the same room/thread before the voice event.
-        `caption` is only the audio event body; it is not a separate timeline message.
+        Sends one voice-note `m.audio` event to the current room/thread. `thread_id="room"` forces room scope. `companion_message` sends normal text to the same target first; `caption` only labels the audio event.
 
         Args:
-            text (str): Required spoken content to synthesize into the voice message.
-            room_id (str | None): Optional target room ID, full alias, or managed room key; defaults to the current room context when omitted.
-            thread_id (str | None): Optional explicit thread target; `thread_id="room"` forces room-level scope instead of inheriting the current thread.
-            caption (str | None): Optional Matrix event body shown beside the audio. If omitted, the event body is a short generated audio filename.
-            companion_message (str | None): Optional normal text message to send to the same target before the voice message. Mentions are suppressed like `matrix_message` default text sends.
+            text (str): Required spoken content.
+            room_id (str | None): Target room; defaults to the current room.
+            thread_id (str | None): Explicit thread; `thread_id="room"` forces room scope.
+            caption (str | None): Matrix event body; defaults to a generated filename.
+            companion_message (str | None): Normal text message sent first, with mentions suppressed.
 
         """
         context = get_tool_runtime_context()

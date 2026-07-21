@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -639,10 +640,14 @@ def test_matrix_voice_message_description_covers_critical_behavior() -> None:
     description = function.description
 
     assert description is not None
+    assert len(description) <= 800
     assert "send a Matrix voice message" in description
     assert "configured text-to-speech" in description
     assert 'thread_id="room"' in description
     assert "companion_message" in description
+    docstring = inspect.getdoc(MatrixVoiceMessageTools.matrix_voice_message)
+    assert docstring is not None
+    assert len(docstring) <= 800
 
 
 def test_matrix_voice_message_parameter_descriptions_are_exposed() -> None:
@@ -652,5 +657,5 @@ def test_matrix_voice_message_parameter_descriptions_are_exposed() -> None:
 
     assert "spoken content" in properties["text"]["description"]
     assert "Matrix event body" in properties["caption"]["description"]
-    assert "normal text message" in properties["companion_message"]["description"]
+    assert "Normal text message" in properties["companion_message"]["description"]
     assert 'thread_id="room"' in properties["thread_id"]["description"]

@@ -38,6 +38,7 @@ nav = [
     { "AI & Generation" = "tools/ai-and-generation.md" },
     { "Media & Content" = "tools/media-and-content.md" },
     { "Matrix & Attachments" = "tools/matrix-and-attachments.md" },
+    { "Matrix Message Full Semantics" = "tools/matrix-message.md" },
     { "Matrix Desktop Bridge" = "tools/desktop.md" },
     { "Messaging & Social" = "tools/messaging-and-social.md" },
     { "Project Management" = "tools/project-management.md" },

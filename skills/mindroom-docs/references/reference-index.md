@@ -31,6 +31,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | AI & Generation | `tools/ai-and-generation.md` | `tools/ai-and-generation/index.md` | `page__tools__ai-and-generation__index.md` |
 | Media & Content | `tools/media-and-content.md` | `tools/media-and-content/index.md` | `page__tools__media-and-content__index.md` |
 | Matrix & Attachments | `tools/matrix-and-attachments.md` | `tools/matrix-and-attachments/index.md` | `page__tools__matrix-and-attachments__index.md` |
+| Matrix Message Full Semantics | `tools/matrix-message.md` | `tools/matrix-message/index.md` | `page__tools__matrix-message__index.md` |
 | Matrix Desktop Bridge | `tools/desktop.md` | `tools/desktop/index.md` | `page__tools__desktop__index.md` |
 | Messaging & Social | `tools/messaging-and-social.md` | `tools/messaging-and-social/index.md` | `page__tools__messaging-and-social__index.md` |
 | Project Management | `tools/project-management.md` | `tools/project-management/index.md` | `page__tools__project-management__index.md` |
