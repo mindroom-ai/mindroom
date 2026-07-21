@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import time
 from pathlib import Path  # noqa: TC003 - Typer evaluates command annotations at runtime.
 from typing import TYPE_CHECKING
 
 import typer
 from rich.console import Console
+
+from mindroom.desktop.login_method import DesktopLoginMethod
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -21,12 +24,32 @@ if TYPE_CHECKING:
 
 _console = Console()
 _error_console = Console(stderr=True)
+_DESKTOP_EXTRA = "desktop"
+_DESKTOP_DEPENDENCIES = ["pyautogui"]
+_MACOS_DESKTOP_DEPENDENCIES = [
+    "pyobjc-framework-applicationservices",
+    "pyobjc-framework-cocoa",
+]
 
 desktop_app = typer.Typer(
     name="desktop",
     help="Connect allowlisted local applications to cloud MindRoom over Matrix E2EE.",
     no_args_is_help=True,
 )
+
+
+def _ensure_desktop_dependencies(runtime_paths: RuntimePaths) -> None:
+    """Install the optional desktop runtime before starting the bridge."""
+    from mindroom.desktop.provider import DesktopProviderError  # noqa: PLC0415
+    from mindroom.tool_system.dependencies import ensure_optional_deps  # noqa: PLC0415
+
+    dependencies = [*_DESKTOP_DEPENDENCIES]
+    if sys.platform == "darwin":
+        dependencies.extend(_MACOS_DESKTOP_DEPENDENCIES)
+    try:
+        ensure_optional_deps(dependencies, _DESKTOP_EXTRA, runtime_paths)
+    except ImportError as exc:
+        raise DesktopProviderError(str(exc)) from exc
 
 
 @desktop_app.command("controller")
@@ -65,11 +88,31 @@ def desktop_controller(
 
 @desktop_app.command("login")
 def desktop_login(
-    user_id: str = typer.Option(..., "--user-id", help="Dedicated Matrix user ID for this desktop device."),
+    user_id: str | None = typer.Option(
+        None,
+        "--user-id",
+        help="Expected Matrix user ID; required for password login and optional for SSO.",
+    ),
     homeserver: str | None = typer.Option(
         None,
         "--homeserver",
         help="Matrix homeserver URL; defaults to the configured MindRoom homeserver.",
+    ),
+    login_method: DesktopLoginMethod = typer.Option(  # noqa: B008
+        DesktopLoginMethod.AUTO,
+        "--login-method",
+        case_sensitive=False,
+        help="Matrix login method. Auto uses password when advertised, otherwise browser SSO.",
+    ),
+    sso_idp: str | None = typer.Option(
+        None,
+        "--sso-idp",
+        help="Matrix SSO identity-provider ID. Selects SSO when login method is auto.",
+    ),
+    open_browser: bool = typer.Option(
+        True,
+        "--open-browser/--no-open-browser",
+        help="Open Matrix SSO in the default browser; otherwise print the URL.",
     ),
     replace: bool = typer.Option(False, "--replace", help="Replace the saved session with a fresh Matrix device."),
     matrix_http_headers_file: Path | None = typer.Option(  # noqa: B008
@@ -98,7 +141,9 @@ def desktop_login(
         DesktopSessionError,
         desktop_session_path,
         load_desktop_http_headers,
+        resolve_desktop_login_method,
     )
+    from mindroom.desktop.sso import DesktopSsoError, receive_sso_login_token  # noqa: PLC0415
 
     runtime_paths = activate_cli_runtime(config_path, storage_path=storage_path)
     session_path = desktop_session_path(runtime_paths)
@@ -107,30 +152,79 @@ def desktop_login(
         raise typer.Exit(1)
     try:
         http_headers = load_desktop_http_headers(matrix_http_headers_file)
-        password = os.environ.get("MINDROOM_DESKTOP_MATRIX_PASSWORD")
-        if password is None:
-            password = typer.prompt("Matrix password", hide_input=True, confirmation_prompt=False)
+        resolved_homeserver = homeserver or runtime_matrix_homeserver(runtime_paths)
+        requested_login_method = _login_method_for_sso_idp(login_method, sso_idp=sso_idp)
+        resolved_login_method = asyncio.run(
+            resolve_desktop_login_method(
+                requested_login_method,
+                homeserver=resolved_homeserver,
+                runtime_paths=runtime_paths,
+                http_headers=http_headers,
+            ),
+        )
+        password: str | None = None
+        login_token: str | None = None
+        if resolved_login_method is DesktopLoginMethod.PASSWORD:
+            user_id = _require_password_user_id(user_id)
+            password = os.environ.get("MINDROOM_DESKTOP_MATRIX_PASSWORD")
+            if password is None:
+                password = typer.prompt("Matrix password", hide_input=True, confirmation_prompt=False)
+        else:
+            login_token = receive_sso_login_token(
+                resolved_homeserver,
+                open_browser=open_browser,
+                announce=lambda message: _console.print(message, markup=False),
+                idp_id=sso_idp,
+            )
         asyncio.run(
             _login_and_save(
                 runtime_paths=runtime_paths,
-                homeserver=homeserver or runtime_matrix_homeserver(runtime_paths),
+                homeserver=resolved_homeserver,
                 user_id=user_id,
                 password=password,
+                login_token=login_token,
                 session_path=session_path,
                 http_headers=http_headers,
             ),
         )
-    except DesktopSessionError as exc:
+    except (DesktopSessionError, DesktopSsoError) as exc:
         _error_console.print(f"[red]Desktop login failed:[/red] {exc}")
         raise typer.Exit(1) from None
+
+
+def _require_password_user_id(user_id: str | None) -> str:
+    """Return a password-login identity or raise one friendly CLI error."""
+    from mindroom.desktop.session import DesktopSessionError  # noqa: PLC0415
+
+    if user_id is None:
+        msg = "--user-id is required for Matrix password login."
+        raise DesktopSessionError(msg)
+    return user_id
+
+
+def _login_method_for_sso_idp(
+    login_method: DesktopLoginMethod,
+    *,
+    sso_idp: str | None,
+) -> DesktopLoginMethod:
+    """Make an explicit SSO provider select SSO without hiding conflicts."""
+    if sso_idp is None:
+        return login_method
+    if login_method is DesktopLoginMethod.PASSWORD:
+        from mindroom.desktop.session import DesktopSessionError  # noqa: PLC0415
+
+        msg = "--sso-idp cannot be used with --login-method password."
+        raise DesktopSessionError(msg)
+    return DesktopLoginMethod.SSO
 
 
 async def _login_and_save(
     *,
     runtime_paths: RuntimePaths,
     homeserver: str,
-    user_id: str,
-    password: str,
+    user_id: str | None,
+    password: str | None,
+    login_token: str | None,
     session_path: Path,
     http_headers: Mapping[str, str] | None = None,
 ) -> None:
@@ -144,6 +238,7 @@ async def _login_and_save(
         homeserver=homeserver,
         user_id=user_id,
         password=password,
+        login_token=login_token,
         runtime_paths=runtime_paths,
         http_headers=http_headers,
     )
@@ -262,6 +357,7 @@ def desktop_run(
     try:
         http_headers = load_desktop_http_headers(matrix_http_headers_file)
         session = load_desktop_session(desktop_session_path(runtime_paths))
+        _ensure_desktop_dependencies(runtime_paths)
         asyncio.run(
             _run_bridge(
                 runtime_paths=runtime_paths,

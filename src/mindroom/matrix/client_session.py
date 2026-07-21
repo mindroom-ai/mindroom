@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import ssl as ssl_module
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -206,7 +207,10 @@ def _create_matrix_client(
 
     if store_path is None and user_id:
         store_path = str(olm_store_dir(user_id, runtime_paths=runtime_paths))
-        Path(store_path).mkdir(parents=True, exist_ok=True)
+        store_dir = Path(store_path)
+        store_dir.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            store_dir.chmod(0o700)
 
     client = _MindRoomAsyncClient(
         homeserver,
@@ -231,9 +235,17 @@ def create_authenticated_client(
     device_id: str,
     access_token: str,
     runtime_paths: RuntimePaths,
+    *,
+    http_headers: Mapping[str, str] | None = None,
 ) -> nio.AsyncClient:
     """Create a Matrix client from newly issued login credentials."""
-    client = _create_matrix_client(homeserver, runtime_paths, user_id, access_token)
+    client = _create_matrix_client(
+        homeserver,
+        runtime_paths,
+        user_id,
+        access_token,
+        http_headers=http_headers,
+    )
     client.restore_login(user_id, device_id, access_token)
     return client
 
@@ -278,6 +290,94 @@ async def login(
     raise matrix_startup_error(msg, response=response)
 
 
+async def login_with_token(
+    homeserver: str,
+    login_token: str,
+    runtime_paths: RuntimePaths,
+    *,
+    expected_user_id: str | None = None,
+    http_headers: Mapping[str, str] | None = None,
+) -> nio.AsyncClient:
+    """Exchange one short-lived Matrix login token and restore its exact device."""
+    runtime_paths = _require_runtime_paths_arg(runtime_paths)
+    login_client = _create_matrix_client(homeserver, runtime_paths, http_headers=http_headers)
+    try:
+        response = await login_client.login(
+            token=login_token,
+            device_name="MindRoom Desktop Bridge",
+        )
+        if not isinstance(response, nio.LoginResponse):
+            msg = f"Failed to exchange Matrix login token: {response}"
+            raise matrix_startup_error(msg, response=response)
+        if expected_user_id is not None and response.user_id != expected_user_id:
+            await _revoke_unexpected_login(
+                login_client,
+                expected_user_id=expected_user_id,
+                actual_user_id=response.user_id,
+            )
+            msg = f"Matrix SSO returned {response.user_id}, but {expected_user_id} was requested."
+            raise matrix_startup_error(msg, permanent=True)
+        credentials = (response.user_id, response.device_id, response.access_token)
+    finally:
+        await login_client.close()
+
+    user_id, device_id, access_token = credentials
+    logger.info("matrix_login_succeeded", user_id=user_id, login_method="token")
+    return create_authenticated_client(
+        homeserver,
+        user_id,
+        device_id,
+        access_token,
+        runtime_paths,
+        http_headers=http_headers,
+    )
+
+
+async def _revoke_unexpected_login(
+    client: nio.AsyncClient,
+    *,
+    expected_user_id: str,
+    actual_user_id: str,
+) -> None:
+    """Best-effort revoke an SSO session issued for an unexpected identity."""
+    try:
+        response = await client.logout()
+    except Exception:
+        logger.warning(
+            "matrix_unexpected_sso_session_revoke_failed",
+            expected_user_id=expected_user_id,
+            actual_user_id=actual_user_id,
+            exc_info=True,
+        )
+        return
+    if isinstance(response, nio.ErrorResponse):
+        logger.warning(
+            "matrix_unexpected_sso_session_revoke_failed",
+            expected_user_id=expected_user_id,
+            actual_user_id=actual_user_id,
+            error=str(response),
+        )
+
+
+async def login_flows(
+    homeserver: str,
+    runtime_paths: RuntimePaths,
+    *,
+    http_headers: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Return login methods advertised by one Matrix homeserver."""
+    runtime_paths = _require_runtime_paths_arg(runtime_paths)
+    client = _create_matrix_client(homeserver, runtime_paths, http_headers=http_headers)
+    try:
+        response = await client.login_info()
+    finally:
+        await client.close()
+    if isinstance(response, nio.LoginInfoResponse):
+        return tuple(response.flows)
+    msg = f"Failed to query Matrix login methods: {response}"
+    raise matrix_startup_error(msg, response=response)
+
+
 async def restore_login(
     homeserver: str,
     user_id: str,
@@ -315,6 +415,8 @@ __all__ = [
     "PermanentMatrixStartupError",
     "create_authenticated_client",
     "login",
+    "login_flows",
+    "login_with_token",
     "matrix_client",
     "matrix_client_config",
     "matrix_startup_error",

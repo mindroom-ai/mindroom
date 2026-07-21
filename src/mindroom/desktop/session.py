@@ -8,10 +8,19 @@ import stat
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
+import aiohttp
 import nio
 
+from mindroom.desktop.login_method import DesktopLoginMethod
 from mindroom.durable_write import write_json_file_durable
-from mindroom.matrix.client_session import PermanentMatrixStartupError, login, olm_store_exists, restore_login
+from mindroom.matrix.client_session import (
+    PermanentMatrixStartupError,
+    login,
+    login_flows,
+    login_with_token,
+    olm_store_exists,
+    restore_login,
+)
 from mindroom.matrix.cross_signing import ensure_agent_cross_signing
 from mindroom.matrix.users import AgentMatrixUser
 
@@ -120,34 +129,81 @@ def load_desktop_http_headers(path: Path | None) -> dict[str, str] | None:
     return cast("dict[str, str]", raw)
 
 
+async def resolve_desktop_login_method(
+    requested: DesktopLoginMethod,
+    *,
+    homeserver: str,
+    runtime_paths: RuntimePaths,
+    http_headers: Mapping[str, str] | None = None,
+) -> DesktopLoginMethod:
+    """Resolve automatic desktop login from methods advertised by Matrix."""
+    if requested is not DesktopLoginMethod.AUTO:
+        return requested
+    try:
+        flows = await login_flows(
+            homeserver,
+            runtime_paths,
+            http_headers=http_headers,
+        )
+    except (PermanentMatrixStartupError, aiohttp.ClientError, OSError, TimeoutError, ValueError) as exc:
+        msg = f"Could not discover Matrix login methods: {exc}"
+        raise DesktopSessionError(msg) from exc
+    if "m.login.password" in flows:
+        return DesktopLoginMethod.PASSWORD
+    if "m.login.sso" in flows:
+        return DesktopLoginMethod.SSO
+    advertised = ", ".join(sorted(flows)) or "none"
+    msg = f"Matrix homeserver offers no supported desktop login method (advertised: {advertised})."
+    raise DesktopSessionError(msg)
+
+
 async def login_desktop_client(
     *,
     homeserver: str,
-    user_id: str,
-    password: str,
+    user_id: str | None,
     runtime_paths: RuntimePaths,
+    password: str | None = None,
+    login_token: str | None = None,
     http_headers: Mapping[str, str] | None = None,
 ) -> tuple[nio.AsyncClient, DesktopMatrixSession]:
-    """Create a fresh cross-signed Matrix desktop device and its restorable session."""
+    """Create a fresh Matrix desktop device and its restorable session."""
+    if (password is None) == (login_token is None):
+        msg = "Desktop Matrix login requires exactly one password or SSO login token."
+        raise DesktopSessionError(msg)
+    if password is not None and user_id is None:
+        msg = "Desktop Matrix password login requires --user-id."
+        raise DesktopSessionError(msg)
     try:
-        client = await login(homeserver, user_id, password, runtime_paths, http_headers=http_headers)
-    except (PermanentMatrixStartupError, ValueError) as exc:
+        if login_token is not None:
+            client = await login_with_token(
+                homeserver,
+                login_token,
+                runtime_paths,
+                expected_user_id=user_id,
+                http_headers=http_headers,
+            )
+        else:
+            assert user_id is not None
+            assert password is not None
+            client = await login(homeserver, user_id, password, runtime_paths, http_headers=http_headers)
+    except (PermanentMatrixStartupError, aiohttp.ClientError, OSError, TimeoutError, ValueError) as exc:
         msg = f"Desktop Matrix login failed: {exc}"
         raise DesktopSessionError(msg) from exc
     try:
         await _prepare_crypto(client)
         authenticated_session = _session_from_authenticated_client(client, homeserver=homeserver)
-        await ensure_agent_cross_signing(
-            client,
-            AgentMatrixUser(
-                agent_name="desktop_bridge",
-                user_id=authenticated_session.user_id,
-                display_name="MindRoom Desktop Bridge",
-                password=password,
-                device_id=authenticated_session.device_id,
-                access_token=authenticated_session.access_token,
-            ),
-        )
+        if password is not None:
+            await ensure_agent_cross_signing(
+                client,
+                AgentMatrixUser(
+                    agent_name="desktop_bridge",
+                    user_id=authenticated_session.user_id,
+                    display_name="MindRoom Desktop Bridge",
+                    password=password,
+                    device_id=authenticated_session.device_id,
+                    access_token=authenticated_session.access_token,
+                ),
+            )
     except Exception:
         await client.close()
         raise
@@ -249,6 +305,7 @@ __all__ = [
     "login_desktop_client",
     "open_desktop_client",
     "prepare_desktop_client",
+    "resolve_desktop_login_method",
     "restore_desktop_client",
     "save_desktop_session",
 ]
