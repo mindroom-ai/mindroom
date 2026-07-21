@@ -3241,7 +3241,7 @@ Tool discovery never invalidates the prompt cache: Anthropic expands discovered 
 The `dynamic_tools` manager, its prompt blocks, and session loaded-tool state are not used on this path; all deferred toolkits are attached at agent build, so discovered calls execute directly.
 `defer: true, initial: true` tools stay in the rendered schema list as plain non-deferred tools.
 Instructions attached to a toolkit or its functions remain inline when any function in that toolkit is initially active.
-MindRoom omits those instructions when every function is deferred because native tool search cannot extend the already-sent system prompt when it discovers a tool.
+MindRoom omits those instructions only when every function is deferred and non-initial because native tool search cannot extend the already-sent system prompt when it discovers a tool.
 
 ## Runtime Tools
 
