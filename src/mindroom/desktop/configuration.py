@@ -7,7 +7,7 @@ from enum import Enum
 from typing import Any
 
 from mindroom.desktop.protocol import MAX_COMMAND_TTL_MS
-from mindroom.matrix.olm_to_device import PinnedMatrixDevice
+from mindroom.matrix.device_identity import PinnedMatrixDevice
 
 DESKTOP_IDENTITY_FIELDS = frozenset({"device_user_id", "device_id", "device_ed25519"})
 
@@ -78,9 +78,15 @@ def desktop_configuration_state(credentials: dict[str, Any] | None) -> DesktopCo
     )
 
 
+def desktop_runtime_config_error(values: dict[str, object]) -> str | None:
+    """Return one runtime configuration error after generic required-field checks."""
+    return desktop_configuration_state(values).error
+
+
 __all__ = [
     "DESKTOP_IDENTITY_FIELDS",
     "DesktopConfigurationState",
     "DesktopConfigurationStatus",
     "desktop_configuration_state",
+    "desktop_runtime_config_error",
 ]

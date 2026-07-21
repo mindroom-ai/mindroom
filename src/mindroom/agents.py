@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -23,12 +22,7 @@ from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent as Agent
 from mindroom.agent_knowledge_descriptions import knowledge_source_descriptions
 from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, native_tool_search_supported
-from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
-from mindroom.desktop.configuration import (
-    DESKTOP_IDENTITY_FIELDS,
-    DesktopConfigurationStatus,
-    desktop_configuration_state,
-)
+from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
@@ -51,12 +45,14 @@ from mindroom.tool_system.dynamic_toolkits import (
     VisibleToolSurface,
     deferred_tool_catalog_entries,
     has_deferred_tools,
+    requester_scoped_dynamic_tool_session_id,
     resolve_dynamic_tool_selection,
     suppress_fully_deferred_toolkit_instructions,
     visible_tool_surface,
 )
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.plugins import load_plugins
+from mindroom.tool_system.runtime_availability import resolve_agent_runtime_tool_availability
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.skills import build_agent_skills
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
@@ -485,16 +481,6 @@ def _tool_base_dir_override(
     return {"base_dir": str(workspace_path)}
 
 
-def _without_private_desktop_identity_overrides(
-    overrides: dict[str, object] | None,
-) -> dict[str, object] | None:
-    """Keep private Desktop identity requester-owned, never YAML-owned."""
-    if not overrides:
-        return overrides
-    sanitized = {key: value for key, value in overrides.items() if key not in DESKTOP_IDENTITY_FIELDS}
-    return sanitized or None
-
-
 def _build_registered_agent_tool(
     tool_name: str,
     runtime_paths: constants.RuntimePaths,
@@ -512,9 +498,6 @@ def _build_registered_agent_tool(
     runtime_overrides: dict[str, object] | None,
 ) -> Toolkit:
     """Build one registered toolkit using the resolved routing inputs for this agent."""
-    if tool_name == "desktop" and routing_agent_is_private and worker_scope in {"user", "user_agent"}:
-        tool_config_overrides = _without_private_desktop_identity_overrides(tool_config_overrides)
-        runtime_overrides = _without_private_desktop_identity_overrides(runtime_overrides)
     worker_target = build_agent_toolkit_worker_target(
         worker_scope,
         agent_name,
@@ -717,10 +700,10 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
-    if tool_name == "desktop_setup":
-        from mindroom.custom_tools.desktop_setup import DesktopSetupTools  # noqa: PLC0415
+    if tool_name == "tool_setup":
+        from mindroom.custom_tools.tool_setup import ToolSetupTools  # noqa: PLC0415
 
-        return DesktopSetupTools()
+        return ToolSetupTools(setup_required_tool_names)
 
     if tool_name == "compact_context":
         from mindroom.custom_tools.compact_context import CompactContextTools  # noqa: PLC0415
@@ -861,12 +844,7 @@ def _is_learning_enabled(agent_config: AgentConfig, defaults: DefaultsConfig) ->
 def _context_hidden_toolkits(execution_identity: ToolExecutionIdentity | None) -> frozenset[str]:
     if execution_identity is None or execution_identity.room_id is not None:
         return frozenset()
-    return frozenset(
-        {
-            "desktop_setup",
-            *(tool_name for tool_name, metadata in TOOL_METADATA.items() if metadata.requires_room_context),
-        },
-    )
+    return frozenset(tool_name for tool_name, metadata in TOOL_METADATA.items() if metadata.requires_room_context)
 
 
 def _visible_deferred_tool_names(
@@ -1218,60 +1196,6 @@ def _resolve_agent_dynamic_tool_selection(
     )
 
 
-def _private_dynamic_tool_session_id(
-    agent_runtime: ResolvedAgentRuntime,
-    session_id: str | None,
-) -> str | None:
-    """Partition dynamic-tool state by requester without exposing requester IDs."""
-    worker_key = agent_runtime.execution.worker_key
-    if session_id is None or not agent_runtime.execution.is_private or worker_key is None:
-        return session_id
-    digest = hashlib.sha256(worker_key.encode()).hexdigest()
-    return f"{session_id}:private:{digest}"
-
-
-def _private_desktop_configuration_status(
-    agent_name: str,
-    config: Config,
-    runtime_paths: constants.RuntimePaths,
-    agent_runtime: ResolvedAgentRuntime,
-) -> DesktopConfigurationStatus | None:
-    """Resolve one private requester-agent Desktop target without shared fallback."""
-    entity = config.resolve_entity(agent_name)
-    execution = agent_runtime.execution
-    if (
-        "desktop" not in entity.available_tools
-        or not execution.is_private
-        or execution.execution_scope not in {"user", "user_agent"}
-    ):
-        return None
-    worker_target = build_agent_toolkit_worker_target(
-        execution.execution_scope,
-        agent_name,
-        is_private=True,
-        execution_identity=execution.execution_identity,
-        runtime_paths=runtime_paths,
-    )
-    credentials = load_scoped_credentials(
-        "desktop",
-        credentials_manager=get_runtime_credentials_manager(runtime_paths),
-        worker_target=worker_target,
-        allowed_shared_services=frozenset(),
-    )
-    values = dict(credentials or {})
-    all_tools = visible_tool_surface(
-        agent_name=agent_name,
-        config=config,
-        loaded_tools=_visible_deferred_tool_names(config, agent_name),
-        enable_dynamic_tools_manager=False,
-    )
-    desktop_entry = next((entry for entry in all_tools.runtime_tool_configs if entry.name == "desktop"), None)
-    if desktop_entry is not None:
-        values.update(_without_private_desktop_identity_overrides(desktop_entry.tool_config_overrides) or {})
-    values.update(_without_private_desktop_identity_overrides(entity.tool_runtime_overrides("desktop")) or {})
-    return desktop_configuration_state(values).status
-
-
 def _render_agent_identity_context(
     agent_name: str,
     display_name: str,
@@ -1391,17 +1315,10 @@ def _assemble_agent_toolkits(
     # sharing one Matrix thread do not leak loaded tools across agents. Private
     # agents add their requester worker key so users sharing a room cannot leak
     # loaded-tool state to each other either.
-    dynamic_session_id = _private_dynamic_tool_session_id(agent_runtime, session_id)
-    desktop_status = _private_desktop_configuration_status(
-        agent_name,
-        config,
-        runtime_paths,
-        agent_runtime,
-    )
-    setup_required_tool_names = (
-        frozenset({"desktop"})
-        if desktop_status is not None and desktop_status is not DesktopConfigurationStatus.READY
-        else frozenset()
+    execution = agent_runtime.execution
+    dynamic_session_id = requester_scoped_dynamic_tool_session_id(
+        session_id,
+        worker_key=execution.worker_key if execution.is_private else None,
     )
     dynamic_tool_selection = _resolve_agent_dynamic_tool_selection(
         agent_name=agent_name,
@@ -1412,23 +1329,18 @@ def _assemble_agent_toolkits(
         eager_deferred_tools=eager_deferred_tools,
     )
     hidden_toolkits = _context_hidden_toolkits(execution_identity)
-    resolved_tool_configs = {
-        entry.name: entry
-        for entry in dynamic_tool_selection.runtime_tool_configs
-        if entry.name not in setup_required_tool_names
-    }
-    if disable_runtime_capabilities:
-        resolved_tool_configs = {}
-    elif disabled_tool_names:
-        resolved_tool_configs = {
-            tool_name: entry
-            for tool_name, entry in resolved_tool_configs.items()
-            if tool_name not in disabled_tool_names
-        }
-    if hidden_toolkits:
-        resolved_tool_configs = {
-            tool_name: entry for tool_name, entry in resolved_tool_configs.items() if tool_name not in hidden_toolkits
-        }
+    availability = resolve_agent_runtime_tool_availability(
+        agent_name,
+        config,
+        runtime_paths,
+        execution,
+        visible_tool_configs=dynamic_tool_selection.runtime_tool_configs,
+        hidden_tool_names=hidden_toolkits,
+        disabled_tool_names=disabled_tool_names,
+        disable_runtime_capabilities=disable_runtime_capabilities,
+    )
+    setup_required_tool_names = availability.setup_required_tool_names
+    resolved_tool_configs = {entry.name: entry for entry in availability.ready_tool_configs}
     loaded_tools = (
         ()
         if disable_runtime_capabilities
@@ -1448,12 +1360,11 @@ def _assemble_agent_toolkits(
             list(resolved_tool_configs),
             tool_registry_preloaded=True,
         )
-    entity_view = config.resolve_entity(agent_name)
     tools: list[Toolkit] = []
     deferred_wire_tool_names: set[str] = set()
     for tool_name, tool_entry in resolved_tool_configs.items():
         try:
-            runtime_overrides = entity_view.tool_runtime_overrides(tool_name)
+            runtime_overrides = availability.runtime_overrides_by_tool.get(tool_name)
             with _agent_create_timing("toolkit_build.one", tool_name=tool_name):
                 toolkit = build_agent_toolkit(
                     tool_name,

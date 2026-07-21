@@ -17,6 +17,7 @@ from mindroom.tool_system.dynamic_toolkits import (
     load_tool_for_session,
     unload_tool_for_session,
 )
+from mindroom.tool_system.runtime_availability import tool_setup_guidance
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -243,10 +244,7 @@ class DynamicToolsToolkit(Toolkit):
                 "setup_required",
                 tool_name=tool_name,
                 loaded_tools=self._loaded_tools(),
-                message=(
-                    f"Tool '{tool_name}' requires requester setup. "
-                    "Ask the requester to run !desktop setup directly in this chat."
-                ),
+                message=tool_setup_guidance(tool_name),
             )
 
         result = load_tool_for_session(

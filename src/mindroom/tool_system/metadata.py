@@ -80,13 +80,24 @@ _OMIT_TOOL_CONFIG_ARG = object()
 
 
 class ToolConfigurationNotReadyError(ValueError):
-    """One opt-in tool lacks complete requester-visible runtime configuration."""
+    """One opt-in tool lacks complete runtime configuration."""
 
-    def __init__(self, tool_name: str, missing_fields: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        tool_name: str,
+        missing_fields: tuple[str, ...] = (),
+        *,
+        error: str | None = None,
+    ) -> None:
         self.tool_name = tool_name
         self.missing_fields = missing_fields
-        fields = ", ".join(missing_fields)
-        super().__init__(f"Tool '{tool_name}' requires setup; missing fields: {fields}.")
+        self.error = error
+        if missing_fields:
+            fields = ", ".join(missing_fields)
+            message = f"Tool '{tool_name}' requires setup; missing fields: {fields}."
+        else:
+            message = f"Tool '{tool_name}' requires setup: {error or 'runtime configuration is invalid.'}"
+        super().__init__(message)
 
 
 class ToolInitOverrideError(ValueError):
@@ -496,6 +507,19 @@ def _build_tool_config_init_kwargs(
     return init_kwargs
 
 
+def _without_requester_owned_overrides(
+    metadata: ToolMetadata,
+    worker_target: ResolvedWorkerTarget | None,
+    values: dict[str, object] | None,
+) -> dict[str, object] | None:
+    """Keep requester-owned fields sourced only from scoped credentials."""
+    if not values or worker_target is None or worker_target.worker_scope not in {"user", "user_agent"}:
+        return values
+    requester_owned_fields = {field.name for field in metadata.config_fields or () if field.requester_owned}
+    filtered = {name: value for name, value in values.items() if name not in requester_owned_fields}
+    return filtered or None
+
+
 def _validate_runtime_config_readiness(
     tool_name: str,
     metadata: ToolMetadata,
@@ -513,6 +537,10 @@ def _validate_runtime_config_readiness(
     )
     if missing_fields:
         raise ToolConfigurationNotReadyError(tool_name, missing_fields)
+    if metadata.runtime_config_validator is not None:
+        error = metadata.runtime_config_validator(init_kwargs)
+        if error is not None:
+            raise ToolConfigurationNotReadyError(tool_name, error=error)
 
 
 def _runtime_config_field_missing(field_name: str, init_kwargs: dict[str, object]) -> bool:
@@ -620,6 +648,106 @@ def _resolve_tool_credentials_manager(
     return None
 
 
+@dataclass(frozen=True, slots=True)
+class _ResolvedToolConfiguration:
+    """Merged configuration inputs shared by readiness checks and construction."""
+
+    credentials_manager: CredentialsManager | None
+    tool_config_overrides: dict[str, object]
+    tool_init_overrides: dict[str, object] | None
+    init_kwargs: dict[str, object]
+
+
+def _resolve_tool_configuration(
+    tool_name: str,
+    runtime_paths: RuntimePaths,
+    *,
+    credential_overrides: dict[str, object] | None,
+    credentials_manager: CredentialsManager | None,
+    tool_config_overrides: dict[str, object] | None,
+    tool_init_overrides: dict[str, object] | None,
+    runtime_overrides: dict[str, object] | None,
+    allowed_shared_services: frozenset[str] | None,
+    worker_target: ResolvedWorkerTarget | None,
+) -> _ResolvedToolConfiguration:
+    """Resolve one tool's scoped credentials and effective constructor configuration."""
+    metadata = TOOL_METADATA[tool_name]
+    resolved_credentials_manager = _resolve_tool_credentials_manager(
+        metadata,
+        runtime_paths,
+        credentials_manager,
+    )
+    credentials = (
+        load_scoped_credentials(
+            tool_name,
+            credentials_manager=resolved_credentials_manager,
+            worker_target=worker_target,
+            allowed_shared_services=allowed_shared_services,
+        )
+        if resolved_credentials_manager is not None
+        else {}
+    ) or {}
+    if credential_overrides:
+        credentials = {**credentials, **credential_overrides}
+    validated_tool_config_overrides = validate_authored_tool_entry_overrides(tool_name, tool_config_overrides)
+    validated_tool_config_overrides = (
+        _without_requester_owned_overrides(
+            metadata,
+            worker_target,
+            validated_tool_config_overrides,
+        )
+        or {}
+    )
+    resolved_runtime_overrides = _without_requester_owned_overrides(
+        metadata,
+        worker_target,
+        runtime_overrides,
+    )
+    safe_tool_init_overrides = sanitize_tool_init_overrides(tool_name, tool_init_overrides)
+    init_kwargs = _build_tool_config_init_kwargs(
+        tool_name,
+        metadata,
+        credentials=credentials,
+        tool_config_overrides=validated_tool_config_overrides,
+        tool_init_overrides=safe_tool_init_overrides,
+        runtime_overrides=resolved_runtime_overrides,
+    )
+    return _ResolvedToolConfiguration(
+        credentials_manager=resolved_credentials_manager,
+        tool_config_overrides=validated_tool_config_overrides,
+        tool_init_overrides=safe_tool_init_overrides,
+        init_kwargs=init_kwargs,
+    )
+
+
+def validate_tool_runtime_configuration(
+    tool_name: str,
+    runtime_paths: RuntimePaths,
+    *,
+    credentials_manager: CredentialsManager | None = None,
+    tool_config_overrides: dict[str, object] | None = None,
+    runtime_overrides: dict[str, object] | None = None,
+    allowed_shared_services: frozenset[str] | None = None,
+    worker_target: ResolvedWorkerTarget | None,
+) -> None:
+    """Validate effective runtime configuration without constructing a tool."""
+    metadata = TOOL_METADATA[tool_name]
+    if not metadata.runtime_config_required:
+        return
+    resolved = _resolve_tool_configuration(
+        tool_name,
+        runtime_paths,
+        credential_overrides=None,
+        credentials_manager=credentials_manager,
+        tool_config_overrides=tool_config_overrides,
+        tool_init_overrides=None,
+        runtime_overrides=runtime_overrides,
+        allowed_shared_services=allowed_shared_services,
+        worker_target=worker_target,
+    )
+    _validate_runtime_config_readiness(tool_name, metadata, resolved.init_kwargs)
+
+
 def _build_tool_instance(
     tool_name: str,
     runtime_paths: RuntimePaths,
@@ -658,36 +786,21 @@ def _build_tool_instance(
 
     metadata = TOOL_METADATA[tool_name]
     tool_class = TOOL_REGISTRY[tool_name]()
-    resolved_credentials_manager = _resolve_tool_credentials_manager(
-        metadata,
-        runtime_paths,
-        credentials_manager,
-    )
-    credentials = (
-        load_scoped_credentials(
-            tool_name,
-            credentials_manager=resolved_credentials_manager,
-            worker_target=worker_target,
-            allowed_shared_services=allowed_shared_services,
-        )
-        if resolved_credentials_manager is not None
-        else {}
-    ) or {}
-    if credential_overrides:
-        credentials = {**credentials, **credential_overrides}
-    validated_tool_config_overrides = validate_authored_tool_entry_overrides(tool_name, tool_config_overrides)
-    safe_tool_init_overrides = sanitize_tool_init_overrides(tool_name, tool_init_overrides)
-    init_kwargs = _build_tool_config_init_kwargs(
+    resolved = _resolve_tool_configuration(
         tool_name,
-        metadata,
-        credentials=credentials,
-        tool_config_overrides=validated_tool_config_overrides,
-        tool_init_overrides=safe_tool_init_overrides,
+        runtime_paths,
+        credential_overrides=credential_overrides,
+        credentials_manager=credentials_manager,
+        tool_config_overrides=tool_config_overrides,
+        tool_init_overrides=tool_init_overrides,
         runtime_overrides=runtime_overrides,
+        allowed_shared_services=allowed_shared_services,
+        worker_target=worker_target,
     )
+    init_kwargs = dict(resolved.init_kwargs)
     _validate_runtime_config_readiness(tool_name, metadata, init_kwargs)
     extra_env_passthrough = init_kwargs.get("extra_env_passthrough")
-    proxy_tool_init_overrides = dict(safe_tool_init_overrides or {})
+    proxy_tool_init_overrides = dict(resolved.tool_init_overrides or {})
     shell_path_prepend = init_kwargs.get("shell_path_prepend")
     if tool_name == "shell" and isinstance(shell_path_prepend, str):
         proxy_tool_init_overrides["shell_path_prepend"] = shell_path_prepend
@@ -695,7 +808,7 @@ def _build_tool_instance(
         _build_managed_tool_init_kwargs(
             metadata,
             runtime_paths=runtime_paths,
-            credentials_manager=resolved_credentials_manager,
+            credentials_manager=resolved.credentials_manager,
             worker_target=worker_target,
             tool_output_workspace_root=tool_output_workspace_root,
             worker_tools_override=worker_tools_override,
@@ -725,9 +838,9 @@ def _build_tool_instance(
         tool_name,
         toolkit,
         runtime_paths=runtime_paths,
-        credentials_manager=resolved_credentials_manager,
+        credentials_manager=resolved.credentials_manager,
         tool_init_overrides=proxy_tool_init_overrides or None,
-        tool_config_overrides=validated_tool_config_overrides,
+        tool_config_overrides=resolved.tool_config_overrides,
         extra_env_passthrough=extra_env_passthrough if isinstance(extra_env_passthrough, str) else None,
         worker_tools_override=worker_tools_override,
         shared_storage_root_path=shared_storage_root_path,
@@ -1364,7 +1477,12 @@ def export_tools_metadata(tool_metadata: dict[str, ToolMetadata] | None = None) 
         tool_dict["status"] = metadata.status.value
         tool_dict["setup_type"] = metadata.setup_type.value
         tool_dict["default_execution_target"] = metadata.default_execution_target.value
+        for field_collection in ("config_fields", "agent_override_fields"):
+            for field in tool_dict.get(field_collection) or ():
+                if not field["requester_owned"]:
+                    field.pop("requester_owned")
         tool_dict.pop("runtime_config_required", None)
+        tool_dict.pop("runtime_config_validator", None)
         tool_dict.pop("authored_override_validator", None)
         tool_dict.pop("managed_init_args", None)
         tool_dict.pop("supports_toolkit_filters", None)

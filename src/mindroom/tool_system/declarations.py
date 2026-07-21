@@ -80,6 +80,7 @@ class ConfigField:
     options: list[dict[str, str]] | None = None
     validation: dict[str, Any] | None = None
     authored_override: bool = True
+    requester_owned: bool = False
 
 
 @dataclass(frozen=True)
@@ -111,6 +112,7 @@ class ToolMetadata:
     consumes_workspace_paths: bool = False
     requires_room_context: bool = False
     runtime_config_required: bool = False
+    runtime_config_validator: Callable[[dict[str, object]], str | None] | None = None
     icon: str | None = None
     icon_color: str | None = None
     config_fields: list[ConfigField] | None = None

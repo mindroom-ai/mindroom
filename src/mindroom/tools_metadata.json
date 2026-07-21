@@ -7664,6 +7664,7 @@
           "name": "device_user_id",
           "options": null,
           "placeholder": null,
+          "requester_owned": true,
           "required": true,
           "type": "text",
           "validation": null
@@ -7676,6 +7677,7 @@
           "name": "device_id",
           "options": null,
           "placeholder": null,
+          "requester_owned": true,
           "required": true,
           "type": "text",
           "validation": null
@@ -7688,6 +7690,7 @@
           "name": "device_ed25519",
           "options": null,
           "placeholder": null,
+          "requester_owned": true,
           "required": true,
           "type": "text",
           "validation": null
@@ -7714,7 +7717,7 @@
       "function_names": [
         "desktop"
       ],
-      "helper_text": null,
+      "helper_text": "For private per-user-agent setup, ask the requester to send `!desktop setup` directly in this Matrix chat. Shared or operator-managed setup must be configured by the operator.",
       "icon": "MonitorUp",
       "icon_color": "text-cyan-500",
       "name": "desktop",

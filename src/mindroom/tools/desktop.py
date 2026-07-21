@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.desktop.configuration import desktop_runtime_config_error
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
     setup_type=SetupType.SPECIAL,
     requires_room_context=True,
     runtime_config_required=True,
+    runtime_config_validator=desktop_runtime_config_error,
     icon="MonitorUp",
     icon_color="text-cyan-500",
     config_fields=[
@@ -28,18 +30,21 @@ if TYPE_CHECKING:
             label="Desktop Matrix User ID",
             type="text",
             description="Dedicated Matrix account used by the local desktop bridge.",
+            requester_owned=True,
         ),
         ConfigField(
             name="device_id",
             label="Desktop Matrix Device ID",
             type="text",
             description="Exact device ID printed by 'mindroom desktop login'.",
+            requester_owned=True,
         ),
         ConfigField(
             name="device_ed25519",
             label="Desktop Device Fingerprint",
             type="text",
             description="Exact Ed25519 fingerprint printed by 'mindroom desktop login'.",
+            requester_owned=True,
         ),
         ConfigField(
             name="timeout_seconds",
@@ -51,6 +56,10 @@ if TYPE_CHECKING:
         ),
     ],
     docs_url="https://docs.mindroom.chat/tools/desktop/",
+    helper_text=(
+        "For private per-user-agent setup, ask the requester to send `!desktop setup` directly in this Matrix chat. "
+        "Shared or operator-managed setup must be configured by the operator."
+    ),
     function_names=("desktop",),
 )
 def desktop_tools() -> type[DesktopTools]:

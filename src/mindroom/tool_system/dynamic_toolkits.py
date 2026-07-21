@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from threading import RLock
 from typing import TYPE_CHECKING
@@ -69,6 +70,18 @@ class DeferredToolCatalogEntry:
 def _dynamic_tool_scope_key(session_id: str) -> str:
     """Normalize one session id to the dynamic-tool state scope used in memory."""
     return session_id
+
+
+def requester_scoped_dynamic_tool_session_id(
+    session_id: str | None,
+    *,
+    worker_key: str | None,
+) -> str | None:
+    """Partition dynamic-tool state by requester without exposing worker keys."""
+    if session_id is None or worker_key is None:
+        return session_id
+    digest = hashlib.sha256(worker_key.encode()).hexdigest()
+    return f"{session_id}:private:{digest}"
 
 
 def _state_key(agent_name: str, session_id: str) -> tuple[str, str]:
@@ -189,14 +202,6 @@ def _special_tool_names(
     )
     if allow_self_config:
         tool_names.append("self_config")
-
-    entity = config.resolve_entity(agent_name)
-    if (
-        "desktop" in entity.available_tools
-        and agent_config.private is not None
-        and entity.execution_scope == "user_agent"
-    ):
-        tool_names.append("desktop_setup")
 
     if enable_dynamic_tools_manager and has_deferred_tools(config, agent_name):
         tool_names.append("dynamic_tools")

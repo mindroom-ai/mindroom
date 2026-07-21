@@ -19,7 +19,7 @@ from mindroom.approval_inbound import (
 )
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.desktop.pairing import handle_desktop_pairing_claim
+from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
@@ -1304,33 +1304,6 @@ class AgentBot:
             AuthenticatedToDeviceEvent,
         )
 
-    async def _on_desktop_pairing_claim(self, event: AuthenticatedToDeviceEvent) -> None:
-        """Bind one authenticated local device claim to this exact configured agent."""
-        client = self.client
-        if client is None:
-            return
-        await handle_desktop_pairing_claim(
-            event,
-            client=client,
-            agent_name=self.agent_name,
-            runtime_paths=self.runtime_paths,
-        )
-
-    def _register_desktop_pairing_callback(self, client: nio.AsyncClient) -> None:
-        """Wire pairing only for configured agents that declare Desktop."""
-        if self.agent_name not in self.config.agents:
-            return
-        if "desktop" not in self.config.resolve_entity(self.agent_name).available_tools:
-            return
-        client.add_to_device_callback(
-            _create_task_wrapper(  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
-                self._on_desktop_pairing_claim,
-                owner=self._runtime_view,
-                on_error=self._sync_cache_trust.mark_callback_failed,
-            ),
-            AuthenticatedToDeviceEvent,
-        )
-
     async def _apply_own_room_membership_from_sync(self, response: nio.SyncResponse) -> None:
         """Apply this bot's authoritative joined/left room sections before other sync work."""
         joined_room_ids = set(response.rooms.join)
@@ -1456,7 +1429,17 @@ class AgentBot:
                 nio.MegolmEvent,
             )
             self._register_call_manager_callbacks(client)
-            self._register_desktop_pairing_callback(client)
+            register_desktop_pairing_receiver(
+                self.config,
+                client=client,
+                agent_name=self.agent_name,
+                runtime_paths=self.runtime_paths,
+                callback_wrapper=lambda callback: _create_task_wrapper(
+                    callback,
+                    owner=self._runtime_view,
+                    on_error=callback_failed,
+                ),
+            )
             await self._set_presence_with_model_info()
             client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
             client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]

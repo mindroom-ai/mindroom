@@ -20,6 +20,7 @@ import mindroom.tools  # noqa: F401
 import mindroom.tools.custom_api as custom_api_module
 from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.redaction import REDACTED
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
@@ -51,6 +52,7 @@ from mindroom.tool_system.registry_state import (
 )
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    build_agent_toolkit_worker_target,
     resolve_worker_target,
 )
 from mindroom.tools.crawl4ai import crawl4ai_tools
@@ -594,6 +596,85 @@ def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> N
         assert tool.runtime_paths == runtime_paths
         assert tool.worker_target == worker_target
         assert tool.current_room_id == execution_identity.room_id
+    finally:
+        TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_METADATA.pop(tool_name, None)
+
+
+def test_requester_owned_fields_ignore_authored_and_runtime_overrides(tmp_path: Path) -> None:
+    """Requester-owned fields come only from requester-scoped credentials."""
+    tool_name = "test_requester_owned_tool"
+
+    class RequesterOwnedToolkit(Toolkit):
+        def __init__(self, requester_identity: str, label: str) -> None:
+            self.requester_identity = requester_identity
+            self.label = label
+            super().__init__(name=tool_name, tools=[])
+
+    @register_tool_with_metadata(
+        name=tool_name,
+        display_name="Requester-owned Tool",
+        description="Test-only toolkit for requester-owned configuration coverage.",
+        category=ToolCategory.DEVELOPMENT,
+        runtime_config_required=True,
+        config_fields=[
+            ConfigField(name="requester_identity", label="Requester identity", requester_owned=True),
+            ConfigField(name="label", label="Label"),
+        ],
+    )
+    def _requester_owned_tool_factory() -> type[RequesterOwnedToolkit]:
+        return RequesterOwnedToolkit
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session",
+    )
+    worker_target = build_agent_toolkit_worker_target(
+        "user_agent",
+        "general",
+        is_private=True,
+        execution_identity=identity,
+        runtime_paths=runtime_paths,
+    )
+    save_scoped_credentials(
+        tool_name,
+        {"requester_identity": "scoped", "label": "stored"},
+        credentials_manager=get_runtime_credentials_manager(runtime_paths),
+        worker_target=worker_target,
+    )
+
+    try:
+        tool = get_tool_by_name(
+            tool_name,
+            runtime_paths,
+            tool_config_overrides={"requester_identity": "authored", "label": "authored"},
+            runtime_overrides={"requester_identity": "runtime", "label": "runtime"},
+            worker_target=worker_target,
+        )
+
+        assert isinstance(tool, RequesterOwnedToolkit)
+        assert tool.requester_identity == "scoped"
+        assert tool.label == "runtime"
+
+        shared_tool = get_tool_by_name(
+            tool_name,
+            runtime_paths,
+            tool_config_overrides={"requester_identity": "authored", "label": "authored"},
+            runtime_overrides={"requester_identity": "runtime", "label": "runtime"},
+            worker_target=None,
+        )
+        assert isinstance(shared_tool, RequesterOwnedToolkit)
+        assert shared_tool.requester_identity == "runtime"
     finally:
         TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)

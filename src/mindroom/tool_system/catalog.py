@@ -34,6 +34,7 @@ from mindroom.tool_system.metadata import (
     serialize_tool_validation_snapshot,
     unresolved_plugin_tool_sources_for_runtime,
     validate_authored_tool_entry_overrides,
+    validate_tool_runtime_configuration,
 )
 
 __all__ = [
@@ -66,4 +67,5 @@ __all__ = [
     "serialize_tool_validation_snapshot",
     "unresolved_plugin_tool_sources_for_runtime",
     "validate_authored_tool_entry_overrides",
+    "validate_tool_runtime_configuration",
 ]

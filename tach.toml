@@ -178,11 +178,12 @@ depends_on = [
     "mindroom.agent_descriptions",
     "mindroom.agent_storage",
     "mindroom.claude_prompt_cache",
+    "mindroom.config.models",
     "mindroom.constants",
     "mindroom.credentials",
     "mindroom.custom_tools.delegate",
     "mindroom.custom_tools.memory",
-    "mindroom.desktop.configuration",
+    "mindroom.custom_tools.tool_setup",
     "mindroom.entity_resolution",
     "mindroom.hooks",
     "mindroom.logging_config",
@@ -197,6 +198,7 @@ depends_on = [
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.runtime_availability",
     "mindroom.tool_system.skills",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_routing",
@@ -2144,6 +2146,7 @@ visibility = [
     "mindroom.cli.desktop",
     "mindroom.desktop.bridge",
     "mindroom.desktop.client",
+    "mindroom.desktop.pairing_receiver",
     "mindroom.matrix.client_session",
     "mindroom.matrix.olm_to_device",
     "mindroom.matrix_rtc.call_manager",
@@ -2151,7 +2154,18 @@ visibility = [
 
 [[modules]]
 path = "mindroom.matrix.olm_to_device"
-depends_on = ["mindroom.matrix.to_device"]
+depends_on = [
+    "mindroom.matrix.device_identity",
+    "mindroom.matrix.to_device",
+]
+
+[[modules]]
+path = "mindroom.matrix.device_identity"
+depends_on = []
+visibility = [
+    "mindroom.desktop.configuration",
+    "mindroom.matrix.olm_to_device",
+]
 
 [[modules]]
 path = "mindroom.desktop"
@@ -2161,15 +2175,22 @@ depends_on = []
 path = "mindroom.desktop.configuration"
 depends_on = [
     "mindroom.desktop.protocol",
-    "mindroom.matrix.olm_to_device",
+    "mindroom.matrix.device_identity",
 ]
 
 [[modules]]
 path = "mindroom.desktop.pairing"
+depends_on = ["mindroom.desktop.protocol"]
+
+[[modules]]
+path = "mindroom.desktop.pairing_receiver"
 depends_on = [
+    "mindroom.desktop.pairing",
     "mindroom.desktop.protocol",
     "mindroom.logging_config",
+    "mindroom.matrix.to_device",
 ]
+visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.desktop.login_method"
@@ -2630,7 +2651,7 @@ depends_on = [
     "mindroom.conversation_resolver",
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
-    "mindroom.desktop.pairing",
+    "mindroom.desktop.pairing_receiver",
     "mindroom.edit_regenerator",
     "mindroom.entity_resolution",
     "mindroom.hooks",
@@ -2888,7 +2909,6 @@ depends_on = [
 ]
 visibility = [
     "mindroom.commands.handler",
-    "mindroom.custom_tools.desktop_setup",
 ]
 
 [[modules]]
@@ -3157,6 +3177,26 @@ depends_on = [
     "mindroom.custom_tools.delegate",
     "mindroom.tool_system.catalog",
 ]
+
+[[modules]]
+path = "mindroom.tool_system.runtime_availability"
+depends_on = [
+    "mindroom.config.models",
+    "mindroom.credentials",
+    "mindroom.tool_system.catalog",
+    "mindroom.tool_system.dynamic_toolkits",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = [
+    "mindroom.agents",
+    "mindroom.custom_tools.dynamic_tools",
+    "mindroom.custom_tools.tool_setup",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.tool_setup"
+depends_on = ["mindroom.tool_system.runtime_availability"]
+visibility = ["mindroom.agents"]
 
 [[modules]]
 path = "mindroom.tool_system.plugins"
@@ -4026,6 +4066,7 @@ expose = [
     "serialize_tool_validation_snapshot",
     "unresolved_plugin_tool_sources_for_runtime",
     "validate_authored_tool_entry_overrides",
+    "validate_tool_runtime_configuration",
 ]
 from = ["mindroom.tool_system.metadata"]
 visibility = ["mindroom.tool_system.catalog"]
@@ -4068,6 +4109,7 @@ expose = [
     "serialize_tool_validation_snapshot",
     "unresolved_plugin_tool_sources_for_runtime",
     "validate_authored_tool_entry_overrides",
+    "validate_tool_runtime_configuration",
 ]
 from = ["mindroom.tool_system.catalog"]
 
@@ -4420,6 +4462,7 @@ expose = [
     "get_loaded_tools_for_session",
     "has_deferred_tools",
     "load_tool_for_session",
+    "requester_scoped_dynamic_tool_session_id",
     "resolve_dynamic_tool_selection",
     "save_loaded_tools_for_session",
     "suppress_fully_deferred_toolkit_instructions",

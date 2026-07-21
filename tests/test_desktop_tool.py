@@ -38,6 +38,12 @@ def test_desktop_tool_is_registered_as_room_scoped_primary_tool() -> None:
     assert metadata.default_execution_target.value == "primary"
     assert metadata.function_names == ("desktop",)
     assert metadata.runtime_config_required
+    assert metadata.runtime_config_validator is not None
+    assert {field.name for field in metadata.config_fields or () if field.requester_owned} == {
+        "device_user_id",
+        "device_id",
+        "device_ed25519",
+    }
 
 
 def test_desktop_tool_reports_setup_required_before_constructor(tmp_path: Path) -> None:

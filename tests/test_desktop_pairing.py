@@ -6,6 +6,7 @@ import re
 import sqlite3
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import Mock
 
 import pytest
 
@@ -18,8 +19,8 @@ from mindroom.desktop.pairing import (
     complete_desktop_pairing,
     confirm_desktop_pairing,
     create_desktop_pairing,
-    handle_desktop_pairing_claim,
 )
+from mindroom.desktop.pairing_receiver import DesktopPairingReceiver, register_desktop_pairing_receiver
 from mindroom.desktop.protocol import (
     DESKTOP_PAIRING_CLAIM_EVENT_TYPE,
     DesktopPairingClaim,
@@ -181,12 +182,11 @@ async def test_pairing_claim_uses_authenticated_device_store_identity(tmp_path: 
         authenticated_device_id="SIGNED",
     )
 
-    await handle_desktop_pairing_claim(
-        event,
+    await DesktopPairingReceiver(
         client=client,  # type: ignore[arg-type]
         agent_name="computer",
         runtime_paths=runtime_paths,
-    )
+    ).on_event(event)
 
     confirmed = confirm_desktop_pairing(
         runtime_paths,
@@ -215,7 +215,7 @@ async def test_pairing_claim_contains_database_errors(
         message = "database is locked"
         raise sqlite3.OperationalError(message)
 
-    monkeypatch.setattr("mindroom.desktop.pairing.claim_desktop_pairing", fail_claim)
+    monkeypatch.setattr("mindroom.desktop.pairing_receiver.claim_desktop_pairing", fail_claim)
     device = SimpleNamespace(ed25519="signed-fingerprint", blacklisted=False)
     client = SimpleNamespace(
         olm=SimpleNamespace(device_store={"@desktop:example.org": {"SIGNED": device}}),
@@ -227,12 +227,56 @@ async def test_pairing_claim_contains_database_errors(
         authenticated_device_id="SIGNED",
     )
 
-    await handle_desktop_pairing_claim(
-        event,
+    await DesktopPairingReceiver(
         client=client,  # type: ignore[arg-type]
         agent_name="computer",
         runtime_paths=test_runtime_paths(tmp_path),
+    ).on_event(event)
+
+
+def test_pairing_receiver_registration_owns_desktop_enablement_check(tmp_path: Path) -> None:
+    """The transport collaborator, not AgentBot, decides whether to register."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "defaults": {"tools": []},
+            "agents": {
+                "computer": {
+                    "display_name": "Computer",
+                    "role": "Operate local apps",
+                    "tools": ["desktop"],
+                },
+                "chat": {
+                    "display_name": "Chat",
+                    "role": "Talk",
+                    "tools": [],
+                },
+            },
+        },
+        runtime_paths,
     )
+    client = SimpleNamespace(add_to_device_callback=Mock())
+
+    register_desktop_pairing_receiver(
+        config,
+        client=client,  # type: ignore[arg-type]
+        agent_name="chat",
+        runtime_paths=runtime_paths,
+        callback_wrapper=lambda callback: callback,
+    )
+    client.add_to_device_callback.assert_not_called()
+
+    register_desktop_pairing_receiver(
+        config,
+        client=client,  # type: ignore[arg-type]
+        agent_name="computer",
+        runtime_paths=runtime_paths,
+        callback_wrapper=lambda callback: callback,
+    )
+
+    callback, event_type = client.add_to_device_callback.call_args.args
+    assert callback.__self__.agent_name == "computer"
+    assert event_type is AuthenticatedToDeviceEvent
 
 
 def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(

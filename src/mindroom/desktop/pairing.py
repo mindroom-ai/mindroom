@@ -11,24 +11,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from mindroom.desktop.protocol import (
-    DESKTOP_PAIRING_CLAIM_EVENT_TYPE,
-    DesktopPairingClaim,
-    DesktopProtocolError,
     desktop_pairing_verification,
-    event_content,
 )
-from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
-    import nio
-
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
-
-logger = get_logger(__name__)
 
 _PAIRING_TOKEN_BYTES = 24
 _PAIRING_TTL_SECONDS = 15 * 60
@@ -260,47 +250,6 @@ def complete_desktop_pairing(runtime_paths: RuntimePaths, *, token: str) -> None
         connection.execute("DELETE FROM desktop_pairings WHERE token_hash = ?", (_token_hash(token),))
 
 
-async def handle_desktop_pairing_claim(
-    event: AuthenticatedToDeviceEvent,
-    *,
-    client: nio.AsyncClient,
-    agent_name: str,
-    runtime_paths: RuntimePaths,
-) -> None:
-    """Record a claim only from its Matrix-authenticated local device identity."""
-    if event.type != DESKTOP_PAIRING_CLAIM_EVENT_TYPE:
-        return
-    try:
-        claim = DesktopPairingClaim.from_content(event_content(event.source))
-    except DesktopProtocolError as exc:
-        logger.warning("desktop_pairing_claim_malformed", agent=agent_name, reason=str(exc))
-        return
-    olm = client.olm
-    if olm is None:
-        logger.warning("desktop_pairing_claim_rejected", agent=agent_name, reason="missing_olm")
-        return
-    device = olm.device_store[event.sender].get(event.authenticated_device_id)
-    if device is None or device.blacklisted:
-        logger.warning("desktop_pairing_claim_rejected", agent=agent_name, reason="untrusted_device")
-        return
-    try:
-        claim_desktop_pairing(
-            runtime_paths,
-            token=claim.token,
-            agent_name=agent_name,
-            device_user_id=event.sender,
-            device_id=event.authenticated_device_id,
-            device_ed25519=device.ed25519,
-        )
-    except DesktopPairingError as exc:
-        logger.warning("desktop_pairing_claim_rejected", agent=agent_name, reason=str(exc))
-        return
-    except sqlite3.Error:
-        logger.exception("desktop_pairing_claim_db_error", agent=agent_name)
-        return
-    logger.info("desktop_pairing_claimed", agent=agent_name)
-
-
 __all__ = [
     "DesktopPairingError",
     "DesktopPairingStart",
@@ -309,5 +258,4 @@ __all__ = [
     "complete_desktop_pairing",
     "confirm_desktop_pairing",
     "create_desktop_pairing",
-    "handle_desktop_pairing_claim",
 ]

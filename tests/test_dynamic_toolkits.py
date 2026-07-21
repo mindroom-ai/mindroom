@@ -137,7 +137,7 @@ def test_openai_compatible_context_hides_desktop_and_setup_surfaces() -> None:
         session_id="api-session",
     )
 
-    assert {"desktop", "desktop_setup"} <= _context_hidden_toolkits(identity)
+    assert "desktop" in _context_hidden_toolkits(identity)
 
 
 def _install_update_awareness_status(monkeypatch: pytest.MonkeyPatch) -> str:
@@ -687,8 +687,9 @@ def test_private_desktop_setup_is_requester_agent_scoped_without_shared_fallback
     alice_catalog = _tool_payload(alice_manager.list_tools())
 
     assert any(tool.name == "calculator" for tool in alice_unpaired.tools)
-    setup_toolkit = next(tool for tool in alice_unpaired.tools if tool.name == "desktop_setup")
-    assert set(setup_toolkit.get_functions()) == {"desktop_setup"}
+    setup_toolkit = next(tool for tool in alice_unpaired.tools if tool.name == "tool_setup")
+    assert set(setup_toolkit.get_functions()) == {"tool_setup"}
+    assert _tool_payload(setup_toolkit.tool_setup("desktop"))["status"] == "setup_required"
     assert not any(tool.name == "desktop" for tool in alice_unpaired.tools)
     assert alice_catalog["tools"][0]["setup_required"] is True  # type: ignore[index]
     assert _tool_payload(alice_manager.load_tool("desktop"))["status"] == "setup_required"
@@ -801,7 +802,7 @@ def test_native_tool_search_rebuilds_private_desktop_after_pairing(tmp_path: Pat
         session_id="native-session",
     )
     assert not any(tool.name == "desktop" for tool in unpaired.tools)
-    assert any(tool.name == "desktop_setup" for tool in unpaired.tools)
+    assert any(tool.name == "tool_setup" for tool in unpaired.tools)
     assert _DEFERRED_TOOL_NAMES_ATTR not in vars(unpaired.model)
 
     save_scoped_credentials(
