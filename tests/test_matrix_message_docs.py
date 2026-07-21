@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import inspect
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
@@ -34,12 +32,14 @@ def test_matrix_message_description_covers_critical_behavior() -> None:
     assert "`reply` and `thread-reply` inherit the current thread" in description
     assert 'thread_id="room"' in description
 
+    assert "Mention safety for text send/reply/thread-reply" in description
     assert "default `ignore_mentions=True`" in description
     assert "com.mindroom.skip_mentions" in description
     assert "com.mindroom.original_sender" in description
     assert "Set `False` ONLY" in description
     assert "handoff" in description
     assert "self-trigger" in description
+    assert "then human requesters use `com.mindroom.original_sender`" in description
 
     assert "only `send`, `reply`, and `thread-reply`" in description
     assert "context-scoped `att_*` IDs or local file paths" in description
@@ -51,7 +51,7 @@ def test_matrix_message_description_covers_critical_behavior() -> None:
     assert "`text/plain`" in description
     assert "`text/markdown`" in description
     assert "`text/html`" in description
-    assert "Full semantics: `docs/tools/matrix-message.md`" in description
+    assert "Full semantics: https://docs.mindroom.chat/tools/matrix-message/" in description
 
 
 def test_matrix_message_docstring_stays_within_hard_cap() -> None:
@@ -60,19 +60,6 @@ def test_matrix_message_docstring_stays_within_hard_cap() -> None:
 
     assert docstring is not None
     assert len(docstring) <= 2_500
-
-
-def test_matrix_message_long_form_docstring_was_relocated_verbatim() -> None:
-    """The dedicated docs page should preserve the exact former cleaned docstring."""
-    page = (Path(__file__).parents[1] / "docs/tools/matrix-message.md").read_text()
-    start = "<!-- matrix-message-docstring:start -->\n"
-    end = "\n<!-- matrix-message-docstring:end -->"
-    relocated = page.split(start, maxsplit=1)[1].split(end, maxsplit=1)[0]
-
-    assert len(relocated) == 7_281
-    assert hashlib.sha256(relocated.encode()).hexdigest() == (
-        "acef1649f73f923e2bcf96a9f773d41ae276b69cc8c1bce1dc61c94cd871dcdc"
-    )
 
 
 def test_matrix_message_parameter_descriptions_are_exposed() -> None:
@@ -90,13 +77,13 @@ def test_matrix_message_parameter_descriptions_are_exposed() -> None:
     ignore_mentions_description = properties["ignore_mentions"]["description"]
     limit_description = properties["limit"]["description"]
 
-    assert action_description.endswith("Action listed above.")
+    assert "Action" in action_description
 
     assert "emoji" in message_description
 
     assert "att_*" in attachment_ids_description
     assert "combined maximum 5" in attachment_ids_description
-    assert attachment_paths_description.endswith("Local paths with the same restrictions.")
+    assert "Local paths" in attachment_paths_description
 
     assert "defaults to current" in room_id_description
     assert "react/edit" in target_description

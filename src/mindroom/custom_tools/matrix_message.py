@@ -235,13 +235,13 @@ class MatrixMessageTools(Toolkit):
 
         Threading: `send` is room-level even inside a thread; an explicit thread ID targets that thread. `reply` and `thread-reply` inherit the current thread. `thread_id="room"` forces room scope and prevents thread inheritance.
 
-        Mention safety: default `ignore_mentions=True` sets `com.mindroom.skip_mentions` and suppresses mention dispatch to prevent loops. Set `False` ONLY for an intentional handoff or self-trigger; human requesters use `com.mindroom.original_sender` for authorization.
+        Mention safety for text send/reply/thread-reply: default `ignore_mentions=True` sets `com.mindroom.skip_mentions` and suppresses dispatch to prevent loops. Set `False` ONLY for an intentional handoff or self-trigger; then human requesters use `com.mindroom.original_sender` for authorization.
 
         Attachments: only `send`, `reply`, and `thread-reply` accept context-scoped `att_*` IDs or local file paths, combined maximum 5. Include text, attachments, or both, but not neither. Relative paths resolve from the agent workspace.
 
         `message_extras` adds collapsible sections to send/reply/thread-reply/edit. Sections use `title`, `content`, optional `collapsed`, and `content_type`: `text/plain`, `text/markdown` (default), or sanitized `text/html`.
 
-        Full semantics: `docs/tools/matrix-message.md`.
+        Full semantics: https://docs.mindroom.chat/tools/matrix-message/
 
         Args:
             action (str): Action listed above.

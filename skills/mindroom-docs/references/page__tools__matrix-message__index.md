@@ -1,9 +1,8 @@
 # Matrix Message Full Semantics
 
-This page preserves the complete long-form `matrix_message` method documentation that was relocated when the model-facing tool description was condensed.
-The text between the markers below is verbatim from the former cleaned Python docstring.
+This page contains the complete long-form `matrix_message` method documentation that was relocated when the model-facing tool description was condensed.
+Keep this reference aligned with the tool's behavior as its semantics evolve.
 
-<!-- matrix-message-docstring:start -->
 Send, reply, react to, read, edit, or inspect Matrix messages using current room and thread context defaults.
 
 Actions:
@@ -79,4 +78,3 @@ Args:
     message_extras (list[dict[str, object]] | None): Optional collapsible MindRoom sections for supporting evidence. Each section supports title, content, content_type (`text/plain`, `text/markdown`, or sanitized `text/html`), and collapsed.
     limit (int | None): Maximum messages returned for `read` or `thread-list`, or thread roots returned for `room-threads`; defaults to 20 and is capped at 50.
     page_token (str | None): Pagination token for `room-threads`, returned by a previous `room-threads` call to fetch the next page of thread roots.
-<!-- matrix-message-docstring:end -->
