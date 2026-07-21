@@ -116,9 +116,12 @@ def receive_sso_login_token(
             except (OSError, webbrowser.Error):
                 opened = False
         if opened:
-            announce("Browser opened for Matrix SSO. Complete sign-in there; this command will continue automatically.")
+            announce(
+                "Browser opened for Matrix SSO. Complete sign-in there; this command will continue automatically. "
+                "Press Ctrl-C to cancel.",
+            )
         else:
-            announce(f"Open this URL in a browser to complete Matrix SSO:\n{login_url}")
+            announce(f"Waiting for Matrix SSO. Press Ctrl-C to cancel.\nOpen this URL in a browser:\n{login_url}")
 
         while server.login_token is None and server.callback_error is None:
             server.handle_request()

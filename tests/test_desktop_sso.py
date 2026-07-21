@@ -10,6 +10,7 @@ from urllib.request import urlopen
 
 import pytest
 
+import mindroom.desktop.sso as desktop_sso
 from mindroom.desktop.sso import DesktopSsoError, matrix_sso_login_url, receive_sso_login_token
 
 if TYPE_CHECKING:
@@ -81,7 +82,8 @@ def test_sso_callback_returns_token_without_logging_it() -> None:
 
     assert token == "short-lived-secret"  # noqa: S105 - Test-only login token.
     assert notices == [
-        "Browser opened for Matrix SSO. Complete sign-in there; this command will continue automatically.",
+        "Browser opened for Matrix SSO. Complete sign-in there; this command will continue automatically. "
+        "Press Ctrl-C to cancel.",
     ]
     assert all(token not in notice for notice in notices)
     assert request_thread is not None
@@ -109,10 +111,37 @@ def test_manual_sso_prints_login_url_and_accepts_callback() -> None:
     )
 
     assert token == "manual-token"  # noqa: S105 - Test-only login token.
-    assert notices[0].startswith("Open this URL in a browser")
+    assert notices[0].startswith("Waiting for Matrix SSO. Press Ctrl-C to cancel.")
     assert request_thread is not None
     request_thread.join(timeout=2)
     assert not request_thread.is_alive()
+
+
+def test_sso_callback_interrupt_closes_loopback_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ctrl-C cancels an abandoned login and releases the loopback listener."""
+    closed = False
+    original_close = desktop_sso._SsoCallbackServer.server_close
+
+    def close_server(server: desktop_sso._SsoCallbackServer) -> None:
+        nonlocal closed
+        closed = True
+        original_close(server)
+
+    def interrupt(_server: desktop_sso._SsoCallbackServer) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(desktop_sso._SsoCallbackServer, "server_close", close_server)
+    monkeypatch.setattr(desktop_sso._SsoCallbackServer, "handle_request", interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        receive_sso_login_token(
+            "https://matrix.example.org",
+            open_browser=True,
+            announce=lambda _message: None,
+            browser_opener=lambda _url: True,
+        )
+
+    assert closed
 
 
 def test_sso_callback_rejects_missing_token() -> None:
