@@ -55,7 +55,7 @@ def test_matrix_message_description_covers_critical_behavior() -> None:
     assert "`text/markdown`" in description
     assert "`text/html`" in description
     assert "`text/html`; basic fragments only" in description
-    assert "no scripts/styles/forms/media/SVG/math/interactive elements" in description
+    assert "no scripts/styles/images/forms/media/SVG/math/interactive elements" in description
     assert "links only `http`/`https`/`mailto`" in description
     assert "Full semantics: https://docs.mindroom.chat/tools/matrix-message/" in description
 

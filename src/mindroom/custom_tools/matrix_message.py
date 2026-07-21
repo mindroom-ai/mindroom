@@ -239,7 +239,7 @@ class MatrixMessageTools(Toolkit):
 
         Attachments: only `send`, `reply`, and `thread-reply` accept context-scoped `att_*` IDs or local file paths, combined maximum 5. Include text, attachments, or both, but not neither. Relative paths resolve from the agent workspace.
 
-        `message_extras` adds collapsible sections to send/reply/thread-reply/edit. Each uses `title`, `content`, optional `collapsed`, and `content_type`: `text/plain`, `text/markdown` (default), or `text/html`; basic fragments only: no scripts/styles/forms/media/SVG/math/interactive elements; links only `http`/`https`/`mailto`.
+        `message_extras` adds collapsible sections to send/reply/thread-reply/edit. Each uses `title`, `content`, optional `collapsed`, and `content_type`: `text/plain`, `text/markdown` (default), or `text/html`; basic fragments only: no scripts/styles/images/forms/media/SVG/math/interactive elements; links only `http`/`https`/`mailto`.
 
         Full semantics: https://docs.mindroom.chat/tools/matrix-message/
 
