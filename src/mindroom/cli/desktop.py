@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import time
 from pathlib import Path  # noqa: TC003 - Typer evaluates command annotations at runtime.
 from typing import TYPE_CHECKING
@@ -23,12 +24,32 @@ if TYPE_CHECKING:
 
 _console = Console()
 _error_console = Console(stderr=True)
+_DESKTOP_EXTRA = "desktop"
+_DESKTOP_DEPENDENCIES = ["pyautogui"]
+_MACOS_DESKTOP_DEPENDENCIES = [
+    "pyobjc-framework-applicationservices",
+    "pyobjc-framework-cocoa",
+]
 
 desktop_app = typer.Typer(
     name="desktop",
     help="Connect allowlisted local applications to cloud MindRoom over Matrix E2EE.",
     no_args_is_help=True,
 )
+
+
+def _ensure_desktop_dependencies(runtime_paths: RuntimePaths) -> None:
+    """Install the optional desktop runtime before starting the bridge."""
+    from mindroom.desktop.provider import DesktopProviderError  # noqa: PLC0415
+    from mindroom.tool_system.dependencies import ensure_optional_deps  # noqa: PLC0415
+
+    dependencies = [*_DESKTOP_DEPENDENCIES]
+    if sys.platform == "darwin":
+        dependencies.extend(_MACOS_DESKTOP_DEPENDENCIES)
+    try:
+        ensure_optional_deps(dependencies, _DESKTOP_EXTRA, runtime_paths)
+    except ImportError as exc:
+        raise DesktopProviderError(str(exc)) from exc
 
 
 @desktop_app.command("controller")
@@ -336,6 +357,7 @@ def desktop_run(
     try:
         http_headers = load_desktop_http_headers(matrix_http_headers_file)
         session = load_desktop_session(desktop_session_path(runtime_paths))
+        _ensure_desktop_dependencies(runtime_paths)
         asyncio.run(
             _run_bridge(
                 runtime_paths=runtime_paths,

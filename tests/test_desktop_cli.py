@@ -15,6 +15,7 @@ from typer.testing import CliRunner
 import mindroom.cli.desktop as desktop_cli
 from mindroom.cli.desktop import desktop_app
 from mindroom.desktop.login_method import DesktopLoginMethod
+from mindroom.desktop.provider import DesktopProviderError
 from mindroom.desktop.session import DesktopMatrixSession, DesktopSessionError
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 
@@ -132,8 +133,10 @@ def test_desktop_run_loads_matrix_http_headers(monkeypatch: pytest.MonkeyPatch, 
     headers_path.write_text('{"X-Access-Client": "test-secret"}', encoding="utf-8")
     headers_path.chmod(0o600)
     bridge = AsyncMock()
+    ensure_dependencies = MagicMock()
     monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
     monkeypatch.setattr("mindroom.logging_config.setup_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(desktop_cli, "_ensure_desktop_dependencies", ensure_dependencies)
     monkeypatch.setattr("mindroom.desktop.session.load_desktop_session", lambda _path: object())
     monkeypatch.setattr(desktop_cli, "_run_bridge", bridge)
 
@@ -159,7 +162,40 @@ def test_desktop_run_loads_matrix_http_headers(monkeypatch: pytest.MonkeyPatch, 
     )
 
     assert result.exit_code == 0, result.output
+    ensure_dependencies.assert_called_once_with(runtime_paths)
     assert bridge.await_args.kwargs["http_headers"] == {"X-Access-Client": "test-secret"}
+
+
+def test_desktop_dependencies_use_optional_extra_auto_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Desktop startup reuses optional-extra installation, including macOS frameworks."""
+    ensure = MagicMock()
+    runtime_paths = SimpleNamespace()
+    monkeypatch.setattr(desktop_cli.sys, "platform", "darwin")
+    monkeypatch.setattr("mindroom.tool_system.dependencies.ensure_optional_deps", ensure)
+
+    desktop_cli._ensure_desktop_dependencies(runtime_paths)
+
+    ensure.assert_called_once_with(
+        [
+            "pyautogui",
+            "pyobjc-framework-applicationservices",
+            "pyobjc-framework-cocoa",
+        ],
+        "desktop",
+        runtime_paths,
+    )
+
+
+def test_desktop_dependency_install_failure_is_provider_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disabled or failed auto-install keeps the existing desktop-domain CLI error."""
+    monkeypatch.setattr(desktop_cli.sys, "platform", "linux")
+    monkeypatch.setattr(
+        "mindroom.tool_system.dependencies.ensure_optional_deps",
+        MagicMock(side_effect=ImportError("install mindroom[desktop]")),
+    )
+
+    with pytest.raises(DesktopProviderError, match=r"mindroom\[desktop\]"):
+        desktop_cli._ensure_desktop_dependencies(SimpleNamespace())
 
 
 def test_browser_profile_paths_require_extension_mode(tmp_path: Path) -> None:

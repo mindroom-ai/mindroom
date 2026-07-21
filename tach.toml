@@ -2746,6 +2746,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix.olm_to_device",
     "mindroom.matrix.to_device",
+    "mindroom.tool_system.dependencies",
 ]
 visibility = ["mindroom.cli.main"]
 
