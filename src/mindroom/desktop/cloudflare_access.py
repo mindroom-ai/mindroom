@@ -101,9 +101,6 @@ class CloudflareAccessTokenProvider:
                 text=True,
                 timeout=_TOKEN_TIMEOUT_SECONDS,
             )
-        except OSError as exc:
-            msg = f"Failed to run cloudflared access token: {exc}"
-            raise CloudflareAccessError(msg) from exc
         except subprocess.TimeoutExpired as exc:
             msg = "cloudflared access token timed out."
             raise CloudflareAccessError(msg) from exc
@@ -117,14 +114,10 @@ class CloudflareAccessTokenProvider:
         raise CloudflareAccessError(msg)
 
     def _login(self) -> None:
-        try:
-            completed = subprocess.run(
-                [self.executable, "access", "login", self.app_url],
-                check=False,
-            )
-        except OSError as exc:
-            msg = f"Failed to run cloudflared access login: {exc}"
-            raise CloudflareAccessError(msg) from exc
+        completed = subprocess.run(
+            [self.executable, "access", "login", self.app_url],
+            check=False,
+        )
         if completed.returncode != 0:
             msg = f"cloudflared access login failed with exit {completed.returncode}."
             raise CloudflareAccessError(msg)

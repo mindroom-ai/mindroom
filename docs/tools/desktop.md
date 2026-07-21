@@ -164,7 +164,8 @@ mindroom desktop login \
 MindRoom passes the resulting user-scoped JWT as `cf-access-token` on Matrix requests without saving that token in the desktop session.
 The session remembers that Cloudflare Access is enabled, so later `mindroom desktop run` commands do not need the flag again.
 MindRoom reads the JWT's documented `exp` claim and reuses it only while current.
-The first Matrix request after expiry pauses for a fresh browser login, then continues with the new token.
+After expiry, the first Matrix request obtains a current token from `cloudflared`, prompting for browser reauthentication when needed.
+For an older saved session, `mindroom desktop run --cloudflare-access` enables Access for that invocation without rewriting the session.
 
 For unattended proxies that issue machine credentials instead, put their required request headers in a separate JSON file:
 
