@@ -559,8 +559,10 @@ async def _close_cascaded_call_resources(
     agent_cache: _CallAgentCache,
 ) -> None:
     """Settle playout reconciliation, then close the call-owned agent."""
-    await response_tracker.wait_for_settlements()
-    await agent_cache.aclose()
+    try:
+        await response_tracker.wait_for_settlements()
+    finally:
+        await agent_cache.aclose()
 
 
 def _call_agent_run_state(

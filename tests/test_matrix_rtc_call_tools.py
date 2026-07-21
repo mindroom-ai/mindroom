@@ -25,6 +25,7 @@ from mindroom.knowledge import KnowledgeAvailability, KnowledgeAvailabilityDetai
 from mindroom.matrix_rtc.call_tools import (
     _CallAgentRunState,
     _CallResponseTracker,
+    _close_cascaded_call_resources,
     _wrap_agno_function,
     build_call_tools,
 )
@@ -751,9 +752,20 @@ def test_call_response_tracker_keeps_fifo_without_retaining_settled_tokens(tmp_p
     for _ in range(1_000):
         token = tracker.register(state)
         assert tracker.finalize(token, "done", False) is None
-
     assert tracker.pending == {}
     assert first not in tracker.pending
+
+
+@pytest.mark.asyncio
+async def test_cascaded_close_releases_agent_when_settlement_wait_is_cancelled() -> None:
+    """Call cancellation cannot leak the cached agent runtime."""
+    tracker = SimpleNamespace(wait_for_settlements=AsyncMock(side_effect=asyncio.CancelledError))
+    cache = SimpleNamespace(aclose=AsyncMock())
+
+    with pytest.raises(asyncio.CancelledError):
+        await _close_cascaded_call_resources(tracker, cache)  # type: ignore[arg-type]
+
+    cache.aclose.assert_awaited_once()
 
 
 @pytest.mark.asyncio
