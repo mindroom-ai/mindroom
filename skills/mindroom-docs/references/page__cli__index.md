@@ -262,6 +262,13 @@ Create and privately save the dedicated local desktop Matrix device.
 │                                                                    print the URL.      │
 │                                                                    [default:           │
 │                                                                    open-browser]       │
+│ --cloudflare-access                                                Authenticate Matrix │
+│                                                                    requests            │
+│                                                                    interactively with  │
+│                                                                    the local           │
+│                                                                    cloudflared CLI.    │
+│                                                                    [env var:           │
+│                                                                    MINDROOM_DESKTOP_C… │
 │ --replace                                                          Replace the saved   │
 │                                                                    session with a      │
 │                                                                    fresh Matrix        │
@@ -361,6 +368,12 @@ Control remains disabled unless the local command grants a short lease.
 │                                                                   timeout.                   │
 │                                                                   [default: 90]              │
 │    --log-level                -l      TEXT                        [default: INFO]            │
+│    --cloudflare-access                                            Authenticate Matrix        │
+│                                                                   requests interactively     │
+│                                                                   with the local cloudflared │
+│                                                                   CLI.                       │
+│                                                                   [env var:                  │
+│                                                                   MINDROOM_DESKTOP_CLOUDFLA… │
 │    --matrix-http-headers-fi…          PATH                        Owner-only JSON file of    │
 │                                                                   HTTP headers added to      │
 │                                                                   every Matrix request.      │

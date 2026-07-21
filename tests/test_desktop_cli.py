@@ -57,6 +57,42 @@ def test_desktop_login_accepts_explicit_homeserver(monkeypatch: pytest.MonkeyPat
     assert login.await_args.kwargs["http_headers"] == {"X-Access-Client": "test-secret"}
     assert login.await_args.kwargs["password"] == "test-password"  # noqa: S105 - Test-only password.
     assert login.await_args.kwargs["login_token"] is None
+    assert login.await_args.kwargs["cloudflare_access"] is False
+
+
+def test_desktop_login_uses_cloudflare_access_before_matrix_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """CLI authentication reaches login-method discovery and persists its transport mode."""
+    runtime_paths = SimpleNamespace(storage_root=tmp_path)
+    headers = {"cf-access-token": "access-token"}
+    access_headers = MagicMock(return_value=headers)
+    discover = AsyncMock(return_value=DesktopLoginMethod.PASSWORD)
+    login = AsyncMock()
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
+    monkeypatch.setattr("mindroom.desktop.cloudflare_access.cloudflare_access_headers", access_headers)
+    monkeypatch.setattr("mindroom.desktop.session.resolve_desktop_login_method", discover)
+    monkeypatch.setattr(desktop_cli, "_login_and_save", login)
+    monkeypatch.setenv("MINDROOM_DESKTOP_MATRIX_PASSWORD", "test-password")
+
+    result = runner.invoke(
+        desktop_app,
+        [
+            "login",
+            "--user-id",
+            "@laptop:example.org",
+            "--homeserver",
+            "https://matrix.example.org",
+            "--cloudflare-access",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    access_headers.assert_called_once_with("https://matrix.example.org", None)
+    assert discover.await_args.kwargs["http_headers"] is headers
+    assert login.await_args.kwargs["http_headers"] is headers
+    assert login.await_args.kwargs["cloudflare_access"] is True
 
 
 def test_desktop_login_uses_browser_sso_without_password_or_user_id(
@@ -137,7 +173,10 @@ def test_desktop_run_loads_matrix_http_headers(monkeypatch: pytest.MonkeyPatch, 
     monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
     monkeypatch.setattr("mindroom.logging_config.setup_logging", lambda **_kwargs: None)
     monkeypatch.setattr(desktop_cli, "_ensure_desktop_dependencies", ensure_dependencies)
-    monkeypatch.setattr("mindroom.desktop.session.load_desktop_session", lambda _path: object())
+    monkeypatch.setattr(
+        "mindroom.desktop.session.load_desktop_session",
+        lambda _path: SimpleNamespace(homeserver="https://matrix.example.org", cloudflare_access=False),
+    )
     monkeypatch.setattr(desktop_cli, "_run_bridge", bridge)
 
     result = runner.invoke(
@@ -164,6 +203,47 @@ def test_desktop_run_loads_matrix_http_headers(monkeypatch: pytest.MonkeyPatch, 
     assert result.exit_code == 0, result.output
     ensure_dependencies.assert_called_once_with(runtime_paths)
     assert bridge.await_args.kwargs["http_headers"] == {"X-Access-Client": "test-secret"}
+
+
+def test_desktop_run_restores_saved_cloudflare_access_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """One-time login choice automatically applies to later bridge runs."""
+    runtime_paths = SimpleNamespace(storage_root=tmp_path)
+    session = SimpleNamespace(homeserver="https://matrix.example.org", cloudflare_access=True)
+    headers = MagicMock()
+    access_headers = MagicMock(return_value=headers)
+    bridge = AsyncMock()
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
+    monkeypatch.setattr("mindroom.logging_config.setup_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(desktop_cli, "_ensure_desktop_dependencies", MagicMock())
+    monkeypatch.setattr("mindroom.desktop.session.load_desktop_session", lambda _path: session)
+    monkeypatch.setattr("mindroom.desktop.cloudflare_access.cloudflare_access_headers", access_headers)
+    monkeypatch.setattr(desktop_cli, "_run_bridge", bridge)
+
+    result = runner.invoke(
+        desktop_app,
+        [
+            "run",
+            "--controller-user-id",
+            "@cloud:example.org",
+            "--controller-device-id",
+            "CLOUD",
+            "--controller-ed25519",
+            "fingerprint",
+            "--allow-requester",
+            "@alice:example.org",
+            "--allow-agent",
+            "computer",
+            "--allow-app",
+            "com.example.Editor",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    access_headers.assert_called_once_with("https://matrix.example.org", None)
+    assert bridge.await_args.kwargs["http_headers"] is headers
 
 
 def test_desktop_dependencies_use_optional_extra_auto_install(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -366,7 +446,6 @@ async def test_bridge_pins_controller_before_consuming_initial_sync(
     monkeypatch.setattr("mindroom.matrix.olm_to_device.resolve_pinned_device", resolve_device)
     monkeypatch.setattr("mindroom.desktop.provider.PyAutoGuiDesktopProvider", lambda **_kwargs: object())
     monkeypatch.setattr("mindroom.desktop.bridge.DesktopBridge", lambda **_kwargs: bridge)
-
     await desktop_cli._run_bridge(
         runtime_paths=SimpleNamespace(storage_root=tmp_path),
         session=DesktopMatrixSession(

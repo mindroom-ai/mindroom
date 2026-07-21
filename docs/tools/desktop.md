@@ -152,7 +152,21 @@ Copy these exact public identity values to the cloud MindRoom configuration.
 ### Homeservers Behind an Identity-Aware Proxy
 
 A command-line Matrix client cannot reuse an interactive browser proxy cookie.
-If an identity-aware proxy requires machine credentials, put its required request headers in a separate JSON file:
+For a homeserver protected by Cloudflare Access, install the [`cloudflared` CLI](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) and enable interactive Access authentication during desktop login:
+
+```bash
+mindroom desktop login \
+  --homeserver https://matrix.example.org \
+  --cloudflare-access
+```
+
+`cloudflared` opens the browser when the local Access session needs authentication.
+MindRoom passes the resulting user-scoped JWT as `cf-access-token` on Matrix requests without saving that token in the desktop session.
+The session remembers that Cloudflare Access is enabled, so later `mindroom desktop run` commands do not need the flag again.
+MindRoom reads the JWT's documented `exp` claim and reuses it only while current.
+The first Matrix request after expiry pauses for a fresh browser login, then continues with the new token.
+
+For unattended proxies that issue machine credentials instead, put their required request headers in a separate JSON file:
 
 ```json
 {
@@ -179,6 +193,7 @@ They are not copied into the saved Matrix session.
 Set `MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE` to the file path instead of repeating the option on both commands.
 During Matrix SSO, the browser handles any interactive proxy authentication while the header file authenticates the CLI's login-method discovery, token exchange, and later Matrix requests.
 Configure the proxy to accept these machine credentials only for the Matrix endpoints the desktop device needs, while keeping normal Matrix authentication enabled.
+Do not combine `--cloudflare-access` with a static `cf-access-token` header.
 
 ## 2. Configure the Cloud Agent
 

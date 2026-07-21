@@ -43,16 +43,20 @@ class DesktopMatrixSession:
     user_id: str
     device_id: str
     access_token: str
+    cloudflare_access: bool = False
 
-    def to_payload(self) -> dict[str, str | int]:
+    def to_payload(self) -> dict[str, str | int | bool]:
         """Serialize the minimum restorable device state."""
-        return {
+        payload: dict[str, str | int | bool] = {
             "v": 1,
             "homeserver": self.homeserver,
             "user_id": self.user_id,
             "device_id": self.device_id,
             "access_token": self.access_token,
         }
+        if self.cloudflare_access:
+            payload["cloudflare_access"] = True
+        return payload
 
     @classmethod
     def from_payload(cls, raw: object) -> DesktopMatrixSession:
@@ -71,7 +75,11 @@ class DesktopMatrixSession:
                 msg = f"Desktop Matrix session field {key} is missing."
                 raise DesktopSessionError(msg)
             values[key] = value
-        return cls(**values)
+        cloudflare_access = payload.get("cloudflare_access", False)
+        if not isinstance(cloudflare_access, bool):
+            msg = "Desktop Matrix session field cloudflare_access must be a boolean."
+            raise DesktopSessionError(msg)
+        return cls(**values, cloudflare_access=cloudflare_access)
 
 
 def desktop_session_path(runtime_paths: RuntimePaths) -> Path:
@@ -165,6 +173,7 @@ async def login_desktop_client(
     password: str | None = None,
     login_token: str | None = None,
     http_headers: Mapping[str, str] | None = None,
+    cloudflare_access: bool = False,
 ) -> tuple[nio.AsyncClient, DesktopMatrixSession]:
     """Create a fresh Matrix desktop device and its restorable session."""
     if (password is None) == (login_token is None):
@@ -191,7 +200,11 @@ async def login_desktop_client(
         raise DesktopSessionError(msg) from exc
     try:
         await _prepare_crypto(client)
-        authenticated_session = _session_from_authenticated_client(client, homeserver=homeserver)
+        authenticated_session = _session_from_authenticated_client(
+            client,
+            homeserver=homeserver,
+            cloudflare_access=cloudflare_access,
+        )
         if password is not None:
             await ensure_agent_cross_signing(
                 client,
@@ -210,7 +223,12 @@ async def login_desktop_client(
     return client, authenticated_session
 
 
-def _session_from_authenticated_client(client: nio.AsyncClient, *, homeserver: str) -> DesktopMatrixSession:
+def _session_from_authenticated_client(
+    client: nio.AsyncClient,
+    *,
+    homeserver: str,
+    cloudflare_access: bool,
+) -> DesktopMatrixSession:
     if client.user_id is None or client.device_id is None or client.access_token is None:
         msg = "Matrix login did not return complete desktop device credentials."
         raise DesktopSessionError(msg)
@@ -219,6 +237,7 @@ def _session_from_authenticated_client(client: nio.AsyncClient, *, homeserver: s
         user_id=client.user_id,
         device_id=client.device_id,
         access_token=client.access_token,
+        cloudflare_access=cloudflare_access,
     )
 
 

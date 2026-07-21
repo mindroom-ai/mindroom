@@ -49,6 +49,22 @@ def test_session_round_trip_uses_owner_only_permissions(tmp_path: Path) -> None:
         assert path.stat().st_mode & 0o777 == 0o600
 
 
+def test_session_round_trip_remembers_interactive_access_transport(tmp_path: Path) -> None:
+    """Bridge startup can renew Access without requiring the flag again."""
+    path = tmp_path / "desktop" / "matrix_session.json"
+    session = DesktopMatrixSession(
+        homeserver="https://matrix.example.org",
+        user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        access_token="secret-access-token",  # noqa: S106 - Test-only persisted token fixture.
+        cloudflare_access=True,
+    )
+
+    save_desktop_session(path, session)
+
+    assert load_desktop_session(path) == session
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Unix permission bits are not authoritative on Windows")
 def test_session_refuses_group_readable_token(tmp_path: Path) -> None:
     """An accidentally exposed token stops the bridge instead of being used."""
@@ -286,6 +302,7 @@ async def test_sso_login_uses_returned_identity_without_password(monkeypatch: py
         login_token="short-lived-token",  # noqa: S106 - Test-only login token.
         runtime_paths=runtime_paths,
         http_headers={"X-Access-Client": "test-secret"},
+        cloudflare_access=True,
     )
 
     assert returned_client is client
@@ -294,6 +311,7 @@ async def test_sso_login_uses_returned_identity_without_password(monkeypatch: py
         user_id="@desktop:example.org",
         device_id="DESKTOP",
         access_token="matrix-access-token",  # noqa: S106 - Test-only access token.
+        cloudflare_access=True,
     )
     token_login.assert_awaited_once_with(
         "https://matrix.example.org",

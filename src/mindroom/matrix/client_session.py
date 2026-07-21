@@ -6,7 +6,7 @@ import os
 import ssl as ssl_module
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import nio
 
@@ -185,9 +185,10 @@ def olm_store_exists(user_id: str, device_id: str, runtime_paths: RuntimePaths) 
 
 
 def matrix_client_config(*, http_headers: Mapping[str, str] | None = None) -> nio.AsyncClientConfig:
-    """Return the shared nio configuration used to read and write Olm stores."""
+    """Return nio config, copying plain headers while preserving request-time mappings."""
+    custom_headers = dict(http_headers) if isinstance(http_headers, dict) else http_headers
     return nio.AsyncClientConfig(
-        custom_headers=dict(http_headers) if http_headers is not None else None,
+        custom_headers=cast("dict[str, str] | None", custom_headers),
         replace_rotated_device_keys=True,
     )
 

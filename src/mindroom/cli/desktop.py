@@ -114,6 +114,12 @@ def desktop_login(
         "--open-browser/--no-open-browser",
         help="Open Matrix SSO in the default browser; otherwise print the URL.",
     ),
+    cloudflare_access: bool = typer.Option(
+        False,
+        "--cloudflare-access",
+        envvar="MINDROOM_DESKTOP_CLOUDFLARE_ACCESS",
+        help="Authenticate Matrix requests interactively with the local cloudflared CLI.",
+    ),
     replace: bool = typer.Option(False, "--replace", help="Replace the saved session with a fresh Matrix device."),
     matrix_http_headers_file: Path | None = typer.Option(  # noqa: B008
         None,
@@ -137,6 +143,10 @@ def desktop_login(
     """Log in once, create an Olm device, and save its access token privately."""
     from mindroom.cli.config import activate_cli_runtime  # noqa: PLC0415
     from mindroom.constants import runtime_matrix_homeserver  # noqa: PLC0415
+    from mindroom.desktop.cloudflare_access import (  # noqa: PLC0415
+        CloudflareAccessError,
+        cloudflare_access_headers,
+    )
     from mindroom.desktop.session import (  # noqa: PLC0415
         DesktopSessionError,
         desktop_session_path,
@@ -151,8 +161,10 @@ def desktop_login(
         _error_console.print(f"[red]Error:[/red] Session already exists at {session_path}. Use --replace explicitly.")
         raise typer.Exit(1)
     try:
-        http_headers = load_desktop_http_headers(matrix_http_headers_file)
         resolved_homeserver = homeserver or runtime_matrix_homeserver(runtime_paths)
+        http_headers: Mapping[str, str] | None = load_desktop_http_headers(matrix_http_headers_file)
+        if cloudflare_access:
+            http_headers = cloudflare_access_headers(resolved_homeserver, http_headers)
         requested_login_method = _login_method_for_sso_idp(login_method, sso_idp=sso_idp)
         resolved_login_method = asyncio.run(
             resolve_desktop_login_method(
@@ -185,9 +197,10 @@ def desktop_login(
                 login_token=login_token,
                 session_path=session_path,
                 http_headers=http_headers,
+                cloudflare_access=cloudflare_access,
             ),
         )
-    except (DesktopSessionError, DesktopSsoError) as exc:
+    except (CloudflareAccessError, DesktopSessionError, DesktopSsoError) as exc:
         _error_console.print(f"[red]Desktop login failed:[/red] {exc}")
         raise typer.Exit(1) from None
 
@@ -227,6 +240,7 @@ async def _login_and_save(
     login_token: str | None,
     session_path: Path,
     http_headers: Mapping[str, str] | None = None,
+    cloudflare_access: bool = False,
 ) -> None:
     from mindroom.desktop.session import (  # noqa: PLC0415
         client_ed25519_fingerprint,
@@ -241,6 +255,7 @@ async def _login_and_save(
         login_token=login_token,
         runtime_paths=runtime_paths,
         http_headers=http_headers,
+        cloudflare_access=cloudflare_access,
     )
     try:
         save_desktop_session(session_path, session)
@@ -315,6 +330,12 @@ def desktop_run(
         help="Local Playwright MCP call timeout.",
     ),
     log_level: str = typer.Option("INFO", "--log-level", "-l"),
+    cloudflare_access: bool = typer.Option(
+        False,
+        "--cloudflare-access",
+        envvar="MINDROOM_DESKTOP_CLOUDFLARE_ACCESS",
+        help="Authenticate Matrix requests interactively with the local cloudflared CLI.",
+    ),
     matrix_http_headers_file: Path | None = typer.Option(  # noqa: B008
         None,
         "--matrix-http-headers-file",
@@ -336,6 +357,10 @@ def desktop_run(
 ) -> None:
     """Run the outbound-only Matrix sync loop and execute locally authorized commands."""
     from mindroom.cli.config import activate_cli_runtime  # noqa: PLC0415
+    from mindroom.desktop.cloudflare_access import (  # noqa: PLC0415
+        CloudflareAccessError,
+        cloudflare_access_headers,
+    )
     from mindroom.desktop.command_journal import DesktopCommandJournalError  # noqa: PLC0415
     from mindroom.desktop.provider import DesktopProviderError  # noqa: PLC0415
     from mindroom.desktop.session import (  # noqa: PLC0415
@@ -355,8 +380,10 @@ def desktop_run(
     runtime_paths = activate_cli_runtime(config_path, storage_path=storage_path)
     setup_logging(level=log_level.upper(), runtime_paths=runtime_paths)
     try:
-        http_headers = load_desktop_http_headers(matrix_http_headers_file)
+        http_headers: Mapping[str, str] | None = load_desktop_http_headers(matrix_http_headers_file)
         session = load_desktop_session(desktop_session_path(runtime_paths))
+        if cloudflare_access or session.cloudflare_access:
+            http_headers = cloudflare_access_headers(session.homeserver, http_headers)
         _ensure_desktop_dependencies(runtime_paths)
         asyncio.run(
             _run_bridge(
@@ -381,7 +408,13 @@ def desktop_run(
         )
     except KeyboardInterrupt:
         _console.print("\n[yellow]Desktop bridge stopped.[/yellow]")
-    except (DesktopCommandJournalError, DesktopProviderError, DesktopSessionError, OlmToDeviceError) as exc:
+    except (
+        CloudflareAccessError,
+        DesktopCommandJournalError,
+        DesktopProviderError,
+        DesktopSessionError,
+        OlmToDeviceError,
+    ) as exc:
         _error_console.print(f"[red]Desktop bridge failed:[/red] {exc}")
         raise typer.Exit(1) from None
 
