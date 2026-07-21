@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -53,7 +54,8 @@ class DesktopPairingReceiver:
             logger.warning("desktop_pairing_claim_rejected", agent=self.agent_name, reason="untrusted_device")
             return
         try:
-            claim_desktop_pairing(
+            await asyncio.to_thread(
+                claim_desktop_pairing,
                 self.runtime_paths,
                 token=claim.token,
                 agent_name=self.agent_name,

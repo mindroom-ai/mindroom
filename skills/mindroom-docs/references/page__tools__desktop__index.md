@@ -212,7 +212,8 @@ agents:
           timeout_seconds: 30
 ```
 
-Each user then runs `!desktop setup` in a room with exactly that private Desktop-enabled agent.
+Each user then runs `!desktop setup` in a private room containing only that user, the serving bot, and that private Desktop-enabled agent.
+The short-lived pairing code is a bearer secret, so MindRoom rejects `!desktop` when any other room member is present.
 The router returns a `mindroom desktop pair` command containing a short-lived code and the exact pinned cloud controller identity.
 Run that command on the computer after `mindroom desktop login`, then copy the exact `!desktop confirm <code> <verification>` command it prints back to the same Matrix chat.
 The claim travels as an authenticated Olm-encrypted to-device event, and confirmation stores the local device identity only in that requester's agent-scoped credential store.

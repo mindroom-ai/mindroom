@@ -209,7 +209,7 @@ async def _desktop_agent_for_room(
     room: nio.MatrixRoom,
     requester_user_id: str,
 ) -> str | None:
-    """Resolve one exact eligible private agent from router-visible room membership."""
+    """Resolve one eligible agent from a room containing only the requester and serving bots."""
     if context.responder_candidates_for_room is None:
         candidates = await responder_candidate_entities_for_room(
             context.client,
@@ -221,7 +221,7 @@ async def _desktop_agent_for_room(
     else:
         candidates = await context.responder_candidates_for_room(room, requester_user_id)
     registry = entity_identity_registry(context.config, context.runtime_paths)
-    eligible: list[str] = []
+    eligible: list[tuple[str, str]] = []
     for candidate in candidates:
         agent_name = registry.current_entity_name_for_user_id(candidate.full_id, include_router=False)
         if agent_name is None or agent_name not in context.config.agents:
@@ -233,8 +233,14 @@ async def _desktop_agent_for_room(
             and entity.execution_scope == "user_agent"
             and "desktop" in entity.available_tools
         ):
-            eligible.append(agent_name)
-    return eligible[0] if len(eligible) == 1 else None
+            eligible.append((agent_name, candidate.full_id))
+    if len(eligible) != 1:
+        return None
+    agent_name, agent_user_id = eligible[0]
+    expected_members = {requester_user_id, room.own_user_id, agent_user_id}
+    if set(room.users) != expected_members or room.member_count != len(expected_members):
+        return None
+    return agent_name
 
 
 async def handle_command(  # noqa: C901, PLR0912, PLR0915
@@ -285,7 +291,10 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     elif command.type == CommandType.DESKTOP:
         desktop_agent_name = await _desktop_agent_for_room(context, room, requester_user_id)
         if desktop_agent_name is None:
-            response_text = "❌ Use `!desktop` in a room with exactly one private Desktop-enabled agent."
+            response_text = (
+                "❌ Use `!desktop` in a private room containing only you, the serving bot, "
+                "and exactly one private Desktop-enabled agent."
+            )
         else:
             response_text = handle_desktop_command(
                 command.args.get("args_text", ""),

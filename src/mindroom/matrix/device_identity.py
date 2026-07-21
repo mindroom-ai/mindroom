@@ -15,7 +15,8 @@ class PinnedMatrixDevice:
 
     def __post_init__(self) -> None:
         """Reject incomplete pins before any network or trust-store mutation."""
-        if not self.user_id.startswith("@") or ":" not in self.user_id:
+        localpart, separator, server_name = self.user_id.removeprefix("@").partition(":")
+        if not self.user_id.startswith("@") or not localpart or not separator or not server_name:
             msg = "Pinned Matrix user_id must use @user:server form."
             raise ValueError(msg)
         if not self.device_id.strip():
