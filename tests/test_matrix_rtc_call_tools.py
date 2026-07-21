@@ -156,6 +156,48 @@ def test_call_agent_cache_closes_history_storage_when_agent_build_fails(
 
 
 @pytest.mark.asyncio
+async def test_call_agent_cache_rebuilds_private_desktop_schema_each_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A chat pairing becomes visible on the next voice turn without restarting the call."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "defaults": {"tools": []},
+            "agents": {
+                AGENT: {
+                    "display_name": "Helper",
+                    "private": {"per": "user_agent"},
+                    "tools": ["desktop"],
+                },
+            },
+        },
+        runtime_paths,
+    )
+    cache = _CallAgentCache(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
+        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
+        session_id="call-session",
+        active_model_name="default",
+    )
+    built_agents = [MagicMock(name="first"), MagicMock(name="second")]
+    build = MagicMock(side_effect=built_agents)
+    monkeypatch.setattr(cache, "_build_agent", build)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.close_agent_runtime_state_dbs", MagicMock())
+
+    first = await cache._get_agent(knowledge=None, knowledge_identity=(), refresh_scheduler=None)
+    second = await cache._get_agent(knowledge=None, knowledge_identity=(), refresh_scheduler=None)
+
+    assert first is built_agents[0]
+    assert second is built_agents[1]
+    assert build.call_count == 2
+
+
+@pytest.mark.asyncio
 async def test_wrapped_tool_executes_sync_entrypoint_in_context() -> None:
     """Sync entrypoints run in a worker thread with the runtime context bound."""
     seen_context: list[object] = []

@@ -23,6 +23,7 @@ class CommandType(Enum):
     CANCEL_SCHEDULE = "cancel_schedule"
     EDIT_SCHEDULE = "edit_schedule"
     CONFIG = "config"  # Configuration command
+    DESKTOP = "desktop"  # Requester-scoped Desktop pairing
     MODEL = "model"  # Per-thread model override command
     THREAD_MODE = "thread_mode"  # Room-level thread mode override command
     ENCRYPT = "encrypt"  # Room encryption enablement command
@@ -40,6 +41,7 @@ _COMMAND_DOCS = {
     CommandType.HELP: ("!help [topic]", "Get help"),
     CommandType.RELOAD_PLUGINS: ("!reload-plugins", "Reload configured plugins (admin only)"),
     CommandType.CONFIG: ("!config <operation>", "Manage configuration"),
+    CommandType.DESKTOP: ("!desktop [setup|status|confirm|rotate|disconnect]", "Manage your private Desktop target"),
     CommandType.MODEL: ("!model [name|list|reset]", "Show or switch the model used in the current thread"),
     CommandType.THREAD_MODE: (
         "!thread_mode [room|thread|reset|show]",
@@ -117,6 +119,7 @@ class _CommandParser:
     CANCEL_SCHEDULE_PATTERN = re.compile(r"^!cancel[_-]?schedule\s+(.+)$", re.IGNORECASE)
     EDIT_SCHEDULE_PATTERN = re.compile(r"^!edit[_-]?schedule\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
     CONFIG_PATTERN = re.compile(r"^!config(?:\s+(.+))?$", re.IGNORECASE)
+    DESKTOP_PATTERN = re.compile(r"^!desktop(?:\s+(.+))?$", re.IGNORECASE)
     MODEL_PATTERN = re.compile(r"^!model(?:\s+(.+))?$", re.IGNORECASE)
     THREAD_MODE_PATTERN = re.compile(r"^!thread[_-]?mode(?:\s+(.+))?$", re.IGNORECASE)
     ENCRYPT_PATTERN = re.compile(r"^!encrypt(?:\s+(.+))?$", re.IGNORECASE)
@@ -199,6 +202,15 @@ class _CommandParser:
             args_text = match.group(1).strip() if match.group(1) else ""
             return Command(
                 type=CommandType.CONFIG,
+                args={"args_text": args_text},
+                raw_text=message,
+            )
+
+        match = self.DESKTOP_PATTERN.match(message)
+        if match:
+            args_text = match.group(1).strip() if match.group(1) else ""
+            return Command(
+                type=CommandType.DESKTOP,
                 args={"args_text": args_text},
                 raw_text=message,
             )

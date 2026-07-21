@@ -162,6 +162,37 @@ def test_desktop_password_login_requires_user_id(monkeypatch: pytest.MonkeyPatch
     assert "--user-id is required" in result.output
 
 
+def test_desktop_pair_sends_claim_with_saved_local_session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The setup command can present its token from the already logged-in local device."""
+    runtime_paths = SimpleNamespace(storage_root=tmp_path)
+    session = SimpleNamespace(homeserver="https://matrix.example.org", cloudflare_access=False)
+    pair = AsyncMock(return_value="VERIFY123")
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
+    monkeypatch.setattr("mindroom.desktop.session.load_desktop_session", lambda _path: session)
+    monkeypatch.setattr(desktop_cli, "_pair_desktop", pair)
+
+    result = runner.invoke(
+        desktop_app,
+        [
+            "pair",
+            "--code",
+            "short-code",
+            "--controller-user-id",
+            "@computer:example.org",
+            "--controller-device-id",
+            "CLOUD",
+            "--controller-ed25519",
+            "cloud-fingerprint",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert pair.await_args.kwargs["session"] is session
+    assert pair.await_args.kwargs["code"] == "short-code"
+    assert pair.await_args.kwargs["controller_user_id"] == "@computer:example.org"
+    assert "!desktop confirm short-code VERIFY123" in result.output
+
+
 def test_desktop_run_loads_matrix_http_headers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Long-running sync receives the same proxy headers as one-time login."""
     runtime_paths = SimpleNamespace(storage_root=tmp_path)

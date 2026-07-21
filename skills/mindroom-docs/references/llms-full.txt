@@ -164,7 +164,7 @@ mindroom run
 | **Authorization** | Fine-grained user and room access control |
 | **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client |
 | **Streaming** | Progressive message edits with presence-based gating and tool-call markers |
-| **Chat Commands** | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!model [name\|list\|reset]`, `!thread_mode [room\|thread\|reset\|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi` commands handled by the router |
+| **Chat Commands** | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!desktop [setup\|status\|confirm\|rotate\|disconnect]`, `!model [name\|list\|reset]`, `!thread_mode [room\|thread\|reset\|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi` commands handled by the router |
 | **Hot Reload** | Config changes are detected and agents restart automatically |
 
 ## Architecture
@@ -206,7 +206,7 @@ mindroom run
 - [Image Messages](https://docs.mindroom.chat/images/) - Image analysis with vision models
 - [File & Video Attachments](https://docs.mindroom.chat/attachments/) - Context-scoped file and video handling
 - [Streaming Responses](https://docs.mindroom.chat/streaming/) - Progressive message edits with presence-based gating
-- [Chat Commands](https://docs.mindroom.chat/chat-commands/) - Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!model [name|list|reset]`, `!thread_mode [room|thread|reset|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi` commands
+- [Chat Commands](https://docs.mindroom.chat/chat-commands/) - Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!desktop [setup|status|confirm|rotate|disconnect]`, `!model [name|list|reset]`, `!thread_mode [room|thread|reset|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi` commands
 - [Interactive Q&A](https://docs.mindroom.chat/interactive/) - Clickable multiple-choice questions via Matrix reactions
 - [Authorization](https://docs.mindroom.chat/authorization/) - User and room access control
 - [Matrix Space](https://docs.mindroom.chat/matrix-space/) - Optional root Matrix Space for grouping managed rooms
@@ -7573,7 +7573,8 @@ Device: ABCDEFGHIJ
 Ed25519: desktop-device-fingerprint
 ```
 
-Copy these exact public identity values to the cloud MindRoom configuration.
+Keep these public identity values available for legacy shared-agent configuration.
+Private multi-user agents register them through the chat flow below instead.
 
 ### Homeservers Behind an Identity-Aware Proxy
 
@@ -7623,6 +7624,35 @@ Configure the proxy to accept these machine credentials only for the Matrix endp
 Do not combine `--cloudflare-access` with a static `cf-access-token` header.
 
 ## 2. Configure the Cloud Agent
+
+### Private Multi-User Agents Without Dashboard Access
+
+Configure the Desktop tool on a private agent without authored device identity fields:
+
+```yaml
+agents:
+  computer:
+    display_name: Computer Agent
+    role: Operate my locally authorized applications one step at a time
+    private:
+      per: user_agent
+    tools:
+      - desktop:
+          defer: true
+          timeout_seconds: 30
+```
+
+Each user then runs `!desktop setup` in a room with exactly that private Desktop-enabled agent.
+The router returns a `mindroom desktop pair` command containing a short-lived code and the exact pinned cloud controller identity.
+Run that command on the computer after `mindroom desktop login`, then copy the exact `!desktop confirm <code> <verification>` command it prints back to the same Matrix chat.
+The claim travels as an authenticated Olm-encrypted to-device event, and confirmation stores the local device identity only in that requester's agent-scoped credential store.
+The verification value binds confirmation to the claimed Ed25519 key, so a different device cannot pre-claim a visible pairing code and be confirmed accidentally.
+Another requester or agent cannot confirm or use that record, and shared credentials are never used as a fallback.
+Until pairing is confirmed, the callable Desktop schema is omitted while the agent's unrelated tools continue to work.
+The model receives only a read-only setup-status helper and cannot register or replace a device itself.
+Use `!desktop rotate` to replace a device without dropping the current target before confirmation, or `!desktop disconnect confirm` to remove it.
+
+### Shared or Operator-Managed Agents
 
 Start cloud MindRoom at least once so the chosen agent has a persistent Matrix device.
 On the cloud server, print that controller's local device identity:
@@ -14318,6 +14348,7 @@ Commands start with `!` and are handled by the router agent.
 | `!list_schedules` | List pending scheduled tasks |
 | `!cancel_schedule <id>` | Cancel a scheduled task |
 | `!edit_schedule <id> <task>` | Edit an existing scheduled task |
+| `!desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one private agent |
 | `!model [name\|list\|reset]` | Show or switch the model used in the current thread |
 | `!thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room |
 | `!encrypt [confirm]` | Enable end-to-end encryption for this room (irreversible, room admin only) |
@@ -14465,6 +14496,29 @@ Schedule type cannot be changed (one-time to recurring or vice versa) -- cancel 
 ```
 
 **Aliases:** `!editschedule`, `!edit-schedule`
+
+### `!desktop`
+
+Manage the current requester's Desktop target for one private Desktop-enabled agent.
+
+Run these commands in a room with exactly one eligible private agent:
+
+```text
+!desktop setup
+!desktop status
+!desktop confirm <code> <verification>
+!desktop rotate
+!desktop disconnect
+!desktop disconnect confirm
+```
+
+`!desktop setup` returns a local `mindroom desktop pair` command and a short-lived pairing code.
+The local pairing command presents that code through an authenticated encrypted Matrix device event.
+It then prints an exact chat confirmation command with a verification value derived from the authenticated local device key.
+Only the same Matrix requester in the same agent scope can confirm the matching claim.
+`!desktop rotate` starts the same flow while leaving the current target active until confirmation.
+The agent can report setup status, but it cannot start, confirm, rotate, or disconnect pairing on the requester's behalf.
+See [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) for local login and allowlist instructions.
 
 ### `!model`
 

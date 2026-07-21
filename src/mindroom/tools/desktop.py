@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,
     requires_room_context=True,
+    runtime_config_required=True,
     icon="MonitorUp",
     icon_color="text-cyan-500",
     config_fields=[

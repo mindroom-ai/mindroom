@@ -17,6 +17,7 @@ Commands start with `!` and are handled by the router agent.
 | `!list_schedules` | List pending scheduled tasks |
 | `!cancel_schedule <id>` | Cancel a scheduled task |
 | `!edit_schedule <id> <task>` | Edit an existing scheduled task |
+| `!desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one private agent |
 | `!model [name\|list\|reset]` | Show or switch the model used in the current thread |
 | `!thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room |
 | `!encrypt [confirm]` | Enable end-to-end encryption for this room (irreversible, room admin only) |
@@ -164,6 +165,29 @@ Schedule type cannot be changed (one-time to recurring or vice versa) -- cancel 
 ```
 
 **Aliases:** `!editschedule`, `!edit-schedule`
+
+### `!desktop`
+
+Manage the current requester's Desktop target for one private Desktop-enabled agent.
+
+Run these commands in a room with exactly one eligible private agent:
+
+```text
+!desktop setup
+!desktop status
+!desktop confirm <code> <verification>
+!desktop rotate
+!desktop disconnect
+!desktop disconnect confirm
+```
+
+`!desktop setup` returns a local `mindroom desktop pair` command and a short-lived pairing code.
+The local pairing command presents that code through an authenticated encrypted Matrix device event.
+It then prints an exact chat confirmation command with a verification value derived from the authenticated local device key.
+Only the same Matrix requester in the same agent scope can confirm the matching claim.
+`!desktop rotate` starts the same flow while leaving the current target active until confirmation.
+The agent can report setup status, but it cannot start, confirm, rotate, or disconnect pairing on the requester's behalf.
+See [Matrix Desktop Bridge](tools/desktop.md) for local login and allowlist instructions.
 
 ### `!model`
 

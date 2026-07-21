@@ -38,6 +38,7 @@ EXPECTED_PUBLIC_CATALOG_SYMBOLS = [
     "ToolAuthoredOverrideValidator",
     "ToolCategory",
     "ToolConfigOverrideError",
+    "ToolConfigurationNotReadyError",
     "ToolInitOverrideError",
     "ToolManagedInitArg",
     "ToolMetadata",

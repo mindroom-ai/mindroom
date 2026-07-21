@@ -63,6 +63,7 @@ class DeferredToolCatalogEntry:
     function_names: tuple[str, ...]
     loaded: bool
     sticky: bool
+    setup_required: bool = False
 
 
 def _dynamic_tool_scope_key(session_id: str) -> str:
@@ -188,6 +189,14 @@ def _special_tool_names(
     )
     if allow_self_config:
         tool_names.append("self_config")
+
+    entity = config.resolve_entity(agent_name)
+    if (
+        "desktop" in entity.available_tools
+        and agent_config.private is not None
+        and entity.execution_scope == "user_agent"
+    ):
+        tool_names.append("desktop_setup")
 
     if enable_dynamic_tools_manager and has_deferred_tools(config, agent_name):
         tool_names.append("dynamic_tools")
@@ -524,6 +533,7 @@ def deferred_tool_catalog_entries(
     agent_name: str,
     config: Config,
     loaded_tools: list[str],
+    setup_required_tool_names: frozenset[str] = frozenset(),
 ) -> list[DeferredToolCatalogEntry]:
     """Return model-visible catalog metadata for one agent's authored deferred tools."""
     loaded = set(loaded_tools)
@@ -539,6 +549,7 @@ def deferred_tool_catalog_entries(
                 function_names=tuple(metadata.function_names or ()) if metadata else (),
                 loaded=entry.name in loaded,
                 sticky=entry.initial,
+                setup_required=entry.name in setup_required_tool_names,
             ),
         )
     return entries
