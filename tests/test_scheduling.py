@@ -2128,6 +2128,33 @@ async def test_persist_scheduled_task_state_raises_on_matrix_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_persist_scheduled_task_state_includes_cron_description() -> None:
+    """Matrix state should expose the backend-owned recurring schedule description."""
+    client = AsyncMock()
+    client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
+        {"event_id": "$state"},
+        room_id="!test:server",
+    )
+    workflow = ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="0", hour="9"),
+        message="check logs",
+        description="check logs",
+        room_id="!test:server",
+    )
+
+    await _persist_scheduled_task_state(
+        client=client,
+        room_id="!test:server",
+        task_id="task1234",
+        workflow=workflow,
+    )
+
+    content = client.room_put_state.await_args.kwargs["content"]
+    assert content["cron_description"] == "At 09:00"
+
+
+@pytest.mark.asyncio
 async def test_schedule_task_persists_via_admin_when_active_agent_lacks_state_power(tmp_path: Path) -> None:
     """A successful schedule must be visible in Matrix state even when the active agent cannot write state."""
     client = AsyncMock()

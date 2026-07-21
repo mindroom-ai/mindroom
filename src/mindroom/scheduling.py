@@ -746,6 +746,9 @@ async def _persist_scheduled_task_state(
         content={
             "task_id": task_id,
             "workflow": workflow.model_dump_json(),
+            "cron_description": (
+                workflow.cron_schedule.to_natural_language() if workflow.cron_schedule is not None else None
+            ),
             "status": status,
             "created_at": _serialize_scheduled_task_created_at(created_at),
             "updated_at": datetime.now(UTC).isoformat(),
