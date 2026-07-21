@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from mindroom.authorization import responder_candidate_entities_for_room
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
+from mindroom.commands.desktop_commands import DesktopCommandScope, handle_desktop_command
 from mindroom.commands.encryption_commands import handle_e2ee_command, handle_encrypt_command
 from mindroom.commands.model_commands import handle_model_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help, get_compact_command_entries
@@ -203,6 +204,39 @@ def _format_plugin_reload_summary(result: PluginReloadResult) -> str:
     return f"✅ Reloaded {plugin_count} {plugin_label}; cancelled {result.cancelled_task_count} {task_label}; active: {active_plugins}"
 
 
+async def _desktop_agent_for_room(
+    context: CommandHandlerContext,
+    room: nio.MatrixRoom,
+    requester_user_id: str,
+) -> str | None:
+    """Resolve one exact eligible private agent from router-visible room membership."""
+    if context.responder_candidates_for_room is None:
+        candidates = await responder_candidate_entities_for_room(
+            context.client,
+            room,
+            requester_user_id,
+            context.config,
+            context.runtime_paths,
+        )
+    else:
+        candidates = await context.responder_candidates_for_room(room, requester_user_id)
+    registry = entity_identity_registry(context.config, context.runtime_paths)
+    eligible: list[str] = []
+    for candidate in candidates:
+        agent_name = registry.current_entity_name_for_user_id(candidate.full_id, include_router=False)
+        if agent_name is None or agent_name not in context.config.agents:
+            continue
+        agent_config = context.config.get_agent(agent_name)
+        entity = context.config.resolve_entity(agent_name)
+        if (
+            agent_config.private is not None
+            and entity.execution_scope == "user_agent"
+            and "desktop" in entity.available_tools
+        ):
+            eligible.append(agent_name)
+    return eligible[0] if len(eligible) == 1 else None
+
+
 async def handle_command(  # noqa: C901, PLR0912, PLR0915
     *,
     context: CommandHandlerContext,
@@ -247,6 +281,23 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         else:
             candidate_entities = await context.responder_candidates_for_room(room, requester_user_id)
             response_text = _format_welcome_message(candidate_entities, context.config, context.runtime_paths)
+
+    elif command.type == CommandType.DESKTOP:
+        desktop_agent_name = await _desktop_agent_for_room(context, room, requester_user_id)
+        if desktop_agent_name is None:
+            response_text = "❌ Use `!desktop` in a room with exactly one private Desktop-enabled agent."
+        else:
+            response_text = handle_desktop_command(
+                command.args.get("args_text", ""),
+                scope=DesktopCommandScope(
+                    config=context.config,
+                    runtime_paths=context.runtime_paths,
+                    agent_name=desktop_agent_name,
+                    requester_id=requester_user_id,
+                    room_id=room.room_id,
+                    thread_id=effective_thread_id,
+                ),
+            )
 
     elif command.type == CommandType.SCHEDULE:
         full_text = command.args["full_text"]

@@ -87,8 +87,8 @@ def test_worker_grantable_policy_rejects_google_oauth_token_services(service: st
 
 
 def test_worker_grantable_policy_rejects_sensitive_google_services() -> None:
-    """Sensitive non-OAuth Google credential services should stay unsupported for worker mirroring."""
-    assert frozenset({"google_vertex_adc"}) == _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
+    """Machine-local identity services stay unsupported for worker mirroring."""
+    assert frozenset({"desktop", "google_vertex_adc"}) == _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
     assert credential_service_policy("google_vertex_adc", "shared").worker_grantable_supported is False
 
 

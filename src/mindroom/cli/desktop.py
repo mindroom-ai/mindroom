@@ -279,6 +279,116 @@ def _print_device_identity(
     _console.print("\nPin these exact values in the cloud agent's desktop tool configuration.")
 
 
+@desktop_app.command("pair")
+def desktop_pair(
+    code: str = typer.Option(..., "--code", help="Short-lived code returned by !desktop setup."),
+    controller_user_id: str = typer.Option(..., "--controller-user-id", help="Pinned cloud controller Matrix user."),
+    controller_device_id: str = typer.Option(..., "--controller-device-id", help="Pinned cloud controller device."),
+    controller_ed25519: str = typer.Option(..., "--controller-ed25519", help="Pinned controller fingerprint."),
+    cloudflare_access: bool = typer.Option(
+        False,
+        "--cloudflare-access",
+        envvar="MINDROOM_DESKTOP_CLOUDFLARE_ACCESS",
+        help="Authenticate Matrix requests interactively with the local cloudflared CLI.",
+    ),
+    matrix_http_headers_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--matrix-http-headers-file",
+        envvar="MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE",
+        help="Owner-only JSON file of HTTP headers added to every Matrix request.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="MindRoom config path used for runtime env.",
+    ),
+    storage_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--storage-path",
+        "-s",
+        help="Desktop bridge state directory.",
+    ),
+) -> None:
+    """Claim one requester-agent pairing through authenticated Matrix E2EE."""
+    from mindroom.cli.config import activate_cli_runtime  # noqa: PLC0415
+    from mindroom.desktop.cloudflare_access import (  # noqa: PLC0415
+        CloudflareAccessError,
+        cloudflare_access_headers,
+    )
+    from mindroom.desktop.session import (  # noqa: PLC0415
+        DesktopSessionError,
+        desktop_session_path,
+        load_desktop_http_headers,
+        load_desktop_session,
+    )
+    from mindroom.matrix.olm_to_device import OlmToDeviceError  # noqa: PLC0415
+
+    runtime_paths = activate_cli_runtime(config_path, storage_path=storage_path)
+    try:
+        http_headers: Mapping[str, str] | None = load_desktop_http_headers(matrix_http_headers_file)
+        session = load_desktop_session(desktop_session_path(runtime_paths))
+        if cloudflare_access or session.cloudflare_access:
+            http_headers = cloudflare_access_headers(session.homeserver, http_headers)
+        verification = asyncio.run(
+            _pair_desktop(
+                runtime_paths=runtime_paths,
+                session=session,
+                code=code,
+                controller_user_id=controller_user_id,
+                controller_device_id=controller_device_id,
+                controller_ed25519=controller_ed25519,
+                http_headers=http_headers,
+            ),
+        )
+    except (CloudflareAccessError, DesktopSessionError, OlmToDeviceError, ValueError) as exc:
+        _error_console.print(f"[red]Desktop pairing failed:[/red] {exc}")
+        raise typer.Exit(1) from None
+    _console.print("[green]Pairing claim sent.[/green] Return to the chat and run:")
+    _console.print(f"!desktop confirm {code} {verification}", markup=False)
+
+
+async def _pair_desktop(
+    *,
+    runtime_paths: RuntimePaths,
+    session: DesktopMatrixSession,
+    code: str,
+    controller_user_id: str,
+    controller_device_id: str,
+    controller_ed25519: str,
+    http_headers: Mapping[str, str] | None = None,
+) -> str:
+    from mindroom.desktop.protocol import (  # noqa: PLC0415
+        DESKTOP_PAIRING_CLAIM_EVENT_TYPE,
+        DesktopPairingClaim,
+        desktop_pairing_verification,
+    )
+    from mindroom.desktop.session import (  # noqa: PLC0415
+        client_ed25519_fingerprint,
+        open_desktop_client,
+        prepare_desktop_client,
+    )
+    from mindroom.matrix.olm_to_device import PinnedMatrixDevice, send_encrypted_to_device  # noqa: PLC0415
+
+    controller = PinnedMatrixDevice(
+        user_id=controller_user_id,
+        device_id=controller_device_id,
+        ed25519=controller_ed25519,
+    )
+    client = await open_desktop_client(session, runtime_paths=runtime_paths, http_headers=http_headers)
+    try:
+        await prepare_desktop_client(client)
+        await send_encrypted_to_device(
+            client,
+            controller,
+            event_type=DESKTOP_PAIRING_CLAIM_EVENT_TYPE,
+            content=DesktopPairingClaim(code).to_content(),
+        )
+        return desktop_pairing_verification(code, client_ed25519_fingerprint(client))
+    finally:
+        await client.close()
+
+
 @desktop_app.command("run")
 def desktop_run(
     controller_user_id: str = typer.Option(..., "--controller-user-id", help="Pinned cloud controller Matrix user."),
@@ -573,4 +683,4 @@ async def _sync_desktop_client(client: nio.AsyncClient) -> None:
         raise DesktopSessionError(msg)
 
 
-__all__ = ["desktop_app", "desktop_controller", "desktop_login", "desktop_run"]
+__all__ = ["desktop_app", "desktop_controller", "desktop_login", "desktop_pair", "desktop_run"]

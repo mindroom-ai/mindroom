@@ -16,6 +16,7 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     ToolConfigOverrideError,
+    ToolConfigurationNotReadyError,
     ToolInitOverrideError,
     ToolMetadataValidationError,
     apply_authored_overrides,
@@ -42,6 +43,7 @@ __all__ = [
     "ToolAuthoredOverrideValidator",
     "ToolCategory",
     "ToolConfigOverrideError",
+    "ToolConfigurationNotReadyError",
     "ToolInitOverrideError",
     "ToolManagedInitArg",
     "ToolMetadata",

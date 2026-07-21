@@ -143,7 +143,8 @@ Device: ABCDEFGHIJ
 Ed25519: desktop-device-fingerprint
 ```
 
-Copy these exact public identity values to the cloud MindRoom configuration.
+Keep these public identity values available for legacy shared-agent configuration.
+Private multi-user agents register them through the chat flow below instead.
 
 ### Homeservers Behind an Identity-Aware Proxy
 
@@ -193,6 +194,35 @@ Configure the proxy to accept these machine credentials only for the Matrix endp
 Do not combine `--cloudflare-access` with a static `cf-access-token` header.
 
 ## 2. Configure the Cloud Agent
+
+### Private Multi-User Agents Without Dashboard Access
+
+Configure the Desktop tool on a private agent without authored device identity fields:
+
+```yaml
+agents:
+  computer:
+    display_name: Computer Agent
+    role: Operate my locally authorized applications one step at a time
+    private:
+      per: user_agent
+    tools:
+      - desktop:
+          defer: true
+          timeout_seconds: 30
+```
+
+Each user then runs `!desktop setup` in a room with exactly that private Desktop-enabled agent.
+The router returns a `mindroom desktop pair` command containing a short-lived code and the exact pinned cloud controller identity.
+Run that command on the computer after `mindroom desktop login`, then copy the exact `!desktop confirm <code> <verification>` command it prints back to the same Matrix chat.
+The claim travels as an authenticated Olm-encrypted to-device event, and confirmation stores the local device identity only in that requester's agent-scoped credential store.
+The verification value binds confirmation to the claimed Ed25519 key, so a different device cannot pre-claim a visible pairing code and be confirmed accidentally.
+Another requester or agent cannot confirm or use that record, and shared credentials are never used as a fallback.
+Until pairing is confirmed, the callable Desktop schema is omitted while the agent's unrelated tools continue to work.
+The model receives only a read-only setup-status helper and cannot register or replace a device itself.
+Use `!desktop rotate` to replace a device without dropping the current target before confirmation, or `!desktop disconnect confirm` to remove it.
+
+### Shared or Operator-Managed Agents
 
 Start cloud MindRoom at least once so the chosen agent has a persistent Matrix device.
 On the cloud server, print that controller's local device identity:

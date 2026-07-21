@@ -19,6 +19,7 @@ from agno.tools.function import Function
 from mindroom.agents import (
     _build_dynamic_tooling_instruction_block,
     _build_dynamic_tooling_state_suffix,
+    _context_hidden_toolkits,
     build_agent_toolkit,
     create_agent,
     get_agent_toolkit_names,
@@ -27,6 +28,7 @@ from mindroom.claude_prompt_cache import _DEFERRED_TOOL_NAMES_ATTR
 from mindroom.config.main import Config
 from mindroom.config.models import EffectiveToolConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.credentials import delete_scoped_credentials, get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.custom_tools import update_awareness
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.mcp.toolkit import bind_mcp_server_manager
@@ -39,6 +41,7 @@ from mindroom.tool_system.dynamic_toolkits import (
     suppress_fully_deferred_toolkit_instructions,
     visible_tool_surface,
 )
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, build_agent_toolkit_worker_target
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -108,6 +111,33 @@ def _render_system_prompt(agent: Agent) -> str:
     )
     assert message is not None
     return str(message.content)
+
+
+def _private_identity(requester_id: str) -> ToolExecutionIdentity:
+    return ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id=requester_id,
+        room_id="!shared:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="shared-session",
+    )
+
+
+def test_openai_compatible_context_hides_desktop_and_setup_surfaces() -> None:
+    """Non-Matrix callers cannot access Desktop control or pairing guidance tools."""
+    identity = ToolExecutionIdentity(
+        channel="openai_compat",
+        agent_name="code",
+        requester_id="api-user",
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="api-session",
+    )
+
+    assert {"desktop", "desktop_setup"} <= _context_hidden_toolkits(identity)
 
 
 def _install_update_awareness_status(monkeypatch: pytest.MonkeyPatch) -> str:
@@ -610,7 +640,6 @@ def test_dynamic_tools_manager_loads_unloads_searches_and_respects_sticky_initia
     assert already_loaded_payload["message"] == "Tool 'sleep' is already loaded for this session."
 
     assert _tool_payload(manager.unload_tool("shell"))["status"] == "sticky"
-
     unloaded_payload = _tool_payload(manager.unload_tool("sleep"))
     assert unloaded_payload["status"] == "unloaded"
     assert "takes_effect" not in unloaded_payload
@@ -618,6 +647,188 @@ def test_dynamic_tools_manager_loads_unloads_searches_and_respects_sticky_initia
 
     assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
     assert _tool_payload(manager.unload_tool("sleep"))["status"] == "not_loaded"
+
+
+def test_private_desktop_setup_is_requester_agent_scoped_without_shared_fallback(tmp_path: Path) -> None:
+    """Pairing and dynamic state for one user-agent pair must not reach another user."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["private"] = {"per": "user_agent"}  # type: ignore[index]
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        "calculator",
+        {
+            "desktop": {
+                "defer": True,
+                "device_user_id": "@authored-desktop:example.org",
+                "device_id": "AUTHORED",
+                "device_ed25519": "authored-fingerprint",
+            },
+        },
+    ]
+    config = _validated_config(tmp_path, raw)
+    runtime_paths = _runtime_paths(tmp_path)
+    alice_identity = _private_identity("@alice:example.org")
+    bob_identity = _private_identity("@bob:example.org")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    shared_identity = {
+        "device_user_id": "@shared-desktop:example.org",
+        "device_id": "SHARED",
+        "device_ed25519": "shared-fingerprint",
+    }
+    credentials_manager.shared_manager().save_credentials("desktop", shared_identity)
+
+    alice_unpaired = create_agent(
+        "code",
+        config,
+        runtime_paths,
+        execution_identity=alice_identity,
+        session_id="same-room-session",
+    )
+    alice_manager = next(tool for tool in alice_unpaired.tools if tool.name == "dynamic_tools")
+    alice_catalog = _tool_payload(alice_manager.list_tools())
+
+    assert any(tool.name == "calculator" for tool in alice_unpaired.tools)
+    setup_toolkit = next(tool for tool in alice_unpaired.tools if tool.name == "desktop_setup")
+    assert set(setup_toolkit.get_functions()) == {"desktop_setup"}
+    assert not any(tool.name == "desktop" for tool in alice_unpaired.tools)
+    assert alice_catalog["tools"][0]["setup_required"] is True  # type: ignore[index]
+    assert _tool_payload(alice_manager.load_tool("desktop"))["status"] == "setup_required"
+
+    alice_target = build_agent_toolkit_worker_target(
+        "user_agent",
+        "code",
+        is_private=True,
+        execution_identity=alice_identity,
+        runtime_paths=runtime_paths,
+    )
+    save_scoped_credentials(
+        "desktop",
+        {
+            "device_user_id": "@alice-desktop:example.org",
+            "device_id": "ALICE",
+            "device_ed25519": "alice-fingerprint",
+        },
+        credentials_manager=credentials_manager,
+        worker_target=alice_target,
+    )
+
+    alice_paired = create_agent(
+        "code",
+        config,
+        runtime_paths,
+        execution_identity=alice_identity,
+        session_id="same-room-session",
+    )
+    alice_manager = next(tool for tool in alice_paired.tools if tool.name == "dynamic_tools")
+    assert _tool_payload(alice_manager.load_tool("desktop"))["status"] == "loaded"
+    alice_loaded = create_agent(
+        "code",
+        config,
+        runtime_paths,
+        execution_identity=alice_identity,
+        session_id="same-room-session",
+    )
+    alice_desktop = next(tool for tool in alice_loaded.tools if tool.name == "desktop")
+    assert alice_desktop._target.user_id == "@alice-desktop:example.org"  # type: ignore[attr-defined]
+
+    save_scoped_credentials(
+        "desktop",
+        {
+            "device_user_id": "@alice-rotated:example.org",
+            "device_id": "ROTATED",
+            "device_ed25519": "rotated-fingerprint",
+        },
+        credentials_manager=credentials_manager,
+        worker_target=alice_target,
+    )
+    alice_rotated = create_agent(
+        "code",
+        config,
+        runtime_paths,
+        execution_identity=alice_identity,
+        session_id="same-room-session",
+    )
+    rotated_desktop = next(tool for tool in alice_rotated.tools if tool.name == "desktop")
+    assert rotated_desktop._target.user_id == "@alice-rotated:example.org"  # type: ignore[attr-defined]
+
+    delete_scoped_credentials(
+        "desktop",
+        credentials_manager=credentials_manager,
+        worker_target=alice_target,
+    )
+    alice_disconnected = create_agent(
+        "code",
+        config,
+        runtime_paths,
+        execution_identity=alice_identity,
+        session_id="same-room-session",
+    )
+    assert not any(tool.name == "desktop" for tool in alice_disconnected.tools)
+
+    bob_unpaired = create_agent(
+        "code",
+        config,
+        runtime_paths,
+        execution_identity=bob_identity,
+        session_id="same-room-session",
+    )
+    bob_manager = next(tool for tool in bob_unpaired.tools if tool.name == "dynamic_tools")
+    bob_catalog = _tool_payload(bob_manager.list_tools())
+    assert bob_catalog["loaded_tools"] == []
+    assert bob_catalog["tools"][0]["setup_required"] is True  # type: ignore[index]
+    assert not any(tool.name == "desktop" for tool in bob_unpaired.tools)
+
+
+def test_native_tool_search_rebuilds_private_desktop_after_pairing(tmp_path: Path) -> None:
+    """Native deferred schemas omit unconfigured Desktop and add it after scoped setup."""
+    raw = _base_config_data()
+    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-4-8"}  # type: ignore[index]
+    raw["agents"]["code"].update(  # type: ignore[union-attr,index]
+        {
+            "model": "claude",
+            "private": {"per": "user_agent"},
+            "tools": [{"desktop": {"defer": True}}],
+        },
+    )
+    config = _validated_config(tmp_path, raw)
+    runtime_paths = _runtime_paths(tmp_path)
+    identity = _private_identity("@alice:example.org")
+
+    unpaired = create_agent(
+        "code",
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        session_id="native-session",
+    )
+    assert not any(tool.name == "desktop" for tool in unpaired.tools)
+    assert any(tool.name == "desktop_setup" for tool in unpaired.tools)
+    assert _DEFERRED_TOOL_NAMES_ATTR not in vars(unpaired.model)
+
+    save_scoped_credentials(
+        "desktop",
+        {
+            "device_user_id": "@alice-desktop:example.org",
+            "device_id": "ALICE",
+            "device_ed25519": "alice-fingerprint",
+        },
+        credentials_manager=get_runtime_credentials_manager(runtime_paths),
+        worker_target=build_agent_toolkit_worker_target(
+            "user_agent",
+            "code",
+            is_private=True,
+            execution_identity=identity,
+            runtime_paths=runtime_paths,
+        ),
+    )
+    paired = create_agent(
+        "code",
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        session_id="native-session",
+    )
+    assert any(tool.name == "desktop" for tool in paired.tools)
+    assert "desktop" in vars(paired.model)[_DEFERRED_TOOL_NAMES_ATTR]
 
 
 def test_dynamic_tools_stop_after_tool_call_only_when_continuation_enabled(tmp_path: Path) -> None:

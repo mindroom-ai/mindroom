@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
 
 import mindroom.tools  # noqa: F401
 from mindroom.custom_tools.desktop import DesktopTools
+from mindroom.desktop.configuration import DesktopConfigurationStatus, desktop_configuration_state
 from mindroom.desktop.media import DesktopMediaError
 from mindroom.desktop.protocol import DesktopResponse, EncryptedDesktopMedia
-from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.metadata import TOOL_METADATA, ToolConfigurationNotReadyError, get_tool_by_name
+from tests.conftest import test_runtime_paths
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 MEDIA = EncryptedDesktopMedia(
     url="mxc://example.org/screenshot",
@@ -31,6 +37,32 @@ def test_desktop_tool_is_registered_as_room_scoped_primary_tool() -> None:
     assert metadata.requires_room_context
     assert metadata.default_execution_target.value == "primary"
     assert metadata.function_names == ("desktop",)
+    assert metadata.runtime_config_required
+
+
+def test_desktop_tool_reports_setup_required_before_constructor(tmp_path: Path) -> None:
+    """Missing identity becomes a skippable readiness state, not a raw constructor TypeError."""
+    with pytest.raises(ToolConfigurationNotReadyError) as exc_info:
+        get_tool_by_name("desktop", test_runtime_paths(tmp_path), worker_target=None)
+
+    assert exc_info.value.missing_fields == ("device_ed25519", "device_id", "device_user_id")
+
+
+def test_desktop_configuration_distinguishes_partial_and_invalid_state() -> None:
+    """Partial and malformed scoped records fail closed with actionable state."""
+    partial = desktop_configuration_state({"device_user_id": "@desktop:example.org"})
+    invalid = desktop_configuration_state(
+        {
+            "device_user_id": "not-a-matrix-id",
+            "device_id": "DEVICE",
+            "device_ed25519": "fingerprint",
+        },
+    )
+
+    assert partial.status is DesktopConfigurationStatus.SETUP_REQUIRED
+    assert partial.missing_fields == ("device_ed25519", "device_id")
+    assert invalid.status is DesktopConfigurationStatus.INVALID
+    assert "@user:server" in (invalid.error or "")
 
 
 @pytest.mark.asyncio

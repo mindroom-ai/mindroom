@@ -92,6 +92,7 @@ class ToolValidationInfo:
     authored_override_validator: ToolAuthoredOverrideValidator = ToolAuthoredOverrideValidator.DEFAULT
     supports_toolkit_filters: bool = False
     requires_room_context: bool = False
+    runtime_config_required: bool = False
     runtime_loadable: bool = True
     unavailable_due_to_plugin_load_error: bool = False
 
@@ -109,6 +110,7 @@ class ToolMetadata:
     default_execution_target: ToolExecutionTarget = ToolExecutionTarget.PRIMARY
     consumes_workspace_paths: bool = False
     requires_room_context: bool = False
+    runtime_config_required: bool = False
     icon: str | None = None
     icon_color: str | None = None
     config_fields: list[ConfigField] | None = None
