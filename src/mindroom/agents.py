@@ -1379,6 +1379,7 @@ def _assemble_agent_toolkits(
                 # initial deferred tools were always loaded, so they stay in
                 # the rendered prompt prefix as plain non-deferred tools.
                 if native_deferred_tools and tool_entry.defer and not tool_entry.initial:
+                    suppress_fully_deferred_toolkit_instructions(toolkit)
                     deferred_wire_tool_names.update(toolkit.get_functions())
                     deferred_wire_tool_names.update(toolkit.get_async_functions())
         except (ValueError, ImportError) as exc:
@@ -1388,7 +1389,6 @@ def _assemble_agent_toolkits(
                 agent=agent_name,
                 error=str(exc),
             )
-    suppress_fully_deferred_toolkit_instructions(tools, deferred_wire_tool_names)
     return _AgentToolAssembly(
         tools=tools,
         loaded_tools=loaded_tools,

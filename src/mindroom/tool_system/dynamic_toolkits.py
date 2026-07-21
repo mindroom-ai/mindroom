@@ -11,7 +11,7 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_system.catalog import TOOL_METADATA, validate_authored_tool_entry_overrides
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection
+    from collections.abc import Callable
 
     from agno.tools import Toolkit
 
@@ -154,21 +154,16 @@ def has_deferred_tools(config: Config, agent_name: str) -> bool:
 
 
 def suppress_fully_deferred_toolkit_instructions(
-    toolkits: Collection[Toolkit],
-    deferred_function_names: Collection[str],
+    toolkit: Toolkit,
 ) -> None:
-    """Omit all instructions when every function in a toolkit is provider-deferred.
+    """Omit all instructions for one provider-deferred toolkit.
 
     Native tool search cannot extend the already-sent system prompt when it discovers a tool.
     """
-    deferred_names = frozenset(deferred_function_names)
-    for toolkit in toolkits:
-        functions = (*toolkit.get_functions().values(), *toolkit.get_async_functions().values())
-        function_names = frozenset(function.name for function in functions)
-        if function_names and function_names <= deferred_names:
-            toolkit.add_instructions = False
-            for function in functions:
-                function.add_instructions = False
+    toolkit.add_instructions = False
+    functions = (*toolkit.get_functions().values(), *toolkit.get_async_functions().values())
+    for function in functions:
+        function.add_instructions = False
 
 
 def _special_tool_names(

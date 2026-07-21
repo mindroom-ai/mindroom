@@ -909,15 +909,15 @@ def test_fully_deferred_toolkit_omits_function_instructions() -> None:
         add_instructions=True,
     )
     toolkit = Toolkit(name="deferred", tools=[function])
-    suppress_fully_deferred_toolkit_instructions([toolkit], {"deferred_tool"})
+    suppress_fully_deferred_toolkit_instructions(toolkit)
     agent = Agent(id="deferred-agent", model=OpenAIChat(id="test"), tools=[toolkit], instructions=["BASE"])
 
     assert toolkit.functions["deferred_tool"].add_instructions is False
     assert instruction_marker not in _render_system_prompt(agent)
 
 
-def test_partially_deferred_toolkit_keeps_instructions_inline() -> None:
-    """A toolkit with any active function should retain all of its instructions."""
+def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
+    """A name collision must not suppress instructions from an active toolkit."""
 
     def active_tool() -> str:
         return "active"
@@ -925,28 +925,46 @@ def test_partially_deferred_toolkit_keeps_instructions_inline() -> None:
     def deferred_tool() -> str:
         return "deferred"
 
-    toolkit_instruction_marker = "MIXED_TOOLKIT_INSTRUCTIONS"
-    function_instruction_marker = "MIXED_FUNCTION_INSTRUCTIONS"
+    active_toolkit_marker = "ACTIVE_TOOLKIT_INSTRUCTIONS"
+    active_function_marker = "ACTIVE_FUNCTION_INSTRUCTIONS"
+    deferred_toolkit_marker = "DEFERRED_TOOLKIT_INSTRUCTIONS"
+    deferred_function_marker = "DEFERRED_FUNCTION_INSTRUCTIONS"
+    active_function = Function(
+        name="shared_tool",
+        entrypoint=active_tool,
+        instructions=active_function_marker,
+        add_instructions=True,
+    )
     deferred_function = Function(
-        name="deferred_tool",
+        name="shared_tool",
         entrypoint=deferred_tool,
-        instructions=function_instruction_marker,
+        instructions=deferred_function_marker,
         add_instructions=True,
     )
-    toolkit = Toolkit(
-        name="mixed",
-        tools=[active_tool, deferred_function],
-        instructions=toolkit_instruction_marker,
+    active_toolkit = Toolkit(
+        name="active",
+        tools=[active_function],
+        instructions=active_toolkit_marker,
         add_instructions=True,
     )
-    suppress_fully_deferred_toolkit_instructions([toolkit], {"deferred_tool"})
-    agent = Agent(id="mixed-agent", model=OpenAIChat(id="test"), tools=[toolkit])
+    deferred_toolkit = Toolkit(
+        name="deferred",
+        tools=[deferred_function],
+        instructions=deferred_toolkit_marker,
+        add_instructions=True,
+    )
+    suppress_fully_deferred_toolkit_instructions(deferred_toolkit)
+    agent = Agent(id="collision-agent", model=OpenAIChat(id="test"), tools=[active_toolkit, deferred_toolkit])
 
-    assert toolkit.add_instructions is True
-    assert toolkit.functions["deferred_tool"].add_instructions is True
+    assert active_toolkit.add_instructions is True
+    assert active_toolkit.functions["shared_tool"].add_instructions is True
+    assert deferred_toolkit.add_instructions is False
+    assert deferred_toolkit.functions["shared_tool"].add_instructions is False
     system_prompt = _render_system_prompt(agent)
-    assert toolkit_instruction_marker in system_prompt
-    assert function_instruction_marker in system_prompt
+    assert active_toolkit_marker in system_prompt
+    assert active_function_marker in system_prompt
+    assert deferred_toolkit_marker not in system_prompt
+    assert deferred_function_marker not in system_prompt
 
 
 def test_native_tool_search_keeps_initial_toolkit_instructions(
