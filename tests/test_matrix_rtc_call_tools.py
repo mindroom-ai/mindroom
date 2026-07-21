@@ -442,8 +442,11 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
         )
         return "It is sunny."
 
-    create_agent_mock = MagicMock()
+    cached_agent = SimpleNamespace(additional_context="base context")
+    create_agent_mock = MagicMock(return_value=cached_agent)
+    close_agent_mock = MagicMock()
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", create_agent_mock)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.close_agent_runtime_state_dbs", close_agent_mock)
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access",
         lambda *_args, **_kwargs: SimpleNamespace(knowledge=knowledge, unavailable=()),
@@ -480,7 +483,7 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
     assert response.tool_names == ("weather",)
     assert response.turn_id is not None
     assert recorded_tool_uses == [["weather"]]
-    create_agent_mock.assert_not_called()
+    create_agent_mock.assert_called_once()
     turn, kwargs = calls[0]
     assert turn.entity_label == AGENT
     assert turn.requester_id == REQUESTER
@@ -495,6 +498,7 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
     assert kwargs["include_interactive_questions"] is False
     assert kwargs["show_tool_calls"] is False
     assert kwargs["eager_deferred_tools"] is True
+    assert kwargs["reusable_agent"] is cached_agent
     assert tooling.finalize_spoken_response is not None
     finalize = tooling.finalize_spoken_response(response.turn_id, "It is", True)
     assert finalize is not None
@@ -580,6 +584,9 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
     assert tool_filter(spawn) is False
     assert tool_filter(send) is False
     assert contexts[0].tool_function_filter is None
+    assert tooling.close is not None
+    await tooling.close()
+    close_agent_mock.assert_called_once_with(cached_agent)
 
 
 @pytest.mark.asyncio
@@ -644,6 +651,7 @@ async def test_cascaded_responder_records_call_selected_model_metadata(
     mock_agent.model.__class__.__name__ = "OpenAIChat"
     mock_agent.model.id = "fast-model"
     mock_agent.name = "Helper"
+    mock_agent.additional_context = "base context"
     mock_agent.add_history_to_context = False
     mock_run_output = MagicMock()
     mock_run_output.run_id = "call-run-1"
@@ -656,7 +664,9 @@ async def test_cascaded_responder_records_call_selected_model_metadata(
     mock_run_output.content = "It is sunny."
 
     create_agent_mock = MagicMock(return_value=mock_agent)
-    monkeypatch.setattr("mindroom.ai.create_agent", create_agent_mock)
+    ai_close_agent_mock = MagicMock()
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", create_agent_mock)
+    monkeypatch.setattr("mindroom.ai.close_agent_runtime_state_dbs", ai_close_agent_mock)
     monkeypatch.setattr(
         "mindroom.ai.build_memory_prompt_parts",
         AsyncMock(return_value=MemoryPromptParts()),
@@ -711,6 +721,7 @@ async def test_cascaded_responder_records_call_selected_model_metadata(
     assert payload["model"]["config"] == "call_fast"
     assert payload["model"]["id"] == "fast-model"
     assert payload["context"]["window_tokens"] == 16_000
+    assert (mock_agent.additional_context, ai_close_agent_mock.call_count) == ("base context", 0)
 
 
 def test_call_response_tracker_keeps_fifo_without_retaining_settled_tokens(tmp_path: Path) -> None:
@@ -852,7 +863,13 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
         ai_calls.append((turn, kwargs))
         return f"answer-{len(ai_calls)}"
 
+    first_agent = SimpleNamespace(additional_context="first base")
+    second_agent = SimpleNamespace(additional_context="second base")
+    create_agent_mock = MagicMock(side_effect=(first_agent, second_agent))
+    close_agent_mock = MagicMock()
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access", resolve_knowledge)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", create_agent_mock)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.close_agent_runtime_state_dbs", close_agent_mock)
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
     tooling = await build_call_tools(
         agent_name=AGENT,
@@ -878,10 +895,17 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
     assert all(call["execution_identity"] is execution_identity for call in resolver_calls)
     assert ai_calls[0][1]["knowledge"] is None
     assert ai_calls[1][1]["knowledge"] is ready_knowledge
+    assert ai_calls[0][1]["reusable_agent"] is first_agent
+    assert ai_calls[1][1]["reusable_agent"] is second_agent
+    assert create_agent_mock.call_count == 2
+    close_agent_mock.assert_called_once_with(first_agent)
     assert [item.key for item in ai_calls[0][0].system_enrichment_items] == ["voice_call"]
     assert [item.key for item in ai_calls[0][0].transient_enrichment_items] == ["knowledge_availability"]
     assert [item.key for item in ai_calls[1][0].system_enrichment_items] == ["voice_call"]
     assert ai_calls[1][0].transient_enrichment_items == ()
+    assert tooling.close is not None
+    await tooling.close()
+    assert close_agent_mock.call_args_list[-1].args == (second_agent,)
 
 
 @pytest.mark.asyncio
@@ -932,6 +956,10 @@ async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access",
         lambda *_args, **_kwargs: SimpleNamespace(knowledge=None, unavailable={}),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.create_agent",
+        MagicMock(return_value=SimpleNamespace(additional_context="base context")),
     )
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
     monkeypatch.setattr(

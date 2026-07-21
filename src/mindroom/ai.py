@@ -133,6 +133,13 @@ def _append_additional_context(agent: Agent, context_chunk: str) -> None:
     agent.additional_context = f"{existing_context}\n\n{context_chunk}" if existing_context else context_chunk
 
 
+def _reset_reusable_agent_context(agent: Agent | None, base_context: str | None) -> Agent | None:
+    """Restore caller-owned context before or after one sequential turn."""
+    if agent is not None:
+        agent.additional_context = base_context
+    return agent
+
+
 def _compose_current_turn_prompt(
     *,
     raw_prompt: str,
@@ -369,6 +376,7 @@ def _build_agent_turn_callbacks(
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
+    retain_agent_runtime_state: bool = False,
 ) -> _AgentTurnCallbacks:
     """Build the entity-specific turn-driver callbacks for one agent response."""
 
@@ -389,6 +397,8 @@ def _build_agent_turn_callbacks(
         )
 
     def _close_runtime_dbs(scope_context: ScopeSessionContext | None) -> None:
+        if retain_agent_runtime_state:
+            return
         close_agent_runtime_state_dbs(
             holder.agent,
             shared_scope_storage=scope_context.storage if scope_context is not None else None,
@@ -1096,6 +1106,7 @@ async def _prepare_agent_and_prompt(
     current_prompt_is_structured: bool = False,
     pipeline_timing: DispatchPipelineTiming | None = None,
     eager_deferred_tools: bool = False,
+    reusable_agent: Agent | None = None,
 ) -> _PreparedAgentRun:
     """Prepare agent and full prompt for AI processing.
 
@@ -1118,23 +1129,25 @@ async def _prepare_agent_and_prompt(
             thread_id=ctx.thread_id,
             runtime_paths=runtime_paths,
         )
-        agent = create_agent(
-            agent_name,
-            config,
-            runtime_paths,
-            session_id=ctx.session_id,
-            history_storage=scope_context.storage if scope_context is not None else None,
-            active_model_name=runtime_model.model_name,
-            knowledge=knowledge,
-            include_interactive_questions=include_interactive_questions,
-            tool_function_filter=tool_function_filter,
-            include_openai_compat_guidance=include_openai_compat_guidance,
-            execution_identity=execution_identity,
-            delegation_depth=delegation_depth,
-            refresh_scheduler=refresh_scheduler,
-            dynamic_tool_continuation=True,
-            eager_deferred_tools=eager_deferred_tools,
-        )
+        agent = reusable_agent
+        if agent is None:
+            agent = create_agent(
+                agent_name,
+                config,
+                runtime_paths,
+                session_id=ctx.session_id,
+                history_storage=scope_context.storage if scope_context is not None else None,
+                active_model_name=runtime_model.model_name,
+                knowledge=knowledge,
+                include_interactive_questions=include_interactive_questions,
+                tool_function_filter=tool_function_filter,
+                include_openai_compat_guidance=include_openai_compat_guidance,
+                execution_identity=execution_identity,
+                delegation_depth=delegation_depth,
+                refresh_scheduler=refresh_scheduler,
+                dynamic_tool_continuation=True,
+                eager_deferred_tools=eager_deferred_tools,
+            )
         return runtime_model, agent
 
     parallel_branches = config.resolve_entity(agent_name).memory_backend == "mem0"
@@ -1271,6 +1284,7 @@ async def _prepare_agent_run_context(
     turn_recorder: TurnRecorder | None,
     pipeline_timing: DispatchPipelineTiming | None,
     eager_deferred_tools: bool = False,
+    reusable_agent: Agent | None = None,
 ) -> _AgentRunContext:
     """Prepare one agent response lifecycle through metadata assembly."""
     if pipeline_timing is not None:
@@ -1296,6 +1310,7 @@ async def _prepare_agent_run_context(
         current_prompt_is_structured=current_prompt_is_structured,
         pipeline_timing=pipeline_timing,
         eager_deferred_tools=eager_deferred_tools,
+        reusable_agent=reusable_agent,
     )
     if pipeline_timing is not None:
         pipeline_timing.mark("history_ready", overwrite=True)
@@ -1361,6 +1376,7 @@ async def ai_response(  # noqa: C901
     turn_recorder: TurnRecorder | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     eager_deferred_tools: bool = False,
+    reusable_agent: Agent | None = None,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
 
@@ -1402,6 +1418,8 @@ async def ai_response(  # noqa: C901
         turn_recorder: Optional lifecycle-owned recorder updated with trusted turn state.
         pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
         eager_deferred_tools: Whether to materialize every deferred toolkit without the dynamic loader.
+        reusable_agent: Optional caller-owned agent materialized for repeated sequential turns.
+            The caller must serialize uses and close its runtime database handles.
 
     Returns:
         Agent response string
@@ -1435,6 +1453,7 @@ async def ai_response(  # noqa: C901
                 turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
                 eager_deferred_tools=eager_deferred_tools,
+                reusable_agent=reusable_agent,
             ),
             show_tool_calls=show_tool_calls,
             tool_trace_collector=tool_trace_collector,
@@ -1458,6 +1477,7 @@ async def ai_response(  # noqa: C901
         return get_user_friendly_error_message(e, agent_name)
 
     holder = _AgentTurnHolder()
+    reusable_agent_base_context = reusable_agent.additional_context if reusable_agent is not None else None
     callbacks = _build_agent_turn_callbacks(
         holder,
         agent_name=agent_name,
@@ -1467,6 +1487,7 @@ async def ai_response(  # noqa: C901
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=execution_identity,
+        retain_agent_runtime_state=reusable_agent is not None,
     )
 
     async def _run_blocking_attempt(
@@ -1498,6 +1519,7 @@ async def ai_response(  # noqa: C901
                 turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
                 eager_deferred_tools=eager_deferred_tools,
+                reusable_agent=_reset_reusable_agent_context(reusable_agent, reusable_agent_base_context),
             )
         except Exception as e:
             logger.exception("Error preparing agent", agent=agent_name)
@@ -1598,19 +1620,22 @@ async def ai_response(  # noqa: C901
         on_scope_opened=callbacks.on_scope_opened,
         persist_standalone_replay=callbacks.persist_standalone_replay,
     )
-    return await run_blocking_response_turn(
-        ctx,
-        adapter,
-        TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
-        continuation=_initial_agent_continuation(
-            prompt=prompt,
-            model_prompt=model_prompt,
-            current_timestamp_ms=current_timestamp_ms,
-            current_prompt_is_structured=current_prompt_is_structured,
-            current_event_id=ctx.reply_to_event_id,
-            run_id=ctx.run_id,
-        ),
-    )
+    try:
+        return await run_blocking_response_turn(
+            ctx,
+            adapter,
+            TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
+            continuation=_initial_agent_continuation(
+                prompt=prompt,
+                model_prompt=model_prompt,
+                current_timestamp_ms=current_timestamp_ms,
+                current_prompt_is_structured=current_prompt_is_structured,
+                current_event_id=ctx.reply_to_event_id,
+                run_id=ctx.run_id,
+            ),
+        )
+    finally:
+        _reset_reusable_agent_context(reusable_agent, reusable_agent_base_context)
 
 
 @timed("model_request_to_completion")
@@ -1840,6 +1865,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     turn_recorder: TurnRecorder | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     eager_deferred_tools: bool = False,
+    reusable_agent: Agent | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
 
@@ -1877,6 +1903,8 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         turn_recorder: Optional lifecycle-owned recorder updated with trusted turn state.
         pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
         eager_deferred_tools: Whether to materialize every deferred toolkit without the dynamic loader.
+        reusable_agent: Optional caller-owned agent materialized for repeated sequential turns.
+            The caller must serialize uses and close its runtime database handles.
 
     Yields:
         Streaming chunks/events as they become available
@@ -1903,6 +1931,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         return
 
     holder = _AgentTurnHolder(state=_StreamingAttemptState())
+    reusable_agent_base_context = reusable_agent.additional_context if reusable_agent is not None else None
     callbacks = _build_agent_turn_callbacks(
         holder,
         agent_name=agent_name,
@@ -1912,6 +1941,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=execution_identity,
+        retain_agent_runtime_state=reusable_agent is not None,
     )
 
     def _finalize_streaming_attempt(scope_context: ScopeSessionContext | None) -> None:
@@ -1955,6 +1985,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
                 eager_deferred_tools=eager_deferred_tools,
+                reusable_agent=_reset_reusable_agent_context(reusable_agent, reusable_agent_base_context),
             )
         except Exception as e:
             logger.exception("Error preparing agent for streaming", agent=agent_name)
@@ -2181,6 +2212,9 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     )
     # Close the driver generator deterministically when this wrapper unwinds so
     # its cleanup does not wait for event-loop async-generator finalization.
-    async with aclosing(response_stream) as closing_stream:
-        async for chunk in closing_stream:
-            yield chunk
+    try:
+        async with aclosing(response_stream) as closing_stream:
+            async for chunk in closing_stream:
+                yield chunk
+    finally:
+        _reset_reusable_agent_context(reusable_agent, reusable_agent_base_context)
