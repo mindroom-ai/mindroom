@@ -4045,6 +4045,7 @@ expose = [
     "ToolAuthoredOverrideValidator",
     "ToolCategory",
     "ToolConfigOverrideError",
+    "ToolConfigurationNotReadyError",
     "ToolInitOverrideError",
     "ToolManagedInitArg",
     "ToolMetadata",
