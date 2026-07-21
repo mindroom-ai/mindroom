@@ -938,6 +938,7 @@ class CallManager:
             tts=backend.tts,
             respond=tooling.responder,
             finalize_spoken_response=tooling.finalize_spoken_response,
+            close_responder=tooling.close,
             greeting_text="Hello, I joined the call.",
             on_conversation_turn=transcript.record,
             on_tools_executed=transcript.record_tool_use,

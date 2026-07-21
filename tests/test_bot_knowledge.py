@@ -14,7 +14,7 @@ from agno.knowledge.knowledge import Knowledge
 from mindroom.bot import AgentBot
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.utils import _MultiKnowledgeVectorDb
+from mindroom.knowledge.utils import _MultiKnowledgeVectorDb, knowledge_runtime_identity
 from mindroom.knowledge_source_descriptions import KnowledgeWithSourceDescriptions
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -184,6 +184,25 @@ class TestAgentBot(AgentBotTestBase):
 
         docs = vector_db.search(query="knowledge query", limit=4)
         assert [doc.content for doc in docs] == ["research 1", "legal 1", "research 2", "legal 2"]
+
+    def test_multi_knowledge_runtime_identity_tracks_underlying_handles(self) -> None:
+        """Fresh merged views over unchanged indexes keep the same runtime identity."""
+        sources = [_SyncStubVectorDb(documents=[]), _SyncStubVectorDb(documents=[])]
+        first = KnowledgeWithSourceDescriptions(
+            name="merged",
+            vector_db=_MultiKnowledgeVectorDb(vector_dbs=sources),
+        )
+        second = KnowledgeWithSourceDescriptions(
+            name="merged",
+            vector_db=_MultiKnowledgeVectorDb(vector_dbs=sources),
+        )
+        changed = KnowledgeWithSourceDescriptions(
+            name="merged",
+            vector_db=_MultiKnowledgeVectorDb(vector_dbs=[sources[0], _SyncStubVectorDb(documents=[])]),
+        )
+
+        assert knowledge_runtime_identity(first) == knowledge_runtime_identity(second)
+        assert knowledge_runtime_identity(first) != knowledge_runtime_identity(changed)
 
     def test_multi_knowledge_vector_db_sync_ignores_failing_source(self) -> None:
         """A failing knowledge source should not suppress healthy source results."""

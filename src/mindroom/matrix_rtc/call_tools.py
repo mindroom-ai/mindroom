@@ -34,11 +34,15 @@ from agno.tools.function import Function, FunctionCall
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
 from mindroom.history.interrupted_replay import persist_interrupted_replay
-from mindroom.history.runtime import open_resolved_scope_session_context
+from mindroom.history.runtime import (
+    close_agent_runtime_state_dbs,
+    create_scope_session_storage,
+    open_resolved_scope_session_context,
+)
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
-from mindroom.knowledge.utils import resolve_agent_knowledge_access
+from mindroom.knowledge.utils import knowledge_runtime_identity, resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
@@ -49,10 +53,12 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from agno.agent import Agent as AgnoAgent
+    from agno.knowledge.protocol import KnowledgeProtocol
     from livekit.agents.llm import RawFunctionTool
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -90,6 +96,7 @@ class CallAgentTooling:
     execution_identity: ToolExecutionIdentity
     responder: Callable[[str, Callable[[list[str]], None] | None], Awaitable[CallAgentResponse]] | None = None
     finalize_spoken_response: Callable[[str | None, str, bool], Awaitable[None] | None] | None = None
+    close: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -193,6 +200,110 @@ class _CallResponseTracker:
             )
 
 
+@dataclass
+class _CallAgentCache:
+    """Own one serially reused cascaded agent for the lifetime of a call."""
+
+    agent_name: str
+    config: Config
+    runtime_paths: RuntimePaths
+    context: ToolRuntimeContext
+    execution_identity: ToolExecutionIdentity
+    session_id: str
+    active_model_name: str | None
+    agent: AgnoAgent | None = None
+    knowledge_identity: tuple[int, ...] = ()
+    refresh_scheduler: KnowledgeRefreshScheduler | None = None
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    async def run(
+        self,
+        *,
+        knowledge: KnowledgeProtocol | None,
+        knowledge_identity: tuple[int, ...],
+        refresh_scheduler: KnowledgeRefreshScheduler | None,
+        operation: Callable[[AgnoAgent], Awaitable[str]],
+    ) -> str:
+        """Run one turn, rebuilding only when call dependencies change identity."""
+        async with self.lock:
+            agent = await self._get_agent(
+                knowledge=knowledge,
+                knowledge_identity=knowledge_identity,
+                refresh_scheduler=refresh_scheduler,
+            )
+            return await operation(agent)
+
+    async def aclose(self) -> None:
+        """Close the cached agent's caller-owned runtime state."""
+        async with self.lock:
+            agent, self.agent = self.agent, None
+            self.knowledge_identity = ()
+            self.refresh_scheduler = None
+            if agent is not None:
+                await asyncio.to_thread(close_agent_runtime_state_dbs, agent)
+
+    async def _get_agent(
+        self,
+        *,
+        knowledge: KnowledgeProtocol | None,
+        knowledge_identity: tuple[int, ...],
+        refresh_scheduler: KnowledgeRefreshScheduler | None,
+    ) -> AgnoAgent:
+        if (
+            self.agent is not None
+            and self.knowledge_identity == knowledge_identity
+            and self.refresh_scheduler is refresh_scheduler
+        ):
+            return self.agent
+        if self.agent is not None:
+            await asyncio.to_thread(close_agent_runtime_state_dbs, self.agent)
+            self.agent = None
+        agent = await asyncio.to_thread(
+            self._build_agent,
+            knowledge=knowledge,
+            refresh_scheduler=refresh_scheduler,
+        )
+        self.agent = agent
+        self.knowledge_identity = knowledge_identity
+        self.refresh_scheduler = refresh_scheduler
+        return agent
+
+    def _build_agent(
+        self,
+        *,
+        knowledge: KnowledgeProtocol | None,
+        refresh_scheduler: KnowledgeRefreshScheduler | None,
+    ) -> AgnoAgent:
+        """Build one cached agent with canonical prompt-sanitizing history storage."""
+        history_storage = create_scope_session_storage(
+            agent_name=self.agent_name,
+            scope=HistoryScope(kind="agent", scope_id=self.agent_name),
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            execution_identity=self.execution_identity,
+        )
+        try:
+            return create_agent(
+                self.agent_name,
+                self.config,
+                self.runtime_paths,
+                execution_identity=self.execution_identity,
+                session_id=self.session_id,
+                hook_registry=self.context.hook_registry,
+                knowledge=knowledge,
+                history_storage=history_storage,
+                active_model_name=self.active_model_name,
+                include_interactive_questions=False,
+                tool_function_filter=self.context.tool_function_filter,
+                refresh_scheduler=refresh_scheduler,
+                dynamic_tool_continuation=True,
+                eager_deferred_tools=True,
+            )
+        except Exception:
+            history_storage.close()
+            raise
+
+
 async def build_call_tools(
     *,
     agent_name: str,
@@ -208,6 +319,18 @@ async def build_call_tools(
 ) -> CallAgentTooling:
     """Materialize the agent for the selected voice backend."""
     session_id = session_id or create_session_id(room_id, None)
+    if enable_responder:
+        runtime_model = await asyncio.to_thread(
+            functools.partial(
+                config.resolve_runtime_model,
+                entity_name=agent_name,
+                active_model_name=active_model_name,
+                room_id=room_id,
+                thread_id=None,
+                runtime_paths=runtime_paths,
+            ),
+        )
+        active_model_name = runtime_model.model_name
     target = MessageTarget(
         room_id=room_id,
         source_thread_id=None,
@@ -247,6 +370,15 @@ async def build_call_tools(
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
         )
+        agent_cache = _CallAgentCache(
+            agent_name=agent_name,
+            config=config,
+            runtime_paths=runtime_paths,
+            context=context,
+            execution_identity=execution_identity,
+            session_id=session_id,
+            active_model_name=active_model_name,
+        )
         responder = functools.partial(
             _run_call_agent,
             agent_name=agent_name,
@@ -260,6 +392,7 @@ async def build_call_tools(
             session_id=session_id,
             voice_enrichment_items=voice_enrichment_items,
             response_tracker=response_tracker,
+            agent_cache=agent_cache,
             active_model_name=active_model_name,
         )
         return CallAgentTooling(
@@ -268,6 +401,7 @@ async def build_call_tools(
             execution_identity=execution_identity,
             responder=responder,
             finalize_spoken_response=response_tracker.finalize,
+            close=functools.partial(_close_cascaded_call_resources, response_tracker, agent_cache),
         )
 
     refresh_scheduler = context.orchestrator.knowledge_refresh_scheduler if context.orchestrator is not None else None
@@ -367,6 +501,7 @@ async def _run_call_agent(
     session_id: str,
     voice_enrichment_items: tuple[EnrichmentItem, ...],
     response_tracker: _CallResponseTracker,
+    agent_cache: _CallAgentCache,
     active_model_name: str | None,
 ) -> CallAgentResponse:
     """Run one finalized call transcript through the normal MindRoom agent."""
@@ -403,7 +538,7 @@ async def _run_call_agent(
     )
     run_metadata: dict[str, Any] = {}
 
-    async def _respond() -> str:
+    async def _respond(agent: AgnoAgent) -> str:
         try:
             return await ai_response(
                 turn,
@@ -420,12 +555,24 @@ async def _run_call_agent(
                 refresh_scheduler=refresh_scheduler,
                 turn_recorder=recorder,
                 eager_deferred_tools=True,
+                reusable_agent=agent,
             )
         finally:
             recorder.set_run_metadata({**(recorder.run_metadata or {}), **run_metadata})
 
+    async def _run_with_agent(agent: AgnoAgent) -> str:
+        return await tool_support.run_in_context(
+            tool_context=context,
+            operation=functools.partial(_respond, agent),
+        )
+
     try:
-        response = await tool_support.run_in_context(tool_context=context, operation=_respond)
+        response = await agent_cache.run(
+            knowledge=knowledge_resolution.knowledge,
+            knowledge_identity=knowledge_runtime_identity(knowledge_resolution.knowledge),
+            refresh_scheduler=refresh_scheduler,
+            operation=_run_with_agent,
+        )
     except asyncio.CancelledError:
         state = _call_agent_run_state(recorder, session_id=session_id, fallback_run_id=fallback_run_id)
         await response_tracker.persist_unspoken(state, default_status=RunStatus.cancelled)
@@ -443,6 +590,17 @@ async def _run_call_agent(
     if not response and state.outcome == "interrupted":
         await response_tracker.persist_unspoken(state, default_status=RunStatus.cancelled)
     return CallAgentResponse(text=response, tool_names=tool_names, turn_id=turn_id)
+
+
+async def _close_cascaded_call_resources(
+    response_tracker: _CallResponseTracker,
+    agent_cache: _CallAgentCache,
+) -> None:
+    """Settle playout reconciliation, then close the call-owned agent."""
+    try:
+        await response_tracker.wait_for_settlements()
+    finally:
+        await agent_cache.aclose()
 
 
 def _call_agent_run_state(

@@ -296,6 +296,7 @@ class CascadedVoiceAgentOptions:
     tts: SpeechServiceOptions
     respond: Callable[[str, Callable[[list[str]], None] | None], Awaitable[CallAgentResponse]]
     finalize_spoken_response: Callable[[str | None, str, bool], Awaitable[None] | None] | None = None
+    close_responder: Callable[[], Awaitable[None]] | None = None
     greeting_text: str | None = None
     on_conversation_turn: Callable[[str, str], None] | None = None
     on_tools_executed: Callable[[list[str]], None] | None = None
@@ -641,6 +642,8 @@ class CascadedVoiceBridge(RealtimeVoiceBridge):
         if not isinstance(options, CascadedVoiceAgentOptions):
             msg = "CascadedVoiceBridge requires cascaded agent options"
             raise TypeError(msg)
+        if options.close_responder is not None:
+            self._owned_speech_resource_closers += (options.close_responder,)
 
         stt_client = AsyncOpenAI(
             api_key=options.stt.api_key,
@@ -656,7 +659,7 @@ class CascadedVoiceBridge(RealtimeVoiceBridge):
         except BaseException:
             await stt_client.close()
             raise
-        self._owned_speech_resource_closers = (stt_client.close, tts.aclose)
+        self._owned_speech_resource_closers += (stt_client.close, tts.aclose)
         mindroom_llm = _build_mindroom_llm(options.respond, options.on_tools_executed)
         session = AgentSession(
             stt=stt,
@@ -759,9 +762,9 @@ def _build_mindroom_llm(
 
     class _MindRoomLLMStream(llm.LLMStream):
         async def _run(self) -> None:
-            transcript = _latest_user_transcript(self._chat_ctx)
-            if not transcript:
-                logger.warning("cascaded_voice_turn_skipped_no_transcript")
+            transcript = _latest_user_transcript(self._chat_ctx).strip()
+            if not any(character.isalnum() for character in transcript):
+                logger.warning("cascaded_voice_turn_skipped_no_speech_content")
                 return
             result = await respond(transcript, on_tools_executed)
             if result.text:

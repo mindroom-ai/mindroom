@@ -288,6 +288,8 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
     async def finalize_spoken_response(token: str | None, text: str, interrupted: bool) -> None:
         finalized.append((token, text, interrupted))
 
+    close_responder = AsyncMock()
+
     fake_session = FakeSession()
     stt = FakeSpeechModel()
     tts = FakeSpeechModel()
@@ -344,6 +346,7 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
         ),
         respond=respond,
         finalize_spoken_response=finalize_spoken_response,
+        close_responder=close_responder,
         greeting_text="Hello.",
         on_conversation_turn=lambda role, text: turns.append((role, text)),
         on_tools_executed=tool_uses.append,
@@ -431,6 +434,7 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
     assert transcript_synchronizer.closed
     assert built["session_closed"] is True
     fake_audio_input.aclose.assert_awaited_once()
+    close_responder.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -517,6 +521,33 @@ async def test_cascaded_empty_transcript_is_ignored() -> None:
 
     assert chunks == []
     respond.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transcript", ["   ", ".", "...?!", "—"])
+async def test_cascaded_transcript_without_speech_content_is_ignored(transcript: str) -> None:
+    """Whitespace and punctuation-only STT artifacts cannot start agent work."""
+    respond = AsyncMock()
+    context = llm.ChatContext.empty()
+    context.add_message(role="user", content=transcript)
+
+    chunks = [chunk async for chunk in _build_mindroom_llm(respond, None).chat(chat_ctx=context)]
+
+    assert chunks == []
+    respond.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cascaded_transcript_filter_accepts_unicode_speech() -> None:
+    """The structural noise filter must not guess which language is valid."""
+    respond = AsyncMock(return_value=CallAgentResponse(text="ok"))
+    context = llm.ChatContext.empty()
+    context.add_message(role="user", content="  はい  ")
+
+    chunks = [chunk async for chunk in _build_mindroom_llm(respond, None).chat(chat_ctx=context)]
+
+    assert [chunk.delta.content for chunk in chunks] == ["ok"]
+    respond.assert_awaited_once_with("はい", None)
 
 
 def test_voice_agent_import_keeps_livekit_and_openai_lazy() -> None:

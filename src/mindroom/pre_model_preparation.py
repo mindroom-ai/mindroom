@@ -36,7 +36,13 @@ def _log_secondary_agent_error(agent_name: str, error: Exception) -> None:
     )
 
 
-def _close_unreturned_agent(agent: Agent, shared_scope_storage: BaseDb | None) -> None:
+def _close_unreturned_agent(
+    agent: Agent,
+    shared_scope_storage: BaseDb | None,
+    caller_owned_agent: Agent | None,
+) -> None:
+    if agent is caller_owned_agent:
+        return
     try:
         close_agent_runtime_state_dbs(agent, shared_scope_storage=shared_scope_storage)
     except Exception:
@@ -48,6 +54,7 @@ async def _drain_unreturned_agent_build(
     *,
     agent_name: str,
     shared_scope_storage: BaseDb | None,
+    caller_owned_agent: Agent | None,
 ) -> None:
     """Wait through repeated cancellation and clean an unreturned agent build."""
     while not build_future.done():
@@ -64,7 +71,7 @@ async def _drain_unreturned_agent_build(
     except Exception as error:
         _log_secondary_agent_error(agent_name, error)
     else:
-        _close_unreturned_agent(unreturned_agent, shared_scope_storage)
+        _close_unreturned_agent(unreturned_agent, shared_scope_storage, caller_owned_agent)
 
 
 def _discard_unreturned_agent_result(
@@ -72,12 +79,13 @@ def _discard_unreturned_agent_result(
     *,
     agent_name: str,
     shared_scope_storage: BaseDb | None,
+    caller_owned_agent: Agent | None,
 ) -> None:
     """Log a failed build or close an agent that preparation cannot return."""
     if isinstance(result, Exception):
         _log_secondary_agent_error(agent_name, result)
     else:
-        _close_unreturned_agent(result[1], shared_scope_storage)
+        _close_unreturned_agent(result[1], shared_scope_storage, caller_owned_agent)
 
 
 async def prepare_mem0_prompt_branches(
@@ -87,6 +95,7 @@ async def prepare_mem0_prompt_branches(
     agent_name: str,
     shared_scope_storage: BaseDb | None,
     pipeline_timing: DispatchPipelineTiming | None,
+    caller_owned_agent: Agent | None = None,
 ) -> tuple[MemoryPromptParts, ResolvedRuntimeModel, Agent]:
     """Overlap Mem0 preparation with agent construction and join both safely."""
 
@@ -127,6 +136,7 @@ async def prepare_mem0_prompt_branches(
             build_future,
             agent_name=agent_name,
             shared_scope_storage=shared_scope_storage,
+            caller_owned_agent=caller_owned_agent,
         )
         raise
 
@@ -138,6 +148,7 @@ async def prepare_mem0_prompt_branches(
             agent_result,
             agent_name=agent_name,
             shared_scope_storage=shared_scope_storage,
+            caller_owned_agent=caller_owned_agent,
         )
         raise
     if isinstance(memory_result, Exception):
@@ -145,6 +156,7 @@ async def prepare_mem0_prompt_branches(
             agent_result,
             agent_name=agent_name,
             shared_scope_storage=shared_scope_storage,
+            caller_owned_agent=caller_owned_agent,
         )
         raise memory_result
     if isinstance(agent_result, Exception):

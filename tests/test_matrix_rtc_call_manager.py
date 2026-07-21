@@ -624,6 +624,8 @@ async def test_manager_selects_cascaded_backend_with_independent_speech_services
     ) -> CallAgentResponse:
         return CallAgentResponse("answer")
 
+    close_responder = AsyncMock()
+
     async def fake_tools(**kwargs: object) -> CallAgentTooling:
         assert kwargs["enable_responder"] is True
         assert kwargs["active_model_name"] == "call_fast"
@@ -633,6 +635,7 @@ async def test_manager_selects_cascaded_backend_with_independent_speech_services
             instructions="",
             execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
             responder=respond,
+            close=close_responder,
         )
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
@@ -657,6 +660,7 @@ async def test_manager_selects_cascaded_backend_with_independent_speech_services
         "http://127.0.0.1:9001/v1",
     )
     assert options.tts.extra_kwargs == {"voice": "ash"}
+    assert options.close_responder is close_responder
     await manager.shutdown()
 
 
