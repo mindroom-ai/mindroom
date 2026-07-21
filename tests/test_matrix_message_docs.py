@@ -51,6 +51,9 @@ def test_matrix_message_description_covers_critical_behavior() -> None:
     assert "`text/plain`" in description
     assert "`text/markdown`" in description
     assert "`text/html`" in description
+    assert "`text/html`; basic fragments only" in description
+    assert "no scripts/styles/forms/media/SVG/math/interactive elements" in description
+    assert "links only `http`/`https`/`mailto`" in description
     assert "Full semantics: https://docs.mindroom.chat/tools/matrix-message/" in description
 
 
@@ -82,17 +85,16 @@ def test_matrix_message_parameter_descriptions_are_exposed() -> None:
     assert "emoji" in message_description
 
     assert "att_*" in attachment_ids_description
-    assert "combined maximum 5" in attachment_ids_description
+    assert "combined max 5" in attachment_ids_description
     assert "Local paths" in attachment_paths_description
 
-    assert "defaults to current" in room_id_description
+    assert "current by default" in room_id_description
     assert "react/edit" in target_description
 
     assert '"room"' in thread_id_description
     assert "room scope" in thread_id_description
 
-    assert "Keep `True`" in ignore_mentions_description
-    assert "handoffs/self-triggers" in ignore_mentions_description
+    assert "`True`" in ignore_mentions_description
+    assert "intentional dispatch" in ignore_mentions_description
 
-    assert "default 20" in limit_description
-    assert "maximum 50" in limit_description
+    assert "20-50" in limit_description

@@ -239,22 +239,22 @@ class MatrixMessageTools(Toolkit):
 
         Attachments: only `send`, `reply`, and `thread-reply` accept context-scoped `att_*` IDs or local file paths, combined maximum 5. Include text, attachments, or both, but not neither. Relative paths resolve from the agent workspace.
 
-        `message_extras` adds collapsible sections to send/reply/thread-reply/edit. Sections use `title`, `content`, optional `collapsed`, and `content_type`: `text/plain`, `text/markdown` (default), or sanitized `text/html`.
+        `message_extras` adds collapsible sections to send/reply/thread-reply/edit. Each uses `title`, `content`, optional `collapsed`, and `content_type`: `text/plain`, `text/markdown` (default), or `text/html`; basic fragments only: no scripts/styles/forms/media/SVG/math/interactive elements; links only `http`/`https`/`mailto`.
 
         Full semantics: https://docs.mindroom.chat/tools/matrix-message/
 
         Args:
-            action (str): Action listed above.
+            action (str): Action.
             message (str | None): Text/edit body or reaction emoji.
-            attachment_ids (list[str] | None): `att_*` IDs; send/reply/thread-reply only, combined maximum 5.
-            attachment_file_paths (list[str] | None): Local paths with the same restrictions.
-            room_id (str | None): Target room; defaults to current.
+            attachment_ids (list[str] | None): `att_*` IDs; writes only, combined max 5.
+            attachment_file_paths (list[str] | None): Local paths; same limits.
+            room_id (str | None): Target room; current by default.
             target (str | None): Event ID for react/edit.
-            thread_id (str | None): Explicit thread; `"room"` forces room scope.
-            ignore_mentions (bool): Keep `True` except for intentional handoffs/self-triggers.
+            thread_id (str | None): Thread; `"room"` forces room scope.
+            ignore_mentions (bool): `True` except intentional dispatch.
             message_extras (list[dict[str, object]] | None): Collapsible sections.
-            limit (int | None): Read/list limit; default 20, maximum 50.
-            page_token (str | None): Next room-threads page.
+            limit (int | None): Read/list limit: 20-50.
+            page_token (str | None): Next threads page.
 
         """
         context = get_tool_runtime_context()
