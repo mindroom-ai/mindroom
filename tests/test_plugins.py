@@ -16,6 +16,7 @@ import pytest
 import mindroom.tool_system.metadata as metadata_module
 import mindroom.tool_system.plugin_imports as plugin_module
 import mindroom.tool_system.plugins as plugins_module
+import mindroom.tool_system.skills as skills_module
 import mindroom.tools  # noqa: F401
 from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -3257,3 +3258,84 @@ def test_reload_plugins_skip_broken_plugins_keeps_healthy_plugin_when_explicit_p
         for module_name in set(sys.modules) - original_modules:
             if module_name.startswith("mindroom_plugin_"):
                 sys.modules.pop(module_name, None)
+
+
+def _write_skill_plugin(plugin_root: Path, *, description: str = "Demo skill") -> Path:
+    plugin_root.mkdir(parents=True, exist_ok=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "skill-plugin", "skills": ["skills"]}),
+        encoding="utf-8",
+    )
+    skill_dir = plugin_root / "skills" / "demo-skill"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_path = skill_dir / "SKILL.md"
+    skill_path.write_text(
+        f"---\nname: demo-skill\ndescription: {description}\n---\n\n# Demo\n",
+        encoding="utf-8",
+    )
+    return skill_path
+
+
+def test_repeated_load_plugins_with_unchanged_roots_keeps_skill_cache(tmp_path: Path) -> None:
+    """Warm per-agent plugin loads must not rescan unchanged plugin skill roots."""
+    plugin_root = tmp_path / "plugins" / "skill-plugin"
+    _write_skill_plugin(plugin_root)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/skill-plugin"]), config_path)
+    skills_root = (plugin_root / "skills").resolve()
+
+    with _preserved_plugin_loader_state():
+        load_plugins(config, runtime_paths_for(config))
+        first_load = skills_module._load_root_skills(skills_root)
+        assert [skill.name for skill in first_load] == ["demo-skill"]
+
+        load_plugins(config, runtime_paths_for(config))
+
+        assert skills_module._load_root_skills(skills_root) is first_load
+        skills_module.clear_skill_cache()
+
+
+def test_reload_plugins_picks_up_skill_file_changes(tmp_path: Path) -> None:
+    """A plugin reload with unchanged roots must still surface edited skill files."""
+    plugin_root = tmp_path / "plugins" / "skill-plugin"
+    skill_path = _write_skill_plugin(plugin_root, description="Demo v1")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/skill-plugin"]), config_path)
+    skills_root = (plugin_root / "skills").resolve()
+
+    with _preserved_plugin_loader_state():
+        load_plugins(config, runtime_paths_for(config))
+        first_load = skills_module._load_root_skills(skills_root)
+        assert first_load[0].description == "Demo v1"
+
+        old_mtime = skill_path.stat().st_mtime_ns
+        _write_skill_plugin(plugin_root, description="Demo v2")
+        os.utime(skill_path, ns=(old_mtime + 2_000_000_000, old_mtime + 2_000_000_000))
+        reload_plugins(config, runtime_paths_for(config))
+
+        refreshed = skills_module._load_root_skills(skills_root)
+        assert refreshed[0].description == "Demo v2"
+        skills_module.clear_skill_cache()
+
+
+def test_deactivating_plugins_clears_cached_plugin_skills(tmp_path: Path) -> None:
+    """Dropping plugin roots must invalidate skills cached for those roots."""
+    plugin_root = tmp_path / "plugins" / "skill-plugin"
+    _write_skill_plugin(plugin_root)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/skill-plugin"]), config_path)
+    skills_root = (plugin_root / "skills").resolve()
+
+    with _preserved_plugin_loader_state():
+        load_plugins(config, runtime_paths_for(config))
+        first_load = skills_module._load_root_skills(skills_root)
+        assert [skill.name for skill in first_load] == ["demo-skill"]
+
+        plugins_module.deactivate_plugins()
+
+        assert _get_plugin_skill_roots() == []
+        assert skills_module._load_root_skills(skills_root) is not first_load
+        skills_module.clear_skill_cache()

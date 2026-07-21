@@ -16,7 +16,7 @@ from mindroom.config.main import Config
 from mindroom.custom_tools.todo_state import todos_path
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
-from mindroom.tool_schema_cache import process_function_schema_for_prompt
+from mindroom.tool_schema_cache import cached_processed_schema
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
@@ -121,13 +121,16 @@ def test_todo_tool_schemas_include_model_visible_arguments(tmp_path: Path) -> No
     """Runtime annotations should resolve so Agno exposes tool-call arguments."""
     config = _config(tmp_path)
     tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
-    for function in tool.functions.values():
-        process_function_schema_for_prompt(function, strict=False)
+    schemas: dict[str, dict[str, object]] = {}
+    for name, function in tool.functions.items():
+        snapshot = cached_processed_schema(function, strict=False)
+        assert snapshot is not None
+        schemas[name] = snapshot.parameters
 
-    plan_params = tool.functions["plan"].parameters["properties"]
-    add_params = tool.functions["add_todo"].parameters["properties"]
-    update_params = tool.functions["update_todo"].parameters["properties"]
-    apply_template_params = tool.functions["apply_template"].parameters["properties"]
+    plan_params = schemas["plan"]["properties"]
+    add_params = schemas["add_todo"]["properties"]
+    update_params = schemas["update_todo"]["properties"]
+    apply_template_params = schemas["apply_template"]["properties"]
 
     assert "tasks" in plan_params
     assert "title" in add_params
