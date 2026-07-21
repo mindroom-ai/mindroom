@@ -182,6 +182,37 @@ async def test_pairing_claim_uses_authenticated_device_store_identity(tmp_path: 
     ) == ("@desktop:example.org", "SIGNED", "signed-fingerprint")
 
 
+@pytest.mark.asyncio
+async def test_pairing_claim_contains_database_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transient pairing storage failures must not fail the Matrix callback."""
+
+    def fail_claim(*_args: object, **_kwargs: object) -> None:
+        message = "database is locked"
+        raise sqlite3.OperationalError(message)
+
+    monkeypatch.setattr("mindroom.desktop.pairing.claim_desktop_pairing", fail_claim)
+    device = SimpleNamespace(ed25519="signed-fingerprint", blacklisted=False)
+    client = SimpleNamespace(
+        olm=SimpleNamespace(device_store={"@desktop:example.org": {"SIGNED": device}}),
+    )
+    event = AuthenticatedToDeviceEvent(
+        source={"content": DesktopPairingClaim("pairing-token").to_content()},
+        sender="@desktop:example.org",
+        type=DESKTOP_PAIRING_CLAIM_EVENT_TYPE,
+        authenticated_device_id="SIGNED",
+    )
+
+    await handle_desktop_pairing_claim(
+        event,
+        client=client,  # type: ignore[arg-type]
+        agent_name="computer",
+        runtime_paths=test_runtime_paths(tmp_path),
+    )
+
+
 def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

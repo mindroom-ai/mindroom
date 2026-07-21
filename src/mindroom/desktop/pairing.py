@@ -281,6 +281,9 @@ async def handle_desktop_pairing_claim(
     except DesktopPairingError as exc:
         logger.warning("desktop_pairing_claim_rejected", agent=agent_name, reason=str(exc))
         return
+    except sqlite3.Error:
+        logger.exception("desktop_pairing_claim_db_error", agent=agent_name)
+        return
     logger.info("desktop_pairing_claimed", agent=agent_name)
 
 
