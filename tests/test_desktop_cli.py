@@ -27,6 +27,9 @@ runner = CliRunner()
 def test_desktop_login_accepts_explicit_homeserver(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A fresh local machine can target cloud Matrix without hidden environment setup."""
     runtime_paths = SimpleNamespace(storage_root=tmp_path)
+    headers_path = tmp_path / "matrix-http-headers.json"
+    headers_path.write_text('{"X-Access-Client": "test-secret"}', encoding="utf-8")
+    headers_path.chmod(0o600)
     login = AsyncMock()
     monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
     monkeypatch.setattr(desktop_cli, "_login_and_save", login)
@@ -40,11 +43,51 @@ def test_desktop_login_accepts_explicit_homeserver(monkeypatch: pytest.MonkeyPat
             "@laptop:example.org",
             "--homeserver",
             "https://matrix.example.org",
+            "--matrix-http-headers-file",
+            str(headers_path),
         ],
     )
 
     assert result.exit_code == 0, result.output
     assert login.await_args.kwargs["homeserver"] == "https://matrix.example.org"
+    assert login.await_args.kwargs["http_headers"] == {"X-Access-Client": "test-secret"}
+
+
+def test_desktop_run_loads_matrix_http_headers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Long-running sync receives the same proxy headers as one-time login."""
+    runtime_paths = SimpleNamespace(storage_root=tmp_path)
+    headers_path = tmp_path / "matrix-http-headers.json"
+    headers_path.write_text('{"X-Access-Client": "test-secret"}', encoding="utf-8")
+    headers_path.chmod(0o600)
+    bridge = AsyncMock()
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
+    monkeypatch.setattr("mindroom.logging_config.setup_logging", lambda **_kwargs: None)
+    monkeypatch.setattr("mindroom.desktop.session.load_desktop_session", lambda _path: object())
+    monkeypatch.setattr(desktop_cli, "_run_bridge", bridge)
+
+    result = runner.invoke(
+        desktop_app,
+        [
+            "run",
+            "--controller-user-id",
+            "@cloud:example.org",
+            "--controller-device-id",
+            "CLOUD",
+            "--controller-ed25519",
+            "fingerprint",
+            "--allow-requester",
+            "@alice:example.org",
+            "--allow-agent",
+            "computer",
+            "--allow-app",
+            "com.example.Editor",
+            "--matrix-http-headers-file",
+            str(headers_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert bridge.await_args.kwargs["http_headers"] == {"X-Access-Client": "test-secret"}
 
 
 def test_browser_profile_paths_require_extension_mode(tmp_path: Path) -> None:
